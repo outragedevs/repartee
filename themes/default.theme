@@ -1,0 +1,57 @@
+[meta]
+name = "Nightfall"
+description = "Modern dark theme with subtle accents"
+
+[colors]
+bg = "#1a1b26"
+bg_alt = "#16161e"
+border = "#292e42"
+fg = "#a9b1d6"
+fg_muted = "#565f89"
+fg_dim = "#292e42"
+accent = "#7aa2f7"
+cursor = "#7aa2f7"
+
+[abstracts]
+timestamp = "%Z6e738d$*%Z7aa2f7%N"
+msgnick = "%Z565f89$0$1%Z7aa2f7❯%N%| "
+ownnick = "%Z9ece6a%_$*%_%N"
+pubnick = "%Z7aa2f7%_$*%_%N"
+menick = "%Zbb9af7%_$*%_%N"
+channel = "%Z7aa2f7%_$*%_%N"
+action = "%Ze0af68* $*%N"
+error = "%Zf7768e! $*%N"
+
+[formats.messages]
+own_msg = "{msgnick $2 {ownnick $0}}%Zc0caf5$1%N"
+pubmsg = "{msgnick $2 {pubnick $0}}%Za9b1d6$1%N"
+pubmsg_mention = "{msgnick %Zbb9af7$2 {menick $0}}%Zbb9af7$1%N"
+pubmsg_highlight = "{msgnick %Zf7768e$2 %Zf7768e%_$0%_%N}%Zf7768e$1%N"
+action = "{action $0} %Ze0af68$1%N"
+notice = "%Z7dcfff-%Z7aa2f7$0%Z7dcfff-%N $1"
+
+[formats.events]
+join = "%Z9ece6a-->%N %Za9b1d6$0%N %Z565f89($1@$2)%N has joined {channel $3}"
+part = "%Ze0af68<--%N %Za9b1d6$0%N %Z565f89($1@$2)%N has left {channel $3} %Z565f89($4)%N"
+quit = "%Zf7768e<--%N %Za9b1d6$0%N %Z565f89($1@$2)%N has quit %Z565f89($3)%N"
+nick_change = "%Zbb9af7---%N %Za9b1d6$0%N is now known as %Za9b1d6$1%N"
+topic = "%Z7aa2f7---%N Topic set by %Z565f89$0%N: $1"
+mode = "%Z7aa2f7---%N %Za9b1d6$0%N sets mode %Ze0af68$1%N on {channel $2}"
+
+[formats.sidepanel]
+header = "%Z7aa2f7%_$0%_%N"
+item = "%Z565f89$0.%N %Z6e738d$1%N"
+item_selected = "%Ze0af68$0.%N %Zc0caf5%_$1%_%N"
+item_activity_0 = "%Z565f89$0.%N %Z6e738d$1%N"
+item_activity_1 = "%Z565f89$0.%N %Z9ece6a$1%N"
+item_activity_2 = "%Z565f89$0.%N %Zf7768e$1%N"
+item_activity_3 = "%Z565f89$0.%N %Ze0af68$1%N"
+item_activity_4 = "%Z565f89$0.%N %Zbb9af7$1%N"
+
+[formats.nicklist]
+owner = "%Ze0af68~%Zc0caf5$0%N"
+admin = "%Zf7768e&%Zc0caf5$0%N"
+op = "%Z9ece6a@%Za9b1d6$0%N"
+halfop = "%Z7aa2f7%%%Za9b1d6$0%N"
+voice = "%Z7dcfff+%Z6e738d$0%N"
+normal = " %Z565f89$0%N"
