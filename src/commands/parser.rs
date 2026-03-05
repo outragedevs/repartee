@@ -4,10 +4,11 @@ pub struct ParsedCommand {
 }
 
 /// Greedy commands: the last arg consumes the rest of the line.
-/// - me, quit, close: single arg (entire rest)
+/// - me, quit, close, quote: single arg (entire rest)
 /// - msg, notice, topic, kick, kb, disconnect, set, alias: two args (first word, rest)
 const GREEDY_COMMANDS: &[&str] = &[
     "msg", "notice", "me", "quit", "topic", "kick", "kb", "close", "disconnect", "set", "alias",
+    "quote",
 ];
 
 pub fn parse_command(input: &str) -> Option<ParsedCommand> {
@@ -26,7 +27,7 @@ pub fn parse_command(input: &str) -> Option<ParsedCommand> {
     };
 
     if GREEDY_COMMANDS.contains(&command.as_str()) {
-        if matches!(command.as_str(), "me" | "quit" | "close") {
+        if matches!(command.as_str(), "me" | "quit" | "close" | "quote") {
             return Some(ParsedCommand {
                 name: command,
                 args: vec![rest.to_string()],
