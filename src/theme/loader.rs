@@ -34,27 +34,26 @@ pub fn load_theme(path: &Path) -> Result<ThemeFile> {
     let parsed: toml::Value = toml::from_str(&content)?;
     let default = default_theme();
 
-    let meta = if let Some(meta) = parsed.get("meta") {
-        toml::from_str(&toml::to_string(meta)?).unwrap_or(default.meta)
+    let meta: ThemeMeta = if let Some(meta) = parsed.get("meta") {
+        meta.clone().try_into().unwrap_or(default.meta)
     } else {
         default.meta
     };
 
-    // For colors: parse, then merge with defaults (individual color fields via serde default)
     let colors: ThemeColors = if let Some(colors_val) = parsed.get("colors") {
-        toml::from_str(&toml::to_string(colors_val)?).unwrap_or_default()
+        colors_val.clone().try_into().unwrap_or_default()
     } else {
         ThemeColors::default()
     };
 
-    let abstracts = if let Some(abs) = parsed.get("abstracts") {
-        toml::from_str(&toml::to_string(abs)?).unwrap_or(default.abstracts)
+    let abstracts: HashMap<String, String> = if let Some(abs) = parsed.get("abstracts") {
+        abs.clone().try_into().unwrap_or(default.abstracts)
     } else {
         default.abstracts
     };
 
-    let formats = if let Some(fmts) = parsed.get("formats") {
-        toml::from_str(&toml::to_string(fmts)?).unwrap_or_default()
+    let formats: ThemeFormats = if let Some(fmts) = parsed.get("formats") {
+        fmts.clone().try_into().unwrap_or_default()
     } else {
         default.formats
     };

@@ -220,8 +220,7 @@ fn split_abstraction_args(args_str: &str) -> Vec<String> {
 
         if ch == ' ' && depth == 0 {
             if !current.is_empty() {
-                args.push(current.clone());
-                current.clear();
+                args.push(std::mem::take(&mut current));
             }
         } else {
             current.push(ch);
@@ -329,8 +328,7 @@ pub fn parse_format_string(input: &str, params: &[&str]) -> Vec<StyledSpan> {
 
     let flush = |buffer: &mut String, spans: &mut Vec<StyledSpan>, current: &StyleState| {
         if !buffer.is_empty() {
-            spans.push(current.to_span(buffer.clone()));
-            buffer.clear();
+            spans.push(current.to_span(std::mem::take(buffer)));
         }
     };
 
