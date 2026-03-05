@@ -26,14 +26,17 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             })
             .collect();
 
-        // Show messages from bottom of visible area
         let visible_height = area.height as usize;
-        let skip = if lines.len() > visible_height {
-            lines.len() - visible_height
+        let total = lines.len();
+        let max_scroll = total.saturating_sub(visible_height);
+        let scroll = app.scroll_offset.min(max_scroll);
+
+        let skip = if total > visible_height {
+            total - visible_height - scroll
         } else {
             0
         };
-        let visible_lines: Vec<Line> = lines.into_iter().skip(skip).collect();
+        let visible_lines: Vec<Line> = lines.into_iter().skip(skip).take(visible_height).collect();
 
         let paragraph = Paragraph::new(visible_lines).style(Style::default().bg(bg));
         frame.render_widget(paragraph, area);

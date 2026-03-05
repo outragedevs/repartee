@@ -1,5 +1,8 @@
+use chrono::Utc;
 use color_eyre::eyre::Result;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
+use futures::StreamExt;
+use tokio::time::{interval, Duration};
 
 use crate::config::{self, AppConfig};
 use crate::constants;
@@ -10,6 +13,7 @@ use crate::state::buffer::{
 use crate::state::connection::{Connection, ConnectionStatus};
 use crate::theme::{self, ThemeFile};
 use crate::ui;
+use crate::ui::layout::UiRegions;
 
 pub struct App {
     pub state: AppState,
@@ -17,6 +21,8 @@ pub struct App {
     pub theme: ThemeFile,
     pub input: ui::input::InputState,
     pub should_quit: bool,
+    pub scroll_offset: usize,
+    pub ui_regions: Option<UiRegions>,
 }
 
 impl App {
@@ -33,7 +39,6 @@ impl App {
             message_counter: 0,
         };
 
-        // Add mock data for visual development
         Self::populate_mock_data(&mut state);
 
         Ok(App {
@@ -42,11 +47,12 @@ impl App {
             theme,
             input: ui::input::InputState::new(),
             should_quit: false,
+            scroll_offset: 0,
+            ui_regions: None,
         })
     }
 
     fn populate_mock_data(state: &mut AppState) {
-        use chrono::Utc;
         use std::collections::HashMap;
 
         let conn_id = "ircnet";
@@ -61,7 +67,6 @@ impl App {
             lag: Some(42),
         });
 
-        // Server buffer
         let server_id = make_buffer_id(conn_id, "IRCnet");
         state.add_buffer(Buffer {
             id: server_id.clone(),
@@ -80,7 +85,6 @@ impl App {
             list_modes: HashMap::new(),
         });
 
-        // Channel buffer with users and messages
         let chan_id = make_buffer_id(conn_id, "#rust");
         state.add_buffer(Buffer {
             id: chan_id.clone(),
@@ -99,7 +103,6 @@ impl App {
             list_modes: HashMap::new(),
         });
 
-        // Add nicks
         state.add_nick(
             &chan_id,
             NickEntry {
@@ -141,7 +144,6 @@ impl App {
             },
         );
 
-        // Add messages
         let msgs = vec![
             ("ferris", "Welcome to #rust!", MessageType::Message),
             (
@@ -173,7 +175,6 @@ impl App {
             );
         }
 
-        // Query buffer
         let query_id = make_buffer_id(conn_id, "ferris");
         state.add_buffer(Buffer {
             id: query_id.clone(),
@@ -211,41 +212,202 @@ impl App {
         state.set_active_buffer(&chan_id);
     }
 
-    pub fn run(&mut self, terminal: &mut ui::Tui) -> Result<()> {
+    pub async fn run(&mut self, terminal: &mut ui::Tui) -> Result<()> {
+        let mut events = event::EventStream::new();
+        let mut tick = interval(Duration::from_secs(1));
+
         while !self.should_quit {
             terminal.draw(|frame| ui::layout::draw(frame, self))?;
 
-            // Simple synchronous event loop for now
-            if event::poll(std::time::Duration::from_millis(100))?
-                && let Event::Key(key) = event::read()?
-            {
-                self.handle_key(key);
+            tokio::select! {
+                Some(Ok(ev)) = events.next() => {
+                    self.handle_event(ev);
+                }
+                _ = tick.tick() => {
+                    // Triggers redraw for clock update
+                }
             }
         }
         Ok(())
+    }
+
+    fn handle_event(&mut self, event: Event) {
+        match event {
+            Event::Key(key) => self.handle_key(key),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Resize(_, _) => {
+                // Terminal redraw happens automatically on next loop iteration
+            }
+            _ => {}
+        }
     }
 
     fn handle_key(&mut self, key: event::KeyEvent) {
         match (key.modifiers, key.code) {
             (KeyModifiers::CONTROL, KeyCode::Char('q')) => self.should_quit = true,
             (KeyModifiers::CONTROL, KeyCode::Char('c')) => self.should_quit = true,
-            // Alt+number for buffer switching
+            (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
+                // Force redraw (happens automatically on next iteration)
+            }
             (KeyModifiers::ALT, KeyCode::Char(c)) if c.is_ascii_digit() => {
                 let n = c.to_digit(10).unwrap_or(0) as usize;
                 let ids = self.state.sorted_buffer_ids();
-                let idx = if n == 0 { 9 } else { n - 1 }; // Alt+1 = buffer 0, Alt+0 = buffer 9
+                let idx = if n == 0 { 9 } else { n - 1 };
                 if idx < ids.len() {
                     self.state.set_active_buffer(&ids[idx]);
+                    self.scroll_offset = 0;
                 }
             }
-            // Arrow keys for buffer navigation
             (mods, KeyCode::Left) if mods.contains(KeyModifiers::ALT) => {
                 self.state.prev_buffer();
+                self.scroll_offset = 0;
             }
             (mods, KeyCode::Right) if mods.contains(KeyModifiers::ALT) => {
                 self.state.next_buffer();
+                self.scroll_offset = 0;
+            }
+            (_, KeyCode::Enter) => {
+                let text = self.input.submit();
+                if !text.is_empty() {
+                    self.handle_submit(text);
+                }
+            }
+            (_, KeyCode::Backspace) => self.input.backspace(),
+            (_, KeyCode::Delete) => self.input.delete(),
+            (_, KeyCode::Home) => self.input.home(),
+            (_, KeyCode::End) => self.input.end(),
+            (mods, KeyCode::Left) if !mods.contains(KeyModifiers::ALT) => self.input.move_left(),
+            (mods, KeyCode::Right) if !mods.contains(KeyModifiers::ALT) => self.input.move_right(),
+            (_, KeyCode::Up) => self.input.history_up(),
+            (_, KeyCode::Down) => self.input.history_down(),
+            (_, KeyCode::PageUp) => {
+                self.scroll_offset = self.scroll_offset.saturating_add(10);
+            }
+            (_, KeyCode::PageDown) => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(10);
+            }
+            (_, KeyCode::Tab) => self.handle_tab(),
+            (mods, KeyCode::Char(c))
+                if mods.is_empty() || mods == KeyModifiers::SHIFT =>
+            {
+                self.input.insert_char(c);
             }
             _ => {}
+        }
+    }
+
+    fn handle_mouse(&mut self, mouse: event::MouseEvent) {
+        let Some(ref regions) = self.ui_regions else {
+            return;
+        };
+        let regions = regions.clone();
+
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                if let Some(chat) = regions.chat_area
+                    && mouse.column >= chat.x
+                    && mouse.column < chat.x + chat.width
+                    && mouse.row >= chat.y
+                    && mouse.row < chat.y + chat.height
+                {
+                    self.scroll_offset = self.scroll_offset.saturating_add(3);
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if let Some(chat) = regions.chat_area
+                    && mouse.column >= chat.x
+                    && mouse.column < chat.x + chat.width
+                    && mouse.row >= chat.y
+                    && mouse.row < chat.y + chat.height
+                {
+                    self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(buf_area) = regions.buffer_list_area
+                    && mouse.column >= buf_area.x
+                    && mouse.column < buf_area.x + buf_area.width
+                    && mouse.row >= buf_area.y
+                    && mouse.row < buf_area.y + buf_area.height
+                {
+                    let y_offset = (mouse.row - buf_area.y) as usize;
+                    self.handle_buffer_list_click(y_offset);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_buffer_list_click(&mut self, y_offset: usize) {
+        let sorted_ids = self.state.sorted_buffer_ids();
+        // The buffer list renders connection headers and buffer items.
+        // We need to map y_offset to the correct buffer, accounting for headers.
+        let mut row = 0;
+        let mut last_conn_id = String::new();
+        for id in &sorted_ids {
+            let Some(buf) = self.state.buffers.get(id.as_str()) else {
+                continue;
+            };
+            if buf.connection_id != last_conn_id {
+                last_conn_id.clone_from(&buf.connection_id);
+                if row == y_offset {
+                    // Clicked on a connection header, ignore
+                    return;
+                }
+                row += 1;
+            }
+            if row == y_offset {
+                self.state.set_active_buffer(id);
+                self.scroll_offset = 0;
+                return;
+            }
+            row += 1;
+        }
+    }
+
+    fn handle_tab(&mut self) {
+        let nicks: Vec<String> = if let Some(buf) = self.state.active_buffer() {
+            buf.users.keys().cloned().collect()
+        } else {
+            Vec::new()
+        };
+        let commands: &[&str] = &[
+            "join", "part", "msg", "query", "quit", "nick", "topic", "kick", "ban", "mode",
+            "whois", "invite", "notice", "me", "away", "back", "clear", "close", "help",
+            "connect", "disconnect", "server",
+        ];
+        self.input.tab_complete(&nicks, commands);
+    }
+
+    fn handle_submit(&mut self, text: String) {
+        // For now, echo the input as a message in the active buffer (for testing)
+        if let Some(active_id) = self.state.active_buffer_id.clone() {
+            let nick = self
+                .state
+                .active_buffer()
+                .and_then(|buf| {
+                    self.state
+                        .connections
+                        .get(&buf.connection_id)
+                        .map(|c| c.nick.clone())
+                })
+                .unwrap_or_default();
+            let id = self.state.next_message_id();
+            self.state.add_message(
+                &active_id,
+                Message {
+                    id,
+                    timestamp: Utc::now(),
+                    message_type: MessageType::Message,
+                    nick: Some(nick),
+                    nick_mode: None,
+                    text,
+                    highlight: false,
+                    event_key: None,
+                    event_params: None,
+                },
+            );
+            self.scroll_offset = 0;
         }
     }
 }

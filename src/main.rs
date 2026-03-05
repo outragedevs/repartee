@@ -11,13 +11,14 @@ mod ui;
 
 use color_eyre::eyre::Result;
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     color_eyre::install()?;
     ui::install_panic_hook();
 
     let mut app = app::App::new()?;
     let mut terminal = ui::setup_terminal()?;
-    let result = app.run(&mut terminal);
+    let result = app.run(&mut terminal).await;
     ui::restore_terminal(&mut terminal)?;
     result
 }
