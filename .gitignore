@@ -1,0 +1,9 @@
+/target
+*.db
+*.db-shm
+*.db-wal
+.env
+/.agents
+/.claude/skills
+skills-lock.json
+memory.db*

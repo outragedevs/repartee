@@ -1,0 +1,1 @@
+// Nick list sidebar widget

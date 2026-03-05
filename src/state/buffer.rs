@@ -1,0 +1,1 @@
+// Buffer state management

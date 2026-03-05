@@ -1,0 +1,1 @@
+// Chat message view widget

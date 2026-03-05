@@ -1,0 +1,1 @@
+// Channel topic bar widget
