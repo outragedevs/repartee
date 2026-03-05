@@ -1,6 +1,7 @@
 use chrono::Utc;
 use color_eyre::eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
+use ratatui::layout::Position;
 use futures::StreamExt;
 use tokio::time::{interval, Duration};
 
@@ -220,12 +221,12 @@ impl App {
             terminal.draw(|frame| ui::layout::draw(frame, self))?;
 
             tokio::select! {
-                Some(Ok(ev)) = events.next() => {
-                    self.handle_event(ev);
-                }
-                _ = tick.tick() => {
-                    // Triggers redraw for clock update
-                }
+                ev = events.next() => match ev {
+                    Some(Ok(ev)) => self.handle_event(ev),
+                    Some(Err(_)) => {}
+                    None => break,
+                },
+                _ = tick.tick() => {}
             }
         }
         Ok(())
@@ -275,7 +276,10 @@ impl App {
             (_, KeyCode::Backspace) => self.input.backspace(),
             (_, KeyCode::Delete) => self.input.delete(),
             (_, KeyCode::Home) => self.input.home(),
-            (_, KeyCode::End) => self.input.end(),
+            (_, KeyCode::End) => {
+                self.input.end();
+                self.scroll_offset = 0;
+            }
             (mods, KeyCode::Left) if !mods.contains(KeyModifiers::ALT) => self.input.move_left(),
             (mods, KeyCode::Right) if !mods.contains(KeyModifiers::ALT) => self.input.move_right(),
             (_, KeyCode::Up) => self.input.history_up(),
@@ -297,38 +301,25 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: event::MouseEvent) {
-        let Some(ref regions) = self.ui_regions else {
+        let Some(regions) = self.ui_regions else {
             return;
         };
-        let regions = regions.clone();
+        let pos = Position::new(mouse.column, mouse.row);
 
         match mouse.kind {
             MouseEventKind::ScrollUp => {
-                if let Some(chat) = regions.chat_area
-                    && mouse.column >= chat.x
-                    && mouse.column < chat.x + chat.width
-                    && mouse.row >= chat.y
-                    && mouse.row < chat.y + chat.height
-                {
+                if regions.chat_area.is_some_and(|r| r.contains(pos)) {
                     self.scroll_offset = self.scroll_offset.saturating_add(3);
                 }
             }
             MouseEventKind::ScrollDown => {
-                if let Some(chat) = regions.chat_area
-                    && mouse.column >= chat.x
-                    && mouse.column < chat.x + chat.width
-                    && mouse.row >= chat.y
-                    && mouse.row < chat.y + chat.height
-                {
+                if regions.chat_area.is_some_and(|r| r.contains(pos)) {
                     self.scroll_offset = self.scroll_offset.saturating_sub(3);
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(buf_area) = regions.buffer_list_area
-                    && mouse.column >= buf_area.x
-                    && mouse.column < buf_area.x + buf_area.width
-                    && mouse.row >= buf_area.y
-                    && mouse.row < buf_area.y + buf_area.height
+                    && buf_area.contains(pos)
                 {
                     let y_offset = (mouse.row - buf_area.y) as usize;
                     self.handle_buffer_list_click(y_offset);
@@ -371,43 +362,59 @@ impl App {
         } else {
             Vec::new()
         };
-        let commands: &[&str] = &[
-            "join", "part", "msg", "query", "quit", "nick", "topic", "kick", "ban", "mode",
-            "whois", "invite", "notice", "me", "away", "back", "clear", "close", "help",
-            "connect", "disconnect", "server",
-        ];
-        self.input.tab_complete(&nicks, commands);
+        let commands = crate::commands::registry::get_command_names();
+        self.input.tab_complete(&nicks, &commands);
     }
 
     fn handle_submit(&mut self, text: String) {
-        // For now, echo the input as a message in the active buffer (for testing)
-        if let Some(active_id) = self.state.active_buffer_id.clone() {
-            let nick = self
-                .state
-                .active_buffer()
-                .and_then(|buf| {
-                    self.state
-                        .connections
-                        .get(&buf.connection_id)
-                        .map(|c| c.nick.clone())
-                })
-                .unwrap_or_default();
-            let id = self.state.next_message_id();
-            self.state.add_message(
-                &active_id,
-                Message {
-                    id,
-                    timestamp: Utc::now(),
-                    message_type: MessageType::Message,
-                    nick: Some(nick),
-                    nick_mode: None,
-                    text,
-                    highlight: false,
-                    event_key: None,
-                    event_params: None,
-                },
-            );
-            self.scroll_offset = 0;
+        if let Some(parsed) = crate::commands::parser::parse_command(&text) {
+            self.execute_command(parsed);
+        } else {
+            self.handle_plain_message(text);
         }
+        self.scroll_offset = 0;
+    }
+
+    fn execute_command(&mut self, parsed: crate::commands::parser::ParsedCommand) {
+        let commands = crate::commands::registry::get_commands();
+        if let Some((_, def)) = commands.into_iter().find(|(name, _)| *name == parsed.name) {
+            (def.handler)(self, &parsed.args);
+        } else {
+            crate::commands::helpers::add_local_event(
+                self,
+                &format!("Unknown command: /{}", parsed.name),
+            );
+        }
+    }
+
+    fn handle_plain_message(&mut self, text: String) {
+        let Some(active_id) = self.state.active_buffer_id.clone() else {
+            return;
+        };
+        let nick = self
+            .state
+            .active_buffer()
+            .and_then(|buf| {
+                self.state
+                    .connections
+                    .get(&buf.connection_id)
+                    .map(|c| c.nick.clone())
+            })
+            .unwrap_or_default();
+        let id = self.state.next_message_id();
+        self.state.add_message(
+            &active_id,
+            Message {
+                id,
+                timestamp: Utc::now(),
+                message_type: MessageType::Message,
+                nick: Some(nick),
+                nick_mode: None,
+                text,
+                highlight: false,
+                event_key: None,
+                event_params: None,
+            },
+        );
     }
 }
