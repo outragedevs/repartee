@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
@@ -19,7 +21,7 @@ pub struct InputState {
     pub value: String,
     pub cursor_pos: usize,
     pub tab_state: Option<TabCompletionState>,
-    pub history: Vec<String>,
+    pub history: VecDeque<String>,
     pub history_index: Option<usize>,
     pub saved_input: Option<String>,
 }
@@ -30,7 +32,7 @@ impl InputState {
             value: String::new(),
             cursor_pos: 0,
             tab_state: None,
-            history: Vec::new(),
+            history: VecDeque::new(),
             history_index: None,
             saved_input: None,
         }
@@ -108,9 +110,9 @@ impl InputState {
     pub fn submit(&mut self) -> String {
         let val = self.clear();
         if !val.is_empty() {
-            self.history.push(val.clone());
+            self.history.push_back(val.clone());
             if self.history.len() > MAX_HISTORY {
-                self.history.remove(0);
+                self.history.pop_front();
             }
         }
         self.history_index = None;
@@ -234,25 +236,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let fg_muted = hex_to_color(&colors.fg_muted).unwrap_or(Color::DarkGray);
     let fg = hex_to_color(&colors.fg).unwrap_or(Color::White);
 
-    let server_label = app
-        .state
-        .connections
-        .values()
-        .next()
-        .map(|c| c.label.as_str())
-        .unwrap_or("");
-    let channel_name = app
-        .state
-        .active_buffer()
-        .map(|b| b.name.as_str())
-        .unwrap_or("");
-    let nick = app
-        .state
-        .connections
-        .values()
-        .next()
-        .map(|c| c.nick.as_str())
-        .unwrap_or("");
+    let active_buf = app.state.active_buffer();
+    let conn = active_buf.and_then(|b| app.state.connections.get(&b.connection_id));
+    let server_label = conn.map(|c| c.label.as_str()).unwrap_or("");
+    let channel_name = active_buf.map(|b| b.name.as_str()).unwrap_or("");
+    let nick = conn.map(|c| c.nick.as_str()).unwrap_or("");
 
     let prompt = app
         .config
@@ -362,7 +350,7 @@ mod tests {
         input.cursor_pos = 6;
         input.submit();
 
-        assert_eq!(input.history, vec!["first", "second"]);
+        assert_eq!(input.history, VecDeque::from(["first".to_string(), "second".to_string()]));
 
         // Navigate up
         input.value = "current".to_string();

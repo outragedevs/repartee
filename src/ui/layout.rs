@@ -5,7 +5,7 @@ use crate::app::App;
 use crate::state::buffer::BufferType;
 use crate::theme::hex_to_color;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct UiRegions {
     pub buffer_list_area: Option<Rect>,
     pub chat_area: Option<Rect>,
@@ -18,6 +18,7 @@ pub struct UiRegions {
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let colors = &app.theme.colors;
     let bg = hex_to_color(&colors.bg).unwrap_or(Color::Black);
+    let bg_alt = hex_to_color(&colors.bg_alt).unwrap_or(Color::Black);
     let border_color = hex_to_color(&colors.border).unwrap_or(Color::DarkGray);
 
     // Clear background
@@ -84,7 +85,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let bottom_block = Block::default()
         .borders(Borders::TOP)
         .border_style(Style::default().fg(border_color))
-        .style(Style::default().bg(bg));
+        .style(Style::default().bg(bg_alt));
     let bottom_inner = bottom_block.inner(bottom_area);
     frame.render_widget(bottom_block, bottom_area);
 
