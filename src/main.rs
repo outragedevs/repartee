@@ -13,6 +13,11 @@ use color_eyre::eyre::Result;
 
 fn main() -> Result<()> {
     color_eyre::install()?;
-    println!("{} v{}", constants::APP_NAME, constants::APP_VERSION);
-    Ok(())
+    ui::install_panic_hook();
+
+    let mut app = app::App::new()?;
+    let mut terminal = ui::setup_terminal()?;
+    let result = app.run(&mut terminal);
+    ui::restore_terminal(&mut terminal)?;
+    result
 }
