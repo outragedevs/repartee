@@ -19,6 +19,7 @@ dirs = "6"
 unicode-width = "0.2"
 thiserror = "2.0"
 indexmap = { version = "2", features = ["serde"] }
+regex = "1"
 
 [profile.release]
 lto = true
