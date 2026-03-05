@@ -72,7 +72,18 @@ pub struct AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
-        default_config()
+        AppConfig {
+            general: GeneralConfig::default(),
+            display: DisplayConfig::default(),
+            sidepanel: SidepanelConfig::default(),
+            statusbar: StatusbarConfig::default(),
+            image_preview: ImagePreviewConfig::default(),
+            servers: HashMap::new(),
+            aliases: HashMap::new(),
+            ignores: Vec::new(),
+            scripts: ScriptsConfig::default(),
+            logging: LoggingConfig::default(),
+        }
     }
 }
 
@@ -90,7 +101,16 @@ pub struct GeneralConfig {
 
 impl Default for GeneralConfig {
     fn default() -> Self {
-        default_config().general
+        use crate::constants::APP_NAME;
+        GeneralConfig {
+            nick: APP_NAME.to_string(),
+            username: APP_NAME.to_lowercase(),
+            realname: format!("{APP_NAME} Client"),
+            theme: "default".to_string(),
+            timestamp_format: "%H:%M:%S".to_string(),
+            flood_protection: true,
+            ctcp_version: APP_NAME.to_string(),
+        }
     }
 }
 
@@ -107,7 +127,14 @@ pub struct DisplayConfig {
 
 impl Default for DisplayConfig {
     fn default() -> Self {
-        default_config().display
+        DisplayConfig {
+            nick_column_width: 8,
+            nick_max_length: 8,
+            nick_alignment: NickAlignment::Right,
+            nick_truncation: true,
+            show_timestamps: true,
+            scrollback_lines: 2000,
+        }
     }
 }
 
@@ -120,7 +147,10 @@ pub struct SidepanelConfig {
 
 impl Default for SidepanelConfig {
     fn default() -> Self {
-        default_config().sidepanel
+        SidepanelConfig {
+            left: PanelConfig { width: 20, visible: true },
+            right: PanelConfig { width: 18, visible: true },
+        }
     }
 }
 
@@ -133,10 +163,7 @@ pub struct PanelConfig {
 
 impl Default for PanelConfig {
     fn default() -> Self {
-        PanelConfig {
-            width: 20,
-            visible: true,
-        }
+        SidepanelConfig::default().left
     }
 }
 
@@ -162,7 +189,27 @@ pub struct StatusbarConfig {
 
 impl Default for StatusbarConfig {
     fn default() -> Self {
-        default_config().statusbar
+        StatusbarConfig {
+            enabled: true,
+            items: vec![
+                StatusbarItem::Time,
+                StatusbarItem::NickInfo,
+                StatusbarItem::ChannelInfo,
+                StatusbarItem::Lag,
+                StatusbarItem::ActiveWindows,
+            ],
+            separator: " | ".to_string(),
+            item_formats: HashMap::new(),
+            background: String::new(),
+            text_color: String::new(),
+            accent_color: String::new(),
+            muted_color: String::new(),
+            dim_color: String::new(),
+            prompt: "[$server\u{2771} ".to_string(),
+            prompt_color: String::new(),
+            input_color: String::new(),
+            cursor_color: String::new(),
+        }
     }
 }
 
@@ -182,7 +229,17 @@ pub struct ImagePreviewConfig {
 
 impl Default for ImagePreviewConfig {
     fn default() -> Self {
-        default_config().image_preview
+        ImagePreviewConfig {
+            enabled: true,
+            max_width: 0,
+            max_height: 0,
+            cache_max_mb: 100,
+            cache_max_days: 7,
+            fetch_timeout: 30,
+            max_file_size: 10_485_760,
+            protocol: "auto".to_string(),
+            kitty_format: "rgba".to_string(),
+        }
     }
 }
 
@@ -246,7 +303,12 @@ pub struct LoggingConfig {
 
 impl Default for LoggingConfig {
     fn default() -> Self {
-        default_config().logging
+        LoggingConfig {
+            enabled: true,
+            encrypt: false,
+            retention_days: 0,
+            exclude_types: Vec::new(),
+        }
     }
 }
 
