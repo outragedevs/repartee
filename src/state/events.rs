@@ -1,1 +1,441 @@
-// State events
+use crate::state::buffer::{ActivityLevel, Buffer, Message, NickEntry};
+use crate::state::connection::{Connection, ConnectionStatus};
+use crate::state::sorting::sort_buffers;
+use crate::state::AppState;
+
+impl AppState {
+    pub fn new() -> Self {
+        Self {
+            connections: std::collections::HashMap::new(),
+            buffers: indexmap::IndexMap::new(),
+            active_buffer_id: None,
+            previous_buffer_id: None,
+            message_counter: 0,
+        }
+    }
+
+    pub fn next_message_id(&mut self) -> u64 {
+        self.message_counter += 1;
+        self.message_counter
+    }
+
+    // === Connection management ===
+
+    pub fn add_connection(&mut self, conn: Connection) {
+        self.connections.insert(conn.id.clone(), conn);
+    }
+
+    pub fn remove_connection(&mut self, id: &str) {
+        self.connections.remove(id);
+    }
+
+    pub fn update_connection_status(&mut self, id: &str, status: ConnectionStatus) {
+        if let Some(conn) = self.connections.get_mut(id) {
+            conn.status = status;
+        }
+    }
+
+    // === Buffer management ===
+
+    pub fn add_buffer(&mut self, buffer: Buffer) {
+        self.buffers.insert(buffer.id.clone(), buffer);
+    }
+
+    pub fn remove_buffer(&mut self, id: &str) {
+        let was_active = self.active_buffer_id.as_deref() == Some(id);
+        self.buffers.shift_remove(id);
+
+        if was_active {
+            // Try to fall back to previous buffer
+            if let Some(ref prev_id) = self.previous_buffer_id.clone()
+                && self.buffers.contains_key(prev_id)
+            {
+                self.active_buffer_id = Some(prev_id.clone());
+                self.previous_buffer_id = None;
+                return;
+            }
+            // Fall back to first buffer in sorted order
+            let sorted = self.sorted_buffer_ids();
+            self.active_buffer_id = sorted.into_iter().next();
+            self.previous_buffer_id = None;
+        }
+    }
+
+    pub fn set_active_buffer(&mut self, id: &str) {
+        if !self.buffers.contains_key(id) {
+            return;
+        }
+        // Save current as previous
+        if self.active_buffer_id.as_deref() != Some(id) {
+            self.previous_buffer_id = self.active_buffer_id.clone();
+        }
+        self.active_buffer_id = Some(id.to_string());
+
+        // Reset activity on the newly active buffer
+        if let Some(buf) = self.buffers.get_mut(id) {
+            buf.activity = ActivityLevel::None;
+            buf.unread_count = 0;
+        }
+    }
+
+    // === Messages ===
+
+    pub fn add_message(&mut self, buffer_id: &str, message: Message) {
+        if let Some(buf) = self.buffers.get_mut(buffer_id) {
+            buf.messages.push(message);
+        }
+    }
+
+    pub fn add_message_with_activity(
+        &mut self,
+        buffer_id: &str,
+        message: Message,
+        level: ActivityLevel,
+    ) {
+        if let Some(buf) = self.buffers.get_mut(buffer_id) {
+            buf.messages.push(message);
+            // Only escalate activity if this is not the active buffer
+            let is_active = self.active_buffer_id.as_deref() == Some(buffer_id);
+            if !is_active && level > buf.activity {
+                buf.activity = level;
+                buf.unread_count += 1;
+            }
+        }
+    }
+
+    pub fn set_activity(&mut self, buffer_id: &str, level: ActivityLevel) {
+        if let Some(buf) = self.buffers.get_mut(buffer_id)
+            && level > buf.activity
+        {
+            buf.activity = level;
+        }
+    }
+
+    // === Topic ===
+
+    pub fn set_topic(&mut self, buffer_id: &str, topic: String, set_by: Option<String>) {
+        if let Some(buf) = self.buffers.get_mut(buffer_id) {
+            buf.topic = Some(topic);
+            buf.topic_set_by = set_by;
+        }
+    }
+
+    // === Nick management ===
+
+    pub fn add_nick(&mut self, buffer_id: &str, entry: NickEntry) {
+        if let Some(buf) = self.buffers.get_mut(buffer_id) {
+            buf.users.insert(entry.nick.clone(), entry);
+        }
+    }
+
+    pub fn remove_nick(&mut self, buffer_id: &str, nick: &str) {
+        if let Some(buf) = self.buffers.get_mut(buffer_id) {
+            buf.users.remove(nick);
+        }
+    }
+
+    pub fn update_nick(&mut self, buffer_id: &str, old_nick: &str, new_nick: String) {
+        if let Some(buf) = self.buffers.get_mut(buffer_id)
+            && let Some(mut entry) = buf.users.remove(old_nick)
+        {
+            entry.nick = new_nick.clone();
+            buf.users.insert(new_nick, entry);
+        }
+    }
+
+    // === Active buffer accessors ===
+
+    pub fn active_buffer(&self) -> Option<&Buffer> {
+        self.active_buffer_id
+            .as_ref()
+            .and_then(|id| self.buffers.get(id))
+    }
+
+    pub fn active_buffer_mut(&mut self) -> Option<&mut Buffer> {
+        // Need to clone to avoid borrow issues
+        let id = self.active_buffer_id.clone();
+        id.and_then(move |id| self.buffers.get_mut(&id))
+    }
+
+    // === Navigation ===
+
+    pub fn sorted_buffer_ids(&self) -> Vec<String> {
+        let buf_refs: Vec<&Buffer> = self.buffers.values().collect();
+        let sorted = sort_buffers(&buf_refs);
+        sorted.into_iter().map(|b| b.id.clone()).collect()
+    }
+
+    pub fn next_buffer(&mut self) {
+        let sorted = self.sorted_buffer_ids();
+        if sorted.is_empty() {
+            return;
+        }
+        let current_idx = self
+            .active_buffer_id
+            .as_ref()
+            .and_then(|id| sorted.iter().position(|s| s == id));
+        let next_idx = match current_idx {
+            Some(idx) => (idx + 1) % sorted.len(),
+            None => 0,
+        };
+        let next_id = sorted[next_idx].clone();
+        self.set_active_buffer(&next_id);
+    }
+
+    pub fn prev_buffer(&mut self) {
+        let sorted = self.sorted_buffer_ids();
+        if sorted.is_empty() {
+            return;
+        }
+        let current_idx = self
+            .active_buffer_id
+            .as_ref()
+            .and_then(|id| sorted.iter().position(|s| s == id));
+        let prev_idx = match current_idx {
+            Some(0) => sorted.len() - 1,
+            Some(idx) => idx - 1,
+            None => 0,
+        };
+        let prev_id = sorted[prev_idx].clone();
+        self.set_active_buffer(&prev_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::buffer::*;
+    use crate::state::connection::*;
+    use chrono::Utc;
+    use std::collections::HashMap;
+
+    fn make_test_connection() -> Connection {
+        Connection {
+            id: "libera".to_string(),
+            label: "Libera".to_string(),
+            status: ConnectionStatus::Connected,
+            nick: "testuser".to_string(),
+            user_modes: String::new(),
+            isupport: HashMap::new(),
+            error: None,
+            lag: None,
+        }
+    }
+
+    fn make_test_buffer(conn_id: &str, btype: BufferType, name: &str) -> Buffer {
+        Buffer {
+            id: make_buffer_id(conn_id, name),
+            connection_id: conn_id.to_string(),
+            buffer_type: btype,
+            name: name.to_string(),
+            messages: Vec::new(),
+            activity: ActivityLevel::None,
+            unread_count: 0,
+            last_read: Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: HashMap::new(),
+        }
+    }
+
+    fn make_test_message(state: &mut AppState, text: &str) -> Message {
+        Message {
+            id: state.next_message_id(),
+            timestamp: Utc::now(),
+            message_type: MessageType::Message,
+            nick: Some("someone".to_string()),
+            nick_mode: None,
+            text: text.to_string(),
+            highlight: false,
+            event_key: None,
+            event_params: None,
+        }
+    }
+
+    fn make_test_state() -> AppState {
+        let mut state = AppState::new();
+        state.add_connection(make_test_connection());
+        state.add_buffer(make_test_buffer("libera", BufferType::Server, "libera"));
+        state.add_buffer(make_test_buffer(
+            "libera",
+            BufferType::Channel,
+            "#rust",
+        ));
+        state.add_buffer(make_test_buffer(
+            "libera",
+            BufferType::Channel,
+            "#linux",
+        ));
+        state
+    }
+
+    #[test]
+    fn add_buffer_and_set_active() {
+        let mut state = make_test_state();
+        assert!(state.active_buffer().is_none());
+
+        state.set_active_buffer("libera/#rust");
+        assert_eq!(
+            state.active_buffer().unwrap().name,
+            "#rust"
+        );
+    }
+
+    #[test]
+    fn add_message_to_buffer() {
+        let mut state = make_test_state();
+        let msg = make_test_message(&mut state, "hello world");
+        state.add_message("libera/#rust", msg);
+
+        let buf = state.buffers.get("libera/#rust").unwrap();
+        assert_eq!(buf.messages.len(), 1);
+        assert_eq!(buf.messages[0].text, "hello world");
+    }
+
+    #[test]
+    fn activity_only_escalates() {
+        let mut state = make_test_state();
+        state.set_activity("libera/#rust", ActivityLevel::Events);
+        assert_eq!(
+            state.buffers.get("libera/#rust").unwrap().activity,
+            ActivityLevel::Events
+        );
+
+        // Escalate to Mention
+        state.set_activity("libera/#rust", ActivityLevel::Mention);
+        assert_eq!(
+            state.buffers.get("libera/#rust").unwrap().activity,
+            ActivityLevel::Mention
+        );
+
+        // Should NOT downgrade
+        state.set_activity("libera/#rust", ActivityLevel::Events);
+        assert_eq!(
+            state.buffers.get("libera/#rust").unwrap().activity,
+            ActivityLevel::Mention
+        );
+    }
+
+    #[test]
+    fn activation_resets_activity() {
+        let mut state = make_test_state();
+        state.set_activity("libera/#rust", ActivityLevel::Mention);
+        assert_eq!(
+            state.buffers.get("libera/#rust").unwrap().activity,
+            ActivityLevel::Mention
+        );
+
+        state.set_active_buffer("libera/#rust");
+        assert_eq!(
+            state.buffers.get("libera/#rust").unwrap().activity,
+            ActivityLevel::None
+        );
+    }
+
+    #[test]
+    fn remove_buffer_falls_back_to_previous() {
+        let mut state = make_test_state();
+        state.set_active_buffer("libera/libera");
+        state.set_active_buffer("libera/#rust");
+
+        assert_eq!(state.active_buffer_id.as_deref(), Some("libera/#rust"));
+        assert_eq!(
+            state.previous_buffer_id.as_deref(),
+            Some("libera/libera")
+        );
+
+        // Remove the active buffer; should fall back to previous
+        state.remove_buffer("libera/#rust");
+        assert_eq!(state.active_buffer_id.as_deref(), Some("libera/libera"));
+    }
+
+    #[test]
+    fn next_prev_buffer_cycles() {
+        let mut state = make_test_state();
+        // Sorted order: libera/libera (server=1), libera/#linux (chan=2), libera/#rust (chan=2)
+        let sorted = state.sorted_buffer_ids();
+        assert_eq!(sorted, vec!["libera/libera", "libera/#linux", "libera/#rust"]);
+
+        state.set_active_buffer("libera/libera");
+
+        state.next_buffer();
+        assert_eq!(state.active_buffer_id.as_deref(), Some("libera/#linux"));
+
+        state.next_buffer();
+        assert_eq!(state.active_buffer_id.as_deref(), Some("libera/#rust"));
+
+        // Wrap around
+        state.next_buffer();
+        assert_eq!(state.active_buffer_id.as_deref(), Some("libera/libera"));
+
+        // Prev wraps the other way
+        state.prev_buffer();
+        assert_eq!(state.active_buffer_id.as_deref(), Some("libera/#rust"));
+    }
+
+    #[test]
+    fn add_message_with_activity_skips_active_buffer() {
+        let mut state = make_test_state();
+        state.set_active_buffer("libera/#rust");
+
+        // Adding a message with activity to the *active* buffer should not escalate
+        let msg = make_test_message(&mut state, "test");
+        state.add_message_with_activity("libera/#rust", msg, ActivityLevel::Mention);
+        assert_eq!(
+            state.buffers.get("libera/#rust").unwrap().activity,
+            ActivityLevel::None
+        );
+
+        // Adding to an inactive buffer should escalate
+        let msg2 = make_test_message(&mut state, "test2");
+        state.add_message_with_activity("libera/#linux", msg2, ActivityLevel::Mention);
+        assert_eq!(
+            state.buffers.get("libera/#linux").unwrap().activity,
+            ActivityLevel::Mention
+        );
+    }
+
+    #[test]
+    fn nick_management() {
+        let mut state = make_test_state();
+        let entry = NickEntry {
+            nick: "alice".to_string(),
+            prefix: "@".to_string(),
+            modes: "o".to_string(),
+            away: false,
+            account: None,
+        };
+        state.add_nick("libera/#rust", entry);
+        assert!(state
+            .buffers
+            .get("libera/#rust")
+            .unwrap()
+            .users
+            .contains_key("alice"));
+
+        state.update_nick("libera/#rust", "alice", "alice_".to_string());
+        assert!(!state
+            .buffers
+            .get("libera/#rust")
+            .unwrap()
+            .users
+            .contains_key("alice"));
+        assert!(state
+            .buffers
+            .get("libera/#rust")
+            .unwrap()
+            .users
+            .contains_key("alice_"));
+
+        state.remove_nick("libera/#rust", "alice_");
+        assert!(state
+            .buffers
+            .get("libera/#rust")
+            .unwrap()
+            .users
+            .is_empty());
+    }
+}
