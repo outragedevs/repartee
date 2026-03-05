@@ -15,6 +15,7 @@ pub struct App {
     pub state: AppState,
     pub config: AppConfig,
     pub theme: ThemeFile,
+    pub input: ui::input::InputState,
     pub should_quit: bool,
 }
 
@@ -39,6 +40,7 @@ impl App {
             state,
             config,
             theme,
+            input: ui::input::InputState::new(),
             should_quit: false,
         })
     }

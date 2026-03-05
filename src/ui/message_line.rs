@@ -1,2 +1,192 @@
-// Message line rendering (used by chat_view for themed message formatting)
-// Will be fully implemented when theme-based message rendering is wired up.
+use crate::config::AppConfig;
+use crate::state::buffer::{Message, MessageType};
+use crate::theme::{StyledSpan, parse_format_string, resolve_abstractions};
+use crate::ui::styled_text::styled_spans_to_line;
+use ratatui::text::Line;
+
+/// Render a single message into a themed ratatui Line.
+pub fn render_message(
+    msg: &Message,
+    is_own: bool,
+    theme: &crate::theme::ThemeFile,
+    config: &AppConfig,
+) -> Line<'static> {
+    let abstracts = &theme.abstracts;
+
+    // 1. Format timestamp
+    let ts = msg
+        .timestamp
+        .format(&config.general.timestamp_format)
+        .to_string();
+    let ts_format = abstracts
+        .get("timestamp")
+        .cloned()
+        .unwrap_or_else(|| "$*".to_string());
+    let ts_resolved = resolve_abstractions(&ts_format, abstracts, 0);
+    let ts_spans = parse_format_string(&ts_resolved, &[&ts]);
+
+    // 2. Build message spans based on type
+    let msg_spans = if msg.message_type == MessageType::Event {
+        render_event(msg, theme)
+    } else {
+        render_chat_message(msg, is_own, theme, config)
+    };
+
+    // 3. Combine: timestamp + space + message
+    let separator = StyledSpan {
+        text: " ".to_string(),
+        fg: None,
+        bg: None,
+        bold: false,
+        italic: false,
+        underline: false,
+        dim: false,
+    };
+
+    let mut all_spans = ts_spans;
+    all_spans.push(separator);
+    all_spans.extend(msg_spans);
+
+    styled_spans_to_line(&all_spans)
+}
+
+fn render_event(msg: &Message, theme: &crate::theme::ThemeFile) -> Vec<StyledSpan> {
+    let events = &theme.formats.events;
+    let abstracts = &theme.abstracts;
+
+    if let Some(event_key) = &msg.event_key
+        && let Some(format) = events.get(event_key)
+    {
+        let resolved = resolve_abstractions(format, abstracts, 0);
+        let params: Vec<&str> = msg
+            .event_params
+            .as_ref()
+            .map(|p| p.iter().map(|s| s.as_str()).collect())
+            .unwrap_or_default();
+        return parse_format_string(&resolved, &params);
+    }
+    // Fallback: parse text directly (may contain inline format codes)
+    parse_format_string(&msg.text, &[])
+}
+
+fn render_chat_message(
+    msg: &Message,
+    is_own: bool,
+    theme: &crate::theme::ThemeFile,
+    config: &AppConfig,
+) -> Vec<StyledSpan> {
+    let abstracts = &theme.abstracts;
+    let messages = &theme.formats.messages;
+
+    let nick = msg.nick.as_deref().unwrap_or("");
+    let nick_mode = msg.nick_mode.as_deref().unwrap_or("");
+    let nick_width = config.display.nick_column_width as usize;
+    let max_len = config.display.nick_max_length as usize;
+
+    // Truncate nick if needed
+    let mut display_nick = nick.to_string();
+    if config.display.nick_truncation && display_nick.len() > max_len {
+        display_nick.truncate(max_len);
+    }
+
+    // Pad combined mode+nick to fill column width
+    let total_len = nick_mode.len() + display_nick.len();
+    let pad_size = nick_width.saturating_sub(total_len);
+
+    let padded_nick_mode = match config.display.nick_alignment {
+        crate::config::NickAlignment::Right => {
+            format!("{}{}", " ".repeat(pad_size), nick_mode)
+        }
+        crate::config::NickAlignment::Center => {
+            let left = pad_size / 2;
+            let right = pad_size - left;
+            display_nick = format!("{}{}", display_nick, " ".repeat(right));
+            format!("{}{}", " ".repeat(left), nick_mode)
+        }
+        crate::config::NickAlignment::Left => {
+            display_nick = format!("{}{}", display_nick, " ".repeat(pad_size));
+            nick_mode.to_string()
+        }
+    };
+
+    // Determine format key
+    let format_key = match msg.message_type {
+        MessageType::Action => "action",
+        _ if is_own => "own_msg",
+        _ if msg.highlight => "pubmsg_mention",
+        _ => "pubmsg",
+    };
+
+    let msg_format = messages
+        .get(format_key)
+        .cloned()
+        .unwrap_or_else(|| "$0 $1".to_string());
+    let resolved = resolve_abstractions(&msg_format, abstracts, 0);
+    // params: $0=displayNick, $1=text, $2=paddedNickMode
+    parse_format_string(&resolved, &[&display_nick, &msg.text, &padded_nick_mode])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::default_config;
+    use crate::state::buffer::{Message, MessageType};
+    use crate::theme::loader::default_theme;
+    use chrono::Utc;
+
+    fn test_message(nick: &str, text: &str, msg_type: MessageType) -> Message {
+        Message {
+            id: 1,
+            timestamp: Utc::now(),
+            message_type: msg_type,
+            nick: Some(nick.to_string()),
+            nick_mode: None,
+            text: text.to_string(),
+            highlight: false,
+            event_key: None,
+            event_params: None,
+        }
+    }
+
+    #[test]
+    fn render_own_message_contains_nick_and_text() {
+        let msg = test_message("me", "hello world", MessageType::Message);
+        let theme = default_theme();
+        let config = default_config();
+        let line = render_message(&msg, true, &theme, &config);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("me"));
+        assert!(text.contains("hello world"));
+    }
+
+    #[test]
+    fn render_public_message() {
+        let msg = test_message("bob", "hi there", MessageType::Message);
+        let theme = default_theme();
+        let config = default_config();
+        let line = render_message(&msg, false, &theme, &config);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("bob"));
+        assert!(text.contains("hi there"));
+    }
+
+    #[test]
+    fn render_event_message() {
+        let msg = Message {
+            id: 1,
+            timestamp: Utc::now(),
+            message_type: MessageType::Event,
+            nick: None,
+            nick_mode: None,
+            text: "system message".to_string(),
+            highlight: false,
+            event_key: None,
+            event_params: None,
+        };
+        let theme = default_theme();
+        let config = default_config();
+        let line = render_message(&msg, false, &theme, &config);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("system message"));
+    }
+}

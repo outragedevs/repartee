@@ -3,7 +3,8 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::App;
 use crate::state::sorting;
-use crate::theme::hex_to_color;
+use crate::theme::{hex_to_color, parse_format_string, resolve_abstractions};
+use crate::ui::styled_text::styled_spans_to_line;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let colors = &app.theme.colors;
@@ -21,6 +22,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(buf) = app.state.active_buffer() {
         let nick_refs: Vec<_> = buf.users.values().collect();
         let sorted = sorting::sort_nicks(&nick_refs, sorting::DEFAULT_PREFIX_ORDER);
+        let abstracts = &app.theme.abstracts;
+        let nicklist = &app.theme.formats.nicklist;
 
         let mut lines: Vec<Line> = vec![Line::from(Span::styled(
             format!("{} users", sorted.len()),
@@ -28,14 +31,21 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         ))];
 
         for entry in &sorted {
-            let prefix_style = Style::default()
-                .fg(hex_to_color(&colors.accent).unwrap_or(Color::Cyan));
-            let nick_style = Style::default()
-                .fg(hex_to_color(&colors.fg).unwrap_or(Color::White));
-            lines.push(Line::from(vec![
-                Span::styled(entry.prefix.clone(), prefix_style),
-                Span::styled(entry.nick.clone(), nick_style),
-            ]));
+            let format_key = match entry.prefix.as_str() {
+                "~" => "owner",
+                "&" => "admin",
+                "@" => "op",
+                "%" => "halfop",
+                "+" => "voice",
+                _ => "normal",
+            };
+            let format = nicklist
+                .get(format_key)
+                .cloned()
+                .unwrap_or_else(|| " $0".to_string());
+            let resolved = resolve_abstractions(&format, abstracts, 0);
+            let spans = parse_format_string(&resolved, &[&entry.nick]);
+            lines.push(styled_spans_to_line(&spans));
         }
 
         let paragraph = Paragraph::new(lines);
