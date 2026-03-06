@@ -2,6 +2,7 @@ use crate::state::buffer::{ActivityLevel, Buffer, Message, NickEntry};
 use crate::state::connection::{Connection, ConnectionStatus};
 use crate::state::sorting::sort_buffers;
 use crate::state::AppState;
+use crate::storage::LogRow;
 
 impl AppState {
     pub fn new() -> Self {
@@ -11,10 +12,16 @@ impl AppState {
             active_buffer_id: None,
             previous_buffer_id: None,
             message_counter: 0,
+            flood_state: crate::irc::flood::FloodState::new(),
+            netsplit_state: crate::irc::netsplit::NetsplitState::new(),
+            flood_protection: true,
+            ignores: Vec::new(),
+            log_tx: None,
+            log_exclude_types: Vec::new(),
         }
     }
 
-    pub fn next_message_id(&mut self) -> u64 {
+    pub const fn next_message_id(&mut self) -> u64 {
         self.message_counter += 1;
         self.message_counter
     }
@@ -25,6 +32,7 @@ impl AppState {
         self.connections.insert(conn.id.clone(), conn);
     }
 
+    #[allow(dead_code)]
     pub fn remove_connection(&mut self, id: &str) {
         self.connections.remove(id);
     }
@@ -81,6 +89,7 @@ impl AppState {
     // === Messages ===
 
     pub fn add_message(&mut self, buffer_id: &str, message: Message) {
+        self.maybe_log(buffer_id, &message);
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
             buf.messages.push(message);
         }
@@ -92,6 +101,7 @@ impl AppState {
         message: Message,
         level: ActivityLevel,
     ) {
+        self.maybe_log(buffer_id, &message);
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
             buf.messages.push(message);
             // Only escalate activity if this is not the active buffer
@@ -103,6 +113,44 @@ impl AppState {
         }
     }
 
+    /// Send a message to the storage writer if logging is enabled.
+    fn maybe_log(&self, buffer_id: &str, message: &Message) {
+        let Some(tx) = &self.log_tx else { return };
+
+        // Check exclude_types filter (e.g. "event" skips quit/join/nick fan-out)
+        let type_str = format!("{:?}", message.message_type).to_lowercase();
+        if self.log_exclude_types.iter().any(|t| t == &type_str) {
+            return;
+        }
+
+        // buffer_id format: "connection_id/buffer_name"
+        let Some((conn_id, buf_name)) = buffer_id.split_once('/') else {
+            return;
+        };
+
+        // Use the connection label as network name (falls back to conn_id)
+        let network = self
+            .connections
+            .get(conn_id)
+            .map_or_else(|| conn_id.to_string(), |c| c.label.clone());
+
+        let is_ref = message.log_ref_id.is_some();
+        let row = LogRow {
+            msg_id: message.log_msg_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            network,
+            buffer: buf_name.to_string(),
+            timestamp: message.timestamp.timestamp(),
+            msg_type: message.message_type.clone(),
+            nick: message.nick.clone(),
+            text: if is_ref { String::new() } else { message.text.clone() },
+            highlight: message.highlight,
+            ref_id: message.log_ref_id.clone(),
+        };
+
+        let _ = tx.send(row);
+    }
+
+    #[allow(dead_code)]
     pub fn set_activity(&mut self, buffer_id: &str, level: ActivityLevel) {
         if let Some(buf) = self.buffers.get_mut(buffer_id)
             && level > buf.activity
@@ -138,7 +186,7 @@ impl AppState {
         if let Some(buf) = self.buffers.get_mut(buffer_id)
             && let Some(mut entry) = buf.users.remove(old_nick)
         {
-            entry.nick = new_nick.clone();
+            entry.nick.clone_from(&new_nick);
             buf.users.insert(new_nick, entry);
         }
     }
@@ -161,7 +209,11 @@ impl AppState {
 
     pub fn sorted_buffer_ids(&self) -> Vec<String> {
         let buf_refs: Vec<&Buffer> = self.buffers.values().collect();
-        let sorted = sort_buffers(&buf_refs);
+        let sorted = sort_buffers(&buf_refs, |conn_id| {
+            self.connections
+                .get(conn_id)
+                .map_or_else(|| conn_id.to_string(), |c| c.label.clone())
+        });
         sorted.into_iter().map(|b| b.id.clone()).collect()
     }
 
@@ -174,10 +226,7 @@ impl AppState {
             .active_buffer_id
             .as_ref()
             .and_then(|id| sorted.iter().position(|s| s == id));
-        let next_idx = match current_idx {
-            Some(idx) => (idx + 1) % sorted.len(),
-            None => 0,
-        };
+        let next_idx = current_idx.map_or(0, |idx| (idx + 1) % sorted.len());
         let next_id = sorted[next_idx].clone();
         self.set_active_buffer(&next_id);
     }
@@ -217,8 +266,36 @@ mod tests {
             nick: "testuser".to_string(),
             user_modes: String::new(),
             isupport: HashMap::new(),
+            isupport_parsed: crate::irc::isupport::Isupport::new(),
             error: None,
             lag: None,
+            reconnect_attempts: 0,
+            max_reconnect_attempts: 10,
+            reconnect_delay_secs: 30,
+            next_reconnect: None,
+            should_reconnect: true,
+            joined_channels: Vec::new(),
+            origin_config: crate::config::ServerConfig {
+                label: "Libera".to_string(),
+                address: "irc.libera.chat".to_string(),
+                port: 6697,
+                tls: true,
+                tls_verify: true,
+                autoconnect: false,
+                channels: vec![],
+                nick: None,
+                username: None,
+                realname: None,
+                password: None,
+                sasl_user: None,
+                sasl_pass: None,
+                bind_ip: None,
+                encoding: None,
+                auto_reconnect: Some(true),
+                reconnect_delay: None,
+                reconnect_max_retries: None,
+                autosendcmd: None,
+            },
         }
     }
 
@@ -251,7 +328,7 @@ mod tests {
             text: text.to_string(),
             highlight: false,
             event_key: None,
-            event_params: None,
+            event_params: None, log_msg_id: None, log_ref_id: None,
         }
     }
 
@@ -437,5 +514,57 @@ mod tests {
             .unwrap()
             .users
             .is_empty());
+    }
+
+    #[test]
+    fn maybe_log_sends_ref_id_with_empty_text() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = make_test_state();
+        state.log_tx = Some(tx);
+
+        let primary_id = "primary-uuid-123".to_string();
+
+        // Primary row: full text, log_msg_id set, no ref_id
+        let msg1 = Message {
+            id: state.next_message_id(),
+            timestamp: Utc::now(),
+            message_type: MessageType::Event,
+            nick: None,
+            nick_mode: None,
+            text: "alice has quit (Quit: bye)".to_string(),
+            highlight: false,
+            event_key: None,
+            event_params: None,
+            log_msg_id: Some(primary_id.clone()),
+            log_ref_id: None,
+        };
+        state.add_message("libera/#rust", msg1);
+
+        // Reference row: same text in UI, but ref_id set
+        let msg2 = Message {
+            id: state.next_message_id(),
+            timestamp: Utc::now(),
+            message_type: MessageType::Event,
+            nick: None,
+            nick_mode: None,
+            text: "alice has quit (Quit: bye)".to_string(),
+            highlight: false,
+            event_key: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: Some(primary_id.clone()),
+        };
+        state.add_message("libera/#linux", msg2);
+
+        // Check primary row
+        let row1 = rx.try_recv().unwrap();
+        assert_eq!(row1.msg_id, primary_id);
+        assert_eq!(row1.text, "alice has quit (Quit: bye)");
+        assert!(row1.ref_id.is_none());
+
+        // Check reference row
+        let row2 = rx.try_recv().unwrap();
+        assert!(row2.text.is_empty(), "reference row should have empty text");
+        assert_eq!(row2.ref_id, Some(primary_id));
     }
 }

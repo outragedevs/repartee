@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::config::ServerConfig;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectionStatus {
     Connecting,
@@ -10,6 +12,7 @@ pub enum ConnectionStatus {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Connection {
     pub id: String,
     pub label: String,
@@ -17,6 +20,23 @@ pub struct Connection {
     pub nick: String,
     pub user_modes: String,
     pub isupport: HashMap<String, String>,
+    pub isupport_parsed: crate::irc::isupport::Isupport,
     pub error: Option<String>,
     pub lag: Option<u64>,
+    /// Number of reconnect attempts made so far.
+    pub reconnect_attempts: u32,
+    /// Maximum number of reconnect attempts before giving up.
+    pub max_reconnect_attempts: u32,
+    /// Base delay in seconds between reconnect attempts.
+    pub reconnect_delay_secs: u64,
+    /// When the next reconnect attempt should be made.
+    pub next_reconnect: Option<std::time::Instant>,
+    /// Whether auto-reconnect is enabled. Set to false when user explicitly /disconnects.
+    pub should_reconnect: bool,
+    /// Channels that were joined before disconnect, for auto-rejoin on reconnect.
+    pub joined_channels: Vec<String>,
+    /// The server config used to establish this connection.
+    /// Stored so ad-hoc connections (from `/connect address`) can reconnect
+    /// without requiring a matching entry in the config file.
+    pub origin_config: ServerConfig,
 }
