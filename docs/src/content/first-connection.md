@@ -42,6 +42,16 @@ Once connected, join channels with:
 
 Channels listed in your config's `channels` array are joined automatically on connect.
 
+## Cycle a channel
+
+To refresh your presence in a channel (part + rejoin), use:
+
+```
+/cycle
+/cycle #channel
+/cycle Refreshing...
+```
+
 ## Navigation
 
 - **Esc + 1–9** — switch between buffers (windows)
@@ -70,7 +80,10 @@ port = 6697
 tls = true
 sasl_user = "mynick"
 # sasl_pass loaded from .env
+# sasl_mechanism = "SCRAM-SHA-256"  # or PLAIN (default), EXTERNAL
 ```
+
+Supported SASL mechanisms: **PLAIN**, **EXTERNAL** (client TLS certificate), **SCRAM-SHA-256** (secure challenge-response — preferred when available).
 
 ## Next steps
 

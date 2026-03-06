@@ -141,6 +141,7 @@ autosendcmd = &quot;MSG NickServ identify pass; WAIT 2000; MODE $N +i&quot;
 # nick = &quot;othernick&quot;           # per-server nick override
 # sasl_user = &quot;mynick&quot;
 # sasl_pass = &quot;hunter2&quot;
+# sasl_mechanism = &quot;SCRAM-SHA-256&quot;  # PLAIN (default), EXTERNAL, SCRAM-SHA-256
 # auto_reconnect = true
 # reconnect_delay = 30
 # reconnect_max_retries = 10
@@ -180,6 +181,7 @@ levels = [&quot;ALL&quot;]
 <p>Configure which items appear in the status line. Available items: <code>active_windows</code>, <code>nick_info</code>, <code>channel_info</code>, <code>lag</code>, <code>time</code>.</p>
 <h3><code>[servers.*]</code></h3>
 <p>Each server gets a unique identifier (the key after <code>servers.</code>). The <code>channels</code> array lists channels to auto-join on connect. Channels with keys use the format <code>&quot;#channel key&quot;</code>.</p>
+<p>Set <code>sasl_mechanism</code> to override automatic mechanism selection. Available: <code>PLAIN</code> (default), <code>EXTERNAL</code> (client TLS certificate), <code>SCRAM-SHA-256</code> (secure challenge-response).</p>
 <h3><code>[logging]</code></h3>
 <p>Chat logging to SQLite. When <code>encrypt = true</code>, messages are encrypted with AES-256-GCM. <code>retention_days = 0</code> keeps logs forever.</p>
 <h3><code>[aliases]</code></h3>

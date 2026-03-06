@@ -161,7 +161,7 @@ exclude_types = []       # e.g. [&quot;join&quot;, &quot;part&quot;, &quot;quit&
 <h2>Encryption</h2>
 <p>When <code>encrypt = true</code>, message text is encrypted with AES-256-GCM before storage. The encryption key is derived from a passphrase stored in <code>~/.repartee/.env</code>:</p>
 <pre><code class="language-bash"># ~/.repartee/.env
-RUSTIRC_LOG_KEY=your-secret-passphrase
+REPARTEE_LOG_KEY=your-secret-passphrase
 </code></pre>
 <p>Encrypted logs can only be searched/read with the correct key.</p>
 <h2>Full-text search</h2>

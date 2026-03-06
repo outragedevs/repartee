@@ -90,6 +90,9 @@
     <div class="content-wrapper">
       <main class="content">
         <h1>Scripting — Examples</h1>
+<blockquote>
+<p><strong>Note:</strong> Scripts run in a sandboxed Lua environment. The <code>os</code>, <code>io</code>, <code>loadfile</code>, <code>dofile</code>, and <code>package</code> globals are removed. Use <code>api.log()</code> for debug output and <code>api.print()</code> for UI messages.</p>
+</blockquote>
 <p>Practical Lua script examples for repartee.</p>
 <h2>Auto-greet on join</h2>
 <p>Greet users when they join a specific channel:</p>
@@ -123,7 +126,6 @@ function setup(api)
     api.on(&quot;irc.privmsg&quot;, function(event)
         for url in event.message:gmatch(&quot;https?://[%w%.%-/%%?&amp;=_#]+&quot;) do
             table.insert(urls, {
-                time = os.date(&quot;%H:%M&quot;),
                 nick = event.nick,
                 channel = event.target,
                 url = url
@@ -138,7 +140,7 @@ function setup(api)
             local start = math.max(1, #urls - count + 1)
             for i = start, #urls do
                 local u = urls[i]
-                api.print(u.time .. &quot; &quot; .. u.nick .. &quot; &gt; &quot; .. u.url)
+                api.print(u.nick .. &quot; &gt; &quot; .. u.url)
             end
         end,
         description = &quot;Show recent URLs&quot;,
@@ -227,18 +229,18 @@ function setup(api)
 end
 </code></pre>
 <h2>Nick highlight with sound</h2>
-<p>Play a terminal bell when your nick is mentioned:</p>
+<p>Print an alert when your nick is mentioned:</p>
 <pre><code class="language-lua">meta = {
     name = &quot;nickbell&quot;,
     version = &quot;1.0&quot;,
-    description = &quot;Bell on nick mention&quot;
+    description = &quot;Print alert on nick mention&quot;
 }
 
 function setup(api)
     api.on(&quot;irc.privmsg&quot;, function(event)
         local my_nick = api.our_nick()
         if my_nick and event.message:lower():find(my_nick:lower(), 1, true) then
-            io.write(&quot;\a&quot;)  -- terminal bell
+            api.print(&quot;** Mentioned in &quot; .. event.target .. &quot; by &quot; .. event.nick)
         end
     end)
 end

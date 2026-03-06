@@ -51,7 +51,18 @@ Yes. Add multiple `[servers.*]` sections to your config. Each gets its own conne
 
 ## Does repartee support IRCv3?
 
-The underlying `irc` crate supports IRCv3 capabilities including SASL, server-time, and CAP negotiation.
+Yes — repartee has comprehensive IRCv3 support negotiated at connection time:
+
+- **server-time**, **echo-message**, **away-notify**, **account-notify**, **chghost**, **cap-notify**
+- **multi-prefix** (e.g. `@+nick`), **extended-join**, **userhost-in-names**, **message-tags**
+- **invite-notify**, **BATCH** (netsplit/netjoin grouping)
+- **SASL**: PLAIN, EXTERNAL (client certificate), SCRAM-SHA-256
+- **WHOX**: auto-detected for account name and full host tracking
+- **Extban**: `$a:account` ban type with `/ban -a` shorthand
+
+## What does /cycle do?
+
+`/cycle` parts and immediately rejoins a channel. Useful for refreshing your nick list, re-triggering auto-op, or clearing stale channel state. Channel keys are preserved. Alias: `/rejoin`.
 
 ## How do I report bugs?
 

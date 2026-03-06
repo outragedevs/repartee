@@ -1,5 +1,7 @@
 # Scripting — Examples
 
+> **Note:** Scripts run in a sandboxed Lua environment. The `os`, `io`, `loadfile`, `dofile`, and `package` globals are removed. Use `api.log()` for debug output and `api.print()` for UI messages.
+
 Practical Lua script examples for repartee.
 
 ## Auto-greet on join
@@ -41,7 +43,6 @@ function setup(api)
     api.on("irc.privmsg", function(event)
         for url in event.message:gmatch("https?://[%w%.%-/%%?&=_#]+") do
             table.insert(urls, {
-                time = os.date("%H:%M"),
                 nick = event.nick,
                 channel = event.target,
                 url = url
@@ -56,7 +57,7 @@ function setup(api)
             local start = math.max(1, #urls - count + 1)
             for i = start, #urls do
                 local u = urls[i]
-                api.print(u.time .. " " .. u.nick .. " > " .. u.url)
+                api.print(u.nick .. " > " .. u.url)
             end
         end,
         description = "Show recent URLs",
@@ -159,20 +160,20 @@ end
 
 ## Nick highlight with sound
 
-Play a terminal bell when your nick is mentioned:
+Print an alert when your nick is mentioned:
 
 ```lua
 meta = {
     name = "nickbell",
     version = "1.0",
-    description = "Bell on nick mention"
+    description = "Print alert on nick mention"
 }
 
 function setup(api)
     api.on("irc.privmsg", function(event)
         local my_nick = api.our_nick()
         if my_nick and event.message:lower():find(my_nick:lower(), 1, true) then
-            io.write("\a")  -- terminal bell
+            api.print("** Mentioned in " .. event.target .. " by " .. event.nick)
         end
     end)
 end

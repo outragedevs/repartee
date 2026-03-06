@@ -42,6 +42,12 @@ src/
   state/               # Application state (buffers, connections, sorting)
   irc/                 # IRC connection, event handling, formatting
     events.rs          # IRC message → state update
+    mod.rs             # Connection setup, CAP negotiation, SASL
+    cap.rs             # IRCv3 CAP framework
+    isupport.rs        # ISUPPORT parameter parsing
+    batch.rs           # IRCv3 BATCH (netsplit/netjoin)
+    sasl_scram.rs      # SASL SCRAM-SHA-256 implementation
+    extban.rs          # Extended ban types ($a:account, etc.)
     flood.rs           # Flood protection
     netsplit.rs        # Netsplit detection
     ignore.rs          # Ignore list matching
@@ -105,6 +111,30 @@ ScriptManager
 ```
 
 The `ScriptEngine` trait allows adding new languages (Rhai, etc.) by implementing the trait and registering with `ScriptManager`.
+
+## IRCv3 support
+
+repartee implements a comprehensive set of IRCv3 capabilities negotiated during connection via CAP LS/REQ/ACK:
+
+| Capability | Description |
+|---|---|
+| `multi-prefix` | Multiple mode prefixes per nick (e.g. `@+nick`) |
+| `extended-join` | Account name and realname in JOIN messages |
+| `server-time` | Message timestamps from the server |
+| `account-tag` | Account name on every message |
+| `cap-notify` | Server-side capability change notifications |
+| `away-notify` | Real-time away status changes |
+| `account-notify` | Account login/logout notifications |
+| `chghost` | Real-time ident/hostname changes |
+| `echo-message` | Authoritative echo of sent messages |
+| `invite-notify` | Notifications for channel invites |
+| `batch` | Grouped message batches (netsplit/netjoin) |
+| `userhost-in-names` | Full user@host in NAMES replies |
+| `message-tags` | Arbitrary IRCv3 message metadata |
+
+SASL mechanisms supported: PLAIN, EXTERNAL (client certificate), SCRAM-SHA-256.
+
+WHOX (extended WHO) is auto-detected and used to populate account names and full user@host for nick entries.
 
 ## Storage pipeline
 

@@ -38,6 +38,14 @@ A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by ir
     <div class="card-body">Lua 5.4 scripts with an event bus, custom commands, and full IRC/state access.</div>
   </div>
   <div class="card">
+    <div class="card-title">IRCv3 Capabilities</div>
+    <div class="card-body">Full IRCv3 suite: server-time, echo-message, away-notify, account tags, BATCH netsplit grouping, SASL SCRAM-SHA-256, and more.</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Extended Bans</div>
+    <div class="card-body">WHOX account tracking and extban support — ban by account name with <code>/ban -a accountname</code>.</div>
+  </div>
+  <div class="card">
     <div class="card-title">Single Binary</div>
     <div class="card-body">Compiles to a ~5MB standalone executable. Zero runtime dependencies.</div>
   </div>

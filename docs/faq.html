@@ -165,7 +165,17 @@
 <h2>Can I use multiple IRC networks?</h2>
 <p>Yes. Add multiple <code>[servers.*]</code> sections to your config. Each gets its own connection and set of channel buffers.</p>
 <h2>Does repartee support IRCv3?</h2>
-<p>The underlying <code>irc</code> crate supports IRCv3 capabilities including SASL, server-time, and CAP negotiation.</p>
+<p>Yes — repartee has comprehensive IRCv3 support negotiated at connection time:</p>
+<ul>
+<li><strong>server-time</strong>, <strong>echo-message</strong>, <strong>away-notify</strong>, <strong>account-notify</strong>, <strong>chghost</strong>, <strong>cap-notify</strong></li>
+<li><strong>multi-prefix</strong> (e.g. <code>@+nick</code>), <strong>extended-join</strong>, <strong>userhost-in-names</strong>, <strong>message-tags</strong></li>
+<li><strong>invite-notify</strong>, <strong>BATCH</strong> (netsplit/netjoin grouping)</li>
+<li><strong>SASL</strong>: PLAIN, EXTERNAL (client certificate), SCRAM-SHA-256</li>
+<li><strong>WHOX</strong>: auto-detected for account name and full host tracking</li>
+<li><strong>Extban</strong>: <code>$a:account</code> ban type with <code>/ban -a</code> shorthand</li>
+</ul>
+<h2>What does /cycle do?</h2>
+<p><code>/cycle</code> parts and immediately rejoins a channel. Useful for refreshing your nick list, re-triggering auto-op, or clearing stale channel state. Channel keys are preserved. Alias: <code>/rejoin</code>.</p>
 <h2>How do I report bugs?</h2>
 <p>Open an issue on the <a href="https://github.com/kofany/repartee/issues">GitHub repository</a>.</p>
 

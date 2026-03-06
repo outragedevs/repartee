@@ -58,6 +58,7 @@ autosendcmd = "MSG NickServ identify pass; WAIT 2000; MODE $N +i"
 # nick = "othernick"           # per-server nick override
 # sasl_user = "mynick"
 # sasl_pass = "hunter2"
+# sasl_mechanism = "SCRAM-SHA-256"  # PLAIN (default), EXTERNAL, SCRAM-SHA-256
 # auto_reconnect = true
 # reconnect_delay = 30
 # reconnect_max_retries = 10
@@ -108,6 +109,8 @@ Configure which items appear in the status line. Available items: `active_window
 ### `[servers.*]`
 
 Each server gets a unique identifier (the key after `servers.`). The `channels` array lists channels to auto-join on connect. Channels with keys use the format `"#channel key"`.
+
+Set `sasl_mechanism` to override automatic mechanism selection. Available: `PLAIN` (default), `EXTERNAL` (client TLS certificate), `SCRAM-SHA-256` (secure challenge-response).
 
 ### `[logging]`
 

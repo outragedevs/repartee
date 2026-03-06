@@ -42,7 +42,7 @@ When `encrypt = true`, message text is encrypted with AES-256-GCM before storage
 
 ```bash
 # ~/.repartee/.env
-RUSTIRC_LOG_KEY=your-secret-passphrase
+REPARTEE_LOG_KEY=your-secret-passphrase
 ```
 
 Encrypted logs can only be searched/read with the correct key.

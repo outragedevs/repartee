@@ -129,6 +129,25 @@ cannot be closed.</p>
 <h2>See Also</h2>
 <p>/part, /quit</p>
 </div>
+<div class="command-entry" data-command="cycle" data-category="Channel">
+<h1>/cycle</h1>
+<h2>Syntax</h2>
+<pre><code>/cycle [channel] [message]
+</code></pre>
+<h2>Description</h2>
+<p>Leave and immediately rejoin a channel. Useful for refreshing your user list,
+re-triggering auto-op or auto-voice, or clearing stale state. If the channel
+has a key set, it is preserved for the rejoin.</p>
+<p>With no arguments, cycles the current channel. An optional part message can
+be provided.</p>
+<h2>Examples</h2>
+<pre><code>/cycle
+/cycle #linux
+/cycle #linux Refreshing...
+</code></pre>
+<h2>See Also</h2>
+<p>/part, /join</p>
+</div>
 <div class="command-entry" data-command="except" data-category="Channel">
 <h1>/except</h1>
 <h2>Syntax</h2>
