@@ -69,7 +69,7 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
             handle_mode(state, conn_id, msg.prefix.as_ref(), target, msg, tags);
         }
         Command::INVITE(nick, channel) => {
-            handle_invite(state, conn_id, msg.prefix.as_ref(), nick, channel, tags);
+            handle_invite(state, conn_id, &our_nick, msg.prefix.as_ref(), nick, channel, tags);
         }
         Command::Response(response, args) => {
             handle_response(state, conn_id, *response, args);
@@ -1647,6 +1647,7 @@ const fn user_mode_letter(m: &irc::proto::UserMode) -> char {
 fn handle_invite(
     state: &mut AppState,
     conn_id: &str,
+    our_nick: &str,
     prefix: Option<&Prefix>,
     nick: &str,
     channel: &str,
@@ -1654,33 +1655,55 @@ fn handle_invite(
 ) {
     let inviter = extract_nick(prefix).unwrap_or_default();
 
-    // Show invite in active buffer or server buffer
-    let label = state
-        .connections
-        .get(conn_id)
-        .map_or("Status", |c| c.label.as_str());
-    let _ = nick; // nick is us (the invited user)
-    let buffer_id = state
-        .active_buffer_id
-        .clone()
-        .unwrap_or_else(|| make_buffer_id(conn_id, label));
+    if nick.eq_ignore_ascii_case(our_nick) {
+        // We are the invited user — show in active buffer or server buffer (highlight)
+        let label = state
+            .connections
+            .get(conn_id)
+            .map_or("Status", |c| c.label.as_str());
+        let buffer_id = state
+            .active_buffer_id
+            .clone()
+            .unwrap_or_else(|| make_buffer_id(conn_id, label));
 
-    let id = state.next_message_id();
-    state.add_message(
-        &buffer_id,
-        Message {
-            id,
-            timestamp: message_timestamp(&tags),
-            message_type: MessageType::Event,
-            nick: None,
-            nick_mode: None,
-            text: format!("{inviter} invites you to {channel}"),
-            highlight: true,
-            event_key: None,
-            event_params: None, log_msg_id: None, log_ref_id: None,
-            tags,
-        },
-    );
+        let id = state.next_message_id();
+        state.add_message(
+            &buffer_id,
+            Message {
+                id,
+                timestamp: message_timestamp(&tags),
+                message_type: MessageType::Event,
+                nick: None,
+                nick_mode: None,
+                text: format!("{inviter} invites you to {channel}"),
+                highlight: true,
+                event_key: None,
+                event_params: None, log_msg_id: None, log_ref_id: None,
+                tags,
+            },
+        );
+    } else {
+        // invite-notify: someone else was invited — show in the channel buffer
+        let buffer_id = make_buffer_id(conn_id, channel);
+        if state.buffers.contains_key(&buffer_id) {
+            let id = state.next_message_id();
+            state.add_message(
+                &buffer_id,
+                Message {
+                    id,
+                    timestamp: message_timestamp(&tags),
+                    message_type: MessageType::Event,
+                    nick: None,
+                    nick_mode: None,
+                    text: format!("{inviter} invited {nick} to {channel}"),
+                    highlight: false,
+                    event_key: None,
+                    event_params: None, log_msg_id: None, log_ref_id: None,
+                    tags,
+                },
+            );
+        }
+    }
 }
 
 fn handle_wallops(
@@ -3796,5 +3819,51 @@ mod tests {
         assert_eq!(buf.messages.len(), 1);
         assert_eq!(buf.messages[0].message_type, MessageType::Notice);
         assert_eq!(buf.messages[0].text, "notice to bob");
+    }
+
+    // === invite-notify tests ===
+
+    #[test]
+    fn invite_target_is_us_shows_in_active_buffer() {
+        let mut state = make_test_state();
+        // Set active buffer to the channel so the invite message lands there
+        state.set_active_buffer("test/#test");
+
+        let msg = make_irc_msg(
+            Some("op!user@host"),
+            Command::INVITE("me".into(), "#secret".into()),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        // When we are the target, the message goes to the active buffer
+        let buf = state.buffers.get("test/#test").unwrap();
+        assert_eq!(buf.messages.len(), 1);
+        assert_eq!(buf.messages[0].message_type, MessageType::Event);
+        assert_eq!(buf.messages[0].text, "op invites you to #secret");
+        assert!(buf.messages[0].highlight);
+    }
+
+    #[test]
+    fn invite_notify_other_user_shows_in_channel() {
+        let mut state = make_test_state();
+        // Set active buffer to server so we can verify the message goes to #test, not active
+        state.set_active_buffer("test/testserver");
+
+        let msg = make_irc_msg(
+            Some("op!user@host"),
+            Command::INVITE("alice".into(), "#test".into()),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        // invite-notify: message goes to the channel buffer, not the active buffer
+        let buf = state.buffers.get("test/#test").unwrap();
+        assert_eq!(buf.messages.len(), 1);
+        assert_eq!(buf.messages[0].message_type, MessageType::Event);
+        assert_eq!(buf.messages[0].text, "op invited alice to #test");
+        assert!(!buf.messages[0].highlight);
+
+        // Server buffer should have no messages from this invite
+        let server_buf = state.buffers.get("test/testserver").unwrap();
+        assert_eq!(server_buf.messages.len(), 0);
     }
 }
