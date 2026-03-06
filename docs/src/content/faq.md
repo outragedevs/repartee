@@ -66,4 +66,4 @@ Yes — repartee has comprehensive IRCv3 support negotiated at connection time:
 
 ## How do I report bugs?
 
-Open an issue on the [GitHub repository](https://github.com/kofany/repartee/issues).
+Open an issue on the [GitHub repository](https://github.com/outragedevs/repartee/issues).
