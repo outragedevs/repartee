@@ -66,10 +66,23 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                     if let Some(modes) = &buf.modes
                         && !modes.is_empty()
                     {
-                        spans.push(Span::styled(
-                            format!("(+{modes})"),
-                            Style::default().fg(fg_muted),
-                        ));
+                        // Append param values for modes that have them (l=limit, k=key)
+                        let param_str: String = modes
+                            .chars()
+                            .filter_map(|ch| {
+                                buf.mode_params
+                                    .as_ref()
+                                    .and_then(|mp| mp.get(&ch.to_string()))
+                                    .map(String::as_str)
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let display = if param_str.is_empty() {
+                            format!("(+{modes})")
+                        } else {
+                            format!("(+{modes} {param_str})")
+                        };
+                        spans.push(Span::styled(display, Style::default().fg(fg_muted)));
                     }
                 }
             }

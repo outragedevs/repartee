@@ -71,6 +71,8 @@ pub struct App {
     batch_trackers: HashMap<String, crate::irc::batch::BatchTracker>,
     /// Storage subsystem for persistent message logging.
     pub storage: Option<crate::storage::Storage>,
+    /// Custom quit message set by `/quit [msg]`.
+    pub quit_message: Option<String>,
 }
 
 impl App {
@@ -125,6 +127,7 @@ impl App {
             lag_pings: HashMap::new(),
             batch_trackers: HashMap::new(),
             storage,
+            quit_message: None,
         })
     }
 
@@ -324,9 +327,10 @@ impl App {
         // Stop the terminal reader thread so it doesn't interfere with restore.
         reader_stop.store(true, Ordering::Relaxed);
 
-        // Send QUIT to all connected servers
+        // Send QUIT to all connected servers (once — cmd_quit defers to here)
+        let quit_msg = self.quit_message.as_deref().unwrap_or("Leaving");
         for handle in self.irc_handles.values() {
-            let _ = handle.sender.send_quit("Leaving");
+            let _ = handle.sender.send_quit(quit_msg);
         }
 
         // Shut down storage writer (flushes remaining rows)
@@ -927,14 +931,24 @@ impl App {
                     crate::irc::events::handle_irc_message(&mut self.state, &conn_id, &msg);
 
                     // Auto-WHO on channel join: send WHOX WHO if supported (silent — no display)
-                    if let Some(channel) = endofnames_channel
+                    if let Some(ref channel) = endofnames_channel
                         && let Some((target, fields)) =
-                            crate::irc::events::build_whox_who(&mut self.state, &conn_id, &channel, true)
+                            crate::irc::events::build_whox_who(&mut self.state, &conn_id, channel, true)
                         && let Some(handle) = self.irc_handles.get(&conn_id)
                     {
                         let _ = handle.sender.send(::irc::proto::Command::Raw(
                             "WHO".to_string(),
                             vec![target, fields],
+                        ));
+                    }
+
+                    // Auto-MODE on channel join: request channel modes for status bar display
+                    if let Some(channel) = endofnames_channel
+                        && let Some(handle) = self.irc_handles.get(&conn_id)
+                    {
+                        let _ = handle.sender.send(::irc::proto::Command::Raw(
+                            "MODE".to_string(),
+                            vec![channel],
                         ));
                     }
                 }

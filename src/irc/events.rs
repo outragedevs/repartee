@@ -1614,20 +1614,18 @@ fn apply_channel_mode(
             if !modes.contains(ch) {
                 modes.push(ch);
             }
-            // Store key param for /cycle to preserve
-            if ch == 'k'
-                && let Some(key) = param
+            // Store params for modes that carry values (k=key, l=limit)
+            if matches!(ch, 'k' | 'l')
+                && let Some(val) = param
             {
                 buf.mode_params
                     .get_or_insert_with(HashMap::new)
-                    .insert("k".to_string(), key.to_string());
+                    .insert(ch.to_string(), val.to_string());
             }
         } else {
             *modes = modes.replace(ch, "");
-            if ch == 'k'
-                && let Some(ref mut mp) = buf.mode_params
-            {
-                mp.remove("k");
+            if let Some(ref mut mp) = buf.mode_params {
+                mp.remove(&ch.to_string());
             }
         }
         // Strip leading '+' if present from RPL_CHANNELMODEIS
@@ -1890,14 +1888,34 @@ fn handle_response(
                 }
             }
         }
-        // RPL_CHANNELMODEIS: args = [our_nick, channel, modes, ...]
+        // RPL_CHANNELMODEIS: args = [our_nick, channel, modes, param1, param2, ...]
+        // e.g. [nick, #chan, +ntlk, 50, secret]
         Response::RPL_CHANNELMODEIS => {
             if args.len() >= 3 {
                 let channel = &args[1];
-                let modes = args[2].strip_prefix('+').unwrap_or(&args[2]);
+                let mode_str = args[2].strip_prefix('+').unwrap_or(&args[2]);
                 let buffer_id = make_buffer_id(conn_id, channel);
                 if let Some(buf) = state.buffers.get_mut(&buffer_id) {
-                    buf.modes = Some(modes.to_string());
+                    buf.modes = Some(mode_str.to_string());
+                    // Parse mode params: modes with params (k, l, etc.) consume
+                    // positional args starting from args[3].
+                    let mut param_idx = 3;
+                    let mut params = HashMap::new();
+                    for ch in mode_str.chars() {
+                        // Type B (always has param): k
+                        // Type C (param when set): l
+                        if matches!(ch, 'k' | 'l')
+                            && let Some(val) = args.get(param_idx)
+                        {
+                            params.insert(ch.to_string(), val.clone());
+                            param_idx += 1;
+                        }
+                    }
+                    if params.is_empty() {
+                        buf.mode_params = None;
+                    } else {
+                        buf.mode_params = Some(params);
+                    }
                 }
             }
         }

@@ -7,15 +7,12 @@ use super::types::{
 };
 
 pub(crate) fn cmd_quit(app: &mut App, args: &[String]) {
-    let quit_msg = if args.is_empty() {
-        "Leaving"
-    } else {
-        &args[0]
-    };
-    for handle in app.irc_handles.values() {
-        let _ = handle.sender.send_quit(quit_msg);
+    if !args.is_empty() {
+        app.quit_message = Some(args[0].clone());
     }
     app.should_quit = true;
+    // QUIT is sent once in the post-loop cleanup (App::run) to avoid
+    // double-QUIT which triggers "Excess Flood" on strict servers.
 }
 
 pub(crate) fn cmd_help(app: &mut App, args: &[String]) {
