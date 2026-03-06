@@ -2,6 +2,23 @@
 name = "repartee"
 version = "0.1.0"
 edition = "2024"
+description = "A modern terminal IRC client built with Ratatui and Tokio"
+license = "MIT"
+repository = "https://github.com/outragedevs/repartee"
+homepage = "https://outragedevs.github.io/repartee/"
+readme = "README.md"
+keywords = ["irc", "terminal", "tui", "chat", "client"]
+categories = ["command-line-utilities", "network-programming"]
+authors = ["outragedevs"]
+exclude = [
+    ".adal/", ".agent/", ".augment/", ".codebuddy/", ".commandcode/",
+    ".continue/", ".crush/", ".factory/", ".goose/", ".iflow/",
+    ".junie/", ".kilocode/", ".kiro/", ".kode/", ".mcpjam/",
+    ".mux/", ".neovate/", ".openhands/", ".pi/", ".pochi/",
+    ".qoder/", ".qwen/", ".roo/", ".trae/", ".vibe/",
+    ".windsurf/", ".zencoder/", ".claude/",
+    "docs/node_modules/", "docs/bun.lock",
+]
 
 [dependencies]
 ratatui = "0.30"
