@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="rustirc — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
+  <meta name="keywords" content="irc, terminal, tui, client, chat, rustirc, ratatui, tokio, rust">
+  <meta name="author" content="kofany">
+  <meta property="og:title" content="Examples — rustirc">
+  <meta property="og:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by irssi, designed for the future.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://kofany.github.io/rustirc/">
+  <meta property="og:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{title}} — rustirc">
+  <meta name="twitter:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust.">
+  <meta name="twitter:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <title>{{title}} — rustirc</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- Mobile hamburger toggle -->
+  <button class="hamburger" aria-label="Toggle navigation">
+    <span></span>
+    <span></span>
+    <span></span>
+  </button>
+
+  <div class="page-wrapper">
+    <!-- Sidebar navigation -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <a href="index.html" class="brand">rustirc</a>
+        <span class="brand-tagline">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+          <ul>
+    <li><a href="index.html">Home</a></li>
+  </ul>
+  <div class="nav-section">
+    <span class="nav-section-title">Getting Started</span>
+    <ul>
+      <li><a href="installation.html">Installation</a></li>
+      <li><a href="first-connection.html">First Connection</a></li>
+      <li><a href="configuration.html">Configuration</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Reference</span>
+    <ul>
+      <li><a href="commands.html">Commands</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Scripting</span>
+    <ul>
+      <li><a href="scripting-getting-started.html">Getting Started</a></li>
+      <li><a href="scripting-api.html">API Reference</a></li>
+      <li><a href="scripting-examples.html" class="active">Examples</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Customization</span>
+    <ul>
+      <li><a href="theming.html">Theming</a></li>
+      <li><a href="theming-format-strings.html">Format Strings</a></li>
+      <li><a href="logging.html">Logging & Search</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Project</span>
+    <ul>
+      <li><a href="architecture.html">Architecture</a></li>
+      <li><a href="faq.html">FAQ</a></li>
+    </ul>
+  </div>
+
+      </nav>
+      <div class="sidebar-footer">
+        Built with <a href="https://www.rust-lang.org">Rust</a>
+        &middot;
+        <a href="https://github.com/kofany/rustirc">GitHub</a>
+      </div>
+    </aside>
+
+    <!-- Overlay for mobile sidebar -->
+    <div class="sidebar-overlay"></div>
+
+    <!-- Main content -->
+    <div class="content-wrapper">
+      <main class="content">
+        <h1>Scripting — Examples</h1>
+<p>Practical Lua script examples for rustirc.</p>
+<h2>Auto-greet on join</h2>
+<p>Greet users when they join a specific channel:</p>
+<pre><code class="language-lua">meta = {
+    name = &quot;autogreet&quot;,
+    version = &quot;1.0&quot;,
+    description = &quot;Auto-greet users on join&quot;
+}
+
+function setup(api)
+    local greet_channels = { [&quot;#mychannel&quot;] = true }
+
+    api.on(&quot;irc.join&quot;, function(event)
+        if greet_channels[event.channel] and event.nick ~= api.our_nick() then
+            api.irc.say(event.channel, &quot;Welcome, &quot; .. event.nick .. &quot;!&quot;)
+        end
+    end)
+end
+</code></pre>
+<h2>URL logger</h2>
+<p>Log all URLs posted to channels:</p>
+<pre><code class="language-lua">meta = {
+    name = &quot;urllogger&quot;,
+    version = &quot;1.0&quot;,
+    description = &quot;Log URLs from messages&quot;
+}
+
+function setup(api)
+    local urls = {}
+
+    api.on(&quot;irc.privmsg&quot;, function(event)
+        for url in event.message:gmatch(&quot;https?://[%w%.%-/%%?&amp;=_#]+&quot;) do
+            table.insert(urls, {
+                time = os.date(&quot;%H:%M&quot;),
+                nick = event.nick,
+                channel = event.target,
+                url = url
+            })
+            api.log(&quot;URL: &quot; .. url .. &quot; from &quot; .. event.nick)
+        end
+    end)
+
+    api.command(&quot;urls&quot;, {
+        handler = function(args)
+            local count = tonumber(args[1]) or 10
+            local start = math.max(1, #urls - count + 1)
+            for i = start, #urls do
+                local u = urls[i]
+                api.print(u.time .. &quot; &quot; .. u.nick .. &quot; &gt; &quot; .. u.url)
+            end
+        end,
+        description = &quot;Show recent URLs&quot;,
+        usage = &quot;/urls [count]&quot;
+    })
+end
+</code></pre>
+<h2>Highlight monitor</h2>
+<p>Copy highlighted messages to a dedicated buffer:</p>
+<pre><code class="language-lua">meta = {
+    name = &quot;hilight&quot;,
+    version = &quot;1.0&quot;,
+    description = &quot;Monitor highlighted messages&quot;
+}
+
+function setup(api)
+    api.on(&quot;irc.privmsg&quot;, function(event)
+        local my_nick = api.our_nick()
+        if my_nick and event.message:lower():find(my_nick:lower(), 1, true) then
+            local msg = &quot;[&quot; .. event.target .. &quot;] &lt;&quot; .. event.nick .. &quot;&gt; &quot; .. event.message
+            api.print(msg)
+        end
+    end)
+end
+</code></pre>
+<h2>Custom slap command</h2>
+<p>The classic IRC <code>/slap</code> command:</p>
+<pre><code class="language-lua">meta = {
+    name = &quot;slap&quot;,
+    version = &quot;1.0&quot;,
+    description = &quot;Slap someone with a large trout&quot;
+}
+
+function setup(api)
+    local items = {
+        &quot;a large trout&quot;,
+        &quot;a mass of wet noodles&quot;,
+        &quot;a mass-produced plastic toy&quot;,
+        &quot;a mass of jello&quot;,
+        &quot;a mass of cotton candy&quot;,
+    }
+
+    api.command(&quot;slap&quot;, {
+        handler = function(args)
+            local target = args[1]
+            if not target then
+                api.print(&quot;Usage: /slap &lt;nick&gt;&quot;)
+                return
+            end
+            local item = items[math.random(#items)]
+            local buf = api.active_buffer()
+            if buf then
+                api.irc.action(buf, &quot;slaps &quot; .. target .. &quot; around a bit with &quot; .. item)
+            end
+        end,
+        description = &quot;Slap someone with a random object&quot;,
+        usage = &quot;/slap &lt;nick&gt;&quot;
+    })
+end
+</code></pre>
+<h2>Spam filter</h2>
+<p>Block messages matching patterns:</p>
+<pre><code class="language-lua">meta = {
+    name = &quot;spamfilter&quot;,
+    version = &quot;1.0&quot;,
+    description = &quot;Filter spam messages&quot;
+}
+
+function setup(api)
+    local patterns = {
+        &quot;buy cheap&quot;,
+        &quot;free bitcoins&quot;,
+        &quot;click here now&quot;,
+    }
+
+    -- High priority so we run before default handlers
+    api.on(&quot;irc.privmsg&quot;, function(event)
+        local lower = event.message:lower()
+        for _, pattern in ipairs(patterns) do
+            if lower:find(pattern, 1, true) then
+                api.log(&quot;Blocked spam from &quot; .. event.nick .. &quot;: &quot; .. event.message)
+                return true  -- suppress the event
+            end
+        end
+    end, 90)  -- priority 90 = high
+end
+</code></pre>
+<h2>Nick highlight with sound</h2>
+<p>Play a terminal bell when your nick is mentioned:</p>
+<pre><code class="language-lua">meta = {
+    name = &quot;nickbell&quot;,
+    version = &quot;1.0&quot;,
+    description = &quot;Bell on nick mention&quot;
+}
+
+function setup(api)
+    api.on(&quot;irc.privmsg&quot;, function(event)
+        local my_nick = api.our_nick()
+        if my_nick and event.message:lower():find(my_nick:lower(), 1, true) then
+            io.write(&quot;\a&quot;)  -- terminal bell
+        end
+    end)
+end
+</code></pre>
+
+
+        <!-- Prev / Next navigation -->
+        <nav class="page-nav">
+          <a href="scripting-api.html" class="page-nav-link prev">
+  <span class="page-nav-label">&larr; Previous</span>
+  <span class="page-nav-title">API Reference</span>
+</a>
+          <a href="theming.html" class="page-nav-link next">
+  <span class="page-nav-label">Next &rarr;</span>
+  <span class="page-nav-title">Theming</span>
+</a>
+        </nav>
+
+        <footer class="site-footer">
+          Built with <a href="https://www.rust-lang.org">Rust</a> &middot;
+          <a href="https://github.com/kofany/rustirc">GitHub</a> &middot;
+          MIT License
+        </footer>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    // Mobile sidebar toggle
+    (function() {
+      const hamburger = document.querySelector('.hamburger');
+      const sidebar = document.querySelector('.sidebar');
+      const overlay = document.querySelector('.sidebar-overlay');
+
+      function toggleSidebar() {
+        hamburger.classList.toggle('active');
+        sidebar.classList.toggle('open');
+        overlay.classList.toggle('visible');
+        document.body.style.overflow = sidebar.classList.contains('open') ? 'hidden' : '';
+      }
+
+      function closeSidebar() {
+        hamburger.classList.remove('active');
+        sidebar.classList.remove('open');
+        overlay.classList.remove('visible');
+        document.body.style.overflow = '';
+      }
+
+      hamburger.addEventListener('click', toggleSidebar);
+      overlay.addEventListener('click', closeSidebar);
+
+      // Close sidebar on Escape key
+      document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && sidebar.classList.contains('open')) {
+          closeSidebar();
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

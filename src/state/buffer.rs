@@ -45,6 +45,18 @@ pub enum MessageType {
     Ctcp,
 }
 
+impl MessageType {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Message => "message",
+            Self::Action => "action",
+            Self::Event => "event",
+            Self::Notice => "notice",
+            Self::Ctcp => "ctcp",
+        }
+    }
+}
+
 // === Message ===
 
 #[derive(Debug, Clone)]

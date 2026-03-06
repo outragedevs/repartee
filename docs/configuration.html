@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="rustirc — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
+  <meta name="keywords" content="irc, terminal, tui, client, chat, rustirc, ratatui, tokio, rust">
+  <meta name="author" content="kofany">
+  <meta property="og:title" content="Configuration — rustirc">
+  <meta property="og:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by irssi, designed for the future.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://kofany.github.io/rustirc/">
+  <meta property="og:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{title}} — rustirc">
+  <meta name="twitter:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust.">
+  <meta name="twitter:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <title>{{title}} — rustirc</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- Mobile hamburger toggle -->
+  <button class="hamburger" aria-label="Toggle navigation">
+    <span></span>
+    <span></span>
+    <span></span>
+  </button>
+
+  <div class="page-wrapper">
+    <!-- Sidebar navigation -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <a href="index.html" class="brand">rustirc</a>
+        <span class="brand-tagline">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+          <ul>
+    <li><a href="index.html">Home</a></li>
+  </ul>
+  <div class="nav-section">
+    <span class="nav-section-title">Getting Started</span>
+    <ul>
+      <li><a href="installation.html">Installation</a></li>
+      <li><a href="first-connection.html">First Connection</a></li>
+      <li><a href="configuration.html" class="active">Configuration</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Reference</span>
+    <ul>
+      <li><a href="commands.html">Commands</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Scripting</span>
+    <ul>
+      <li><a href="scripting-getting-started.html">Getting Started</a></li>
+      <li><a href="scripting-api.html">API Reference</a></li>
+      <li><a href="scripting-examples.html">Examples</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Customization</span>
+    <ul>
+      <li><a href="theming.html">Theming</a></li>
+      <li><a href="theming-format-strings.html">Format Strings</a></li>
+      <li><a href="logging.html">Logging & Search</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Project</span>
+    <ul>
+      <li><a href="architecture.html">Architecture</a></li>
+      <li><a href="faq.html">FAQ</a></li>
+    </ul>
+  </div>
+
+      </nav>
+      <div class="sidebar-footer">
+        Built with <a href="https://www.rust-lang.org">Rust</a>
+        &middot;
+        <a href="https://github.com/kofany/rustirc">GitHub</a>
+      </div>
+    </aside>
+
+    <!-- Overlay for mobile sidebar -->
+    <div class="sidebar-overlay"></div>
+
+    <!-- Main content -->
+    <div class="content-wrapper">
+      <main class="content">
+        <h1>Configuration</h1>
+<h2>Config location</h2>
+<p>rustirc stores its configuration in <code>~/.rustirc/config.toml</code>. This file is created automatically on first run with sensible defaults.</p>
+<p>The full directory layout:</p>
+<pre><code>~/.rustirc/
+  config.toml          # main configuration
+  .env                 # credentials (passwords, SASL)
+  themes/              # custom themes
+  scripts/             # user scripts (Lua)
+  logs/messages.db     # chat logs (SQLite)
+</code></pre>
+<h2>Full annotated example</h2>
+<pre><code class="language-toml">[general]
+nick = &quot;mynick&quot;
+username = &quot;mynick&quot;
+realname = &quot;rustirc user&quot;
+theme = &quot;default&quot;
+timestamp_format = &quot;%H:%M:%S&quot;
+flood_protection = true
+ctcp_version = &quot;rustirc&quot;
+
+[display]
+nick_column_width = 8
+nick_max_length = 8
+nick_alignment = &quot;right&quot;       # &quot;left&quot;, &quot;right&quot;, or &quot;center&quot;
+nick_truncation = true
+show_timestamps = true
+scrollback_lines = 2000
+
+[sidepanel.left]
+width = 20
+visible = true
+
+[sidepanel.right]
+width = 18
+visible = true
+
+[statusbar]
+items = [&quot;active_windows&quot;, &quot;nick_info&quot;, &quot;channel_info&quot;, &quot;lag&quot;, &quot;time&quot;]
+
+[servers.libera]
+label = &quot;Libera&quot;
+address = &quot;irc.libera.chat&quot;
+port = 6697
+tls = true
+tls_verify = true
+autoconnect = true
+channels = [&quot;#rustirc&quot;, &quot;#secret mykey&quot;]
+autosendcmd = &quot;MSG NickServ identify pass; WAIT 2000; MODE $N +i&quot;
+# nick = &quot;othernick&quot;           # per-server nick override
+# sasl_user = &quot;mynick&quot;
+# sasl_pass = &quot;hunter2&quot;
+# auto_reconnect = true
+# reconnect_delay = 30
+# reconnect_max_retries = 10
+
+[image_preview]
+enabled = true
+protocol = &quot;auto&quot;              # &quot;auto&quot;, &quot;kitty&quot;, &quot;iterm2&quot;, &quot;sixel&quot;, &quot;symbols&quot;
+max_width = 0                  # 0 = auto
+max_height = 0                 # 0 = auto
+
+[logging]
+enabled = true
+encrypt = false
+retention_days = 0             # 0 = keep forever
+exclude_types = []             # e.g. [&quot;join&quot;, &quot;part&quot;, &quot;quit&quot;]
+
+[aliases]
+wc = &quot;/close&quot;
+j = &quot;/join&quot;
+
+[scripts]
+autoload = [&quot;slap&quot;]
+# debug = true
+
+[[ignores]]
+pattern = &quot;*!*@spammer.host&quot;
+levels = [&quot;ALL&quot;]
+</code></pre>
+<h2>Sections explained</h2>
+<h3><code>[general]</code></h3>
+<p>Global identity and behavior. The <code>nick</code>, <code>username</code>, and <code>realname</code> are used as defaults for all servers unless overridden per-server. Set <code>theme</code> to the name of a theme file in <code>~/.rustirc/themes/</code> (without the <code>.theme</code> extension).</p>
+<h3><code>[display]</code></h3>
+<p>Controls how messages are rendered. <code>nick_column_width</code> sets the fixed-width column for nicks in chat view. <code>scrollback_lines</code> is the number of messages kept in memory per buffer.</p>
+<h3><code>[sidepanel]</code></h3>
+<p>Left panel shows buffer list, right panel shows nick list. Set <code>visible = false</code> to hide a panel. Widths are in terminal columns.</p>
+<h3><code>[statusbar]</code></h3>
+<p>Configure which items appear in the status line. Available items: <code>active_windows</code>, <code>nick_info</code>, <code>channel_info</code>, <code>lag</code>, <code>time</code>.</p>
+<h3><code>[servers.*]</code></h3>
+<p>Each server gets a unique identifier (the key after <code>servers.</code>). The <code>channels</code> array lists channels to auto-join on connect. Channels with keys use the format <code>&quot;#channel key&quot;</code>.</p>
+<h3><code>[logging]</code></h3>
+<p>Chat logging to SQLite. When <code>encrypt = true</code>, messages are encrypted with AES-256-GCM. <code>retention_days = 0</code> keeps logs forever.</p>
+<h3><code>[aliases]</code></h3>
+<p>Custom command shortcuts. The key is the alias name, the value is the command it expands to.</p>
+<h3><code>[scripts]</code></h3>
+<p>The <code>autoload</code> array lists script names to load on startup. Scripts live in <code>~/.rustirc/scripts/</code> as <code>.lua</code> files.</p>
+<h3><code>[[ignores]]</code></h3>
+<p>Ignore patterns for filtering unwanted messages. Uses wildcard matching (<code>*!*@host</code>). Levels: <code>MSGS</code>, <code>PUBLIC</code>, <code>NOTICES</code>, <code>ACTIONS</code>, <code>JOINS</code>, <code>PARTS</code>, <code>QUITS</code>, <code>NICKS</code>, <code>KICKS</code>, <code>CTCPS</code>, <code>ALL</code>.</p>
+<h2>Credentials</h2>
+<p>Passwords and SASL credentials should <strong>not</strong> go in <code>config.toml</code> — store them in <code>~/.rustirc/.env</code> instead.</p>
+<pre><code class="language-bash"># ~/.rustirc/.env
+LIBERA_SASL_USER=mynick
+LIBERA_SASL_PASS=hunter2
+LIBERA_PASSWORD=serverpassword
+</code></pre>
+<p>The naming convention uses the server identifier uppercased.</p>
+<h2>Runtime changes</h2>
+<ul>
+<li><strong><code>/set section.field value</code></strong> — change a config value at runtime. Changes are saved immediately.</li>
+<li><strong><code>/reload</code></strong> — reload theme and config from disk.</li>
+</ul>
+
+
+        <!-- Prev / Next navigation -->
+        <nav class="page-nav">
+          <a href="first-connection.html" class="page-nav-link prev">
+  <span class="page-nav-label">&larr; Previous</span>
+  <span class="page-nav-title">First Connection</span>
+</a>
+          <a href="commands.html" class="page-nav-link next">
+  <span class="page-nav-label">Next &rarr;</span>
+  <span class="page-nav-title">Commands</span>
+</a>
+        </nav>
+
+        <footer class="site-footer">
+          Built with <a href="https://www.rust-lang.org">Rust</a> &middot;
+          <a href="https://github.com/kofany/rustirc">GitHub</a> &middot;
+          MIT License
+        </footer>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    // Mobile sidebar toggle
+    (function() {
+      const hamburger = document.querySelector('.hamburger');
+      const sidebar = document.querySelector('.sidebar');
+      const overlay = document.querySelector('.sidebar-overlay');
+
+      function toggleSidebar() {
+        hamburger.classList.toggle('active');
+        sidebar.classList.toggle('open');
+        overlay.classList.toggle('visible');
+        document.body.style.overflow = sidebar.classList.contains('open') ? 'hidden' : '';
+      }
+
+      function closeSidebar() {
+        hamburger.classList.remove('active');
+        sidebar.classList.remove('open');
+        overlay.classList.remove('visible');
+        document.body.style.overflow = '';
+      }
+
+      hamburger.addEventListener('click', toggleSidebar);
+      overlay.addEventListener('click', closeSidebar);
+
+      // Close sidebar on Escape key
+      document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && sidebar.classList.contains('open')) {
+          closeSidebar();
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

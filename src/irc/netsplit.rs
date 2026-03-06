@@ -58,7 +58,7 @@ pub struct NetsplitState {
 impl NetsplitState {
     /// Create a new, empty netsplit state.
     pub fn new() -> Self {
-        NetsplitState {
+        Self {
             groups: Vec::new(),
             nick_index: HashMap::new(),
             netjoins: Vec::new(),
@@ -77,7 +77,9 @@ impl NetsplitState {
             return false;
         }
 
-        let space = message.find(' ').unwrap();
+        let Some(space) = message.find(' ') else {
+            return false;
+        };
         let server1 = &message[..space];
         let server2 = &message[space + 1..];
         let now = Instant::now();
@@ -87,18 +89,17 @@ impl NetsplitState {
             g.server1 == server1 && g.server2 == server2 && !g.printed
         });
 
-        let idx = match group_idx {
-            Some(idx) => idx,
-            None => {
-                self.groups.push(SplitGroup {
-                    server1: server1.to_string(),
-                    server2: server2.to_string(),
-                    nicks: Vec::new(),
-                    last_quit: now,
-                    printed: false,
-                });
-                self.groups.len() - 1
-            }
+        let idx = if let Some(idx) = group_idx {
+            idx
+        } else {
+            self.groups.push(SplitGroup {
+                server1: server1.to_string(),
+                server2: server2.to_string(),
+                nicks: Vec::new(),
+                last_quit: now,
+                printed: false,
+            });
+            self.groups.len() - 1
         };
 
         self.groups[idx].nicks.push(SplitRecord {
@@ -114,9 +115,8 @@ impl NetsplitState {
     /// Process a JOIN to check if it's from a user who was in a netsplit.
     /// Returns `true` if handled as a netjoin (suppress normal join display).
     pub fn handle_join(&mut self, nick: &str, buffer_id: &str) -> bool {
-        let group_idx = match self.nick_index.get(nick) {
-            Some(&idx) => idx,
-            None => return false,
+        let Some(&group_idx) = self.nick_index.get(nick) else {
+            return false;
         };
 
         // Bounds check (group may have been removed during expiry)
@@ -134,26 +134,27 @@ impl NetsplitState {
             nj.server1 == server1 && nj.server2 == server2 && !nj.printed
         });
 
-        let nj = match nj_idx {
-            Some(idx) => &mut self.netjoins[idx],
-            None => {
-                self.netjoins.push(NetjoinGroup {
-                    server1,
-                    server2,
-                    nicks: Vec::new(),
-                    channels: HashSet::new(),
-                    last_join: now,
-                    printed: false,
-                });
-                self.netjoins.last_mut().unwrap()
-            }
+        let nj_index = if let Some(idx) = nj_idx {
+            idx
+        } else {
+            self.netjoins.push(NetjoinGroup {
+                server1,
+                server2,
+                nicks: Vec::new(),
+                channels: HashSet::new(),
+                last_join: now,
+                printed: false,
+            });
+            self.netjoins.len() - 1
         };
 
-        if !nj.nicks.contains(&nick.to_string()) {
-            nj.nicks.push(nick.to_string());
+        if let Some(nj) = self.netjoins.get_mut(nj_index) {
+            if !nj.nicks.iter().any(|n| n == nick) {
+                nj.nicks.push(nick.to_string());
+            }
+            nj.channels.insert(buffer_id.to_string());
+            nj.last_join = now;
         }
-        nj.channels.insert(buffer_id.to_string());
-        nj.last_join = now;
 
         // Remove from split index
         self.nick_index.remove(nick);
@@ -189,15 +190,20 @@ impl NetsplitState {
         self.netjoins
             .retain(|nj| now.duration_since(nj.last_join) < SPLIT_EXPIRE);
 
-        // Clean up nick index for expired groups — rebuild valid entries
-        self.nick_index
-            .retain(|_, idx| *idx < self.groups.len() && now.duration_since(self.groups[*idx].last_quit) < SPLIT_EXPIRE);
+        // Rebuild nick_index from scratch — indices are invalidated by retain()
+        self.nick_index.clear();
+        for (idx, group) in self.groups.iter().enumerate() {
+            for rec in &group.nicks {
+                self.nick_index.insert(rec.nick.clone(), idx);
+            }
+        }
 
         messages
     }
 
     /// Check if a nick is known to have quit in an expired (or current) netsplit.
-    /// Useful for cleanup of user lists when a split nick never rejoins.
+    /// Used for nick list cleanup when a split nick never rejoins.
+    #[allow(dead_code)] // Will be used when nick list stale-entry cleanup is wired
     pub fn is_expired_split_nick(&self, nick: &str) -> bool {
         if let Some(&idx) = self.nick_index.get(nick)
             && idx < self.groups.len()
@@ -296,7 +302,7 @@ fn format_split_message(group: &SplitGroup) -> NetsplitMessage {
 }
 
 fn format_netjoin_message(group: &NetjoinGroup) -> NetsplitMessage {
-    let nick_names: Vec<&str> = group.nicks.iter().map(|s| s.as_str()).collect();
+    let nick_names: Vec<&str> = group.nicks.iter().map(String::as_str).collect();
     let nick_str = format_nick_list(&nick_names);
 
     let text = format!(
@@ -530,7 +536,7 @@ mod tests {
     #[test]
     fn format_nick_list_over_limit() {
         let names: Vec<String> = (0..20).map(|i| format!("nick{i}")).collect();
-        let nicks: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let nicks: Vec<&str> = names.iter().map(String::as_str).collect();
         let result = format_nick_list(&nicks);
         assert!(result.contains("(+5 more)"));
         assert!(result.contains("nick0"));

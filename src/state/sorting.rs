@@ -8,21 +8,16 @@ pub fn sort_buffers<'a, F>(buffers: &[&'a Buffer], label_fn: F) -> Vec<&'a Buffe
 where
     F: Fn(&str) -> String,
 {
-    let mut sorted: Vec<&Buffer> = buffers.to_vec();
-    sorted.sort_by(|a, b| {
-        let label_a = label_fn(&a.connection_id);
-        let label_b = label_fn(&b.connection_id);
-        let conn_cmp = label_a.to_lowercase().cmp(&label_b.to_lowercase());
-        if conn_cmp != std::cmp::Ordering::Equal {
-            return conn_cmp;
-        }
-        let group_cmp = a.buffer_type.sort_group().cmp(&b.buffer_type.sort_group());
-        if group_cmp != std::cmp::Ordering::Equal {
-            return group_cmp;
-        }
-        a.name.to_lowercase().cmp(&b.name.to_lowercase())
+    let mut keyed: Vec<(String, &'a Buffer)> = buffers
+        .iter()
+        .map(|&b| (label_fn(&b.connection_id).to_lowercase(), b))
+        .collect();
+    keyed.sort_by(|(la, a), (lb, b)| {
+        la.cmp(lb)
+            .then_with(|| a.buffer_type.sort_group().cmp(&b.buffer_type.sort_group()))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
-    sorted
+    keyed.into_iter().map(|(_, b)| b).collect()
 }
 
 /// Sort nicks by prefix rank (using `prefix_order`), then alphabetically (case-insensitive).
@@ -49,7 +44,9 @@ fn prefix_rank(prefix: &str, prefix_order: &str) -> usize {
         return prefix_order.len();
     }
     // Use the first character of the prefix for ranking
-    let ch = prefix.chars().next().unwrap();
+    let Some(ch) = prefix.chars().next() else {
+        return prefix_order.len();
+    };
     prefix_order.find(ch).unwrap_or(prefix_order.len())
 }
 
@@ -146,6 +143,20 @@ mod tests {
         let result = sort_nicks(&input, DEFAULT_PREFIX_ORDER);
 
         assert_eq!(result[0].nick, "alice"); // @
+        assert_eq!(result[1].nick, "bob"); // +
+        assert_eq!(result[2].nick, "charlie"); // no prefix
+    }
+
+    #[test]
+    fn sort_nicks_multi_prefix_uses_highest() {
+        let op_voice = make_nick("alice", "@+");
+        let voice = make_nick("bob", "+");
+        let normal = make_nick("charlie", "");
+
+        let input: Vec<&NickEntry> = vec![&normal, &voice, &op_voice];
+        let result = sort_nicks(&input, DEFAULT_PREFIX_ORDER);
+
+        assert_eq!(result[0].nick, "alice"); // @+ sorts as @
         assert_eq!(result[1].nick, "bob"); // +
         assert_eq!(result[2].nick, "charlie"); // no prefix
     }

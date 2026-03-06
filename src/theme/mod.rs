@@ -2,6 +2,7 @@ pub mod loader;
 pub mod parser;
 
 pub use loader::load_theme;
+#[allow(unused_imports)]
 pub use parser::{parse_format_string, resolve_abstractions, substitute_vars};
 
 use ratatui::style::Color;
@@ -22,7 +23,7 @@ pub struct ThemeMeta {
     pub description: String,
 }
 
-/// ThemeColors stores hex strings in TOML but we also provide a method to convert to ratatui Color.
+/// `ThemeColors` stores hex strings in TOML but we also provide a method to convert to ratatui Color.
 /// We store as String for serialization compatibility, and convert to Color at render time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -39,7 +40,7 @@ pub struct ThemeColors {
 
 impl Default for ThemeColors {
     fn default() -> Self {
-        ThemeColors {
+        Self {
             bg: "#1a1b26".to_string(),
             bg_alt: "#16161e".to_string(),
             border: "#292e42".to_string(),
@@ -63,10 +64,11 @@ pub struct ThemeFormats {
 
 impl Default for ThemeFormats {
     fn default() -> Self {
-        ThemeFormats {
+        Self {
             messages: HashMap::from([
                 ("pubmsg".into(), "$0 $1".into()),
                 ("own_msg".into(), "$0 $1".into()),
+                ("notice".into(), "-$0- $1".into()),
             ]),
             events: HashMap::new(),
             sidepanel: HashMap::from([
@@ -79,7 +81,8 @@ impl Default for ThemeFormats {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(clippy::struct_excessive_bools, reason = "each bool maps to an independent text style attribute")]
 pub struct StyledSpan {
     pub text: String,
     pub fg: Option<Color>,
@@ -90,7 +93,7 @@ pub struct StyledSpan {
     pub dim: bool,
 }
 
-/// Convert "#RRGGBB" hex string to ratatui Color::Rgb.
+/// Convert "#RRGGBB" hex string to ratatui `Color::Rgb`.
 pub fn hex_to_color(hex: &str) -> Option<Color> {
     let hex = hex.strip_prefix('#').unwrap_or(hex);
     if hex.len() != 6 {

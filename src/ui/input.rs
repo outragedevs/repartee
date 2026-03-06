@@ -8,6 +8,7 @@ use crate::theme::hex_to_color;
 
 const MAX_HISTORY: usize = 100;
 
+#[allow(dead_code)]
 pub struct TabCompletionState {
     pub prefix: String,
     pub matches: Vec<String>,
@@ -27,8 +28,8 @@ pub struct InputState {
 }
 
 impl InputState {
-    pub fn new() -> Self {
-        InputState {
+    pub const fn new() -> Self {
+        Self {
             value: String::new(),
             cursor_pos: 0,
             tab_state: None,
@@ -49,8 +50,7 @@ impl InputState {
             let prev = self.value[..self.cursor_pos]
                 .char_indices()
                 .last()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
+                .map_or(0, |(i, _)| i);
             self.value.drain(prev..self.cursor_pos);
             self.cursor_pos = prev;
         }
@@ -62,8 +62,7 @@ impl InputState {
             let next = self.value[self.cursor_pos..]
                 .char_indices()
                 .nth(1)
-                .map(|(i, _)| self.cursor_pos + i)
-                .unwrap_or(self.value.len());
+                .map_or(self.value.len(), |(i, _)| self.cursor_pos + i);
             self.value.drain(self.cursor_pos..next);
         }
         self.tab_state = None;
@@ -74,8 +73,7 @@ impl InputState {
             self.cursor_pos = self.value[..self.cursor_pos]
                 .char_indices()
                 .last()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
+                .map_or(0, |(i, _)| i);
         }
         self.tab_state = None;
     }
@@ -85,8 +83,7 @@ impl InputState {
             self.cursor_pos = self.value[self.cursor_pos..]
                 .char_indices()
                 .nth(1)
-                .map(|(i, _)| self.cursor_pos + i)
-                .unwrap_or(self.value.len());
+                .map_or(self.value.len(), |(i, _)| self.cursor_pos + i);
         }
         self.tab_state = None;
     }
@@ -98,6 +95,39 @@ impl InputState {
 
     pub fn end(&mut self) {
         self.cursor_pos = self.value.len();
+        self.tab_state = None;
+    }
+
+    /// Clear from cursor to start of line (Ctrl+U).
+    pub fn clear_to_start(&mut self) {
+        if self.cursor_pos > 0 {
+            self.value.drain(..self.cursor_pos);
+            self.cursor_pos = 0;
+        }
+        self.tab_state = None;
+    }
+
+    /// Clear from cursor to end of line (Ctrl+K).
+    pub fn clear_to_end(&mut self) {
+        if self.cursor_pos < self.value.len() {
+            self.value.truncate(self.cursor_pos);
+        }
+        self.tab_state = None;
+    }
+
+    /// Delete the word before cursor (Ctrl+W).
+    pub fn delete_word_back(&mut self) {
+        if self.cursor_pos == 0 {
+            return;
+        }
+        let before = &self.value[..self.cursor_pos];
+        // Skip trailing whitespace, then skip non-whitespace
+        let trimmed_end = before.trim_end().len();
+        let word_start = before[..trimmed_end]
+            .rfind(char::is_whitespace)
+            .map_or(0, |i| i + 1);
+        self.value.drain(word_start..self.cursor_pos);
+        self.cursor_pos = word_start;
         self.tab_state = None;
     }
 
@@ -165,7 +195,12 @@ impl InputState {
         self.tab_state = None;
     }
 
-    pub fn tab_complete(&mut self, nicks: &[String], commands: &[&str]) {
+    pub fn tab_complete(
+        &mut self,
+        nicks: &[String],
+        commands: &[&str],
+        setting_paths: &[String],
+    ) {
         if let Some(ref mut tab) = self.tab_state {
             if tab.matches.is_empty() {
                 return;
@@ -179,7 +214,7 @@ impl InputState {
             } else {
                 " ".to_string()
             };
-            self.value = format!("{}{}{}", tab.text_before, completion, suffix);
+            self.value = format!("{}{completion}{suffix}", tab.text_before);
             self.cursor_pos = self.value.len();
         } else {
             let text = self.value[..self.cursor_pos].to_string();
@@ -193,20 +228,42 @@ impl InputState {
             let is_start_of_line = text_before.is_empty();
             let is_command = is_start_of_line && word.starts_with('/');
 
+            // Detect subcommand context: /help <partial> or /set <partial>
+            let subcommand_ctx = detect_subcommand_context(&text_before);
+
             let prefix = word;
-            let mut matches: Vec<String> = if is_command {
-                let cmd_prefix = &prefix[1..]; // strip leading /
-                commands
-                    .iter()
-                    .filter(|c| c.to_lowercase().starts_with(&cmd_prefix.to_lowercase()))
-                    .map(|c| format!("/{c}"))
-                    .collect()
-            } else {
-                nicks
-                    .iter()
-                    .filter(|n| n.to_lowercase().starts_with(&prefix.to_lowercase()))
-                    .cloned()
-                    .collect()
+            let mut matches: Vec<String> = match subcommand_ctx {
+                Some(SubcommandContext::Help) => {
+                    // Complete with command names (without /)
+                    commands
+                        .iter()
+                        .filter(|c| c.to_lowercase().starts_with(&prefix.to_lowercase()))
+                        .map(ToString::to_string)
+                        .collect()
+                }
+                Some(SubcommandContext::Set) => {
+                    // Complete with setting paths
+                    setting_paths
+                        .iter()
+                        .filter(|p| p.to_lowercase().starts_with(&prefix.to_lowercase()))
+                        .cloned()
+                        .collect()
+                }
+                None if is_command => {
+                    let cmd_prefix = &prefix[1..]; // strip leading /
+                    commands
+                        .iter()
+                        .filter(|c| c.to_lowercase().starts_with(&cmd_prefix.to_lowercase()))
+                        .map(|c| format!("/{c}"))
+                        .collect()
+                }
+                None => {
+                    nicks
+                        .iter()
+                        .filter(|n| n.to_lowercase().starts_with(&prefix.to_lowercase()))
+                        .cloned()
+                        .collect()
+                }
             };
             matches.sort_by_key(|a| a.to_lowercase());
 
@@ -216,7 +273,7 @@ impl InputState {
 
             let completion = &matches[0];
             let suffix = if is_command { " " } else if is_start_of_line { ": " } else { " " };
-            self.value = format!("{}{}{}", text_before, completion, suffix);
+            self.value = format!("{text_before}{completion}{suffix}");
             self.cursor_pos = self.value.len();
 
             self.tab_state = Some(TabCompletionState {
@@ -231,6 +288,27 @@ impl InputState {
     }
 }
 
+enum SubcommandContext {
+    Help,
+    Set,
+}
+
+/// Detect if the user is typing a subcommand for /help or /set.
+/// `text_before` is the text before the word being completed (including trailing space).
+fn detect_subcommand_context(text_before: &str) -> Option<SubcommandContext> {
+    let trimmed = text_before.trim();
+    let lower = trimmed.to_lowercase();
+    // "/help <partial>" or "/? <partial>"
+    if lower == "/help" || lower == "/?" {
+        return Some(SubcommandContext::Help);
+    }
+    // "/set <partial>" (first arg is path)
+    if lower == "/set" {
+        return Some(SubcommandContext::Set);
+    }
+    None
+}
+
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let colors = &app.theme.colors;
     let fg_muted = hex_to_color(&colors.fg_muted).unwrap_or(Color::DarkGray);
@@ -238,9 +316,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
     let active_buf = app.state.active_buffer();
     let conn = active_buf.and_then(|b| app.state.connections.get(&b.connection_id));
-    let server_label = conn.map(|c| c.label.as_str()).unwrap_or("");
-    let channel_name = active_buf.map(|b| b.name.as_str()).unwrap_or("");
-    let nick = conn.map(|c| c.nick.as_str()).unwrap_or("");
+    let server_label = conn.map_or("", |c| c.label.as_str());
+    let channel_name = active_buf.map_or("", |b| b.name.as_str());
+    let nick = conn.map_or("", |c| c.nick.as_str());
 
     let prompt = app
         .config
@@ -402,7 +480,7 @@ mod tests {
         input.cursor_pos = 3;
 
         let nicks = vec!["ferris".to_string(), "helper".to_string()];
-        input.tab_complete(&nicks, &[]);
+        input.tab_complete(&nicks, &[], &[]);
 
         assert_eq!(input.value, "ferris: ");
         assert_eq!(input.cursor_pos, 8);
@@ -415,7 +493,7 @@ mod tests {
         input.cursor_pos = 7;
 
         let nicks = vec!["ferris".to_string(), "helper".to_string()];
-        input.tab_complete(&nicks, &[]);
+        input.tab_complete(&nicks, &[], &[]);
 
         assert_eq!(input.value, "hey ferris ");
         assert_eq!(input.cursor_pos, 11);
@@ -432,17 +510,17 @@ mod tests {
             "hank".to_string(),
             "hiro".to_string(),
         ];
-        input.tab_complete(&nicks, &[]);
+        input.tab_complete(&nicks, &[], &[]);
         assert_eq!(input.value, "hank: "); // sorted: hank, helper, hiro
 
-        input.tab_complete(&nicks, &[]);
+        input.tab_complete(&nicks, &[], &[]);
         assert_eq!(input.value, "helper: ");
 
-        input.tab_complete(&nicks, &[]);
+        input.tab_complete(&nicks, &[], &[]);
         assert_eq!(input.value, "hiro: ");
 
         // Wraps around
-        input.tab_complete(&nicks, &[]);
+        input.tab_complete(&nicks, &[], &[]);
         assert_eq!(input.value, "hank: ");
     }
 
@@ -453,9 +531,152 @@ mod tests {
         input.cursor_pos = 3;
 
         let commands = &["join", "part", "msg", "quit"];
-        input.tab_complete(&[], commands);
+        input.tab_complete(&[], commands, &[]);
 
         assert_eq!(input.value, "/join ");
+    }
+
+    #[test]
+    fn help_subcommand_completion() {
+        let mut input = InputState::new();
+        input.value = "/help cl".to_string();
+        input.cursor_pos = 8;
+
+        let commands = &["connect", "close", "clear", "quit"];
+        input.tab_complete(&[], commands, &[]);
+        assert_eq!(input.value, "/help clear ");
+    }
+
+    #[test]
+    fn help_subcommand_cycling() {
+        let mut input = InputState::new();
+        input.value = "/help c".to_string();
+        input.cursor_pos = 7;
+
+        let commands = &["connect", "close", "clear"];
+        input.tab_complete(&[], commands, &[]);
+        assert_eq!(input.value, "/help clear ");
+
+        input.tab_complete(&[], commands, &[]);
+        assert_eq!(input.value, "/help close ");
+
+        input.tab_complete(&[], commands, &[]);
+        assert_eq!(input.value, "/help connect ");
+    }
+
+    #[test]
+    fn set_path_completion() {
+        let mut input = InputState::new();
+        input.value = "/set general.ni".to_string();
+        input.cursor_pos = 15;
+
+        let settings = vec!["general.nick".to_string(), "general.username".to_string()];
+        input.tab_complete(&[], &[], &settings);
+        assert_eq!(input.value, "/set general.nick ");
+    }
+
+    #[test]
+    fn set_path_completion_section() {
+        let mut input = InputState::new();
+        input.value = "/set dis".to_string();
+        input.cursor_pos = 8;
+
+        let settings = vec![
+            "display.nick_column_width".to_string(),
+            "display.show_timestamps".to_string(),
+        ];
+        input.tab_complete(&[], &[], &settings);
+        assert_eq!(input.value, "/set display.nick_column_width ");
+    }
+
+    #[test]
+    fn clear_to_start() {
+        let mut input = InputState::new();
+        input.value = "hello world".to_string();
+        input.cursor_pos = 5;
+        input.clear_to_start();
+        assert_eq!(input.value, " world");
+        assert_eq!(input.cursor_pos, 0);
+    }
+
+    #[test]
+    fn clear_to_start_at_beginning() {
+        let mut input = InputState::new();
+        input.value = "hello".to_string();
+        input.cursor_pos = 0;
+        input.clear_to_start();
+        assert_eq!(input.value, "hello");
+        assert_eq!(input.cursor_pos, 0);
+    }
+
+    #[test]
+    fn clear_to_end() {
+        let mut input = InputState::new();
+        input.value = "hello world".to_string();
+        input.cursor_pos = 5;
+        input.clear_to_end();
+        assert_eq!(input.value, "hello");
+        assert_eq!(input.cursor_pos, 5);
+    }
+
+    #[test]
+    fn clear_to_end_at_end() {
+        let mut input = InputState::new();
+        input.value = "hello".to_string();
+        input.cursor_pos = 5;
+        input.clear_to_end();
+        assert_eq!(input.value, "hello");
+        assert_eq!(input.cursor_pos, 5);
+    }
+
+    #[test]
+    fn delete_word_back_single_word() {
+        let mut input = InputState::new();
+        input.value = "hello".to_string();
+        input.cursor_pos = 5;
+        input.delete_word_back();
+        assert_eq!(input.value, "");
+        assert_eq!(input.cursor_pos, 0);
+    }
+
+    #[test]
+    fn delete_word_back_multiple_words() {
+        let mut input = InputState::new();
+        input.value = "hello world".to_string();
+        input.cursor_pos = 11;
+        input.delete_word_back();
+        assert_eq!(input.value, "hello ");
+        assert_eq!(input.cursor_pos, 6);
+    }
+
+    #[test]
+    fn delete_word_back_with_trailing_spaces() {
+        let mut input = InputState::new();
+        input.value = "hello   ".to_string();
+        input.cursor_pos = 8;
+        input.delete_word_back();
+        assert_eq!(input.value, "");
+        assert_eq!(input.cursor_pos, 0);
+    }
+
+    #[test]
+    fn delete_word_back_at_start() {
+        let mut input = InputState::new();
+        input.value = "hello".to_string();
+        input.cursor_pos = 0;
+        input.delete_word_back();
+        assert_eq!(input.value, "hello");
+        assert_eq!(input.cursor_pos, 0);
+    }
+
+    #[test]
+    fn delete_word_back_mid_line() {
+        let mut input = InputState::new();
+        input.value = "one two three".to_string();
+        input.cursor_pos = 7; // after "one two"
+        input.delete_word_back();
+        assert_eq!(input.value, "one  three");
+        assert_eq!(input.cursor_pos, 4);
     }
 
     #[test]
@@ -465,7 +686,7 @@ mod tests {
         input.cursor_pos = 3;
 
         let nicks = vec!["ferris".to_string()];
-        input.tab_complete(&nicks, &[]);
+        input.tab_complete(&nicks, &[], &[]);
         assert!(input.tab_state.is_some());
 
         input.insert_char('x');

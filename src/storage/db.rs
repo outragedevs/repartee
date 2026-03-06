@@ -84,17 +84,24 @@ pub fn open_database_at(path: &str, encrypt: bool) -> rusqlite::Result<Connectio
 pub fn purge_old_messages(db: &Connection, retention_days: u32, has_fts: bool) -> usize {
     let cutoff = chrono::Utc::now().timestamp() - i64::from(retention_days) * 86400;
 
-    if has_fts {
-        let _ = db.execute(
+    if has_fts
+        && let Err(e) = db.execute(
             "INSERT INTO messages_fts(messages_fts, rowid, nick, text)
              SELECT 'delete', id, nick, text
              FROM messages WHERE timestamp < ?1",
             params![cutoff],
-        );
+        )
+    {
+        tracing::warn!("Failed to delete FTS entries during purge: {e}");
     }
 
-    db.execute("DELETE FROM messages WHERE timestamp < ?1", params![cutoff])
-        .unwrap_or(0)
+    match db.execute("DELETE FROM messages WHERE timestamp < ?1", params![cutoff]) {
+        Ok(count) => count,
+        Err(e) => {
+            tracing::warn!("Failed to purge old messages: {e}");
+            0
+        }
+    }
 }
 
 #[cfg(test)]

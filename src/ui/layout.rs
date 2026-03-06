@@ -6,6 +6,8 @@ use crate::state::buffer::BufferType;
 use crate::theme::hex_to_color;
 
 #[derive(Debug, Clone, Copy, Default)]
+#[allow(dead_code)]
+#[expect(clippy::struct_field_names, reason = "_area suffix clarifies these are ratatui Rect regions")]
 pub struct UiRegions {
     pub buffer_list_area: Option<Rect>,
     pub chat_area: Option<Rect>,
@@ -64,7 +66,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     if left_visible {
         let buf_list_area = main_chunks[chunk_idx];
-        super::buffer_list::render(frame, buf_list_area, app);
+        app.buffer_list_total =
+            super::buffer_list::render(frame, buf_list_area, app, app.buffer_list_scroll);
         regions.buffer_list_area = Some(buf_list_area);
         chunk_idx += 1;
     }
@@ -76,7 +79,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     if show_nicklist {
         let nick_area = main_chunks[chunk_idx];
-        super::nick_list::render(frame, nick_area, app);
+        app.nick_list_total =
+            super::nick_list::render(frame, nick_area, app, app.nick_list_scroll);
         regions.nick_list_area = Some(nick_area);
     }
 

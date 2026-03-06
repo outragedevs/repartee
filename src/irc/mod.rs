@@ -24,12 +24,14 @@ use crate::irc::cap::{DESIRED_CAPS, ServerCaps};
 pub enum IrcEvent {
     /// A raw IRC protocol message from the server.
     Message(String, Box<irc::proto::Message>),
-    /// The connection has been established and identified.
+    /// Registration complete (`RPL_WELCOME` received).
     Connected(String, HashSet<String>),
     /// The connection was lost, optionally with an error description.
     Disconnected(String, Option<String>),
     /// An IRC handle (sender) is ready after async connection completes.
     HandleReady(String, irc::client::Sender),
+    /// Diagnostic messages from CAP/SASL negotiation (fires immediately).
+    NegotiationInfo(String, Vec<String>),
 }
 
 /// Handle to a connected IRC client, holding the connection ID and send-side.
@@ -137,8 +139,15 @@ pub async fn connect_server(
         .as_deref()
         .unwrap_or(&general.realname);
 
+    // Generate alt nicks so the irc crate can retry on ERR_NICKNAMEINUSE
+    // instead of fatally erroring with NoUsableNick.
+    let alt_nicks: Vec<String> = (1..=4)
+        .map(|i| format!("{nick}{}", "_".repeat(i)))
+        .collect();
+
     let irc_config = Config {
         nickname: Some(nick.to_string()),
+        alt_nicks,
         username: Some(username.to_string()),
         realname: Some(realname.to_string()),
         server: Some(server_config.address.clone()),
@@ -146,7 +155,10 @@ pub async fn connect_server(
         use_tls: Some(server_config.tls),
         dangerously_accept_invalid_certs: Some(!server_config.tls_verify),
         password: server_config.password.clone(),
-        channels: server_config.channels.clone(),
+        // Do NOT pass channels here — the irc crate auto-joins after ENDOFMOTD
+        // which combined with our own join logic causes Excess Flood.
+        // Our app handles channel joining with throttling via IrcEvent::Connected.
+        channels: vec![],
         encoding: server_config.encoding.clone(),
         version: Some(general.ctcp_version.clone()),
         client_cert_path: server_config.client_cert_path.clone(),
@@ -157,19 +169,18 @@ pub async fn connect_server(
     let sender = client.sender();
     let mut stream = client.stream()?;
 
-    let enabled_caps = negotiate_caps(
-        &sender,
-        &mut stream,
+    let reg_params = RegistrationParams {
         nick,
         username,
         realname,
-        server_config.password.as_deref(),
-        server_config.sasl_user.as_deref(),
-        server_config.sasl_pass.as_deref(),
-        server_config.sasl_mechanism.as_deref(),
-        server_config.client_cert_path.is_some(),
-    )
-    .await?;
+        password: server_config.password.as_deref(),
+        sasl_user: server_config.sasl_user.as_deref(),
+        sasl_pass: server_config.sasl_pass.as_deref(),
+        sasl_mechanism_override: server_config.sasl_mechanism.as_deref(),
+        has_client_cert: server_config.client_cert_path.is_some(),
+    };
+
+    let (enabled_caps, cap_diag) = negotiate_caps(&sender, &mut stream, &reg_params).await?;
 
     let (tx, rx) = mpsc::unbounded_channel();
     let id = conn_id.to_string();
@@ -177,11 +188,26 @@ pub async fn connect_server(
 
     // Spawn reader task
     tokio::spawn(async move {
-        let _ = tx.send(IrcEvent::Connected(id.clone(), enabled_caps));
+        // Send negotiation diagnostics immediately so they're visible even if
+        // registration fails (e.g. server requires SASL but auth didn't complete).
+        let _ = tx.send(IrcEvent::NegotiationInfo(id.clone(), cap_diag));
+
+        let mut sent_connected = false;
         let mut error = None;
         while let Some(result) = stream.next().await {
             match result {
                 Ok(message) => {
+                    // Fire Connected when RPL_WELCOME (001) confirms registration is complete.
+                    // Before 001, any JOIN/autosendcmd would get 451 ERR_NOTREGISTERED.
+                    if !sent_connected
+                        && let Command::Response(Response::RPL_WELCOME, _) = &message.command
+                    {
+                        sent_connected = true;
+                        let _ = tx.send(IrcEvent::Connected(
+                            id.clone(),
+                            enabled_caps.clone(),
+                        ));
+                    }
                     if tx.send(IrcEvent::Message(id.clone(), Box::new(message))).is_err() {
                         return; // receiver dropped, no disconnect event needed
                     }
@@ -199,6 +225,18 @@ pub async fn connect_server(
     Ok((IrcHandle { conn_id: id2, sender }, rx))
 }
 
+/// Parameters for IRC connection registration, bundled to avoid long argument lists.
+struct RegistrationParams<'a> {
+    nick: &'a str,
+    username: &'a str,
+    realname: &'a str,
+    password: Option<&'a str>,
+    sasl_user: Option<&'a str>,
+    sasl_pass: Option<&'a str>,
+    sasl_mechanism_override: Option<&'a str>,
+    has_client_cert: bool,
+}
+
 /// Negotiate `IRCv3` capabilities and perform connection registration.
 ///
 /// 1. Send `CAP LS 302`
@@ -209,22 +247,18 @@ pub async fn connect_server(
 /// 6. Wait for `ACK`/`NAK`
 /// 7. If `sasl` was ACK'd, select the best mechanism and run the appropriate flow
 /// 8. Send `CAP END`, `PASS` (if set), `NICK`, `USER`
-/// 9. Return the set of enabled capability names
-#[expect(clippy::too_many_arguments, reason = "IRC registration requires many parameters")]
-#[expect(clippy::too_many_lines, reason = "sequential protocol handshake cannot be split without losing clarity")]
+/// 9. Return the set of enabled capability names and diagnostic messages
+///
+/// Uses [`RegistrationParams`] to bundle the many registration parameters
+/// into a single struct, avoiding a long argument list.
+#[expect(clippy::too_many_lines)]
 async fn negotiate_caps(
     sender: &irc::client::Sender,
     stream: &mut irc::client::ClientStream,
-    nick: &str,
-    username: &str,
-    realname: &str,
-    password: Option<&str>,
-    sasl_user: Option<&str>,
-    sasl_pass: Option<&str>,
-    sasl_mechanism_override: Option<&str>,
-    has_client_cert: bool,
-) -> Result<HashSet<String>> {
+    params: &RegistrationParams<'_>,
+) -> Result<(HashSet<String>, Vec<String>)> {
     use irc::proto::command::CapSubCommand;
+    let mut diag: Vec<String> = Vec::new();
 
     // Step 1: Request capability listing (version 302 for values)
     sender.send(Command::CAP(None, CapSubCommand::LS, Some("302".to_string()), None))?;
@@ -252,15 +286,21 @@ async fn negotiate_caps(
     }
 
     // Step 3: Determine whether we can authenticate via SASL at all
-    let has_credentials = sasl_user.is_some() && sasl_pass.is_some();
+    let has_credentials = params.sasl_user.is_some() && params.sasl_pass.is_some();
     let server_mechanisms = server_caps.sasl_mechanisms();
     let selected_mechanism = select_sasl_mechanism(
         &server_mechanisms,
-        sasl_mechanism_override,
-        has_client_cert,
+        params.sasl_mechanism_override,
+        params.has_client_cert,
         has_credentials,
     );
     let want_sasl = selected_mechanism.is_some();
+
+    diag.push(format!(
+        "CAP: server advertises sasl={}, has_credentials={has_credentials}, mechanism={:?}",
+        server_caps.has("sasl"),
+        selected_mechanism,
+    ));
 
     // Step 4: Compute capabilities to request
     let mut caps_to_request = server_caps.negotiate(DESIRED_CAPS);
@@ -280,9 +320,11 @@ async fn negotiate_caps(
     let mut enabled_caps: HashSet<String> = HashSet::new();
 
     // Step 5: Send CAP REQ if there are any caps to request
-    if !caps_to_request.is_empty() {
+    if caps_to_request.is_empty() {
+        diag.push("CAP: no capabilities to request".to_string());
+    } else {
         let req_str = caps_to_request.join(" ");
-        tracing::info!("requesting capabilities: {req_str}");
+        diag.push(format!("CAP REQ: {req_str}"));
         sender.send(Command::CAP(
             None,
             CapSubCommand::REQ,
@@ -291,22 +333,27 @@ async fn negotiate_caps(
         ))?;
 
         // Step 6: Wait for ACK/NAK
+        // The irc-proto crate parses `:server CAP * ACK :caps` as
+        // CAP(Some("*"), ACK, Some("caps"), None) — caps are in field3.
         while let Some(result) = stream.next().await {
             let msg = result?;
-            if let Command::CAP(_, CapSubCommand::ACK, _, ref acked) = msg.command {
+            if let Command::CAP(_, CapSubCommand::ACK, ref acked, _) = msg.command {
                 if let Some(ref acked_str) = *acked {
                     for cap in acked_str.split_whitespace() {
                         enabled_caps.insert(cap.to_ascii_lowercase());
                     }
                 }
-                tracing::info!("capabilities ACK'd: {}", enabled_caps.iter().cloned().collect::<Vec<_>>().join(" "));
+                diag.push(format!(
+                    "CAP ACK: {}",
+                    enabled_caps.iter().cloned().collect::<Vec<_>>().join(" "),
+                ));
                 break;
             }
-            if let Command::CAP(_, CapSubCommand::NAK, _, ref naked) = msg.command {
-                tracing::warn!(
-                    "server NAK'd capabilities: {}",
-                    naked.as_deref().unwrap_or("(unknown)")
-                );
+            if let Command::CAP(_, CapSubCommand::NAK, ref naked, _) = msg.command {
+                diag.push(format!(
+                    "CAP NAK: {}",
+                    naked.as_deref().unwrap_or("(unknown)"),
+                ));
                 break;
             }
         }
@@ -318,20 +365,20 @@ async fn negotiate_caps(
         if let Some(mechanism) = selected_mechanism {
             let result = match mechanism {
                 SaslMechanism::External => {
-                    tracing::info!("authenticating via SASL EXTERNAL (client certificate)");
+                    diag.push("SASL: authenticating via EXTERNAL".to_string());
                     run_sasl_external(sender, stream).await
                 }
                 SaslMechanism::ScramSha256 => {
-                    if let (Some(user), Some(pass)) = (sasl_user, sasl_pass) {
-                        tracing::info!("authenticating via SASL SCRAM-SHA-256");
+                    if let (Some(user), Some(pass)) = (params.sasl_user, params.sasl_pass) {
+                        diag.push(format!("SASL: authenticating via SCRAM-SHA-256 as {user}"));
                         run_sasl_scram(sender, stream, user, pass).await
                     } else {
                         Err(eyre!("SASL SCRAM-SHA-256 selected but credentials missing"))
                     }
                 }
                 SaslMechanism::Plain => {
-                    if let (Some(user), Some(pass)) = (sasl_user, sasl_pass) {
-                        tracing::info!("authenticating via SASL PLAIN");
+                    if let (Some(user), Some(pass)) = (params.sasl_user, params.sasl_pass) {
+                        diag.push(format!("SASL: authenticating via PLAIN as {user}"));
                         run_sasl_plain(sender, stream, user, pass).await
                     } else {
                         Err(eyre!("SASL PLAIN selected but credentials missing"))
@@ -340,32 +387,34 @@ async fn negotiate_caps(
             };
             match result {
                 Ok(()) => {
-                    tracing::info!("SASL {mechanism} authentication successful");
+                    diag.push(format!("SASL: {mechanism} authentication successful"));
                 }
                 Err(e) => {
-                    tracing::warn!("SASL {mechanism} authentication failed: {e}");
+                    diag.push(format!("SASL: {mechanism} authentication FAILED: {e}"));
                     // Remove sasl from enabled since auth failed
                     enabled_caps.remove("sasl");
                 }
             }
         }
     } else if sasl_requested && !sasl_acked {
-        tracing::warn!("server did not ACK sasl capability");
+        diag.push("SASL: requested but server did not ACK".to_string());
+    } else if !sasl_requested && has_credentials {
+        diag.push("SASL: credentials available but server does not advertise sasl".to_string());
     }
 
     // Step 8: Finish registration
     sender.send(Command::CAP(None, CapSubCommand::END, None, None))?;
-    if let Some(pass) = password {
+    if let Some(pass) = params.password {
         sender.send(Command::PASS(pass.to_string()))?;
     }
-    sender.send(Command::NICK(nick.to_string()))?;
+    sender.send(Command::NICK(params.nick.to_string()))?;
     sender.send(Command::USER(
-        username.to_string(),
+        params.username.to_string(),
         "0".to_string(),
-        realname.to_string(),
+        params.realname.to_string(),
     ))?;
 
-    Ok(enabled_caps)
+    Ok((enabled_caps, diag))
 }
 
 /// Execute the SASL PLAIN authentication handshake.

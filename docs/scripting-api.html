@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="rustirc — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
+  <meta name="keywords" content="irc, terminal, tui, client, chat, rustirc, ratatui, tokio, rust">
+  <meta name="author" content="kofany">
+  <meta property="og:title" content="API Reference — rustirc">
+  <meta property="og:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by irssi, designed for the future.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://kofany.github.io/rustirc/">
+  <meta property="og:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{title}} — rustirc">
+  <meta name="twitter:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust.">
+  <meta name="twitter:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <title>{{title}} — rustirc</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- Mobile hamburger toggle -->
+  <button class="hamburger" aria-label="Toggle navigation">
+    <span></span>
+    <span></span>
+    <span></span>
+  </button>
+
+  <div class="page-wrapper">
+    <!-- Sidebar navigation -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <a href="index.html" class="brand">rustirc</a>
+        <span class="brand-tagline">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+          <ul>
+    <li><a href="index.html">Home</a></li>
+  </ul>
+  <div class="nav-section">
+    <span class="nav-section-title">Getting Started</span>
+    <ul>
+      <li><a href="installation.html">Installation</a></li>
+      <li><a href="first-connection.html">First Connection</a></li>
+      <li><a href="configuration.html">Configuration</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Reference</span>
+    <ul>
+      <li><a href="commands.html">Commands</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Scripting</span>
+    <ul>
+      <li><a href="scripting-getting-started.html">Getting Started</a></li>
+      <li><a href="scripting-api.html" class="active">API Reference</a></li>
+      <li><a href="scripting-examples.html">Examples</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Customization</span>
+    <ul>
+      <li><a href="theming.html">Theming</a></li>
+      <li><a href="theming-format-strings.html">Format Strings</a></li>
+      <li><a href="logging.html">Logging & Search</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Project</span>
+    <ul>
+      <li><a href="architecture.html">Architecture</a></li>
+      <li><a href="faq.html">FAQ</a></li>
+    </ul>
+  </div>
+
+      </nav>
+      <div class="sidebar-footer">
+        Built with <a href="https://www.rust-lang.org">Rust</a>
+        &middot;
+        <a href="https://github.com/kofany/rustirc">GitHub</a>
+      </div>
+    </aside>
+
+    <!-- Overlay for mobile sidebar -->
+    <div class="sidebar-overlay"></div>
+
+    <!-- Main content -->
+    <div class="content-wrapper">
+      <main class="content">
+        <h1>Scripting — API Reference</h1>
+<p>Complete reference for the <code>api</code> object passed to every script&#39;s <code>setup</code> function.</p>
+<pre><code class="language-lua">function setup(api)
+    -- api.on, api.irc, api.log, etc.
+end
+</code></pre>
+<hr>
+<h2>Events</h2>
+<h3><code>api.on(event, handler, priority?)</code></h3>
+<p>Register an event handler. Returns a handler ID for removal.</p>
+<pre><code class="language-lua">local id = api.on(&quot;irc.privmsg&quot;, function(event)
+    -- handle message
+end)
+</code></pre>
+<p><strong>Parameters:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Param</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>event</code></td>
+<td>string</td>
+<td>Event name (see event list below)</td>
+</tr>
+<tr>
+<td><code>handler</code></td>
+<td>function</td>
+<td>Handler function receiving event table</td>
+</tr>
+<tr>
+<td><code>priority</code></td>
+<td>number</td>
+<td>Optional. Default: 50 (normal)</td>
+</tr>
+</tbody></table>
+<p>Handlers run in descending priority order. Return <code>true</code> from a handler to suppress the event (prevent lower-priority handlers and built-in handling from running).</p>
+<h3><code>api.once(event, handler, priority?)</code></h3>
+<p>Same as <code>api.on()</code> but the handler fires only once, then removes itself.</p>
+<h3><code>api.off(id)</code></h3>
+<p>Remove a previously registered handler by its ID.</p>
+<pre><code class="language-lua">local id = api.on(&quot;irc.privmsg&quot;, handler)
+api.off(id)  -- remove the handler
+</code></pre>
+<hr>
+<h2>IRC Events</h2>
+<p>These events fire when the IRC server sends data.</p>
+<h3><code>irc.privmsg</code></h3>
+<p>A channel or private message.</p>
+<pre><code class="language-lua">api.on(&quot;irc.privmsg&quot;, function(event)
+    -- event.connection_id  (string)
+    -- event.nick           (string)
+    -- event.ident          (string)
+    -- event.hostname       (string)
+    -- event.target         (string) channel or your nick
+    -- event.message        (string)
+    -- event.is_channel     (boolean)
+end)
+</code></pre>
+<h3><code>irc.action</code></h3>
+<p>A CTCP ACTION (<code>/me</code> message). Same fields as <code>irc.privmsg</code>.</p>
+<h3><code>irc.notice</code></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>connection_id</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>nick</code></td>
+<td>string</td>
+<td>Sender (nil for server notices)</td>
+</tr>
+<tr>
+<td><code>target</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>message</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>from_server</code></td>
+<td>boolean</td>
+<td></td>
+</tr>
+</tbody></table>
+<h3><code>irc.join</code></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>connection_id</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>nick</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>ident</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>hostname</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>channel</code></td>
+<td>string</td>
+<td></td>
+</tr>
+</tbody></table>
+<h3><code>irc.part</code></h3>
+<p>Same as <code>irc.join</code> plus <code>message</code> (part reason).</p>
+<h3><code>irc.quit</code></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>connection_id</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>nick</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>ident</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>hostname</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>message</code></td>
+<td>string</td>
+<td>Quit reason</td>
+</tr>
+</tbody></table>
+<h3><code>irc.kick</code></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>connection_id</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>nick</code></td>
+<td>string</td>
+<td>Who kicked</td>
+</tr>
+<tr>
+<td><code>channel</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>kicked</code></td>
+<td>string</td>
+<td>Who was kicked</td>
+</tr>
+<tr>
+<td><code>message</code></td>
+<td>string</td>
+<td>Kick reason</td>
+</tr>
+</tbody></table>
+<h3><code>irc.nick</code></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>connection_id</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>nick</code></td>
+<td>string</td>
+<td>Old nick</td>
+</tr>
+<tr>
+<td><code>new_nick</code></td>
+<td>string</td>
+<td>New nick</td>
+</tr>
+</tbody></table>
+<h3><code>irc.topic</code></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>connection_id</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>nick</code></td>
+<td>string</td>
+<td>Who changed it</td>
+</tr>
+<tr>
+<td><code>channel</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>topic</code></td>
+<td>string</td>
+<td></td>
+</tr>
+</tbody></table>
+<h3><code>irc.mode</code></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>connection_id</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>nick</code></td>
+<td>string</td>
+<td>Who set the mode</td>
+</tr>
+<tr>
+<td><code>target</code></td>
+<td>string</td>
+<td>Channel or nick</td>
+</tr>
+<tr>
+<td><code>modes</code></td>
+<td>string</td>
+<td>Mode string (e.g. &quot;+o nick&quot;)</td>
+</tr>
+</tbody></table>
+<h3><code>irc.invite</code></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>connection_id</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>nick</code></td>
+<td>string</td>
+<td>Who invited</td>
+</tr>
+<tr>
+<td><code>channel</code></td>
+<td>string</td>
+<td></td>
+</tr>
+</tbody></table>
+<h3><code>irc.ctcp_request</code> / <code>irc.ctcp_response</code></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>connection_id</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>nick</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>ctcp_type</code></td>
+<td>string</td>
+<td>e.g. &quot;PING&quot;, &quot;TIME&quot;</td>
+</tr>
+<tr>
+<td><code>message</code></td>
+<td>string</td>
+<td></td>
+</tr>
+</tbody></table>
+<h3><code>irc.wallops</code></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>connection_id</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>nick</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>message</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>from_server</code></td>
+<td>boolean</td>
+<td></td>
+</tr>
+</tbody></table>
+<hr>
+<h2>App Events</h2>
+<h3><code>connected</code></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>connection_id</code></td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>nick</code></td>
+<td>string</td>
+</tr>
+</tbody></table>
+<h3><code>disconnected</code></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>connection_id</code></td>
+<td>string</td>
+</tr>
+</tbody></table>
+<h3><code>command_input</code></h3>
+<p>Fired before a command executes. Return <code>true</code> to suppress.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>command</code></td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>args</code></td>
+<td>table</td>
+</tr>
+<tr>
+<td><code>connection_id</code></td>
+<td>string</td>
+</tr>
+</tbody></table>
+<h3><code>buffer_switch</code></h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>from_buffer_id</code></td>
+<td>string</td>
+</tr>
+<tr>
+<td><code>to_buffer_id</code></td>
+<td>string</td>
+</tr>
+</tbody></table>
+<hr>
+<h2>Commands</h2>
+<h3><code>api.command(name, def)</code></h3>
+<p>Register a custom slash command.</p>
+<pre><code class="language-lua">api.command(&quot;greet&quot;, {
+    handler = function(args, connection_id)
+        local target = args[1] or &quot;world&quot;
+        api.irc.say(target, &quot;Hello, &quot; .. target .. &quot;!&quot;)
+    end,
+    description = &quot;Send a greeting&quot;,
+    usage = &quot;/greet &lt;nick&gt;&quot;,
+})
+</code></pre>
+<h3><code>api.remove_command(name)</code></h3>
+<p>Remove a command registered by this script.</p>
+<hr>
+<h2>IRC Methods</h2>
+<p>All IRC methods take an optional <code>connection_id</code> as the last parameter. If omitted, the active buffer&#39;s connection is used.</p>
+<h3><code>api.irc.say(target, message, connection_id?)</code></h3>
+<p>Send a PRIVMSG to a channel or nick.</p>
+<h3><code>api.irc.action(target, message, connection_id?)</code></h3>
+<p>Send a CTCP ACTION (<code>/me</code>).</p>
+<h3><code>api.irc.notice(target, message, connection_id?)</code></h3>
+<p>Send a NOTICE.</p>
+<h3><code>api.irc.join(channel, key?, connection_id?)</code></h3>
+<p>Join a channel, optionally with a key.</p>
+<h3><code>api.irc.part(channel, message?, connection_id?)</code></h3>
+<p>Leave a channel with an optional part message.</p>
+<h3><code>api.irc.raw(line, connection_id?)</code></h3>
+<p>Send a raw IRC protocol line.</p>
+<h3><code>api.irc.nick(new_nick, connection_id?)</code></h3>
+<p>Change your nickname.</p>
+<h3><code>api.irc.whois(nick, connection_id?)</code></h3>
+<p>Send a WHOIS query.</p>
+<h3><code>api.irc.mode(target, mode_string, connection_id?)</code></h3>
+<p>Set a channel or user mode.</p>
+<h3><code>api.irc.kick(channel, nick, reason?, connection_id?)</code></h3>
+<p>Kick a user from a channel.</p>
+<h3><code>api.irc.ctcp(target, type, message?, connection_id?)</code></h3>
+<p>Send a CTCP request.</p>
+<hr>
+<h2>UI Methods</h2>
+<h3><code>api.print(text)</code></h3>
+<p>Display a local event message in the active buffer.</p>
+<h3><code>api.print_to(buffer_id, text)</code></h3>
+<p>Display a local event message in a specific buffer.</p>
+<h3><code>api.switch_buffer(buffer_id)</code></h3>
+<p>Switch to a buffer.</p>
+<h3><code>api.execute(command_line)</code></h3>
+<p>Execute a client command (e.g. <code>api.execute(&quot;/set theme default&quot;)</code>).</p>
+<hr>
+<h2>State Access</h2>
+<h3><code>api.active_buffer()</code></h3>
+<p>Returns the active buffer ID, or nil.</p>
+<h3><code>api.our_nick(connection_id?)</code></h3>
+<p>Returns your current nick, or nil if not connected.</p>
+<h3><code>api.connections()</code></h3>
+<p>Returns a table of all connections.</p>
+<h3><code>api.buffers()</code></h3>
+<p>Returns a table of all buffers.</p>
+<h3><code>api.nicks(buffer_id)</code></h3>
+<p>Returns a table of nicks in a buffer.</p>
+<hr>
+<h2>Config</h2>
+<h3><code>api.config.get(key)</code></h3>
+<p>Get a per-script config value.</p>
+<h3><code>api.config.set(key, value)</code></h3>
+<p>Set a per-script config value at runtime.</p>
+<hr>
+<h2>Timers</h2>
+<h3><code>api.timer(ms, handler)</code></h3>
+<p>Start a repeating timer. Returns a timer ID.</p>
+<h3><code>api.timeout(ms, handler)</code></h3>
+<p>Start a one-shot timeout. Returns a timer ID.</p>
+<h3><code>api.cancel_timer(id)</code></h3>
+<p>Cancel a timer.</p>
+<hr>
+<h2>Logging</h2>
+<h3><code>api.log(message)</code></h3>
+<p>Log a debug message. Only outputs when <code>scripts.debug = true</code> in config.</p>
+
+
+        <!-- Prev / Next navigation -->
+        <nav class="page-nav">
+          <a href="scripting-getting-started.html" class="page-nav-link prev">
+  <span class="page-nav-label">&larr; Previous</span>
+  <span class="page-nav-title">Getting Started</span>
+</a>
+          <a href="scripting-examples.html" class="page-nav-link next">
+  <span class="page-nav-label">Next &rarr;</span>
+  <span class="page-nav-title">Examples</span>
+</a>
+        </nav>
+
+        <footer class="site-footer">
+          Built with <a href="https://www.rust-lang.org">Rust</a> &middot;
+          <a href="https://github.com/kofany/rustirc">GitHub</a> &middot;
+          MIT License
+        </footer>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    // Mobile sidebar toggle
+    (function() {
+      const hamburger = document.querySelector('.hamburger');
+      const sidebar = document.querySelector('.sidebar');
+      const overlay = document.querySelector('.sidebar-overlay');
+
+      function toggleSidebar() {
+        hamburger.classList.toggle('active');
+        sidebar.classList.toggle('open');
+        overlay.classList.toggle('visible');
+        document.body.style.overflow = sidebar.classList.contains('open') ? 'hidden' : '';
+      }
+
+      function closeSidebar() {
+        hamburger.classList.remove('active');
+        sidebar.classList.remove('open');
+        overlay.classList.remove('visible');
+        document.body.style.overflow = '';
+      }
+
+      hamburger.addEventListener('click', toggleSidebar);
+      overlay.addEventListener('click', closeSidebar);
+
+      // Close sidebar on Escape key
+      document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && sidebar.classList.contains('open')) {
+          closeSidebar();
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

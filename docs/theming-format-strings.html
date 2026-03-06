@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="rustirc — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
+  <meta name="keywords" content="irc, terminal, tui, client, chat, rustirc, ratatui, tokio, rust">
+  <meta name="author" content="kofany">
+  <meta property="og:title" content="Format Strings — rustirc">
+  <meta property="og:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by irssi, designed for the future.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://kofany.github.io/rustirc/">
+  <meta property="og:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{title}} — rustirc">
+  <meta name="twitter:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust.">
+  <meta name="twitter:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <title>{{title}} — rustirc</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- Mobile hamburger toggle -->
+  <button class="hamburger" aria-label="Toggle navigation">
+    <span></span>
+    <span></span>
+    <span></span>
+  </button>
+
+  <div class="page-wrapper">
+    <!-- Sidebar navigation -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <a href="index.html" class="brand">rustirc</a>
+        <span class="brand-tagline">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+          <ul>
+    <li><a href="index.html">Home</a></li>
+  </ul>
+  <div class="nav-section">
+    <span class="nav-section-title">Getting Started</span>
+    <ul>
+      <li><a href="installation.html">Installation</a></li>
+      <li><a href="first-connection.html">First Connection</a></li>
+      <li><a href="configuration.html">Configuration</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Reference</span>
+    <ul>
+      <li><a href="commands.html">Commands</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Scripting</span>
+    <ul>
+      <li><a href="scripting-getting-started.html">Getting Started</a></li>
+      <li><a href="scripting-api.html">API Reference</a></li>
+      <li><a href="scripting-examples.html">Examples</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Customization</span>
+    <ul>
+      <li><a href="theming.html">Theming</a></li>
+      <li><a href="theming-format-strings.html" class="active">Format Strings</a></li>
+      <li><a href="logging.html">Logging & Search</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Project</span>
+    <ul>
+      <li><a href="architecture.html">Architecture</a></li>
+      <li><a href="faq.html">FAQ</a></li>
+    </ul>
+  </div>
+
+      </nav>
+      <div class="sidebar-footer">
+        Built with <a href="https://www.rust-lang.org">Rust</a>
+        &middot;
+        <a href="https://github.com/kofany/rustirc">GitHub</a>
+      </div>
+    </aside>
+
+    <!-- Overlay for mobile sidebar -->
+    <div class="sidebar-overlay"></div>
+
+    <!-- Main content -->
+    <div class="content-wrapper">
+      <main class="content">
+        <h1>Format Strings</h1>
+<p>rustirc implements a full irssi-compatible format string engine with extensions for 24-bit color.</p>
+<h2>Color codes</h2>
+<h3>24-bit foreground: <code>%Z</code> + RRGGBB</h3>
+<pre><code>%Z7aa2f7Hello    → &quot;Hello&quot; in blue (#7aa2f7)
+</code></pre>
+<h3>24-bit background: <code>%z</code> + RRGGBB</h3>
+<pre><code>%z1a1b26%Za9b1d6Text    → Light text on dark background
+</code></pre>
+<h3>irssi single-letter codes: <code>%X</code></h3>
+<table>
+<thead>
+<tr>
+<th>Code</th>
+<th>Color</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>%k</code> / <code>%K</code></td>
+<td>Black / Dark gray</td>
+</tr>
+<tr>
+<td><code>%r</code> / <code>%R</code></td>
+<td>Red / Light red</td>
+</tr>
+<tr>
+<td><code>%g</code> / <code>%G</code></td>
+<td>Green / Light green</td>
+</tr>
+<tr>
+<td><code>%y</code> / <code>%Y</code></td>
+<td>Yellow / Light yellow</td>
+</tr>
+<tr>
+<td><code>%b</code> / <code>%B</code></td>
+<td>Blue / Light blue</td>
+</tr>
+<tr>
+<td><code>%m</code> / <code>%M</code></td>
+<td>Magenta / Light magenta</td>
+</tr>
+<tr>
+<td><code>%c</code> / <code>%C</code></td>
+<td>Cyan / Light cyan</td>
+</tr>
+<tr>
+<td><code>%w</code> / <code>%W</code></td>
+<td>White / Bright white</td>
+</tr>
+</tbody></table>
+<h3>Style codes</h3>
+<table>
+<thead>
+<tr>
+<th>Code</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>%_</code></td>
+<td>Bold</td>
+</tr>
+<tr>
+<td><code>%/</code></td>
+<td>Italic</td>
+</tr>
+<tr>
+<td><code>%-</code></td>
+<td>Strikethrough</td>
+</tr>
+<tr>
+<td><code>%U</code></td>
+<td>Underline</td>
+</tr>
+<tr>
+<td><code>%n</code> / <code>%N</code></td>
+<td>Reset all formatting</td>
+</tr>
+</tbody></table>
+<h2>Abstracts: <code>{name args}</code></h2>
+<p>Abstracts are named templates that expand recursively:</p>
+<pre><code class="language-toml">[abstracts]
+sb_background = &quot;%z24283b&quot;
+timestamp = &quot;%Z565f89$*&quot;
+line_start = &quot;{timestamp $Z}{sb_background}&quot;
+</code></pre>
+<p>Usage in another abstract: <code>{timestamp 12:34}</code> expands <code>$*</code> to <code>12:34</code>.</p>
+<h2>Variable substitution</h2>
+<table>
+<thead>
+<tr>
+<th>Syntax</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>$0</code> – <code>$9</code></td>
+<td>Positional argument</td>
+</tr>
+<tr>
+<td><code>$*</code></td>
+<td>All arguments joined</td>
+</tr>
+<tr>
+<td><code>$[N]0</code></td>
+<td>Argument padded/truncated to N characters</td>
+</tr>
+</tbody></table>
+<p>Example: <code>$[8]0</code> pads argument 0 to 8 characters (right-aligned by default).</p>
+<h2>mIRC control characters</h2>
+<p>rustirc also parses mIRC-style control characters in incoming messages:</p>
+<table>
+<thead>
+<tr>
+<th>Char</th>
+<th>Hex</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Bold</td>
+<td><code>\x02</code></td>
+<td>Toggle bold</td>
+</tr>
+<tr>
+<td>Color</td>
+<td><code>\x03</code></td>
+<td>mIRC color code (fg,bg)</td>
+</tr>
+<tr>
+<td>Hex color</td>
+<td><code>\x04</code></td>
+<td>Hex color code</td>
+</tr>
+<tr>
+<td>Reset</td>
+<td><code>\x0F</code></td>
+<td>Reset all formatting</td>
+</tr>
+<tr>
+<td>Reverse</td>
+<td><code>\x16</code></td>
+<td>Swap fg/bg</td>
+</tr>
+<tr>
+<td>Italic</td>
+<td><code>\x1D</code></td>
+<td>Toggle italic</td>
+</tr>
+<tr>
+<td>Strikethrough</td>
+<td><code>\x1E</code></td>
+<td>Toggle strikethrough</td>
+</tr>
+<tr>
+<td>Underline</td>
+<td><code>\x1F</code></td>
+<td>Toggle underline</td>
+</tr>
+</tbody></table>
+<h2>Abstraction depth</h2>
+<p>Abstracts can reference other abstracts up to 10 levels deep to prevent infinite recursion.</p>
+
+
+        <!-- Prev / Next navigation -->
+        <nav class="page-nav">
+          <a href="theming.html" class="page-nav-link prev">
+  <span class="page-nav-label">&larr; Previous</span>
+  <span class="page-nav-title">Theming</span>
+</a>
+          <a href="logging.html" class="page-nav-link next">
+  <span class="page-nav-label">Next &rarr;</span>
+  <span class="page-nav-title">Logging & Search</span>
+</a>
+        </nav>
+
+        <footer class="site-footer">
+          Built with <a href="https://www.rust-lang.org">Rust</a> &middot;
+          <a href="https://github.com/kofany/rustirc">GitHub</a> &middot;
+          MIT License
+        </footer>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    // Mobile sidebar toggle
+    (function() {
+      const hamburger = document.querySelector('.hamburger');
+      const sidebar = document.querySelector('.sidebar');
+      const overlay = document.querySelector('.sidebar-overlay');
+
+      function toggleSidebar() {
+        hamburger.classList.toggle('active');
+        sidebar.classList.toggle('open');
+        overlay.classList.toggle('visible');
+        document.body.style.overflow = sidebar.classList.contains('open') ? 'hidden' : '';
+      }
+
+      function closeSidebar() {
+        hamburger.classList.remove('active');
+        sidebar.classList.remove('open');
+        overlay.classList.remove('visible');
+        document.body.style.overflow = '';
+      }
+
+      hamburger.addEventListener('click', toggleSidebar);
+      overlay.addEventListener('click', closeSidebar);
+
+      // Close sidebar on Escape key
+      document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && sidebar.classList.contains('open')) {
+          closeSidebar();
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

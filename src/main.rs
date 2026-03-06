@@ -6,6 +6,7 @@ mod image_preview;
 mod irc;
 mod scripting;
 mod state;
+mod storage;
 mod theme;
 mod ui;
 

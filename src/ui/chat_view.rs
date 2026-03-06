@@ -14,29 +14,24 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             .state
             .connections
             .get(&buf.connection_id)
-            .map(|c| c.nick.as_str())
-            .unwrap_or("");
+            .map_or("", |c| c.nick.as_str());
 
-        let lines: Vec<Line> = buf
+        let total = buf.messages.len();
+        let visible_height = area.height as usize;
+        let max_scroll = total.saturating_sub(visible_height);
+        let scroll = app.scroll_offset.min(max_scroll);
+        let skip = total.saturating_sub(visible_height + scroll);
+
+        let visible_lines: Vec<Line> = buf
             .messages
             .iter()
+            .skip(skip)
+            .take(visible_height)
             .map(|msg| {
                 let is_own = msg.nick.as_deref() == Some(current_nick);
                 super::message_line::render_message(msg, is_own, &app.theme, &app.config)
             })
             .collect();
-
-        let visible_height = area.height as usize;
-        let total = lines.len();
-        let max_scroll = total.saturating_sub(visible_height);
-        let scroll = app.scroll_offset.min(max_scroll);
-
-        let skip = if total > visible_height {
-            total - visible_height - scroll
-        } else {
-            0
-        };
-        let visible_lines: Vec<Line> = lines.into_iter().skip(skip).take(visible_height).collect();
 
         let paragraph = Paragraph::new(visible_lines).style(Style::default().bg(bg));
         frame.render_widget(paragraph, area);

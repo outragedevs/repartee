@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use irc::proto::{Command, Message as IrcMessage, Prefix, Response};
 
 use crate::config::IgnoreLevel;
-use crate::irc::formatting::{extract_nick, extract_nick_userhost, get_highest_prefix, is_channel, is_server_prefix, strip_irc_formatting};
+use crate::irc::formatting::{extract_nick, extract_nick_userhost, modes_to_prefix, is_channel, is_server_prefix, strip_irc_formatting};
 use crate::irc::ignore::should_ignore;
 use crate::state::buffer::{make_buffer_id, ActivityLevel, Buffer, BufferType, Message, MessageType, NickEntry};
 use crate::state::connection::ConnectionStatus;
@@ -30,8 +30,8 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
         Command::NOTICE(target, text) => {
             handle_notice(state, conn_id, msg.prefix.as_ref(), target, text, tags);
         }
-        Command::JOIN(channel, account, _) => {
-            handle_join(state, conn_id, &our_nick, msg.prefix.as_ref(), channel, account.as_deref(), tags);
+        Command::JOIN(channel, account, realname) => {
+            handle_join(state, conn_id, &our_nick, msg.prefix.as_ref(), channel, account.as_deref(), realname.as_deref(), tags);
         }
         Command::PART(channel, reason) => {
             handle_part(
@@ -486,14 +486,14 @@ pub fn handle_cap_nak(
 }
 
 /// Look up a nick's mode prefix (e.g. "@", "+") from the buffer's user list.
-fn nick_prefix(state: &AppState, buffer_id: &str, nick: &str) -> Option<String> {
+/// Get the highest-rank prefix for a nick in a buffer (for chat message display).
+///
+/// Returns only the single highest prefix character (e.g. `"@"` for an op+voice user),
+/// not the full multi-prefix string. The nick list handles its own display via theme formats.
+fn nick_prefix(state: &AppState, buffer_id: &str, nick: &str) -> Option<char> {
     let buf = state.buffers.get(buffer_id)?;
     let entry = buf.users.get(&nick.to_lowercase())?;
-    if entry.prefix.is_empty() {
-        None
-    } else {
-        Some(entry.prefix.clone())
-    }
+    entry.prefix.chars().next()
 }
 
 /// Extract `IRCv3` message tags from an `irc::proto::Message`.
@@ -634,7 +634,7 @@ fn handle_privmsg(
                     timestamp: message_timestamp(&tags),
                     message_type: MessageType::Action,
                     nick: Some(nick),
-                    nick_mode: mode_prefix,
+                    nick_mode: mode_prefix.map(String::from),
                     text: action_text.to_string(),
                     highlight: is_mention,
                     event_key: None,
@@ -708,7 +708,7 @@ fn handle_privmsg(
             timestamp: message_timestamp(&tags),
             message_type: MessageType::Message,
             nick: Some(nick),
-            nick_mode: mode_prefix,
+            nick_mode: mode_prefix.map(String::from),
             text: text.to_string(),
             highlight: is_mention,
             event_key: None,
@@ -790,7 +790,7 @@ fn handle_notice(
             timestamp: message_timestamp(&tags),
             message_type: MessageType::Notice,
             nick,
-            nick_mode: mode_prefix,
+            nick_mode: mode_prefix.map(String::from),
             text: text.to_string(),
             highlight: false,
             event_key: None,
@@ -800,6 +800,7 @@ fn handle_notice(
     );
 }
 
+#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
 fn handle_join(
     state: &mut AppState,
     conn_id: &str,
@@ -807,6 +808,7 @@ fn handle_join(
     prefix: Option<&Prefix>,
     channel: &str,
     extended_account: Option<&str>,
+    extended_realname: Option<&str>,
     tags: HashMap<String, String>,
 ) {
     let (nick, ident, host) = extract_nick_userhost(prefix);
@@ -824,6 +826,9 @@ fn handle_join(
             if a == "*" { None } else { Some(a.clone()) }
         })
     });
+
+    // extended-join: realname from third JOIN arg
+    let realname = extended_realname.unwrap_or("");
 
     // --- Ignore check (never ignore our own joins) ---
     if nick != our_nick
@@ -882,7 +887,7 @@ fn handle_join(
                 prefix: String::new(),
                 modes: String::new(),
                 away: false,
-                account,
+                account: account.clone(),
                 ident: None,
                 host: None,
             },
@@ -895,6 +900,16 @@ fn handle_join(
         }
     }
 
+    // extended-join: show account and realname in join message when available
+    let account_display = account
+        .as_deref()
+        .map_or(String::new(), |a| format!("[{a}]"));
+    let realname_display = if realname.is_empty() {
+        String::new()
+    } else {
+        realname.to_string()
+    };
+
     let id = state.next_message_id();
     state.add_message(
         &buffer_id,
@@ -904,10 +919,20 @@ fn handle_join(
             message_type: MessageType::Event,
             nick: None,
             nick_mode: None,
-            text: format!("{nick} ({ident}@{host}) has joined {channel}"),
+            text: format!("{nick} ({ident}@{host}) has joined {channel} {account_display} {realname_display}"),
             highlight: false,
             event_key: Some("join".to_string()),
-            event_params: Some(vec![nick, ident, host, channel.to_string()]), log_msg_id: None, log_ref_id: None,
+            // $0=nick, $1=ident, $2=host, $3=channel, $4=account, $5=realname
+            event_params: Some(vec![
+                nick,
+                ident,
+                host,
+                channel.to_string(),
+                account_display,
+                realname_display,
+            ]),
+            log_msg_id: None,
+            log_ref_id: None,
             tags,
         },
     );
@@ -970,9 +995,12 @@ fn handle_account(
         .map(|b| b.id.clone())
         .collect();
 
-    let text = resolved.map_or_else(
-        || format!("{nick} has logged out"),
-        |acct| format!("{nick} is now logged in as {acct}"),
+    let (text, description) = resolved.map_or_else(
+        || (format!("{nick} has logged out"), "has logged out".to_string()),
+        |acct| (
+            format!("{nick} is now logged in as {acct}"),
+            format!("is now logged in as {acct}"),
+        ),
     );
 
     for buf_id in shared_buffers {
@@ -988,7 +1016,7 @@ fn handle_account(
                 text: text.clone(),
                 highlight: false,
                 event_key: Some("account".to_string()),
-                event_params: Some(vec![nick.clone(), account.to_string()]),
+                event_params: Some(vec![nick.clone(), description.clone()]),
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: tags.clone(),
@@ -1168,7 +1196,9 @@ fn handle_quit(
     let affected: Vec<String> = state
         .buffers
         .iter()
-        .filter(|(_, buf)| buf.connection_id == conn_id && buf.users.contains_key(&nick))
+        .filter(|(_, buf)| {
+            buf.connection_id == conn_id && buf.users.contains_key(&nick.to_lowercase())
+        })
         .map(|(id, _)| id.clone())
         .collect();
 
@@ -1260,16 +1290,17 @@ fn handle_nick_change(
             None,
         ) {
             // Still update nick list so state is correct, but suppress messages
+            let old_nick_lower = old_nick.to_lowercase();
             let affected: Vec<String> = state
                 .buffers
                 .iter()
                 .filter(|(_, buf)| {
-                    buf.connection_id == conn_id && buf.users.contains_key(&old_nick)
+                    buf.connection_id == conn_id && buf.users.contains_key(&old_nick_lower)
                 })
                 .map(|(id, _)| id.clone())
                 .collect();
             for buf_id in &affected {
-                state.update_nick(buf_id, &old_nick, new_nick.to_string());
+                state.update_nick(buf_id, &old_nick, new_nick);
             }
             return;
         }
@@ -1279,7 +1310,9 @@ fn handle_nick_change(
     let affected: Vec<String> = state
         .buffers
         .iter()
-        .filter(|(_, buf)| buf.connection_id == conn_id && buf.users.contains_key(&old_nick))
+        .filter(|(_, buf)| {
+            buf.connection_id == conn_id && buf.users.contains_key(&old_nick.to_lowercase())
+        })
         .map(|(id, _)| id.clone())
         .collect();
 
@@ -1290,7 +1323,7 @@ fn handle_nick_change(
     let ts = message_timestamp(&tags);
 
     for buf_id in &affected {
-        state.update_nick(buf_id, &old_nick, new_nick.to_string());
+        state.update_nick(buf_id, &old_nick, new_nick);
 
         // --- Nick flood check ---
         if state.flood_protection
@@ -1554,14 +1587,14 @@ fn apply_channel_mode(
     if let Some(mc) = mode_char
         && let Some(target_nick) = param
         && let Some(buf) = state.buffers.get_mut(buffer_id)
-        && let Some(entry) = buf.users.get_mut(target_nick)
+        && let Some(entry) = buf.users.get_mut(&target_nick.to_lowercase())
     {
         if adding && !entry.modes.contains(mc) {
             entry.modes.push(mc);
         } else if !adding {
             entry.modes = entry.modes.replace(mc, "");
         }
-        entry.prefix = get_highest_prefix(&entry.modes, "~&@%+");
+        entry.prefix = modes_to_prefix(&entry.modes, "~&@%+");
     }
 }
 
@@ -1750,33 +1783,13 @@ fn handle_response(
     args: &[String],
 ) {
     match response {
-        // RPL_MYINFO: args = [our_nick, server_name, version, user_modes, channel_modes, ...]
-        Response::RPL_MYINFO => {
-            if args.len() >= 3 {
-                let server_name = &args[1];
-                // Store in isupport for reference
-                if let Some(conn) = state.connections.get_mut(conn_id) {
-                    conn.isupport.insert("SERVER_NAME".to_string(), server_name.clone());
-                }
-            }
-        }
+        // RPL_MYINFO: informational only, no state changes needed.
 
         // RPL_ISUPPORT: args = [our_nick, TOKEN=VALUE, TOKEN=VALUE, ..., "are supported by this server"]
         Response::RPL_ISUPPORT => {
             if args.len() >= 2 {
                 // Parse KEY=VALUE tokens (skip first arg = our nick, skip last = trailing text)
                 let tokens = &args[1..args.len().saturating_sub(1)];
-                // Store raw tokens in the HashMap (legacy)
-                for token in tokens {
-                    if let Some((key, value)) = token.split_once('=') {
-                        if let Some(conn) = state.connections.get_mut(conn_id) {
-                            conn.isupport.insert(key.to_string(), value.to_string());
-                        }
-                    } else if let Some(conn) = state.connections.get_mut(conn_id) {
-                        conn.isupport.insert(token.clone(), String::new());
-                    }
-                }
-                // Structured parsing
                 let token_strs: Vec<&str> = tokens.iter().map(String::as_str).collect();
                 if let Some(conn) = state.connections.get_mut(conn_id) {
                     conn.isupport_parsed.parse_tokens(&token_strs);
@@ -2025,21 +2038,14 @@ fn handle_response(
         // === Nick collision / erroneous nick ===
 
         Response::ERR_NICKNAMEINUSE => {
-            // params: [current, attempted_nick, "Nickname is already in use"]
+            // Display only — the irc crate handles retry via alt_nicks internally.
             let attempted = if args.len() >= 2 { &args[1] } else { "unknown" };
-            let new_nick = format!("{attempted}_");
             let target_buf = server_buffer(state, conn_id);
             emit(
                 state,
                 &target_buf,
-                &format!("%Ze0af68Nick {attempted} is in use, trying {new_nick}...%N"),
+                &format!("%Ze0af68Nick {attempted} is already in use%N"),
             );
-            // Update the connection's nick so the next attempt uses it.
-            // NOTE: The actual NICK command must be sent by the caller (app.rs)
-            // since events.rs only has access to AppState, not the IRC sender.
-            if let Some(conn) = state.connections.get_mut(conn_id) {
-                conn.nick = new_nick;
-            }
         }
         Response::ERR_ERRONEOUSNICKNAME => {
             let attempted = if args.len() >= 2 { &args[1] } else { "unknown" };
@@ -2094,20 +2100,34 @@ fn handle_response(
             // params: [our_nick, channel, user, host, server, nick, flags, hopcount_realname]
             if args.len() >= 8 {
                 let channel = &args[1];
-                let user = &args[2];
-                let host = &args[3];
-                let nick = &args[5];
-                let flags = &args[6];
-                let realname = &args[7];
-                let target_buf = active_or_server_buffer(state, conn_id);
-                emit(state, &target_buf, &format!(
-                    "%Zc0caf5{nick}%Z565f89 ({user}@{host}) [{flags}] {channel}%Za9b1d6 {realname}%N"
-                ));
+                let silent = state
+                    .connections
+                    .get(conn_id)
+                    .is_some_and(|c| c.silent_who_channels.contains(channel.as_str()));
+                if !silent {
+                    let user = &args[2];
+                    let host = &args[3];
+                    let nick = &args[5];
+                    let flags = &args[6];
+                    let realname = &args[7];
+                    let target_buf = active_or_server_buffer(state, conn_id);
+                    emit(state, &target_buf, &format!(
+                        "%Zc0caf5{nick}%Z565f89 ({user}@{host}) [{flags}] {channel}%Za9b1d6 {realname}%N"
+                    ));
+                }
             }
         }
         Response::RPL_ENDOFWHO => {
-            let target_buf = active_or_server_buffer(state, conn_id);
-            emit(state, &target_buf, "%Z565f89End of WHO list%N");
+            // args: [our_nick, target, "End of WHO list"]
+            let target = args.get(1).map_or("", String::as_str);
+            let was_silent = state
+                .connections
+                .get_mut(conn_id)
+                .is_some_and(|c| c.silent_who_channels.remove(target));
+            if !was_silent {
+                let target_buf = active_or_server_buffer(state, conn_id);
+                emit(state, &target_buf, "%Z565f89End of WHO list%N");
+            }
         }
 
         // === WHOWAS responses ===
@@ -2201,7 +2221,7 @@ fn update_label_from_network(state: &mut AppState, conn_id: &str, network_name: 
 }
 
 /// Helper: emit a formatted event message to a buffer.
-fn emit(state: &mut AppState, buffer_id: &str, text: &str) {
+pub fn emit(state: &mut AppState, buffer_id: &str, text: &str) {
     let id = state.next_message_id();
     state.add_message(
         buffer_id,
@@ -2349,7 +2369,11 @@ pub fn next_who_token(state: &mut AppState, conn_id: &str) -> String {
 
 /// Build a WHOX WHO command for the given channel.
 /// Returns `Some((target, fields_with_token))` if WHOX is available, `None` otherwise.
-pub fn build_whox_who(state: &mut AppState, conn_id: &str, channel: &str) -> Option<(String, String)> {
+///
+/// When `silent` is true, the channel is added to
+/// `Connection::silent_who_channels` so that reply handlers update
+/// nick state without displaying output (used for auto-WHO on join).
+pub fn build_whox_who(state: &mut AppState, conn_id: &str, channel: &str, silent: bool) -> Option<(String, String)> {
     let has_whox = state
         .connections
         .get(conn_id)
@@ -2357,6 +2381,11 @@ pub fn build_whox_who(state: &mut AppState, conn_id: &str, channel: &str) -> Opt
 
     if has_whox {
         let token = next_who_token(state, conn_id);
+        if silent
+            && let Some(conn) = state.connections.get_mut(conn_id)
+        {
+            conn.silent_who_channels.insert(channel.to_string());
+        }
         let fields = format!("{},{token}", crate::constants::WHOX_FIELDS);
         Some((channel.to_string(), fields))
     } else {
@@ -2378,7 +2407,7 @@ fn handle_whox_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
         return;
     }
 
-    // args[1] is the token — we don't need to match it for now.
+    // args[1] is the WHOX token
     let channel = &args[2];
     let user = &args[3];
     // args[4] is IP
@@ -2389,6 +2418,12 @@ fn handle_whox_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
     // args[9] is hopcount, args[10] is idle
     let account_raw = &args[11];
     let realname = &args[12];
+
+    // Auto-WHO replies are silent — update state only, no display
+    let silent = state
+        .connections
+        .get(conn_id)
+        .is_some_and(|c| c.silent_who_channels.contains(channel.as_str()));
 
     // Parse away status from flags: H = here, G = gone
     let away = flags.starts_with('G');
@@ -2403,7 +2438,7 @@ fn handle_whox_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
     // Update NickEntry in the channel buffer
     let buffer_id = make_buffer_id(conn_id, channel);
     if let Some(buf) = state.buffers.get_mut(&buffer_id)
-        && let Some(entry) = buf.users.get_mut(nick)
+        && let Some(entry) = buf.users.get_mut(&nick.to_lowercase())
     {
         entry.ident = Some(user.clone());
         entry.host = Some(host.clone());
@@ -2411,12 +2446,14 @@ fn handle_whox_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
         entry.away = away;
     }
 
-    // Display the WHOX line (same format as standard WHO but with account)
-    let target_buf = active_or_server_buffer(state, conn_id);
-    let account_str = account.as_deref().unwrap_or("");
-    emit(state, &target_buf, &format!(
-        "%Zc0caf5{nick}%Z565f89 ({user}@{host}) [{flags}] {channel}%Za9b1d6 {realname}%Z565f89 [{account_str}]%N"
-    ));
+    // Only display for manual /who — auto-WHO on join is silent
+    if !silent {
+        let target_buf = active_or_server_buffer(state, conn_id);
+        let account_str = account.as_deref().unwrap_or("");
+        emit(state, &target_buf, &format!(
+            "%Zc0caf5{nick}%Z565f89 ({user}@{host}) [{flags}] {channel}%Za9b1d6 {realname}%Z565f89 [{account_str}]%N"
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -2470,6 +2507,7 @@ mod tests {
             },
             enabled_caps: std::collections::HashSet::new(),
             who_token_counter: 0,
+            silent_who_channels: std::collections::HashSet::new(),
         });
         // Server buffer
         state.add_buffer(Buffer {
@@ -3098,6 +3136,14 @@ mod tests {
         assert!(buf.users.contains_key("carol"));
         let entry = buf.users.get("carol").unwrap();
         assert_eq!(entry.account.as_deref(), Some("patrick"));
+
+        // Join message should include account and realname
+        let join_msg = buf.messages.last().unwrap();
+        assert!(join_msg.text.contains("[patrick]"));
+        assert!(join_msg.text.contains("Real Name"));
+        let params = join_msg.event_params.as_ref().unwrap();
+        assert_eq!(params[4], "[patrick]");  // $4 = account
+        assert_eq!(params[5], "Real Name");  // $5 = realname
     }
 
     #[test]
@@ -3199,7 +3245,7 @@ mod tests {
         // Create a second channel buffer
         let chan2_id = make_buffer_id("test", "#other");
         state.add_buffer(Buffer {
-            id: chan2_id.clone(),
+            id: chan2_id,
             connection_id: "test".to_string(),
             buffer_type: BufferType::Channel,
             name: "#other".to_string(),
@@ -3317,7 +3363,7 @@ mod tests {
         // Create a second channel buffer
         let chan2_id = make_buffer_id("test", "#other");
         state.add_buffer(Buffer {
-            id: chan2_id.clone(),
+            id: chan2_id,
             connection_id: "test".to_string(),
             buffer_type: BufferType::Channel,
             name: "#other".to_string(),
@@ -3430,7 +3476,7 @@ mod tests {
         // Create a second channel buffer
         let chan2_id = make_buffer_id("test", "#other");
         state.add_buffer(Buffer {
-            id: chan2_id.clone(),
+            id: chan2_id,
             connection_id: "test".to_string(),
             buffer_type: BufferType::Channel,
             name: "#other".to_string(),
@@ -4133,10 +4179,10 @@ mod tests {
 
         // First set alice as away
         let chan_id = make_buffer_id("test", "#test");
-        if let Some(buf) = state.buffers.get_mut(&chan_id) {
-            if let Some(entry) = buf.users.get_mut("alice") {
-                entry.away = true;
-            }
+        if let Some(buf) = state.buffers.get_mut(&chan_id)
+            && let Some(entry) = buf.users.get_mut("alice")
+        {
+            entry.away = true;
         }
         state.set_active_buffer("test/testserver");
 
@@ -4213,19 +4259,136 @@ mod tests {
     fn build_whox_who_returns_none_without_whox() {
         let mut state = make_test_state();
         // WHOX not enabled by default
-        assert!(build_whox_who(&mut state, "test", "#test").is_none());
+        assert!(build_whox_who(&mut state, "test", "#test", false).is_none());
     }
 
     #[test]
     fn build_whox_who_returns_fields_with_whox() {
         let mut state = make_whox_state();
-        let result = build_whox_who(&mut state, "test", "#test");
+        let result = build_whox_who(&mut state, "test", "#test", false);
         assert!(result.is_some());
         let (target, fields) = result.unwrap();
         assert_eq!(target, "#test");
         assert!(fields.starts_with("%tcuihsnfdlar,"));
         // Token should be "1" (first call)
         assert!(fields.ends_with(",1"));
+    }
+
+    #[test]
+    fn build_whox_who_silent_registers_channel() {
+        let mut state = make_whox_state();
+        let result = build_whox_who(&mut state, "test", "#silent", true);
+        assert!(result.is_some());
+        let conn = state.connections.get("test").unwrap();
+        assert!(conn.silent_who_channels.contains("#silent"));
+    }
+
+    #[test]
+    fn build_whox_who_non_silent_does_not_register() {
+        let mut state = make_whox_state();
+        let _result = build_whox_who(&mut state, "test", "#loud", false);
+        let conn = state.connections.get("test").unwrap();
+        assert!(!conn.silent_who_channels.contains("#loud"));
+    }
+
+    #[test]
+    fn silent_whox_reply_updates_state_without_display() {
+        let mut state = make_whox_state();
+        state.set_active_buffer("test/testserver");
+
+        // Register #test as silent auto-WHO
+        if let Some(conn) = state.connections.get_mut("test") {
+            conn.silent_who_channels.insert("#test".to_string());
+        }
+
+        let msg = make_irc_msg(
+            None,
+            Command::Raw(
+                "354".to_string(),
+                vec![
+                    "me".to_string(),
+                    "1".to_string(),
+                    "#test".to_string(),
+                    "~alice".to_string(),
+                    "1.2.3.4".to_string(),
+                    "host.example.com".to_string(),
+                    "irc.server.net".to_string(),
+                    "alice".to_string(),
+                    "H".to_string(),
+                    "0".to_string(),
+                    "42".to_string(),
+                    "alice_acct".to_string(),
+                    "Alice Smith".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        // State updated
+        let buf = state.buffers.get("test/#test").unwrap();
+        let entry = buf.users.get("alice").unwrap();
+        assert_eq!(entry.ident.as_deref(), Some("~alice"));
+        assert_eq!(entry.account.as_deref(), Some("alice_acct"));
+
+        // No display output — server buffer should be empty
+        let server_buf = state.buffers.get("test/testserver").unwrap();
+        assert!(server_buf.messages.is_empty());
+    }
+
+    #[test]
+    fn silent_who_end_cleans_up_and_suppresses_display() {
+        let mut state = make_whox_state();
+        state.set_active_buffer("test/testserver");
+
+        // Register #test as silent auto-WHO
+        if let Some(conn) = state.connections.get_mut("test") {
+            conn.silent_who_channels.insert("#test".to_string());
+        }
+
+        let msg = make_irc_msg(
+            None,
+            Command::Response(
+                Response::RPL_ENDOFWHO,
+                vec![
+                    "me".to_string(),
+                    "#test".to_string(),
+                    "End of WHO list".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        // Silent channel removed
+        let conn = state.connections.get("test").unwrap();
+        assert!(!conn.silent_who_channels.contains("#test"));
+
+        // No display output
+        let server_buf = state.buffers.get("test/testserver").unwrap();
+        assert!(server_buf.messages.is_empty());
+    }
+
+    #[test]
+    fn manual_who_end_displays_message() {
+        let mut state = make_whox_state();
+        state.set_active_buffer("test/testserver");
+
+        // No silent channels registered — this is a manual /who
+        let msg = make_irc_msg(
+            None,
+            Command::Response(
+                Response::RPL_ENDOFWHO,
+                vec![
+                    "me".to_string(),
+                    "#test".to_string(),
+                    "End of WHO list".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let server_buf = state.buffers.get("test/testserver").unwrap();
+        assert_eq!(server_buf.messages.len(), 1);
+        assert!(server_buf.messages[0].text.contains("End of WHO list"));
     }
 
     // === ERROR handler tests ===

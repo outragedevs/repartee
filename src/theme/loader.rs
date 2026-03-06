@@ -35,25 +35,37 @@ pub fn load_theme(path: &Path) -> Result<ThemeFile> {
     let default = default_theme();
 
     let meta: ThemeMeta = if let Some(meta) = parsed.get("meta") {
-        meta.clone().try_into().unwrap_or(default.meta)
+        meta.clone().try_into().unwrap_or_else(|e| {
+            tracing::warn!("Failed to parse theme [meta]: {e}, using defaults");
+            default.meta
+        })
     } else {
         default.meta
     };
 
-    let colors: ThemeColors = if let Some(colors_val) = parsed.get("colors") {
-        colors_val.clone().try_into().unwrap_or_default()
-    } else {
-        ThemeColors::default()
-    };
+    let colors: ThemeColors = parsed
+        .get("colors")
+        .map_or_else(ThemeColors::default, |v| {
+            v.clone().try_into().unwrap_or_else(|e| {
+                tracing::warn!("Failed to parse theme [colors]: {e}, using defaults");
+                ThemeColors::default()
+            })
+        });
 
     let abstracts: HashMap<String, String> = if let Some(abs) = parsed.get("abstracts") {
-        abs.clone().try_into().unwrap_or(default.abstracts)
+        abs.clone().try_into().unwrap_or_else(|e| {
+            tracing::warn!("Failed to parse theme [abstracts]: {e}, using defaults");
+            default.abstracts
+        })
     } else {
         default.abstracts
     };
 
     let formats: ThemeFormats = if let Some(fmts) = parsed.get("formats") {
-        fmts.clone().try_into().unwrap_or_default()
+        fmts.clone().try_into().unwrap_or_else(|e| {
+            tracing::warn!("Failed to parse theme [formats]: {e}, using defaults");
+            ThemeFormats::default()
+        })
     } else {
         default.formats
     };

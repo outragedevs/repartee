@@ -5,10 +5,10 @@ pub struct ParsedCommand {
 
 /// Greedy commands: the last arg consumes the rest of the line.
 /// - me, quit, close, quote: single arg (entire rest)
-/// - msg, notice, topic, kick, kb, disconnect, set, alias: two args (first word, rest)
+/// - msg, query, notice, topic, kick, kb, disconnect, set, alias: two args (first word, rest)
 const GREEDY_COMMANDS: &[&str] = &[
-    "msg", "notice", "me", "quit", "topic", "kick", "kb", "close", "disconnect", "set", "alias",
-    "quote",
+    "msg", "query", "notice", "me", "quit", "topic", "kick", "kb", "close", "disconnect", "set",
+    "alias", "quote",
 ];
 
 pub fn parse_command(input: &str) -> Option<ParsedCommand> {
@@ -101,5 +101,26 @@ mod tests {
     fn case_insensitive() {
         let cmd = parse_command("/QUIT").unwrap();
         assert_eq!(cmd.name, "quit");
+    }
+
+    #[test]
+    fn connect_with_flags() {
+        let cmd = parse_command("/connect irc.example.com 6697 -tls").unwrap();
+        assert_eq!(cmd.name, "connect");
+        assert_eq!(cmd.args, vec!["irc.example.com", "6697", "-tls"]);
+    }
+
+    #[test]
+    fn connect_with_bind() {
+        let cmd = parse_command("/connect mynet -bind=192.168.1.1").unwrap();
+        assert_eq!(cmd.name, "connect");
+        assert_eq!(cmd.args, vec!["mynet", "-bind=192.168.1.1"]);
+    }
+
+    #[test]
+    fn connect_address_port_colon() {
+        let cmd = parse_command("/connect irc.example.com:6697 -tls").unwrap();
+        assert_eq!(cmd.name, "connect");
+        assert_eq!(cmd.args, vec!["irc.example.com:6697", "-tls"]);
     }
 }

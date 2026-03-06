@@ -8,13 +8,13 @@
 // NETSPLIT/NETJOIN batch types produce summary messages instead of individual
 // QUIT/JOIN events, providing server-authoritative netsplit information.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use irc::proto::{Command, Message as IrcMessage};
 
-use crate::irc::formatting::extract_nick;
+use crate::irc::formatting::{extract_nick, extract_nick_userhost};
 use crate::state::AppState;
-use crate::state::buffer::{Message, MessageType, make_buffer_id};
+use crate::state::buffer::{Message, MessageType, NickEntry, make_buffer_id};
 
 /// Maximum number of nicks to show in a netsplit/netjoin summary line.
 const MAX_NICKS_DISPLAY: usize = 15;
@@ -127,6 +127,7 @@ fn process_netsplit_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo
     let server2 = batch.params.get(1).map_or("???", String::as_str);
 
     let mut nicks: Vec<String> = Vec::new();
+    let mut nick_seen: HashSet<String> = HashSet::new();
     let mut affected_buffers: HashMap<String, Vec<String>> = HashMap::new();
 
     for msg in &batch.messages {
@@ -155,7 +156,7 @@ fn process_netsplit_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo
                     .push(nick.clone());
             }
 
-            if !nicks.contains(&nick) {
+            if nick_seen.insert(nick.clone()) {
                 nicks.push(nick);
             }
         }
@@ -201,23 +202,38 @@ fn process_netjoin_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo)
     let server2 = batch.params.get(1).map_or("???", String::as_str);
 
     let mut nicks: Vec<String> = Vec::new();
+    let mut nick_seen: HashSet<String> = HashSet::new();
     let mut affected_buffers: HashMap<String, bool> = HashMap::new();
 
-    // Replay JOIN messages through the normal handler so nick lists are updated,
-    // but we suppress the individual join messages by processing only the state
-    // changes and then posting our own summary.
+    // Directly update nick lists without replaying through handle_irc_message,
+    // which would generate individual join display messages we don't want.
     for msg in &batch.messages {
-        if let Command::JOIN(channel, _, _) = &msg.command {
-            let Some(nick) = extract_nick(msg.prefix.as_ref()) else {
-                continue;
-            };
+        if let Command::JOIN(channel, account, _) = &msg.command {
+            let (nick, _ident, _host) = extract_nick_userhost(msg.prefix.as_ref());
             let buffer_id = make_buffer_id(conn_id, channel);
 
-            // Process the JOIN through the normal handler for nick list updates
-            crate::irc::events::handle_irc_message(state, conn_id, msg);
+            // Parse account from extended-join parameter
+            let account = match account.as_deref() {
+                Some("*") | None => None,
+                Some(a) => Some(a.to_string()),
+            };
+
+            // Add nick directly to buffer's user list (state mutation only, no message)
+            state.add_nick(
+                &buffer_id,
+                NickEntry {
+                    nick: nick.clone(),
+                    prefix: String::new(),
+                    modes: String::new(),
+                    away: false,
+                    account,
+                    ident: None,
+                    host: None,
+                },
+            );
 
             affected_buffers.insert(buffer_id, true);
-            if !nicks.contains(&nick) {
+            if nick_seen.insert(nick.clone()) {
                 nicks.push(nick);
             }
         }
@@ -432,6 +448,7 @@ mod tests {
             origin_config: make_test_server_config(),
             enabled_caps: std::collections::HashSet::new(),
             who_token_counter: 0,
+            silent_who_channels: std::collections::HashSet::new(),
         });
 
         let buf_id = make_buffer_id(conn_id, "#test");

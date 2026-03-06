@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="rustirc — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
+  <meta name="keywords" content="irc, terminal, tui, client, chat, rustirc, ratatui, tokio, rust">
+  <meta name="author" content="kofany">
+  <meta property="og:title" content="First Connection — rustirc">
+  <meta property="og:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by irssi, designed for the future.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://kofany.github.io/rustirc/">
+  <meta property="og:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{title}} — rustirc">
+  <meta name="twitter:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust.">
+  <meta name="twitter:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <title>{{title}} — rustirc</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- Mobile hamburger toggle -->
+  <button class="hamburger" aria-label="Toggle navigation">
+    <span></span>
+    <span></span>
+    <span></span>
+  </button>
+
+  <div class="page-wrapper">
+    <!-- Sidebar navigation -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <a href="index.html" class="brand">rustirc</a>
+        <span class="brand-tagline">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+          <ul>
+    <li><a href="index.html">Home</a></li>
+  </ul>
+  <div class="nav-section">
+    <span class="nav-section-title">Getting Started</span>
+    <ul>
+      <li><a href="installation.html">Installation</a></li>
+      <li><a href="first-connection.html" class="active">First Connection</a></li>
+      <li><a href="configuration.html">Configuration</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Reference</span>
+    <ul>
+      <li><a href="commands.html">Commands</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Scripting</span>
+    <ul>
+      <li><a href="scripting-getting-started.html">Getting Started</a></li>
+      <li><a href="scripting-api.html">API Reference</a></li>
+      <li><a href="scripting-examples.html">Examples</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Customization</span>
+    <ul>
+      <li><a href="theming.html">Theming</a></li>
+      <li><a href="theming-format-strings.html">Format Strings</a></li>
+      <li><a href="logging.html">Logging & Search</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Project</span>
+    <ul>
+      <li><a href="architecture.html">Architecture</a></li>
+      <li><a href="faq.html">FAQ</a></li>
+    </ul>
+  </div>
+
+      </nav>
+      <div class="sidebar-footer">
+        Built with <a href="https://www.rust-lang.org">Rust</a>
+        &middot;
+        <a href="https://github.com/kofany/rustirc">GitHub</a>
+      </div>
+    </aside>
+
+    <!-- Overlay for mobile sidebar -->
+    <div class="sidebar-overlay"></div>
+
+    <!-- Main content -->
+    <div class="content-wrapper">
+      <main class="content">
+        <h1>First Connection</h1>
+<h2>Quick start</h2>
+<p>After installing rustirc, launch it:</p>
+<pre><code class="language-bash">rustirc
+</code></pre>
+<p>You&#39;ll see the main UI with a status buffer. Let&#39;s connect to an IRC network.</p>
+<h2>Add a server</h2>
+<p>Edit <code>~/.rustirc/config.toml</code> (created on first run) and add a server:</p>
+<pre><code class="language-toml">[servers.libera]
+label = &quot;Libera&quot;
+address = &quot;irc.libera.chat&quot;
+port = 6697
+tls = true
+autoconnect = true
+channels = [&quot;#rustirc&quot;]
+</code></pre>
+<p>Or use the <code>/server</code> command at runtime:</p>
+<pre><code>/server add libera irc.libera.chat
+/server connect libera
+</code></pre>
+<h2>Join channels</h2>
+<p>Once connected, join channels with:</p>
+<pre><code>/join #channel
+/join #secret mykey
+</code></pre>
+<p>Channels listed in your config&#39;s <code>channels</code> array are joined automatically on connect.</p>
+<h2>Navigation</h2>
+<ul>
+<li><strong>Esc + 1–9</strong> — switch between buffers (windows)</li>
+<li><strong>Ctrl+N / Ctrl+P</strong> — next / previous buffer</li>
+<li><strong>Click</strong> on buffer list or nick list entries</li>
+<li><strong>Mouse wheel</strong> — scroll chat history</li>
+<li><strong>Tab</strong> — nick completion</li>
+<li><strong>Up/Down</strong> — input history</li>
+</ul>
+<h2>SASL authentication</h2>
+<p>For networks that support SASL (Libera Chat, OFTC, etc.), add credentials to <code>~/.rustirc/.env</code>:</p>
+<pre><code class="language-bash"># ~/.rustirc/.env
+LIBERA_SASL_USER=mynick
+LIBERA_SASL_PASS=hunter2
+</code></pre>
+<p>Then in your config:</p>
+<pre><code class="language-toml">[servers.libera]
+address = &quot;irc.libera.chat&quot;
+port = 6697
+tls = true
+sasl_user = &quot;mynick&quot;
+# sasl_pass loaded from .env
+</code></pre>
+<h2>Next steps</h2>
+<ul>
+<li><a href="configuration.html">Configuration</a> — full config reference</li>
+<li><a href="commands.html">Commands</a> — all available commands</li>
+<li><a href="theming.html">Theming</a> — customize colors and layout</li>
+</ul>
+
+
+        <!-- Prev / Next navigation -->
+        <nav class="page-nav">
+          <a href="installation.html" class="page-nav-link prev">
+  <span class="page-nav-label">&larr; Previous</span>
+  <span class="page-nav-title">Installation</span>
+</a>
+          <a href="configuration.html" class="page-nav-link next">
+  <span class="page-nav-label">Next &rarr;</span>
+  <span class="page-nav-title">Configuration</span>
+</a>
+        </nav>
+
+        <footer class="site-footer">
+          Built with <a href="https://www.rust-lang.org">Rust</a> &middot;
+          <a href="https://github.com/kofany/rustirc">GitHub</a> &middot;
+          MIT License
+        </footer>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    // Mobile sidebar toggle
+    (function() {
+      const hamburger = document.querySelector('.hamburger');
+      const sidebar = document.querySelector('.sidebar');
+      const overlay = document.querySelector('.sidebar-overlay');
+
+      function toggleSidebar() {
+        hamburger.classList.toggle('active');
+        sidebar.classList.toggle('open');
+        overlay.classList.toggle('visible');
+        document.body.style.overflow = sidebar.classList.contains('open') ? 'hidden' : '';
+      }
+
+      function closeSidebar() {
+        hamburger.classList.remove('active');
+        sidebar.classList.remove('open');
+        overlay.classList.remove('visible');
+        document.body.style.overflow = '';
+      }
+
+      hamburger.addEventListener('click', toggleSidebar);
+      overlay.addEventListener('click', closeSidebar);
+
+      // Close sidebar on Escape key
+      document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && sidebar.classList.contains('open')) {
+          closeSidebar();
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

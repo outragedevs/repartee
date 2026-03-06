@@ -1,8 +1,24 @@
 // User ignore management — wildcard pattern matching against nick!ident@host masks.
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use regex::Regex;
 
 use crate::config::{IgnoreEntry, IgnoreLevel};
+
+/// Thread-safe cache of compiled regexes keyed by wildcard pattern.
+static REGEX_CACHE: std::sync::LazyLock<Mutex<HashMap<String, Regex>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Get a compiled regex for a wildcard pattern, using a cache to avoid recompilation.
+fn cached_wildcard_regex(pattern: &str) -> Regex {
+    let mut cache = REGEX_CACHE.lock().expect("regex cache lock poisoned");
+    cache
+        .entry(pattern.to_string())
+        .or_insert_with(|| wildcard_to_regex(pattern))
+        .clone()
+}
 
 /// Convert a simple wildcard pattern (`*` and `?`) to a case-insensitive regex.
 ///
@@ -68,11 +84,12 @@ pub fn should_ignore(
             continue;
         }
 
-        // Pattern check: bare nick vs full mask
+        // Pattern check: bare nick vs full mask (uses cached compiled regex)
+        let re = cached_wildcard_regex(&entry.mask);
         let matched = if entry.mask.contains('!') {
-            wildcard_to_regex(&entry.mask).is_match(&full_mask)
+            re.is_match(&full_mask)
         } else {
-            wildcard_to_regex(&entry.mask).is_match(nick)
+            re.is_match(nick)
         };
 
         if !matched {
@@ -191,7 +208,7 @@ mod tests {
         IgnoreEntry {
             mask: mask.to_string(),
             levels,
-            channels: channels.map(|v| v.into_iter().map(|s| s.to_string()).collect()),
+            channels: channels.map(|v| v.into_iter().map(str::to_string).collect()),
         }
     }
 

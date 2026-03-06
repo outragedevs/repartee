@@ -6,12 +6,14 @@ use crate::config::StatusbarItem;
 use crate::state::buffer::{ActivityLevel, BufferType};
 use crate::theme::hex_to_color;
 
+#[expect(clippy::too_many_lines, reason = "single render function iterating status bar items")]
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     if !app.config.statusbar.enabled {
         return;
     }
 
     let colors = &app.theme.colors;
+    let fg = hex_to_color(&colors.fg).unwrap_or(Color::White);
     let fg_muted = hex_to_color(&colors.fg_muted).unwrap_or(Color::DarkGray);
     let fg_dim = hex_to_color(&colors.fg_dim).unwrap_or(Color::DarkGray);
     let accent = hex_to_color(&colors.accent).unwrap_or(Color::Cyan);
@@ -40,12 +42,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                 spans.push(Span::styled(time, Style::default().fg(fg_muted)));
             }
             StatusbarItem::NickInfo => {
-                let nick = conn.map(|c| c.nick.as_str()).unwrap_or("?");
+                let nick = conn.map_or("?", |c| c.nick.as_str());
                 let modes = conn.map(|c| &c.user_modes).filter(|m| !m.is_empty());
                 spans.push(Span::styled(nick.to_string(), Style::default().fg(accent)));
                 if let Some(modes) = modes {
                     spans.push(Span::styled(
-                        format!("(+{})", modes),
+                        format!("(+{modes})"),
                         Style::default().fg(fg_muted),
                     ));
                 }
@@ -54,7 +56,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                 if let Some(buf) = active_buf {
                     let name_color = match buf.buffer_type {
                         BufferType::Channel => accent,
-                        BufferType::Query => Color::Rgb(0xe0, 0xaf, 0x68), // yellow
+                        BufferType::Query => fg,
                         _ => fg_muted,
                     };
                     spans.push(Span::styled(
@@ -63,7 +65,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                     ));
                     if let Some(modes) = &buf.modes {
                         spans.push(Span::styled(
-                            format!("(+{})", modes),
+                            format!("(+{modes})"),
                             Style::default().fg(fg_muted),
                         ));
                     }
@@ -71,13 +73,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             }
             StatusbarItem::Lag => {
                 if let Some(lag) = conn.and_then(|c| c.lag) {
+                    #[expect(clippy::cast_precision_loss, reason = "lag in ms will never exceed f64 mantissa")]
                     let secs = lag as f64 / 1000.0;
                     let lag_color = if lag > 5000 {
-                        Color::Rgb(0xf7, 0x76, 0x8e)
+                        accent
                     } else if lag > 2000 {
-                        Color::Rgb(0xe0, 0xaf, 0x68)
+                        fg_muted
                     } else {
-                        Color::Rgb(0x9e, 0xce, 0x6a)
+                        fg
                     };
                     spans.push(Span::styled("Lag: ", Style::default().fg(fg_muted)));
                     spans.push(Span::styled(
@@ -90,24 +93,30 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                 let sorted_ids = app.state.sorted_buffer_ids();
                 let active_id = app.state.active_buffer_id.as_deref();
                 let mut activity_spans: Vec<Span> = Vec::new();
+                let mut win_num = 1u32; // Real buffers start at 1
 
-                for (idx, id) in sorted_ids.iter().enumerate() {
+                for id in &sorted_ids {
+                    let Some(buf) = app.state.buffers.get(id.as_str()) else {
+                        continue;
+                    };
+                    // Skip default Status buffer
+                    if buf.connection_id == crate::app::App::DEFAULT_CONN_ID {
+                        continue;
+                    }
+                    let current_num = win_num;
+                    win_num += 1;
+
                     if active_id == Some(id.as_str()) {
                         continue;
                     }
-                    let buf = match app.state.buffers.get(id.as_str()) {
-                        Some(b) => b,
-                        None => continue,
-                    };
                     if buf.activity == ActivityLevel::None {
                         continue;
                     }
 
                     let color = match buf.activity {
-                        ActivityLevel::Mention => Color::Rgb(0xbb, 0x9a, 0xf7),
-                        ActivityLevel::Highlight => Color::Rgb(0xf7, 0x76, 0x8e),
-                        ActivityLevel::Activity => Color::Rgb(0xe0, 0xaf, 0x68),
-                        _ => Color::Rgb(0x9e, 0xce, 0x6a),
+                        ActivityLevel::Mention | ActivityLevel::Highlight => accent,
+                        ActivityLevel::Activity => fg,
+                        _ => fg_muted,
                     };
 
                     if !activity_spans.is_empty() {
@@ -115,7 +124,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                             .push(Span::styled(",", Style::default().fg(fg_dim)));
                     }
                     activity_spans.push(Span::styled(
-                        format!("{}", idx + 1),
+                        current_num.to_string(),
                         Style::default().fg(color),
                     ));
                 }

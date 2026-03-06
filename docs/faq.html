@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="rustirc — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
+  <meta name="keywords" content="irc, terminal, tui, client, chat, rustirc, ratatui, tokio, rust">
+  <meta name="author" content="kofany">
+  <meta property="og:title" content="FAQ — rustirc">
+  <meta property="og:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by irssi, designed for the future.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://kofany.github.io/rustirc/">
+  <meta property="og:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{title}} — rustirc">
+  <meta name="twitter:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust.">
+  <meta name="twitter:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <title>{{title}} — rustirc</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- Mobile hamburger toggle -->
+  <button class="hamburger" aria-label="Toggle navigation">
+    <span></span>
+    <span></span>
+    <span></span>
+  </button>
+
+  <div class="page-wrapper">
+    <!-- Sidebar navigation -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <a href="index.html" class="brand">rustirc</a>
+        <span class="brand-tagline">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+          <ul>
+    <li><a href="index.html">Home</a></li>
+  </ul>
+  <div class="nav-section">
+    <span class="nav-section-title">Getting Started</span>
+    <ul>
+      <li><a href="installation.html">Installation</a></li>
+      <li><a href="first-connection.html">First Connection</a></li>
+      <li><a href="configuration.html">Configuration</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Reference</span>
+    <ul>
+      <li><a href="commands.html">Commands</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Scripting</span>
+    <ul>
+      <li><a href="scripting-getting-started.html">Getting Started</a></li>
+      <li><a href="scripting-api.html">API Reference</a></li>
+      <li><a href="scripting-examples.html">Examples</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Customization</span>
+    <ul>
+      <li><a href="theming.html">Theming</a></li>
+      <li><a href="theming-format-strings.html">Format Strings</a></li>
+      <li><a href="logging.html">Logging & Search</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Project</span>
+    <ul>
+      <li><a href="architecture.html">Architecture</a></li>
+      <li><a href="faq.html" class="active">FAQ</a></li>
+    </ul>
+  </div>
+
+      </nav>
+      <div class="sidebar-footer">
+        Built with <a href="https://www.rust-lang.org">Rust</a>
+        &middot;
+        <a href="https://github.com/kofany/rustirc">GitHub</a>
+      </div>
+    </aside>
+
+    <!-- Overlay for mobile sidebar -->
+    <div class="sidebar-overlay"></div>
+
+    <!-- Main content -->
+    <div class="content-wrapper">
+      <main class="content">
+        <h1>FAQ</h1>
+<h2>What is rustirc?</h2>
+<p>rustirc is a terminal IRC client written in Rust, inspired by irssi and built as a port of <a href="https://github.com/kofany/kokoIRC">kokoirc</a> (TypeScript/OpenTUI/Bun) to Rust/ratatui/tokio.</p>
+<h2>Why Rust?</h2>
+<ul>
+<li><strong>Performance</strong>: ~5MB binary, instant startup, minimal memory usage</li>
+<li><strong>Safety</strong>: Memory-safe without garbage collection</li>
+<li><strong>Concurrency</strong>: tokio async runtime handles multiple connections efficiently</li>
+<li><strong>Reliability</strong>: Rust&#39;s type system catches bugs at compile time</li>
+<li><strong>Distribution</strong>: Single static binary, no runtime dependencies</li>
+</ul>
+<h2>How does rustirc compare to kokoirc?</h2>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>kokoirc</th>
+<th>rustirc</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Language</td>
+<td>TypeScript</td>
+<td>Rust</td>
+</tr>
+<tr>
+<td>TUI framework</td>
+<td>OpenTUI/React</td>
+<td>ratatui</td>
+</tr>
+<tr>
+<td>Runtime</td>
+<td>Bun</td>
+<td>Native binary</td>
+</tr>
+<tr>
+<td>Binary size</td>
+<td>~68MB</td>
+<td>~5MB</td>
+</tr>
+<tr>
+<td>Scripting</td>
+<td>TypeScript</td>
+<td>Lua 5.4</td>
+</tr>
+<tr>
+<td>Config format</td>
+<td>TOML</td>
+<td>TOML (same format)</td>
+</tr>
+<tr>
+<td>Theme format</td>
+<td>irssi-compatible</td>
+<td>irssi-compatible (same)</td>
+</tr>
+</tbody></table>
+<p>The config and theme formats are compatible — you can copy your kokoirc config to rustirc with minimal changes.</p>
+<h2>How do I migrate from kokoirc?</h2>
+<ol>
+<li>Copy <code>~/.kokoirc/config.toml</code> to <code>~/.rustirc/config.toml</code></li>
+<li>Copy <code>~/.kokoirc/.env</code> to <code>~/.rustirc/.env</code></li>
+<li>Copy <code>~/.kokoirc/themes/</code> to <code>~/.rustirc/themes/</code></li>
+<li>Scripts need to be rewritten from TypeScript to Lua</li>
+</ol>
+<h2>How do I migrate from irssi?</h2>
+<p>rustirc uses irssi-compatible format strings, so your theme knowledge transfers directly. The key differences:</p>
+<ul>
+<li>Config is TOML instead of irssi&#39;s custom format</li>
+<li>Scripts are Lua instead of Perl</li>
+<li>Most <code>/commands</code> work the same</li>
+</ul>
+<h2>Where are logs stored?</h2>
+<p><code>~/.rustirc/logs/messages.db</code> — a SQLite database with optional AES-256-GCM encryption.</p>
+<h2>Can I use multiple IRC networks?</h2>
+<p>Yes. Add multiple <code>[servers.*]</code> sections to your config. Each gets its own connection and set of channel buffers.</p>
+<h2>Does rustirc support IRCv3?</h2>
+<p>The underlying <code>irc</code> crate supports IRCv3 capabilities including SASL, server-time, and CAP negotiation.</p>
+<h2>How do I report bugs?</h2>
+<p>Open an issue on the <a href="https://github.com/kofany/rustirc/issues">GitHub repository</a>.</p>
+
+
+        <!-- Prev / Next navigation -->
+        <nav class="page-nav">
+          <a href="architecture.html" class="page-nav-link prev">
+  <span class="page-nav-label">&larr; Previous</span>
+  <span class="page-nav-title">Architecture</span>
+</a>
+          
+        </nav>
+
+        <footer class="site-footer">
+          Built with <a href="https://www.rust-lang.org">Rust</a> &middot;
+          <a href="https://github.com/kofany/rustirc">GitHub</a> &middot;
+          MIT License
+        </footer>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    // Mobile sidebar toggle
+    (function() {
+      const hamburger = document.querySelector('.hamburger');
+      const sidebar = document.querySelector('.sidebar');
+      const overlay = document.querySelector('.sidebar-overlay');
+
+      function toggleSidebar() {
+        hamburger.classList.toggle('active');
+        sidebar.classList.toggle('open');
+        overlay.classList.toggle('visible');
+        document.body.style.overflow = sidebar.classList.contains('open') ? 'hidden' : '';
+      }
+
+      function closeSidebar() {
+        hamburger.classList.remove('active');
+        sidebar.classList.remove('open');
+        overlay.classList.remove('visible');
+        document.body.style.overflow = '';
+      }
+
+      hamburger.addEventListener('click', toggleSidebar);
+      overlay.addEventListener('click', closeSidebar);
+
+      // Close sidebar on Escape key
+      document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && sidebar.classList.contains('open')) {
+          closeSidebar();
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

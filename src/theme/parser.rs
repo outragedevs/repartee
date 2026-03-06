@@ -6,7 +6,7 @@ use super::{StyledSpan, hex_to_color};
 
 /// Irssi-compatible color map.
 /// Lowercase = normal, uppercase = bright.
-fn color_map(code: char) -> Option<&'static str> {
+const fn color_map(code: char) -> Option<&'static str> {
     match code {
         'k' => Some("#000000"),
         'K' => Some("#555555"),
@@ -53,6 +53,7 @@ const MAX_ABSTRACTION_DEPTH: usize = 10;
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default)]
+#[expect(clippy::struct_excessive_bools, reason = "each bool maps to an independent text style attribute")]
 struct StyleState {
     fg: Option<Color>,
     bg: Option<Color>,
@@ -63,7 +64,7 @@ struct StyleState {
 }
 
 impl StyleState {
-    fn to_span(&self, text: String) -> StyledSpan {
+    const fn to_span(&self, text: String) -> StyledSpan {
         StyledSpan {
             text,
             fg: self.fg,
@@ -147,11 +148,11 @@ pub fn substitute_vars(input: &str, params: &[&str]) -> String {
 
                 let abs_width = pad_width.unsigned_abs() as usize;
                 if pad_width < 0 {
-                    // left-pad
-                    result.push_str(&format!("{:>width$}", value, width = abs_width));
+                    use std::fmt::Write;
+                    let _ = write!(result, "{value:>abs_width$}");
                 } else {
-                    // right-pad
-                    result.push_str(&format!("{:<width$}", value, width = abs_width));
+                    use std::fmt::Write;
+                    let _ = write!(result, "{value:<abs_width$}");
                 }
                 continue;
             }
@@ -172,12 +173,9 @@ pub fn substitute_vars(input: &str, params: &[&str]) -> String {
 
             // Not a recognized variable -- keep the $ and current char
             result.push('$');
-            result.push(chars[i]);
-            i += 1;
-        } else {
-            result.push(chars[i]);
-            i += 1;
         }
+        result.push(chars[i]);
+        i += 1;
     }
 
     result
@@ -205,7 +203,7 @@ fn find_matching_brace(input: &[char], open_pos: usize) -> Option<usize> {
 }
 
 /// Split abstraction args respecting nested braces.
-/// e.g., "$2 {pubnick $0}" -> ["$2", "{pubnick $0}"]
+/// e.g., `"$2 {pubnick $0}"` -> `["$2", "{pubnick $0}"]`
 fn split_abstraction_args(args_str: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut current = String::new();
@@ -233,7 +231,7 @@ fn split_abstraction_args(args_str: &str) -> Vec<String> {
 }
 
 /// Resolve `{name args...}` abstraction references.
-/// Recursively expands up to MAX_ABSTRACTION_DEPTH.
+/// Recursively expands up to `MAX_ABSTRACTION_DEPTH`.
 pub fn resolve_abstractions(
     input: &str,
     abstracts: &HashMap<String, String>,
@@ -252,12 +250,10 @@ pub fn resolve_abstractions(
             // Find matching closing brace (respecting nesting)
             if let Some(close_idx) = find_matching_brace(&chars, i) {
                 let inner: String = chars[i + 1..close_idx].iter().collect();
-                let space_idx = inner.find(' ');
-
-                let (name, args_str) = match space_idx {
-                    None => (inner.as_str(), ""),
-                    Some(idx) => (&inner[..idx], &inner[idx + 1..]),
-                };
+                let (name, args_str) = inner.find(' ').map_or(
+                    (inner.as_str(), ""),
+                    |idx| (&inner[..idx], &inner[idx + 1..]),
+                );
 
                 if abstracts.contains_key(name) {
                     let template = &abstracts[name];
@@ -274,7 +270,7 @@ pub fn resolve_abstractions(
                         .collect();
                     // Convert to &str for substitute_vars
                     let resolved_refs: Vec<&str> =
-                        resolved_args.iter().map(|s| s.as_str()).collect();
+                        resolved_args.iter().map(String::as_str).collect();
                     // Then substitute into template
                     let expanded = substitute_vars(template, &resolved_refs);
                     // Recurse to handle any remaining abstractions
@@ -304,6 +300,7 @@ pub fn resolve_abstractions(
 // parse_format_string
 // ---------------------------------------------------------------------------
 
+#[expect(clippy::too_many_lines, reason = "monolithic state machine parser, splitting would reduce readability")]
 /// Parse an irssi-compatible format string into styled spans.
 ///
 /// Supports:
@@ -435,7 +432,6 @@ pub fn parse_format_string(input: &str, params: &[&str]) -> Vec<StyledSpan> {
             // Unknown code -- keep as-is
             buffer.push('%');
             buffer.push(code);
-            i += 1;
         } else {
             // -- mIRC control characters --
             let ch = chars[i] as u32;
@@ -570,8 +566,8 @@ pub fn parse_format_string(input: &str, params: &[&str]) -> Vec<StyledSpan> {
             }
 
             buffer.push(chars[i]);
-            i += 1;
         }
+        i += 1;
     }
 
     flush(&mut buffer, &mut spans, &current);

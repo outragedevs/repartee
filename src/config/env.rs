@@ -33,14 +33,21 @@ pub fn apply_credentials(
 ) {
     for (id, server) in servers.iter_mut() {
         let prefix = id.to_uppercase();
-        if let Some(val) = env.get(&format!("{prefix}_SASL_USER")) {
-            server.sasl_user = Some(val.clone());
+        let mut key = String::with_capacity(prefix.len() + 10);
+        let mut get = |suffix: &str| -> Option<String> {
+            key.clear();
+            key.push_str(&prefix);
+            key.push_str(suffix);
+            env.get(&key).cloned()
+        };
+        if let Some(val) = get("_SASL_USER") {
+            server.sasl_user = Some(val);
         }
-        if let Some(val) = env.get(&format!("{prefix}_SASL_PASS")) {
-            server.sasl_pass = Some(val.clone());
+        if let Some(val) = get("_SASL_PASS") {
+            server.sasl_pass = Some(val);
         }
-        if let Some(val) = env.get(&format!("{prefix}_PASSWORD")) {
-            server.password = Some(val.clone());
+        if let Some(val) = get("_PASSWORD") {
+            server.password = Some(val);
         }
     }
 }

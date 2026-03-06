@@ -11,62 +11,68 @@
 /// - \x04RRGGBB[,RRGGBB] (hex color codes)
 pub fn strip_irc_formatting(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let chars: Vec<char> = text.chars().collect();
-    let len = chars.len();
+    let bytes = text.as_bytes();
+    let len = bytes.len();
     let mut i = 0;
 
     while i < len {
-        match chars[i] {
-            '\x02' | '\x1D' | '\x1F' | '\x1E' | '\x16' | '\x0F' => {
+        match bytes[i] {
+            b'\x02' | b'\x1D' | b'\x1F' | b'\x1E' | b'\x16' | b'\x0F' => {
                 // Skip formatting toggle / reset characters
                 i += 1;
             }
-            '\x03' => {
+            b'\x03' => {
                 // mIRC color code: \x03[N[N]][,N[N]]
                 i += 1;
                 // Consume up to 2 foreground digits
                 let mut digits = 0;
-                while i < len && chars[i].is_ascii_digit() && digits < 2 {
+                while i < len && bytes[i].is_ascii_digit() && digits < 2 {
                     i += 1;
                     digits += 1;
                 }
                 // Optional comma + up to 2 background digits
-                if i < len && chars[i] == ',' {
+                if i < len && bytes[i] == b',' {
                     // Peek ahead: only consume if followed by a digit
-                    if i + 1 < len && chars[i + 1].is_ascii_digit() {
+                    if i + 1 < len && bytes[i + 1].is_ascii_digit() {
                         i += 1; // skip comma
                         let mut bg_digits = 0;
-                        while i < len && chars[i].is_ascii_digit() && bg_digits < 2 {
+                        while i < len && bytes[i].is_ascii_digit() && bg_digits < 2 {
                             i += 1;
                             bg_digits += 1;
                         }
                     }
                 }
             }
-            '\x04' => {
+            b'\x04' => {
                 // Hex color code: \x04RRGGBB[,RRGGBB]
                 i += 1;
                 // Consume up to 6 hex digits for foreground
                 let mut hex_digits = 0;
-                while i < len && chars[i].is_ascii_hexdigit() && hex_digits < 6 {
+                while i < len && bytes[i].is_ascii_hexdigit() && hex_digits < 6 {
                     i += 1;
                     hex_digits += 1;
                 }
                 // Optional comma + up to 6 hex digits for background
-                if i < len && chars[i] == ','
-                    && i + 1 < len && chars[i + 1].is_ascii_hexdigit()
+                if i < len && bytes[i] == b','
+                    && i + 1 < len && bytes[i + 1].is_ascii_hexdigit()
                 {
                     i += 1; // skip comma
                     let mut bg_hex = 0;
-                    while i < len && chars[i].is_ascii_hexdigit() && bg_hex < 6 {
+                    while i < len && bytes[i].is_ascii_hexdigit() && bg_hex < 6 {
                         i += 1;
                         bg_hex += 1;
                     }
                 }
             }
-            c => {
-                out.push(c);
+            _ => {
+                // Non-control byte: figure out the full UTF-8 character and push it
+                // All IRC control chars are single-byte ASCII, so this is safe
+                let ch_start = i;
                 i += 1;
+                while i < len && (bytes[i] & 0xC0) == 0x80 {
+                    i += 1; // skip UTF-8 continuation bytes
+                }
+                out.push_str(&text[ch_start..i]);
             }
         }
     }
@@ -118,10 +124,21 @@ pub fn prefix_to_mode(prefix: &str) -> String {
         .collect()
 }
 
-/// Return the highest-ranked prefix character for the given mode string.
+/// Build the full prefix string from a mode string, ordered by rank.
 ///
-/// `prefix_order` defines the ranking from highest to lowest (e.g., "~&@%+").
-pub fn get_highest_prefix(modes: &str, prefix_order: &str) -> String {
+/// `prefix_order` defines the ranking from highest to lowest (e.g., `"~&@%+"`).
+/// All matching modes are included (multi-prefix), not just the highest.
+///
+/// # Examples
+///
+/// ```ignore
+/// modes_to_prefix("ov", "~&@%+") // → "@+"
+/// modes_to_prefix("qov", "~&@%+") // → "~@+"
+/// modes_to_prefix("v", "~&@%+")   // → "+"
+/// modes_to_prefix("", "~&@%+")    // → ""
+/// ```
+pub fn modes_to_prefix(modes: &str, prefix_order: &str) -> String {
+    let mut result = String::new();
     for prefix_char in prefix_order.chars() {
         let mode_char = match prefix_char {
             '~' => 'q',
@@ -132,10 +149,10 @@ pub fn get_highest_prefix(modes: &str, prefix_order: &str) -> String {
             c => c,
         };
         if modes.contains(mode_char) {
-            return prefix_char.to_string();
+            result.push(prefix_char);
         }
     }
-    String::new()
+    result
 }
 
 /// Check whether a target string refers to a channel (starts with #, &, +, or !).
@@ -333,26 +350,31 @@ mod tests {
         assert_eq!(prefix_to_mode(""), "");
     }
 
-    // === get_highest_prefix ===
+    // === modes_to_prefix ===
 
     #[test]
-    fn highest_prefix_op() {
-        assert_eq!(get_highest_prefix("ov", "~&@%+"), "@");
+    fn modes_to_prefix_op_voice() {
+        assert_eq!(modes_to_prefix("ov", "~&@%+"), "@+");
     }
 
     #[test]
-    fn highest_prefix_owner() {
-        assert_eq!(get_highest_prefix("qov", "~&@%+"), "~");
+    fn modes_to_prefix_owner_op_voice() {
+        assert_eq!(modes_to_prefix("qov", "~&@%+"), "~@+");
     }
 
     #[test]
-    fn highest_prefix_voice_only() {
-        assert_eq!(get_highest_prefix("v", "~&@%+"), "+");
+    fn modes_to_prefix_voice_only() {
+        assert_eq!(modes_to_prefix("v", "~&@%+"), "+");
     }
 
     #[test]
-    fn highest_prefix_none() {
-        assert_eq!(get_highest_prefix("", "~&@%+"), "");
+    fn modes_to_prefix_none() {
+        assert_eq!(modes_to_prefix("", "~&@%+"), "");
+    }
+
+    #[test]
+    fn modes_to_prefix_all() {
+        assert_eq!(modes_to_prefix("qaohv", "~&@%+"), "~&@%+");
     }
 
     // === is_channel ===

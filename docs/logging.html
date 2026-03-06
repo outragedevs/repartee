@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="rustirc — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
+  <meta name="keywords" content="irc, terminal, tui, client, chat, rustirc, ratatui, tokio, rust">
+  <meta name="author" content="kofany">
+  <meta property="og:title" content="Logging & Search — rustirc">
+  <meta property="og:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by irssi, designed for the future.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://kofany.github.io/rustirc/">
+  <meta property="og:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{title}} — rustirc">
+  <meta name="twitter:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust.">
+  <meta name="twitter:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <title>{{title}} — rustirc</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- Mobile hamburger toggle -->
+  <button class="hamburger" aria-label="Toggle navigation">
+    <span></span>
+    <span></span>
+    <span></span>
+  </button>
+
+  <div class="page-wrapper">
+    <!-- Sidebar navigation -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <a href="index.html" class="brand">rustirc</a>
+        <span class="brand-tagline">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+          <ul>
+    <li><a href="index.html">Home</a></li>
+  </ul>
+  <div class="nav-section">
+    <span class="nav-section-title">Getting Started</span>
+    <ul>
+      <li><a href="installation.html">Installation</a></li>
+      <li><a href="first-connection.html">First Connection</a></li>
+      <li><a href="configuration.html">Configuration</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Reference</span>
+    <ul>
+      <li><a href="commands.html">Commands</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Scripting</span>
+    <ul>
+      <li><a href="scripting-getting-started.html">Getting Started</a></li>
+      <li><a href="scripting-api.html">API Reference</a></li>
+      <li><a href="scripting-examples.html">Examples</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Customization</span>
+    <ul>
+      <li><a href="theming.html">Theming</a></li>
+      <li><a href="theming-format-strings.html">Format Strings</a></li>
+      <li><a href="logging.html" class="active">Logging & Search</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Project</span>
+    <ul>
+      <li><a href="architecture.html">Architecture</a></li>
+      <li><a href="faq.html">FAQ</a></li>
+    </ul>
+  </div>
+
+      </nav>
+      <div class="sidebar-footer">
+        Built with <a href="https://www.rust-lang.org">Rust</a>
+        &middot;
+        <a href="https://github.com/kofany/rustirc">GitHub</a>
+      </div>
+    </aside>
+
+    <!-- Overlay for mobile sidebar -->
+    <div class="sidebar-overlay"></div>
+
+    <!-- Main content -->
+    <div class="content-wrapper">
+      <main class="content">
+        <h1>Logging &amp; Search</h1>
+<p>rustirc includes a built-in logging system backed by SQLite with optional encryption and full-text search.</p>
+<h2>Configuration</h2>
+<pre><code class="language-toml">[logging]
+enabled = true
+encrypt = false
+retention_days = 0       # 0 = keep forever
+exclude_types = []       # e.g. [&quot;join&quot;, &quot;part&quot;, &quot;quit&quot;]
+</code></pre>
+<h2>Storage</h2>
+<p>Logs are stored in <code>~/.rustirc/logs/messages.db</code> using SQLite with WAL (Write-Ahead Logging) mode for concurrent read/write performance.</p>
+<h3>Database schema</h3>
+<p>Each message is stored with:</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>msg_id</code></td>
+<td>TEXT</td>
+<td>Unique UUID</td>
+</tr>
+<tr>
+<td><code>network</code></td>
+<td>TEXT</td>
+<td>Connection/network ID</td>
+</tr>
+<tr>
+<td><code>buffer</code></td>
+<td>TEXT</td>
+<td>Channel or query name</td>
+</tr>
+<tr>
+<td><code>timestamp</code></td>
+<td>INTEGER</td>
+<td>Unix timestamp</td>
+</tr>
+<tr>
+<td><code>msg_type</code></td>
+<td>TEXT</td>
+<td>Message type (privmsg, join, etc.)</td>
+</tr>
+<tr>
+<td><code>nick</code></td>
+<td>TEXT</td>
+<td>Sender nick</td>
+</tr>
+<tr>
+<td><code>text</code></td>
+<td>TEXT</td>
+<td>Message content</td>
+</tr>
+<tr>
+<td><code>highlight</code></td>
+<td>INTEGER</td>
+<td>1 if message is a highlight</td>
+</tr>
+<tr>
+<td><code>ref_id</code></td>
+<td>TEXT</td>
+<td>Reference to primary row (for fan-out dedup)</td>
+</tr>
+</tbody></table>
+<h3>Fan-out deduplication</h3>
+<p>Events like QUIT and NICK affect multiple channels. rustirc stores a single full row for the first channel and reference rows (with empty text and a <code>ref_id</code> pointing to the primary) for subsequent channels. This saves storage while preserving per-channel history.</p>
+<h2>Encryption</h2>
+<p>When <code>encrypt = true</code>, message text is encrypted with AES-256-GCM before storage. The encryption key is derived from a passphrase stored in <code>~/.rustirc/.env</code>:</p>
+<pre><code class="language-bash"># ~/.rustirc/.env
+RUSTIRC_LOG_KEY=your-secret-passphrase
+</code></pre>
+<p>Encrypted logs can only be searched/read with the correct key.</p>
+<h2>Full-text search</h2>
+<p>rustirc uses SQLite FTS5 for fast full-text search across all logs:</p>
+<pre><code>/log search &lt;query&gt;
+</code></pre>
+<p>Search supports standard FTS5 syntax including phrase matching (<code>&quot;exact phrase&quot;</code>), prefix matching (<code>prefix*</code>), and boolean operators (<code>AND</code>, <code>OR</code>, <code>NOT</code>).</p>
+<h2>Commands</h2>
+<h3><code>/log status</code></h3>
+<p>Show logging status, database size, and message count.</p>
+<h3><code>/log search &lt;query&gt;</code></h3>
+<p>Search across all logged messages.</p>
+<h2>Batched writes</h2>
+<p>Messages are written to the database in batches (50 rows or every 1 second) using an async writer task connected via a tokio mpsc channel. This minimizes SQLite lock contention and ensures the UI never blocks on disk I/O.</p>
+
+
+        <!-- Prev / Next navigation -->
+        <nav class="page-nav">
+          <a href="theming-format-strings.html" class="page-nav-link prev">
+  <span class="page-nav-label">&larr; Previous</span>
+  <span class="page-nav-title">Format Strings</span>
+</a>
+          <a href="architecture.html" class="page-nav-link next">
+  <span class="page-nav-label">Next &rarr;</span>
+  <span class="page-nav-title">Architecture</span>
+</a>
+        </nav>
+
+        <footer class="site-footer">
+          Built with <a href="https://www.rust-lang.org">Rust</a> &middot;
+          <a href="https://github.com/kofany/rustirc">GitHub</a> &middot;
+          MIT License
+        </footer>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    // Mobile sidebar toggle
+    (function() {
+      const hamburger = document.querySelector('.hamburger');
+      const sidebar = document.querySelector('.sidebar');
+      const overlay = document.querySelector('.sidebar-overlay');
+
+      function toggleSidebar() {
+        hamburger.classList.toggle('active');
+        sidebar.classList.toggle('open');
+        overlay.classList.toggle('visible');
+        document.body.style.overflow = sidebar.classList.contains('open') ? 'hidden' : '';
+      }
+
+      function closeSidebar() {
+        hamburger.classList.remove('active');
+        sidebar.classList.remove('open');
+        overlay.classList.remove('visible');
+        document.body.style.overflow = '';
+      }
+
+      hamburger.addEventListener('click', toggleSidebar);
+      overlay.addEventListener('click', closeSidebar);
+
+      // Close sidebar on Escape key
+      document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && sidebar.classList.contains('open')) {
+          closeSidebar();
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

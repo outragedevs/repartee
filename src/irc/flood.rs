@@ -46,7 +46,7 @@ pub struct FloodState {
 impl FloodState {
     /// Create a new, empty flood detection state.
     pub fn new() -> Self {
-        FloodState {
+        Self {
             ctcp_times: Vec::new(),
             ctcp_blocked_until: None,
             tilde_times: Vec::new(),
@@ -123,7 +123,7 @@ impl FloodState {
         self.msg_window.push((text.to_string(), now));
 
         // Prune old entries
-        let cutoff = now - DUP_WINDOW;
+        let cutoff = now.checked_sub(DUP_WINDOW).unwrap_or(now);
         self.msg_window.retain(|(_, t)| *t >= cutoff);
 
         // Only analyze when enough messages in window
@@ -184,7 +184,7 @@ impl Default for FloodState {
 /// Remove timestamps older than `window` from the front of `times`.
 /// Returns the number of remaining entries.
 pub fn prune_window(times: &mut Vec<Instant>, now: Instant, window: Duration) -> usize {
-    let cutoff = now - window;
+    let cutoff = now.checked_sub(window).unwrap_or(now);
     let mut i = 0;
     while i < times.len() && times[i] < cutoff {
         i += 1;
@@ -478,10 +478,10 @@ mod tests {
     fn prune_window_removes_old_entries() {
         let now = Instant::now();
         let mut times = vec![
-            now - Duration::from_secs(10),
-            now - Duration::from_secs(8),
-            now - Duration::from_secs(3),
-            now - Duration::from_secs(1),
+            now.checked_sub(Duration::from_secs(10)).unwrap(),
+            now.checked_sub(Duration::from_secs(8)).unwrap(),
+            now.checked_sub(Duration::from_secs(3)).unwrap(),
+            now.checked_sub(Duration::from_secs(1)).unwrap(),
             now,
         ];
         let count = prune_window(&mut times, now, Duration::from_secs(5));
@@ -507,9 +507,9 @@ mod tests {
     fn prune_window_all_expired() {
         let now = Instant::now();
         let mut times = vec![
-            now - Duration::from_secs(20),
-            now - Duration::from_secs(15),
-            now - Duration::from_secs(10),
+            now.checked_sub(Duration::from_secs(20)).unwrap(),
+            now.checked_sub(Duration::from_secs(15)).unwrap(),
+            now.checked_sub(Duration::from_secs(10)).unwrap(),
         ];
         let count = prune_window(&mut times, now, Duration::from_secs(5));
         assert_eq!(count, 0);

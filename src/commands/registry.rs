@@ -1,9 +1,11 @@
+use std::sync::LazyLock;
+
 use super::types::{CommandDef, CommandCategory};
 use super::handlers_ui::{
     cmd_quit, cmd_help, cmd_clear, cmd_close, cmd_alias, cmd_unalias, cmd_items,
 };
 use super::handlers_irc::{
-    cmd_connect, cmd_disconnect, cmd_join, cmd_part, cmd_topic, cmd_kick, cmd_invite,
+    cmd_connect, cmd_disconnect, cmd_join, cmd_part, cmd_cycle, cmd_topic, cmd_kick, cmd_invite,
     cmd_mode, cmd_op, cmd_deop, cmd_voice, cmd_devoice, cmd_ban, cmd_unban, cmd_kickban,
     cmd_except, cmd_unexcept, cmd_invex, cmd_uninvex, cmd_reop, cmd_unreop,
     cmd_names, cmd_msg, cmd_query, cmd_me, cmd_notice, cmd_nick, cmd_whois, cmd_wii, cmd_version,
@@ -15,10 +17,7 @@ use super::handlers_admin::{
     cmd_oper, cmd_kill, cmd_wallops, cmd_stats, cmd_log,
 };
 
-/// Command table — handler + short description + aliases + category.
-/// Detailed help lives in docs/commands/*.md, accessed via the docs module.
-pub fn get_commands() -> Vec<(&'static str, CommandDef)> {
-    vec![
+static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| vec![
         // === Connection ===
         ("connect",    CommandDef { handler: cmd_connect,    description: "Connect to a server",              aliases: &["c"],          category: CommandCategory::Connection }),
         ("disconnect", CommandDef { handler: cmd_disconnect, description: "Disconnect from current server",   aliases: &[],             category: CommandCategory::Connection }),
@@ -27,6 +26,7 @@ pub fn get_commands() -> Vec<(&'static str, CommandDef)> {
         // === Channel ===
         ("join",       CommandDef { handler: cmd_join,       description: "Join a channel",                   aliases: &["j"],          category: CommandCategory::Channel }),
         ("part",       CommandDef { handler: cmd_part,       description: "Leave a channel",                  aliases: &["leave"],      category: CommandCategory::Channel }),
+        ("cycle",      CommandDef { handler: cmd_cycle,      description: "Part and rejoin a channel",        aliases: &["rejoin"],     category: CommandCategory::Channel }),
         ("topic",      CommandDef { handler: cmd_topic,      description: "View or set channel topic",        aliases: &["t"],          category: CommandCategory::Channel }),
         ("kick",       CommandDef { handler: cmd_kick,       description: "Kick a user from channel",         aliases: &[],             category: CommandCategory::Channel }),
         ("invite",     CommandDef { handler: cmd_invite,     description: "Invite a user to a channel",       aliases: &[],             category: CommandCategory::Channel }),
@@ -83,14 +83,19 @@ pub fn get_commands() -> Vec<(&'static str, CommandDef)> {
         ("clear",      CommandDef { handler: cmd_clear,      description: "Clear active buffer",              aliases: &[],             category: CommandCategory::Other }),
         ("close",      CommandDef { handler: cmd_close,      description: "Close active buffer",              aliases: &["wc"],         category: CommandCategory::Other }),
         ("quote",      CommandDef { handler: cmd_quote,      description: "Send a raw IRC command",           aliases: &["raw"],        category: CommandCategory::Other }),
-    ]
+    ]);
+
+/// Command table — handler + short description + aliases + category.
+/// Detailed help lives in docs/commands/*.md, accessed via the docs module.
+pub fn get_commands() -> &'static [(&'static str, CommandDef)] {
+    &COMMANDS
 }
 
 /// Get all command names including aliases.
 pub fn get_command_names() -> Vec<&'static str> {
     let commands = get_commands();
     let mut names: Vec<&'static str> = Vec::new();
-    for (name, def) in &commands {
+    for &(name, ref def) in commands {
         names.push(name);
         for alias in def.aliases {
             names.push(alias);
@@ -105,8 +110,8 @@ pub fn get_command_names() -> Vec<&'static str> {
 #[allow(dead_code)]
 pub fn resolve_alias(name: &str) -> Option<&'static str> {
     let commands = get_commands();
-    for (cmd_name, def) in &commands {
-        if *cmd_name == name {
+    for &(cmd_name, ref def) in commands {
+        if cmd_name == name {
             return Some(cmd_name);
         }
         for alias in def.aliases {
@@ -124,7 +129,7 @@ mod tests {
 
     #[test]
     fn all_commands_have_description() {
-        for (name, def) in get_commands() {
+        for &(name, ref def) in get_commands() {
             assert!(!def.description.is_empty(), "/{name} missing description");
         }
     }
@@ -150,7 +155,7 @@ mod tests {
 
     #[test]
     fn categories_cover_all_commands() {
-        for (name, def) in get_commands() {
+        for &(name, ref def) in get_commands() {
             assert!(
                 !def.category.label().is_empty(),
                 "/{name} has empty category label"
@@ -173,8 +178,8 @@ mod tests {
     #[test]
     fn server_query_commands_in_correct_category() {
         let commands = get_commands();
-        for (name, def) in &commands {
-            match *name {
+        for &(name, ref def) in commands {
+            match name {
                 "info" | "admin" | "lusers" | "time" | "links" => {
                     assert!(
                         matches!(def.category, CommandCategory::Info),
@@ -190,7 +195,7 @@ mod tests {
     #[test]
     fn no_duplicate_aliases() {
         let mut all_names: Vec<&str> = Vec::new();
-        for (name, def) in get_commands() {
+        for &(name, ref def) in get_commands() {
             assert!(!all_names.contains(&name), "Duplicate command name: {name}");
             all_names.push(name);
             for alias in def.aliases {

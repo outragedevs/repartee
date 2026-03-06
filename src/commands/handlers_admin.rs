@@ -135,21 +135,32 @@ pub(crate) fn cmd_unignore(app: &mut App, args: &[String]) {
     }
 }
 
-fn parse_ignore_level(s: &str) -> Option<crate::config::IgnoreLevel> {
+const fn parse_ignore_level(s: &str) -> Option<crate::config::IgnoreLevel> {
     use crate::config::IgnoreLevel;
-    match s.to_uppercase().as_str() {
-        "ALL" => Some(IgnoreLevel::All),
-        "MSGS" => Some(IgnoreLevel::Msgs),
-        "PUBLIC" => Some(IgnoreLevel::Public),
-        "NOTICES" => Some(IgnoreLevel::Notices),
-        "ACTIONS" => Some(IgnoreLevel::Actions),
-        "JOINS" => Some(IgnoreLevel::Joins),
-        "PARTS" => Some(IgnoreLevel::Parts),
-        "QUITS" => Some(IgnoreLevel::Quits),
-        "NICKS" => Some(IgnoreLevel::Nicks),
-        "KICKS" => Some(IgnoreLevel::Kicks),
-        "CTCP" | "CTCPS" => Some(IgnoreLevel::Ctcps),
-        _ => None,
+    if s.eq_ignore_ascii_case("all") {
+        Some(IgnoreLevel::All)
+    } else if s.eq_ignore_ascii_case("msgs") {
+        Some(IgnoreLevel::Msgs)
+    } else if s.eq_ignore_ascii_case("public") {
+        Some(IgnoreLevel::Public)
+    } else if s.eq_ignore_ascii_case("notices") {
+        Some(IgnoreLevel::Notices)
+    } else if s.eq_ignore_ascii_case("actions") {
+        Some(IgnoreLevel::Actions)
+    } else if s.eq_ignore_ascii_case("joins") {
+        Some(IgnoreLevel::Joins)
+    } else if s.eq_ignore_ascii_case("parts") {
+        Some(IgnoreLevel::Parts)
+    } else if s.eq_ignore_ascii_case("quits") {
+        Some(IgnoreLevel::Quits)
+    } else if s.eq_ignore_ascii_case("nicks") {
+        Some(IgnoreLevel::Nicks)
+    } else if s.eq_ignore_ascii_case("kicks") {
+        Some(IgnoreLevel::Kicks)
+    } else if s.eq_ignore_ascii_case("ctcp") || s.eq_ignore_ascii_case("ctcps") {
+        Some(IgnoreLevel::Ctcps)
+    } else {
+        None
     }
 }
 
@@ -264,7 +275,7 @@ pub(crate) fn cmd_server(app: &mut App, args: &[String]) {
 
 pub(crate) fn cmd_autoconnect(app: &mut App, args: &[String]) {
     // Find the server ID for the current connection
-    let Some(conn_id) = app.active_conn_id() else {
+    let Some(conn_id) = app.active_conn_id().map(str::to_owned) else {
         add_local_event(app, "No active connection");
         return;
     };

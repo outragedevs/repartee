@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="rustirc — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
+  <meta name="keywords" content="irc, terminal, tui, client, chat, rustirc, ratatui, tokio, rust">
+  <meta name="author" content="kofany">
+  <meta property="og:title" content="Home — rustirc">
+  <meta property="og:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by irssi, designed for the future.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://kofany.github.io/rustirc/">
+  <meta property="og:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{title}} — rustirc">
+  <meta name="twitter:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust.">
+  <meta name="twitter:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <title>{{title}} — rustirc</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- Mobile hamburger toggle -->
+  <button class="hamburger" aria-label="Toggle navigation">
+    <span></span>
+    <span></span>
+    <span></span>
+  </button>
+
+  <div class="page-wrapper">
+    <!-- Sidebar navigation -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <a href="index.html" class="brand">rustirc</a>
+        <span class="brand-tagline">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+          <ul>
+    <li><a href="index.html" class="active">Home</a></li>
+  </ul>
+  <div class="nav-section">
+    <span class="nav-section-title">Getting Started</span>
+    <ul>
+      <li><a href="installation.html">Installation</a></li>
+      <li><a href="first-connection.html">First Connection</a></li>
+      <li><a href="configuration.html">Configuration</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Reference</span>
+    <ul>
+      <li><a href="commands.html">Commands</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Scripting</span>
+    <ul>
+      <li><a href="scripting-getting-started.html">Getting Started</a></li>
+      <li><a href="scripting-api.html">API Reference</a></li>
+      <li><a href="scripting-examples.html">Examples</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Customization</span>
+    <ul>
+      <li><a href="theming.html">Theming</a></li>
+      <li><a href="theming-format-strings.html">Format Strings</a></li>
+      <li><a href="logging.html">Logging & Search</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Project</span>
+    <ul>
+      <li><a href="architecture.html">Architecture</a></li>
+      <li><a href="faq.html">FAQ</a></li>
+    </ul>
+  </div>
+
+      </nav>
+      <div class="sidebar-footer">
+        Built with <a href="https://www.rust-lang.org">Rust</a>
+        &middot;
+        <a href="https://github.com/kofany/rustirc">GitHub</a>
+      </div>
+    </aside>
+
+    <!-- Overlay for mobile sidebar -->
+    <div class="sidebar-overlay"></div>
+
+    <!-- Main content -->
+    <div class="content-wrapper">
+      <main class="content">
+        <h1>rustirc</h1>
+<p>A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by irssi, designed for the future.</p>
+<h2>Features</h2>
+<div class="card-grid">
+  <div class="card">
+    <div class="card-title">Full IRC Protocol</div>
+    <div class="card-body">Channels, queries, CTCP, SASL, TLS, channel modes, ban lists — the complete IRC experience.</div>
+  </div>
+  <div class="card">
+    <div class="card-title">irssi-style Navigation</div>
+    <div class="card-body">Esc+1–9 window switching, /commands, aliases. If you know irssi, you already know rustirc.</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Mouse Support</div>
+    <div class="card-body">Click buffers and nicks, drag to resize side panels. Terminal client, modern interaction.</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Netsplit Detection</div>
+    <div class="card-body">Batches join/part floods into single events so your scrollback stays readable.</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Flood Protection</div>
+    <div class="card-body">Blocks CTCP spam and nick-change floods from botnets automatically.</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Persistent Logging</div>
+    <div class="card-body">SQLite with optional AES-256-GCM encryption and FTS5 full-text search across all logs.</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Theming</div>
+    <div class="card-body">irssi-compatible format strings with 24-bit color support and custom abstracts.</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Lua Scripting</div>
+    <div class="card-body">Lua 5.4 scripts with an event bus, custom commands, and full IRC/state access.</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Single Binary</div>
+    <div class="card-body">Compiles to a ~5MB standalone executable. Zero runtime dependencies.</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Written in Rust</div>
+    <div class="card-body">Memory-safe, zero-cost abstractions, fearless concurrency. Built on tokio async runtime.</div>
+  </div>
+</div>
+
+<h2>Quick Install</h2>
+<pre><code class="language-bash">cargo install rustirc
+rustirc
+</code></pre>
+<p>That&#39;s it. No build steps, no configuration required. Connect to a server with <code>/server add</code> and you&#39;re chatting.</p>
+<p>New to rustirc? Start with the <a href="installation.html">Installation guide</a>.</p>
+
+
+        <!-- Prev / Next navigation -->
+        <nav class="page-nav">
+          
+          <a href="installation.html" class="page-nav-link next">
+  <span class="page-nav-label">Next &rarr;</span>
+  <span class="page-nav-title">Installation</span>
+</a>
+        </nav>
+
+        <footer class="site-footer">
+          Built with <a href="https://www.rust-lang.org">Rust</a> &middot;
+          <a href="https://github.com/kofany/rustirc">GitHub</a> &middot;
+          MIT License
+        </footer>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    // Mobile sidebar toggle
+    (function() {
+      const hamburger = document.querySelector('.hamburger');
+      const sidebar = document.querySelector('.sidebar');
+      const overlay = document.querySelector('.sidebar-overlay');
+
+      function toggleSidebar() {
+        hamburger.classList.toggle('active');
+        sidebar.classList.toggle('open');
+        overlay.classList.toggle('visible');
+        document.body.style.overflow = sidebar.classList.contains('open') ? 'hidden' : '';
+      }
+
+      function closeSidebar() {
+        hamburger.classList.remove('active');
+        sidebar.classList.remove('open');
+        overlay.classList.remove('visible');
+        document.body.style.overflow = '';
+      }
+
+      hamburger.addEventListener('click', toggleSidebar);
+      overlay.addEventListener('click', closeSidebar);
+
+      // Close sidebar on Escape key
+      document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && sidebar.classList.contains('open')) {
+          closeSidebar();
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

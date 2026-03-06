@@ -178,7 +178,7 @@ pub(crate) fn cmd_disconnect(app: &mut App, args: &[String]) {
         &args[0]
     };
 
-    let Some(conn_id) = app.active_conn_id() else {
+    let Some(conn_id) = app.active_conn_id().map(str::to_owned) else {
         add_local_event(app, "No active connection");
         return;
     };
@@ -229,7 +229,6 @@ pub(crate) fn cmd_join(app: &mut App, args: &[String]) {
             && !args[i + 1].starts_with('&')
             && !args[i + 1].starts_with('+')
             && !args[i + 1].starts_with('!')
-            && args.len() == 2
         {
             i += 1;
             Some(args[i].clone())
@@ -418,7 +417,7 @@ pub(crate) fn cmd_mode(app: &mut App, args: &[String]) {
         let nick = app
             .state
             .connections
-            .get(&app.active_conn_id().unwrap_or_default())
+            .get(app.active_conn_id().unwrap_or(""))
             .map(|c| c.nick.clone())
             .unwrap_or_default();
         let _ = sender.send(irc::proto::Command::Raw("MODE".to_string(), vec![nick]));
@@ -638,6 +637,65 @@ pub(crate) fn cmd_unreop(app: &mut App, args: &[String]) {
     list_mode_unset(app, args, 'R', "unreop");
 }
 
+pub(crate) fn cmd_cycle(app: &mut App, args: &[String]) {
+    let Some(sender) = app.active_irc_sender().cloned() else {
+        add_local_event(app, "Not connected");
+        return;
+    };
+
+    let (channel, reason) = if args.is_empty() {
+        let Some(buf) = app.state.active_buffer() else {
+            return;
+        };
+        if buf.buffer_type != crate::state::buffer::BufferType::Channel {
+            add_local_event(app, "Not in a channel");
+            return;
+        }
+        (buf.name.clone(), None)
+    } else if crate::irc::formatting::is_channel(&args[0]) {
+        let reason = if args.len() > 1 { Some(args[1].as_str()) } else { None };
+        (args[0].clone(), reason)
+    } else {
+        // Treat first arg as reason for current channel
+        let Some(buf) = app.state.active_buffer() else {
+            return;
+        };
+        if buf.buffer_type != crate::state::buffer::BufferType::Channel {
+            add_local_event(app, "Not in a channel");
+            return;
+        }
+        (buf.name.clone(), Some(args[0].as_str()))
+    };
+
+    // Collect the channel key if one is set (to rejoin key-protected channels)
+    let key = app
+        .state
+        .active_buffer()
+        .and_then(|b| b.mode_params.as_ref())
+        .and_then(|p| p.get("k").cloned());
+
+    // PART
+    let part_result = if let Some(reason) = reason {
+        sender.send(irc::proto::Command::PART(channel.clone(), Some(reason.to_string())))
+    } else {
+        sender.send(irc::proto::Command::PART(channel.clone(), None))
+    };
+    if let Err(e) = part_result {
+        add_local_event(app, &format!("Failed to cycle {channel}: {e}"));
+        return;
+    }
+
+    // JOIN (sent immediately — IRC guarantees command ordering on a single connection)
+    let join_result = if let Some(key) = key {
+        sender.send(irc::proto::Command::JOIN(channel.clone(), Some(key), None))
+    } else {
+        sender.send_join(&channel)
+    };
+    if let Err(e) = join_result {
+        add_local_event(app, &format!("Failed to rejoin {channel}: {e}"));
+    }
+}
+
 // === Messaging ===
 
 pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
@@ -650,7 +708,7 @@ pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
     let text = &args[1];
 
     let (conn_id, nick) = {
-        let Some(conn_id) = app.active_conn_id() else {
+        let Some(conn_id) = app.active_conn_id().map(str::to_owned) else {
             add_local_event(app, "No active connection");
             return;
         };
@@ -729,7 +787,7 @@ pub(crate) fn cmd_query(app: &mut App, args: &[String]) {
     }
 
     let target = &args[0];
-    let Some(conn_id) = app.active_conn_id() else {
+    let Some(conn_id) = app.active_conn_id().map(str::to_owned) else {
         add_local_event(app, "No active connection");
         return;
     };
@@ -822,12 +880,14 @@ pub(crate) fn cmd_me(app: &mut App, args: &[String]) {
         .map(|c| c.nick.clone())
         .unwrap_or_default();
 
-    if let Some(handle) = app.irc_handles.get(&conn_id) {
-        let ctcp = format!("\x01ACTION {action_text}\x01");
-        if let Err(e) = handle.sender.send_privmsg(&target, &ctcp) {
-            add_local_event(app, &format!("Failed to send action: {e}"));
-            return;
-        }
+    let Some(handle) = app.irc_handles.get(&conn_id) else {
+        add_local_event(app, "Not connected");
+        return;
+    };
+    let ctcp = format!("\x01ACTION {action_text}\x01");
+    if let Err(e) = handle.sender.send_privmsg(&target, &ctcp) {
+        add_local_event(app, &format!("Failed to send action: {e}"));
+        return;
     }
 
     // When echo-message is enabled, skip local display — the server echo is authoritative.
@@ -1029,7 +1089,7 @@ pub(crate) fn cmd_who(app: &mut App, args: &[String]) {
         return;
     }
 
-    let Some(conn_id) = app.active_conn_id() else {
+    let Some(conn_id) = app.active_conn_id().map(str::to_owned) else {
         add_local_event(app, "No active connection");
         return;
     };
@@ -1041,19 +1101,13 @@ pub(crate) fn cmd_who(app: &mut App, args: &[String]) {
 
     let target = &args[0];
 
-    // Check WHOX support and send extended WHO if available
-    let has_whox = app
-        .state
-        .connections
-        .get(&conn_id)
-        .is_some_and(|c| c.isupport_parsed.has_whox());
-
-    let result = if has_whox {
-        let token = crate::irc::events::next_who_token(&mut app.state, &conn_id);
-        let fields = format!("{},{token}", crate::constants::WHOX_FIELDS);
+    // Send WHOX if supported, otherwise standard WHO (never silent — manual request)
+    let result = if let Some((who_target, fields)) =
+        crate::irc::events::build_whox_who(&mut app.state, &conn_id, target, false)
+    {
         sender.send(irc::proto::Command::Raw(
             "WHO".to_string(),
-            vec![target.clone(), fields],
+            vec![who_target, fields],
         ))
     } else {
         sender.send(irc::proto::Command::WHO(Some(target.clone()), None))

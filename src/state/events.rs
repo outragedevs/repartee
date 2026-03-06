@@ -55,8 +55,8 @@ impl AppState {
 
         if was_active {
             // Try to fall back to previous buffer
-            if let Some(ref prev_id) = self.previous_buffer_id.clone()
-                && self.buffers.contains_key(prev_id)
+            if let Some(prev_id) = &self.previous_buffer_id
+                && self.buffers.contains_key(prev_id.as_str())
             {
                 self.active_buffer_id = Some(prev_id.clone());
                 self.previous_buffer_id = None;
@@ -118,8 +118,12 @@ impl AppState {
         let Some(tx) = &self.log_tx else { return };
 
         // Check exclude_types filter (e.g. "event" skips quit/join/nick fan-out)
-        let type_str = format!("{:?}", message.message_type).to_lowercase();
-        if self.log_exclude_types.iter().any(|t| t == &type_str) {
+        let type_str = message.message_type.as_str();
+        if self
+            .log_exclude_types
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(type_str))
+        {
             return;
         }
 
@@ -178,22 +182,23 @@ impl AppState {
 
     pub fn add_nick(&mut self, buffer_id: &str, entry: NickEntry) {
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
-            buf.users.insert(entry.nick.clone(), entry);
+            let key = entry.nick.to_lowercase();
+            buf.users.insert(key, entry);
         }
     }
 
     pub fn remove_nick(&mut self, buffer_id: &str, nick: &str) {
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
-            buf.users.remove(nick);
+            buf.users.remove(&nick.to_lowercase());
         }
     }
 
-    pub fn update_nick(&mut self, buffer_id: &str, old_nick: &str, new_nick: String) {
+    pub fn update_nick(&mut self, buffer_id: &str, old_nick: &str, new_nick: &str) {
         if let Some(buf) = self.buffers.get_mut(buffer_id)
-            && let Some(mut entry) = buf.users.remove(old_nick)
+            && let Some(mut entry) = buf.users.remove(&old_nick.to_lowercase())
         {
-            entry.nick.clone_from(&new_nick);
-            buf.users.insert(new_nick, entry);
+            new_nick.clone_into(&mut entry.nick);
+            buf.users.insert(new_nick.to_lowercase(), entry);
         }
     }
 
@@ -206,9 +211,8 @@ impl AppState {
     }
 
     pub fn active_buffer_mut(&mut self) -> Option<&mut Buffer> {
-        // Need to clone to avoid borrow issues
-        let id = self.active_buffer_id.clone();
-        id.and_then(move |id| self.buffers.get_mut(&id))
+        let id = self.active_buffer_id.as_deref()?;
+        self.buffers.get_mut(id)
     }
 
     // === Navigation ===
@@ -306,6 +310,7 @@ mod tests {
             },
             enabled_caps: std::collections::HashSet::new(),
             who_token_counter: 0,
+            silent_who_channels: std::collections::HashSet::new(),
         }
     }
 
@@ -506,7 +511,7 @@ mod tests {
             .users
             .contains_key("alice"));
 
-        state.update_nick("libera/#rust", "alice", "alice_".to_string());
+        state.update_nick("libera/#rust", "alice", "alice_");
         assert!(!state
             .buffers
             .get("libera/#rust")

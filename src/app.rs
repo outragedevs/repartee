@@ -22,6 +22,25 @@ use crate::theme::{self, ThemeFile};
 use crate::ui;
 use crate::ui::layout::UiRegions;
 
+/// Split channel entries into parallel (names, keys) vectors for IRC JOIN.
+///
+/// Each entry may be `"#channel"` or `"#channel key"` (space-separated).
+/// The returned vectors have the same length — keyless channels get an empty string.
+fn split_channel_keys(entries: &[String]) -> (Vec<&str>, Vec<&str>) {
+    let mut names = Vec::with_capacity(entries.len());
+    let mut keys = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if let Some(idx) = entry.find(' ') {
+            names.push(&entry[..idx]);
+            keys.push(&entry[idx + 1..]);
+        } else {
+            names.push(entry.as_str());
+            keys.push("");
+        }
+    }
+    (names, keys)
+}
+
 pub struct App {
     pub state: AppState,
     pub config: AppConfig,
@@ -150,6 +169,7 @@ impl App {
             origin_config: server_config.clone(),
             enabled_caps: HashSet::new(),
             who_token_counter: 0,
+            silent_who_channels: HashSet::new(),
         });
 
         let server_buf_id = make_buffer_id(conn_id, &server_config.label);
@@ -362,6 +382,7 @@ impl App {
             },
             enabled_caps: HashSet::new(),
             who_token_counter: 0,
+            silent_who_channels: HashSet::new(),
         });
         state.add_buffer(Buffer {
             id: buf_id.clone(),
@@ -652,6 +673,15 @@ impl App {
                     },
                 );
             }
+            IrcEvent::NegotiationInfo(conn_id, diag) => {
+                // Display CAP/SASL diagnostics in status buffer — fires immediately
+                // so they're visible even if connection fails before RPL_WELCOME.
+                let buf_id = self.state.connections.get(&conn_id)
+                    .map_or_else(|| conn_id.clone(), |c| crate::state::buffer::make_buffer_id(&conn_id, &c.label));
+                for msg in &diag {
+                    crate::irc::events::emit(&mut self.state, &buf_id, &format!("%Z56b6c2{msg}%N"));
+                }
+            }
             IrcEvent::Connected(conn_id, enabled_caps) => {
                 // Store negotiated caps on connection
                 if let Some(conn) = self.state.connections.get_mut(&conn_id) {
@@ -661,15 +691,24 @@ impl App {
                 let rejoin_channels =
                     crate::irc::events::channels_to_rejoin(&self.state, &conn_id);
                 crate::irc::events::handle_connected(&mut self.state, &conn_id);
-                // Auto-rejoin channels after reconnect
-                if !rejoin_channels.is_empty()
-                    && let Some(handle) = self.irc_handles.get(&conn_id)
-                {
-                    for channel in &rejoin_channels {
-                        let _ = handle.sender.send_join(channel);
+
+                // Merge config channels with rejoin channels (dedup, config order first)
+                let config_channels: Vec<String> = self
+                    .config
+                    .servers
+                    .iter()
+                    .find(|(id, cfg)| *id == &conn_id || cfg.label == conn_id)
+                    .map(|(_, cfg)| cfg.channels.clone())
+                    .unwrap_or_default();
+
+                let mut all_channels = config_channels;
+                for ch in &rejoin_channels {
+                    if !all_channels.iter().any(|c| c.eq_ignore_ascii_case(ch)) {
+                        all_channels.push(ch.clone());
                     }
                 }
-                // Execute autosendcmd: check config file first, fall back to origin_config
+
+                // Execute autosendcmd BEFORE autojoin (e.g. NickServ identify)
                 let autosendcmd = self
                     .config
                     .servers
@@ -684,6 +723,32 @@ impl App {
                     });
                 if let Some(cmds) = autosendcmd {
                     self.execute_autosendcmd(&conn_id, &cmds);
+                }
+
+                // Throttled join: batch 4 channels per JOIN, 2s delay between batches.
+                // Channel entries may contain keys: "#channel key" → split on first space.
+                if !all_channels.is_empty()
+                    && let Some(handle) = self.irc_handles.get(&conn_id)
+                {
+                    let sender = handle.sender.clone();
+                    let channels = all_channels;
+                    tokio::spawn(async move {
+                        for batch in channels.chunks(4) {
+                            let (names, keys) = split_channel_keys(batch);
+                            let keys_param =
+                                if keys.iter().all(|k| k.is_empty()) {
+                                    None
+                                } else {
+                                    Some(keys.join(","))
+                                };
+                            let _ = sender.send(::irc::proto::Command::JOIN(
+                                names.join(","),
+                                keys_param,
+                                None,
+                            ));
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
+                    });
                 }
             }
             IrcEvent::Disconnected(conn_id, error) => {
@@ -793,17 +858,6 @@ impl App {
                         .add_message(*msg);
                 } else {
                     // Normal message processing
-                    // Check for nick-in-use before processing — capture the new nick
-                    // that events.rs will set so we can send the NICK command.
-                    let nick_retry = if let ::irc::proto::Command::Response(
-                        ::irc::proto::Response::ERR_NICKNAMEINUSE, _
-                    ) = &msg.command {
-                        // events.rs updates conn.nick to attempted + "_"
-                        // We need to send the actual NICK command since events.rs can't.
-                        true
-                    } else {
-                        false
-                    };
 
                     // Detect RPL_ENDOFNAMES to trigger auto-WHO (WHOX) after channel join.
                     // Extract the channel name before handle_irc_message borrows state.
@@ -816,20 +870,23 @@ impl App {
                         None
                     };
 
-                    crate::irc::events::handle_irc_message(&mut self.state, &conn_id, &msg);
-
-                    // Send NICK command for nick-in-use retry
-                    if nick_retry
-                        && let Some(conn) = self.state.connections.get(&conn_id)
-                        && let Some(handle) = self.irc_handles.get(&conn_id)
+                    // Update conn.nick from RPL_WELCOME — args[0] is our confirmed nick
+                    // after any ERR_NICKNAMEINUSE retries by the irc crate.
+                    if let ::irc::proto::Command::Response(
+                        ::irc::proto::Response::RPL_WELCOME, ref args
+                    ) = msg.command
+                        && let Some(confirmed_nick) = args.first()
+                        && let Some(conn) = self.state.connections.get_mut(&conn_id)
                     {
-                        let _ = handle.sender.send(::irc::proto::Command::NICK(conn.nick.clone()));
+                        conn.nick.clone_from(confirmed_nick);
                     }
 
-                    // Auto-WHO on channel join: send WHOX WHO if supported
+                    crate::irc::events::handle_irc_message(&mut self.state, &conn_id, &msg);
+
+                    // Auto-WHO on channel join: send WHOX WHO if supported (silent — no display)
                     if let Some(channel) = endofnames_channel
                         && let Some((target, fields)) =
-                            crate::irc::events::build_whox_who(&mut self.state, &conn_id, &channel)
+                            crate::irc::events::build_whox_who(&mut self.state, &conn_id, &channel, true)
                         && let Some(handle) = self.irc_handles.get(&conn_id)
                     {
                         let _ = handle.sender.send(::irc::proto::Command::Raw(
@@ -1186,7 +1243,7 @@ impl App {
     fn execute_command(&mut self, parsed: &crate::commands::parser::ParsedCommand) {
         let commands = crate::commands::registry::get_commands();
         // Find by name or alias (built-in commands first)
-        let found = commands.into_iter().find(|(name, def)| {
+        let found = commands.iter().find(|(name, def)| {
             *name == parsed.name || def.aliases.contains(&parsed.name.as_str())
         });
         if let Some((_, def)) = found {
@@ -1274,10 +1331,10 @@ impl App {
     }
 
     /// Get the connection ID of the active buffer.
-    pub fn active_conn_id(&self) -> Option<String> {
+    pub fn active_conn_id(&self) -> Option<&str> {
         self.state
             .active_buffer()
-            .map(|buf| buf.connection_id.clone())
+            .map(|buf| buf.connection_id.as_str())
     }
 }
 
@@ -1303,4 +1360,37 @@ fn expand_alias_template(template: &str, args: &[String]) -> String {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_channel_keys_no_keys() {
+        let entries = vec!["#linux".to_string(), "#rust".to_string()];
+        let (names, keys) = split_channel_keys(&entries);
+        assert_eq!(names, vec!["#linux", "#rust"]);
+        assert_eq!(keys, vec!["", ""]);
+    }
+
+    #[test]
+    fn split_channel_keys_with_keys() {
+        let entries = vec![
+            "#public".to_string(),
+            "#secret mykey".to_string(),
+            "#other pass123".to_string(),
+        ];
+        let (names, keys) = split_channel_keys(&entries);
+        assert_eq!(names, vec!["#public", "#secret", "#other"]);
+        assert_eq!(keys, vec!["", "mykey", "pass123"]);
+    }
+
+    #[test]
+    fn split_channel_keys_empty() {
+        let entries: Vec<String> = vec![];
+        let (names, keys) = split_channel_keys(&entries);
+        assert!(names.is_empty());
+        assert!(keys.is_empty());
+    }
 }

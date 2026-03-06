@@ -1,8 +1,8 @@
 use ratatui::text::{Line, Span};
-use ratatui::style::{Style, Modifier};
+use ratatui::style::{Color, Style, Modifier};
 use crate::theme::StyledSpan;
 
-/// Convert a slice of StyledSpans (from the theme parser) into a ratatui Line.
+/// Convert a slice of `StyledSpan`s (from the theme parser) into a ratatui `Line`.
 pub fn styled_spans_to_line(spans: &[StyledSpan]) -> Line<'static> {
     let ratatui_spans: Vec<Span<'static>> = spans
         .iter()
@@ -11,6 +11,29 @@ pub fn styled_spans_to_line(spans: &[StyledSpan]) -> Line<'static> {
             if let Some(fg) = s.fg {
                 style = style.fg(fg);
             }
+            if let Some(bg) = s.bg {
+                style = style.bg(bg);
+            }
+            let mut modifiers = Modifier::empty();
+            if s.bold { modifiers |= Modifier::BOLD; }
+            if s.italic { modifiers |= Modifier::ITALIC; }
+            if s.underline { modifiers |= Modifier::UNDERLINED; }
+            if s.dim { modifiers |= Modifier::DIM; }
+            if !modifiers.is_empty() {
+                style = style.add_modifier(modifiers);
+            }
+            Span::styled(s.text.clone(), style)
+        })
+        .collect();
+    Line::from(ratatui_spans)
+}
+
+/// Convert a slice of `StyledSpan`s into a ratatui `Line`, using `default_fg` when a span has no fg color.
+pub fn styled_spans_to_line_with_fg(spans: &[StyledSpan], default_fg: Color) -> Line<'static> {
+    let ratatui_spans: Vec<Span<'static>> = spans
+        .iter()
+        .map(|s| {
+            let mut style = Style::default().fg(s.fg.unwrap_or(default_fg));
             if let Some(bg) = s.bg {
                 style = style.bg(bg);
             }

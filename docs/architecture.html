@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="rustirc — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
+  <meta name="keywords" content="irc, terminal, tui, client, chat, rustirc, ratatui, tokio, rust">
+  <meta name="author" content="kofany">
+  <meta property="og:title" content="Architecture — rustirc">
+  <meta property="og:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by irssi, designed for the future.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://kofany.github.io/rustirc/">
+  <meta property="og:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{title}} — rustirc">
+  <meta name="twitter:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust.">
+  <meta name="twitter:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <title>{{title}} — rustirc</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- Mobile hamburger toggle -->
+  <button class="hamburger" aria-label="Toggle navigation">
+    <span></span>
+    <span></span>
+    <span></span>
+  </button>
+
+  <div class="page-wrapper">
+    <!-- Sidebar navigation -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <a href="index.html" class="brand">rustirc</a>
+        <span class="brand-tagline">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+          <ul>
+    <li><a href="index.html">Home</a></li>
+  </ul>
+  <div class="nav-section">
+    <span class="nav-section-title">Getting Started</span>
+    <ul>
+      <li><a href="installation.html">Installation</a></li>
+      <li><a href="first-connection.html">First Connection</a></li>
+      <li><a href="configuration.html">Configuration</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Reference</span>
+    <ul>
+      <li><a href="commands.html">Commands</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Scripting</span>
+    <ul>
+      <li><a href="scripting-getting-started.html">Getting Started</a></li>
+      <li><a href="scripting-api.html">API Reference</a></li>
+      <li><a href="scripting-examples.html">Examples</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Customization</span>
+    <ul>
+      <li><a href="theming.html">Theming</a></li>
+      <li><a href="theming-format-strings.html">Format Strings</a></li>
+      <li><a href="logging.html">Logging & Search</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Project</span>
+    <ul>
+      <li><a href="architecture.html" class="active">Architecture</a></li>
+      <li><a href="faq.html">FAQ</a></li>
+    </ul>
+  </div>
+
+      </nav>
+      <div class="sidebar-footer">
+        Built with <a href="https://www.rust-lang.org">Rust</a>
+        &middot;
+        <a href="https://github.com/kofany/rustirc">GitHub</a>
+      </div>
+    </aside>
+
+    <!-- Overlay for mobile sidebar -->
+    <div class="sidebar-overlay"></div>
+
+    <!-- Main content -->
+    <div class="content-wrapper">
+      <main class="content">
+        <h1>Architecture</h1>
+<p>Technical overview of rustirc&#39;s internal design.</p>
+<h2>Technology stack</h2>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Technology</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Language</td>
+<td>Rust 2024 edition</td>
+</tr>
+<tr>
+<td>TUI framework</td>
+<td>ratatui 0.30+ with crossterm backend</td>
+</tr>
+<tr>
+<td>Async runtime</td>
+<td>tokio (full features)</td>
+</tr>
+<tr>
+<td>IRC protocol</td>
+<td><code>irc</code> crate v1.1.0</td>
+</tr>
+<tr>
+<td>Scripting</td>
+<td>Lua 5.4 via mlua 0.11</td>
+</tr>
+<tr>
+<td>Storage</td>
+<td>SQLite via rusqlite (bundled)</td>
+</tr>
+<tr>
+<td>Encryption</td>
+<td>AES-256-GCM via aes-gcm</td>
+</tr>
+<tr>
+<td>Error handling</td>
+<td>color-eyre + thiserror</td>
+</tr>
+<tr>
+<td>Config</td>
+<td>TOML via serde</td>
+</tr>
+</tbody></table>
+<h2>TEA architecture</h2>
+<p>rustirc follows The Elm Architecture (TEA) pattern:</p>
+<pre><code>Model → Message → Update → View
+</code></pre>
+<ul>
+<li><strong>Model</strong>: <code>AppState</code> — all application state (buffers, connections, config)</li>
+<li><strong>Message</strong>: Events from IRC, keyboard, mouse, timers</li>
+<li><strong>Update</strong>: Event handlers that transform state</li>
+<li><strong>View</strong>: ratatui rendering functions that read state</li>
+</ul>
+<p>State is UI-agnostic — the <code>state/</code> module has no ratatui imports.</p>
+<h2>Module structure</h2>
+<pre><code>src/
+  main.rs              # Entry point, terminal setup
+  app.rs               # Main event loop, App struct
+  constants.rs         # APP_NAME and global constants
+  config/              # TOML config loading
+  state/               # Application state (buffers, connections, sorting)
+  irc/                 # IRC connection, event handling, formatting
+    events.rs          # IRC message → state update
+    flood.rs           # Flood protection
+    netsplit.rs        # Netsplit detection
+    ignore.rs          # Ignore list matching
+    formatting.rs      # IRC formatting helpers
+  ui/                  # TUI rendering
+    layout.rs          # Screen layout + regions
+    buffer_list.rs     # Left sidebar
+    nick_list.rs       # Right sidebar
+    chat_view.rs       # Message display
+    input.rs           # Command input + tab completion
+    status_line.rs     # Bottom status bar
+    topic_bar.rs       # Top topic display
+    message_line.rs    # Single message rendering
+    styled_text.rs     # Format string → ratatui spans
+  theme/               # Theme loading + format string parser
+  scripting/           # Lua scripting engine
+    engine.rs          # ScriptEngine trait + ScriptManager
+    api.rs             # Event names
+    event_bus.rs       # Priority-ordered event dispatch
+    lua/               # Lua 5.4 backend (mlua)
+  storage/             # SQLite logging
+    db.rs              # Database schema + migrations
+    writer.rs          # Batched async writer
+    query.rs           # Search + read queries
+    crypto.rs          # AES-256-GCM encryption
+    types.rs           # LogRow, StoredMessage
+  commands/            # Command system
+    parser.rs          # /command arg parsing
+    registry.rs        # Command registration
+    handlers_irc.rs    # IRC commands (/join, /msg, etc.)
+    handlers_ui.rs     # UI commands (/clear, /close, etc.)
+    handlers_admin.rs  # Admin commands (/set, /reload, etc.)
+    docs.rs            # Command documentation loader
+</code></pre>
+<h2>Event flow</h2>
+<ol>
+<li><strong>Terminal events</strong> (keyboard, mouse) arrive via crossterm <code>event::poll</code> in a <code>spawn_blocking</code> thread</li>
+<li>Events are sent through a tokio mpsc channel to the main loop</li>
+<li><strong>IRC events</strong> arrive via the <code>irc</code> crate&#39;s async reader, converted to <code>IrcEvent</code> enum variants</li>
+<li>The main loop in <code>App::run()</code> processes all events sequentially, updating <code>AppState</code></li>
+<li>After each event batch, the UI is re-rendered from the current state</li>
+</ol>
+<h2>IRC connection layer</h2>
+<p>Each server connection spawns:</p>
+<ul>
+<li>An async reader task that receives IRC messages and sends <code>IrcEvent</code> to a shared mpsc channel</li>
+<li>Messages are sent through the <code>irc</code> crate&#39;s <code>Sender</code> stored in the connection state</li>
+</ul>
+<p>All connections share a single event channel, with events tagged by <code>connection_id</code>.</p>
+<h2>Scripting architecture</h2>
+<pre><code>ScriptManager
+  └── Vec&lt;Box&lt;dyn ScriptEngine&gt;&gt;
+        └── LuaEngine (mlua)
+              ├── Per-script Lua environments (sandboxed)
+              ├── Event handlers (priority-sorted, per-event)
+              └── Command handlers
+</code></pre>
+<p>The <code>ScriptEngine</code> trait allows adding new languages (Rhai, etc.) by implementing the trait and registering with <code>ScriptManager</code>.</p>
+<h2>Storage pipeline</h2>
+<pre><code>AppState::add_message()
+  → log_tx (tokio mpsc sender)
+  → WriterTask (batches 50 rows / 1 second)
+  → SQLite (WAL mode, FTS5 index)
+</code></pre>
+<p>Messages flow from the UI thread to the writer task asynchronously, ensuring zero UI blocking on disk I/O.</p>
+
+
+        <!-- Prev / Next navigation -->
+        <nav class="page-nav">
+          <a href="logging.html" class="page-nav-link prev">
+  <span class="page-nav-label">&larr; Previous</span>
+  <span class="page-nav-title">Logging & Search</span>
+</a>
+          <a href="faq.html" class="page-nav-link next">
+  <span class="page-nav-label">Next &rarr;</span>
+  <span class="page-nav-title">FAQ</span>
+</a>
+        </nav>
+
+        <footer class="site-footer">
+          Built with <a href="https://www.rust-lang.org">Rust</a> &middot;
+          <a href="https://github.com/kofany/rustirc">GitHub</a> &middot;
+          MIT License
+        </footer>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    // Mobile sidebar toggle
+    (function() {
+      const hamburger = document.querySelector('.hamburger');
+      const sidebar = document.querySelector('.sidebar');
+      const overlay = document.querySelector('.sidebar-overlay');
+
+      function toggleSidebar() {
+        hamburger.classList.toggle('active');
+        sidebar.classList.toggle('open');
+        overlay.classList.toggle('visible');
+        document.body.style.overflow = sidebar.classList.contains('open') ? 'hidden' : '';
+      }
+
+      function closeSidebar() {
+        hamburger.classList.remove('active');
+        sidebar.classList.remove('open');
+        overlay.classList.remove('visible');
+        document.body.style.overflow = '';
+      }
+
+      hamburger.addEventListener('click', toggleSidebar);
+      overlay.addEventListener('click', closeSidebar);
+
+      // Close sidebar on Escape key
+      document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && sidebar.classList.contains('open')) {
+          closeSidebar();
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

@@ -148,7 +148,10 @@ pub struct PanelConfig {
 
 impl Default for PanelConfig {
     fn default() -> Self {
-        SidepanelConfig::default().left
+        Self {
+            width: 20,
+            visible: true,
+        }
     }
 }
 

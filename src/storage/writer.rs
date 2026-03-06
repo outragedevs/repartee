@@ -60,21 +60,20 @@ async fn writer_loop(
             Some(row) = row_rx.recv() => {
                 queue.push(row);
                 if queue.len() >= BATCH_SIZE {
-                    flush(&db, &mut queue, has_fts, crypto_key.as_ref());
+                    queue = flush_blocking(&db, queue, has_fts, crypto_key).await;
                 }
             }
             _ = tick.tick() => {
                 if !queue.is_empty() {
-                    flush(&db, &mut queue, has_fts, crypto_key.as_ref());
+                    queue = flush_blocking(&db, queue, has_fts, crypto_key).await;
                 }
             }
             _ = shutdown_rx.recv() => {
-                // Drain any remaining rows from the channel.
                 while let Ok(row) = row_rx.try_recv() {
                     queue.push(row);
                 }
                 if !queue.is_empty() {
-                    flush(&db, &mut queue, has_fts, crypto_key.as_ref());
+                    flush_blocking(&db, queue, has_fts, crypto_key).await;
                 }
                 return;
             }
@@ -82,23 +81,38 @@ async fn writer_loop(
     }
 }
 
+async fn flush_blocking(
+    db: &Arc<Mutex<Connection>>,
+    queue: Vec<LogRow>,
+    _has_fts: bool,
+    crypto_key: Option<Key<Aes256Gcm>>,
+) -> Vec<LogRow> {
+    let db = Arc::clone(db);
+    match tokio::task::spawn_blocking(move || flush(&db, queue, crypto_key.as_ref())).await {
+        Ok(remaining) => remaining,
+        Err(e) => {
+            tracing::error!("flush task panicked: {e}");
+            Vec::new()
+        }
+    }
+}
+
 fn flush(
     db: &Arc<Mutex<Connection>>,
-    queue: &mut Vec<LogRow>,
-    _has_fts: bool,
+    queue: Vec<LogRow>,
     crypto_key: Option<&Key<Aes256Gcm>>,
-) {
+) -> Vec<LogRow> {
     let Ok(conn) = db.lock() else {
         tracing::error!("failed to lock database for flush");
-        return;
+        return queue;
     };
 
     if let Err(e) = conn.execute_batch("BEGIN") {
         tracing::error!("failed to begin transaction: {e}");
-        return;
+        return queue;
     }
 
-    for row in queue.iter() {
+    for row in &queue {
         let msg_type_str = format!("{:?}", row.msg_type).to_lowercase();
         let highlight_int = i32::from(row.highlight);
 
@@ -107,7 +121,8 @@ fn flush(
                 Ok(enc) => (enc.ciphertext, Some(enc.iv)),
                 Err(e) => {
                     tracing::error!("encryption failed for msg_id={}: {e}", row.msg_id);
-                    continue;
+                    let _ = conn.execute_batch("ROLLBACK");
+                    return queue;
                 }
             },
             None => (row.text.clone(), None),
@@ -131,15 +146,18 @@ fn flush(
             ],
         ) {
             tracing::error!("failed to insert msg_id={}: {e}", row.msg_id);
+            let _ = conn.execute_batch("ROLLBACK");
+            return queue;
         }
-        // FTS is handled automatically by triggers when has_fts is true.
     }
 
     if let Err(e) = conn.execute_batch("COMMIT") {
         tracing::error!("failed to commit transaction: {e}");
+        let _ = conn.execute_batch("ROLLBACK");
+        return queue;
     }
 
-    queue.clear();
+    Vec::new()
 }
 
 #[cfg(test)]

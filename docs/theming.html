@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="rustirc — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
+  <meta name="keywords" content="irc, terminal, tui, client, chat, rustirc, ratatui, tokio, rust">
+  <meta name="author" content="kofany">
+  <meta property="og:title" content="Theming — rustirc">
+  <meta property="og:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by irssi, designed for the future.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://kofany.github.io/rustirc/">
+  <meta property="og:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{title}} — rustirc">
+  <meta name="twitter:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust.">
+  <meta name="twitter:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <title>{{title}} — rustirc</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- Mobile hamburger toggle -->
+  <button class="hamburger" aria-label="Toggle navigation">
+    <span></span>
+    <span></span>
+    <span></span>
+  </button>
+
+  <div class="page-wrapper">
+    <!-- Sidebar navigation -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <a href="index.html" class="brand">rustirc</a>
+        <span class="brand-tagline">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+          <ul>
+    <li><a href="index.html">Home</a></li>
+  </ul>
+  <div class="nav-section">
+    <span class="nav-section-title">Getting Started</span>
+    <ul>
+      <li><a href="installation.html">Installation</a></li>
+      <li><a href="first-connection.html">First Connection</a></li>
+      <li><a href="configuration.html">Configuration</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Reference</span>
+    <ul>
+      <li><a href="commands.html">Commands</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Scripting</span>
+    <ul>
+      <li><a href="scripting-getting-started.html">Getting Started</a></li>
+      <li><a href="scripting-api.html">API Reference</a></li>
+      <li><a href="scripting-examples.html">Examples</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Customization</span>
+    <ul>
+      <li><a href="theming.html" class="active">Theming</a></li>
+      <li><a href="theming-format-strings.html">Format Strings</a></li>
+      <li><a href="logging.html">Logging & Search</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Project</span>
+    <ul>
+      <li><a href="architecture.html">Architecture</a></li>
+      <li><a href="faq.html">FAQ</a></li>
+    </ul>
+  </div>
+
+      </nav>
+      <div class="sidebar-footer">
+        Built with <a href="https://www.rust-lang.org">Rust</a>
+        &middot;
+        <a href="https://github.com/kofany/rustirc">GitHub</a>
+      </div>
+    </aside>
+
+    <!-- Overlay for mobile sidebar -->
+    <div class="sidebar-overlay"></div>
+
+    <!-- Main content -->
+    <div class="content-wrapper">
+      <main class="content">
+        <h1>Theming</h1>
+<p>rustirc uses irssi-compatible format strings with 24-bit color support.</p>
+<h2>Theme files</h2>
+<p>Themes are TOML files stored in <code>~/.rustirc/themes/</code>. Set the active theme in your config:</p>
+<pre><code class="language-toml">[general]
+theme = &quot;mytheme&quot;
+</code></pre>
+<p>This loads <code>~/.rustirc/themes/mytheme.theme</code>.</p>
+<h2>Theme structure</h2>
+<p>A theme file has two sections: <code>colors</code> and <code>abstracts</code>.</p>
+<pre><code class="language-toml">[colors]
+bg = &quot;1a1b26&quot;
+bg_alt = &quot;24283b&quot;
+fg = &quot;a9b1d6&quot;
+fg_alt = &quot;565f89&quot;
+highlight = &quot;e0af68&quot;
+nick_self = &quot;7aa2f7&quot;
+timestamp = &quot;565f89&quot;
+separator = &quot;3b4261&quot;
+
+[abstracts]
+line_start = &quot;{timestamp $Z}{sb_background}&quot;
+timestamp = &quot;%Z565f89$*&quot;
+own_msg = &quot;{ownmsgnick $0}$1&quot;
+pubmsg = &quot;{pubmsgnick $0}$1&quot;
+</code></pre>
+<h2>Colors</h2>
+<p>The <code>[colors]</code> section defines hex RGB values (without <code>#</code>) for UI elements:</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>bg</code></td>
+<td>Main background color</td>
+</tr>
+<tr>
+<td><code>bg_alt</code></td>
+<td>Alternate background (topic bar, status line)</td>
+</tr>
+<tr>
+<td><code>fg</code></td>
+<td>Main text color</td>
+</tr>
+<tr>
+<td><code>fg_alt</code></td>
+<td>Muted text color</td>
+</tr>
+<tr>
+<td><code>highlight</code></td>
+<td>Highlight/mention color</td>
+</tr>
+<tr>
+<td><code>nick_self</code></td>
+<td>Your own nick color</td>
+</tr>
+<tr>
+<td><code>timestamp</code></td>
+<td>Timestamp color</td>
+</tr>
+<tr>
+<td><code>separator</code></td>
+<td>Border/separator color</td>
+</tr>
+</tbody></table>
+<h2>Abstracts</h2>
+<p>Abstracts are named format string templates that can reference each other. They control how every UI element is rendered — from message lines to the status bar.</p>
+<p>See <a href="theming-format-strings.html">Format Strings</a> for the full format string syntax.</p>
+<h2>Default theme</h2>
+<p>If no theme is set, rustirc uses built-in defaults with a dark color scheme inspired by Tokyo Night.</p>
+
+
+        <!-- Prev / Next navigation -->
+        <nav class="page-nav">
+          <a href="scripting-examples.html" class="page-nav-link prev">
+  <span class="page-nav-label">&larr; Previous</span>
+  <span class="page-nav-title">Examples</span>
+</a>
+          <a href="theming-format-strings.html" class="page-nav-link next">
+  <span class="page-nav-label">Next &rarr;</span>
+  <span class="page-nav-title">Format Strings</span>
+</a>
+        </nav>
+
+        <footer class="site-footer">
+          Built with <a href="https://www.rust-lang.org">Rust</a> &middot;
+          <a href="https://github.com/kofany/rustirc">GitHub</a> &middot;
+          MIT License
+        </footer>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    // Mobile sidebar toggle
+    (function() {
+      const hamburger = document.querySelector('.hamburger');
+      const sidebar = document.querySelector('.sidebar');
+      const overlay = document.querySelector('.sidebar-overlay');
+
+      function toggleSidebar() {
+        hamburger.classList.toggle('active');
+        sidebar.classList.toggle('open');
+        overlay.classList.toggle('visible');
+        document.body.style.overflow = sidebar.classList.contains('open') ? 'hidden' : '';
+      }
+
+      function closeSidebar() {
+        hamburger.classList.remove('active');
+        sidebar.classList.remove('open');
+        overlay.classList.remove('visible');
+        document.body.style.overflow = '';
+      }
+
+      hamburger.addEventListener('click', toggleSidebar);
+      overlay.addEventListener('click', closeSidebar);
+
+      // Close sidebar on Escape key
+      document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && sidebar.classList.contains('open')) {
+          closeSidebar();
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

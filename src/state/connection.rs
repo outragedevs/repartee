@@ -44,4 +44,8 @@ pub struct Connection {
     /// Counter for WHOX tokens. Each `WHO %fields,TOKEN` request gets
     /// a unique numeric token so we can match 354 replies.
     pub who_token_counter: u32,
+    /// Channels with a pending auto-WHO (e.g. on join).
+    /// WHO/WHOX replies for these channels update state silently
+    /// without display. Removed on `RPL_ENDOFWHO` (315).
+    pub silent_who_channels: HashSet<String>,
 }
