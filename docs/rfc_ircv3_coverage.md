@@ -15,7 +15,7 @@ Track implementation status of IRC protocol features in rustirc.
 | PASS | Done | Server password sent before registration |
 | NICK | Done | Nickname setting + ERR_NICKNAMEINUSE retry |
 | USER | Done | Username/realname registration |
-| OPER | Not Started | IRC operator login |
+| OPER | Done | IRC operator login (`/oper`) |
 | QUIT | Done | Disconnect with message |
 | USER MODE | Done | +i, +w, etc. |
 
@@ -44,13 +44,13 @@ Track implementation status of IRC protocol features in rustirc.
 | Feature | Status | Notes |
 |---------|--------|-------|
 | MOTD | Done | Full MOTD display |
-| LUSERS | Not Started | Server user/channel stats |
-| VERSION (server) | Not Started | Server version query |
-| STATS | Not Started | Server statistics |
-| LINKS | Not Started | Server links |
-| TIME | Not Started | Server time query |
-| ADMIN | Not Started | Admin info |
-| INFO | Not Started | Server info |
+| LUSERS | Done | Server user/channel stats (`/lusers`) |
+| VERSION (server) | Done | Server version query (`/version` with no args) |
+| STATS | Done | Server statistics (`/stats`) |
+| LINKS | Done | Server links (`/links`) |
+| TIME | Done | Server time query (`/time`) |
+| ADMIN | Done | Admin info (`/admin`) |
+| INFO | Done | Server info (`/info`) |
 
 ### User Queries (3.6)
 
@@ -67,7 +67,7 @@ Track implementation status of IRC protocol features in rustirc.
 | PING/PONG | Done | Handled by irc crate |
 | AWAY | Done | Set/unset + RPL_AWAY display |
 | WALLOPS | Done | Wall message display |
-| ERROR | Not Started | Connection termination handling |
+| ERROR | Done | Connection termination handling — marks connection as errored, displays in status buffer |
 | USERHOST | Not Started | Quick user lookup |
 | ISON | Not Started | Online check (superseded by MONITOR) |
 

@@ -1080,3 +1080,67 @@ pub(crate) fn cmd_whowas(app: &mut App, args: &[String]) {
         add_local_event(app, &format!("Failed to send WHOWAS: {e}"));
     }
 }
+
+// === Server Query Commands (RFC 2812 3.4) ===
+
+pub(crate) fn cmd_info(app: &mut App, args: &[String]) {
+    let Some(sender) = app.active_irc_sender().cloned() else {
+        add_local_event(app, "Not connected");
+        return;
+    };
+
+    let server = args.first().cloned();
+    if let Err(e) = sender.send(irc::proto::Command::INFO(server)) {
+        add_local_event(app, &format!("Failed to send INFO: {e}"));
+    }
+}
+
+pub(crate) fn cmd_admin(app: &mut App, args: &[String]) {
+    let Some(sender) = app.active_irc_sender().cloned() else {
+        add_local_event(app, "Not connected");
+        return;
+    };
+
+    let server = args.first().cloned();
+    if let Err(e) = sender.send(irc::proto::Command::ADMIN(server)) {
+        add_local_event(app, &format!("Failed to send ADMIN: {e}"));
+    }
+}
+
+pub(crate) fn cmd_lusers(app: &mut App, args: &[String]) {
+    let Some(sender) = app.active_irc_sender().cloned() else {
+        add_local_event(app, "Not connected");
+        return;
+    };
+
+    let mask = args.first().cloned();
+    let server = args.get(1).cloned();
+    if let Err(e) = sender.send(irc::proto::Command::LUSERS(mask, server)) {
+        add_local_event(app, &format!("Failed to send LUSERS: {e}"));
+    }
+}
+
+pub(crate) fn cmd_time(app: &mut App, args: &[String]) {
+    let Some(sender) = app.active_irc_sender().cloned() else {
+        add_local_event(app, "Not connected");
+        return;
+    };
+
+    let server = args.first().cloned();
+    if let Err(e) = sender.send(irc::proto::Command::TIME(server)) {
+        add_local_event(app, &format!("Failed to send TIME: {e}"));
+    }
+}
+
+pub(crate) fn cmd_links(app: &mut App, args: &[String]) {
+    let Some(sender) = app.active_irc_sender().cloned() else {
+        add_local_event(app, "Not connected");
+        return;
+    };
+
+    let remote = args.first().cloned();
+    let mask = args.get(1).cloned();
+    if let Err(e) = sender.send(irc::proto::Command::LINKS(remote, mask)) {
+        add_local_event(app, &format!("Failed to send LINKS: {e}"));
+    }
+}

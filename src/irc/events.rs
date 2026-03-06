@@ -86,6 +86,9 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
         Command::CHGHOST(new_user, new_host) => {
             handle_chghost(state, conn_id, msg.prefix.as_ref(), new_user, new_host, tags);
         }
+        Command::ERROR(message) => {
+            handle_error(state, conn_id, message);
+        }
         // WHOX response (354) comes as Command::Raw because the irc crate
         // doesn't recognize this non-standard numeric.
         Command::Raw(cmd, args) if cmd == "354" => {
@@ -1709,6 +1712,19 @@ fn handle_invite(
             );
         }
     }
+}
+
+fn handle_error(state: &mut AppState, conn_id: &str, message: &str) {
+    tracing::warn!("ERROR from {conn_id}: {message}");
+
+    // Mark the connection as errored
+    if let Some(conn) = state.connections.get_mut(conn_id) {
+        conn.status = ConnectionStatus::Error;
+        conn.error = Some(message.to_string());
+    }
+
+    let buf = server_buffer(state, conn_id);
+    emit(state, &buf, &format!("%Zff4444ERROR: {message}%N"));
 }
 
 fn handle_wallops(
@@ -4210,5 +4226,37 @@ mod tests {
         assert!(fields.starts_with("%tcuihsnfdlar,"));
         // Token should be "1" (first call)
         assert!(fields.ends_with(",1"));
+    }
+
+    // === ERROR handler tests ===
+
+    #[test]
+    fn error_command_creates_event_in_status_buffer() {
+        let mut state = make_test_state();
+        let msg = make_irc_msg(
+            Some("irc.server.com"),
+            Command::ERROR("Closing Link: timeout".into()),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/testserver").unwrap();
+        assert_eq!(buf.messages.len(), 1);
+        assert!(buf.messages[0].text.contains("ERROR"));
+        assert!(buf.messages[0].text.contains("Closing Link: timeout"));
+        assert_eq!(buf.messages[0].message_type, MessageType::Event);
+    }
+
+    #[test]
+    fn error_command_marks_connection_as_errored() {
+        let mut state = make_test_state();
+        let msg = make_irc_msg(
+            Some("irc.server.com"),
+            Command::ERROR("Banned".into()),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let conn = state.connections.get("test").unwrap();
+        assert_eq!(conn.status, ConnectionStatus::Error);
+        assert_eq!(conn.error.as_deref(), Some("Banned"));
     }
 }

@@ -1,741 +1,205 @@
-use crate::app::App;
+use super::types::{CommandDef, CommandCategory};
+use super::handlers_ui::{
+    cmd_quit, cmd_help, cmd_clear, cmd_close, cmd_alias, cmd_unalias, cmd_items,
+};
+use super::handlers_irc::{
+    cmd_connect, cmd_disconnect, cmd_join, cmd_part, cmd_topic, cmd_kick, cmd_invite,
+    cmd_mode, cmd_op, cmd_deop, cmd_voice, cmd_devoice, cmd_ban, cmd_unban, cmd_kickban,
+    cmd_except, cmd_unexcept, cmd_invex, cmd_uninvex, cmd_reop, cmd_unreop,
+    cmd_names, cmd_msg, cmd_query, cmd_me, cmd_notice, cmd_nick, cmd_whois, cmd_wii, cmd_version,
+    cmd_quote, cmd_away, cmd_list, cmd_who, cmd_whowas,
+    cmd_info, cmd_admin, cmd_lusers, cmd_time, cmd_links,
+};
+use super::handlers_admin::{
+    cmd_reload, cmd_ignore, cmd_unignore, cmd_server, cmd_autoconnect,
+    cmd_oper, cmd_kill, cmd_wallops, cmd_stats, cmd_log,
+};
 
-pub type CommandHandler = fn(&mut App, &[String]);
-
-pub struct CommandDef {
-    pub handler: CommandHandler,
-    pub description: &'static str,
-    pub usage: &'static str,
-}
-
+/// Command table — handler + short description + aliases + category.
+/// Detailed help lives in docs/commands/*.md, accessed via the docs module.
 pub fn get_commands() -> Vec<(&'static str, CommandDef)> {
     vec![
-        (
-            "quit",
-            CommandDef {
-                handler: cmd_quit,
-                description: "Quit the client",
-                usage: "/quit [message]",
-            },
-        ),
-        (
-            "help",
-            CommandDef {
-                handler: cmd_help,
-                description: "Show command list",
-                usage: "/help [command]",
-            },
-        ),
-        (
-            "clear",
-            CommandDef {
-                handler: cmd_clear,
-                description: "Clear active buffer",
-                usage: "/clear",
-            },
-        ),
-        (
-            "close",
-            CommandDef {
-                handler: cmd_close,
-                description: "Close active buffer",
-                usage: "/close",
-            },
-        ),
-        // === IRC commands ===
-        (
-            "connect",
-            CommandDef {
-                handler: cmd_connect,
-                description: "Connect to a server defined in config",
-                usage: "/connect <server_id>",
-            },
-        ),
-        (
-            "disconnect",
-            CommandDef {
-                handler: cmd_disconnect,
-                description: "Disconnect from current server",
-                usage: "/disconnect [message]",
-            },
-        ),
-        (
-            "join",
-            CommandDef {
-                handler: cmd_join,
-                description: "Join a channel",
-                usage: "/join <channel> [key]",
-            },
-        ),
-        (
-            "part",
-            CommandDef {
-                handler: cmd_part,
-                description: "Leave a channel",
-                usage: "/part [channel] [message]",
-            },
-        ),
-        (
-            "msg",
-            CommandDef {
-                handler: cmd_msg,
-                description: "Send a private message",
-                usage: "/msg <target> <message>",
-            },
-        ),
-        (
-            "me",
-            CommandDef {
-                handler: cmd_me,
-                description: "Send a CTCP ACTION",
-                usage: "/me <action>",
-            },
-        ),
-        (
-            "nick",
-            CommandDef {
-                handler: cmd_nick,
-                description: "Change nickname",
-                usage: "/nick <new_nick>",
-            },
-        ),
-        (
-            "topic",
-            CommandDef {
-                handler: cmd_topic,
-                description: "View or set channel topic",
-                usage: "/topic [channel] [topic]",
-            },
-        ),
-        (
-            "kick",
-            CommandDef {
-                handler: cmd_kick,
-                description: "Kick a user from channel",
-                usage: "/kick <nick> [reason]",
-            },
-        ),
-        (
-            "notice",
-            CommandDef {
-                handler: cmd_notice,
-                description: "Send a notice",
-                usage: "/notice <target> <message>",
-            },
-        ),
-        (
-            "invite",
-            CommandDef {
-                handler: cmd_invite,
-                description: "Invite a user to a channel",
-                usage: "/invite <nick> [channel]",
-            },
-        ),
-        (
-            "whois",
-            CommandDef {
-                handler: cmd_whois,
-                description: "WHOIS query on a user",
-                usage: "/whois <nick>",
-            },
-        ),
-        (
-            "quote",
-            CommandDef {
-                handler: cmd_quote,
-                description: "Send a raw IRC command",
-                usage: "/quote <raw command>",
-            },
-        ),
-        (
-            "names",
-            CommandDef {
-                handler: cmd_names,
-                description: "Request NAMES list for a channel",
-                usage: "/names [channel]",
-            },
-        ),
+        // === Connection ===
+        ("connect",    CommandDef { handler: cmd_connect,    description: "Connect to a server",              aliases: &["c"],          category: CommandCategory::Connection }),
+        ("disconnect", CommandDef { handler: cmd_disconnect, description: "Disconnect from current server",   aliases: &[],             category: CommandCategory::Connection }),
+        ("quit",       CommandDef { handler: cmd_quit,       description: "Quit the client",                  aliases: &["exit"],       category: CommandCategory::Connection }),
+        ("server",     CommandDef { handler: cmd_server,     description: "Manage server configurations",     aliases: &[],             category: CommandCategory::Connection }),
+        // === Channel ===
+        ("join",       CommandDef { handler: cmd_join,       description: "Join a channel",                   aliases: &["j"],          category: CommandCategory::Channel }),
+        ("part",       CommandDef { handler: cmd_part,       description: "Leave a channel",                  aliases: &["leave"],      category: CommandCategory::Channel }),
+        ("topic",      CommandDef { handler: cmd_topic,      description: "View or set channel topic",        aliases: &["t"],          category: CommandCategory::Channel }),
+        ("kick",       CommandDef { handler: cmd_kick,       description: "Kick a user from channel",         aliases: &[],             category: CommandCategory::Channel }),
+        ("invite",     CommandDef { handler: cmd_invite,     description: "Invite a user to a channel",       aliases: &[],             category: CommandCategory::Channel }),
+        ("mode",       CommandDef { handler: cmd_mode,       description: "Query or set modes",               aliases: &[],             category: CommandCategory::Channel }),
+        ("op",         CommandDef { handler: cmd_op,         description: "Give operator status",             aliases: &[],             category: CommandCategory::Channel }),
+        ("deop",       CommandDef { handler: cmd_deop,       description: "Remove operator status",           aliases: &[],             category: CommandCategory::Channel }),
+        ("voice",      CommandDef { handler: cmd_voice,      description: "Give voice status",                aliases: &["v"],          category: CommandCategory::Channel }),
+        ("devoice",    CommandDef { handler: cmd_devoice,    description: "Remove voice status",              aliases: &[],             category: CommandCategory::Channel }),
+        ("ban",        CommandDef { handler: cmd_ban,        description: "Add ban or show ban list",         aliases: &["b"],          category: CommandCategory::Channel }),
+        ("unban",      CommandDef { handler: cmd_unban,      description: "Remove a ban",                     aliases: &[],             category: CommandCategory::Channel }),
+        ("kb",         CommandDef { handler: cmd_kickban,    description: "Kick and ban a user",              aliases: &["kickban"],    category: CommandCategory::Channel }),
+        ("except",     CommandDef { handler: cmd_except,     description: "Add exception or show list",       aliases: &[],             category: CommandCategory::Channel }),
+        ("unexcept",   CommandDef { handler: cmd_unexcept,   description: "Remove an exception",              aliases: &[],             category: CommandCategory::Channel }),
+        ("invex",      CommandDef { handler: cmd_invex,      description: "Add invite exception or show list",aliases: &[],             category: CommandCategory::Channel }),
+        ("uninvex",    CommandDef { handler: cmd_uninvex,    description: "Remove an invite exception",       aliases: &[],             category: CommandCategory::Channel }),
+        ("reop",       CommandDef { handler: cmd_reop,       description: "Add reop entry or show list",      aliases: &[],             category: CommandCategory::Channel }),
+        ("unreop",     CommandDef { handler: cmd_unreop,     description: "Remove a reop entry",              aliases: &[],             category: CommandCategory::Channel }),
+        ("names",      CommandDef { handler: cmd_names,      description: "Request NAMES list",               aliases: &[],             category: CommandCategory::Channel }),
+        // === Messaging ===
+        ("msg",        CommandDef { handler: cmd_msg,        description: "Send a private message",           aliases: &["m"],          category: CommandCategory::Messaging }),
+        ("query",      CommandDef { handler: cmd_query,      description: "Open a query with a user",         aliases: &["q"],          category: CommandCategory::Messaging }),
+        ("me",         CommandDef { handler: cmd_me,         description: "Send a CTCP ACTION",               aliases: &["action"],     category: CommandCategory::Messaging }),
+        ("notice",     CommandDef { handler: cmd_notice,     description: "Send a notice",                    aliases: &[],             category: CommandCategory::Messaging }),
+        ("nick",       CommandDef { handler: cmd_nick,       description: "Change nickname",                  aliases: &[],             category: CommandCategory::Messaging }),
+        ("away",       CommandDef { handler: cmd_away,       description: "Set or clear away status",         aliases: &[],             category: CommandCategory::Messaging }),
+        // === Info ===
+        ("help",       CommandDef { handler: cmd_help,       description: "Show help for commands",           aliases: &["?"],          category: CommandCategory::Info }),
+        ("whois",      CommandDef { handler: cmd_whois,      description: "WHOIS query on a user",            aliases: &["wi"],         category: CommandCategory::Info }),
+        ("wii",        CommandDef { handler: cmd_wii,        description: "WHOIS with idle time",             aliases: &[],             category: CommandCategory::Info }),
+        ("version",    CommandDef { handler: cmd_version,    description: "CTCP VERSION or server version",   aliases: &["ver"],        category: CommandCategory::Info }),
+        ("list",       CommandDef { handler: cmd_list,       description: "List channels on server",          aliases: &[],             category: CommandCategory::Info }),
+        ("who",        CommandDef { handler: cmd_who,        description: "WHO query",                        aliases: &[],             category: CommandCategory::Info }),
+        ("whowas",     CommandDef { handler: cmd_whowas,     description: "WHOWAS query on a nick",           aliases: &[],             category: CommandCategory::Info }),
+        ("info",       CommandDef { handler: cmd_info,       description: "Request server info",              aliases: &[],             category: CommandCategory::Info }),
+        ("admin",      CommandDef { handler: cmd_admin,      description: "Request server admin info",        aliases: &[],             category: CommandCategory::Info }),
+        ("lusers",     CommandDef { handler: cmd_lusers,     description: "Request server user statistics",   aliases: &[],             category: CommandCategory::Info }),
+        ("time",       CommandDef { handler: cmd_time,       description: "Request server time",              aliases: &[],             category: CommandCategory::Info }),
+        ("links",      CommandDef { handler: cmd_links,      description: "List server links",                aliases: &[],             category: CommandCategory::Info }),
+        // === Configuration ===
+        ("set",        CommandDef { handler: super::settings::cmd_set, description: "View or change settings",aliases: &[],             category: CommandCategory::Configuration }),
+        ("reload",     CommandDef { handler: cmd_reload,     description: "Reload theme and config",          aliases: &[],             category: CommandCategory::Configuration }),
+        ("ignore",     CommandDef { handler: cmd_ignore,     description: "Add or list ignore rules",         aliases: &[],             category: CommandCategory::Configuration }),
+        ("unignore",   CommandDef { handler: cmd_unignore,   description: "Remove an ignore rule",            aliases: &[],             category: CommandCategory::Configuration }),
+        ("alias",      CommandDef { handler: cmd_alias,      description: "Define or list command aliases",   aliases: &[],             category: CommandCategory::Configuration }),
+        ("unalias",    CommandDef { handler: cmd_unalias,    description: "Remove a command alias",           aliases: &[],             category: CommandCategory::Configuration }),
+        ("autoconnect",CommandDef { handler: cmd_autoconnect,description: "Toggle server autoconnect",        aliases: &[],             category: CommandCategory::Configuration }),
+        ("items",      CommandDef { handler: cmd_items,      description: "Manage statusbar items",           aliases: &[],             category: CommandCategory::Configuration }),
+        ("log",        CommandDef { handler: cmd_log,        description: "Log status and search",            aliases: &[],             category: CommandCategory::Configuration }),
+        // === Other ===
+        ("oper",       CommandDef { handler: cmd_oper,       description: "Authenticate as IRC operator",     aliases: &[],             category: CommandCategory::Other }),
+        ("kill",       CommandDef { handler: cmd_kill,       description: "Disconnect a user (oper only)",    aliases: &[],             category: CommandCategory::Other }),
+        ("wallops",    CommandDef { handler: cmd_wallops,    description: "Send message to all opers",        aliases: &[],             category: CommandCategory::Other }),
+        ("stats",      CommandDef { handler: cmd_stats,      description: "Request server statistics",        aliases: &[],             category: CommandCategory::Other }),
+        ("clear",      CommandDef { handler: cmd_clear,      description: "Clear active buffer",              aliases: &[],             category: CommandCategory::Other }),
+        ("close",      CommandDef { handler: cmd_close,      description: "Close active buffer",              aliases: &["wc"],         category: CommandCategory::Other }),
+        ("quote",      CommandDef { handler: cmd_quote,      description: "Send a raw IRC command",           aliases: &["raw"],        category: CommandCategory::Other }),
     ]
 }
 
+/// Get all command names including aliases.
 pub fn get_command_names() -> Vec<&'static str> {
-    get_commands().iter().map(|(name, _)| *name).collect()
-}
-
-// === Basic commands ===
-
-fn cmd_quit(app: &mut App, args: &[String]) {
-    let quit_msg = if args.is_empty() {
-        "Leaving"
-    } else {
-        &args[0]
-    };
-    for handle in app.irc_handles.values() {
-        let _ = handle.sender.send_quit(quit_msg);
-    }
-    app.should_quit = true;
-}
-
-fn cmd_help(app: &mut App, _args: &[String]) {
     let commands = get_commands();
-    let mut help_text = String::from("Available commands:");
-    for (_name, def) in &commands {
-        help_text.push_str(&format!("\n  {} — {}", def.usage, def.description));
-    }
-
-    super::helpers::add_local_event(app, &help_text);
-}
-
-fn cmd_clear(app: &mut App, _args: &[String]) {
-    if let Some(buf) = app.state.active_buffer_mut() {
-        buf.messages.clear();
-    }
-}
-
-fn cmd_close(app: &mut App, _args: &[String]) {
-    if let Some(active_id) = app.state.active_buffer_id.clone() {
-        app.state.remove_buffer(&active_id);
-    }
-}
-
-// === IRC commands ===
-
-fn cmd_connect(app: &mut App, args: &[String]) {
-    if args.is_empty() {
-        super::helpers::add_local_event(app, "Usage: /connect <server_id>");
-        return;
-    }
-    let server_id = &args[0];
-
-    // Check if already connected
-    if app.irc_handles.contains_key(server_id.as_str()) {
-        super::helpers::add_local_event(
-            app,
-            &format!("Already connected to {server_id}"),
-        );
-        return;
-    }
-
-    // We need to spawn the connection asynchronously since command handlers are sync.
-    let server_config = match app.config.servers.get(server_id.as_str()) {
-        Some(cfg) => cfg.clone(),
-        None => {
-            let available: Vec<&String> = app.config.servers.keys().collect();
-            super::helpers::add_local_event(
-                app,
-                &format!(
-                    "Unknown server: {server_id}. Available: {}",
-                    if available.is_empty() {
-                        "(none configured)".to_string()
-                    } else {
-                        available.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
-                    }
-                ),
-            );
-            return;
+    let mut names: Vec<&'static str> = Vec::new();
+    for (name, def) in &commands {
+        names.push(name);
+        for alias in def.aliases {
+            names.push(alias);
         }
-    };
+    }
+    names.sort_unstable();
+    names.dedup();
+    names
+}
 
-    let conn_id = server_id.to_string();
-
-    // Create connection entry and server buffer immediately
-    app.state.add_connection(crate::state::connection::Connection {
-        id: conn_id.clone(),
-        label: server_config.label.clone(),
-        status: crate::state::connection::ConnectionStatus::Connecting,
-        nick: server_config
-            .nick
-            .as_deref()
-            .unwrap_or(&app.config.general.nick)
-            .to_string(),
-        user_modes: String::new(),
-        isupport: std::collections::HashMap::new(),
-        error: None,
-        lag: None,
-    });
-
-    let server_buf_id =
-        crate::state::buffer::make_buffer_id(&conn_id, &server_config.label);
-    app.state.add_buffer(crate::state::buffer::Buffer {
-        id: server_buf_id.clone(),
-        connection_id: conn_id.clone(),
-        buffer_type: crate::state::buffer::BufferType::Server,
-        name: server_config.label.clone(),
-        messages: Vec::new(),
-        activity: crate::state::buffer::ActivityLevel::None,
-        unread_count: 0,
-        last_read: chrono::Utc::now(),
-        topic: None,
-        topic_set_by: None,
-        users: std::collections::HashMap::new(),
-        modes: None,
-        mode_params: None,
-        list_modes: std::collections::HashMap::new(),
-    });
-    app.state.set_active_buffer(&server_buf_id);
-
-    let id = app.state.next_message_id();
-    app.state.add_message(
-        &server_buf_id,
-        crate::state::buffer::Message {
-            id,
-            timestamp: chrono::Utc::now(),
-            message_type: crate::state::buffer::MessageType::Event,
-            nick: None,
-            nick_mode: None,
-            text: format!("Connecting to {}...", server_config.label),
-            highlight: false,
-            event_key: None,
-            event_params: None,
-        },
-    );
-
-    // Spawn async connection task
-    let general = app.config.general.clone();
-    let tx = app.irc_tx.clone();
-    let id_clone = conn_id;
-
-    tokio::spawn(async move {
-        match crate::irc::connect_server(&id_clone, &server_config, &general).await {
-            Ok((handle, mut rx)) => {
-                // Send the sender back to the main thread via HandleReady
-                let _ = tx.send(crate::irc::IrcEvent::HandleReady(
-                    handle.conn_id.clone(),
-                    handle.sender,
-                ));
-
-                // Forward all events from the per-connection receiver to the shared sender
-                while let Some(event) = rx.recv().await {
-                    if tx.send(event).is_err() {
-                        break;
-                    }
-                }
-            }
-            Err(e) => {
-                let _ = tx.send(crate::irc::IrcEvent::Disconnected(
-                    id_clone,
-                    Some(e.to_string()),
-                ));
+/// Resolve an alias to its canonical command name.
+#[allow(dead_code)]
+pub fn resolve_alias(name: &str) -> Option<&'static str> {
+    let commands = get_commands();
+    for (cmd_name, def) in &commands {
+        if *cmd_name == name {
+            return Some(cmd_name);
+        }
+        for alias in def.aliases {
+            if *alias == name {
+                return Some(cmd_name);
             }
         }
-    });
+    }
+    None
 }
 
-fn cmd_disconnect(app: &mut App, args: &[String]) {
-    let quit_msg = if args.is_empty() {
-        "Leaving"
-    } else {
-        &args[0]
-    };
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let conn_id = match app.active_conn_id() {
-        Some(id) => id,
-        None => {
-            super::helpers::add_local_event(app, "No active connection");
-            return;
+    #[test]
+    fn all_commands_have_description() {
+        for (name, def) in get_commands() {
+            assert!(!def.description.is_empty(), "/{name} missing description");
         }
-    };
-
-    if let Some(handle) = app.irc_handles.get(&conn_id) {
-        let _ = handle.sender.send_quit(quit_msg);
-    }
-    app.irc_handles.remove(&conn_id);
-    crate::irc::events::handle_disconnected(&mut app.state, &conn_id, None);
-}
-
-fn cmd_join(app: &mut App, args: &[String]) {
-    if args.is_empty() {
-        super::helpers::add_local_event(app, "Usage: /join <channel> [key]");
-        return;
     }
 
-    let sender = match app.active_irc_sender() {
-        Some(s) => s.clone(),
-        None => {
-            super::helpers::add_local_event(app, "Not connected");
-            return;
-        }
-    };
+    #[test]
+    fn command_names_includes_aliases() {
+        let names = get_command_names();
+        assert!(names.contains(&"connect"));
+        assert!(names.contains(&"c"));
+        assert!(names.contains(&"j"));
+        assert!(names.contains(&"?"));
+        assert!(names.contains(&"exit"));
+    }
 
-    for channel in args {
-        if let Err(e) = sender.send_join(channel) {
-            super::helpers::add_local_event(
-                app,
-                &format!("Failed to join {channel}: {e}"),
+    #[test]
+    fn resolve_alias_works() {
+        assert_eq!(resolve_alias("c"), Some("connect"));
+        assert_eq!(resolve_alias("j"), Some("join"));
+        assert_eq!(resolve_alias("?"), Some("help"));
+        assert_eq!(resolve_alias("connect"), Some("connect"));
+        assert_eq!(resolve_alias("nonexistent"), None);
+    }
+
+    #[test]
+    fn categories_cover_all_commands() {
+        for (name, def) in get_commands() {
+            assert!(
+                !def.category.label().is_empty(),
+                "/{name} has empty category label"
             );
         }
     }
-}
 
-fn cmd_part(app: &mut App, args: &[String]) {
-    let sender = match app.active_irc_sender() {
-        Some(s) => s.clone(),
-        None => {
-            super::helpers::add_local_event(app, "Not connected");
-            return;
-        }
-    };
-
-    let (channel, reason) = if args.is_empty() {
-        // Part current channel
-        let buf = match app.state.active_buffer() {
-            Some(b) => b,
-            None => return,
-        };
-        (buf.name.clone(), None)
-    } else if args.len() == 1 {
-        if crate::irc::formatting::is_channel(&args[0]) {
-            (args[0].clone(), None)
-        } else {
-            // It's a reason, part current channel
-            let buf = match app.state.active_buffer() {
-                Some(b) => b,
-                None => return,
-            };
-            (buf.name.clone(), Some(args[0].as_str()))
-        }
-    } else {
-        (args[0].clone(), Some(args[1].as_str()))
-    };
-
-    if let Some(reason) = reason {
-        let _ = sender.send(irc::proto::Command::PART(channel, Some(reason.to_string())));
-    } else {
-        let _ = sender.send(irc::proto::Command::PART(channel, None));
-    }
-}
-
-fn cmd_msg(app: &mut App, args: &[String]) {
-    if args.len() < 2 {
-        super::helpers::add_local_event(app, "Usage: /msg <target> <message>");
-        return;
+    #[test]
+    fn server_query_commands_registered() {
+        let commands = get_commands();
+        let names: Vec<&str> = commands.iter().map(|(name, _)| *name).collect();
+        assert!(names.contains(&"info"), "/info command not registered");
+        assert!(names.contains(&"admin"), "/admin command not registered");
+        assert!(names.contains(&"lusers"), "/lusers command not registered");
+        assert!(names.contains(&"time"), "/time command not registered");
+        assert!(names.contains(&"stats"), "/stats command not registered");
+        assert!(names.contains(&"links"), "/links command not registered");
     }
 
-    let target = &args[0];
-    let text = &args[1];
-
-    let (conn_id, nick) = {
-        let conn_id = match app.active_conn_id() {
-            Some(id) => id,
-            None => {
-                super::helpers::add_local_event(app, "No active connection");
-                return;
-            }
-        };
-        let nick = app
-            .state
-            .connections
-            .get(&conn_id)
-            .map(|c| c.nick.clone())
-            .unwrap_or_default();
-        (conn_id, nick)
-    };
-
-    if let Some(handle) = app.irc_handles.get(&conn_id)
-        && let Err(e) = handle.sender.send_privmsg(target, text)
-    {
-        super::helpers::add_local_event(
-            app,
-            &format!("Failed to send message: {e}"),
-        );
-        return;
-    }
-
-    // Create query buffer if needed and echo
-    let buffer_id = crate::state::buffer::make_buffer_id(&conn_id, target);
-    if !app.state.buffers.contains_key(&buffer_id) && !crate::irc::formatting::is_channel(target) {
-        app.state.add_buffer(crate::state::buffer::Buffer {
-            id: buffer_id.clone(),
-            connection_id: conn_id,
-            buffer_type: crate::state::buffer::BufferType::Query,
-            name: target.to_string(),
-            messages: Vec::new(),
-            activity: crate::state::buffer::ActivityLevel::None,
-            unread_count: 0,
-            last_read: chrono::Utc::now(),
-            topic: None,
-            topic_set_by: None,
-            users: std::collections::HashMap::new(),
-            modes: None,
-            mode_params: None,
-            list_modes: std::collections::HashMap::new(),
-        });
-    }
-
-    let id = app.state.next_message_id();
-    app.state.add_message(
-        &buffer_id,
-        crate::state::buffer::Message {
-            id,
-            timestamp: chrono::Utc::now(),
-            message_type: crate::state::buffer::MessageType::Message,
-            nick: Some(nick),
-            nick_mode: None,
-            text: text.to_string(),
-            highlight: false,
-            event_key: None,
-            event_params: None,
-        },
-    );
-    app.state.set_active_buffer(&buffer_id);
-}
-
-fn cmd_me(app: &mut App, args: &[String]) {
-    if args.is_empty() {
-        super::helpers::add_local_event(app, "Usage: /me <action>");
-        return;
-    }
-
-    let action_text = &args[0];
-    let buf = match app.state.active_buffer() {
-        Some(b) => b,
-        None => return,
-    };
-    let target = buf.name.clone();
-    let conn_id = buf.connection_id.clone();
-    let nick = app
-        .state
-        .connections
-        .get(&conn_id)
-        .map(|c| c.nick.clone())
-        .unwrap_or_default();
-
-    // Send CTCP ACTION
-    if let Some(handle) = app.irc_handles.get(&conn_id) {
-        let ctcp = format!("\x01ACTION {action_text}\x01");
-        let _ = handle.sender.send_privmsg(&target, &ctcp);
-    }
-
-    // Echo locally
-    let buffer_id = app.state.active_buffer_id.clone().unwrap_or_default();
-    let id = app.state.next_message_id();
-    app.state.add_message(
-        &buffer_id,
-        crate::state::buffer::Message {
-            id,
-            timestamp: chrono::Utc::now(),
-            message_type: crate::state::buffer::MessageType::Action,
-            nick: Some(nick),
-            nick_mode: None,
-            text: action_text.to_string(),
-            highlight: false,
-            event_key: None,
-            event_params: None,
-        },
-    );
-}
-
-fn cmd_nick(app: &mut App, args: &[String]) {
-    if args.is_empty() {
-        super::helpers::add_local_event(app, "Usage: /nick <new_nick>");
-        return;
-    }
-
-    let new_nick = &args[0];
-
-    let sender = match app.active_irc_sender() {
-        Some(s) => s.clone(),
-        None => {
-            super::helpers::add_local_event(app, "Not connected");
-            return;
-        }
-    };
-
-    let _ = sender.send(irc::proto::Command::NICK(new_nick.to_string()));
-}
-
-fn cmd_topic(app: &mut App, args: &[String]) {
-    let sender = match app.active_irc_sender() {
-        Some(s) => s.clone(),
-        None => {
-            super::helpers::add_local_event(app, "Not connected");
-            return;
-        }
-    };
-
-    if args.is_empty() {
-        // Show current topic
-        if let Some(buf) = app.state.active_buffer() {
-            match &buf.topic {
-                Some(topic) => {
-                    let setter = buf
-                        .topic_set_by
-                        .as_deref()
-                        .unwrap_or("unknown");
-                    super::helpers::add_local_event(
-                        app,
-                        &format!("Topic for {}: {} (set by {setter})", buf.name, topic),
+    #[test]
+    fn server_query_commands_in_correct_category() {
+        let commands = get_commands();
+        for (name, def) in &commands {
+            match *name {
+                "info" | "admin" | "lusers" | "time" | "links" => {
+                    assert!(
+                        matches!(def.category, CommandCategory::Info),
+                        "/{name} should be in Info category, got {:?}",
+                        def.category
                     );
                 }
-                None => {
-                    super::helpers::add_local_event(
-                        app,
-                        &format!("No topic set for {}", buf.name),
-                    );
-                }
+                _ => {}
             }
         }
-        return;
     }
 
-    let (channel, topic) = if args.len() == 1 {
-        if crate::irc::formatting::is_channel(&args[0]) {
-            // Just requesting topic for a specific channel
-            let _ = sender.send(irc::proto::Command::TOPIC(args[0].clone(), None));
-            return;
+    #[test]
+    fn no_duplicate_aliases() {
+        let mut all_names: Vec<&str> = Vec::new();
+        for (name, def) in get_commands() {
+            assert!(!all_names.contains(&name), "Duplicate command name: {name}");
+            all_names.push(name);
+            for alias in def.aliases {
+                assert!(
+                    !all_names.contains(alias),
+                    "Duplicate alias: {alias}"
+                );
+                all_names.push(alias);
+            }
         }
-        // Setting topic on current channel
-        let buf = match app.state.active_buffer() {
-            Some(b) => b,
-            None => return,
-        };
-        (buf.name.clone(), args[0].clone())
-    } else {
-        (args[0].clone(), args[1].clone())
-    };
-
-    let _ = sender.send(irc::proto::Command::TOPIC(channel, Some(topic)));
-}
-
-fn cmd_kick(app: &mut App, args: &[String]) {
-    if args.is_empty() {
-        super::helpers::add_local_event(app, "Usage: /kick <nick> [reason]");
-        return;
     }
-
-    let sender = match app.active_irc_sender() {
-        Some(s) => s.clone(),
-        None => {
-            super::helpers::add_local_event(app, "Not connected");
-            return;
-        }
-    };
-
-    let nick = &args[0];
-    let reason = if args.len() > 1 {
-        Some(args[1].clone())
-    } else {
-        None
-    };
-
-    let channel = match app.state.active_buffer() {
-        Some(b) => b.name.clone(),
-        None => return,
-    };
-
-    let _ = sender.send(irc::proto::Command::KICK(
-        channel,
-        nick.to_string(),
-        reason,
-    ));
-}
-
-fn cmd_notice(app: &mut App, args: &[String]) {
-    if args.len() < 2 {
-        super::helpers::add_local_event(app, "Usage: /notice <target> <message>");
-        return;
-    }
-
-    let target = &args[0];
-    let text = &args[1];
-
-    if let Some(sender) = app.active_irc_sender() {
-        let _ = sender.send_notice(target, text);
-    } else {
-        super::helpers::add_local_event(app, "Not connected");
-    }
-}
-
-fn cmd_invite(app: &mut App, args: &[String]) {
-    if args.is_empty() {
-        super::helpers::add_local_event(app, "Usage: /invite <nick> [channel]");
-        return;
-    }
-
-    let sender = match app.active_irc_sender() {
-        Some(s) => s.clone(),
-        None => {
-            super::helpers::add_local_event(app, "Not connected");
-            return;
-        }
-    };
-
-    let nick = &args[0];
-    let channel = if args.len() > 1 {
-        args[1].clone()
-    } else {
-        match app.state.active_buffer() {
-            Some(b) => b.name.clone(),
-            None => return,
-        }
-    };
-
-    let _ = sender.send(irc::proto::Command::INVITE(
-        nick.to_string(),
-        channel,
-    ));
-}
-
-fn cmd_whois(app: &mut App, args: &[String]) {
-    if args.is_empty() {
-        super::helpers::add_local_event(app, "Usage: /whois <nick>");
-        return;
-    }
-
-    if let Some(sender) = app.active_irc_sender() {
-        let _ = sender.send(irc::proto::Command::WHOIS(
-            None,
-            args[0].to_string(),
-        ));
-    } else {
-        super::helpers::add_local_event(app, "Not connected");
-    }
-}
-
-fn cmd_quote(app: &mut App, args: &[String]) {
-    if args.is_empty() {
-        super::helpers::add_local_event(app, "Usage: /quote <raw command>");
-        return;
-    }
-
-    // Greedy parser gives us the entire raw line as args[0]
-    let raw = &args[0];
-
-    if let Some(sender) = app.active_irc_sender() {
-        // Parse the raw command into command + arguments
-        let parts: Vec<&str> = raw.splitn(2, ' ').collect();
-        let command = parts[0].to_string();
-        let args_vec: Vec<String> = if parts.len() > 1 {
-            parts[1].split_whitespace().map(String::from).collect()
-        } else {
-            vec![]
-        };
-        let _ = sender.send(irc::proto::Command::Raw(command, args_vec));
-    } else {
-        super::helpers::add_local_event(app, "Not connected");
-    }
-}
-
-fn cmd_names(app: &mut App, args: &[String]) {
-    let sender = match app.active_irc_sender() {
-        Some(s) => s.clone(),
-        None => {
-            super::helpers::add_local_event(app, "Not connected");
-            return;
-        }
-    };
-
-    let channel = if args.is_empty() {
-        match app.state.active_buffer() {
-            Some(b) => b.name.clone(),
-            None => return,
-        }
-    } else {
-        args[0].clone()
-    };
-
-    let _ = sender.send(irc::proto::Command::NAMES(
-        Some(channel),
-        None,
-    ));
 }
