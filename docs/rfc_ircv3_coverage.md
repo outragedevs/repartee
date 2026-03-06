@@ -117,8 +117,8 @@ Track implementation status of IRC protocol features in rustirc.
 | `account-notify` | Done | 3.1 | ACCOUNT command: login/logout updates `NickEntry.account` across all shared buffers |
 | `chghost` | Done | 3.2 | Host/ident change notifications; updates `NickEntry.ident`/`host`, adds event message |
 | SASL EXTERNAL | Done | 3.1 | CertFP-based authentication via client TLS certificate; `client_cert_path` config field, `run_sasl_external()` flow |
-| SASL SCRAM-SHA-256 | Not Started | 3.1 | Challenge-response SASL mechanism |
-| SASL mechanism selection | Done | — | Auto-detect best mechanism (EXTERNAL > PLAIN) or explicit override via `sasl_mechanism` config; `select_sasl_mechanism()` with 10 unit tests |
+| SASL SCRAM-SHA-256 | Done | 3.1 | RFC 5802/7677 challenge-response: PBKDF2-HMAC-SHA-256, server signature verification, AUTHENTICATE chunking; `sasl_scram.rs` with 15 unit tests |
+| SASL mechanism selection | Done | — | Auto-detect best mechanism (EXTERNAL > SCRAM-SHA-256 > PLAIN) or explicit override via `sasl_mechanism` config; `select_sasl_mechanism()` with 15 unit tests |
 
 ---
 

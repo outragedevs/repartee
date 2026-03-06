@@ -6,6 +6,7 @@ pub mod formatting;
 pub mod ignore;
 pub mod isupport;
 pub mod netsplit;
+pub mod sasl_scram;
 
 use std::collections::HashSet;
 
@@ -43,6 +44,8 @@ pub enum SaslMechanism {
     Plain,
     /// SASL EXTERNAL — client TLS certificate (`CertFP`) based.
     External,
+    /// SASL SCRAM-SHA-256 — challenge-response (RFC 5802 / RFC 7677).
+    ScramSha256,
 }
 
 impl std::fmt::Display for SaslMechanism {
@@ -50,6 +53,7 @@ impl std::fmt::Display for SaslMechanism {
         match self {
             Self::Plain => write!(f, "PLAIN"),
             Self::External => write!(f, "EXTERNAL"),
+            Self::ScramSha256 => write!(f, "SCRAM-SHA-256"),
         }
     }
 }
@@ -58,7 +62,8 @@ impl std::fmt::Display for SaslMechanism {
 ///
 /// Priority when `sasl_mechanism` is `None` (auto-detect):
 /// 1. `EXTERNAL` — only if a `client_cert_path` is configured and the server advertises it.
-/// 2. `PLAIN` — if `sasl_user` + `sasl_pass` are configured and the server advertises it.
+/// 2. `SCRAM-SHA-256` — if `sasl_user` + `sasl_pass` are configured and the server advertises it.
+/// 3. `PLAIN` — if `sasl_user` + `sasl_pass` are configured and the server advertises it.
 ///
 /// When `sasl_mechanism` is explicitly set, that mechanism is used if the server supports it.
 /// Returns `None` if no suitable mechanism can be selected.
@@ -77,6 +82,7 @@ pub fn select_sasl_mechanism(
     if let Some(override_mech) = sasl_mechanism_override {
         return match override_mech.to_ascii_uppercase().as_str() {
             "EXTERNAL" if server_has("EXTERNAL") && has_client_cert => Some(SaslMechanism::External),
+            "SCRAM-SHA-256" if server_has("SCRAM-SHA-256") && has_credentials => Some(SaslMechanism::ScramSha256),
             "PLAIN" if server_has("PLAIN") && has_credentials => Some(SaslMechanism::Plain),
             _ => {
                 tracing::warn!(
@@ -89,9 +95,12 @@ pub fn select_sasl_mechanism(
         };
     }
 
-    // Auto-detect: prefer EXTERNAL, then PLAIN
+    // Auto-detect: prefer EXTERNAL, then SCRAM-SHA-256, then PLAIN
     if has_client_cert && server_has("EXTERNAL") {
         return Some(SaslMechanism::External);
+    }
+    if has_credentials && server_has("SCRAM-SHA-256") {
+        return Some(SaslMechanism::ScramSha256);
     }
     if has_credentials && server_has("PLAIN") {
         return Some(SaslMechanism::Plain);
@@ -311,6 +320,14 @@ async fn negotiate_caps(
                     tracing::info!("authenticating via SASL EXTERNAL (client certificate)");
                     run_sasl_external(sender, stream).await
                 }
+                SaslMechanism::ScramSha256 => {
+                    if let (Some(user), Some(pass)) = (sasl_user, sasl_pass) {
+                        tracing::info!("authenticating via SASL SCRAM-SHA-256");
+                        run_sasl_scram(sender, stream, user, pass).await
+                    } else {
+                        Err(eyre!("SASL SCRAM-SHA-256 selected but credentials missing"))
+                    }
+                }
                 SaslMechanism::Plain => {
                     if let (Some(user), Some(pass)) = (sasl_user, sasl_pass) {
                         tracing::info!("authenticating via SASL PLAIN");
@@ -393,6 +410,125 @@ async fn run_sasl_plain(
     }
 
     Err(eyre!("SASL authentication: connection closed unexpectedly"))
+}
+
+/// Execute the SASL SCRAM-SHA-256 authentication handshake.
+///
+/// Assumes SASL has already been ACK'd.  Performs the three-step
+/// challenge-response protocol:
+///
+/// 1. Send `AUTHENTICATE SCRAM-SHA-256`, wait for `+`
+/// 2. Send base64-encoded client-first message, receive server-first
+/// 3. Send base64-encoded client-final message, receive server-final
+/// 4. Verify server signature and wait for 903/904
+async fn run_sasl_scram(
+    sender: &irc::client::Sender,
+    stream: &mut irc::client::ClientStream,
+    sasl_user: &str,
+    sasl_pass: &str,
+) -> Result<()> {
+    use base64::Engine as _;
+
+    let b64 = &base64::engine::general_purpose::STANDARD;
+
+    // Step 1: Initiate SCRAM-SHA-256
+    sender.send(Command::AUTHENTICATE("SCRAM-SHA-256".to_string()))?;
+
+    // Wait for AUTHENTICATE + from server
+    while let Some(result) = stream.next().await {
+        let msg = result?;
+        if let Command::AUTHENTICATE(ref param) = msg.command
+            && param == "+"
+        {
+            break;
+        }
+    }
+
+    // Step 2: Send client-first message
+    let (client_first_bare, client_first_full, client_nonce) =
+        sasl_scram::client_first(sasl_user);
+    let encoded = b64.encode(&client_first_full);
+    for chunk in sasl_scram::chunk_authenticate(&encoded) {
+        sender.send(Command::AUTHENTICATE(chunk))?;
+    }
+
+    // Step 3: Receive server-first message
+    let server_first = loop {
+        if let Some(result) = stream.next().await {
+            let msg = result?;
+            match &msg.command {
+                Command::AUTHENTICATE(param) if param != "+" => {
+                    // Decode base64 server-first
+                    let decoded = b64
+                        .decode(param)
+                        .map_err(|e| eyre!("SCRAM: invalid base64 in server-first: {e}"))?;
+                    break String::from_utf8(decoded)
+                        .map_err(|e| eyre!("SCRAM: non-UTF-8 server-first: {e}"))?;
+                }
+                Command::Response(response, _) => match response {
+                    irc::proto::Response::ERR_SASLFAIL => {
+                        return Err(eyre!("SASL SCRAM-SHA-256 authentication failed"));
+                    }
+                    irc::proto::Response::ERR_SASLABORT => {
+                        return Err(eyre!("SASL SCRAM-SHA-256 authentication aborted"));
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        } else {
+            return Err(eyre!(
+                "SASL SCRAM-SHA-256: connection closed waiting for server-first"
+            ));
+        }
+    };
+
+    // Step 4: Compute and send client-final message
+    let (client_final_msg, expected_server_sig) =
+        sasl_scram::client_final(&server_first, &client_first_bare, &client_nonce, sasl_pass)?;
+    let encoded_final = b64.encode(&client_final_msg);
+    for chunk in sasl_scram::chunk_authenticate(&encoded_final) {
+        sender.send(Command::AUTHENTICATE(chunk))?;
+    }
+
+    // Step 5: Receive server-final and verify, then wait for 903/904
+    let mut server_verified = false;
+    while let Some(result) = stream.next().await {
+        let msg = result?;
+        match &msg.command {
+            Command::AUTHENTICATE(param) if !server_verified && param != "+" => {
+                let decoded = b64
+                    .decode(param)
+                    .map_err(|e| eyre!("SCRAM: invalid base64 in server-final: {e}"))?;
+                let server_final = String::from_utf8(decoded)
+                    .map_err(|e| eyre!("SCRAM: non-UTF-8 server-final: {e}"))?;
+                if !sasl_scram::verify_server(&server_final, &expected_server_sig) {
+                    return Err(eyre!(
+                        "SCRAM: server signature verification failed — possible MITM"
+                    ));
+                }
+                server_verified = true;
+            }
+            Command::Response(response, _) => match response {
+                irc::proto::Response::RPL_SASLSUCCESS => return Ok(()),
+                irc::proto::Response::ERR_SASLFAIL => {
+                    return Err(eyre!("SASL SCRAM-SHA-256 authentication failed"));
+                }
+                irc::proto::Response::ERR_SASLTOOLONG => {
+                    return Err(eyre!("SASL SCRAM-SHA-256 message too long"));
+                }
+                irc::proto::Response::ERR_SASLABORT => {
+                    return Err(eyre!("SASL SCRAM-SHA-256 authentication aborted"));
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    Err(eyre!(
+        "SASL SCRAM-SHA-256: connection closed unexpectedly"
+    ))
 }
 
 /// Execute the SASL EXTERNAL authentication handshake.
@@ -517,5 +653,55 @@ mod tests {
     fn sasl_mechanism_display() {
         assert_eq!(SaslMechanism::Plain.to_string(), "PLAIN");
         assert_eq!(SaslMechanism::External.to_string(), "EXTERNAL");
+        assert_eq!(SaslMechanism::ScramSha256.to_string(), "SCRAM-SHA-256");
+    }
+
+    #[test]
+    fn scram_preferred_over_plain() {
+        // When both SCRAM-SHA-256 and PLAIN are available, SCRAM wins
+        let server_mechs = vec![
+            "PLAIN".to_string(),
+            "SCRAM-SHA-256".to_string(),
+        ];
+        let result = select_sasl_mechanism(&server_mechs, None, false, true);
+        assert_eq!(result, Some(SaslMechanism::ScramSha256));
+    }
+
+    #[test]
+    fn scram_falls_back_to_plain() {
+        // Server only offers PLAIN, no SCRAM-SHA-256
+        let server_mechs = vec!["PLAIN".to_string()];
+        let result = select_sasl_mechanism(&server_mechs, None, false, true);
+        assert_eq!(result, Some(SaslMechanism::Plain));
+    }
+
+    #[test]
+    fn explicit_override_scram() {
+        let server_mechs = vec![
+            "PLAIN".to_string(),
+            "SCRAM-SHA-256".to_string(),
+        ];
+        let result = select_sasl_mechanism(&server_mechs, Some("SCRAM-SHA-256"), false, true);
+        assert_eq!(result, Some(SaslMechanism::ScramSha256));
+    }
+
+    #[test]
+    fn scram_override_unavailable() {
+        // Server doesn't offer SCRAM-SHA-256, override fails
+        let server_mechs = vec!["PLAIN".to_string()];
+        let result = select_sasl_mechanism(&server_mechs, Some("SCRAM-SHA-256"), false, true);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn external_still_preferred_over_scram() {
+        // EXTERNAL > SCRAM-SHA-256 when cert is available
+        let server_mechs = vec![
+            "PLAIN".to_string(),
+            "SCRAM-SHA-256".to_string(),
+            "EXTERNAL".to_string(),
+        ];
+        let result = select_sasl_mechanism(&server_mechs, None, true, true);
+        assert_eq!(result, Some(SaslMechanism::External));
     }
 }
