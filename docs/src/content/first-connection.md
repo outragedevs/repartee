@@ -2,17 +2,17 @@
 
 ## Quick start
 
-After installing rustirc, launch it:
+After installing repartee, launch it:
 
 ```bash
-rustirc
+repartee
 ```
 
 You'll see the main UI with a status buffer. Let's connect to an IRC network.
 
 ## Add a server
 
-Edit `~/.rustirc/config.toml` (created on first run) and add a server:
+Edit `~/.repartee/config.toml` (created on first run) and add a server:
 
 ```toml
 [servers.libera]
@@ -21,7 +21,7 @@ address = "irc.libera.chat"
 port = 6697
 tls = true
 autoconnect = true
-channels = ["#rustirc"]
+channels = ["#repartee"]
 ```
 
 Or use the `/server` command at runtime:
@@ -53,10 +53,10 @@ Channels listed in your config's `channels` array are joined automatically on co
 
 ## SASL authentication
 
-For networks that support SASL (Libera Chat, OFTC, etc.), add credentials to `~/.rustirc/.env`:
+For networks that support SASL (Libera Chat, OFTC, etc.), add credentials to `~/.repartee/.env`:
 
 ```bash
-# ~/.rustirc/.env
+# ~/.repartee/.env
 LIBERA_SASL_USER=mynick
 LIBERA_SASL_PASS=hunter2
 ```

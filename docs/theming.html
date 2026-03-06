@@ -3,19 +3,19 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="rustirc — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
-  <meta name="keywords" content="irc, terminal, tui, client, chat, rustirc, ratatui, tokio, rust">
+  <meta name="description" content="repartee — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
+  <meta name="keywords" content="irc, terminal, tui, client, chat, repartee, ratatui, tokio, rust">
   <meta name="author" content="kofany">
-  <meta property="og:title" content="Theming — rustirc">
+  <meta property="og:title" content="Theming — repartee">
   <meta property="og:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by irssi, designed for the future.">
   <meta property="og:type" content="website">
-  <meta property="og:url" content="https://kofany.github.io/rustirc/">
-  <meta property="og:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <meta property="og:url" content="https://kofany.github.io/repartee/">
+  <meta property="og:image" content="https://kofany.github.io/repartee/images/chat.png">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="{{title}} — rustirc">
+  <meta name="twitter:title" content="{{title}} — repartee">
   <meta name="twitter:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust.">
-  <meta name="twitter:image" content="https://kofany.github.io/rustirc/images/chat.png">
-  <title>{{title}} — rustirc</title>
+  <meta name="twitter:image" content="https://kofany.github.io/repartee/images/chat.png">
+  <title>{{title}} — repartee</title>
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -30,7 +30,7 @@
     <!-- Sidebar navigation -->
     <aside class="sidebar">
       <div class="sidebar-header">
-        <a href="index.html" class="brand">rustirc</a>
+        <a href="index.html" class="brand">repartee</a>
         <span class="brand-tagline">Documentation</span>
       </div>
       <nav class="sidebar-nav">
@@ -79,7 +79,7 @@
       <div class="sidebar-footer">
         Built with <a href="https://www.rust-lang.org">Rust</a>
         &middot;
-        <a href="https://github.com/kofany/rustirc">GitHub</a>
+        <a href="https://github.com/kofany/repartee">GitHub</a>
       </div>
     </aside>
 
@@ -90,13 +90,13 @@
     <div class="content-wrapper">
       <main class="content">
         <h1>Theming</h1>
-<p>rustirc uses irssi-compatible format strings with 24-bit color support.</p>
+<p>repartee uses irssi-compatible format strings with 24-bit color support.</p>
 <h2>Theme files</h2>
-<p>Themes are TOML files stored in <code>~/.rustirc/themes/</code>. Set the active theme in your config:</p>
+<p>Themes are TOML files stored in <code>~/.repartee/themes/</code>. Set the active theme in your config:</p>
 <pre><code class="language-toml">[general]
 theme = &quot;mytheme&quot;
 </code></pre>
-<p>This loads <code>~/.rustirc/themes/mytheme.theme</code>.</p>
+<p>This loads <code>~/.repartee/themes/mytheme.theme</code>.</p>
 <h2>Theme structure</h2>
 <p>A theme file has two sections: <code>colors</code> and <code>abstracts</code>.</p>
 <pre><code class="language-toml">[colors]
@@ -161,7 +161,7 @@ pubmsg = &quot;{pubmsgnick $0}$1&quot;
 <p>Abstracts are named format string templates that can reference each other. They control how every UI element is rendered — from message lines to the status bar.</p>
 <p>See <a href="theming-format-strings.html">Format Strings</a> for the full format string syntax.</p>
 <h2>Default theme</h2>
-<p>If no theme is set, rustirc uses built-in defaults with a dark color scheme inspired by Tokyo Night.</p>
+<p>If no theme is set, repartee uses built-in defaults with a dark color scheme inspired by Tokyo Night.</p>
 
 
         <!-- Prev / Next navigation -->
@@ -178,7 +178,7 @@ pubmsg = &quot;{pubmsgnick $0}$1&quot;
 
         <footer class="site-footer">
           Built with <a href="https://www.rust-lang.org">Rust</a> &middot;
-          <a href="https://github.com/kofany/rustirc">GitHub</a> &middot;
+          <a href="https://github.com/kofany/repartee">GitHub</a> &middot;
           MIT License
         </footer>
       </main>

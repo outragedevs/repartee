@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn load_or_create_key_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("rustirc_crypto_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("repartee_crypto_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let env_path = dir.join(".env");
 
@@ -1500,7 +1500,7 @@ Expected: compiles cleanly
 
 **Step 4: Check binary size**
 
-Run: `ls -lh target/release/rustirc`
+Run: `ls -lh target/release/repartee`
 Expected: reasonable size (likely ~5-6MB with bundled SQLite)
 
 **Step 5: Commit any remaining fixes**

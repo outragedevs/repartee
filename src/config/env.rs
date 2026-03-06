@@ -59,7 +59,7 @@ mod tests {
 
     #[test]
     fn parse_env_file() {
-        let dir = std::env::temp_dir().join("rustirc_test_env");
+        let dir = std::env::temp_dir().join("repartee_test_env");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(".env");
         let mut f = std::fs::File::create(&path).unwrap();
@@ -77,7 +77,7 @@ mod tests {
 
     #[test]
     fn load_env_missing_file() {
-        let path = std::env::temp_dir().join("rustirc_test_nonexistent/.env");
+        let path = std::env::temp_dir().join("repartee_test_nonexistent/.env");
         let vars = load_env(&path).unwrap();
         assert!(vars.is_empty());
     }

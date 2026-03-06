@@ -1,4 +1,4 @@
-# rustirc
+# repartee
 
 A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by irssi, designed for the future.
 
@@ -11,7 +11,7 @@ A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by ir
   </div>
   <div class="card">
     <div class="card-title">irssi-style Navigation</div>
-    <div class="card-body">Esc+1–9 window switching, /commands, aliases. If you know irssi, you already know rustirc.</div>
+    <div class="card-body">Esc+1–9 window switching, /commands, aliases. If you know irssi, you already know repartee.</div>
   </div>
   <div class="card">
     <div class="card-title">Mouse Support</div>
@@ -50,10 +50,10 @@ A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by ir
 ## Quick Install
 
 ```bash
-cargo install rustirc
-rustirc
+cargo install repartee
+repartee
 ```
 
 That's it. No build steps, no configuration required. Connect to a server with `/server add` and you're chatting.
 
-New to rustirc? Start with the [Installation guide](installation.html).
+New to repartee? Start with the [Installation guide](installation.html).

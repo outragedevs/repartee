@@ -3,19 +3,19 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="rustirc — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
-  <meta name="keywords" content="irc, terminal, tui, client, chat, rustirc, ratatui, tokio, rust">
+  <meta name="description" content="repartee — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
+  <meta name="keywords" content="irc, terminal, tui, client, chat, repartee, ratatui, tokio, rust">
   <meta name="author" content="kofany">
-  <meta property="og:title" content="Getting Started — rustirc">
+  <meta property="og:title" content="Getting Started — repartee">
   <meta property="og:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by irssi, designed for the future.">
   <meta property="og:type" content="website">
-  <meta property="og:url" content="https://kofany.github.io/rustirc/">
-  <meta property="og:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <meta property="og:url" content="https://kofany.github.io/repartee/">
+  <meta property="og:image" content="https://kofany.github.io/repartee/images/chat.png">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="{{title}} — rustirc">
+  <meta name="twitter:title" content="{{title}} — repartee">
   <meta name="twitter:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust.">
-  <meta name="twitter:image" content="https://kofany.github.io/rustirc/images/chat.png">
-  <title>{{title}} — rustirc</title>
+  <meta name="twitter:image" content="https://kofany.github.io/repartee/images/chat.png">
+  <title>{{title}} — repartee</title>
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -30,7 +30,7 @@
     <!-- Sidebar navigation -->
     <aside class="sidebar">
       <div class="sidebar-header">
-        <a href="index.html" class="brand">rustirc</a>
+        <a href="index.html" class="brand">repartee</a>
         <span class="brand-tagline">Documentation</span>
       </div>
       <nav class="sidebar-nav">
@@ -79,7 +79,7 @@
       <div class="sidebar-footer">
         Built with <a href="https://www.rust-lang.org">Rust</a>
         &middot;
-        <a href="https://github.com/kofany/rustirc">GitHub</a>
+        <a href="https://github.com/kofany/repartee">GitHub</a>
       </div>
     </aside>
 
@@ -90,9 +90,9 @@
     <div class="content-wrapper">
       <main class="content">
         <h1>Scripting — Getting Started</h1>
-<p>rustirc supports Lua 5.4 scripting with a rich API modeled after WeeChat, irssi, and kokoirc.</p>
+<p>repartee supports Lua 5.4 scripting with a rich API modeled after WeeChat, irssi, and kokoirc.</p>
 <h2>Script location</h2>
-<p>Scripts live in <code>~/.rustirc/scripts/</code> as <code>.lua</code> files.</p>
+<p>Scripts live in <code>~/.repartee/scripts/</code> as <code>.lua</code> files.</p>
 <h2>Script format</h2>
 <p>Every script has two parts: a <code>meta</code> table and a <code>setup</code> function:</p>
 <pre><code class="language-lua">meta = {
@@ -188,7 +188,7 @@ autoload = [&quot;hello&quot;, &quot;urllogger&quot;]
 
         <footer class="site-footer">
           Built with <a href="https://www.rust-lang.org">Rust</a> &middot;
-          <a href="https://github.com/kofany/rustirc">GitHub</a> &middot;
+          <a href="https://github.com/kofany/repartee">GitHub</a> &middot;
           MIT License
         </footer>
       </main>

@@ -1,4 +1,4 @@
-# rustirc
+# repartee
 
 Rust IRC client — a port of kokoirc (~/dev/kokoirc) from TypeScript/OpenTUI/Bun to Rust/ratatui/tokio.
 
@@ -7,7 +7,7 @@ Rust IRC client — a port of kokoirc (~/dev/kokoirc) from TypeScript/OpenTUI/Bu
 The app name is **not finalized**. Use a single constant for the app name so it can be changed later with a simple find-and-replace. Do NOT hardcode the name in strings throughout the codebase.
 
 ```rust
-pub const APP_NAME: &str = "rustirc";
+pub const APP_NAME: &str = "repartee";
 ```
 
 All paths, config dirs, CTCP version strings, etc. must reference this constant.

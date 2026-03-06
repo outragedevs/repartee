@@ -1,10 +1,10 @@
 # Scripting — Getting Started
 
-rustirc supports Lua 5.4 scripting with a rich API modeled after WeeChat, irssi, and kokoirc.
+repartee supports Lua 5.4 scripting with a rich API modeled after WeeChat, irssi, and kokoirc.
 
 ## Script location
 
-Scripts live in `~/.rustirc/scripts/` as `.lua` files.
+Scripts live in `~/.repartee/scripts/` as `.lua` files.
 
 ## Script format
 

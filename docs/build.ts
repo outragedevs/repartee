@@ -1,5 +1,5 @@
 /**
- * rustirc Documentation — Static Site Builder
+ * repartee Documentation — Static Site Builder
  *
  * Reads markdown content, converts to HTML via `marked`, injects into a
  * page template, and writes the final site to docs/.
@@ -130,7 +130,7 @@ async function buildCommandsPage(): Promise<string> {
 
 async function build() {
   const startTime = performance.now();
-  console.log("Building rustirc documentation...\n");
+  console.log("Building repartee documentation...\n");
   const template = await Bun.file(TEMPLATE_PATH).text();
   const { mkdir } = await import("node:fs/promises");
   await mkdir(join(SITE_DIR, "css"), { recursive: true });

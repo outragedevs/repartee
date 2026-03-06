@@ -1,4 +1,4 @@
-# rustirc Implementation Plan
+# repartee Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 2024, ratatui 0.30, crossterm 0.29, tokio 1.50, irc 1.1, color-eyre, serde, toml
 
-**Reference:** Design doc at `docs/plans/2026-03-05-rustirc-ui-design.md`
+**Reference:** Design doc at `docs/plans/2026-03-05-repartee-ui-design.md`
 **Reference codebase:** kokoirc at `~/dev/kokoirc` (TypeScript source of truth)
 
 ---
@@ -27,7 +27,7 @@
 
 ```toml
 [package]
-name = "rustirc"
+name = "repartee"
 version = "0.1.0"
 edition = "2024"
 
@@ -58,7 +58,7 @@ strip = true
 **Step 2: Create src/constants.rs**
 
 ```rust
-pub const APP_NAME: &str = "rustirc";
+pub const APP_NAME: &str = "repartee";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 use std::path::PathBuf;
@@ -127,7 +127,7 @@ Expected: Compiles with no errors
 ```bash
 git init
 git add Cargo.toml Cargo.lock src/ .gitignore CLAUDE.md docs/
-git commit -m "feat: initialize rustirc project scaffold"
+git commit -m "feat: initialize repartee project scaffold"
 ```
 
 ---
@@ -1525,5 +1525,5 @@ git commit -m "feat: stub image_preview module for future implementation"
 
 ```bash
 git add -A
-git commit -m "feat: complete rustirc v0.1.0 — full IRC client with themed TUI"
+git commit -m "feat: complete repartee v0.1.0 — full IRC client with themed TUI"
 ```

@@ -1,4 +1,4 @@
-# rustirc UI & Architecture Design
+# repartee UI & Architecture Design
 
 **Date:** 2026-03-05
 **Status:** Approved

@@ -145,7 +145,7 @@ mod tests {
     fn encrypt_decrypt_roundtrip() {
         let key_hex = generate_key_hex();
         let key = import_key(&key_hex).unwrap();
-        let plaintext = "Hello, rustirc!";
+        let plaintext = "Hello, repartee!";
 
         let encrypted = encrypt(plaintext, &key).unwrap();
         let decrypted = decrypt(&encrypted.ciphertext, &encrypted.iv, &key).unwrap();
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn load_or_create_key_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("rustirc_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("repartee_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let env_file = dir.join(".env");
 

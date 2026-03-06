@@ -94,7 +94,7 @@ exclude_types = []
 - `app.rs`: `init_storage()` at startup, `shutdown_storage()` on quit
 - After each `add_message()`: call `log_message()`
 - Writer runs as spawned tokio task
-- Database file at `~/.config/rustirc/logs.db`
+- Database file at `~/.config/repartee/logs.db`
 
 ### Testing
 

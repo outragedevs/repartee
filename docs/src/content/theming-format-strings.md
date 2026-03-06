@@ -1,6 +1,6 @@
 # Format Strings
 
-rustirc implements a full irssi-compatible format string engine with extensions for 24-bit color.
+repartee implements a full irssi-compatible format string engine with extensions for 24-bit color.
 
 ## Color codes
 
@@ -64,7 +64,7 @@ Example: `$[8]0` pads argument 0 to 8 characters (right-aligned by default).
 
 ## mIRC control characters
 
-rustirc also parses mIRC-style control characters in incoming messages:
+repartee also parses mIRC-style control characters in incoming messages:
 
 | Char | Hex | Effect |
 |---|---|---|

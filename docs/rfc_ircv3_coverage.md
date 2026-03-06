@@ -1,6 +1,6 @@
 # RFC 2812 / IRCv3 Coverage Roadmap
 
-Track implementation status of IRC protocol features in rustirc.
+Track implementation status of IRC protocol features in repartee.
 
 **Legend:** Done | In Progress | Not Started
 

@@ -3,19 +3,19 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="rustirc — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
-  <meta name="keywords" content="irc, terminal, tui, client, chat, rustirc, ratatui, tokio, rust">
+  <meta name="description" content="repartee — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
+  <meta name="keywords" content="irc, terminal, tui, client, chat, repartee, ratatui, tokio, rust">
   <meta name="author" content="kofany">
-  <meta property="og:title" content="First Connection — rustirc">
+  <meta property="og:title" content="First Connection — repartee">
   <meta property="og:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by irssi, designed for the future.">
   <meta property="og:type" content="website">
-  <meta property="og:url" content="https://kofany.github.io/rustirc/">
-  <meta property="og:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <meta property="og:url" content="https://kofany.github.io/repartee/">
+  <meta property="og:image" content="https://kofany.github.io/repartee/images/chat.png">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="{{title}} — rustirc">
+  <meta name="twitter:title" content="{{title}} — repartee">
   <meta name="twitter:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust.">
-  <meta name="twitter:image" content="https://kofany.github.io/rustirc/images/chat.png">
-  <title>{{title}} — rustirc</title>
+  <meta name="twitter:image" content="https://kofany.github.io/repartee/images/chat.png">
+  <title>{{title}} — repartee</title>
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -30,7 +30,7 @@
     <!-- Sidebar navigation -->
     <aside class="sidebar">
       <div class="sidebar-header">
-        <a href="index.html" class="brand">rustirc</a>
+        <a href="index.html" class="brand">repartee</a>
         <span class="brand-tagline">Documentation</span>
       </div>
       <nav class="sidebar-nav">
@@ -79,7 +79,7 @@
       <div class="sidebar-footer">
         Built with <a href="https://www.rust-lang.org">Rust</a>
         &middot;
-        <a href="https://github.com/kofany/rustirc">GitHub</a>
+        <a href="https://github.com/kofany/repartee">GitHub</a>
       </div>
     </aside>
 
@@ -91,19 +91,19 @@
       <main class="content">
         <h1>First Connection</h1>
 <h2>Quick start</h2>
-<p>After installing rustirc, launch it:</p>
-<pre><code class="language-bash">rustirc
+<p>After installing repartee, launch it:</p>
+<pre><code class="language-bash">repartee
 </code></pre>
 <p>You&#39;ll see the main UI with a status buffer. Let&#39;s connect to an IRC network.</p>
 <h2>Add a server</h2>
-<p>Edit <code>~/.rustirc/config.toml</code> (created on first run) and add a server:</p>
+<p>Edit <code>~/.repartee/config.toml</code> (created on first run) and add a server:</p>
 <pre><code class="language-toml">[servers.libera]
 label = &quot;Libera&quot;
 address = &quot;irc.libera.chat&quot;
 port = 6697
 tls = true
 autoconnect = true
-channels = [&quot;#rustirc&quot;]
+channels = [&quot;#repartee&quot;]
 </code></pre>
 <p>Or use the <code>/server</code> command at runtime:</p>
 <pre><code>/server add libera irc.libera.chat
@@ -125,8 +125,8 @@ channels = [&quot;#rustirc&quot;]
 <li><strong>Up/Down</strong> — input history</li>
 </ul>
 <h2>SASL authentication</h2>
-<p>For networks that support SASL (Libera Chat, OFTC, etc.), add credentials to <code>~/.rustirc/.env</code>:</p>
-<pre><code class="language-bash"># ~/.rustirc/.env
+<p>For networks that support SASL (Libera Chat, OFTC, etc.), add credentials to <code>~/.repartee/.env</code>:</p>
+<pre><code class="language-bash"># ~/.repartee/.env
 LIBERA_SASL_USER=mynick
 LIBERA_SASL_PASS=hunter2
 </code></pre>
@@ -160,7 +160,7 @@ sasl_user = &quot;mynick&quot;
 
         <footer class="site-footer">
           Built with <a href="https://www.rust-lang.org">Rust</a> &middot;
-          <a href="https://github.com/kofany/rustirc">GitHub</a> &middot;
+          <a href="https://github.com/kofany/repartee">GitHub</a> &middot;
           MIT License
         </footer>
       </main>

@@ -12,7 +12,7 @@ description: Chat log management
 ## Description
 
 Manage persistent chat logs. Messages are stored in a local SQLite database
-at `~/.rustirc/logs/messages.db` with WAL mode for concurrent access.
+at `~/.repartee/logs/messages.db` with WAL mode for concurrent access.
 
 Only messages that reach the UI are logged — messages filtered by `/ignore`,
 antiflood, or script `stop()` propagation are never stored.
@@ -51,7 +51,7 @@ exclude_types = []   # filter: "message", "action", "notice", "ctcp", "event"
 ### Encryption
 
 When `encrypt = true`, message text is encrypted with AES-256-GCM using a
-256-bit key auto-generated in `~/.rustirc/.env`. No password is required —
+256-bit key auto-generated in `~/.repartee/.env`. No password is required —
 same trust model as irssi logs or SSH keys.
 
 Only the `text` column is encrypted. Network, buffer, nick, timestamp, and

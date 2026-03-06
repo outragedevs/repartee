@@ -463,7 +463,7 @@ channels = ["#general"]
 
     #[test]
     fn save_and_load_roundtrip() {
-        let dir = std::env::temp_dir().join("rustirc_test_config");
+        let dir = std::env::temp_dir().join("repartee_test_config");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
 
@@ -510,7 +510,7 @@ channels = ["#general"]
 
     #[test]
     fn load_config_missing_file() {
-        let path = std::env::temp_dir().join("rustirc_test_nonexistent/config.toml");
+        let path = std::env::temp_dir().join("repartee_test_nonexistent/config.toml");
         let config = load_config(&path).unwrap();
         assert_eq!(config.general.nick, crate::constants::APP_NAME);
     }

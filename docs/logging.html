@@ -3,19 +3,19 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="rustirc — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
-  <meta name="keywords" content="irc, terminal, tui, client, chat, rustirc, ratatui, tokio, rust">
+  <meta name="description" content="repartee — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
+  <meta name="keywords" content="irc, terminal, tui, client, chat, repartee, ratatui, tokio, rust">
   <meta name="author" content="kofany">
-  <meta property="og:title" content="Logging & Search — rustirc">
+  <meta property="og:title" content="Logging & Search — repartee">
   <meta property="og:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by irssi, designed for the future.">
   <meta property="og:type" content="website">
-  <meta property="og:url" content="https://kofany.github.io/rustirc/">
-  <meta property="og:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <meta property="og:url" content="https://kofany.github.io/repartee/">
+  <meta property="og:image" content="https://kofany.github.io/repartee/images/chat.png">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="{{title}} — rustirc">
+  <meta name="twitter:title" content="{{title}} — repartee">
   <meta name="twitter:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust.">
-  <meta name="twitter:image" content="https://kofany.github.io/rustirc/images/chat.png">
-  <title>{{title}} — rustirc</title>
+  <meta name="twitter:image" content="https://kofany.github.io/repartee/images/chat.png">
+  <title>{{title}} — repartee</title>
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -30,7 +30,7 @@
     <!-- Sidebar navigation -->
     <aside class="sidebar">
       <div class="sidebar-header">
-        <a href="index.html" class="brand">rustirc</a>
+        <a href="index.html" class="brand">repartee</a>
         <span class="brand-tagline">Documentation</span>
       </div>
       <nav class="sidebar-nav">
@@ -79,7 +79,7 @@
       <div class="sidebar-footer">
         Built with <a href="https://www.rust-lang.org">Rust</a>
         &middot;
-        <a href="https://github.com/kofany/rustirc">GitHub</a>
+        <a href="https://github.com/kofany/repartee">GitHub</a>
       </div>
     </aside>
 
@@ -90,7 +90,7 @@
     <div class="content-wrapper">
       <main class="content">
         <h1>Logging &amp; Search</h1>
-<p>rustirc includes a built-in logging system backed by SQLite with optional encryption and full-text search.</p>
+<p>repartee includes a built-in logging system backed by SQLite with optional encryption and full-text search.</p>
 <h2>Configuration</h2>
 <pre><code class="language-toml">[logging]
 enabled = true
@@ -99,7 +99,7 @@ retention_days = 0       # 0 = keep forever
 exclude_types = []       # e.g. [&quot;join&quot;, &quot;part&quot;, &quot;quit&quot;]
 </code></pre>
 <h2>Storage</h2>
-<p>Logs are stored in <code>~/.rustirc/logs/messages.db</code> using SQLite with WAL (Write-Ahead Logging) mode for concurrent read/write performance.</p>
+<p>Logs are stored in <code>~/.repartee/logs/messages.db</code> using SQLite with WAL (Write-Ahead Logging) mode for concurrent read/write performance.</p>
 <h3>Database schema</h3>
 <p>Each message is stored with:</p>
 <table>
@@ -157,15 +157,15 @@ exclude_types = []       # e.g. [&quot;join&quot;, &quot;part&quot;, &quot;quit&
 </tr>
 </tbody></table>
 <h3>Fan-out deduplication</h3>
-<p>Events like QUIT and NICK affect multiple channels. rustirc stores a single full row for the first channel and reference rows (with empty text and a <code>ref_id</code> pointing to the primary) for subsequent channels. This saves storage while preserving per-channel history.</p>
+<p>Events like QUIT and NICK affect multiple channels. repartee stores a single full row for the first channel and reference rows (with empty text and a <code>ref_id</code> pointing to the primary) for subsequent channels. This saves storage while preserving per-channel history.</p>
 <h2>Encryption</h2>
-<p>When <code>encrypt = true</code>, message text is encrypted with AES-256-GCM before storage. The encryption key is derived from a passphrase stored in <code>~/.rustirc/.env</code>:</p>
-<pre><code class="language-bash"># ~/.rustirc/.env
+<p>When <code>encrypt = true</code>, message text is encrypted with AES-256-GCM before storage. The encryption key is derived from a passphrase stored in <code>~/.repartee/.env</code>:</p>
+<pre><code class="language-bash"># ~/.repartee/.env
 RUSTIRC_LOG_KEY=your-secret-passphrase
 </code></pre>
 <p>Encrypted logs can only be searched/read with the correct key.</p>
 <h2>Full-text search</h2>
-<p>rustirc uses SQLite FTS5 for fast full-text search across all logs:</p>
+<p>repartee uses SQLite FTS5 for fast full-text search across all logs:</p>
 <pre><code>/log search &lt;query&gt;
 </code></pre>
 <p>Search supports standard FTS5 syntax including phrase matching (<code>&quot;exact phrase&quot;</code>), prefix matching (<code>prefix*</code>), and boolean operators (<code>AND</code>, <code>OR</code>, <code>NOT</code>).</p>
@@ -192,7 +192,7 @@ RUSTIRC_LOG_KEY=your-secret-passphrase
 
         <footer class="site-footer">
           Built with <a href="https://www.rust-lang.org">Rust</a> &middot;
-          <a href="https://github.com/kofany/rustirc">GitHub</a> &middot;
+          <a href="https://github.com/kofany/repartee">GitHub</a> &middot;
           MIT License
         </footer>
       </main>

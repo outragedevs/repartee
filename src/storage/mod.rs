@@ -39,7 +39,7 @@ pub struct Storage {
 impl Storage {
     /// Initialize storage from the logging config section.
     ///
-    /// Opens (or creates) the `SQLite` database under `~/.rustirc/logs/`,
+    /// Opens (or creates) the `SQLite` database under `~/.repartee/logs/`,
     /// optionally sets up encryption, and spawns the background writer.
     pub fn init(config: &LoggingConfig) -> Result<Self, String> {
         let db_dir = constants::log_dir();

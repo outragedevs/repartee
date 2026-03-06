@@ -95,7 +95,7 @@ pub mod events {
 /// Script file layout expected by the Lua engine:
 ///
 /// ```lua
-/// -- ~/.rustirc/scripts/greet.lua
+/// -- ~/.repartee/scripts/greet.lua
 ///
 /// meta = {
 ///   name = "greet",
@@ -121,7 +121,7 @@ pub mod events {
 /// Returning a function registers it as the cleanup handler
 /// called on unload/reload.
 pub const LUA_SCRIPT_TEMPLATE: &str = r#"-- Script template
--- Save to ~/.rustirc/scripts/<name>.lua
+-- Save to ~/.repartee/scripts/<name>.lua
 
 meta = {
   name = "example",

@@ -411,7 +411,7 @@ impl App {
                 message_type: MessageType::Event,
                 nick: None,
                 nick_mode: None,
-                text: "Welcome to rustirc! Use /connect <server> to connect.".to_string(),
+                text: "Welcome to repartee! Use /connect <server> to connect.".to_string(),
                 highlight: false,
                 event_key: None,
                 event_params: None, log_msg_id: None, log_ref_id: None,

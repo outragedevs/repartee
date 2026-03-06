@@ -1,6 +1,6 @@
 # Architecture
 
-Technical overview of rustirc's internal design.
+Technical overview of repartee's internal design.
 
 ## Technology stack
 
@@ -18,7 +18,7 @@ Technical overview of rustirc's internal design.
 
 ## TEA architecture
 
-rustirc follows The Elm Architecture (TEA) pattern:
+repartee follows The Elm Architecture (TEA) pattern:
 
 ```
 Model → Message → Update → View

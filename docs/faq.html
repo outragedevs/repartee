@@ -3,19 +3,19 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="rustirc — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
-  <meta name="keywords" content="irc, terminal, tui, client, chat, rustirc, ratatui, tokio, rust">
+  <meta name="description" content="repartee — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
+  <meta name="keywords" content="irc, terminal, tui, client, chat, repartee, ratatui, tokio, rust">
   <meta name="author" content="kofany">
-  <meta property="og:title" content="FAQ — rustirc">
+  <meta property="og:title" content="FAQ — repartee">
   <meta property="og:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by irssi, designed for the future.">
   <meta property="og:type" content="website">
-  <meta property="og:url" content="https://kofany.github.io/rustirc/">
-  <meta property="og:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <meta property="og:url" content="https://kofany.github.io/repartee/">
+  <meta property="og:image" content="https://kofany.github.io/repartee/images/chat.png">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="{{title}} — rustirc">
+  <meta name="twitter:title" content="{{title}} — repartee">
   <meta name="twitter:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust.">
-  <meta name="twitter:image" content="https://kofany.github.io/rustirc/images/chat.png">
-  <title>{{title}} — rustirc</title>
+  <meta name="twitter:image" content="https://kofany.github.io/repartee/images/chat.png">
+  <title>{{title}} — repartee</title>
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -30,7 +30,7 @@
     <!-- Sidebar navigation -->
     <aside class="sidebar">
       <div class="sidebar-header">
-        <a href="index.html" class="brand">rustirc</a>
+        <a href="index.html" class="brand">repartee</a>
         <span class="brand-tagline">Documentation</span>
       </div>
       <nav class="sidebar-nav">
@@ -79,7 +79,7 @@
       <div class="sidebar-footer">
         Built with <a href="https://www.rust-lang.org">Rust</a>
         &middot;
-        <a href="https://github.com/kofany/rustirc">GitHub</a>
+        <a href="https://github.com/kofany/repartee">GitHub</a>
       </div>
     </aside>
 
@@ -90,8 +90,8 @@
     <div class="content-wrapper">
       <main class="content">
         <h1>FAQ</h1>
-<h2>What is rustirc?</h2>
-<p>rustirc is a terminal IRC client written in Rust, inspired by irssi and built as a port of <a href="https://github.com/kofany/kokoIRC">kokoirc</a> (TypeScript/OpenTUI/Bun) to Rust/ratatui/tokio.</p>
+<h2>What is repartee?</h2>
+<p>repartee is a terminal IRC client written in Rust, inspired by irssi and built as a port of <a href="https://github.com/kofany/kokoIRC">kokoirc</a> (TypeScript/OpenTUI/Bun) to Rust/ratatui/tokio.</p>
 <h2>Why Rust?</h2>
 <ul>
 <li><strong>Performance</strong>: ~5MB binary, instant startup, minimal memory usage</li>
@@ -100,13 +100,13 @@
 <li><strong>Reliability</strong>: Rust&#39;s type system catches bugs at compile time</li>
 <li><strong>Distribution</strong>: Single static binary, no runtime dependencies</li>
 </ul>
-<h2>How does rustirc compare to kokoirc?</h2>
+<h2>How does repartee compare to kokoirc?</h2>
 <table>
 <thead>
 <tr>
 <th>Feature</th>
 <th>kokoirc</th>
-<th>rustirc</th>
+<th>repartee</th>
 </tr>
 </thead>
 <tbody><tr>
@@ -145,29 +145,29 @@
 <td>irssi-compatible (same)</td>
 </tr>
 </tbody></table>
-<p>The config and theme formats are compatible — you can copy your kokoirc config to rustirc with minimal changes.</p>
+<p>The config and theme formats are compatible — you can copy your kokoirc config to repartee with minimal changes.</p>
 <h2>How do I migrate from kokoirc?</h2>
 <ol>
-<li>Copy <code>~/.kokoirc/config.toml</code> to <code>~/.rustirc/config.toml</code></li>
-<li>Copy <code>~/.kokoirc/.env</code> to <code>~/.rustirc/.env</code></li>
-<li>Copy <code>~/.kokoirc/themes/</code> to <code>~/.rustirc/themes/</code></li>
+<li>Copy <code>~/.kokoirc/config.toml</code> to <code>~/.repartee/config.toml</code></li>
+<li>Copy <code>~/.kokoirc/.env</code> to <code>~/.repartee/.env</code></li>
+<li>Copy <code>~/.kokoirc/themes/</code> to <code>~/.repartee/themes/</code></li>
 <li>Scripts need to be rewritten from TypeScript to Lua</li>
 </ol>
 <h2>How do I migrate from irssi?</h2>
-<p>rustirc uses irssi-compatible format strings, so your theme knowledge transfers directly. The key differences:</p>
+<p>repartee uses irssi-compatible format strings, so your theme knowledge transfers directly. The key differences:</p>
 <ul>
 <li>Config is TOML instead of irssi&#39;s custom format</li>
 <li>Scripts are Lua instead of Perl</li>
 <li>Most <code>/commands</code> work the same</li>
 </ul>
 <h2>Where are logs stored?</h2>
-<p><code>~/.rustirc/logs/messages.db</code> — a SQLite database with optional AES-256-GCM encryption.</p>
+<p><code>~/.repartee/logs/messages.db</code> — a SQLite database with optional AES-256-GCM encryption.</p>
 <h2>Can I use multiple IRC networks?</h2>
 <p>Yes. Add multiple <code>[servers.*]</code> sections to your config. Each gets its own connection and set of channel buffers.</p>
-<h2>Does rustirc support IRCv3?</h2>
+<h2>Does repartee support IRCv3?</h2>
 <p>The underlying <code>irc</code> crate supports IRCv3 capabilities including SASL, server-time, and CAP negotiation.</p>
 <h2>How do I report bugs?</h2>
-<p>Open an issue on the <a href="https://github.com/kofany/rustirc/issues">GitHub repository</a>.</p>
+<p>Open an issue on the <a href="https://github.com/kofany/repartee/issues">GitHub repository</a>.</p>
 
 
         <!-- Prev / Next navigation -->
@@ -181,7 +181,7 @@
 
         <footer class="site-footer">
           Built with <a href="https://www.rust-lang.org">Rust</a> &middot;
-          <a href="https://github.com/kofany/rustirc">GitHub</a> &middot;
+          <a href="https://github.com/kofany/repartee">GitHub</a> &middot;
           MIT License
         </footer>
       </main>

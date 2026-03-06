@@ -3,19 +3,19 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="rustirc — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
-  <meta name="keywords" content="irc, terminal, tui, client, chat, rustirc, ratatui, tokio, rust">
+  <meta name="description" content="repartee — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
+  <meta name="keywords" content="irc, terminal, tui, client, chat, repartee, ratatui, tokio, rust">
   <meta name="author" content="kofany">
-  <meta property="og:title" content="Commands — rustirc">
+  <meta property="og:title" content="Commands — repartee">
   <meta property="og:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by irssi, designed for the future.">
   <meta property="og:type" content="website">
-  <meta property="og:url" content="https://kofany.github.io/rustirc/">
-  <meta property="og:image" content="https://kofany.github.io/rustirc/images/chat.png">
+  <meta property="og:url" content="https://kofany.github.io/repartee/">
+  <meta property="og:image" content="https://kofany.github.io/repartee/images/chat.png">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="{{title}} — rustirc">
+  <meta name="twitter:title" content="{{title}} — repartee">
   <meta name="twitter:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust.">
-  <meta name="twitter:image" content="https://kofany.github.io/rustirc/images/chat.png">
-  <title>{{title}} — rustirc</title>
+  <meta name="twitter:image" content="https://kofany.github.io/repartee/images/chat.png">
+  <title>{{title}} — repartee</title>
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -30,7 +30,7 @@
     <!-- Sidebar navigation -->
     <aside class="sidebar">
       <div class="sidebar-header">
-        <a href="index.html" class="brand">rustirc</a>
+        <a href="index.html" class="brand">repartee</a>
         <span class="brand-tagline">Documentation</span>
       </div>
       <nav class="sidebar-nav">
@@ -79,7 +79,7 @@
       <div class="sidebar-footer">
         Built with <a href="https://www.rust-lang.org">Rust</a>
         &middot;
-        <a href="https://github.com/kofany/rustirc">GitHub</a>
+        <a href="https://github.com/kofany/repartee">GitHub</a>
       </div>
     </aside>
 
@@ -658,7 +658,7 @@ channels, server, and account status.</p>
 </code></pre>
 <h2>Description</h2>
 <p>Manage persistent chat logs. Messages are stored in a local SQLite database
-at <code>~/.rustirc/logs/messages.db</code> with WAL mode for concurrent access.</p>
+at <code>~/.repartee/logs/messages.db</code> with WAL mode for concurrent access.</p>
 <p>Only messages that reach the UI are logged — messages filtered by <code>/ignore</code>,
 antiflood, or script <code>stop()</code> propagation are never stored.</p>
 <h2>Subcommands</h2>
@@ -683,7 +683,7 @@ exclude_types = []   # filter: &quot;message&quot;, &quot;action&quot;, &quot;no
 </code></pre>
 <h3>Encryption</h3>
 <p>When <code>encrypt = true</code>, message text is encrypted with AES-256-GCM using a
-256-bit key auto-generated in <code>~/.rustirc/.env</code>. No password is required —
+256-bit key auto-generated in <code>~/.repartee/.env</code>. No password is required —
 same trust model as irssi logs or SSH keys.</p>
 <p>Only the <code>text</code> column is encrypted. Network, buffer, nick, timestamp, and
 type remain queryable for the future web frontend.</p>
@@ -1260,7 +1260,7 @@ and their format variables.</p>
 
         <footer class="site-footer">
           Built with <a href="https://www.rust-lang.org">Rust</a> &middot;
-          <a href="https://github.com/kofany/rustirc">GitHub</a> &middot;
+          <a href="https://github.com/kofany/repartee">GitHub</a> &middot;
           MIT License
         </footer>
       </main>

@@ -2,12 +2,12 @@
 
 ## Config location
 
-rustirc stores its configuration in `~/.rustirc/config.toml`. This file is created automatically on first run with sensible defaults.
+repartee stores its configuration in `~/.repartee/config.toml`. This file is created automatically on first run with sensible defaults.
 
 The full directory layout:
 
 ```
-~/.rustirc/
+~/.repartee/
   config.toml          # main configuration
   .env                 # credentials (passwords, SASL)
   themes/              # custom themes
@@ -21,11 +21,11 @@ The full directory layout:
 [general]
 nick = "mynick"
 username = "mynick"
-realname = "rustirc user"
+realname = "repartee user"
 theme = "default"
 timestamp_format = "%H:%M:%S"
 flood_protection = true
-ctcp_version = "rustirc"
+ctcp_version = "repartee"
 
 [display]
 nick_column_width = 8
@@ -53,7 +53,7 @@ port = 6697
 tls = true
 tls_verify = true
 autoconnect = true
-channels = ["#rustirc", "#secret mykey"]
+channels = ["#repartee", "#secret mykey"]
 autosendcmd = "MSG NickServ identify pass; WAIT 2000; MODE $N +i"
 # nick = "othernick"           # per-server nick override
 # sasl_user = "mynick"
@@ -91,7 +91,7 @@ levels = ["ALL"]
 
 ### `[general]`
 
-Global identity and behavior. The `nick`, `username`, and `realname` are used as defaults for all servers unless overridden per-server. Set `theme` to the name of a theme file in `~/.rustirc/themes/` (without the `.theme` extension).
+Global identity and behavior. The `nick`, `username`, and `realname` are used as defaults for all servers unless overridden per-server. Set `theme` to the name of a theme file in `~/.repartee/themes/` (without the `.theme` extension).
 
 ### `[display]`
 
@@ -119,7 +119,7 @@ Custom command shortcuts. The key is the alias name, the value is the command it
 
 ### `[scripts]`
 
-The `autoload` array lists script names to load on startup. Scripts live in `~/.rustirc/scripts/` as `.lua` files.
+The `autoload` array lists script names to load on startup. Scripts live in `~/.repartee/scripts/` as `.lua` files.
 
 ### `[[ignores]]`
 
@@ -127,10 +127,10 @@ Ignore patterns for filtering unwanted messages. Uses wildcard matching (`*!*@ho
 
 ## Credentials
 
-Passwords and SASL credentials should **not** go in `config.toml` — store them in `~/.rustirc/.env` instead.
+Passwords and SASL credentials should **not** go in `config.toml` — store them in `~/.repartee/.env` instead.
 
 ```bash
-# ~/.rustirc/.env
+# ~/.repartee/.env
 LIBERA_SASL_USER=mynick
 LIBERA_SASL_PASS=hunter2
 LIBERA_PASSWORD=serverpassword

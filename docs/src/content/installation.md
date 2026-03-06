@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- **Rust 1.85+** — rustirc uses the Rust 2024 edition. Install the toolchain with `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`.
+- **Rust 1.85+** — repartee uses the Rust 2024 edition. Install the toolchain with `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`.
 - **A terminal with 256-color or truecolor support** — any modern terminal works: iTerm2, Alacritty, kitty, WezTerm, Windows Terminal, GNOME Terminal, etc.
 
 ## Install from crates.io
@@ -10,19 +10,19 @@
 The quickest way to get started:
 
 ```bash
-cargo install rustirc
-rustirc
+cargo install repartee
+repartee
 ```
 
 ## Install from source
 
-If you want to hack on rustirc or run the latest unreleased code:
+If you want to hack on repartee or run the latest unreleased code:
 
 ```bash
-git clone https://github.com/kofany/rustirc.git
-cd rustirc
+git clone https://github.com/kofany/repartee.git
+cd repartee
 cargo build --release
-./target/release/rustirc
+./target/release/repartee
 ```
 
 ## Binary size

@@ -1,6 +1,6 @@
 # Scripting — Examples
 
-Practical Lua script examples for rustirc.
+Practical Lua script examples for repartee.
 
 ## Auto-greet on join
 

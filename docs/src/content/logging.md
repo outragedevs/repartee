@@ -1,6 +1,6 @@
 # Logging & Search
 
-rustirc includes a built-in logging system backed by SQLite with optional encryption and full-text search.
+repartee includes a built-in logging system backed by SQLite with optional encryption and full-text search.
 
 ## Configuration
 
@@ -14,7 +14,7 @@ exclude_types = []       # e.g. ["join", "part", "quit"]
 
 ## Storage
 
-Logs are stored in `~/.rustirc/logs/messages.db` using SQLite with WAL (Write-Ahead Logging) mode for concurrent read/write performance.
+Logs are stored in `~/.repartee/logs/messages.db` using SQLite with WAL (Write-Ahead Logging) mode for concurrent read/write performance.
 
 ### Database schema
 
@@ -34,14 +34,14 @@ Each message is stored with:
 
 ### Fan-out deduplication
 
-Events like QUIT and NICK affect multiple channels. rustirc stores a single full row for the first channel and reference rows (with empty text and a `ref_id` pointing to the primary) for subsequent channels. This saves storage while preserving per-channel history.
+Events like QUIT and NICK affect multiple channels. repartee stores a single full row for the first channel and reference rows (with empty text and a `ref_id` pointing to the primary) for subsequent channels. This saves storage while preserving per-channel history.
 
 ## Encryption
 
-When `encrypt = true`, message text is encrypted with AES-256-GCM before storage. The encryption key is derived from a passphrase stored in `~/.rustirc/.env`:
+When `encrypt = true`, message text is encrypted with AES-256-GCM before storage. The encryption key is derived from a passphrase stored in `~/.repartee/.env`:
 
 ```bash
-# ~/.rustirc/.env
+# ~/.repartee/.env
 RUSTIRC_LOG_KEY=your-secret-passphrase
 ```
 
@@ -49,7 +49,7 @@ Encrypted logs can only be searched/read with the correct key.
 
 ## Full-text search
 
-rustirc uses SQLite FTS5 for fast full-text search across all logs:
+repartee uses SQLite FTS5 for fast full-text search across all logs:
 
 ```
 /log search <query>

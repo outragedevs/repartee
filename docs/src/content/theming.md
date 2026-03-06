@@ -1,17 +1,17 @@
 # Theming
 
-rustirc uses irssi-compatible format strings with 24-bit color support.
+repartee uses irssi-compatible format strings with 24-bit color support.
 
 ## Theme files
 
-Themes are TOML files stored in `~/.rustirc/themes/`. Set the active theme in your config:
+Themes are TOML files stored in `~/.repartee/themes/`. Set the active theme in your config:
 
 ```toml
 [general]
 theme = "mytheme"
 ```
 
-This loads `~/.rustirc/themes/mytheme.theme`.
+This loads `~/.repartee/themes/mytheme.theme`.
 
 ## Theme structure
 
@@ -58,4 +58,4 @@ See [Format Strings](theming-format-strings.html) for the full format string syn
 
 ## Default theme
 
-If no theme is set, rustirc uses built-in defaults with a dark color scheme inspired by Tokyo Night.
+If no theme is set, repartee uses built-in defaults with a dark color scheme inspired by Tokyo Night.

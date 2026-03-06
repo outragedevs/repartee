@@ -1,4 +1,4 @@
-pub const APP_NAME: &str = "rustirc";
+pub const APP_NAME: &str = "repartee";
 #[allow(dead_code)]
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
