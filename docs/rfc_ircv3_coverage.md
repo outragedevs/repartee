@@ -100,7 +100,7 @@ Track implementation status of IRC protocol features in rustirc.
 | CAP REQ/ACK/NAK | Done | Request + detect acceptance |
 | CAP END | Done | Properly closes negotiation |
 | CAP NEW/DEL (cap-notify) | Not Started | Runtime capability changes |
-| Capability state machine | Not Started | Extensible cap negotiation framework |
+| Capability state machine | Done | Extensible `negotiate_caps()` framework: `ServerCaps` struct, requests all `DESIRED_CAPS`, stores enabled caps on Connection |
 
 ---
 

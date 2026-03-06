@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -145,6 +145,7 @@ impl App {
             should_reconnect: auto_reconnect,
             joined_channels: server_config.channels.clone(),
             origin_config: server_config.clone(),
+            enabled_caps: HashSet::new(),
         });
 
         let server_buf_id = make_buffer_id(conn_id, &server_config.label);
@@ -352,6 +353,7 @@ impl App {
                 reconnect_max_retries: None,
                 autosendcmd: None,
             },
+            enabled_caps: HashSet::new(),
         });
         state.add_buffer(Buffer {
             id: buf_id.clone(),
@@ -638,7 +640,11 @@ impl App {
                     },
                 );
             }
-            IrcEvent::Connected(conn_id) => {
+            IrcEvent::Connected(conn_id, enabled_caps) => {
+                // Store negotiated caps on connection
+                if let Some(conn) = self.state.connections.get_mut(&conn_id) {
+                    conn.enabled_caps = enabled_caps;
+                }
                 // Collect channels to rejoin before handle_connected resets state
                 let rejoin_channels =
                     crate::irc::events::channels_to_rejoin(&self.state, &conn_id);

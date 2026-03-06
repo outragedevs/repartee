@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::config::ServerConfig;
 
@@ -39,4 +39,6 @@ pub struct Connection {
     /// Stored so ad-hoc connections (from `/connect address`) can reconnect
     /// without requiring a matching entry in the config file.
     pub origin_config: ServerConfig,
+    /// `IRCv3` capabilities that were successfully negotiated with the server.
+    pub enabled_caps: HashSet<String>,
 }

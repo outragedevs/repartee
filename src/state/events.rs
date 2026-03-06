@@ -296,6 +296,7 @@ mod tests {
                 reconnect_max_retries: None,
                 autosendcmd: None,
             },
+            enabled_caps: std::collections::HashSet::new(),
         }
     }
 

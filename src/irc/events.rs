@@ -1701,6 +1701,7 @@ mod tests {
                 reconnect_max_retries: None,
                 autosendcmd: None,
             },
+            enabled_caps: std::collections::HashSet::new(),
         });
         // Server buffer
         state.add_buffer(Buffer {
