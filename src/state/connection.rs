@@ -23,6 +23,8 @@ pub struct Connection {
     pub isupport_parsed: crate::irc::isupport::Isupport,
     pub error: Option<String>,
     pub lag: Option<u64>,
+    /// Whether a PING has been sent and we're still waiting for PONG.
+    pub lag_pending: bool,
     /// Number of reconnect attempts made so far.
     pub reconnect_attempts: u32,
     /// Maximum number of reconnect attempts before giving up.

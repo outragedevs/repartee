@@ -439,6 +439,7 @@ mod tests {
             isupport_parsed: crate::irc::isupport::Isupport::new(),
             error: None,
             lag: None,
+            lag_pending: false,
             reconnect_attempts: 0,
             max_reconnect_attempts: 10,
             reconnect_delay_secs: 30,

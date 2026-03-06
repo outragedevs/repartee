@@ -66,7 +66,7 @@ pub struct App {
     /// Total line count in nick list (set during render, used for scroll clamping).
     pub nick_list_total: usize,
     /// Last CTCP PING sent time per connection, for lag measurement.
-    lag_pings: HashMap<String, Instant>,
+    pub lag_pings: HashMap<String, Instant>,
     /// `IRCv3` batch trackers per connection.
     batch_trackers: HashMap<String, crate::irc::batch::BatchTracker>,
     /// Storage subsystem for persistent message logging.
@@ -160,6 +160,7 @@ impl App {
             isupport_parsed: crate::irc::isupport::Isupport::new(),
             error: None,
             lag: None,
+            lag_pending: false,
             reconnect_attempts: 0,
             max_reconnect_attempts: reconnect_max,
             reconnect_delay_secs: reconnect_delay,
@@ -351,6 +352,7 @@ impl App {
             isupport_parsed: crate::irc::isupport::Isupport::new(),
             error: None,
             lag: None,
+            lag_pending: false,
             reconnect_attempts: 0,
             max_reconnect_attempts: 0,
             reconnect_delay_secs: 0,
@@ -587,6 +589,9 @@ impl App {
     /// Uses the current timestamp (ms since UNIX epoch) as the PING token.
     /// When the server responds with PONG containing the same token, we
     /// compute the round-trip time in `handle_irc_event`.
+    ///
+    /// If a PONG hasn't been received within 5 minutes, the connection is
+    /// considered dead and we trigger a disconnect (like irssi/erssi).
     fn measure_lag(&mut self) {
         let now = Instant::now();
         let conn_ids: Vec<String> = self.irc_handles.keys().cloned().collect();
@@ -598,6 +603,40 @@ impl App {
                 .is_some_and(|c| c.status == ConnectionStatus::Connected);
             if !is_connected {
                 continue;
+            }
+
+            // Check for lag timeout (no PONG for 5 minutes)
+            if let Some(sent_at) = self.lag_pings.get(&conn_id) {
+                let pending = self
+                    .state
+                    .connections
+                    .get(&conn_id)
+                    .is_some_and(|c| c.lag_pending);
+                if pending && sent_at.elapsed().as_secs() >= 300 {
+                    let buf_id = self.state.connections.get(&conn_id)
+                        .map_or_else(|| conn_id.clone(), |c| crate::state::buffer::make_buffer_id(&conn_id, &c.label));
+                    let msg_id = self.state.next_message_id();
+                    self.state.add_message(&buf_id, crate::state::buffer::Message {
+                        id: msg_id,
+                        timestamp: chrono::Utc::now(),
+                        message_type: crate::state::buffer::MessageType::Event,
+                        nick: None,
+                        nick_mode: None,
+                        text: format!("Connection to {conn_id} timed out (no PONG for 5 minutes)"),
+                        highlight: false,
+                        tags: std::collections::HashMap::new(),
+                        log_msg_id: None,
+                        log_ref_id: None,
+                        event_key: None,
+                        event_params: Some(Vec::new()),
+                    });
+                    if let Some(handle) = self.irc_handles.get(&conn_id) {
+                        let _ = handle.sender.send(::irc::proto::Command::QUIT(
+                            Some("Ping timeout".to_string()),
+                        ));
+                    }
+                    continue;
+                }
             }
 
             let should_ping = self
@@ -617,7 +656,10 @@ impl App {
                         vec![ts],
                     ));
                 }
-                self.lag_pings.insert(conn_id, now);
+                self.lag_pings.insert(conn_id.clone(), now);
+                if let Some(conn) = self.state.connections.get_mut(&conn_id) {
+                    conn.lag_pending = true;
+                }
             }
         }
     }
@@ -770,6 +812,7 @@ impl App {
                     let lag_ms = u64::try_from(sent_at.elapsed().as_millis()).unwrap_or(u64::MAX);
                     if let Some(conn) = self.state.connections.get_mut(&conn_id) {
                         conn.lag = Some(lag_ms);
+                        conn.lag_pending = false;
                     }
                 }
                 // Handle CAP subcommands for cap-notify (runtime capability changes)
@@ -1225,7 +1268,7 @@ impl App {
         let nicks: Vec<String> = self
             .state
             .active_buffer()
-            .map_or_else(Vec::new, |buf| buf.users.keys().cloned().collect());
+            .map_or_else(Vec::new, |buf| buf.users.values().map(|e| e.nick.clone()).collect());
         let commands = crate::commands::registry::get_command_names();
         let setting_paths = crate::commands::settings::get_setting_paths(&self.config);
         self.input.tab_complete(&nicks, &commands, &setting_paths);

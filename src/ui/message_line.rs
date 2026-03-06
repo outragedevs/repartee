@@ -16,6 +16,7 @@ pub fn render_message(
     // 1. Format timestamp
     let ts = msg
         .timestamp
+        .with_timezone(&chrono::Local)
         .format(&config.general.timestamp_format)
         .to_string();
     let ts_format = abstracts

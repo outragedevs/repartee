@@ -675,22 +675,20 @@ pub(crate) fn cmd_cycle(app: &mut App, args: &[String]) {
         .and_then(|p| p.get("k").cloned());
 
     // PART
-    let part_result = if let Some(reason) = reason {
-        sender.send(irc::proto::Command::PART(channel.clone(), Some(reason.to_string())))
-    } else {
-        sender.send(irc::proto::Command::PART(channel.clone(), None))
-    };
+    let part_result = reason.map_or_else(
+        || sender.send(irc::proto::Command::PART(channel.clone(), None)),
+        |reason| sender.send(irc::proto::Command::PART(channel.clone(), Some(reason.to_string()))),
+    );
     if let Err(e) = part_result {
         add_local_event(app, &format!("Failed to cycle {channel}: {e}"));
         return;
     }
 
     // JOIN (sent immediately — IRC guarantees command ordering on a single connection)
-    let join_result = if let Some(key) = key {
-        sender.send(irc::proto::Command::JOIN(channel.clone(), Some(key), None))
-    } else {
-        sender.send_join(&channel)
-    };
+    let join_result = key.map_or_else(
+        || sender.send_join(&channel),
+        |key| sender.send(irc::proto::Command::JOIN(channel.clone(), Some(key), None)),
+    );
     if let Err(e) = join_result {
         add_local_event(app, &format!("Failed to rejoin {channel}: {e}"));
     }

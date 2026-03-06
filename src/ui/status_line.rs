@@ -72,21 +72,34 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                 }
             }
             StatusbarItem::Lag => {
-                if let Some(lag) = conn.and_then(|c| c.lag) {
-                    #[expect(clippy::cast_precision_loss, reason = "lag in ms will never exceed f64 mantissa")]
-                    let secs = lag as f64 / 1000.0;
-                    let lag_color = if lag > 5000 {
-                        accent
-                    } else if lag > 2000 {
-                        fg_muted
-                    } else {
-                        fg
-                    };
-                    spans.push(Span::styled("Lag: ", Style::default().fg(fg_muted)));
-                    spans.push(Span::styled(
-                        format!("{secs:.1}s"),
-                        Style::default().fg(lag_color),
-                    ));
+                if let Some(c) = conn {
+                    if c.lag_pending {
+                        // Show live elapsed time with "?" while waiting for PONG
+                        if let Some(sent_at) = app.lag_pings.get(c.id.as_str()) {
+                            #[expect(clippy::cast_precision_loss, reason = "elapsed ms fits f64")]
+                            let elapsed_secs = sent_at.elapsed().as_millis() as f64 / 1000.0;
+                            spans.push(Span::styled("Lag: ", Style::default().fg(fg_muted)));
+                            spans.push(Span::styled(
+                                format!("{elapsed_secs:.1}s (?)"),
+                                Style::default().fg(accent),
+                            ));
+                        }
+                    } else if let Some(lag) = c.lag {
+                        #[expect(clippy::cast_precision_loss, reason = "lag in ms will never exceed f64 mantissa")]
+                        let secs = lag as f64 / 1000.0;
+                        let lag_color = if lag > 5000 {
+                            accent
+                        } else if lag > 2000 {
+                            fg_muted
+                        } else {
+                            fg
+                        };
+                        spans.push(Span::styled("Lag: ", Style::default().fg(fg_muted)));
+                        spans.push(Span::styled(
+                            format!("{secs:.1}s"),
+                            Style::default().fg(lag_color),
+                        ));
+                    }
                 }
             }
             StatusbarItem::ActiveWindows => {
