@@ -113,9 +113,9 @@ Track implementation status of IRC protocol features in rustirc.
 | `server-time` | Done | 3.2 | `@time` tag used as message timestamp; fallback to `Utc::now()` for missing/malformed tags |
 | `account-tag` | Done | 3.2 | User account in message tags; supplementary update on `NickEntry` via PRIVMSG tags |
 | `cap-notify` | Not Started | 3.2 | Server notifies of cap changes (CAP NEW/DEL) |
-| `away-notify` | Not Started | 3.1 | Real-time AWAY status changes |
+| `away-notify` | Done | 3.1 | Real-time AWAY status changes; silently updates `NickEntry.away` across all shared buffers |
 | `account-notify` | Done | 3.1 | ACCOUNT command: login/logout updates `NickEntry.account` across all shared buffers |
-| `chghost` | Not Started | 3.2 | Host/ident change notifications |
+| `chghost` | Done | 3.2 | Host/ident change notifications; updates `NickEntry.ident`/`host`, adds event message |
 | SASL EXTERNAL | Not Started | 3.1 | CertFP-based authentication |
 | SASL SCRAM-SHA-256 | Not Started | 3.1 | Challenge-response SASL mechanism |
 | SASL mechanism selection | Not Started | — | Pick best mechanism from server's advertised list |

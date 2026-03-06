@@ -80,6 +80,12 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
         Command::ACCOUNT(account) => {
             handle_account(state, conn_id, msg.prefix.as_ref(), account, tags);
         }
+        Command::AWAY(reason) => {
+            handle_away(state, conn_id, msg.prefix.as_ref(), reason.as_deref());
+        }
+        Command::CHGHOST(new_user, new_host) => {
+            handle_chghost(state, conn_id, msg.prefix.as_ref(), new_user, new_host, tags);
+        }
         // PING handled automatically by the irc crate
         _ => {}
     }
@@ -707,6 +713,104 @@ fn handle_account(
                 highlight: false,
                 event_key: Some("account".to_string()),
                 event_params: Some(vec![nick.clone(), account.to_string()]),
+                log_msg_id: None,
+                log_ref_id: None,
+                tags: tags.clone(),
+            },
+        );
+    }
+}
+
+/// Handle `IRCv3` `away-notify`: `:nick!user@host AWAY :reason` or `:nick!user@host AWAY`
+///
+/// When a user changes their away status, the server sends AWAY to every
+/// channel we share with them.
+///   - `reason == Some(text)` → user is away
+///   - `reason == None` → user is back
+///
+/// We silently update `NickEntry.away` without adding event messages (too noisy).
+fn handle_away(
+    state: &mut AppState,
+    conn_id: &str,
+    prefix: Option<&Prefix>,
+    reason: Option<&str>,
+) {
+    let Some(nick) = extract_nick(prefix) else {
+        return;
+    };
+
+    let is_away = reason.is_some();
+    let nick_lower = nick.to_lowercase();
+
+    for buf in state.buffers.values_mut() {
+        if buf.connection_id != conn_id {
+            continue;
+        }
+        if let Some(entry) = buf.users.get_mut(&nick_lower) {
+            entry.away = is_away;
+        }
+    }
+}
+
+/// Handle `IRCv3` `chghost`: `:nick!olduser@oldhost CHGHOST newuser newhost`
+///
+/// When a user's ident or hostname changes, the server sends CHGHOST to every
+/// channel we share with them. We update the `NickEntry` and add a subtle event
+/// message.
+#[expect(clippy::needless_pass_by_value, reason = "tags follows the convention of all other event handlers")]
+fn handle_chghost(
+    state: &mut AppState,
+    conn_id: &str,
+    prefix: Option<&Prefix>,
+    new_user: &str,
+    new_host: &str,
+    tags: HashMap<String, String>,
+) {
+    let Some(nick) = extract_nick(prefix) else {
+        return;
+    };
+
+    let nick_lower = nick.to_lowercase();
+
+    // Update ident/host in all shared buffers
+    for buf in state.buffers.values_mut() {
+        if buf.connection_id != conn_id {
+            continue;
+        }
+        if let Some(entry) = buf.users.get_mut(&nick_lower) {
+            entry.ident = Some(new_user.to_string());
+            entry.host = Some(new_host.to_string());
+        }
+    }
+
+    // Log a subtle event in every shared channel
+    let shared_buffers: Vec<String> = state
+        .buffers
+        .values()
+        .filter(|b| {
+            b.connection_id == conn_id
+                && b.buffer_type == BufferType::Channel
+                && b.users.contains_key(&nick_lower)
+        })
+        .map(|b| b.id.clone())
+        .collect();
+
+    let text = format!("{nick} changed host to {new_user}@{new_host}");
+
+    for buf_id in shared_buffers {
+        let id = state.next_message_id();
+        state.add_message(
+            &buf_id,
+            Message {
+                id,
+                timestamp: message_timestamp(&tags),
+                message_type: MessageType::Event,
+                nick: None,
+                nick_mode: None,
+                text: text.clone(),
+                highlight: false,
+                event_key: Some("chghost".to_string()),
+                event_params: Some(vec![nick.clone(), new_user.to_string(), new_host.to_string()]),
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: tags.clone(),
@@ -2727,6 +2831,243 @@ mod tests {
         assert_eq!(entry1.account.as_deref(), Some("alice_acct"));
         let entry2 = state.buffers.get("test/#other").unwrap().users.get("alice").unwrap();
         assert_eq!(entry2.account.as_deref(), Some("alice_acct"));
+    }
+
+    // === away-notify tests ===
+
+    #[test]
+    fn away_notify_sets_away() {
+        let mut state = make_test_state();
+        // Add user to channel
+        state.add_nick(
+            "test/#test",
+            NickEntry {
+                nick: "alice".to_string(),
+                prefix: String::new(),
+                modes: String::new(),
+                away: false,
+                account: None,
+                ident: None,
+                host: None,
+            },
+        );
+
+        let msg = make_irc_msg(
+            Some("alice!user@host"),
+            Command::AWAY(Some("Gone fishing".into())),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        let entry = buf.users.get("alice").unwrap();
+        assert!(entry.away, "NickEntry.away should be true after AWAY with reason");
+        // Should NOT add event messages (too noisy)
+        assert!(
+            buf.messages.is_empty(),
+            "away-notify should not add event messages"
+        );
+    }
+
+    #[test]
+    fn away_notify_clears_away() {
+        let mut state = make_test_state();
+        // Add user already marked away
+        state.add_nick(
+            "test/#test",
+            NickEntry {
+                nick: "alice".to_string(),
+                prefix: String::new(),
+                modes: String::new(),
+                away: true,
+                account: None,
+                ident: None,
+                host: None,
+            },
+        );
+
+        let msg = make_irc_msg(
+            Some("alice!user@host"),
+            Command::AWAY(None),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        let entry = buf.users.get("alice").unwrap();
+        assert!(!entry.away, "NickEntry.away should be false after AWAY without reason");
+        assert!(
+            buf.messages.is_empty(),
+            "away-notify should not add event messages"
+        );
+    }
+
+    #[test]
+    fn away_notify_updates_all_shared_buffers() {
+        let mut state = make_test_state();
+        // Create a second channel buffer
+        let chan2_id = make_buffer_id("test", "#other");
+        state.add_buffer(Buffer {
+            id: chan2_id.clone(),
+            connection_id: "test".to_string(),
+            buffer_type: BufferType::Channel,
+            name: "#other".to_string(),
+            messages: Vec::new(),
+            activity: ActivityLevel::None,
+            unread_count: 0,
+            last_read: Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: HashMap::new(),
+        });
+
+        // Add alice to both channels
+        for buf_id in &["test/#test", "test/#other"] {
+            state.add_nick(
+                buf_id,
+                NickEntry {
+                    nick: "alice".to_string(),
+                    prefix: String::new(),
+                    modes: String::new(),
+                    away: false,
+                    account: None,
+                    ident: None,
+                    host: None,
+                },
+            );
+        }
+
+        let msg = make_irc_msg(
+            Some("alice!user@host"),
+            Command::AWAY(Some("BRB".into())),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        // Both buffers should have away = true
+        let entry1 = state.buffers.get("test/#test").unwrap().users.get("alice").unwrap();
+        assert!(entry1.away);
+        let entry2 = state.buffers.get("test/#other").unwrap().users.get("alice").unwrap();
+        assert!(entry2.away);
+    }
+
+    // === chghost tests ===
+
+    #[test]
+    fn chghost_updates_ident_and_host() {
+        let mut state = make_test_state();
+        // Add user to channel
+        state.add_nick(
+            "test/#test",
+            NickEntry {
+                nick: "alice".to_string(),
+                prefix: String::new(),
+                modes: String::new(),
+                away: false,
+                account: None,
+                ident: Some("olduser".to_string()),
+                host: Some("oldhost.example.com".to_string()),
+            },
+        );
+
+        let msg = make_irc_msg(
+            Some("alice!olduser@oldhost.example.com"),
+            Command::CHGHOST("newuser".into(), "newhost.example.com".into()),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        let entry = buf.users.get("alice").unwrap();
+        assert_eq!(entry.ident.as_deref(), Some("newuser"));
+        assert_eq!(entry.host.as_deref(), Some("newhost.example.com"));
+    }
+
+    #[test]
+    fn chghost_adds_event_message() {
+        let mut state = make_test_state();
+        // Add user to channel
+        state.add_nick(
+            "test/#test",
+            NickEntry {
+                nick: "alice".to_string(),
+                prefix: String::new(),
+                modes: String::new(),
+                away: false,
+                account: None,
+                ident: None,
+                host: None,
+            },
+        );
+
+        let msg = make_irc_msg(
+            Some("alice!olduser@oldhost"),
+            Command::CHGHOST("newident".into(), "new.host.net".into()),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        assert_eq!(buf.messages.len(), 1);
+        let event = &buf.messages[0];
+        assert_eq!(event.message_type, MessageType::Event);
+        assert!(event.text.contains("alice changed host to newident@new.host.net"));
+        assert_eq!(event.event_key.as_deref(), Some("chghost"));
+    }
+
+    #[test]
+    fn chghost_updates_all_shared_buffers() {
+        let mut state = make_test_state();
+        // Create a second channel buffer
+        let chan2_id = make_buffer_id("test", "#other");
+        state.add_buffer(Buffer {
+            id: chan2_id.clone(),
+            connection_id: "test".to_string(),
+            buffer_type: BufferType::Channel,
+            name: "#other".to_string(),
+            messages: Vec::new(),
+            activity: ActivityLevel::None,
+            unread_count: 0,
+            last_read: Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: HashMap::new(),
+        });
+
+        // Add alice to both channels
+        for buf_id in &["test/#test", "test/#other"] {
+            state.add_nick(
+                buf_id,
+                NickEntry {
+                    nick: "alice".to_string(),
+                    prefix: String::new(),
+                    modes: String::new(),
+                    away: false,
+                    account: None,
+                    ident: None,
+                    host: None,
+                },
+            );
+        }
+
+        let msg = make_irc_msg(
+            Some("alice!user@host"),
+            Command::CHGHOST("changed".into(), "vhost.net".into()),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        // Both buffers should have updated ident/host
+        let entry1 = state.buffers.get("test/#test").unwrap().users.get("alice").unwrap();
+        assert_eq!(entry1.ident.as_deref(), Some("changed"));
+        assert_eq!(entry1.host.as_deref(), Some("vhost.net"));
+        let entry2 = state.buffers.get("test/#other").unwrap().users.get("alice").unwrap();
+        assert_eq!(entry2.ident.as_deref(), Some("changed"));
+        assert_eq!(entry2.host.as_deref(), Some("vhost.net"));
+
+        // Both buffers should have event messages
+        assert_eq!(state.buffers.get("test/#test").unwrap().messages.len(), 1);
+        assert_eq!(state.buffers.get("test/#other").unwrap().messages.len(), 1);
     }
 
     // === account-tag tests ===
