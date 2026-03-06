@@ -1,16 +1,19 @@
-# repartee
+# Repartee
 
 Rust IRC client — a port of kokoirc (~/dev/kokoirc) from TypeScript/OpenTUI/Bun to Rust/ratatui/tokio.
 
 ## Naming
 
-The app name is **not finalized**. Use a single constant for the app name so it can be changed later with a simple find-and-replace. Do NOT hardcode the name in strings throughout the codebase.
+The app name is **Repartee** (binary: `repartee`, alias: `reptee`).
 
 ```rust
 pub const APP_NAME: &str = "repartee";
 ```
 
-All paths, config dirs, CTCP version strings, etc. must reference this constant.
+- Config/data directory: `~/.repartee/`
+- Binary installed at: `/usr/local/bin/repartee` (symlink to `target/release/repartee`)
+- Alias: `/usr/local/bin/reptee` (symlink to same binary)
+- All paths, config dirs, CTCP version strings, etc. must reference the `APP_NAME` constant — do NOT hardcode the name in strings.
 
 ## Architecture
 
