@@ -86,6 +86,11 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
         Command::CHGHOST(new_user, new_host) => {
             handle_chghost(state, conn_id, msg.prefix.as_ref(), new_user, new_host, tags);
         }
+        // WHOX response (354) comes as Command::Raw because the irc crate
+        // doesn't recognize this non-standard numeric.
+        Command::Raw(cmd, args) if cmd == "354" => {
+            handle_whox_reply(state, conn_id, args);
+        }
         // PING handled automatically by the irc crate
         _ => {}
     }
@@ -2302,6 +2307,90 @@ fn parse_userhost(input: &str) -> (String, Option<String>, Option<String>) {
     (input.to_string(), None, None)
 }
 
+// === WHOX helpers ===
+
+/// Generate the next WHOX token for a connection and return it as a string.
+pub fn next_who_token(state: &mut AppState, conn_id: &str) -> String {
+    if let Some(conn) = state.connections.get_mut(conn_id) {
+        conn.who_token_counter = conn.who_token_counter.wrapping_add(1);
+        conn.who_token_counter.to_string()
+    } else {
+        "0".to_string()
+    }
+}
+
+/// Build a WHOX WHO command for the given channel.
+/// Returns `Some((target, fields_with_token))` if WHOX is available, `None` otherwise.
+pub fn build_whox_who(state: &mut AppState, conn_id: &str, channel: &str) -> Option<(String, String)> {
+    let has_whox = state
+        .connections
+        .get(conn_id)
+        .is_some_and(|c| c.isupport_parsed.has_whox());
+
+    if has_whox {
+        let token = next_who_token(state, conn_id);
+        let fields = format!("{},{token}", crate::constants::WHOX_FIELDS);
+        Some((channel.to_string(), fields))
+    } else {
+        None
+    }
+}
+
+/// Handle a WHOX reply (numeric 354 / `RPL_WHOSPCRPL`).
+///
+/// Our field selector `%tcuihsnfdlar` produces responses with fields:
+///   `[our_nick, token, channel, user, ip, host, server, nick, flags, hopcount, idle, account, realname]`
+///
+/// Note: The irc crate treats 354 as `Command::Raw("354", args)` since it's non-standard.
+/// The `args` vec already has `our_nick` as the first element (the trailing prefix from the Raw parse).
+fn handle_whox_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
+    // Minimum fields: our_nick(0) + token(1) + channel(2) + user(3) + ip(4) + host(5)
+    //                + server(6) + nick(7) + flags(8) + hopcount(9) + idle(10) + account(11) + realname(12)
+    if args.len() < 13 {
+        return;
+    }
+
+    // args[1] is the token — we don't need to match it for now.
+    let channel = &args[2];
+    let user = &args[3];
+    // args[4] is IP
+    let host = &args[5];
+    // args[6] is server
+    let nick = &args[7];
+    let flags = &args[8];
+    // args[9] is hopcount, args[10] is idle
+    let account_raw = &args[11];
+    let realname = &args[12];
+
+    // Parse away status from flags: H = here, G = gone
+    let away = flags.starts_with('G');
+
+    // Parse account: "0" means not logged in
+    let account = if account_raw == "0" {
+        None
+    } else {
+        Some(account_raw.clone())
+    };
+
+    // Update NickEntry in the channel buffer
+    let buffer_id = make_buffer_id(conn_id, channel);
+    if let Some(buf) = state.buffers.get_mut(&buffer_id)
+        && let Some(entry) = buf.users.get_mut(nick)
+    {
+        entry.ident = Some(user.clone());
+        entry.host = Some(host.clone());
+        entry.account.clone_from(&account);
+        entry.away = away;
+    }
+
+    // Display the WHOX line (same format as standard WHO but with account)
+    let target_buf = active_or_server_buffer(state, conn_id);
+    let account_str = account.as_deref().unwrap_or("");
+    emit(state, &target_buf, &format!(
+        "%Zc0caf5{nick}%Z565f89 ({user}@{host}) [{flags}] {channel}%Za9b1d6 {realname}%Z565f89 [{account_str}]%N"
+    ));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2352,6 +2441,7 @@ mod tests {
                 client_cert_path: None,
             },
             enabled_caps: std::collections::HashSet::new(),
+            who_token_counter: 0,
         });
         // Server buffer
         state.add_buffer(Buffer {
@@ -3867,5 +3957,246 @@ mod tests {
         // Server buffer should have no messages from this invite
         let server_buf = state.buffers.get("test/testserver").unwrap();
         assert_eq!(server_buf.messages.len(), 0);
+    }
+
+    // === WHOX tests ===
+
+    fn make_whox_state() -> AppState {
+        let mut state = make_test_state();
+        // Enable WHOX on the connection's ISUPPORT
+        if let Some(conn) = state.connections.get_mut("test") {
+            conn.isupport_parsed.parse_tokens(&["WHOX"]);
+        }
+        // Add some users to #test for WHOX updates
+        let chan_id = make_buffer_id("test", "#test");
+        state.add_nick(
+            &chan_id,
+            NickEntry {
+                nick: "alice".to_string(),
+                prefix: String::new(),
+                modes: String::new(),
+                away: false,
+                account: None,
+                ident: None,
+                host: None,
+            },
+        );
+        state.add_nick(
+            &chan_id,
+            NickEntry {
+                nick: "bob".to_string(),
+                prefix: "@".to_string(),
+                modes: "o".to_string(),
+                away: false,
+                account: None,
+                ident: None,
+                host: None,
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn whox_reply_updates_nick_entry() {
+        let mut state = make_whox_state();
+        state.set_active_buffer("test/testserver");
+
+        // WHOX 354 response: our_nick, token, channel, user, ip, host, server, nick, flags, hopcount, idle, account, realname
+        let msg = make_irc_msg(
+            None,
+            Command::Raw(
+                "354".to_string(),
+                vec![
+                    "me".to_string(),        // our_nick
+                    "1".to_string(),          // token
+                    "#test".to_string(),      // channel
+                    "~alice".to_string(),     // user
+                    "1.2.3.4".to_string(),    // ip
+                    "host.example.com".to_string(), // host
+                    "irc.server.net".to_string(),   // server
+                    "alice".to_string(),      // nick
+                    "H".to_string(),          // flags (H=here)
+                    "0".to_string(),          // hopcount
+                    "42".to_string(),         // idle
+                    "patrick".to_string(),    // account
+                    "Alice Smith".to_string(), // realname
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        let entry = buf.users.get("alice").unwrap();
+        assert_eq!(entry.ident.as_deref(), Some("~alice"));
+        assert_eq!(entry.host.as_deref(), Some("host.example.com"));
+        assert_eq!(entry.account.as_deref(), Some("patrick"));
+        assert!(!entry.away);
+    }
+
+    #[test]
+    fn whox_account_zero_means_not_logged_in() {
+        let mut state = make_whox_state();
+        state.set_active_buffer("test/testserver");
+
+        let msg = make_irc_msg(
+            None,
+            Command::Raw(
+                "354".to_string(),
+                vec![
+                    "me".to_string(),
+                    "1".to_string(),
+                    "#test".to_string(),
+                    "~bob".to_string(),
+                    "5.6.7.8".to_string(),
+                    "bob.host.net".to_string(),
+                    "irc.server.net".to_string(),
+                    "bob".to_string(),
+                    "H@".to_string(),
+                    "0".to_string(),
+                    "0".to_string(),
+                    "0".to_string(),          // account="0" → not logged in
+                    "Bob Jones".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        let entry = buf.users.get("bob").unwrap();
+        assert!(entry.account.is_none());
+    }
+
+    #[test]
+    fn whox_gone_flag_sets_away() {
+        let mut state = make_whox_state();
+        state.set_active_buffer("test/testserver");
+
+        let msg = make_irc_msg(
+            None,
+            Command::Raw(
+                "354".to_string(),
+                vec![
+                    "me".to_string(),
+                    "1".to_string(),
+                    "#test".to_string(),
+                    "~alice".to_string(),
+                    "1.2.3.4".to_string(),
+                    "host.example.com".to_string(),
+                    "irc.server.net".to_string(),
+                    "alice".to_string(),
+                    "G".to_string(),          // G = gone/away
+                    "0".to_string(),
+                    "100".to_string(),
+                    "alice_acct".to_string(),
+                    "Alice".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        let entry = buf.users.get("alice").unwrap();
+        assert!(entry.away);
+    }
+
+    #[test]
+    fn whox_here_flag_clears_away() {
+        let mut state = make_whox_state();
+
+        // First set alice as away
+        let chan_id = make_buffer_id("test", "#test");
+        if let Some(buf) = state.buffers.get_mut(&chan_id) {
+            if let Some(entry) = buf.users.get_mut("alice") {
+                entry.away = true;
+            }
+        }
+        state.set_active_buffer("test/testserver");
+
+        let msg = make_irc_msg(
+            None,
+            Command::Raw(
+                "354".to_string(),
+                vec![
+                    "me".to_string(),
+                    "1".to_string(),
+                    "#test".to_string(),
+                    "~alice".to_string(),
+                    "1.2.3.4".to_string(),
+                    "host.example.com".to_string(),
+                    "irc.server.net".to_string(),
+                    "alice".to_string(),
+                    "H".to_string(),          // H = here (not away)
+                    "0".to_string(),
+                    "0".to_string(),
+                    "0".to_string(),
+                    "Alice".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        let entry = buf.users.get("alice").unwrap();
+        assert!(!entry.away);
+    }
+
+    #[test]
+    fn standard_who_reply_still_works() {
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+
+        // Standard RPL_WHOREPLY (352)
+        let msg = make_irc_msg(
+            None,
+            Command::Response(
+                Response::RPL_WHOREPLY,
+                vec![
+                    "me".to_string(),
+                    "#test".to_string(),
+                    "~user".to_string(),
+                    "host.com".to_string(),
+                    "irc.net".to_string(),
+                    "alice".to_string(),
+                    "H@".to_string(),
+                    "0 Real Name".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        // Should display in the active/server buffer
+        let buf = state.buffers.get("test/testserver").unwrap();
+        assert_eq!(buf.messages.len(), 1);
+        assert!(buf.messages[0].text.contains("alice"));
+    }
+
+    #[test]
+    fn next_who_token_increments() {
+        let mut state = make_test_state();
+        let t1 = next_who_token(&mut state, "test");
+        let t2 = next_who_token(&mut state, "test");
+        let t3 = next_who_token(&mut state, "test");
+        assert_eq!(t1, "1");
+        assert_eq!(t2, "2");
+        assert_eq!(t3, "3");
+    }
+
+    #[test]
+    fn build_whox_who_returns_none_without_whox() {
+        let mut state = make_test_state();
+        // WHOX not enabled by default
+        assert!(build_whox_who(&mut state, "test", "#test").is_none());
+    }
+
+    #[test]
+    fn build_whox_who_returns_fields_with_whox() {
+        let mut state = make_whox_state();
+        let result = build_whox_who(&mut state, "test", "#test");
+        assert!(result.is_some());
+        let (target, fields) = result.unwrap();
+        assert_eq!(target, "#test");
+        assert!(fields.starts_with("%tcuihsnfdlar,"));
+        // Token should be "1" (first call)
+        assert!(fields.ends_with(",1"));
     }
 }

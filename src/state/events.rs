@@ -305,6 +305,7 @@ mod tests {
                 client_cert_path: None,
             },
             enabled_caps: std::collections::HashSet::new(),
+            who_token_counter: 0,
         }
     }
 

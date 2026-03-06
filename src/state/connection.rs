@@ -41,4 +41,7 @@ pub struct Connection {
     pub origin_config: ServerConfig,
     /// `IRCv3` capabilities that were successfully negotiated with the server.
     pub enabled_caps: HashSet<String>,
+    /// Counter for WHOX tokens. Each `WHO %fields,TOKEN` request gets
+    /// a unique numeric token so we can match 354 replies.
+    pub who_token_counter: u32,
 }

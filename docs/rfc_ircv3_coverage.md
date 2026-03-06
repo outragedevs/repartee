@@ -56,7 +56,7 @@ Track implementation status of IRC protocol features in rustirc.
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| WHO | Done | Basic WHO reply parsing |
+| WHO | Done | Basic WHO (352) + WHOX (354) with account tracking, auto-WHO on join |
 | WHOIS | Done | Full multi-line WHOIS display |
 | WHOWAS | Done | Offline user lookup |
 
@@ -160,7 +160,7 @@ Track implementation status of IRC protocol features in rustirc.
 
 | Feature | Status | Source | Notes |
 |---------|--------|--------|-------|
-| WHOX | Not Started | [contempt-chat/ircd](https://github.com/contempt-chat/ircd/blob/master/doc/whox.md) | Extended WHO with field selectors (%tcuihsnfdlaor), token matching, account field. Auto-detect via ISUPPORT WHOX token. |
+| WHOX | Done | [contempt-chat/ircd](https://github.com/contempt-chat/ircd/blob/master/doc/whox.md) | Extended WHO with field selectors (`%tcuihsnfdlar`), token matching, account field. Auto-detect via ISUPPORT WHOX token. `/who` sends WHOX when available, auto-WHO on channel join populates `NickEntry` (ident, host, account, away). 354 (`RPL_WHOSPCRPL`) handler with 8 tests. |
 | Extban | Not Started | [contempt-chat/ircd](https://github.com/contempt-chat/ircd/blob/master/doc/extban.md) | `$a:account!user@host` — account-based bans/exempts/invites. Display + compose support. |
 
 ---

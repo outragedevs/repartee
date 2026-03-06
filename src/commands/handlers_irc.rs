@@ -990,12 +990,36 @@ pub(crate) fn cmd_who(app: &mut App, args: &[String]) {
         return;
     }
 
+    let Some(conn_id) = app.active_conn_id() else {
+        add_local_event(app, "No active connection");
+        return;
+    };
+
     let Some(sender) = app.active_irc_sender().cloned() else {
         add_local_event(app, "Not connected");
         return;
     };
 
-    if let Err(e) = sender.send(irc::proto::Command::WHO(Some(args[0].clone()), None)) {
+    let target = &args[0];
+
+    // Check WHOX support and send extended WHO if available
+    let has_whox = app
+        .state
+        .connections
+        .get(&conn_id)
+        .is_some_and(|c| c.isupport_parsed.has_whox());
+
+    let result = if has_whox {
+        let token = crate::irc::events::next_who_token(&mut app.state, &conn_id);
+        let fields = format!("{},{token}", crate::constants::WHOX_FIELDS);
+        sender.send(irc::proto::Command::Raw(
+            "WHO".to_string(),
+            vec![target.clone(), fields],
+        ))
+    } else {
+        sender.send(irc::proto::Command::WHO(Some(target.clone()), None))
+    };
+    if let Err(e) = result {
         add_local_event(app, &format!("Failed to send WHO: {e}"));
     }
 }

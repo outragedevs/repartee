@@ -431,6 +431,7 @@ mod tests {
             joined_channels: vec!["#test".to_string()],
             origin_config: make_test_server_config(),
             enabled_caps: std::collections::HashSet::new(),
+            who_token_counter: 0,
         });
 
         let buf_id = make_buffer_id(conn_id, "#test");

@@ -149,6 +149,7 @@ impl App {
             joined_channels: server_config.channels.clone(),
             origin_config: server_config.clone(),
             enabled_caps: HashSet::new(),
+            who_token_counter: 0,
         });
 
         let server_buf_id = make_buffer_id(conn_id, &server_config.label);
@@ -360,6 +361,7 @@ impl App {
                 client_cert_path: None,
             },
             enabled_caps: HashSet::new(),
+            who_token_counter: 0,
         });
         state.add_buffer(Buffer {
             id: buf_id.clone(),
@@ -803,6 +805,17 @@ impl App {
                         false
                     };
 
+                    // Detect RPL_ENDOFNAMES to trigger auto-WHO (WHOX) after channel join.
+                    // Extract the channel name before handle_irc_message borrows state.
+                    let endofnames_channel = if let ::irc::proto::Command::Response(
+                        ::irc::proto::Response::RPL_ENDOFNAMES, ref args
+                    ) = msg.command {
+                        // args: [our_nick, channel, "End of /NAMES list."]
+                        args.get(1).cloned()
+                    } else {
+                        None
+                    };
+
                     crate::irc::events::handle_irc_message(&mut self.state, &conn_id, &msg);
 
                     // Send NICK command for nick-in-use retry
@@ -811,6 +824,18 @@ impl App {
                         && let Some(handle) = self.irc_handles.get(&conn_id)
                     {
                         let _ = handle.sender.send(::irc::proto::Command::NICK(conn.nick.clone()));
+                    }
+
+                    // Auto-WHO on channel join: send WHOX WHO if supported
+                    if let Some(channel) = endofnames_channel
+                        && let Some((target, fields)) =
+                            crate::irc::events::build_whox_who(&mut self.state, &conn_id, &channel)
+                        && let Some(handle) = self.irc_handles.get(&conn_id)
+                    {
+                        let _ = handle.sender.send(::irc::proto::Command::Raw(
+                            "WHO".to_string(),
+                            vec![target, fields],
+                        ));
                     }
                 }
             }
