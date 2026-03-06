@@ -61,7 +61,7 @@ fn render_event(msg: &Message, theme: &crate::theme::ThemeFile) -> Vec<StyledSpa
         let params: Vec<&str> = msg
             .event_params
             .as_ref()
-            .map(|p| p.iter().map(|s| s.as_str()).collect())
+            .map(|p| p.iter().map(String::as_str).collect())
             .unwrap_or_default();
         return parse_format_string(&resolved, &params);
     }
@@ -112,6 +112,7 @@ fn render_chat_message(
     // Determine format key
     let format_key = match msg.message_type {
         MessageType::Action => "action",
+        MessageType::Notice => "notice",
         _ if is_own => "own_msg",
         _ if msg.highlight => "pubmsg_mention",
         _ => "pubmsg",
@@ -144,7 +145,8 @@ mod tests {
             text: text.to_string(),
             highlight: false,
             event_key: None,
-            event_params: None,
+            event_params: None, log_msg_id: None, log_ref_id: None,
+            tags: std::collections::HashMap::new(),
         }
     }
 
@@ -181,7 +183,8 @@ mod tests {
             text: "system message".to_string(),
             highlight: false,
             event_key: None,
-            event_params: None,
+            event_params: None, log_msg_id: None, log_ref_id: None,
+            tags: std::collections::HashMap::new(),
         };
         let theme = default_theme();
         let config = default_config();

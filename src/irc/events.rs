@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::time::Instant;
 
@@ -20,15 +21,17 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
         .map(|c| c.nick.clone())
         .unwrap_or_default();
 
+    let tags = extract_tags(msg);
+
     match &msg.command {
         Command::PRIVMSG(target, text) => {
-            handle_privmsg(state, conn_id, &our_nick, msg.prefix.as_ref(), target, text);
+            handle_privmsg(state, conn_id, &our_nick, msg.prefix.as_ref(), target, text, tags);
         }
         Command::NOTICE(target, text) => {
-            handle_notice(state, conn_id, msg.prefix.as_ref(), target, text);
+            handle_notice(state, conn_id, msg.prefix.as_ref(), target, text, tags);
         }
         Command::JOIN(channel, _, _) => {
-            handle_join(state, conn_id, &our_nick, msg.prefix.as_ref(), channel);
+            handle_join(state, conn_id, &our_nick, msg.prefix.as_ref(), channel, tags);
         }
         Command::PART(channel, reason) => {
             handle_part(
@@ -38,13 +41,14 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
                 msg.prefix.as_ref(),
                 channel,
                 reason.as_deref(),
+                tags,
             );
         }
         Command::QUIT(reason) => {
-            handle_quit(state, conn_id, &our_nick, msg.prefix.as_ref(), reason.as_deref());
+            handle_quit(state, conn_id, &our_nick, msg.prefix.as_ref(), reason.as_deref(), tags);
         }
         Command::NICK(new_nick) => {
-            handle_nick_change(state, conn_id, &our_nick, msg.prefix.as_ref(), new_nick);
+            handle_nick_change(state, conn_id, &our_nick, msg.prefix.as_ref(), new_nick, tags);
         }
         Command::KICK(channel, kicked_user, reason) => {
             handle_kick(
@@ -55,16 +59,17 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
                 channel,
                 kicked_user,
                 reason.as_deref(),
+                tags,
             );
         }
         Command::TOPIC(channel, topic) => {
-            handle_topic(state, conn_id, msg.prefix.as_ref(), channel, topic.as_deref());
+            handle_topic(state, conn_id, msg.prefix.as_ref(), channel, topic.as_deref(), tags);
         }
         Command::ChannelMODE(target, _) | Command::UserMODE(target, _) => {
-            handle_mode(state, conn_id, msg.prefix.as_ref(), target, msg);
+            handle_mode(state, conn_id, msg.prefix.as_ref(), target, msg, tags);
         }
         Command::INVITE(nick, channel) => {
-            handle_invite(state, conn_id, msg.prefix.as_ref(), nick, channel);
+            handle_invite(state, conn_id, msg.prefix.as_ref(), nick, channel, tags);
         }
         Command::Response(response, args) => {
             handle_response(state, conn_id, *response, args);
@@ -107,6 +112,7 @@ pub fn handle_connected(state: &mut AppState, conn_id: &str) {
             highlight: false,
             event_key: Some("connected".to_string()),
             event_params: None, log_msg_id: None, log_ref_id: None,
+            tags: HashMap::new(),
         },
     );
 }
@@ -202,6 +208,7 @@ pub fn handle_disconnected(state: &mut AppState, conn_id: &str, error: Option<&s
             highlight: false,
             event_key: Some("disconnected".to_string()),
             event_params: None, log_msg_id: None, log_ref_id: None,
+            tags: HashMap::new(),
         },
     );
 }
@@ -223,6 +230,17 @@ fn nick_prefix(state: &AppState, buffer_id: &str, nick: &str) -> Option<String> 
     }
 }
 
+/// Extract `IRCv3` message tags from an `irc::proto::Message`.
+///
+/// Tags with no value are omitted — only `key=value` pairs are returned.
+fn extract_tags(msg: &IrcMessage) -> HashMap<String, String> {
+    msg.tags.as_ref().map_or_else(HashMap::new, |tags| {
+        tags.iter()
+            .filter_map(|tag| Some((tag.0.clone(), tag.1.as_ref()?.clone())))
+            .collect()
+    })
+}
+
 // === Private handlers ===
 
 #[expect(clippy::too_many_lines, reason = "linear message handler")]
@@ -233,6 +251,7 @@ fn handle_privmsg(
     prefix: Option<&Prefix>,
     target: &str,
     text: &str,
+    tags: HashMap<String, String>,
 ) {
     let (nick, ident, host) = extract_nick_userhost(prefix);
     let target_is_channel = is_channel(target);
@@ -319,6 +338,7 @@ fn handle_privmsg(
                     highlight: is_mention,
                     event_key: None,
                     event_params: None, log_msg_id: None, log_ref_id: None,
+                    tags,
                 },
                 activity,
             );
@@ -393,6 +413,7 @@ fn handle_privmsg(
             highlight: is_mention,
             event_key: None,
             event_params: None, log_msg_id: None, log_ref_id: None,
+            tags,
         },
         activity,
     );
@@ -404,6 +425,7 @@ fn handle_notice(
     prefix: Option<&Prefix>,
     target: &str,
     text: &str,
+    tags: HashMap<String, String>,
 ) {
     let nick = extract_nick(prefix);
     // Server notices or pre-registration notices go to status buffer
@@ -462,6 +484,7 @@ fn handle_notice(
             highlight: false,
             event_key: None,
             event_params: None, log_msg_id: None, log_ref_id: None,
+            tags,
         },
     );
 }
@@ -472,6 +495,7 @@ fn handle_join(
     our_nick: &str,
     prefix: Option<&Prefix>,
     channel: &str,
+    tags: HashMap<String, String>,
 ) {
     let (nick, ident, host) = extract_nick_userhost(prefix);
     let buffer_id = make_buffer_id(conn_id, channel);
@@ -555,6 +579,7 @@ fn handle_join(
             highlight: false,
             event_key: Some("join".to_string()),
             event_params: Some(vec![nick, ident, host, channel.to_string()]), log_msg_id: None, log_ref_id: None,
+            tags,
         },
     );
 }
@@ -566,6 +591,7 @@ fn handle_part(
     prefix: Option<&Prefix>,
     channel: &str,
     reason: Option<&str>,
+    tags: HashMap<String, String>,
 ) {
     let (nick, ident, host) = extract_nick_userhost(prefix);
     let buffer_id = make_buffer_id(conn_id, channel);
@@ -609,17 +635,20 @@ fn handle_part(
                     reason_str.to_string(),
                 ]),
                 log_msg_id: None, log_ref_id: None,
+                tags,
             },
         );
     }
 }
 
+#[expect(clippy::needless_pass_by_value, reason = "tags are dropped when ignored/netsplit, cloned into fan-out Messages otherwise")]
 fn handle_quit(
     state: &mut AppState,
     conn_id: &str,
     _our_nick: &str,
     prefix: Option<&Prefix>,
     reason: Option<&str>,
+    tags: HashMap<String, String>,
 ) {
     let (nick, ident, host) = extract_nick_userhost(prefix);
     let reason_str = reason.unwrap_or("");
@@ -683,17 +712,20 @@ fn handle_quit(
                 ]),
                 log_msg_id: if i == 0 { Some(primary_msg_id.clone()) } else { None },
                 log_ref_id: if i == 0 { None } else { Some(primary_msg_id.clone()) },
+                tags: tags.clone(),
             },
         );
     }
 }
 
+#[expect(clippy::needless_pass_by_value, reason = "tags are cloned into each fan-out Message")]
 fn handle_nick_change(
     state: &mut AppState,
     conn_id: &str,
     our_nick: &str,
     prefix: Option<&Prefix>,
     new_nick: &str,
+    tags: HashMap<String, String>,
 ) {
     let old_nick = extract_nick(prefix).unwrap_or_default();
 
@@ -778,11 +810,13 @@ fn handle_nick_change(
                 event_params: Some(vec![old_nick.clone(), new_nick.to_string()]),
                 log_msg_id: if is_primary { Some(primary_msg_id.clone()) } else { None },
                 log_ref_id: if is_primary { None } else { Some(primary_msg_id.clone()) },
+                tags: tags.clone(),
             },
         );
     }
 }
 
+#[expect(clippy::too_many_arguments, reason = "IRC KICK has many parameters")]
 fn handle_kick(
     state: &mut AppState,
     conn_id: &str,
@@ -791,6 +825,7 @@ fn handle_kick(
     channel: &str,
     kicked_user: &str,
     reason: Option<&str>,
+    tags: HashMap<String, String>,
 ) {
     let (kicker, kicker_ident, kicker_host) = extract_nick_userhost(prefix);
     let buffer_id = make_buffer_id(conn_id, channel);
@@ -826,6 +861,7 @@ fn handle_kick(
                 highlight: false,
                 event_key: None,
                 event_params: None, log_msg_id: None, log_ref_id: None,
+                tags,
             },
         );
         state.remove_buffer(&buffer_id);
@@ -850,6 +886,7 @@ fn handle_kick(
                     reason_str.to_string(),
                 ]),
                 log_msg_id: None, log_ref_id: None,
+                tags,
             },
         );
     }
@@ -861,6 +898,7 @@ fn handle_topic(
     prefix: Option<&Prefix>,
     channel: &str,
     topic: Option<&str>,
+    tags: HashMap<String, String>,
 ) {
     let nick = extract_nick(prefix);
     let buffer_id = make_buffer_id(conn_id, channel);
@@ -881,6 +919,7 @@ fn handle_topic(
                 highlight: false,
                 event_key: Some("topic_changed".to_string()),
                 event_params: Some(vec![setter, topic_text.to_string()]), log_msg_id: None, log_ref_id: None,
+                tags,
             },
         );
     }
@@ -892,6 +931,7 @@ fn handle_mode(
     prefix: Option<&Prefix>,
     target: &str,
     raw_msg: &IrcMessage,
+    tags: HashMap<String, String>,
 ) {
     let nick = extract_nick(prefix).unwrap_or_else(|| "server".to_string());
 
@@ -944,6 +984,7 @@ fn handle_mode(
                 highlight: false,
                 event_key: Some("mode".to_string()),
                 event_params: Some(vec![nick, mode_display, target.to_string()]), log_msg_id: None, log_ref_id: None,
+                tags,
             },
         );
     } else {
@@ -965,6 +1006,7 @@ fn handle_mode(
                 highlight: false,
                 event_key: Some("mode".to_string()),
                 event_params: Some(vec![nick, mode_display, target.to_string()]), log_msg_id: None, log_ref_id: None,
+                tags,
             },
         );
     }
@@ -1101,6 +1143,7 @@ fn handle_invite(
     prefix: Option<&Prefix>,
     nick: &str,
     channel: &str,
+    tags: HashMap<String, String>,
 ) {
     let inviter = extract_nick(prefix).unwrap_or_default();
 
@@ -1128,6 +1171,7 @@ fn handle_invite(
             highlight: true,
             event_key: None,
             event_params: None, log_msg_id: None, log_ref_id: None,
+            tags,
         },
     );
 }
@@ -1548,6 +1592,7 @@ fn handle_response(
                     highlight: false,
                     event_key: None,
                     event_params: None, log_msg_id: None, log_ref_id: None,
+                    tags: HashMap::new(),
                 },
             );
         }
@@ -1603,6 +1648,7 @@ fn emit(state: &mut AppState, buffer_id: &str, text: &str) {
             highlight: false,
             event_key: None,
             event_params: None, log_msg_id: None, log_ref_id: None,
+            tags: HashMap::new(),
         },
     );
 }

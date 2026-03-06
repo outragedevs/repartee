@@ -13,12 +13,12 @@ pub enum BufferType {
 }
 
 impl BufferType {
-    pub fn sort_group(&self) -> u8 {
+    pub const fn sort_group(&self) -> u8 {
         match self {
-            BufferType::Server => 1,
-            BufferType::Channel => 2,
-            BufferType::Query => 3,
-            BufferType::Special => 4,
+            Self::Server => 1,
+            Self::Channel => 2,
+            Self::Query => 3,
+            Self::Special => 4,
         }
     }
 }
@@ -48,9 +48,11 @@ pub enum MessageType {
 // === Message ===
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Message {
     pub id: u64,
     pub timestamp: DateTime<Utc>,
+    #[expect(clippy::struct_field_names, reason = "message_type is the canonical IRC term")]
     pub message_type: MessageType,
     pub nick: Option<String>,
     pub nick_mode: Option<String>,
@@ -58,11 +60,18 @@ pub struct Message {
     pub highlight: bool,
     pub event_key: Option<String>,
     pub event_params: Option<Vec<String>>,
+    /// For fan-out events: if set, used as the log row's `msg_id` (instead of auto-generating).
+    pub log_msg_id: Option<String>,
+    /// For fan-out events (quit/nick): reference rows point to the primary row's `msg_id`.
+    pub log_ref_id: Option<String>,
+    /// `IRCv3` message tags extracted from the incoming IRC message.
+    pub tags: HashMap<String, String>,
 }
 
 // === NickEntry ===
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct NickEntry {
     pub nick: String,
     pub prefix: String,
@@ -74,6 +83,7 @@ pub struct NickEntry {
 // === ListEntry ===
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ListEntry {
     pub mask: String,
     pub set_by: String,
@@ -83,9 +93,11 @@ pub struct ListEntry {
 // === Buffer ===
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Buffer {
     pub id: String,
     pub connection_id: String,
+    #[expect(clippy::struct_field_names, reason = "buffer_type clarifies the field vs the type enum")]
     pub buffer_type: BufferType,
     pub name: String,
     pub messages: Vec<Message>,

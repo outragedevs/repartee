@@ -18,7 +18,8 @@ pub fn add_local_event(app: &mut App, text: &str) {
             text: text.to_string(),
             highlight: false,
             event_key: None,
-            event_params: None,
+            event_params: None, log_msg_id: None, log_ref_id: None,
+            tags: std::collections::HashMap::new(),
         },
     );
 }

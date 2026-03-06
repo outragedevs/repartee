@@ -1,0 +1,171 @@
+use rusqlite::{Connection, params};
+
+const CREATE_MESSAGES: &str = "
+CREATE TABLE IF NOT EXISTS messages (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    msg_id    TEXT,
+    network   TEXT NOT NULL,
+    buffer    TEXT NOT NULL,
+    timestamp INTEGER NOT NULL,
+    type      TEXT NOT NULL,
+    nick      TEXT,
+    text      TEXT NOT NULL,
+    highlight INTEGER DEFAULT 0,
+    iv        BLOB,
+    ref_id    TEXT,
+    tags      TEXT
+)";
+
+const CREATE_MESSAGES_IDX: &str = "
+CREATE INDEX IF NOT EXISTS idx_messages_network_buffer
+ON messages (network, buffer, timestamp)";
+
+const CREATE_READ_MARKERS: &str = "
+CREATE TABLE IF NOT EXISTS read_markers (
+    network   TEXT NOT NULL,
+    buffer    TEXT NOT NULL,
+    client    TEXT NOT NULL,
+    last_read INTEGER NOT NULL,
+    PRIMARY KEY (network, buffer, client)
+)";
+
+const CREATE_FTS: &str = "
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts
+USING fts5(nick, text, content=messages, content_rowid=id)";
+
+const CREATE_FTS_TRIGGERS: &str = "
+CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, nick, text)
+    VALUES (new.id, new.nick, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, nick, text)
+    VALUES ('delete', old.id, old.nick, old.text);
+END;
+CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, nick, text)
+    VALUES ('delete', old.id, old.nick, old.text);
+    INSERT INTO messages_fts(rowid, nick, text)
+    VALUES (new.id, new.nick, new.text);
+END";
+
+fn apply_pragmas(db: &Connection) -> rusqlite::Result<()> {
+    db.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA synchronous=NORMAL;",
+    )
+}
+
+fn create_schema(db: &Connection, encrypt: bool) -> rusqlite::Result<()> {
+    db.execute_batch(CREATE_MESSAGES)?;
+    db.execute_batch(CREATE_MESSAGES_IDX)?;
+    db.execute_batch(CREATE_READ_MARKERS)?;
+    if !encrypt {
+        db.execute_batch(CREATE_FTS)?;
+        db.execute_batch(CREATE_FTS_TRIGGERS)?;
+    }
+    Ok(())
+}
+
+pub fn open_database(encrypt: bool) -> rusqlite::Result<Connection> {
+    let db = Connection::open_in_memory()?;
+    apply_pragmas(&db)?;
+    create_schema(&db, encrypt)?;
+    Ok(db)
+}
+
+pub fn open_database_at(path: &str, encrypt: bool) -> rusqlite::Result<Connection> {
+    let db = Connection::open(path)?;
+    apply_pragmas(&db)?;
+    create_schema(&db, encrypt)?;
+    Ok(db)
+}
+
+pub fn purge_old_messages(db: &Connection, retention_days: u32, has_fts: bool) -> usize {
+    let cutoff = chrono::Utc::now().timestamp() - i64::from(retention_days) * 86400;
+
+    if has_fts {
+        let _ = db.execute(
+            "INSERT INTO messages_fts(messages_fts, rowid, nick, text)
+             SELECT 'delete', id, nick, text
+             FROM messages WHERE timestamp < ?1",
+            params![cutoff],
+        );
+    }
+
+    db.execute("DELETE FROM messages WHERE timestamp < ?1", params![cutoff])
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn table_exists(db: &Connection, name: &str) -> bool {
+        db.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table','view') AND name = ?1",
+            params![name],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+            > 0
+    }
+
+    #[test]
+    fn open_creates_tables() {
+        let db = open_database(false).unwrap();
+        assert!(table_exists(&db, "messages"));
+    }
+
+    #[test]
+    fn open_creates_read_markers_table() {
+        let db = open_database(false).unwrap();
+        assert!(table_exists(&db, "read_markers"));
+    }
+
+    #[test]
+    fn open_creates_fts_when_not_encrypted() {
+        let db = open_database(false).unwrap();
+        assert!(table_exists(&db, "messages_fts"));
+    }
+
+    #[test]
+    fn open_skips_fts_when_encrypted() {
+        let db = open_database(true).unwrap();
+        assert!(!table_exists(&db, "messages_fts"));
+    }
+
+    #[test]
+    fn purge_removes_old_messages() {
+        let db = open_database(false).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let old = now - 100 * 86400; // 100 days ago
+
+        db.execute(
+            "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params!["old1", "net", "#chan", old, "Message", "alice", "old message", 0],
+        )
+        .unwrap();
+
+        db.execute(
+            "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params!["new1", "net", "#chan", now, "Message", "bob", "new message", 0],
+        )
+        .unwrap();
+
+        let removed = purge_old_messages(&db, 30, true);
+        assert_eq!(removed, 1);
+
+        let count: i64 = db
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let remaining: String = db
+            .query_row("SELECT msg_id FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, "new1");
+    }
+}

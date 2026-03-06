@@ -135,6 +135,11 @@ impl AppState {
             .map_or_else(|| conn_id.to_string(), |c| c.label.clone());
 
         let is_ref = message.log_ref_id.is_some();
+        let tags_json = if message.tags.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&message.tags).ok()
+        };
         let row = LogRow {
             msg_id: message.log_msg_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             network,
@@ -145,6 +150,7 @@ impl AppState {
             text: if is_ref { String::new() } else { message.text.clone() },
             highlight: message.highlight,
             ref_id: message.log_ref_id.clone(),
+            tags: tags_json,
         };
 
         let _ = tx.send(row);
@@ -330,6 +336,7 @@ mod tests {
             highlight: false,
             event_key: None,
             event_params: None, log_msg_id: None, log_ref_id: None,
+            tags: std::collections::HashMap::new(),
         }
     }
 
@@ -538,6 +545,7 @@ mod tests {
             event_params: None,
             log_msg_id: Some(primary_id.clone()),
             log_ref_id: None,
+            tags: std::collections::HashMap::new(),
         };
         state.add_message("libera/#rust", msg1);
 
@@ -554,6 +562,7 @@ mod tests {
             event_params: None,
             log_msg_id: None,
             log_ref_id: Some(primary_id.clone()),
+            tags: std::collections::HashMap::new(),
         };
         state.add_message("libera/#linux", msg2);
 

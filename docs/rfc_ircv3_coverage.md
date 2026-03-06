@@ -130,7 +130,7 @@ Track implementation status of IRC protocol features in rustirc.
 | `invite-notify` | Not Started | 3.2 | Channel members see invites |
 | `batch` | Not Started | 3.2 | NETSPLIT/NETJOIN batching, generic batch support |
 | `userhost-in-names` | Not Started | 3.2 | Full user@host in NAMES reply |
-| `message-tags` | Not Started | 3.2 | Arbitrary tag plumbing + storage |
+| `message-tags` | Done | 3.2 | Plumbing: tags extracted from IRC messages, stored in buffer `Message` and DB |
 
 ---
 

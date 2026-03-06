@@ -180,6 +180,7 @@ impl App {
                 highlight: false,
                 event_key: None,
                 event_params: None, log_msg_id: None, log_ref_id: None,
+                tags: std::collections::HashMap::new(),
             },
         );
 
@@ -386,6 +387,7 @@ impl App {
                 highlight: false,
                 event_key: None,
                 event_params: None, log_msg_id: None, log_ref_id: None,
+                tags: std::collections::HashMap::new(),
             },
         );
     }
@@ -421,6 +423,7 @@ impl App {
                         highlight: false,
                         event_key: Some("netsplit".to_string()),
                         event_params: None, log_msg_id: None, log_ref_id: None,
+                        tags: std::collections::HashMap::new(),
                     },
                 );
             }
@@ -444,6 +447,7 @@ impl App {
                 event_params: None,
                 log_msg_id: None,
                 log_ref_id: None,
+                tags: std::collections::HashMap::new(),
             },
         );
     }
@@ -1129,6 +1133,7 @@ impl App {
                 highlight: false,
                 event_key: None,
                 event_params: None, log_msg_id: None, log_ref_id: None,
+                tags: std::collections::HashMap::new(),
             },
         );
     }
