@@ -1927,8 +1927,12 @@ fn handle_response(
                 } else {
                     String::new()
                 };
+                let extban_prefix = state.connections.get(conn_id)
+                    .and_then(|c| c.isupport_parsed.extban())
+                    .map(|(prefix, _)| prefix);
+                let mask_display = crate::irc::extban::format_ban_mask(&args[2], extban_prefix);
                 emit(state, &target_buf, &format!(
-                    "%Z565f89  ban: %Za9b1d6{}{set_info}%N", args[2]
+                    "%Z565f89  ban: %Za9b1d6{mask_display}{set_info}%N"
                 ));
             }
         }
@@ -1947,8 +1951,12 @@ fn handle_response(
                 } else {
                     String::new()
                 };
+                let extban_prefix = state.connections.get(conn_id)
+                    .and_then(|c| c.isupport_parsed.extban())
+                    .map(|(prefix, _)| prefix);
+                let mask_display = crate::irc::extban::format_ban_mask(&args[2], extban_prefix);
                 emit(state, &target_buf, &format!(
-                    "%Z565f89  except: %Za9b1d6{}{set_info}%N", args[2]
+                    "%Z565f89  except: %Za9b1d6{mask_display}{set_info}%N"
                 ));
             }
         }
@@ -1966,8 +1974,12 @@ fn handle_response(
                 } else {
                     String::new()
                 };
+                let extban_prefix = state.connections.get(conn_id)
+                    .and_then(|c| c.isupport_parsed.extban())
+                    .map(|(prefix, _)| prefix);
+                let mask_display = crate::irc::extban::format_ban_mask(&args[2], extban_prefix);
                 emit(state, &target_buf, &format!(
-                    "%Z565f89  invex: %Za9b1d6{}{set_info}%N", args[2]
+                    "%Z565f89  invex: %Za9b1d6{mask_display}{set_info}%N"
                 ));
             }
         }

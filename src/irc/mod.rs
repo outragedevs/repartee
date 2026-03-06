@@ -1,6 +1,7 @@
 pub mod batch;
 pub mod cap;
 pub mod events;
+pub mod extban;
 pub mod flood;
 pub mod formatting;
 pub mod ignore;

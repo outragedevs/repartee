@@ -479,6 +479,45 @@ pub(crate) fn cmd_devoice(app: &mut App, args: &[String]) {
 }
 
 pub(crate) fn cmd_ban(app: &mut App, args: &[String]) {
+    // `/ban -a <account>` shorthand: compose an account extban mask
+    if args.len() >= 2 && args[0] == "-a" {
+        let account = &args[1];
+        let Some(sender) = app.active_irc_sender().cloned() else {
+            add_local_event(app, "Not connected");
+            return;
+        };
+        let channel = match app.state.active_buffer() {
+            Some(b) if b.buffer_type == crate::state::buffer::BufferType::Channel => b.name.clone(),
+            _ => {
+                add_local_event(app, "Not in a channel");
+                return;
+            }
+        };
+        let conn_id = app
+            .state
+            .active_buffer()
+            .map(|b| b.connection_id.clone())
+            .unwrap_or_default();
+        let extban_info = app
+            .state
+            .connections
+            .get(&conn_id)
+            .and_then(|c| c.isupport_parsed.extban());
+        let Some((prefix, types)) = extban_info else {
+            add_local_event(app, "Server does not advertise EXTBAN support");
+            return;
+        };
+        if !types.contains('a') {
+            add_local_event(app, "Server EXTBAN does not support account type ('a')");
+            return;
+        }
+        let mask = crate::irc::extban::compose_account_ban(account, Some(prefix));
+        let _ = sender.send(irc::proto::Command::Raw(
+            "MODE".to_string(),
+            vec![channel, "+b".to_string(), mask],
+        ));
+        return;
+    }
     list_mode_set(app, args, 'b');
 }
 
