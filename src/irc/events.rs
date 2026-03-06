@@ -30,8 +30,8 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
         Command::NOTICE(target, text) => {
             handle_notice(state, conn_id, msg.prefix.as_ref(), target, text, tags);
         }
-        Command::JOIN(channel, _, _) => {
-            handle_join(state, conn_id, &our_nick, msg.prefix.as_ref(), channel, tags);
+        Command::JOIN(channel, account, _) => {
+            handle_join(state, conn_id, &our_nick, msg.prefix.as_ref(), channel, account.as_deref(), tags);
         }
         Command::PART(channel, reason) => {
             handle_part(
@@ -76,6 +76,9 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
         }
         Command::WALLOPS(text) => {
             handle_wallops(state, conn_id, msg.prefix.as_ref(), text);
+        }
+        Command::ACCOUNT(account) => {
+            handle_account(state, conn_id, msg.prefix.as_ref(), account, tags);
         }
         // PING handled automatically by the irc crate
         _ => {}
@@ -308,6 +311,21 @@ fn handle_privmsg(
         });
     }
 
+    // account-tag: update NickEntry.account from message tags (supplementary)
+    if let Some(tag_account) = tags.get("account") {
+        let account = if tag_account == "*" {
+            None
+        } else {
+            Some(tag_account.clone())
+        };
+        if target_is_channel
+            && let Some(buf) = state.buffers.get_mut(&buffer_id)
+            && let Some(entry) = buf.users.get_mut(&nick.to_lowercase())
+        {
+            entry.account.clone_from(&account);
+        }
+    }
+
     // Check if this is a CTCP ACTION
     if is_ctcp {
         let inner = &text[1..text.len() - 1];
@@ -495,10 +513,24 @@ fn handle_join(
     our_nick: &str,
     prefix: Option<&Prefix>,
     channel: &str,
+    extended_account: Option<&str>,
     tags: HashMap<String, String>,
 ) {
     let (nick, ident, host) = extract_nick_userhost(prefix);
     let buffer_id = make_buffer_id(conn_id, channel);
+
+    // extended-join: account from second JOIN arg ("*" means not logged in)
+    let account = match extended_account {
+        Some("*") | None => None,
+        Some(a) => Some(a.to_string()),
+    };
+
+    // account-tag: supplementary source (only if extended-join didn't provide one)
+    let account = account.or_else(|| {
+        tags.get("account").and_then(|a| {
+            if a == "*" { None } else { Some(a.clone()) }
+        })
+    });
 
     // --- Ignore check (never ignore our own joins) ---
     if nick != our_nick
@@ -519,7 +551,7 @@ fn handle_join(
                 prefix: String::new(),
                 modes: String::new(),
                 away: false,
-                account: None,
+                account,
                 ident: None,
                 host: None,
             },
@@ -557,7 +589,7 @@ fn handle_join(
                 prefix: String::new(),
                 modes: String::new(),
                 away: false,
-                account: None,
+                account,
                 ident: None,
                 host: None,
             },
@@ -586,6 +618,90 @@ fn handle_join(
             tags,
         },
     );
+}
+
+/// Update a nick's `account` field in every buffer on a given connection that
+/// contains that nick.  Used by `account-notify` and `account-tag`.
+fn update_nick_account_in_buffers(
+    state: &mut AppState,
+    conn_id: &str,
+    nick: &str,
+    account: Option<&str>,
+) {
+    let nick_lower = nick.to_lowercase();
+    for buf in state.buffers.values_mut() {
+        if buf.connection_id != conn_id {
+            continue;
+        }
+        if let Some(entry) = buf.users.get_mut(&nick_lower) {
+            entry.account = account.map(str::to_string);
+        }
+    }
+}
+
+/// Handle `IRCv3` `account-notify`: `:nick!user@host ACCOUNT account_name`
+///
+/// When a user logs in or out of their NickServ/services account the server
+/// sends this command to every channel we share with them.
+///   - `account == "*"` → logged out (clear account)
+///   - otherwise → logged in as `account`
+#[expect(clippy::needless_pass_by_value, reason = "tags follows the convention of all other event handlers")]
+fn handle_account(
+    state: &mut AppState,
+    conn_id: &str,
+    prefix: Option<&Prefix>,
+    account: &str,
+    tags: HashMap<String, String>,
+) {
+    let Some(nick) = extract_nick(prefix) else {
+        return;
+    };
+
+    let resolved: Option<&str> = if account == "*" {
+        None
+    } else {
+        Some(account)
+    };
+
+    update_nick_account_in_buffers(state, conn_id, &nick, resolved);
+
+    // Log a subtle event in every shared channel
+    let shared_buffers: Vec<String> = state
+        .buffers
+        .values()
+        .filter(|b| {
+            b.connection_id == conn_id
+                && b.buffer_type == BufferType::Channel
+                && b.users.contains_key(&nick.to_lowercase())
+        })
+        .map(|b| b.id.clone())
+        .collect();
+
+    let text = resolved.map_or_else(
+        || format!("{nick} has logged out"),
+        |acct| format!("{nick} is now logged in as {acct}"),
+    );
+
+    for buf_id in shared_buffers {
+        let id = state.next_message_id();
+        state.add_message(
+            &buf_id,
+            Message {
+                id,
+                timestamp: Utc::now(),
+                message_type: MessageType::Event,
+                nick: None,
+                nick_mode: None,
+                text: text.clone(),
+                highlight: false,
+                event_key: Some("account".to_string()),
+                event_params: Some(vec![nick.clone(), account.to_string()]),
+                log_msg_id: None,
+                log_ref_id: None,
+                tags: tags.clone(),
+            },
+        );
+    }
 }
 
 fn handle_part(
@@ -2433,5 +2549,217 @@ mod tests {
         let buf = state.buffers.get("test/testserver").unwrap();
         assert!(buf.messages.last().unwrap().text.contains("Looking up"));
         assert_eq!(buf.messages.last().unwrap().message_type, MessageType::Notice);
+    }
+
+    // === extended-join tests ===
+
+    #[test]
+    fn extended_join_with_account() {
+        let mut state = make_test_state();
+        // extended-join: JOIN #channel account :Real Name
+        let msg = make_irc_msg(
+            Some("carol!user@host"),
+            Command::JOIN("#test".into(), Some("patrick".into()), Some("Real Name".into())),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        assert!(buf.users.contains_key("carol"));
+        let entry = buf.users.get("carol").unwrap();
+        assert_eq!(entry.account.as_deref(), Some("patrick"));
+    }
+
+    #[test]
+    fn extended_join_without_account() {
+        let mut state = make_test_state();
+        // extended-join with "*" means not logged in
+        let msg = make_irc_msg(
+            Some("carol!user@host"),
+            Command::JOIN("#test".into(), Some("*".into()), Some("Real Name".into())),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        assert!(buf.users.contains_key("carol"));
+        let entry = buf.users.get("carol").unwrap();
+        assert_eq!(entry.account, None);
+    }
+
+    #[test]
+    fn standard_join_no_account() {
+        let mut state = make_test_state();
+        // Standard JOIN (1 arg) — no account info
+        let msg = make_irc_msg(
+            Some("carol!user@host"),
+            Command::JOIN("#test".into(), None, None),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        assert!(buf.users.contains_key("carol"));
+        let entry = buf.users.get("carol").unwrap();
+        assert_eq!(entry.account, None);
+    }
+
+    // === account-notify tests ===
+
+    #[test]
+    fn account_notify_login() {
+        let mut state = make_test_state();
+        // Add user to channel first
+        state.add_nick(
+            "test/#test",
+            NickEntry {
+                nick: "alice".to_string(),
+                prefix: String::new(),
+                modes: String::new(),
+                away: false,
+                account: None,
+                ident: None,
+                host: None,
+            },
+        );
+
+        let msg = make_irc_msg(
+            Some("alice!user@host"),
+            Command::ACCOUNT("alice_account".into()),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        let entry = buf.users.get("alice").unwrap();
+        assert_eq!(entry.account.as_deref(), Some("alice_account"));
+        // Should have an event message
+        assert!(buf.messages.last().unwrap().text.contains("alice is now logged in as alice_account"));
+    }
+
+    #[test]
+    fn account_notify_logout() {
+        let mut state = make_test_state();
+        // Add user with an account
+        state.add_nick(
+            "test/#test",
+            NickEntry {
+                nick: "alice".to_string(),
+                prefix: String::new(),
+                modes: String::new(),
+                away: false,
+                account: Some("alice_account".to_string()),
+                ident: None,
+                host: None,
+            },
+        );
+
+        let msg = make_irc_msg(
+            Some("alice!user@host"),
+            Command::ACCOUNT("*".into()),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        let entry = buf.users.get("alice").unwrap();
+        assert_eq!(entry.account, None);
+        assert!(buf.messages.last().unwrap().text.contains("alice has logged out"));
+    }
+
+    #[test]
+    fn account_notify_updates_all_shared_buffers() {
+        let mut state = make_test_state();
+        // Create a second channel buffer
+        let chan2_id = make_buffer_id("test", "#other");
+        state.add_buffer(Buffer {
+            id: chan2_id.clone(),
+            connection_id: "test".to_string(),
+            buffer_type: BufferType::Channel,
+            name: "#other".to_string(),
+            messages: Vec::new(),
+            activity: ActivityLevel::None,
+            unread_count: 0,
+            last_read: Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: HashMap::new(),
+        });
+
+        // Add alice to both channels
+        for buf_id in &["test/#test", "test/#other"] {
+            state.add_nick(
+                buf_id,
+                NickEntry {
+                    nick: "alice".to_string(),
+                    prefix: String::new(),
+                    modes: String::new(),
+                    away: false,
+                    account: None,
+                    ident: None,
+                    host: None,
+                },
+            );
+        }
+
+        let msg = make_irc_msg(
+            Some("alice!user@host"),
+            Command::ACCOUNT("alice_acct".into()),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        // Both buffers should have the account updated
+        let entry1 = state.buffers.get("test/#test").unwrap().users.get("alice").unwrap();
+        assert_eq!(entry1.account.as_deref(), Some("alice_acct"));
+        let entry2 = state.buffers.get("test/#other").unwrap().users.get("alice").unwrap();
+        assert_eq!(entry2.account.as_deref(), Some("alice_acct"));
+    }
+
+    // === account-tag tests ===
+
+    #[test]
+    fn account_tag_updates_nick_entry_on_privmsg() {
+        let mut state = make_test_state();
+        // Add alice to channel without an account
+        state.add_nick(
+            "test/#test",
+            NickEntry {
+                nick: "alice".to_string(),
+                prefix: String::new(),
+                modes: String::new(),
+                away: false,
+                account: None,
+                ident: None,
+                host: None,
+            },
+        );
+
+        // PRIVMSG with account tag
+        let mut msg = make_irc_msg(
+            Some("alice!user@host"),
+            Command::PRIVMSG("#test".into(), "hello".into()),
+        );
+        msg.tags = Some(vec![
+            irc::proto::message::Tag("account".to_string(), Some("alice_acct".to_string())),
+        ]);
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        let entry = buf.users.get("alice").unwrap();
+        assert_eq!(entry.account.as_deref(), Some("alice_acct"));
+    }
+
+    #[test]
+    fn extended_join_account_on_own_join() {
+        let mut state = make_test_state();
+        // Our own extended-join — should create buffer and not crash
+        // (account tracking for self is less critical but shouldn't break)
+        let msg = make_irc_msg(
+            Some("me!user@host"),
+            Command::JOIN("#newchan".into(), Some("my_account".into()), Some("My Real Name".into())),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        assert!(state.buffers.contains_key("test/#newchan"));
+        let buf = state.buffers.get("test/#newchan").unwrap();
+        assert_eq!(buf.buffer_type, BufferType::Channel);
     }
 }

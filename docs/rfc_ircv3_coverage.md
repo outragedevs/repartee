@@ -109,12 +109,12 @@ Track implementation status of IRC protocol features in rustirc.
 | Capability | Status | Spec | Notes |
 |------------|--------|------|-------|
 | `multi-prefix` | Done | 3.1 | All mode prefixes per user in NAMES, dynamic via ISUPPORT PREFIX |
-| `extended-join` | Not Started | 3.1 | JOIN includes account + realname |
+| `extended-join` | Done | 3.1 | JOIN includes account + realname; account stored on `NickEntry` |
 | `server-time` | Not Started | 3.2 | Server-provided timestamps on messages |
-| `account-tag` | Not Started | 3.2 | User account in message tags |
+| `account-tag` | Done | 3.2 | User account in message tags; supplementary update on `NickEntry` via PRIVMSG tags |
 | `cap-notify` | Not Started | 3.2 | Server notifies of cap changes (CAP NEW/DEL) |
 | `away-notify` | Not Started | 3.1 | Real-time AWAY status changes |
-| `account-notify` | Not Started | 3.1 | Real-time account login/logout (ACCOUNT cmd) |
+| `account-notify` | Done | 3.1 | ACCOUNT command: login/logout updates `NickEntry.account` across all shared buffers |
 | `chghost` | Not Started | 3.2 | Host/ident change notifications |
 | SASL EXTERNAL | Not Started | 3.1 | CertFP-based authentication |
 | SASL SCRAM-SHA-256 | Not Started | 3.1 | Challenge-response SASL mechanism |
