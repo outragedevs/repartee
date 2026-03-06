@@ -3,6 +3,7 @@
 *.db-shm
 *.db-wal
 .env
+node_modules/
 /.agents
 /.claude/skills
 skills-lock.json
