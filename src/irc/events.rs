@@ -6,7 +6,7 @@ use chrono::Utc;
 use irc::proto::{Command, Message as IrcMessage, Prefix, Response};
 
 use crate::config::IgnoreLevel;
-use crate::irc::formatting::{extract_nick, extract_nick_userhost, get_highest_prefix, is_channel, is_server_prefix, prefix_to_mode, split_nick_prefix, strip_irc_formatting};
+use crate::irc::formatting::{extract_nick, extract_nick_userhost, get_highest_prefix, is_channel, is_server_prefix, strip_irc_formatting};
 use crate::irc::ignore::should_ignore;
 use crate::state::buffer::{make_buffer_id, ActivityLevel, Buffer, BufferType, Message, MessageType, NickEntry};
 use crate::state::connection::ConnectionStatus;
@@ -520,6 +520,8 @@ fn handle_join(
                 modes: String::new(),
                 away: false,
                 account: None,
+                ident: None,
+                host: None,
             },
         );
         return;
@@ -556,6 +558,8 @@ fn handle_join(
                 modes: String::new(),
                 away: false,
                 account: None,
+                ident: None,
+                host: None,
             },
         );
 
@@ -1242,24 +1246,28 @@ fn handle_response(
         }
 
         // RPL_NAMREPLY: args = [our_nick, "=" | "*" | "@", channel, "nick1 nick2 ..."]
+        //
+        // Supports:
+        // - multi-prefix: server sends ALL mode prefixes per nick (e.g. `@+nick`)
+        // - userhost-in-names: server sends `nick!user@host` format
         Response::RPL_NAMREPLY => {
             if args.len() >= 4 {
                 let channel = &args[2];
                 let buffer_id = make_buffer_id(conn_id, channel);
                 let nicks_str = &args[3];
-                for nick_with_prefix in nicks_str.split_whitespace() {
-                    let (prefix, nick) = split_nick_prefix(nick_with_prefix);
-                    let modes = prefix_to_mode(&prefix);
-                    state.add_nick(
-                        &buffer_id,
-                        NickEntry {
-                            nick: nick.to_string(),
-                            prefix,
-                            modes,
-                            away: false,
-                            account: None,
-                        },
+
+                // Get prefix map and userhost-in-names state from connection
+                let (prefix_map, has_userhost) = state
+                    .connections
+                    .get(conn_id)
+                    .map_or_else(
+                        || (vec![('o', '@'), ('v', '+')], false),
+                        |c| (c.isupport_parsed.prefix_map(), c.enabled_caps.contains("userhost-in-names")),
                     );
+
+                for nick_with_prefix in nicks_str.split_whitespace() {
+                    let entry = parse_names_entry(nick_with_prefix, &prefix_map, has_userhost);
+                    state.add_nick(&buffer_id, entry);
                 }
             }
         }
@@ -1701,6 +1709,73 @@ fn format_timestamp(ts_str: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Parse a single entry from a NAMES reply, handling multi-prefix and
+/// userhost-in-names capabilities.
+///
+/// `prefix_map` is the server's `(mode_char, prefix_char)` list from ISUPPORT
+/// PREFIX (e.g. `[('o', '@'), ('v', '+')]`).
+///
+/// When `has_userhost` is true, the nick portion is expected in `nick!user@host`
+/// format.
+///
+/// # Examples
+///
+/// Standard:   `@nick`         → prefix="@", modes="o", nick="nick"
+/// Multi:      `@+nick`        → prefix="@+", modes="ov", nick="nick"
+/// Userhost:   `@+nick!u@host` → prefix="@+", modes="ov", nick="nick", ident="u", host="host"
+fn parse_names_entry(
+    raw: &str,
+    prefix_map: &[(char, char)],
+    has_userhost: bool,
+) -> NickEntry {
+    // Strip all leading prefix characters, using the server's PREFIX map
+    // to determine which characters are valid prefixes and their modes.
+    let mut prefix = String::new();
+    let mut modes = String::new();
+    let mut rest = raw;
+    while let Some(c) = rest.chars().next() {
+        if let Some(&(mode, _)) = prefix_map.iter().find(|&&(_, p)| p == c) {
+            prefix.push(c);
+            modes.push(mode);
+            rest = &rest[c.len_utf8()..];
+        } else {
+            break;
+        }
+    }
+
+    // Parse nick!user@host if userhost-in-names is enabled
+    let (nick, ident, host) = if has_userhost {
+        parse_userhost(rest)
+    } else {
+        (rest.to_string(), None, None)
+    };
+
+    NickEntry {
+        nick,
+        prefix,
+        modes,
+        away: false,
+        account: None,
+        ident,
+        host,
+    }
+}
+
+/// Parse `nick!user@host` into `(nick, Some(user), Some(host))`.
+/// If the format doesn't match, returns `(input, None, None)`.
+fn parse_userhost(input: &str) -> (String, Option<String>, Option<String>) {
+    if let Some(bang_pos) = input.find('!') {
+        let nick = &input[..bang_pos];
+        let rest = &input[bang_pos + 1..];
+        if let Some(at_pos) = rest.find('@') {
+            let ident = &rest[..at_pos];
+            let host = &rest[at_pos + 1..];
+            return (nick.to_string(), Some(ident.to_string()), Some(host.to_string()));
+        }
+    }
+    (input.to_string(), None, None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1793,6 +1868,8 @@ mod tests {
                 modes: String::new(),
                 away: false,
                 account: None,
+                ident: None,
+                host: None,
             },
         );
         state
@@ -1956,6 +2033,8 @@ mod tests {
                 modes: String::new(),
                 away: false,
                 account: None,
+                ident: None,
+                host: None,
             },
         );
         let msg = make_irc_msg(
@@ -1983,6 +2062,8 @@ mod tests {
                 modes: String::new(),
                 away: false,
                 account: None,
+                ident: None,
+                host: None,
             },
         );
         let msg = make_irc_msg(
@@ -2021,6 +2102,8 @@ mod tests {
                 modes: "o".to_string(),
                 away: false,
                 account: None,
+                ident: None,
+                host: None,
             },
         );
         let msg = make_irc_msg(
@@ -2065,6 +2148,8 @@ mod tests {
                 modes: String::new(),
                 away: false,
                 account: None,
+                ident: None,
+                host: None,
             },
         );
         let msg = make_irc_msg(
@@ -2127,6 +2212,160 @@ mod tests {
         assert_eq!(buf.users.get("voice").unwrap().modes, "v");
         assert!(buf.users.contains_key("regular"));
         assert_eq!(buf.users.get("regular").unwrap().prefix, "");
+    }
+
+    // === parse_names_entry unit tests (multi-prefix + userhost-in-names) ===
+
+    #[test]
+    fn parse_names_standard_single_prefix() {
+        let prefix_map = vec![('o', '@'), ('v', '+')];
+        let entry = parse_names_entry("@nick", &prefix_map, false);
+        assert_eq!(entry.nick, "nick");
+        assert_eq!(entry.prefix, "@");
+        assert_eq!(entry.modes, "o");
+        assert!(entry.ident.is_none());
+        assert!(entry.host.is_none());
+    }
+
+    #[test]
+    fn parse_names_no_prefix() {
+        let prefix_map = vec![('o', '@'), ('v', '+')];
+        let entry = parse_names_entry("regular", &prefix_map, false);
+        assert_eq!(entry.nick, "regular");
+        assert_eq!(entry.prefix, "");
+        assert_eq!(entry.modes, "");
+    }
+
+    #[test]
+    fn parse_names_multi_prefix_two_modes() {
+        let prefix_map = vec![('o', '@'), ('v', '+')];
+        let entry = parse_names_entry("@+nick", &prefix_map, false);
+        assert_eq!(entry.nick, "nick");
+        assert_eq!(entry.prefix, "@+");
+        assert_eq!(entry.modes, "ov");
+        assert!(entry.ident.is_none());
+        assert!(entry.host.is_none());
+    }
+
+    #[test]
+    fn parse_names_multi_prefix_five_modes() {
+        let prefix_map = vec![
+            ('q', '~'),
+            ('a', '&'),
+            ('o', '@'),
+            ('h', '%'),
+            ('v', '+'),
+        ];
+        let entry = parse_names_entry("~&@%+nick", &prefix_map, false);
+        assert_eq!(entry.nick, "nick");
+        assert_eq!(entry.prefix, "~&@%+");
+        assert_eq!(entry.modes, "qaohv");
+    }
+
+    #[test]
+    fn parse_names_userhost_in_names() {
+        let prefix_map = vec![('o', '@'), ('v', '+')];
+        let entry = parse_names_entry("@+nick!user@host.com", &prefix_map, true);
+        assert_eq!(entry.nick, "nick");
+        assert_eq!(entry.prefix, "@+");
+        assert_eq!(entry.modes, "ov");
+        assert_eq!(entry.ident.as_deref(), Some("user"));
+        assert_eq!(entry.host.as_deref(), Some("host.com"));
+    }
+
+    #[test]
+    fn parse_names_userhost_no_prefix() {
+        let prefix_map = vec![('o', '@'), ('v', '+')];
+        let entry = parse_names_entry("nick!user@host.com", &prefix_map, true);
+        assert_eq!(entry.nick, "nick");
+        assert_eq!(entry.prefix, "");
+        assert_eq!(entry.modes, "");
+        assert_eq!(entry.ident.as_deref(), Some("user"));
+        assert_eq!(entry.host.as_deref(), Some("host.com"));
+    }
+
+    #[test]
+    fn parse_names_userhost_not_enabled_preserves_raw_nick() {
+        // Without userhost-in-names, nick!user@host is treated as the nick
+        let prefix_map = vec![('o', '@'), ('v', '+')];
+        let entry = parse_names_entry("@nick!user@host.com", &prefix_map, false);
+        assert_eq!(entry.nick, "nick!user@host.com");
+        assert_eq!(entry.prefix, "@");
+        assert_eq!(entry.modes, "o");
+        assert!(entry.ident.is_none());
+        assert!(entry.host.is_none());
+    }
+
+    // === parse_names_entry integration via RPL_NAMREPLY ===
+
+    #[test]
+    fn rpl_namreply_multi_prefix() {
+        let mut state = make_test_state();
+        // Set PREFIX=(ov)@+ on the connection's isupport
+        if let Some(conn) = state.connections.get_mut("test") {
+            conn.isupport_parsed.parse_tokens(&["PREFIX=(ov)@+"]);
+        }
+        let msg = make_irc_msg(
+            None,
+            Command::Response(
+                Response::RPL_NAMREPLY,
+                vec![
+                    "me".into(),
+                    "=".into(),
+                    "#test".into(),
+                    "@+alice @bob +carol regular".into(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        let alice = buf.users.get("alice").unwrap();
+        assert_eq!(alice.prefix, "@+");
+        assert_eq!(alice.modes, "ov");
+        let bob = buf.users.get("bob").unwrap();
+        assert_eq!(bob.prefix, "@");
+        assert_eq!(bob.modes, "o");
+        let carol = buf.users.get("carol").unwrap();
+        assert_eq!(carol.prefix, "+");
+        assert_eq!(carol.modes, "v");
+        let regular = buf.users.get("regular").unwrap();
+        assert_eq!(regular.prefix, "");
+        assert_eq!(regular.modes, "");
+    }
+
+    #[test]
+    fn rpl_namreply_userhost_in_names() {
+        let mut state = make_test_state();
+        if let Some(conn) = state.connections.get_mut("test") {
+            conn.isupport_parsed.parse_tokens(&["PREFIX=(ov)@+"]);
+            conn.enabled_caps.insert("userhost-in-names".to_string());
+        }
+        let msg = make_irc_msg(
+            None,
+            Command::Response(
+                Response::RPL_NAMREPLY,
+                vec![
+                    "me".into(),
+                    "=".into(),
+                    "#test".into(),
+                    "@+alice!auser@ahost.net bob!buser@bhost.org".into(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        let alice = buf.users.get("alice").unwrap();
+        assert_eq!(alice.prefix, "@+");
+        assert_eq!(alice.modes, "ov");
+        assert_eq!(alice.ident.as_deref(), Some("auser"));
+        assert_eq!(alice.host.as_deref(), Some("ahost.net"));
+        let bob = buf.users.get("bob").unwrap();
+        assert_eq!(bob.prefix, "");
+        assert_eq!(bob.modes, "");
+        assert_eq!(bob.ident.as_deref(), Some("buser"));
+        assert_eq!(bob.host.as_deref(), Some("bhost.org"));
     }
 
     #[test]

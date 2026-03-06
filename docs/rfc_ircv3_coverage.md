@@ -27,7 +27,7 @@ Track implementation status of IRC protocol features in rustirc.
 | PART | Done | Leave with reason |
 | CHANNEL MODE | Done | +beiklmnostRIv and prefix modes |
 | TOPIC | Done | Get/set, RPL_TOPIC/RPL_TOPICWHOTIME |
-| NAMES | Done | RPL_NAMREPLY with prefix parsing |
+| NAMES | Done | RPL_NAMREPLY with prefix parsing, multi-prefix, userhost-in-names |
 | LIST | Done | Channel listing |
 | INVITE | Done | Invite user + notification |
 | KICK | Done | Kick with reason |
@@ -108,7 +108,7 @@ Track implementation status of IRC protocol features in rustirc.
 
 | Capability | Status | Spec | Notes |
 |------------|--------|------|-------|
-| `multi-prefix` | Not Started | 3.1 | Multiple mode prefixes per user in NAMES/WHO |
+| `multi-prefix` | Done | 3.1 | All mode prefixes per user in NAMES, dynamic via ISUPPORT PREFIX |
 | `extended-join` | Not Started | 3.1 | JOIN includes account + realname |
 | `server-time` | Not Started | 3.2 | Server-provided timestamps on messages |
 | `account-tag` | Not Started | 3.2 | User account in message tags |
@@ -129,7 +129,7 @@ Track implementation status of IRC protocol features in rustirc.
 | `echo-message` | Not Started | 3.2 | Server echoes own messages back |
 | `invite-notify` | Not Started | 3.2 | Channel members see invites |
 | `batch` | Not Started | 3.2 | NETSPLIT/NETJOIN batching, generic batch support |
-| `userhost-in-names` | Not Started | 3.2 | Full user@host in NAMES reply |
+| `userhost-in-names` | Done | 3.2 | `nick!user@host` parsing in NAMES, stored on `NickEntry` |
 | `message-tags` | Done | 3.2 | Plumbing: tags extracted from IRC messages, stored in buffer `Message` and DB |
 
 ---

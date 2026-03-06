@@ -492,6 +492,8 @@ mod tests {
             modes: "o".to_string(),
             away: false,
             account: None,
+            ident: None,
+            host: None,
         };
         state.add_nick("libera/#rust", entry);
         assert!(state

@@ -78,6 +78,10 @@ pub fn strip_irc_formatting(text: &str) -> String {
 ///
 /// Returns `(prefix, nick)` where prefix contains any leading
 /// status characters and nick is the remainder.
+///
+/// Uses a hardcoded set of common prefixes. For dynamic prefix
+/// handling based on ISUPPORT PREFIX, see `parse_names_entry`.
+#[allow(dead_code)]
 pub fn split_nick_prefix(nick_with_prefix: &str) -> (String, &str) {
     const PREFIXES: &str = "~&@%+";
     let mut prefix = String::new();
@@ -96,6 +100,10 @@ pub fn split_nick_prefix(nick_with_prefix: &str) -> (String, &str) {
 /// Convert nick prefix characters to their corresponding channel mode letters.
 ///
 /// ~ -> q (owner), & -> a (admin), @ -> o (op), % -> h (halfop), + -> v (voice)
+///
+/// Uses a hardcoded mapping. For dynamic mapping based on ISUPPORT PREFIX,
+/// see `parse_names_entry`.
+#[allow(dead_code)]
 pub fn prefix_to_mode(prefix: &str) -> String {
     prefix
         .chars()
@@ -142,21 +150,35 @@ pub fn is_channel(target: &str) -> bool {
 ///
 /// For `Nickname(nick, _, _)` returns the nick.
 /// For `ServerName(name)` returns the server name.
-pub fn extract_nick(prefix: &Option<irc::proto::Prefix>) -> Option<String> {
+pub fn extract_nick(prefix: Option<&irc::proto::Prefix>) -> Option<String> {
     use irc::proto::Prefix;
-    prefix.as_ref().map(|p| match p {
+    prefix.map(|p| match p {
         Prefix::Nickname(nick, _, _) => nick.clone(),
         Prefix::ServerName(name) => name.clone(),
     })
 }
 
-/// Check whether a prefix represents a server (no '!' in it).
-pub fn is_server_prefix(prefix: &Option<irc::proto::Prefix>) -> bool {
+/// Extract nick, ident, and hostname from an IRC prefix.
+///
+/// Returns `(nick, ident, hostname)`. For server prefixes, ident and hostname
+/// are empty strings.
+pub fn extract_nick_userhost(prefix: Option<&irc::proto::Prefix>) -> (String, String, String) {
     use irc::proto::Prefix;
     match prefix {
-        Some(Prefix::ServerName(_)) => true,
+        Some(Prefix::Nickname(nick, user, host)) => {
+            (nick.clone(), user.clone(), host.clone())
+        }
+        Some(Prefix::ServerName(name)) => (name.clone(), String::new(), String::new()),
+        None => (String::new(), String::new(), String::new()),
+    }
+}
+
+/// Check whether a prefix represents a server (no `!` in it).
+pub const fn is_server_prefix(prefix: Option<&irc::proto::Prefix>) -> bool {
+    use irc::proto::Prefix;
+    match prefix {
+        Some(Prefix::ServerName(_)) | None => true,
         Some(Prefix::Nickname(_, user, _)) => user.is_empty(),
-        None => true,
     }
 }
 
@@ -365,20 +387,20 @@ mod tests {
     #[test]
     fn extract_nick_with_host() {
         use irc::proto::Prefix;
-        let prefix = Some(Prefix::Nickname("nick".into(), "user".into(), "host".into()));
-        assert_eq!(extract_nick(&prefix), Some("nick".to_string()));
+        let prefix = Prefix::Nickname("nick".into(), "user".into(), "host".into());
+        assert_eq!(extract_nick(Some(&prefix)), Some("nick".to_string()));
     }
 
     #[test]
     fn extract_nick_server_name() {
         use irc::proto::Prefix;
-        let prefix = Some(Prefix::ServerName("irc.server.com".into()));
-        assert_eq!(extract_nick(&prefix), Some("irc.server.com".to_string()));
+        let prefix = Prefix::ServerName("irc.server.com".into());
+        assert_eq!(extract_nick(Some(&prefix)), Some("irc.server.com".to_string()));
     }
 
     #[test]
     fn extract_nick_none() {
-        assert_eq!(extract_nick(&None), None);
+        assert_eq!(extract_nick(None), None);
     }
 
     // === is_server_prefix ===
@@ -386,17 +408,19 @@ mod tests {
     #[test]
     fn is_server_prefix_true_for_server() {
         use irc::proto::Prefix;
-        assert!(is_server_prefix(&Some(Prefix::ServerName("irc.server.com".into()))));
+        let prefix = Prefix::ServerName("irc.server.com".into());
+        assert!(is_server_prefix(Some(&prefix)));
     }
 
     #[test]
     fn is_server_prefix_false_for_nick() {
         use irc::proto::Prefix;
-        assert!(!is_server_prefix(&Some(Prefix::Nickname("nick".into(), "user".into(), "host".into()))));
+        let prefix = Prefix::Nickname("nick".into(), "user".into(), "host".into());
+        assert!(!is_server_prefix(Some(&prefix)));
     }
 
     #[test]
     fn is_server_prefix_true_for_none() {
-        assert!(is_server_prefix(&None));
+        assert!(is_server_prefix(None));
     }
 }

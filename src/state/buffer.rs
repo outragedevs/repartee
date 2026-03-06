@@ -78,6 +78,10 @@ pub struct NickEntry {
     pub modes: String,
     pub away: bool,
     pub account: Option<String>,
+    /// Ident (username) from `userhost-in-names` — `nick!ident@host`.
+    pub ident: Option<String>,
+    /// Hostname from `userhost-in-names` — `nick!ident@host`.
+    pub host: Option<String>,
 }
 
 // === ListEntry ===
