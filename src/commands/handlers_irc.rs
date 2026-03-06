@@ -521,7 +521,52 @@ pub(crate) fn cmd_ban(app: &mut App, args: &[String]) {
 }
 
 pub(crate) fn cmd_unban(app: &mut App, args: &[String]) {
-    list_mode_unset(app, args, 'b', "unban");
+    if args.is_empty() {
+        add_local_event(app, "Usage: /unban <number|mask> [number2|mask2 ...]");
+        return;
+    }
+    let Some(sender) = app.active_irc_sender().cloned() else {
+        add_local_event(app, "Not connected");
+        return;
+    };
+    let channel = match app.state.active_buffer() {
+        Some(b) if b.buffer_type == crate::state::buffer::BufferType::Channel => b.name.clone(),
+        _ => {
+            add_local_event(app, "Not in a channel");
+            return;
+        }
+    };
+
+    // Resolve masks: numeric references index into stored ban list, others are literal
+    let ban_entries: Vec<crate::state::buffer::ListEntry> = app
+        .state
+        .active_buffer()
+        .and_then(|b| b.list_modes.get("b"))
+        .cloned()
+        .unwrap_or_default();
+
+    let mut masks: Vec<String> = Vec::new();
+    for arg in args {
+        if let Ok(num) = arg.parse::<usize>() {
+            if num >= 1 && num <= ban_entries.len() {
+                masks.push(ban_entries[num - 1].mask.clone());
+            } else {
+                add_local_event(app, &format!(
+                    "Ban list #{num} out of range (1-{})",
+                    ban_entries.len()
+                ));
+            }
+        } else {
+            masks.push(arg.clone());
+        }
+    }
+
+    for mask in &masks {
+        let _ = sender.send(irc::proto::Command::Raw(
+            "MODE".to_string(),
+            vec![channel.clone(), "-b".to_string(), mask.clone()],
+        ));
+    }
 }
 
 pub(crate) fn cmd_kickban(app: &mut App, args: &[String]) {
@@ -545,13 +590,26 @@ pub(crate) fn cmd_kickban(app: &mut App, args: &[String]) {
 
     let nick = &args[0];
     let reason = if args.len() > 1 {
-        args[1].clone()
+        args[1..].join(" ")
     } else {
         nick.clone()
     };
 
-    // Ban with nick!*@* mask (simple fallback — no USERHOST lookup)
-    let ban_mask = format!("{nick}!*@*");
+    // Resolve ban mask from cached WHOX data (ident + host)
+    // Falls back to nick!*@* if user info is not available
+    let ban_mask = app
+        .state
+        .active_buffer()
+        .and_then(|buf| buf.users.get(&nick.to_lowercase()))
+        .and_then(|entry| {
+            match (&entry.ident, &entry.host) {
+                (Some(ident), Some(host)) => Some(format!("*!*{ident}@{host}")),
+                _ => None,
+            }
+        })
+        .unwrap_or_else(|| format!("{nick}!*@*"));
+
+    // KICK first, then BAN (same order as kokoirc)
     let _ = sender.send(irc::proto::Command::KICK(
         channel.clone(),
         nick.clone(),
@@ -577,6 +635,10 @@ fn list_mode_set(app: &mut App, args: &[String], mode_char: char) {
         }
     };
     if args.is_empty() {
+        // Clear stored list before requesting fresh one from server
+        if let Some(buf) = app.state.active_buffer_mut() {
+            buf.list_modes.remove(&mode_char.to_string());
+        }
         let _ = sender.send(irc::proto::Command::Raw(
             "MODE".to_string(),
             vec![channel, format!("+{mode_char}")],

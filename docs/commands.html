@@ -890,16 +890,24 @@ command typically used for server-wide announcements among staff.</p>
 <div class="command-entry" data-command="ban" data-category="Moderation">
 <h1>/ban</h1>
 <h2>Syntax</h2>
-<pre><code>/ban &lt;nick|mask&gt;
+<pre><code>/ban [mask]
+/ban -a &lt;account&gt;
 </code></pre>
 <h2>Description</h2>
-<p>Ban a user or hostmask from the current channel. If a plain nick is
-given, it&#39;s converted to <code>nick!*@*</code>. If the argument contains <code>!</code> or <code>@</code>,
-it&#39;s used as a literal hostmask.</p>
+<p>Ban a user or hostmask from the current channel.</p>
+<p>With no arguments, requests the ban list from the server and displays it
+as a numbered list. These numbers can be used with <code>/unban</code> to remove
+entries by index.</p>
+<p>With a mask argument, sets mode <code>+b</code> on the channel. If the argument
+contains <code>!</code> or <code>@</code>, it is used as a literal hostmask. Otherwise it is
+sent as-is (the server typically treats a plain nick as <code>nick!*@*</code>).</p>
+<p>The <code>-a</code> flag creates an account extban (<code>$a:account</code>) if the server
+supports EXTBAN with the account type.</p>
 <h2>Examples</h2>
-<pre><code>/ban troll
-/ban *!*@bad.host.com
-/ban *!*ident@*.isp.net
+<pre><code>/ban                        Show numbered ban list
+/ban *!*@bad.host.com       Ban a hostmask
+/ban *!*ident@*.isp.net     Ban by ident and host pattern
+/ban -a troll               Account extban ($a:troll)
 </code></pre>
 <h2>See Also</h2>
 <p>/unban, /kick, /kb, /mode</p>
@@ -975,10 +983,12 @@ ALL       All of the above
 <pre><code>/kb &lt;nick&gt; [reason]
 </code></pre>
 <h2>Description</h2>
-<p>Kick and ban a user from the current channel. Looks up the user&#39;s
-ident and host via USERHOST to create a proper <code>*!*ident@host</code> ban mask,
-then kicks with the given reason. Falls back to <code>nick!*@*</code> if the
-lookup times out after 5 seconds.</p>
+<p>Kick and ban a user from the current channel. Looks up the user&#39;s ident
+and host from cached WHOX data to create a proper <code>*!*ident@host</code> ban
+mask, then kicks with the given reason.</p>
+<p>Falls back to <code>nick!*@*</code> if the user&#39;s ident and host are not available
+(e.g. the server does not support WHOX or userhost-in-names).</p>
+<p>The reason defaults to the nick if not provided.</p>
 <h2>Examples</h2>
 <pre><code>/kb troll
 /kb spammer Enough is enough
@@ -1035,15 +1045,19 @@ You must be a channel operator to use this command.</p>
 <div class="command-entry" data-command="unban" data-category="Moderation">
 <h1>/unban</h1>
 <h2>Syntax</h2>
-<pre><code>/unban &lt;nick|mask&gt;
+<pre><code>/unban &lt;number|mask&gt; [number2|mask2 ...]
 </code></pre>
 <h2>Description</h2>
-<p>Remove a ban from the current channel. If a plain nick is given, it&#39;s
-converted to <code>nick!*@*</code>. If the argument contains <code>!</code> or <code>@</code>, it&#39;s used
-as a literal hostmask.</p>
+<p>Remove one or more bans from the current channel. Accepts both numeric
+references (from the numbered list shown by <code>/ban</code>) and literal masks.</p>
+<p>Use <code>/ban</code> with no arguments first to display the numbered ban list,
+then <code>/unban 1 3 5</code> to remove entries by their index.</p>
+<p>Multiple arguments can be given to remove several bans at once.</p>
 <h2>Examples</h2>
-<pre><code>/unban friend
-/unban *!*@good.host.com
+<pre><code>/unban 1                     Remove first entry from ban list
+/unban 2 4 7                 Remove multiple entries by index
+/unban *!*@good.host.com     Remove by literal mask
+/unban 1 *!*@other.net       Mix numeric and literal
 </code></pre>
 <h2>See Also</h2>
 <p>/ban, /kick, /kb, /mode</p>

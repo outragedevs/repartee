@@ -1950,18 +1950,38 @@ fn handle_response(
         // RPL_BANLIST: args = [our_nick, channel, banmask, set_by, timestamp]
         Response::RPL_BANLIST => {
             if args.len() >= 3 {
+                let channel = &args[1];
+                let mask = &args[2];
+                let set_by = args.get(3).cloned().unwrap_or_default();
+                let set_at = args.get(4).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+
+                // Store in buffer's list_modes for /unban numeric refs
+                let buf_id = crate::state::buffer::make_buffer_id(conn_id, channel);
+                if let Some(buf) = state.buffers.get_mut(&buf_id) {
+                    let entries = buf.list_modes.entry("b".to_string()).or_default();
+                    entries.push(crate::state::buffer::ListEntry {
+                        mask: mask.clone(),
+                        set_by: set_by.clone(),
+                        set_at,
+                    });
+                }
+
+                // Display numbered entry
+                let index = state.buffers.get(&buf_id)
+                    .and_then(|b| b.list_modes.get("b"))
+                    .map_or(0, Vec::len);
                 let target_buf = active_or_server_buffer(state, conn_id);
-                let set_info = if args.len() >= 5 {
-                    format!(" (set by {} {})", args[3], format_timestamp(&args[4]))
-                } else {
+                let set_info = if set_by.is_empty() {
                     String::new()
+                } else {
+                    format!(" (set by {} {})", set_by, format_timestamp(args.get(4).map_or("0", |s| s.as_str())))
                 };
                 let extban_prefix = state.connections.get(conn_id)
                     .and_then(|c| c.isupport_parsed.extban())
                     .map(|(prefix, _)| prefix);
-                let mask_display = crate::irc::extban::format_ban_mask(&args[2], extban_prefix);
+                let mask_display = crate::irc::extban::format_ban_mask(mask, extban_prefix);
                 emit(state, &target_buf, &format!(
-                    "%Z565f89  ban: %Za9b1d6{mask_display}{set_info}%N"
+                    "%Z565f89  {index}. %Za9b1d6{mask_display}{set_info}%N"
                 ));
             }
         }
