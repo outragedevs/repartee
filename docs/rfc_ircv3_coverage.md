@@ -126,7 +126,7 @@ Track implementation status of IRC protocol features in rustirc.
 
 | Capability | Status | Spec | Notes |
 |------------|--------|------|-------|
-| `echo-message` | Not Started | 3.2 | Server echoes own messages back |
+| `echo-message` | Done | 3.2 | Server echoes own messages back; local echo suppressed when cap enabled, own PRIVMSG/NOTICE/ACTION routed to correct buffer |
 | `invite-notify` | Not Started | 3.2 | Channel members see invites |
 | `batch` | Not Started | 3.2 | NETSPLIT/NETJOIN batching, generic batch support |
 | `userhost-in-names` | Done | 3.2 | `nick!user@host` parsing in NAMES, stored on `NickEntry` |

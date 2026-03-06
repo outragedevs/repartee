@@ -524,7 +524,17 @@ fn handle_privmsg(
 ) {
     let (nick, ident, host) = extract_nick_userhost(prefix);
     let target_is_channel = is_channel(target);
-    let buffer_name = if target_is_channel { target } else { &nick };
+    let is_own = nick == our_nick;
+
+    // For channels and echo-message echoes (is_own), the buffer is the
+    // target.  For incoming PMs the buffer is the sender's nick.  This
+    // ensures that when the server echoes our PM to "bob", it routes to the
+    // "bob" query buffer instead of creating one named after ourselves.
+    let buffer_name = if target_is_channel || is_own {
+        target
+    } else {
+        &nick
+    };
     let buffer_id = make_buffer_id(conn_id, buffer_name);
 
     // Check if this is a CTCP (ACTION or other)
@@ -596,7 +606,6 @@ fn handle_privmsg(
     if is_ctcp {
         let inner = &text[1..text.len() - 1];
         if let Some(action_text) = inner.strip_prefix("ACTION ") {
-            let is_own = nick == our_nick;
             let is_mention = !is_own
                 && strip_irc_formatting(action_text)
                     .to_lowercase()
@@ -669,7 +678,6 @@ fn handle_privmsg(
         }
     }
 
-    let is_own = nick == our_nick;
     let is_mention = !is_own
         && strip_irc_formatting(text)
             .to_lowercase()
@@ -731,12 +739,23 @@ fn handle_notice(
         }
     }
 
+    // echo-message: when the server echoes our own notice to a user, the
+    // target is the recipient (e.g. "bob"). Route to that buffer, not ours.
+    let our_nick = state
+        .connections
+        .get(conn_id)
+        .map(|c| c.nick.as_str())
+        .unwrap_or_default();
+    let is_own = nick.as_deref() == Some(our_nick);
+
+    // For channel notices and echo-message echoes (is_own), the buffer is
+    // the target.  For incoming user notices the buffer is the sender's nick.
     let buffer_name = if is_server_notice {
         state
             .connections
             .get(conn_id)
             .map_or("Status", |c| c.label.as_str())
-    } else if is_channel(target) {
+    } else if is_channel(target) || is_own {
         target
     } else {
         nick.as_deref().unwrap_or("Status")
@@ -3634,5 +3653,148 @@ mod tests {
         let conn = state.connections.get("test").unwrap();
         assert!(conn.enabled_caps.contains("echo-message"), "echo-message should remain");
         assert!(!conn.enabled_caps.contains("batch"), "batch should be removed");
+    }
+
+    // === echo-message tests ===
+
+    #[test]
+    fn echo_message_own_privmsg_displayed_when_cap_enabled() {
+        let mut state = make_test_state();
+        // Enable echo-message cap
+        state
+            .connections
+            .get_mut("test")
+            .unwrap()
+            .enabled_caps
+            .insert("echo-message".to_string());
+
+        // Server echoes our own PRIVMSG to #test
+        let msg = make_irc_msg(
+            Some("me!user@host"),
+            Command::PRIVMSG("#test".into(), "hello from echo".into()),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        assert_eq!(buf.messages.len(), 1, "echoed message should be displayed");
+        assert_eq!(buf.messages[0].text, "hello from echo");
+        assert_eq!(buf.messages[0].nick.as_deref(), Some("me"));
+        assert_eq!(buf.messages[0].message_type, MessageType::Message);
+    }
+
+    #[test]
+    fn echo_message_own_privmsg_no_cap_unchanged() {
+        let mut state = make_test_state();
+        // echo-message is NOT enabled (default)
+
+        // We receive our own PRIVMSG (unusual without echo-message, but handle gracefully)
+        let msg = make_irc_msg(
+            Some("me!user@host"),
+            Command::PRIVMSG("#test".into(), "my own message".into()),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        assert_eq!(buf.messages.len(), 1, "message should still be displayed");
+        assert_eq!(buf.messages[0].text, "my own message");
+        // Own messages should not trigger activity
+        assert_eq!(buf.activity, ActivityLevel::None);
+    }
+
+    #[test]
+    fn echo_message_own_pm_routes_to_recipient_buffer() {
+        let mut state = make_test_state();
+        state
+            .connections
+            .get_mut("test")
+            .unwrap()
+            .enabled_caps
+            .insert("echo-message".to_string());
+
+        // Server echoes our PM to "bob" — target is "bob", nick is "me"
+        let msg = make_irc_msg(
+            Some("me!user@host"),
+            Command::PRIVMSG("bob".into(), "hey bob".into()),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        // Should create a query buffer for "bob", not "me"
+        assert!(
+            state.buffers.contains_key("test/bob"),
+            "query buffer should be created for recipient"
+        );
+        assert!(
+            !state.buffers.contains_key("test/me"),
+            "should NOT create a buffer named after ourselves"
+        );
+        let buf = state.buffers.get("test/bob").unwrap();
+        assert_eq!(buf.buffer_type, BufferType::Query);
+        assert_eq!(buf.messages.len(), 1);
+        assert_eq!(buf.messages[0].text, "hey bob");
+        assert_eq!(buf.messages[0].nick.as_deref(), Some("me"));
+    }
+
+    #[test]
+    fn echo_message_own_action_displayed() {
+        let mut state = make_test_state();
+        state
+            .connections
+            .get_mut("test")
+            .unwrap()
+            .enabled_caps
+            .insert("echo-message".to_string());
+
+        let msg = make_irc_msg(
+            Some("me!user@host"),
+            Command::PRIVMSG("#test".into(), "\x01ACTION dances\x01".into()),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        assert_eq!(buf.messages.len(), 1);
+        assert_eq!(buf.messages[0].message_type, MessageType::Action);
+        assert_eq!(buf.messages[0].text, "dances");
+        assert_eq!(buf.messages[0].nick.as_deref(), Some("me"));
+    }
+
+    #[test]
+    fn echo_message_own_notice_routes_to_recipient() {
+        let mut state = make_test_state();
+        state
+            .connections
+            .get_mut("test")
+            .unwrap()
+            .enabled_caps
+            .insert("echo-message".to_string());
+
+        // Create a query buffer for "bob" so the notice has somewhere to go
+        state.add_buffer(Buffer {
+            id: make_buffer_id("test", "bob"),
+            connection_id: "test".to_string(),
+            buffer_type: BufferType::Query,
+            name: "bob".to_string(),
+            messages: Vec::new(),
+            activity: ActivityLevel::None,
+            unread_count: 0,
+            last_read: Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: HashMap::new(),
+        });
+
+        // Server echoes our NOTICE to "bob"
+        let msg = make_irc_msg(
+            Some("me!user@host"),
+            Command::NOTICE("bob".into(), "notice to bob".into()),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/bob").unwrap();
+        assert_eq!(buf.messages.len(), 1);
+        assert_eq!(buf.messages[0].message_type, MessageType::Notice);
+        assert_eq!(buf.messages[0].text, "notice to bob");
     }
 }

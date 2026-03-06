@@ -636,7 +636,7 @@ pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
     if !app.state.buffers.contains_key(&buffer_id) && !crate::irc::formatting::is_channel(target) {
         app.state.add_buffer(crate::state::buffer::Buffer {
             id: buffer_id.clone(),
-            connection_id: conn_id,
+            connection_id: conn_id.clone(),
             buffer_type: crate::state::buffer::BufferType::Query,
             name: target.clone(),
             messages: Vec::new(),
@@ -652,22 +652,31 @@ pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
         });
     }
 
-    let id = app.state.next_message_id();
-    app.state.add_message(
-        &buffer_id,
-        crate::state::buffer::Message {
-            id,
-            timestamp: chrono::Utc::now(),
-            message_type: crate::state::buffer::MessageType::Message,
-            nick: Some(nick),
-            nick_mode: None,
-            text: text.clone(),
-            highlight: false,
-            event_key: None,
-            event_params: None, log_msg_id: None, log_ref_id: None,
-            tags: std::collections::HashMap::new(),
-        },
-    );
+    // When echo-message is enabled, skip local display — the server echo is authoritative.
+    let echo_message_enabled = app
+        .state
+        .connections
+        .get(&conn_id)
+        .is_some_and(|c| c.enabled_caps.contains("echo-message"));
+
+    if !echo_message_enabled {
+        let id = app.state.next_message_id();
+        app.state.add_message(
+            &buffer_id,
+            crate::state::buffer::Message {
+                id,
+                timestamp: chrono::Utc::now(),
+                message_type: crate::state::buffer::MessageType::Message,
+                nick: Some(nick),
+                nick_mode: None,
+                text: text.clone(),
+                highlight: false,
+                event_key: None,
+                event_params: None, log_msg_id: None, log_ref_id: None,
+                tags: std::collections::HashMap::new(),
+            },
+        );
+    }
     app.state.set_active_buffer(&buffer_id);
 }
 
@@ -724,22 +733,31 @@ pub(crate) fn cmd_query(app: &mut App, args: &[String]) {
             return;
         }
 
-        let id = app.state.next_message_id();
-        app.state.add_message(
-            &buffer_id,
-            crate::state::buffer::Message {
-                id,
-                timestamp: chrono::Utc::now(),
-                message_type: crate::state::buffer::MessageType::Message,
-                nick: Some(nick),
-                nick_mode: None,
-                text: text.clone(),
-                highlight: false,
-                event_key: None,
-                event_params: None, log_msg_id: None, log_ref_id: None,
-                tags: std::collections::HashMap::new(),
-            },
-        );
+        // When echo-message is enabled, skip local display — the server echo is authoritative.
+        let echo_message_enabled = app
+            .state
+            .connections
+            .get(&conn_id)
+            .is_some_and(|c| c.enabled_caps.contains("echo-message"));
+
+        if !echo_message_enabled {
+            let id = app.state.next_message_id();
+            app.state.add_message(
+                &buffer_id,
+                crate::state::buffer::Message {
+                    id,
+                    timestamp: chrono::Utc::now(),
+                    message_type: crate::state::buffer::MessageType::Message,
+                    nick: Some(nick),
+                    nick_mode: None,
+                    text: text.clone(),
+                    highlight: false,
+                    event_key: None,
+                    event_params: None, log_msg_id: None, log_ref_id: None,
+                    tags: std::collections::HashMap::new(),
+                },
+            );
+        }
     }
 }
 
@@ -770,23 +788,32 @@ pub(crate) fn cmd_me(app: &mut App, args: &[String]) {
         }
     }
 
-    let buffer_id = app.state.active_buffer_id.clone().unwrap_or_default();
-    let id = app.state.next_message_id();
-    app.state.add_message(
-        &buffer_id,
-        crate::state::buffer::Message {
-            id,
-            timestamp: chrono::Utc::now(),
-            message_type: crate::state::buffer::MessageType::Action,
-            nick: Some(nick),
-            nick_mode: None,
-            text: action_text.clone(),
-            highlight: false,
-            event_key: None,
-            event_params: None, log_msg_id: None, log_ref_id: None,
-            tags: std::collections::HashMap::new(),
-        },
-    );
+    // When echo-message is enabled, skip local display — the server echo is authoritative.
+    let echo_message_enabled = app
+        .state
+        .connections
+        .get(&conn_id)
+        .is_some_and(|c| c.enabled_caps.contains("echo-message"));
+
+    if !echo_message_enabled {
+        let buffer_id = app.state.active_buffer_id.clone().unwrap_or_default();
+        let id = app.state.next_message_id();
+        app.state.add_message(
+            &buffer_id,
+            crate::state::buffer::Message {
+                id,
+                timestamp: chrono::Utc::now(),
+                message_type: crate::state::buffer::MessageType::Action,
+                nick: Some(nick),
+                nick_mode: None,
+                text: action_text.clone(),
+                highlight: false,
+                event_key: None,
+                event_params: None, log_msg_id: None, log_ref_id: None,
+                tags: std::collections::HashMap::new(),
+            },
+        );
+    }
 }
 
 pub(crate) fn cmd_nick(app: &mut App, args: &[String]) {

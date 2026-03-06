@@ -1164,23 +1164,32 @@ impl App {
             return;
         }
 
-        // Add to local buffer (echo)
-        let id = self.state.next_message_id();
-        self.state.add_message(
-            &active_id,
-            Message {
-                id,
-                timestamp: Utc::now(),
-                message_type: MessageType::Message,
-                nick: Some(nick),
-                nick_mode: None,
-                text,
-                highlight: false,
-                event_key: None,
-                event_params: None, log_msg_id: None, log_ref_id: None,
-                tags: std::collections::HashMap::new(),
-            },
-        );
+        // When echo-message is enabled, the server will echo our message back
+        // with authoritative server-time — skip local display and wait for echo.
+        let echo_message_enabled = self
+            .state
+            .connections
+            .get(&conn_id)
+            .is_some_and(|c| c.enabled_caps.contains("echo-message"));
+
+        if !echo_message_enabled {
+            let id = self.state.next_message_id();
+            self.state.add_message(
+                &active_id,
+                Message {
+                    id,
+                    timestamp: Utc::now(),
+                    message_type: MessageType::Message,
+                    nick: Some(nick),
+                    nick_mode: None,
+                    text,
+                    highlight: false,
+                    event_key: None,
+                    event_params: None, log_msg_id: None, log_ref_id: None,
+                    tags: std::collections::HashMap::new(),
+                },
+            );
+        }
     }
 
     /// Get the IRC sender for the active buffer's connection, if connected.
