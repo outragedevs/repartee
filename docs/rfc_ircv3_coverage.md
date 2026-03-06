@@ -116,9 +116,9 @@ Track implementation status of IRC protocol features in rustirc.
 | `away-notify` | Done | 3.1 | Real-time AWAY status changes; silently updates `NickEntry.away` across all shared buffers |
 | `account-notify` | Done | 3.1 | ACCOUNT command: login/logout updates `NickEntry.account` across all shared buffers |
 | `chghost` | Done | 3.2 | Host/ident change notifications; updates `NickEntry.ident`/`host`, adds event message |
-| SASL EXTERNAL | Not Started | 3.1 | CertFP-based authentication |
+| SASL EXTERNAL | Done | 3.1 | CertFP-based authentication via client TLS certificate; `client_cert_path` config field, `run_sasl_external()` flow |
 | SASL SCRAM-SHA-256 | Not Started | 3.1 | Challenge-response SASL mechanism |
-| SASL mechanism selection | Not Started | — | Pick best mechanism from server's advertised list |
+| SASL mechanism selection | Done | — | Auto-detect best mechanism (EXTERNAL > PLAIN) or explicit override via `sasl_mechanism` config; `select_sasl_mechanism()` with 10 unit tests |
 
 ---
 

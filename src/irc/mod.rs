@@ -36,12 +36,76 @@ pub struct IrcHandle {
     pub sender: irc::client::Sender,
 }
 
+/// SASL authentication mechanism.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaslMechanism {
+    /// SASL PLAIN — username + password, base64-encoded.
+    Plain,
+    /// SASL EXTERNAL — client TLS certificate (`CertFP`) based.
+    External,
+}
+
+impl std::fmt::Display for SaslMechanism {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Plain => write!(f, "PLAIN"),
+            Self::External => write!(f, "EXTERNAL"),
+        }
+    }
+}
+
+/// Select the best SASL mechanism given server capabilities and local config.
+///
+/// Priority when `sasl_mechanism` is `None` (auto-detect):
+/// 1. `EXTERNAL` — only if a `client_cert_path` is configured and the server advertises it.
+/// 2. `PLAIN` — if `sasl_user` + `sasl_pass` are configured and the server advertises it.
+///
+/// When `sasl_mechanism` is explicitly set, that mechanism is used if the server supports it.
+/// Returns `None` if no suitable mechanism can be selected.
+#[must_use]
+pub fn select_sasl_mechanism(
+    server_mechanisms: &[String],
+    sasl_mechanism_override: Option<&str>,
+    has_client_cert: bool,
+    has_credentials: bool,
+) -> Option<SaslMechanism> {
+    let server_has = |mech: &str| {
+        server_mechanisms.iter().any(|m| m.eq_ignore_ascii_case(mech))
+    };
+
+    // Explicit override from config
+    if let Some(override_mech) = sasl_mechanism_override {
+        return match override_mech.to_ascii_uppercase().as_str() {
+            "EXTERNAL" if server_has("EXTERNAL") && has_client_cert => Some(SaslMechanism::External),
+            "PLAIN" if server_has("PLAIN") && has_credentials => Some(SaslMechanism::Plain),
+            _ => {
+                tracing::warn!(
+                    "configured SASL mechanism '{override_mech}' not available \
+                     (server offers: {}, cert={has_client_cert}, creds={has_credentials})",
+                    server_mechanisms.join(",")
+                );
+                None
+            }
+        };
+    }
+
+    // Auto-detect: prefer EXTERNAL, then PLAIN
+    if has_client_cert && server_has("EXTERNAL") {
+        return Some(SaslMechanism::External);
+    }
+    if has_credentials && server_has("PLAIN") {
+        return Some(SaslMechanism::Plain);
+    }
+
+    None
+}
+
 /// Connect to an IRC server, returning a handle and the event receiver.
 ///
 /// Always performs capability negotiation (CAP LS 302), requesting all
-/// supported capabilities from [`DESIRED_CAPS`].  If SASL credentials are
-/// configured and the server supports SASL, performs SASL PLAIN
-/// authentication during negotiation.
+/// supported capabilities from [`DESIRED_CAPS`].  If SASL credentials or
+/// a client certificate are configured and the server supports SASL,
+/// performs the appropriate SASL authentication during negotiation.
 ///
 /// Spawns a tokio task that reads from the message stream and forwards
 /// events over an unbounded channel.
@@ -75,15 +139,13 @@ pub async fn connect_server(
         channels: server_config.channels.clone(),
         encoding: server_config.encoding.clone(),
         version: Some(general.ctcp_version.clone()),
+        client_cert_path: server_config.client_cert_path.clone(),
         ..Config::default()
     };
 
     let mut client = Client::from_config(irc_config).await?;
     let sender = client.sender();
     let mut stream = client.stream()?;
-
-    let sasl_user = server_config.sasl_user.as_deref();
-    let sasl_pass = server_config.sasl_pass.as_deref();
 
     let enabled_caps = negotiate_caps(
         &sender,
@@ -92,8 +154,10 @@ pub async fn connect_server(
         username,
         realname,
         server_config.password.as_deref(),
-        sasl_user,
-        sasl_pass,
+        server_config.sasl_user.as_deref(),
+        server_config.sasl_pass.as_deref(),
+        server_config.sasl_mechanism.as_deref(),
+        server_config.client_cert_path.is_some(),
     )
     .await?;
 
@@ -133,10 +197,11 @@ pub async fn connect_server(
 /// 4. Compute the intersection of desired and available capabilities
 /// 5. Send `CAP REQ` for all supported caps (sasl last if present)
 /// 6. Wait for `ACK`/`NAK`
-/// 7. If `sasl` was ACK'd and credentials exist, run SASL PLAIN flow
+/// 7. If `sasl` was ACK'd, select the best mechanism and run the appropriate flow
 /// 8. Send `CAP END`, `PASS` (if set), `NICK`, `USER`
 /// 9. Return the set of enabled capability names
 #[expect(clippy::too_many_arguments, reason = "IRC registration requires many parameters")]
+#[expect(clippy::too_many_lines, reason = "sequential protocol handshake cannot be split without losing clarity")]
 async fn negotiate_caps(
     sender: &irc::client::Sender,
     stream: &mut irc::client::ClientStream,
@@ -146,6 +211,8 @@ async fn negotiate_caps(
     password: Option<&str>,
     sasl_user: Option<&str>,
     sasl_pass: Option<&str>,
+    sasl_mechanism_override: Option<&str>,
+    has_client_cert: bool,
 ) -> Result<HashSet<String>> {
     use irc::proto::command::CapSubCommand;
 
@@ -174,12 +241,22 @@ async fn negotiate_caps(
         }
     }
 
-    // Step 3: Compute capabilities to request
+    // Step 3: Determine whether we can authenticate via SASL at all
+    let has_credentials = sasl_user.is_some() && sasl_pass.is_some();
+    let server_mechanisms = server_caps.sasl_mechanisms();
+    let selected_mechanism = select_sasl_mechanism(
+        &server_mechanisms,
+        sasl_mechanism_override,
+        has_client_cert,
+        has_credentials,
+    );
+    let want_sasl = selected_mechanism.is_some();
+
+    // Step 4: Compute capabilities to request
     let mut caps_to_request = server_caps.negotiate(DESIRED_CAPS);
 
-    // If we have no SASL credentials, don't request sasl even if advertised
-    let has_sasl_creds = sasl_user.is_some() && sasl_pass.is_some();
-    if !has_sasl_creds {
+    // Only request sasl if we have a usable mechanism
+    if !want_sasl {
         caps_to_request.retain(|c| c != "sasl");
     }
 
@@ -192,7 +269,7 @@ async fn negotiate_caps(
 
     let mut enabled_caps: HashSet<String> = HashSet::new();
 
-    // Step 4: Send CAP REQ if there are any caps to request
+    // Step 5: Send CAP REQ if there are any caps to request
     if !caps_to_request.is_empty() {
         let req_str = caps_to_request.join(" ");
         tracing::info!("requesting capabilities: {req_str}");
@@ -203,7 +280,7 @@ async fn negotiate_caps(
             Some(req_str),
         ))?;
 
-        // Step 5: Wait for ACK/NAK
+        // Step 6: Wait for ACK/NAK
         while let Some(result) = stream.next().await {
             let msg = result?;
             if let Command::CAP(_, CapSubCommand::ACK, _, ref acked) = msg.command {
@@ -225,16 +302,30 @@ async fn negotiate_caps(
         }
     }
 
-    // Step 6: If sasl was ACK'd and we have credentials, run SASL PLAIN
+    // Step 7: If sasl was ACK'd, run the selected SASL flow
     let sasl_acked = enabled_caps.contains("sasl");
     if sasl_requested && sasl_acked {
-        if let (Some(user), Some(pass)) = (sasl_user, sasl_pass) {
-            match run_sasl_plain(sender, stream, user, pass).await {
+        if let Some(mechanism) = selected_mechanism {
+            let result = match mechanism {
+                SaslMechanism::External => {
+                    tracing::info!("authenticating via SASL EXTERNAL (client certificate)");
+                    run_sasl_external(sender, stream).await
+                }
+                SaslMechanism::Plain => {
+                    if let (Some(user), Some(pass)) = (sasl_user, sasl_pass) {
+                        tracing::info!("authenticating via SASL PLAIN");
+                        run_sasl_plain(sender, stream, user, pass).await
+                    } else {
+                        Err(eyre!("SASL PLAIN selected but credentials missing"))
+                    }
+                }
+            };
+            match result {
                 Ok(()) => {
-                    tracing::info!("SASL PLAIN authentication successful");
+                    tracing::info!("SASL {mechanism} authentication successful");
                 }
                 Err(e) => {
-                    tracing::warn!("SASL authentication failed: {e}");
+                    tracing::warn!("SASL {mechanism} authentication failed: {e}");
                     // Remove sasl from enabled since auth failed
                     enabled_caps.remove("sasl");
                 }
@@ -244,7 +335,7 @@ async fn negotiate_caps(
         tracing::warn!("server did not ACK sasl capability");
     }
 
-    // Step 7: Finish registration
+    // Step 8: Finish registration
     sender.send(Command::CAP(None, CapSubCommand::END, None, None))?;
     if let Some(pass) = password {
         sender.send(Command::PASS(pass.to_string()))?;
@@ -302,4 +393,129 @@ async fn run_sasl_plain(
     }
 
     Err(eyre!("SASL authentication: connection closed unexpectedly"))
+}
+
+/// Execute the SASL EXTERNAL authentication handshake.
+///
+/// SASL EXTERNAL authenticates via the client TLS certificate already
+/// presented during the TLS handshake.  The flow is:
+///
+/// 1. Send `AUTHENTICATE EXTERNAL`
+/// 2. Wait for server's `AUTHENTICATE +`
+/// 3. Send `AUTHENTICATE +` (base64 of empty string — literal `+`)
+/// 4. Wait for `RPL_SASLSUCCESS` (903) or `ERR_SASLFAIL` (904)
+async fn run_sasl_external(
+    sender: &irc::client::Sender,
+    stream: &mut irc::client::ClientStream,
+) -> Result<()> {
+    // Send AUTHENTICATE EXTERNAL
+    sender.send(Command::AUTHENTICATE("EXTERNAL".to_string()))?;
+
+    // Wait for AUTHENTICATE + from server
+    while let Some(result) = stream.next().await {
+        let msg = result?;
+        if let Command::AUTHENTICATE(ref param) = msg.command
+            && param == "+"
+        {
+            break;
+        }
+    }
+
+    // Send AUTHENTICATE + (base64 encoding of an empty string is "+")
+    sender.send(Command::AUTHENTICATE("+".to_string()))?;
+
+    // Wait for 903 (success) or 904/905/906 (failure)
+    while let Some(result) = stream.next().await {
+        let msg = result?;
+        if let Command::Response(response, _) = &msg.command {
+            match response {
+                Response::RPL_SASLSUCCESS => return Ok(()),
+                Response::ERR_SASLFAIL => return Err(eyre!("SASL EXTERNAL authentication failed")),
+                Response::ERR_SASLTOOLONG => return Err(eyre!("SASL EXTERNAL message too long")),
+                Response::ERR_SASLABORT => return Err(eyre!("SASL EXTERNAL authentication aborted")),
+                _ => {}
+            }
+        }
+    }
+
+    Err(eyre!("SASL EXTERNAL: connection closed unexpectedly"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn select_external_when_cert_configured() {
+        let server_mechs = vec!["PLAIN".to_string(), "EXTERNAL".to_string()];
+        let result = select_sasl_mechanism(&server_mechs, None, true, true);
+        // EXTERNAL is preferred over PLAIN when cert is available
+        assert_eq!(result, Some(SaslMechanism::External));
+    }
+
+    #[test]
+    fn select_plain_when_only_credentials() {
+        let server_mechs = vec!["PLAIN".to_string(), "EXTERNAL".to_string()];
+        let result = select_sasl_mechanism(&server_mechs, None, false, true);
+        assert_eq!(result, Some(SaslMechanism::Plain));
+    }
+
+    #[test]
+    fn explicit_override_plain() {
+        let server_mechs = vec!["PLAIN".to_string(), "EXTERNAL".to_string()];
+        // Even though cert is available, explicit override to PLAIN
+        let result = select_sasl_mechanism(&server_mechs, Some("PLAIN"), true, true);
+        assert_eq!(result, Some(SaslMechanism::Plain));
+    }
+
+    #[test]
+    fn explicit_override_external() {
+        let server_mechs = vec!["PLAIN".to_string(), "EXTERNAL".to_string()];
+        let result = select_sasl_mechanism(&server_mechs, Some("EXTERNAL"), true, false);
+        assert_eq!(result, Some(SaslMechanism::External));
+    }
+
+    #[test]
+    fn explicit_override_unavailable_mechanism() {
+        let server_mechs = vec!["PLAIN".to_string()];
+        // Server doesn't offer EXTERNAL
+        let result = select_sasl_mechanism(&server_mechs, Some("EXTERNAL"), true, true);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn no_credentials_no_cert() {
+        let server_mechs = vec!["PLAIN".to_string(), "EXTERNAL".to_string()];
+        let result = select_sasl_mechanism(&server_mechs, None, false, false);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn server_no_mechanisms() {
+        let server_mechs: Vec<String> = vec![];
+        let result = select_sasl_mechanism(&server_mechs, None, true, true);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn external_only_when_server_supports() {
+        // Server only offers PLAIN, but we have a cert
+        let server_mechs = vec!["PLAIN".to_string()];
+        let result = select_sasl_mechanism(&server_mechs, None, true, true);
+        // Falls through to PLAIN since server doesn't advertise EXTERNAL
+        assert_eq!(result, Some(SaslMechanism::Plain));
+    }
+
+    #[test]
+    fn case_insensitive_override() {
+        let server_mechs = vec!["PLAIN".to_string(), "EXTERNAL".to_string()];
+        let result = select_sasl_mechanism(&server_mechs, Some("external"), true, false);
+        assert_eq!(result, Some(SaslMechanism::External));
+    }
+
+    #[test]
+    fn sasl_mechanism_display() {
+        assert_eq!(SaslMechanism::Plain.to_string(), "PLAIN");
+        assert_eq!(SaslMechanism::External.to_string(), "EXTERNAL");
+    }
 }

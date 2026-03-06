@@ -1,4 +1,5 @@
 pub mod defaults;
+#[allow(dead_code)]
 pub mod env;
 
 use std::collections::HashMap;
@@ -8,11 +9,12 @@ use color_eyre::eyre::Result;
 use serde::{Deserialize, Serialize};
 
 pub use defaults::default_config;
+#[allow(unused_imports)]
 pub use env::{apply_credentials, load_env};
 
 // === Helper for serde defaults ===
 
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 
@@ -55,7 +57,7 @@ pub enum IgnoreLevel {
 
 // === Config Structs ===
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub general: GeneralConfig,
@@ -68,23 +70,6 @@ pub struct AppConfig {
     pub ignores: Vec<IgnoreEntry>,
     pub scripts: ScriptsConfig,
     pub logging: LoggingConfig,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        AppConfig {
-            general: GeneralConfig::default(),
-            display: DisplayConfig::default(),
-            sidepanel: SidepanelConfig::default(),
-            statusbar: StatusbarConfig::default(),
-            image_preview: ImagePreviewConfig::default(),
-            servers: HashMap::new(),
-            aliases: HashMap::new(),
-            ignores: Vec::new(),
-            scripts: ScriptsConfig::default(),
-            logging: LoggingConfig::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,7 +87,7 @@ pub struct GeneralConfig {
 impl Default for GeneralConfig {
     fn default() -> Self {
         use crate::constants::APP_NAME;
-        GeneralConfig {
+        Self {
             nick: APP_NAME.to_string(),
             username: APP_NAME.to_lowercase(),
             realname: format!("{APP_NAME} Client"),
@@ -127,7 +112,7 @@ pub struct DisplayConfig {
 
 impl Default for DisplayConfig {
     fn default() -> Self {
-        DisplayConfig {
+        Self {
             nick_column_width: 8,
             nick_max_length: 8,
             nick_alignment: NickAlignment::Right,
@@ -147,7 +132,7 @@ pub struct SidepanelConfig {
 
 impl Default for SidepanelConfig {
     fn default() -> Self {
-        SidepanelConfig {
+        Self {
             left: PanelConfig { width: 20, visible: true },
             right: PanelConfig { width: 18, visible: true },
         }
@@ -189,7 +174,7 @@ pub struct StatusbarConfig {
 
 impl Default for StatusbarConfig {
     fn default() -> Self {
-        StatusbarConfig {
+        Self {
             enabled: true,
             items: vec![
                 StatusbarItem::Time,
@@ -229,7 +214,7 @@ pub struct ImagePreviewConfig {
 
 impl Default for ImagePreviewConfig {
     fn default() -> Self {
-        ImagePreviewConfig {
+        Self {
             enabled: true,
             max_width: 0,
             max_height: 0,
@@ -278,9 +263,16 @@ pub struct ServerConfig {
     pub reconnect_max_retries: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autosendcmd: Option<String>,
+    /// SASL mechanism to use: `"PLAIN"`, `"EXTERNAL"`, or `None` (auto-detect best).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sasl_mechanism: Option<String>,
+    /// Path to a client TLS certificate (PEM) for SASL EXTERNAL / `CertFP` auth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_cert_path: Option<String>,
 }
 
-fn default_true_option() -> Option<bool> {
+#[expect(clippy::unnecessary_wraps, reason = "serde default requires Option<bool> return type")]
+const fn default_true_option() -> Option<bool> {
     Some(true)
 }
 
@@ -303,7 +295,7 @@ pub struct LoggingConfig {
 
 impl Default for LoggingConfig {
     fn default() -> Self {
-        LoggingConfig {
+        Self {
             enabled: true,
             encrypt: false,
             retention_days: 0,
@@ -322,7 +314,7 @@ pub struct ScriptsConfig {
 // === Load / Save ===
 
 /// Load config from TOML file, merging with defaults for missing fields.
-/// Uses serde's `#[serde(default)]` on AppConfig to handle missing fields.
+/// Uses serde's `#[serde(default)]` on `AppConfig` to handle missing fields.
 pub fn load_config(path: &Path) -> Result<AppConfig> {
     if !path.exists() {
         return Ok(default_config());
@@ -496,6 +488,8 @@ channels = ["#general"]
                 reconnect_delay: None,
                 reconnect_max_retries: None,
                 autosendcmd: None,
+                sasl_mechanism: None,
+                client_cert_path: None,
             },
         );
 

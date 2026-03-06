@@ -351,6 +351,8 @@ mod tests {
             reconnect_delay: None,
             reconnect_max_retries: None,
             autosendcmd: None,
+            sasl_mechanism: None,
+            client_cert_path: None,
         }
     }
 

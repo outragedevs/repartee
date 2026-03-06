@@ -5,6 +5,7 @@ use super::helpers::add_local_event;
 
 // === Connection ===
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn cmd_connect(app: &mut App, args: &[String]) {
     if args.is_empty() {
         add_local_event(
@@ -125,6 +126,8 @@ pub(crate) fn cmd_connect(app: &mut App, args: &[String]) {
         reconnect_delay: None,
         reconnect_max_retries: None,
         autosendcmd: None,
+        sasl_mechanism: None,
+        client_cert_path: None,
     };
 
     spawn_connection(app, &conn_id, &adhoc_config);

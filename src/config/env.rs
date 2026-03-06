@@ -26,7 +26,7 @@ pub fn load_env(path: &Path) -> Result<HashMap<String, String>> {
 }
 
 /// Apply .env credentials to server configs.
-/// For each server with id "foo", looks for FOO_SASL_USER, FOO_SASL_PASS, FOO_PASSWORD.
+/// For each server with id "foo", looks for `FOO_SASL_USER`, `FOO_SASL_PASS`, `FOO_PASSWORD`.
 pub fn apply_credentials(
     servers: &mut HashMap<String, super::ServerConfig>,
     env: &HashMap<String, String>,
@@ -100,6 +100,8 @@ mod tests {
                 reconnect_delay: None,
                 reconnect_max_retries: None,
                 autosendcmd: None,
+                sasl_mechanism: None,
+                client_cert_path: None,
             },
         );
 
