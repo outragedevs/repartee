@@ -110,7 +110,7 @@ Track implementation status of IRC protocol features in rustirc.
 |------------|--------|------|-------|
 | `multi-prefix` | Done | 3.1 | All mode prefixes per user in NAMES, dynamic via ISUPPORT PREFIX |
 | `extended-join` | Done | 3.1 | JOIN includes account + realname; account stored on `NickEntry` |
-| `server-time` | Not Started | 3.2 | Server-provided timestamps on messages |
+| `server-time` | Done | 3.2 | `@time` tag used as message timestamp; fallback to `Utc::now()` for missing/malformed tags |
 | `account-tag` | Done | 3.2 | User account in message tags; supplementary update on `NickEntry` via PRIVMSG tags |
 | `cap-notify` | Not Started | 3.2 | Server notifies of cap changes (CAP NEW/DEL) |
 | `away-notify` | Not Started | 3.1 | Real-time AWAY status changes |

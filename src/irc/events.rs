@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::time::Instant;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use irc::proto::{Command, Message as IrcMessage, Prefix, Response};
 
 use crate::config::IgnoreLevel;
@@ -244,6 +244,17 @@ fn extract_tags(msg: &IrcMessage) -> HashMap<String, String> {
     })
 }
 
+/// Extract the timestamp from `IRCv3` `server-time` tag (`@time=...`).
+///
+/// If a valid RFC 3339 timestamp is present, use it; otherwise fall back to
+/// `Utc::now()`.  This is critical for bouncer/relay playback where messages
+/// arrive with historical timestamps.
+fn message_timestamp(tags: &HashMap<String, String>) -> DateTime<Utc> {
+    tags.get("time")
+        .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+        .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc))
+}
+
 // === Private handlers ===
 
 #[expect(clippy::too_many_lines, reason = "linear message handler")]
@@ -348,7 +359,7 @@ fn handle_privmsg(
                 &buffer_id,
                 Message {
                     id,
-                    timestamp: Utc::now(),
+                    timestamp: message_timestamp(&tags),
                     message_type: MessageType::Action,
                     nick: Some(nick),
                     nick_mode: mode_prefix,
@@ -423,7 +434,7 @@ fn handle_privmsg(
         &buffer_id,
         Message {
             id,
-            timestamp: Utc::now(),
+            timestamp: message_timestamp(&tags),
             message_type: MessageType::Message,
             nick: Some(nick),
             nick_mode: mode_prefix,
@@ -494,7 +505,7 @@ fn handle_notice(
         &buffer_id,
         Message {
             id,
-            timestamp: Utc::now(),
+            timestamp: message_timestamp(&tags),
             message_type: MessageType::Notice,
             nick,
             nick_mode: mode_prefix,
@@ -607,7 +618,7 @@ fn handle_join(
         &buffer_id,
         Message {
             id,
-            timestamp: Utc::now(),
+            timestamp: message_timestamp(&tags),
             message_type: MessageType::Event,
             nick: None,
             nick_mode: None,
@@ -688,7 +699,7 @@ fn handle_account(
             &buf_id,
             Message {
                 id,
-                timestamp: Utc::now(),
+                timestamp: message_timestamp(&tags),
                 message_type: MessageType::Event,
                 nick: None,
                 nick_mode: None,
@@ -740,7 +751,7 @@ fn handle_part(
             &buffer_id,
             Message {
                 id,
-                timestamp: Utc::now(),
+                timestamp: message_timestamp(&tags),
                 message_type: MessageType::Event,
                 nick: None,
                 nick_mode: None,
@@ -811,13 +822,14 @@ fn handle_quit(
     let primary_msg_id = uuid::Uuid::new_v4().to_string();
     let text = format!("{nick} ({ident}@{host}) has quit ({reason_str})");
 
+    let ts = message_timestamp(&tags);
     for (i, buf_id) in affected.iter().enumerate() {
         let id = state.next_message_id();
         state.add_message(
             buf_id,
             Message {
                 id,
-                timestamp: Utc::now(),
+                timestamp: ts,
                 message_type: MessageType::Event,
                 nick: None,
                 nick_mode: None,
@@ -895,6 +907,7 @@ fn handle_nick_change(
     let primary_msg_id = uuid::Uuid::new_v4().to_string();
     let text = format!("{old_nick} is now known as {new_nick}");
     let mut primary_assigned = false;
+    let ts = message_timestamp(&tags);
 
     for buf_id in &affected {
         state.update_nick(buf_id, &old_nick, new_nick.to_string());
@@ -920,7 +933,7 @@ fn handle_nick_change(
             buf_id,
             Message {
                 id,
-                timestamp: Utc::now(),
+                timestamp: ts,
                 message_type: MessageType::Event,
                 nick: None,
                 nick_mode: None,
@@ -967,13 +980,14 @@ fn handle_kick(
         return;
     }
 
+    let ts = message_timestamp(&tags);
     if kicked_user == our_nick {
         let id = state.next_message_id();
         state.add_message(
             &buffer_id,
             Message {
                 id,
-                timestamp: Utc::now(),
+                timestamp: ts,
                 message_type: MessageType::Event,
                 nick: None,
                 nick_mode: None,
@@ -992,7 +1006,7 @@ fn handle_kick(
             &buffer_id,
             Message {
                 id,
-                timestamp: Utc::now(),
+                timestamp: ts,
                 message_type: MessageType::Event,
                 nick: None,
                 nick_mode: None,
@@ -1031,7 +1045,7 @@ fn handle_topic(
             &buffer_id,
             Message {
                 id,
-                timestamp: Utc::now(),
+                timestamp: message_timestamp(&tags),
                 message_type: MessageType::Event,
                 nick: None,
                 nick_mode: None,
@@ -1089,6 +1103,7 @@ fn handle_mode(
         _ => String::new(),
     };
 
+    let ts = message_timestamp(&tags);
     if is_channel(target) {
         let buffer_id = make_buffer_id(conn_id, target);
         let id = state.next_message_id();
@@ -1096,7 +1111,7 @@ fn handle_mode(
             &buffer_id,
             Message {
                 id,
-                timestamp: Utc::now(),
+                timestamp: ts,
                 message_type: MessageType::Event,
                 nick: None,
                 nick_mode: None,
@@ -1118,7 +1133,7 @@ fn handle_mode(
             &server_buf,
             Message {
                 id,
-                timestamp: Utc::now(),
+                timestamp: ts,
                 message_type: MessageType::Event,
                 nick: None,
                 nick_mode: None,
@@ -1283,7 +1298,7 @@ fn handle_invite(
         &buffer_id,
         Message {
             id,
-            timestamp: Utc::now(),
+            timestamp: message_timestamp(&tags),
             message_type: MessageType::Event,
             nick: None,
             nick_mode: None,
@@ -1895,6 +1910,7 @@ fn parse_userhost(input: &str) -> (String, Option<String>, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Datelike, Timelike};
     use crate::state::connection::Connection;
     use irc::proto::Prefix;
     use std::collections::HashMap;
@@ -2761,5 +2777,94 @@ mod tests {
         assert!(state.buffers.contains_key("test/#newchan"));
         let buf = state.buffers.get("test/#newchan").unwrap();
         assert_eq!(buf.buffer_type, BufferType::Channel);
+    }
+
+    // === server-time tests ===
+
+    #[test]
+    fn server_time_tag_used_as_timestamp() {
+        let mut state = make_test_state();
+        let mut msg = make_irc_msg(
+            Some("alice!user@host"),
+            Command::PRIVMSG("#test".into(), "hello from the past".into()),
+        );
+        msg.tags = Some(vec![irc::proto::message::Tag(
+            "time".to_string(),
+            Some("2020-06-15T10:30:00.000Z".to_string()),
+        )]);
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        let ts = buf.messages[0].timestamp;
+        assert_eq!(ts.year(), 2020);
+        assert_eq!(ts.month(), 6);
+        assert_eq!(ts.day(), 15);
+        assert_eq!(ts.hour(), 10);
+        assert_eq!(ts.minute(), 30);
+    }
+
+    #[test]
+    fn missing_time_tag_falls_back_to_now() {
+        let mut state = make_test_state();
+        let before = Utc::now();
+        let msg = make_irc_msg(
+            Some("alice!user@host"),
+            Command::PRIVMSG("#test".into(), "hello".into()),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+        let after = Utc::now();
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        let ts = buf.messages[0].timestamp;
+        assert!(ts >= before && ts <= after, "timestamp should be approximately now");
+    }
+
+    #[test]
+    fn malformed_time_tag_falls_back_to_now() {
+        let mut state = make_test_state();
+        let before = Utc::now();
+        let mut msg = make_irc_msg(
+            Some("alice!user@host"),
+            Command::PRIVMSG("#test".into(), "hello".into()),
+        );
+        msg.tags = Some(vec![irc::proto::message::Tag(
+            "time".to_string(),
+            Some("not-a-timestamp".to_string()),
+        )]);
+        handle_irc_message(&mut state, "test", &msg);
+        let after = Utc::now();
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        let ts = buf.messages[0].timestamp;
+        assert!(ts >= before && ts <= after, "malformed tag should fall back to now");
+    }
+
+    #[test]
+    fn server_time_helper_unit() {
+        // Valid RFC 3339 timestamp
+        let mut tags = HashMap::new();
+        tags.insert("time".to_string(), "2023-01-15T08:45:30.123Z".to_string());
+        let ts = message_timestamp(&tags);
+        assert_eq!(ts.year(), 2023);
+        assert_eq!(ts.month(), 1);
+        assert_eq!(ts.day(), 15);
+        assert_eq!(ts.hour(), 8);
+        assert_eq!(ts.minute(), 45);
+        assert_eq!(ts.second(), 30);
+
+        // Empty tags → fallback
+        let empty: HashMap<String, String> = HashMap::new();
+        let before = Utc::now();
+        let ts = message_timestamp(&empty);
+        let after = Utc::now();
+        assert!(ts >= before && ts <= after);
+
+        // Malformed value → fallback
+        let mut bad = HashMap::new();
+        bad.insert("time".to_string(), "garbage".to_string());
+        let before = Utc::now();
+        let ts = message_timestamp(&bad);
+        let after = Utc::now();
+        assert!(ts >= before && ts <= after);
     }
 }
