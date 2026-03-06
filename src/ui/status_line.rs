@@ -63,7 +63,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                         buf.name.clone(),
                         Style::default().fg(name_color),
                     ));
-                    if let Some(modes) = &buf.modes {
+                    if let Some(modes) = &buf.modes
+                        && !modes.is_empty()
+                    {
                         spans.push(Span::styled(
                             format!("(+{modes})"),
                             Style::default().fg(fg_muted),

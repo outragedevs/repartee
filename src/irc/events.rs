@@ -1560,7 +1560,7 @@ fn handle_mode(
     }
 }
 
-/// Apply a single channel mode change to nick entries.
+/// Apply a single channel mode change to nick entries and channel mode tracking.
 fn apply_channel_mode(
     state: &mut AppState,
     buffer_id: &str,
@@ -1574,8 +1574,8 @@ fn apply_channel_mode(
         irc::proto::Mode::NoPrefix(_) => return,
     };
 
-    // Map channel modes to prefix mode chars
-    let mode_char = match mode_enum {
+    // Nick prefix modes — update user entries
+    let nick_mode_char = match mode_enum {
         ChannelMode::Founder => Some('q'),
         ChannelMode::Admin => Some('a'),
         ChannelMode::Oper => Some('o'),
@@ -1584,7 +1584,7 @@ fn apply_channel_mode(
         _ => None,
     };
 
-    if let Some(mc) = mode_char
+    if let Some(mc) = nick_mode_char
         && let Some(target_nick) = param
         && let Some(buf) = state.buffers.get_mut(buffer_id)
         && let Some(entry) = buf.users.get_mut(&target_nick.to_lowercase())
@@ -1595,6 +1595,45 @@ fn apply_channel_mode(
             entry.modes = entry.modes.replace(mc, "");
         }
         entry.prefix = modes_to_prefix(&entry.modes, "~&@%+");
+        return;
+    }
+
+    // Channel modes (not nick prefix, not list modes) — update buf.modes
+    // Skip list modes (b, e, I) and nick prefix modes (already handled above)
+    let ch = channel_mode_letter(mode_enum);
+    let is_list_mode = matches!(mode_enum,
+        ChannelMode::Ban | ChannelMode::Exception | ChannelMode::InviteException
+    );
+    if is_list_mode || nick_mode_char.is_some() {
+        return;
+    }
+
+    if let Some(buf) = state.buffers.get_mut(buffer_id) {
+        let modes = buf.modes.get_or_insert_with(String::new);
+        if adding {
+            if !modes.contains(ch) {
+                modes.push(ch);
+            }
+            // Store key param for /cycle to preserve
+            if ch == 'k'
+                && let Some(key) = param
+            {
+                buf.mode_params
+                    .get_or_insert_with(HashMap::new)
+                    .insert("k".to_string(), key.to_string());
+            }
+        } else {
+            *modes = modes.replace(ch, "");
+            if ch == 'k'
+                && let Some(ref mut mp) = buf.mode_params
+            {
+                mp.remove("k");
+            }
+        }
+        // Strip leading '+' if present from RPL_CHANNELMODEIS
+        if modes.starts_with('+') {
+            *modes = modes[1..].to_string();
+        }
     }
 }
 
@@ -1855,10 +1894,10 @@ fn handle_response(
         Response::RPL_CHANNELMODEIS => {
             if args.len() >= 3 {
                 let channel = &args[1];
-                let modes = &args[2];
+                let modes = args[2].strip_prefix('+').unwrap_or(&args[2]);
                 let buffer_id = make_buffer_id(conn_id, channel);
                 if let Some(buf) = state.buffers.get_mut(&buffer_id) {
-                    buf.modes = Some(modes.clone());
+                    buf.modes = Some(modes.to_string());
                 }
             }
         }
