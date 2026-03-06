@@ -99,7 +99,7 @@ Track implementation status of IRC protocol features in rustirc.
 | CAP LS 302 | Done | Multiline parsing, field3/field4 handling |
 | CAP REQ/ACK/NAK | Done | Request + detect acceptance |
 | CAP END | Done | Properly closes negotiation |
-| CAP NEW/DEL (cap-notify) | Not Started | Runtime capability changes |
+| CAP NEW/DEL (cap-notify) | Done | Runtime capability changes: NEW triggers CAP REQ for desired caps, DEL removes from enabled_caps, ACK/NAK handled |
 | Capability state machine | Done | Extensible `negotiate_caps()` framework: `ServerCaps` struct, requests all `DESIRED_CAPS`, stores enabled caps on Connection |
 
 ---
@@ -112,7 +112,7 @@ Track implementation status of IRC protocol features in rustirc.
 | `extended-join` | Done | 3.1 | JOIN includes account + realname; account stored on `NickEntry` |
 | `server-time` | Done | 3.2 | `@time` tag used as message timestamp; fallback to `Utc::now()` for missing/malformed tags |
 | `account-tag` | Done | 3.2 | User account in message tags; supplementary update on `NickEntry` via PRIVMSG tags |
-| `cap-notify` | Not Started | 3.2 | Server notifies of cap changes (CAP NEW/DEL) |
+| `cap-notify` | Done | 3.2 | Server notifies of cap changes; CAP NEW auto-requests desired caps, CAP DEL removes, ACK/NAK logged |
 | `away-notify` | Done | 3.1 | Real-time AWAY status changes; silently updates `NickEntry.away` across all shared buffers |
 | `account-notify` | Done | 3.1 | ACCOUNT command: login/logout updates `NickEntry.account` across all shared buffers |
 | `chghost` | Done | 3.2 | Host/ident change notifications; updates `NickEntry.ident`/`host`, adds event message |

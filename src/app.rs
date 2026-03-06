@@ -633,6 +633,7 @@ impl App {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn handle_irc_event(&mut self, event: IrcEvent) {
         match event {
             IrcEvent::HandleReady(conn_id, sender) => {
@@ -698,6 +699,50 @@ impl App {
                         conn.lag = Some(lag_ms);
                     }
                 }
+                // Handle CAP subcommands for cap-notify (runtime capability changes)
+                if let ::irc::proto::Command::CAP(_, ref subcmd, ref field3, ref field4) = msg.command {
+                    use ::irc::proto::command::CapSubCommand;
+                    match subcmd {
+                        CapSubCommand::NEW => {
+                            let to_request = crate::irc::events::handle_cap_new(
+                                &mut self.state, &conn_id,
+                                field3.as_deref(), field4.as_deref(),
+                            );
+                            if !to_request.is_empty()
+                                && let Some(handle) = self.irc_handles.get(&conn_id)
+                            {
+                                let req_str = to_request.join(" ");
+                                tracing::info!("sending CAP REQ for new caps: {req_str}");
+                                let _ = handle.sender.send(::irc::proto::Command::CAP(
+                                    None,
+                                    CapSubCommand::REQ,
+                                    None,
+                                    Some(req_str),
+                                ));
+                            }
+                        }
+                        CapSubCommand::DEL => {
+                            crate::irc::events::handle_cap_del(
+                                &mut self.state, &conn_id,
+                                field3.as_deref(), field4.as_deref(),
+                            );
+                        }
+                        CapSubCommand::ACK => {
+                            crate::irc::events::handle_cap_ack(
+                                &mut self.state, &conn_id,
+                                field3.as_deref(), field4.as_deref(),
+                            );
+                        }
+                        CapSubCommand::NAK => {
+                            crate::irc::events::handle_cap_nak(
+                                &mut self.state, &conn_id,
+                                field3.as_deref(), field4.as_deref(),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+
                 // Check for nick-in-use before processing — capture the new nick
                 // that events.rs will set so we can send the NICK command.
                 let nick_retry = if let ::irc::proto::Command::Response(

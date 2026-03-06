@@ -228,6 +228,255 @@ fn calculate_reconnect_delay(base_delay: u64, attempts: u32) -> u64 {
     delay.min(300)
 }
 
+/// Extract a capabilities string from a `CAP` command's field3/field4.
+///
+/// The IRC protocol sends `CAP * <subcommand> :caps` which the irc crate parses
+/// as `CAP(Some("*"), subcmd, Some("caps"), None)`.  In some cases the caps may
+/// land in field4 instead (e.g. multiline continuation).  This helper checks both
+/// fields, skipping the `*` continuation marker.
+fn extract_cap_string(field3: Option<&str>, field4: Option<&str>) -> String {
+    // If field3 is "*" (continuation marker), caps are in field4
+    if field3 == Some("*") {
+        return field4.unwrap_or("").to_string();
+    }
+    // Otherwise try field4 first (some servers put caps there), then field3
+    if let Some(s) = field4
+        && !s.is_empty()
+    {
+        return s.to_string();
+    }
+    field3.unwrap_or("").to_string()
+}
+
+/// Handle `CAP NEW` — new capabilities became available at runtime.
+///
+/// Parses the caps string, filters to those in [`DESIRED_CAPS`] that are not
+/// already enabled, and returns the list of caps that should be requested via
+/// `CAP REQ`.  The caller is responsible for sending the actual `CAP REQ`
+/// command (since this function has no access to the IRC sender).
+///
+/// Also logs the event to the server status buffer.
+pub fn handle_cap_new(
+    state: &mut AppState,
+    conn_id: &str,
+    field3: Option<&str>,
+    field4: Option<&str>,
+) -> Vec<String> {
+    use crate::irc::cap::DESIRED_CAPS;
+
+    let caps_str = extract_cap_string(field3, field4);
+    let new_caps: Vec<String> = caps_str
+        .split_whitespace()
+        .map(|s| s.split_once('=').map_or(s, |(name, _)| name))
+        .map(str::to_ascii_lowercase)
+        .collect();
+
+    tracing::info!("CAP NEW from {conn_id}: {}", new_caps.join(" "));
+
+    let enabled = state
+        .connections
+        .get(conn_id)
+        .map(|c| &c.enabled_caps);
+
+    let to_request: Vec<String> = new_caps
+        .iter()
+        .filter(|cap| {
+            DESIRED_CAPS.iter().any(|d| d.eq_ignore_ascii_case(cap))
+                && enabled.is_none_or(|set| !set.contains(cap.as_str()))
+        })
+        .cloned()
+        .collect();
+
+    // Log to server status buffer
+    let label = state
+        .connections
+        .get(conn_id)
+        .map_or_else(|| conn_id.to_string(), |c| c.label.clone());
+    let buffer_id = make_buffer_id(conn_id, &label);
+
+    let text = if to_request.is_empty() {
+        format!("New capabilities available: {} (none requested)", new_caps.join(", "))
+    } else {
+        format!(
+            "New capabilities available: {} — requesting: {}",
+            new_caps.join(", "),
+            to_request.join(", ")
+        )
+    };
+
+    let id = state.next_message_id();
+    state.add_message(
+        &buffer_id,
+        Message {
+            id,
+            timestamp: Utc::now(),
+            message_type: MessageType::Event,
+            nick: None,
+            nick_mode: None,
+            text,
+            highlight: false,
+            event_key: Some("cap_new".to_string()),
+            event_params: None, log_msg_id: None, log_ref_id: None,
+            tags: HashMap::new(),
+        },
+    );
+
+    to_request
+}
+
+/// Handle `CAP DEL` — capabilities removed by the server at runtime.
+///
+/// Parses the caps string and removes each from `conn.enabled_caps`.
+/// Logs the event to the server status buffer.
+pub fn handle_cap_del(
+    state: &mut AppState,
+    conn_id: &str,
+    field3: Option<&str>,
+    field4: Option<&str>,
+) {
+    let caps_str = extract_cap_string(field3, field4);
+    let removed_caps: Vec<String> = caps_str
+        .split_whitespace()
+        .map(|s| s.split_once('=').map_or(s, |(name, _)| name))
+        .map(str::to_ascii_lowercase)
+        .collect();
+
+    tracing::info!("CAP DEL from {conn_id}: {}", removed_caps.join(" "));
+
+    let mut actually_removed = Vec::new();
+    if let Some(conn) = state.connections.get_mut(conn_id) {
+        for cap in &removed_caps {
+            if conn.enabled_caps.remove(cap) {
+                actually_removed.push(cap.clone());
+            }
+        }
+    }
+
+    // Log to server status buffer
+    let label = state
+        .connections
+        .get(conn_id)
+        .map_or_else(|| conn_id.to_string(), |c| c.label.clone());
+    let buffer_id = make_buffer_id(conn_id, &label);
+
+    let text = if actually_removed.is_empty() {
+        format!("Capabilities removed: {} (none were enabled)", removed_caps.join(", "))
+    } else {
+        format!("Capabilities removed: {}", actually_removed.join(", "))
+    };
+
+    let id = state.next_message_id();
+    state.add_message(
+        &buffer_id,
+        Message {
+            id,
+            timestamp: Utc::now(),
+            message_type: MessageType::Event,
+            nick: None,
+            nick_mode: None,
+            text,
+            highlight: false,
+            event_key: Some("cap_del".to_string()),
+            event_params: None, log_msg_id: None, log_ref_id: None,
+            tags: HashMap::new(),
+        },
+    );
+}
+
+/// Handle `CAP ACK` received at runtime (in response to a `CAP REQ` triggered
+/// by `CAP NEW`).
+///
+/// Adds the acknowledged capabilities to `conn.enabled_caps` and logs the event.
+pub fn handle_cap_ack(
+    state: &mut AppState,
+    conn_id: &str,
+    field3: Option<&str>,
+    field4: Option<&str>,
+) {
+    let caps_str = extract_cap_string(field3, field4);
+    let acked_caps: Vec<String> = caps_str
+        .split_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect();
+
+    tracing::info!("CAP ACK from {conn_id}: {}", acked_caps.join(" "));
+
+    if let Some(conn) = state.connections.get_mut(conn_id) {
+        for cap in &acked_caps {
+            conn.enabled_caps.insert(cap.clone());
+        }
+    }
+
+    // Log to server status buffer
+    let label = state
+        .connections
+        .get(conn_id)
+        .map_or_else(|| conn_id.to_string(), |c| c.label.clone());
+    let buffer_id = make_buffer_id(conn_id, &label);
+
+    let text = format!("Capabilities acknowledged: {}", acked_caps.join(", "));
+
+    let id = state.next_message_id();
+    state.add_message(
+        &buffer_id,
+        Message {
+            id,
+            timestamp: Utc::now(),
+            message_type: MessageType::Event,
+            nick: None,
+            nick_mode: None,
+            text,
+            highlight: false,
+            event_key: Some("cap_ack".to_string()),
+            event_params: None, log_msg_id: None, log_ref_id: None,
+            tags: HashMap::new(),
+        },
+    );
+}
+
+/// Handle `CAP NAK` received at runtime (server refused our `CAP REQ`).
+///
+/// Logs the rejection to the server status buffer.
+pub fn handle_cap_nak(
+    state: &mut AppState,
+    conn_id: &str,
+    field3: Option<&str>,
+    field4: Option<&str>,
+) {
+    let caps_str = extract_cap_string(field3, field4);
+    let naked_caps: Vec<String> = caps_str
+        .split_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect();
+
+    tracing::warn!("CAP NAK from {conn_id}: {}", naked_caps.join(" "));
+
+    let label = state
+        .connections
+        .get(conn_id)
+        .map_or_else(|| conn_id.to_string(), |c| c.label.clone());
+    let buffer_id = make_buffer_id(conn_id, &label);
+
+    let text = format!("Capabilities rejected: {}", naked_caps.join(", "));
+
+    let id = state.next_message_id();
+    state.add_message(
+        &buffer_id,
+        Message {
+            id,
+            timestamp: Utc::now(),
+            message_type: MessageType::Event,
+            nick: None,
+            nick_mode: None,
+            text,
+            highlight: false,
+            event_key: Some("cap_nak".to_string()),
+            event_params: None, log_msg_id: None, log_ref_id: None,
+            tags: HashMap::new(),
+        },
+    );
+}
+
 /// Look up a nick's mode prefix (e.g. "@", "+") from the buffer's user list.
 fn nick_prefix(state: &AppState, buffer_id: &str, nick: &str) -> Option<String> {
     let buf = state.buffers.get(buffer_id)?;
@@ -3207,5 +3456,183 @@ mod tests {
         let ts = message_timestamp(&bad);
         let after = Utc::now();
         assert!(ts >= before && ts <= after);
+    }
+
+    // ── cap-notify tests ─────────────────────────────────────────────
+
+    #[test]
+    fn cap_new_desired_caps_returns_request_list() {
+        let mut state = make_test_state();
+        // Pre-enable some caps so they are NOT re-requested
+        if let Some(conn) = state.connections.get_mut("test") {
+            conn.enabled_caps.insert("multi-prefix".to_string());
+        }
+
+        // Server advertises new caps: one already enabled, one desired, one unknown
+        let to_request = handle_cap_new(
+            &mut state, "test",
+            Some("multi-prefix echo-message unknown-cap"), None,
+        );
+
+        // Should only request echo-message (multi-prefix already enabled, unknown-cap not desired)
+        assert_eq!(to_request, vec!["echo-message"]);
+
+        // Verify status message was logged
+        let buf = state.buffers.get(&make_buffer_id("test", "TestServer")).unwrap();
+        let last = buf.messages.last().unwrap();
+        assert!(last.text.contains("echo-message"), "should mention requested cap");
+        assert_eq!(last.event_key.as_deref(), Some("cap_new"));
+    }
+
+    #[test]
+    fn cap_new_non_desired_caps_ignored() {
+        let mut state = make_test_state();
+        let to_request = handle_cap_new(
+            &mut state, "test",
+            Some("unknown-cap fancy-feature"), None,
+        );
+
+        assert!(to_request.is_empty(), "no desired caps should be requested");
+
+        let buf = state.buffers.get(&make_buffer_id("test", "TestServer")).unwrap();
+        let last = buf.messages.last().unwrap();
+        assert!(last.text.contains("none requested"), "should note nothing was requested");
+    }
+
+    #[test]
+    fn cap_new_with_values_strips_value_part() {
+        let mut state = make_test_state();
+        // Server sends caps with values (e.g. sasl=PLAIN,EXTERNAL)
+        let to_request = handle_cap_new(
+            &mut state, "test",
+            Some("sasl=PLAIN,EXTERNAL server-time"), None,
+        );
+
+        // Both are desired caps, neither enabled yet
+        assert!(to_request.contains(&"sasl".to_string()));
+        assert!(to_request.contains(&"server-time".to_string()));
+    }
+
+    #[test]
+    fn cap_del_removes_from_enabled() {
+        let mut state = make_test_state();
+        // Pre-enable some caps
+        if let Some(conn) = state.connections.get_mut("test") {
+            conn.enabled_caps.insert("multi-prefix".to_string());
+            conn.enabled_caps.insert("server-time".to_string());
+            conn.enabled_caps.insert("away-notify".to_string());
+        }
+
+        // Server removes multi-prefix and server-time
+        handle_cap_del(&mut state, "test", Some("multi-prefix server-time"), None);
+
+        let conn = state.connections.get("test").unwrap();
+        assert!(!conn.enabled_caps.contains("multi-prefix"));
+        assert!(!conn.enabled_caps.contains("server-time"));
+        assert!(conn.enabled_caps.contains("away-notify"), "untouched cap should remain");
+
+        let buf = state.buffers.get(&make_buffer_id("test", "TestServer")).unwrap();
+        let last = buf.messages.last().unwrap();
+        assert_eq!(last.event_key.as_deref(), Some("cap_del"));
+        assert!(last.text.contains("multi-prefix"));
+    }
+
+    #[test]
+    fn cap_del_for_non_enabled_caps_is_noop() {
+        let mut state = make_test_state();
+        // No caps enabled
+        handle_cap_del(&mut state, "test", Some("fancy-feature unknown-cap"), None);
+
+        let conn = state.connections.get("test").unwrap();
+        assert!(conn.enabled_caps.is_empty());
+
+        let buf = state.buffers.get(&make_buffer_id("test", "TestServer")).unwrap();
+        let last = buf.messages.last().unwrap();
+        assert!(last.text.contains("none were enabled"));
+    }
+
+    #[test]
+    fn cap_ack_adds_to_enabled() {
+        let mut state = make_test_state();
+        handle_cap_ack(&mut state, "test", Some("echo-message invite-notify"), None);
+
+        let conn = state.connections.get("test").unwrap();
+        assert!(conn.enabled_caps.contains("echo-message"));
+        assert!(conn.enabled_caps.contains("invite-notify"));
+
+        let buf = state.buffers.get(&make_buffer_id("test", "TestServer")).unwrap();
+        let last = buf.messages.last().unwrap();
+        assert_eq!(last.event_key.as_deref(), Some("cap_ack"));
+        assert!(last.text.contains("echo-message"));
+    }
+
+    #[test]
+    fn cap_nak_logs_rejection() {
+        let mut state = make_test_state();
+        handle_cap_nak(&mut state, "test", Some("echo-message"), None);
+
+        // NAK should NOT add to enabled_caps
+        let conn = state.connections.get("test").unwrap();
+        assert!(!conn.enabled_caps.contains("echo-message"));
+
+        let buf = state.buffers.get(&make_buffer_id("test", "TestServer")).unwrap();
+        let last = buf.messages.last().unwrap();
+        assert_eq!(last.event_key.as_deref(), Some("cap_nak"));
+        assert!(last.text.contains("echo-message"));
+    }
+
+    #[test]
+    fn extract_cap_string_field3_primary() {
+        // Normal case: caps in field3
+        assert_eq!(
+            extract_cap_string(Some("multi-prefix server-time"), None),
+            "multi-prefix server-time"
+        );
+    }
+
+    #[test]
+    fn extract_cap_string_continuation() {
+        // Continuation: field3 = "*", caps in field4
+        assert_eq!(
+            extract_cap_string(Some("*"), Some("batch echo-message")),
+            "batch echo-message"
+        );
+    }
+
+    #[test]
+    fn extract_cap_string_field4_preferred_when_present() {
+        // Both present (non-"*" field3): prefer field4 if non-empty
+        assert_eq!(
+            extract_cap_string(Some("some-prefix"), Some("actual-caps here")),
+            "actual-caps here"
+        );
+    }
+
+    #[test]
+    fn cap_new_full_roundtrip_with_ack() {
+        // Simulate: CAP NEW → filter → (caller sends REQ) → CAP ACK → enabled
+        let mut state = make_test_state();
+
+        // Step 1: CAP NEW announces echo-message and batch
+        let to_request = handle_cap_new(
+            &mut state, "test", Some("echo-message batch"), None,
+        );
+        assert_eq!(to_request.len(), 2);
+        assert!(to_request.contains(&"echo-message".to_string()));
+        assert!(to_request.contains(&"batch".to_string()));
+
+        // Step 2: Server ACKs the request
+        handle_cap_ack(&mut state, "test", Some("echo-message batch"), None);
+
+        let conn = state.connections.get("test").unwrap();
+        assert!(conn.enabled_caps.contains("echo-message"));
+        assert!(conn.enabled_caps.contains("batch"));
+
+        // Step 3: Server later DELs batch
+        handle_cap_del(&mut state, "test", Some("batch"), None);
+
+        let conn = state.connections.get("test").unwrap();
+        assert!(conn.enabled_caps.contains("echo-message"), "echo-message should remain");
+        assert!(!conn.enabled_caps.contains("batch"), "batch should be removed");
     }
 }
