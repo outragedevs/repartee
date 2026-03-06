@@ -1,3 +1,4 @@
+pub mod batch;
 pub mod cap;
 pub mod events;
 pub mod flood;

@@ -48,6 +48,8 @@ pub struct App {
     pub nick_list_total: usize,
     /// Last CTCP PING sent time per connection, for lag measurement.
     lag_pings: HashMap<String, Instant>,
+    /// `IRCv3` batch trackers per connection.
+    batch_trackers: HashMap<String, crate::irc::batch::BatchTracker>,
     /// Storage subsystem for persistent message logging.
     pub storage: Option<crate::storage::Storage>,
 }
@@ -102,6 +104,7 @@ impl App {
             nick_list_scroll: 0,
             nick_list_total: 0,
             lag_pings: HashMap::new(),
+            batch_trackers: HashMap::new(),
             storage,
         })
     }
@@ -687,6 +690,7 @@ impl App {
                 );
                 self.irc_handles.remove(&conn_id);
                 self.lag_pings.remove(&conn_id);
+                self.batch_trackers.remove(&conn_id);
             }
             IrcEvent::Message(conn_id, msg) => {
                 // Intercept PONG to update lag measurement
@@ -743,26 +747,69 @@ impl App {
                     }
                 }
 
-                // Check for nick-in-use before processing — capture the new nick
-                // that events.rs will set so we can send the NICK command.
-                let nick_retry = if let ::irc::proto::Command::Response(
-                    ::irc::proto::Response::ERR_NICKNAMEINUSE, _
-                ) = &msg.command {
-                    // events.rs updates conn.nick to attempted + "_"
-                    // We need to send the actual NICK command since events.rs can't.
-                    true
-                } else {
-                    false
-                };
-
-                crate::irc::events::handle_irc_message(&mut self.state, &conn_id, &msg);
-
-                // Send NICK command for nick-in-use retry
-                if nick_retry
-                    && let Some(conn) = self.state.connections.get(&conn_id)
-                    && let Some(handle) = self.irc_handles.get(&conn_id)
+                // --- IRCv3 batch interception ---
+                // Handle BATCH commands (start/end) and collect @batch-tagged messages.
+                if let ::irc::proto::Command::BATCH(ref ref_tag, ref sub, ref params) = msg.command {
+                    let tracker = self.batch_trackers
+                        .entry(conn_id.clone())
+                        .or_default();
+                    if let Some(tag) = ref_tag.strip_prefix('+') {
+                        // Start batch
+                        let batch_type = sub
+                            .as_ref()
+                            .map_or_else(String::new, |s| s.to_str().to_string());
+                        let batch_params = params.clone().unwrap_or_default();
+                        tracker.start_batch(tag, &batch_type, batch_params);
+                        tracing::debug!("batch started: tag={tag} type={batch_type}");
+                    } else if let Some(tag) = ref_tag.strip_prefix('-') {
+                        // End batch
+                        if let Some(batch) = tracker.end_batch(tag) {
+                            tracing::debug!(
+                                "batch ended: tag={tag} type={} msgs={}",
+                                batch.batch_type,
+                                batch.messages.len()
+                            );
+                            crate::irc::batch::process_completed_batch(
+                                &mut self.state,
+                                &conn_id,
+                                &batch,
+                            );
+                        }
+                    }
+                    // BATCH commands themselves are not dispatched further
+                } else if self.batch_trackers
+                    .entry(conn_id.clone())
+                    .or_default()
+                    .is_batched(&msg)
                 {
-                    let _ = handle.sender.send(::irc::proto::Command::NICK(conn.nick.clone()));
+                    // Message belongs to an open batch — collect it, don't process now
+                    self.batch_trackers
+                        .get_mut(&conn_id)
+                        .expect("just inserted")
+                        .add_message(*msg);
+                } else {
+                    // Normal message processing
+                    // Check for nick-in-use before processing — capture the new nick
+                    // that events.rs will set so we can send the NICK command.
+                    let nick_retry = if let ::irc::proto::Command::Response(
+                        ::irc::proto::Response::ERR_NICKNAMEINUSE, _
+                    ) = &msg.command {
+                        // events.rs updates conn.nick to attempted + "_"
+                        // We need to send the actual NICK command since events.rs can't.
+                        true
+                    } else {
+                        false
+                    };
+
+                    crate::irc::events::handle_irc_message(&mut self.state, &conn_id, &msg);
+
+                    // Send NICK command for nick-in-use retry
+                    if nick_retry
+                        && let Some(conn) = self.state.connections.get(&conn_id)
+                        && let Some(handle) = self.irc_handles.get(&conn_id)
+                    {
+                        let _ = handle.sender.send(::irc::proto::Command::NICK(conn.nick.clone()));
+                    }
                 }
             }
         }

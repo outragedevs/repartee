@@ -128,7 +128,7 @@ Track implementation status of IRC protocol features in rustirc.
 |------------|--------|------|-------|
 | `echo-message` | Done | 3.2 | Server echoes own messages back; local echo suppressed when cap enabled, own PRIVMSG/NOTICE/ACTION routed to correct buffer |
 | `invite-notify` | Done | 3.2 | Channel members see invites; third-party INVITE shown in channel buffer |
-| `batch` | Not Started | 3.2 | NETSPLIT/NETJOIN batching, generic batch support |
+| `batch` | Done | 3.2 | `BatchTracker` per connection; NETSPLIT/NETJOIN produce summary messages; unknown batch types replay normally; wired in app event loop |
 | `userhost-in-names` | Done | 3.2 | `nick!user@host` parsing in NAMES, stored on `NickEntry` |
 | `message-tags` | Done | 3.2 | Plumbing: tags extracted from IRC messages, stored in buffer `Message` and DB |
 
