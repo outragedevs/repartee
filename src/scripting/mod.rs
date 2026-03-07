@@ -103,4 +103,9 @@ pub enum ScriptAction {
     TimerFired {
         id: u64,
     },
+    SetScriptConfig {
+        script: String,
+        key: String,
+        value: String,
+    },
 }

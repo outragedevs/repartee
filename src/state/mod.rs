@@ -100,6 +100,8 @@ impl AppState {
             connections,
             buffers,
             buffer_nicks,
+            script_config: HashMap::new(),
+            app_config_toml: None,
         }
     }
 }

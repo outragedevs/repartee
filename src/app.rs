@@ -323,6 +323,8 @@ pub struct App {
     script_action_rx: mpsc::UnboundedReceiver<crate::scripting::ScriptAction>,
     /// Script-registered command names (tracked so we can show them in /help).
     pub script_commands: HashMap<String, (String, String)>,
+    /// Per-script config storage: (script_name, key) → value.
+    pub script_config: HashMap<(String, String), String>,
     /// Handles for active timer tasks, keyed by timer ID. Used to abort on cancel.
     active_timers: HashMap<u64, tokio::task::JoinHandle<()>>,
     /// Sender for script actions — cloned into timer tasks so they can send
@@ -452,6 +454,7 @@ impl App {
             script_state,
             script_action_rx,
             script_commands: HashMap::new(),
+            script_config: HashMap::new(),
             active_timers: HashMap::new(),
             script_action_tx,
         })
@@ -2143,18 +2146,39 @@ impl App {
                 id
             });
 
+        let t = tx.clone();
         let cancel_timer: Arc<dyn Fn(u64) + Send + Sync> =
             Arc::new(move |id| {
-                let _ = tx.send(ScriptAction::CancelTimer { id });
+                let _ = t.send(ScriptAction::CancelTimer { id });
             });
 
-        // Config: stub — returns None / does nothing.
+        // Config: per-script get/set reads from snapshot, set sends ScriptAction.
+        let snap = Arc::clone(&snapshot);
         let config_get: Arc<dyn Fn((String, String)) -> Option<String> + Send + Sync> =
-            Arc::new(|_| None);
-        let config_set: Arc<dyn Fn((String, String, String)) + Send + Sync> =
-            Arc::new(|_| {});
+            Arc::new(move |(script, key)| {
+                snap.read().ok()?.script_config.get(&(script, key)).cloned()
+            });
+        let config_set: Arc<dyn Fn((String, String, String)) + Send + Sync> = {
+            let t = tx.clone();
+            Arc::new(move |(script, key, value)| {
+                let _ = t.send(ScriptAction::SetScriptConfig { script, key, value });
+            })
+        };
+        let snap = Arc::clone(&snapshot);
         let app_config_get: Arc<dyn Fn(String) -> Option<String> + Send + Sync> =
-            Arc::new(|_| None);
+            Arc::new(move |key_path| {
+                let s = snap.read().ok()?;
+                let toml_val = s.app_config_toml.as_ref()?;
+                // Navigate dot-separated path: "general.theme" → toml["general"]["theme"]
+                let mut current = toml_val;
+                for segment in key_path.split('.') {
+                    current = current.get(segment)?;
+                }
+                match current {
+                    toml::Value::String(s) => Some(s.clone()),
+                    other => Some(other.to_string()),
+                }
+            });
 
         crate::scripting::engine::ScriptAPI {
             say,
@@ -2195,6 +2219,9 @@ impl App {
     fn update_script_snapshot(&self) {
         if let Ok(mut snap) = self.script_state.write() {
             *snap = self.state.script_snapshot();
+            snap.script_config.clone_from(&self.script_config);
+            // Serialize app config to TOML value for dot-path lookups
+            snap.app_config_toml = toml::Value::try_from(&self.config).ok();
         }
     }
 
@@ -2378,6 +2405,9 @@ impl App {
                 if let Some(manager) = self.script_manager.as_ref() {
                     manager.fire_timer(id);
                 }
+            }
+            ScriptAction::SetScriptConfig { script, key, value } => {
+                self.script_config.insert((script, key), value);
             }
         }
     }
