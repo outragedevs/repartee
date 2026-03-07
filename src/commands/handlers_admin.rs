@@ -643,7 +643,7 @@ pub(crate) fn cmd_script(app: &mut App, args: &[String]) {
             if loaded.is_empty() && available.is_empty() {
                 lines.push(format!(
                     "  {C_DIM}No scripts found. Place .lua files in {}{C_RST}",
-                    crate::constants::scripts_dir().display()
+                    manager.scripts_dir().display()
                 ));
             } else {
                 if !loaded.is_empty() {
@@ -680,10 +680,16 @@ pub(crate) fn cmd_script(app: &mut App, args: &[String]) {
                 &format!("{C_OK}Autoloaded scripts ({loaded_count} loaded){C_RST}"),
             );
         }
+        "template" => {
+            add_local_event(app, &format!("{C_CMD}Lua script template:{C_RST}"));
+            for line in crate::scripting::api::LUA_SCRIPT_TEMPLATE.lines() {
+                add_local_event(app, &format!("  {C_DIM}{line}{C_RST}"));
+            }
+        }
         _ => {
             add_local_event(
                 app,
-                &format!("{C_ERR}Usage: /script [load|unload|reload|list|autoload] [name]{C_RST}"),
+                &format!("{C_ERR}Usage: /script [load|unload|reload|list|autoload|template] [name]{C_RST}"),
             );
         }
     }

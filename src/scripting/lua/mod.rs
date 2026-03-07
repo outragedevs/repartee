@@ -585,25 +585,29 @@ impl LuaEngine {
 
     // ── Timer API: api.timer / api.timeout / api.cancel_timer
 
-    fn register_timer_api(lua: &Lua, api_table: &LuaTable, _api: &ScriptAPI) -> Result<()> {
+    fn register_timer_api(lua: &Lua, api_table: &LuaTable, api: &ScriptAPI) -> Result<()> {
+        let start_timer = Arc::clone(&api.start_timer);
         api_table.set(
             "timer",
-            lua.create_function(|_, (_ms, _callback): (u64, LuaFunction)| -> LuaResult<u64> {
-                Err(mlua::Error::RuntimeError("timer() is not yet implemented".to_string()))
+            lua.create_function(move |_, (ms, _callback): (u64, LuaFunction)| -> LuaResult<u64> {
+                Ok(start_timer(ms))
             })?,
         )?;
 
+        let start_timeout = Arc::clone(&api.start_timeout);
         api_table.set(
             "timeout",
-            lua.create_function(|_, (_ms, _callback): (u64, LuaFunction)| -> LuaResult<u64> {
-                Err(mlua::Error::RuntimeError("timeout() is not yet implemented".to_string()))
+            lua.create_function(move |_, (ms, _callback): (u64, LuaFunction)| -> LuaResult<u64> {
+                Ok(start_timeout(ms))
             })?,
         )?;
 
+        let cancel_timer = Arc::clone(&api.cancel_timer);
         api_table.set(
             "cancel_timer",
-            lua.create_function(|_, _timer_id: u64| -> LuaResult<()> {
-                Err(mlua::Error::RuntimeError("cancel_timer() is not yet implemented".to_string()))
+            lua.create_function(move |_, timer_id: u64| -> LuaResult<()> {
+                cancel_timer(timer_id);
+                Ok(())
             })?,
         )?;
 

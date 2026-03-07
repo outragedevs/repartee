@@ -27,168 +27,141 @@ pub enum Priority {
     Highest = 100,
 }
 
-/// A registered event handler.
-struct Registration {
-    event: String,
-    handler: Box<dyn EventHandler>,
-    priority: i32,
-    once: bool,
-    owner: String,
-    id: u64,
-}
-
-/// Trait for event handlers (implemented by scripts).
-pub trait EventHandler: Send + Sync {
-    fn handle(&self, event: &Event) -> EventResult;
-}
-
-/// Central event bus for the scripting system.
-///
-/// IRC events and commands emit through this bus. Scripts register handlers
-/// to intercept, modify, or suppress events. Handlers run in priority order
-/// (highest first). A handler returning `Suppress` stops further processing,
-/// matching WeeChat/irssi/kokoirc semantics.
-pub struct EventBus {
-    handlers: Vec<Registration>,
-    next_id: u64,
-}
-
-impl EventBus {
-    pub const fn new() -> Self {
-        Self {
-            handlers: Vec::new(),
-            next_id: 0,
-        }
-    }
-
-    /// Register a handler for an event name. Returns a registration ID
-    /// that can be used to remove this specific handler.
-    pub fn on(
-        &mut self,
-        event_name: &str,
-        handler: Box<dyn EventHandler>,
-        priority: i32,
-        owner: &str,
-    ) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        let reg = Registration {
-            event: event_name.to_string(),
-            handler,
-            priority,
-            once: false,
-            owner: owner.to_string(),
-            id,
-        };
-        self.insert(reg);
-        id
-    }
-
-    /// Register a one-shot handler. Automatically removed after first firing.
-    pub fn once(
-        &mut self,
-        event_name: &str,
-        handler: Box<dyn EventHandler>,
-        priority: i32,
-        owner: &str,
-    ) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        let reg = Registration {
-            event: event_name.to_string(),
-            handler,
-            priority,
-            once: true,
-            owner: owner.to_string(),
-            id,
-        };
-        self.insert(reg);
-        id
-    }
-
-    /// Emit an event to all matching handlers in priority order.
-    /// Returns `true` if any handler suppressed default behavior.
-    /// One-shot handlers are automatically cleaned up after firing.
-    pub fn emit(&mut self, event: &Event) -> bool {
-        let matching: Vec<(usize, u64, bool)> = self
-            .handlers
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.event == event.name)
-            .map(|(i, r)| (i, r.id, r.once))
-            .collect();
-
-        let mut suppressed = false;
-        let mut remove_ids = Vec::new();
-
-        for &(idx, id, once) in &matching {
-            let result = self.handlers[idx].handler.handle(event);
-
-            if once {
-                remove_ids.push(id);
-            }
-
-            if result == EventResult::Suppress {
-                suppressed = true;
-                break;
-            }
-        }
-
-        // Clean up fired once-handlers
-        self.handlers.retain(|r| !remove_ids.contains(&r.id));
-
-        suppressed
-    }
-
-    /// Remove a specific handler by ID.
-    pub fn remove(&mut self, id: u64) {
-        self.handlers.retain(|r| r.id != id);
-    }
-
-    /// Remove all handlers for an event name.
-    pub fn off(&mut self, event_name: &str) {
-        self.handlers.retain(|r| r.event != event_name);
-    }
-
-    /// Remove all handlers owned by a specific script.
-    pub fn remove_all(&mut self, owner: &str) {
-        self.handlers.retain(|r| r.owner != owner);
-    }
-
-    /// Remove all handlers.
-    pub fn clear(&mut self) {
-        self.handlers.clear();
-    }
-
-    /// Number of registered handlers.
-    pub const fn len(&self) -> usize {
-        self.handlers.len()
-    }
-
-    pub const fn is_empty(&self) -> bool {
-        self.handlers.is_empty()
-    }
-
-    /// Insert in priority-sorted position (descending — highest priority first).
-    fn insert(&mut self, reg: Registration) {
-        let pos = self
-            .handlers
-            .iter()
-            .position(|r| r.priority < reg.priority)
-            .unwrap_or(self.handlers.len());
-        self.handlers.insert(pos, reg);
-    }
-}
-
-impl Default for EventBus {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// EventBus, Registration, and EventHandler are only used in tests.
+// The Lua engine manages its own handler storage directly for performance.
+// These types exist as a tested reference implementation of the event dispatch
+// algorithm (priority ordering, once-handlers, suppress semantics).
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Registration {
+        event: String,
+        handler: Box<dyn EventHandler>,
+        priority: i32,
+        once: bool,
+        owner: String,
+        id: u64,
+    }
+
+    trait EventHandler: Send + Sync {
+        fn handle(&self, event: &Event) -> EventResult;
+    }
+
+    struct EventBus {
+        handlers: Vec<Registration>,
+        next_id: u64,
+    }
+
+    impl EventBus {
+        const fn new() -> Self {
+            Self {
+                handlers: Vec::new(),
+                next_id: 0,
+            }
+        }
+
+        fn on(
+            &mut self,
+            event_name: &str,
+            handler: Box<dyn EventHandler>,
+            priority: i32,
+            owner: &str,
+        ) -> u64 {
+            let id = self.next_id;
+            self.next_id += 1;
+            let reg = Registration {
+                event: event_name.to_string(),
+                handler,
+                priority,
+                once: false,
+                owner: owner.to_string(),
+                id,
+            };
+            self.insert(reg);
+            id
+        }
+
+        fn once(
+            &mut self,
+            event_name: &str,
+            handler: Box<dyn EventHandler>,
+            priority: i32,
+            owner: &str,
+        ) -> u64 {
+            let id = self.next_id;
+            self.next_id += 1;
+            let reg = Registration {
+                event: event_name.to_string(),
+                handler,
+                priority,
+                once: true,
+                owner: owner.to_string(),
+                id,
+            };
+            self.insert(reg);
+            id
+        }
+
+        fn emit(&mut self, event: &Event) -> bool {
+            let matching: Vec<(usize, u64, bool)> = self
+                .handlers
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.event == event.name)
+                .map(|(i, r)| (i, r.id, r.once))
+                .collect();
+
+            let mut suppressed = false;
+            let mut remove_ids = Vec::new();
+
+            for &(idx, id, once) in &matching {
+                let result = self.handlers[idx].handler.handle(event);
+
+                if once {
+                    remove_ids.push(id);
+                }
+
+                if result == EventResult::Suppress {
+                    suppressed = true;
+                    break;
+                }
+            }
+
+            self.handlers.retain(|r| !remove_ids.contains(&r.id));
+            suppressed
+        }
+
+        fn remove(&mut self, id: u64) {
+            self.handlers.retain(|r| r.id != id);
+        }
+
+        fn off(&mut self, event_name: &str) {
+            self.handlers.retain(|r| r.event != event_name);
+        }
+
+        fn remove_all(&mut self, owner: &str) {
+            self.handlers.retain(|r| r.owner != owner);
+        }
+
+        fn clear(&mut self) {
+            self.handlers.clear();
+        }
+
+        const fn len(&self) -> usize {
+            self.handlers.len()
+        }
+
+        fn insert(&mut self, reg: Registration) {
+            let pos = self
+                .handlers
+                .iter()
+                .position(|r| r.priority < reg.priority)
+                .unwrap_or(self.handlers.len());
+            self.handlers.insert(pos, reg);
+        }
+    }
 
     struct TestHandler {
         result: EventResult,

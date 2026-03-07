@@ -1161,6 +1161,17 @@ impl App {
                     crate::irc::events::channels_to_rejoin(&self.state, &conn_id);
                 crate::irc::events::handle_connected(&mut self.state, &conn_id);
 
+                // Notify scripts
+                {
+                    use crate::scripting::api::events;
+                    let nick = self.state.connections.get(&conn_id)
+                        .map_or_else(String::new, |c| c.nick.clone());
+                    let mut params = HashMap::new();
+                    params.insert("connection_id".to_string(), conn_id.clone());
+                    params.insert("nick".to_string(), nick);
+                    self.emit_script_event(events::CONNECTED, params);
+                }
+
                 // Merge config channels with rejoin channels (dedup, config order first)
                 let config_channels: Vec<String> = self
                     .config
@@ -1252,6 +1263,13 @@ impl App {
                     &conn_id,
                     error.as_deref(),
                 );
+                // Notify scripts
+                {
+                    use crate::scripting::api::events;
+                    let mut params = HashMap::new();
+                    params.insert("connection_id".to_string(), conn_id.clone());
+                    self.emit_script_event(events::DISCONNECTED, params);
+                }
                 self.irc_handles.remove(&conn_id);
                 self.lag_pings.remove(&conn_id);
                 self.batch_trackers.remove(&conn_id);
@@ -1787,6 +1805,19 @@ impl App {
     }
 
     fn execute_command(&mut self, parsed: &crate::commands::parser::ParsedCommand) {
+        // Emit to scripts — they can suppress commands
+        {
+            use crate::scripting::api::events;
+            let mut params = HashMap::new();
+            params.insert("command".to_string(), parsed.name.clone());
+            params.insert("args".to_string(), parsed.args.join(" "));
+            if let Some(conn_id) = self.active_conn_id() {
+                params.insert("connection_id".to_string(), conn_id.to_owned());
+            }
+            if self.emit_script_event(events::COMMAND_INPUT, params) {
+                return;
+            }
+        }
         let commands = crate::commands::registry::get_commands();
         // Find by name or alias (built-in commands first)
         let found = commands.iter().find(|(name, def)| {
@@ -2318,12 +2349,21 @@ impl App {
                 params.insert("target".to_string(), target.clone());
                 params.insert("channel".to_string(), target.clone());
                 params.insert("is_channel".to_string(), target.starts_with('#').to_string());
-                // Check for CTCP ACTION
-                if let Some(action_text) = text.strip_prefix("\x01ACTION ")
+                // Check for CTCP
+                if let Some(ctcp_body) = text.strip_prefix('\x01')
                     .and_then(|t| t.strip_suffix('\x01'))
                 {
-                    params.insert("message".to_string(), action_text.to_string());
-                    events::ACTION
+                    if let Some(action_text) = ctcp_body.strip_prefix("ACTION ") {
+                        params.insert("message".to_string(), action_text.to_string());
+                        events::ACTION
+                    } else {
+                        let (ctcp_type, ctcp_msg) = ctcp_body
+                            .split_once(' ')
+                            .unwrap_or((ctcp_body, ""));
+                        params.insert("ctcp_type".to_string(), ctcp_type.to_string());
+                        params.insert("message".to_string(), ctcp_msg.to_string());
+                        events::CTCP_REQUEST
+                    }
                 } else {
                     params.insert("message".to_string(), text.clone());
                     events::PRIVMSG
@@ -2332,10 +2372,22 @@ impl App {
             ::irc::proto::Command::NOTICE(target, text) => {
                 params.insert("nick".to_string(), extract_nick(msg.prefix.as_ref()));
                 params.insert("target".to_string(), target.clone());
-                params.insert("message".to_string(), text.clone());
                 let from_server = matches!(msg.prefix, Some(::irc::proto::Prefix::ServerName(_)) | None);
                 params.insert("from_server".to_string(), from_server.to_string());
-                events::NOTICE
+                // CTCP response comes as NOTICE with \x01...\x01
+                if let Some(ctcp_body) = text.strip_prefix('\x01')
+                    .and_then(|t| t.strip_suffix('\x01'))
+                {
+                    let (ctcp_type, ctcp_msg) = ctcp_body
+                        .split_once(' ')
+                        .unwrap_or((ctcp_body, ""));
+                    params.insert("ctcp_type".to_string(), ctcp_type.to_string());
+                    params.insert("message".to_string(), ctcp_msg.to_string());
+                    events::CTCP_RESPONSE
+                } else {
+                    params.insert("message".to_string(), text.clone());
+                    events::NOTICE
+                }
             }
             ::irc::proto::Command::JOIN(channel, _, _) => {
                 params.insert("nick".to_string(), extract_nick(msg.prefix.as_ref()));
@@ -2386,6 +2438,27 @@ impl App {
                 params.insert("channel".to_string(), channel.clone());
                 params.insert("invited".to_string(), nick.clone());
                 events::INVITE
+            }
+            ::irc::proto::Command::ChannelMODE(target, modes) => {
+                params.insert("nick".to_string(), extract_nick(msg.prefix.as_ref()));
+                params.insert("target".to_string(), target.clone());
+                let mode_str: Vec<String> = modes.iter().map(|m| m.to_string()).collect();
+                params.insert("modes".to_string(), mode_str.join(" "));
+                events::MODE
+            }
+            ::irc::proto::Command::UserMODE(target, modes) => {
+                params.insert("nick".to_string(), extract_nick(msg.prefix.as_ref()));
+                params.insert("target".to_string(), target.clone());
+                let mode_str: Vec<String> = modes.iter().map(|m| m.to_string()).collect();
+                params.insert("modes".to_string(), mode_str.join(" "));
+                events::MODE
+            }
+            ::irc::proto::Command::WALLOPS(text) => {
+                params.insert("nick".to_string(), extract_nick(msg.prefix.as_ref()));
+                params.insert("message".to_string(), text.clone());
+                let from_server = matches!(msg.prefix, Some(::irc::proto::Prefix::ServerName(_)) | None);
+                params.insert("from_server".to_string(), from_server.to_string());
+                events::WALLOPS
             }
             // For non-scriptable events, don't emit
             _ => return false,
