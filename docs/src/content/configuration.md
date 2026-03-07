@@ -59,6 +59,7 @@ autosendcmd = "MSG NickServ identify pass; WAIT 2000; MODE $N +i"
 # sasl_user = "mynick"
 # sasl_pass = "hunter2"
 # sasl_mechanism = "SCRAM-SHA-256"  # PLAIN (default), EXTERNAL, SCRAM-SHA-256
+# bind_ip = "192.168.1.100"   # bind to specific local IP (vhost)
 # auto_reconnect = true
 # reconnect_delay = 30
 # reconnect_max_retries = 10
@@ -111,6 +112,8 @@ Configure which items appear in the status line. Available items: `active_window
 Each server gets a unique identifier (the key after `servers.`). The `channels` array lists channels to auto-join on connect. Channels with keys use the format `"#channel key"`.
 
 Set `sasl_mechanism` to override automatic mechanism selection. Available: `PLAIN` (default), `EXTERNAL` (client TLS certificate), `SCRAM-SHA-256` (secure challenge-response).
+
+Set `bind_ip` to bind to a specific local IP address when connecting. Useful for multi-IP hosts (vhosts/bouncers). Supports both IPv4 and IPv6 — DNS resolution automatically filters to match the address family. Can also be set per-connection with `/connect -bind=<ip>` or `/server add -bind=<ip>`.
 
 ### `[logging]`
 

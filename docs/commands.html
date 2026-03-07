@@ -1045,19 +1045,24 @@ You must be a channel operator to use this command.</p>
 <div class="command-entry" data-command="unban" data-category="Moderation">
 <h1>/unban</h1>
 <h2>Syntax</h2>
-<pre><code>/unban &lt;number|mask&gt; [number2|mask2 ...]
+<pre><code>/unban &lt;number|mask|wildcard&gt; [...]
 </code></pre>
 <h2>Description</h2>
-<p>Remove one or more bans from the current channel. Accepts both numeric
-references (from the numbered list shown by <code>/ban</code>) and literal masks.</p>
+<p>Remove one or more bans from the current channel. Accepts numeric
+references (from the numbered list shown by <code>/ban</code>), literal masks,
+and wildcard patterns that match against stored bans.</p>
 <p>Use <code>/ban</code> with no arguments first to display the numbered ban list,
 then <code>/unban 1 3 5</code> to remove entries by their index.</p>
+<p>Wildcard patterns (<code>*</code> and <code>?</code>) are matched against the stored ban list.
+Use <code>/unban *</code> to remove all bans from the channel.</p>
 <p>Multiple arguments can be given to remove several bans at once.</p>
 <h2>Examples</h2>
-<pre><code>/unban 1                     Remove first entry from ban list
+<pre><code>/unban *                     Remove all bans
+/unban 1                     Remove first entry from ban list
 /unban 2 4 7                 Remove multiple entries by index
+/unban *!*@*.spam.host       Remove all bans matching pattern
 /unban *!*@good.host.com     Remove by literal mask
-/unban 1 *!*@other.net       Mix numeric and literal
+/unban 1 *!*@other.net       Mix numeric and wildcard
 </code></pre>
 <h2>See Also</h2>
 <p>/ban, /kick, /kb, /mode</p>

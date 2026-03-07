@@ -142,6 +142,7 @@ autosendcmd = &quot;MSG NickServ identify pass; WAIT 2000; MODE $N +i&quot;
 # sasl_user = &quot;mynick&quot;
 # sasl_pass = &quot;hunter2&quot;
 # sasl_mechanism = &quot;SCRAM-SHA-256&quot;  # PLAIN (default), EXTERNAL, SCRAM-SHA-256
+# bind_ip = &quot;192.168.1.100&quot;   # bind to specific local IP (vhost)
 # auto_reconnect = true
 # reconnect_delay = 30
 # reconnect_max_retries = 10
@@ -182,6 +183,7 @@ levels = [&quot;ALL&quot;]
 <h3><code>[servers.*]</code></h3>
 <p>Each server gets a unique identifier (the key after <code>servers.</code>). The <code>channels</code> array lists channels to auto-join on connect. Channels with keys use the format <code>&quot;#channel key&quot;</code>.</p>
 <p>Set <code>sasl_mechanism</code> to override automatic mechanism selection. Available: <code>PLAIN</code> (default), <code>EXTERNAL</code> (client TLS certificate), <code>SCRAM-SHA-256</code> (secure challenge-response).</p>
+<p>Set <code>bind_ip</code> to bind to a specific local IP address when connecting. Useful for multi-IP hosts (vhosts/bouncers). Supports both IPv4 and IPv6 — DNS resolution automatically filters to match the address family. Can also be set per-connection with <code>/connect -bind=&lt;ip&gt;</code> or <code>/server add -bind=&lt;ip&gt;</code>.</p>
 <h3><code>[logging]</code></h3>
 <p>Chat logging to SQLite. When <code>encrypt = true</code>, messages are encrypted with AES-256-GCM. <code>retention_days = 0</code> keeps logs forever.</p>
 <h3><code>[aliases]</code></h3>
