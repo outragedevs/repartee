@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -83,6 +83,9 @@ pub struct App {
     pub http_client: reqwest::Client,
     /// Terminal image protocol picker (for ratatui-image).
     pub picker: ratatui_image::picker::Picker,
+    /// Queued (`conn_id`, channel) pairs for deferred WHO/MODE after join.
+    /// Drained one-at-a-time by a periodic timer to avoid Excess Flood.
+    pending_channel_queries: VecDeque<(String, String)>,
 }
 
 impl App {
@@ -152,6 +155,7 @@ impl App {
             preview_tx,
             http_client,
             picker,
+            pending_channel_queries: VecDeque::new(),
         })
     }
 
@@ -354,6 +358,7 @@ impl App {
         });
 
         let mut tick = interval(Duration::from_secs(1));
+        let mut query_tick = interval(Duration::from_secs(2));
 
         while !self.should_quit {
             terminal.draw(|frame| ui::layout::draw(frame, self))?;
@@ -383,6 +388,9 @@ impl App {
                     self.handle_netsplit_tick();
                     self.check_reconnects();
                     self.measure_lag();
+                },
+                _ = query_tick.tick() => {
+                    self.drain_pending_channel_query();
                 }
             }
         }
@@ -680,6 +688,38 @@ impl App {
     ///
     /// If a PONG hasn't been received within 5 minutes, the connection is
     /// considered dead and we trigger a disconnect (like irssi/erssi).
+    /// Drain one pending channel query (WHO + MODE) from the queue.
+    ///
+    /// Called every 2 seconds by the query timer. Sends at most 2 commands
+    /// (one WHO/WHOX + one MODE) per tick, avoiding Excess Flood on servers
+    /// with aggressive rate limiting like `IRCnet`.
+    fn drain_pending_channel_query(&mut self) {
+        let Some((conn_id, channel)) = self.pending_channel_queries.pop_front() else {
+            return;
+        };
+
+        // Skip if disconnected or handle gone.
+        let Some(handle) = self.irc_handles.get(&conn_id) else {
+            return;
+        };
+
+        // Send WHOX WHO if supported (silent — updates state without display).
+        if let Some((target, fields)) =
+            crate::irc::events::build_whox_who(&mut self.state, &conn_id, &channel, true)
+        {
+            let _ = handle.sender.send(::irc::proto::Command::Raw(
+                "WHO".to_string(),
+                vec![target, fields],
+            ));
+        }
+
+        // Request channel modes for status bar display.
+        let _ = handle.sender.send(::irc::proto::Command::Raw(
+            "MODE".to_string(),
+            vec![channel],
+        ));
+    }
+
     fn measure_lag(&mut self) {
         let now = Instant::now();
         let conn_ids: Vec<String> = self.irc_handles.keys().cloned().collect();
@@ -1014,26 +1054,11 @@ impl App {
 
                     crate::irc::events::handle_irc_message(&mut self.state, &conn_id, &msg);
 
-                    // Auto-WHO on channel join: send WHOX WHO if supported (silent — no display)
-                    if let Some(ref channel) = endofnames_channel
-                        && let Some((target, fields)) =
-                            crate::irc::events::build_whox_who(&mut self.state, &conn_id, channel, true)
-                        && let Some(handle) = self.irc_handles.get(&conn_id)
-                    {
-                        let _ = handle.sender.send(::irc::proto::Command::Raw(
-                            "WHO".to_string(),
-                            vec![target, fields],
-                        ));
-                    }
-
-                    // Auto-MODE on channel join: request channel modes for status bar display
-                    if let Some(channel) = endofnames_channel
-                        && let Some(handle) = self.irc_handles.get(&conn_id)
-                    {
-                        let _ = handle.sender.send(::irc::proto::Command::Raw(
-                            "MODE".to_string(),
-                            vec![channel],
-                        ));
+                    // Queue auto-WHO and auto-MODE for later — sending them
+                    // immediately after ENDOFNAMES causes Excess Flood on servers
+                    // with aggressive rate limiting (e.g. IRCnet).
+                    if let Some(channel) = endofnames_channel {
+                        self.pending_channel_queries.push_back((conn_id.clone(), channel));
                     }
                 }
             }
