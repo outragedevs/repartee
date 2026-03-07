@@ -92,14 +92,14 @@
         <h1>Scripting — API Reference</h1>
 <p>Complete reference for the <code>api</code> object passed to every script&#39;s <code>setup</code> function.</p>
 <pre><code class="language-lua">function setup(api)
-    -- api.on, api.irc, api.ui, api.store, api.config, api.log, etc.
+    -- api.on, api.irc, api.log, etc.
 end
 </code></pre>
 <hr>
 <h2>Events</h2>
 <h3><code>api.on(event, handler, priority?)</code></h3>
 <p>Register an event handler. Returns a handler ID for removal.</p>
-<pre><code class="language-lua">local id = api.on("irc.privmsg", function(ev)
+<pre><code class="language-lua">local id = api.on(&quot;irc.privmsg&quot;, function(event)
     -- handle message
 end)
 </code></pre>
@@ -120,12 +120,12 @@ end)
 <tr>
 <td><code>handler</code></td>
 <td>function</td>
-<td>Handler function receiving an event table (<code>ev</code>)</td>
+<td>Handler function receiving event table</td>
 </tr>
 <tr>
 <td><code>priority</code></td>
 <td>number</td>
-<td>Optional. Default: 50 (<code>api.PRIORITY_NORMAL</code>)</td>
+<td>Optional. Default: 50 (normal)</td>
 </tr>
 </tbody></table>
 <p>Handlers run in descending priority order. Return <code>true</code> from a handler to suppress the event (prevent lower-priority handlers and built-in handling from running).</p>
@@ -133,52 +133,23 @@ end)
 <p>Same as <code>api.on()</code> but the handler fires only once, then removes itself.</p>
 <h3><code>api.off(id)</code></h3>
 <p>Remove a previously registered handler by its ID.</p>
-<pre><code class="language-lua">local id = api.on("irc.privmsg", handler)
+<pre><code class="language-lua">local id = api.on(&quot;irc.privmsg&quot;, handler)
 api.off(id)  -- remove the handler
 </code></pre>
-<h3>Priority Constants</h3>
-<table>
-<thead>
-<tr>
-<th>Constant</th>
-<th>Value</th>
-</tr>
-</thead>
-<tbody><tr>
-<td><code>api.PRIORITY_HIGHEST</code></td>
-<td>100</td>
-</tr>
-<tr>
-<td><code>api.PRIORITY_HIGH</code></td>
-<td>75</td>
-</tr>
-<tr>
-<td><code>api.PRIORITY_NORMAL</code></td>
-<td>50</td>
-</tr>
-<tr>
-<td><code>api.PRIORITY_LOW</code></td>
-<td>25</td>
-</tr>
-<tr>
-<td><code>api.PRIORITY_LOWEST</code></td>
-<td>0</td>
-</tr>
-</tbody></table>
 <hr>
 <h2>IRC Events</h2>
-<p>These events fire when the IRC server sends data. All IRC events include a <code>connection_id</code> field.</p>
+<p>These events fire when the IRC server sends data.</p>
 <h3><code>irc.privmsg</code></h3>
 <p>A channel or private message.</p>
-<pre><code class="language-lua">api.on("irc.privmsg", function(ev)
-    -- ev.connection_id  (string)
-    -- ev.nick           (string)
-    -- ev.ident          (string)
-    -- ev.hostname       (string)
-    -- ev.target         (string) channel name or your nick
-    -- ev.channel        (string) same as target for channels, nil for PMs
-    -- ev.message        (string)
-    -- ev.is_channel     (boolean)
+<pre><code class="language-lua">api.on(&quot;irc.privmsg&quot;, function(event)
+    -- event.connection_id  (string)
+    -- event.nick           (string)
+    -- event.ident          (string)
+    -- event.hostname       (string)
+    -- event.target         (string) channel or your nick
+    -- event.channel        (string) same as target
+    -- event.message        (string)
+    -- event.is_channel     (string) &quot;true&quot; or &quot;false&quot;
 end)
 </code></pre>
 <h3><code>irc.action</code></h3>
@@ -523,7 +494,6 @@ end)
 <hr>
 <h2>Lifecycle Events</h2>
 <h3><code>connected</code></h3>
-<p>Fired when a connection to an IRC server is established.</p>
 <table>
 <thead>
 <tr>
@@ -541,7 +511,6 @@ end)
 </tr>
 </tbody></table>
 <h3><code>disconnected</code></h3>
-<p>Fired when a connection is lost.</p>
 <table>
 <thead>
 <tr>
@@ -555,7 +524,7 @@ end)
 </tr>
 </tbody></table>
 <h3><code>command_input</code></h3>
-<p>Fired before a slash command executes. Return <code>true</code> to suppress the command.</p>
+<p>Fired before a command executes. Return <code>true</code> to suppress.</p>
 <table>
 <thead>
 <tr>
@@ -577,134 +546,92 @@ end)
 </tr>
 </tbody></table>
 <hr>
-<h2>Custom Commands</h2>
+<h2>Commands</h2>
 <h3><code>api.command(name, def)</code></h3>
 <p>Register a custom slash command.</p>
-<pre><code class="language-lua">api.command("greet", {
+<pre><code class="language-lua">api.command(&quot;greet&quot;, {
     handler = function(args, connection_id)
-        local target = args[1] or "world"
-        api.irc.say(target, "Hello, " .. target .. "!")
+        local target = args[1] or &quot;world&quot;
+        api.irc.say(target, &quot;Hello, &quot; .. target .. &quot;!&quot;)
     end,
-    description = "Send a greeting",
-    usage = "/greet &lt;nick&gt;",
+    description = &quot;Send a greeting&quot;,
+    usage = &quot;/greet &lt;nick&gt;&quot;,
 })
 </code></pre>
-<p><strong>Parameters:</strong></p>
-<table>
-<thead>
-<tr>
-<th>Field</th>
-<th>Type</th>
-<th>Description</th>
-</tr>
-</thead>
-<tbody><tr>
-<td><code>handler</code></td>
-<td>function</td>
-<td>Called with <code>(args, connection_id)</code>. <code>args</code> is a table of strings.</td>
-</tr>
-<tr>
-<td><code>description</code></td>
-<td>string</td>
-<td>Shown in <code>/help</code></td>
-</tr>
-<tr>
-<td><code>usage</code></td>
-<td>string</td>
-<td>Usage string shown in help</td>
-</tr>
-</tbody></table>
-<p>Commands registered by a script are automatically removed when the script is unloaded.</p>
 <hr>
-<h2>IRC Methods — <code>api.irc.*</code></h2>
-<h3><code>api.irc.say(target, message)</code></h3>
+<h2>IRC Methods</h2>
+<p>All IRC methods take an optional <code>connection_id</code> as the last parameter. If omitted, the active buffer&#39;s connection is used.</p>
+<h3><code>api.irc.say(target, message, connection_id?)</code></h3>
 <p>Send a PRIVMSG to a channel or nick.</p>
-<h3><code>api.irc.action(target, message)</code></h3>
+<h3><code>api.irc.action(target, message, connection_id?)</code></h3>
 <p>Send a CTCP ACTION (<code>/me</code>).</p>
-<h3><code>api.irc.notice(target, message)</code></h3>
+<h3><code>api.irc.notice(target, message, connection_id?)</code></h3>
 <p>Send a NOTICE.</p>
-<h3><code>api.irc.join(channel, key?)</code></h3>
+<h3><code>api.irc.join(channel, key?, connection_id?)</code></h3>
 <p>Join a channel, optionally with a key.</p>
-<h3><code>api.irc.part(channel, message?)</code></h3>
+<h3><code>api.irc.part(channel, message?, connection_id?)</code></h3>
 <p>Leave a channel with an optional part message.</p>
-<h3><code>api.irc.raw(line)</code></h3>
+<h3><code>api.irc.raw(line, connection_id?)</code></h3>
 <p>Send a raw IRC protocol line.</p>
-<h3><code>api.irc.nick(new_nick)</code></h3>
+<h3><code>api.irc.nick(new_nick, connection_id?)</code></h3>
 <p>Change your nickname.</p>
-<h3><code>api.irc.whois(nick)</code></h3>
+<h3><code>api.irc.whois(nick, connection_id?)</code></h3>
 <p>Send a WHOIS query.</p>
-<h3><code>api.irc.mode(channel, mode_string)</code></h3>
+<h3><code>api.irc.mode(target, mode_string, connection_id?)</code></h3>
 <p>Set a channel or user mode.</p>
-<h3><code>api.irc.kick(channel, nick, reason?)</code></h3>
+<h3><code>api.irc.kick(channel, nick, reason?, connection_id?)</code></h3>
 <p>Kick a user from a channel.</p>
-<h3><code>api.irc.ctcp(target, type, message?)</code></h3>
+<h3><code>api.irc.ctcp(target, type, message?, connection_id?)</code></h3>
 <p>Send a CTCP request.</p>
 <hr>
-<h2>UI Methods — <code>api.ui.*</code></h2>
+<h2>UI Methods</h2>
 <h3><code>api.ui.print(text)</code></h3>
-<p>Display a message in the active buffer.</p>
+<p>Display a local event message in the active buffer.</p>
 <h3><code>api.ui.print_to(buffer_id, text)</code></h3>
-<p>Display a message in a specific buffer.</p>
+<p>Display a local event message in a specific buffer.</p>
 <h3><code>api.ui.switch_buffer(buffer_id)</code></h3>
-<p>Switch to a buffer by its ID.</p>
+<p>Switch to a buffer.</p>
 <h3><code>api.ui.execute(command_line)</code></h3>
-<p>Execute a slash command (e.g. <code>api.ui.execute("/set theme default")</code>).</p>
+<p>Execute a client command (e.g. <code>api.ui.execute(&quot;/set theme default&quot;)</code>).</p>
 <hr>
-<h2>State Access — <code>api.store.*</code></h2>
-<h3><code>api.store.our_nick(conn_id?)</code></h3>
-<p>Returns your current nick, or nil if not connected. If <code>conn_id</code> is omitted, uses the active connection.</p>
+<h2>State Access</h2>
 <h3><code>api.store.active_buffer()</code></h3>
 <p>Returns the active buffer ID, or nil.</p>
+<h3><code>api.store.our_nick(connection_id?)</code></h3>
+<p>Returns your current nick, or nil if not connected. If no <code>connection_id</code> is given, uses the active buffer&#39;s connection.</p>
 <h3><code>api.store.connections()</code></h3>
-<p>Returns a table of all connection IDs.</p>
-<h3><code>api.store.connection_info(id)</code></h3>
-<p>Returns a table with details about a connection (server, nick, connected status, etc.).</p>
+<p>Returns a table of all connections. Each entry has: <code>id</code>, <code>label</code>, <code>nick</code>, <code>connected</code>, <code>user_modes</code>.</p>
+<h3><code>api.store.connection_info(connection_id)</code></h3>
+<p>Returns info for a specific connection, or nil.</p>
 <h3><code>api.store.buffers()</code></h3>
-<p>Returns a table of all buffer IDs.</p>
-<h3><code>api.store.buffer_info(id)</code></h3>
-<p>Returns a table with details about a buffer (name, type, topic, connection_id, etc.).</p>
+<p>Returns a table of all buffers. Each entry has: <code>id</code>, <code>connection_id</code>, <code>name</code>, <code>buffer_type</code>, <code>topic</code>, <code>unread_count</code>.</p>
+<h3><code>api.store.buffer_info(buffer_id)</code></h3>
+<p>Returns info for a specific buffer, or nil.</p>
 <h3><code>api.store.nicks(buffer_id)</code></h3>
-<p>Returns a table of nicks in a channel buffer.</p>
+<p>Returns a table of nicks in a buffer. Each entry has: <code>nick</code>, <code>prefix</code>, <code>modes</code>, <code>away</code>.</p>
 <hr>
-<h2>Config — <code>api.config.*</code></h2>
-<h3><code>api.config.get(key, default?)</code></h3>
-<p>Get a per-script config value. Returns <code>default</code> (or nil) if the key is not set.</p>
-<pre><code class="language-lua">local timeout = api.config.get("timeout", 300)
-</code></pre>
+<h2>Config</h2>
+<h3><code>api.config.get(key)</code></h3>
+<p>Get a per-script config value.</p>
 <h3><code>api.config.set(key, value)</code></h3>
 <p>Set a per-script config value at runtime.</p>
-<pre><code class="language-lua">api.config.set("timeout", 600)
-</code></pre>
 <h3><code>api.config.app_get(key_path)</code></h3>
-<p>Read an app-level config value using dot-path notation.</p>
-<pre><code class="language-lua">local theme = api.config.app_get("general.theme")
-local nick = api.config.app_get("connections.libera.nick")
+<p>Read an app-level config value using dot-separated path. Returns the value as a string, or nil.</p>
+<pre><code class="language-lua">local theme = api.config.app_get(&quot;general.theme&quot;)
+local nick_width = api.config.app_get(&quot;display.nick_width&quot;)
 </code></pre>
 <hr>
 <h2>Timers</h2>
 <h3><code>api.timer(ms, handler)</code></h3>
 <p>Start a repeating timer. Returns a timer ID.</p>
-<pre><code class="language-lua">local id = api.timer(60000, function()
-    api.ui.print("One minute has passed")
-end)
-</code></pre>
 <h3><code>api.timeout(ms, handler)</code></h3>
 <p>Start a one-shot timeout. Returns a timer ID.</p>
-<pre><code class="language-lua">api.timeout(5000, function()
-    api.ui.print("5 seconds elapsed")
-end)
-</code></pre>
 <h3><code>api.cancel_timer(id)</code></h3>
-<p>Cancel a timer by its ID.</p>
-<pre><code class="language-lua">local id = api.timer(1000, tick)
-api.cancel_timer(id)
-</code></pre>
+<p>Cancel a timer.</p>
 <hr>
 <h2>Logging</h2>
 <h3><code>api.log(message)</code></h3>
-<p>Log a debug message. Output is visible when <code>scripts.debug = true</code> in config.</p>
-<pre><code class="language-lua">api.log("processing message from " .. ev.nick)
-</code></pre>
+<p>Log a debug message. Only outputs when <code>scripts.debug = true</code> in config.</p>
 
 
         <!-- Prev / Next navigation -->

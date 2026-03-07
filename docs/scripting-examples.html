@@ -91,107 +91,76 @@
       <main class="content">
         <h1>Scripting — Examples</h1>
 <blockquote>
-<p><strong>Note:</strong> Scripts run in a sandboxed Lua 5.4 environment. The <code>os</code>, <code>io</code>, <code>loadfile</code>, <code>dofile</code>, and <code>package</code> globals are removed. The <code>math</code>, <code>string</code>, <code>table</code>, <code>coroutine</code>, and <code>utf8</code> libraries are available. Use <code>api.log()</code> for debug output and <code>api.ui.print()</code> for UI messages.</p>
+<p><strong>Note:</strong> Scripts run in a sandboxed Lua environment. The <code>os</code>, <code>io</code>, <code>loadfile</code>, <code>dofile</code>, and <code>package</code> globals are removed. Use <code>api.log()</code> for debug output and <code>api.ui.print()</code> for UI messages.</p>
 </blockquote>
-<p>Practical Lua script examples for Repartee. Save these as <code>.lua</code> files in <code>~/.repartee/scripts/</code>.</p>
+<p>Practical Lua script examples for repartee.</p>
 <h2>Auto-greet on join</h2>
-<p>Greet users when they join a channel:</p>
+<p>Greet users when they join a specific channel:</p>
 <pre><code class="language-lua">meta = {
-    name = "greet",
-    version = "1.0",
-    description = "Welcome joiners",
+    name = &quot;autogreet&quot;,
+    version = &quot;1.0&quot;,
+    description = &quot;Auto-greet users on join&quot;
 }
 
 function setup(api)
-    api.on("irc.join", function(ev)
-        local our_nick = api.store.our_nick()
-        if ev.nick ~= our_nick then
-            api.irc.say(ev.channel, "Welcome, " .. ev.nick .. "!")
+    local greet_channels = { [&quot;#mychannel&quot;] = true }
+
+    api.on(&quot;irc.join&quot;, function(event)
+        if greet_channels[event.channel] and event.nick ~= api.store.our_nick() then
+            api.irc.say(event.channel, &quot;Welcome, &quot; .. event.nick .. &quot;!&quot;)
         end
-    end)
-end
-</code></pre>
-<h2>Dice game</h2>
-<p>Respond to <code>!dice</code> in channels with random rolls:</p>
-<pre><code class="language-lua">meta = {
-    name = "dice",
-    version = "1.0",
-    description = "!dice game -- roll dice in channel",
-}
-
-function setup(api)
-    api.on("irc.privmsg", function(ev)
-        local cmd, rest = (ev.message or ""):match("^(!dice)%s*(.*)")
-        if not cmd then return end
-
-        local count, sides = 1, 6
-        if rest ~= "" then
-            local c, s = rest:match("^(%d+)d(%d+)$")
-            if c then count, sides = tonumber(c), tonumber(s)
-            else
-                local s2 = rest:match("^d(%d+)$")
-                if s2 then sides = tonumber(s2) end
-            end
-        end
-
-        count = math.max(1, math.min(count, 20))
-        sides = math.max(2, math.min(sides, 1000))
-
-        local total = 0
-        for i = 1, count do total = total + math.random(1, sides) end
-        api.irc.say(ev.channel, ev.nick .. " rolls " .. count .. "d" .. sides .. ": " .. total)
     end)
 end
 </code></pre>
 <h2>URL logger</h2>
-<p>Log all URLs posted to channels, with a <code>/urls</code> command to review them:</p>
+<p>Log all URLs posted to channels:</p>
 <pre><code class="language-lua">meta = {
-    name = "urllogger",
-    version = "1.0",
-    description = "Log URLs from messages",
+    name = &quot;urllogger&quot;,
+    version = &quot;1.0&quot;,
+    description = &quot;Log URLs from messages&quot;
 }
 
 function setup(api)
     local urls = {}
 
-    api.on("irc.privmsg", function(ev)
-        for url in ev.message:gmatch("https?://[%w%.%-/%%?&amp;=_#]+") do
+    api.on(&quot;irc.privmsg&quot;, function(event)
+        for url in event.message:gmatch(&quot;https?://[%w%.%-/%%?&amp;=_#]+&quot;) do
             table.insert(urls, {
-                nick = ev.nick,
-                channel = ev.target,
-                url = url,
+                nick = event.nick,
+                channel = event.target,
+                url = url
             })
-            api.log("URL: " .. url .. " from " .. ev.nick)
+            api.log(&quot;URL: &quot; .. url .. &quot; from &quot; .. event.nick)
         end
     end)
 
-    api.command("urls", {
+    api.command(&quot;urls&quot;, {
         handler = function(args)
             local count = tonumber(args[1]) or 10
             local start = math.max(1, #urls - count + 1)
             for i = start, #urls do
                 local u = urls[i]
-                api.ui.print(u.nick .. " > " .. u.url)
+                api.ui.print(u.nick .. &quot; &gt; &quot; .. u.url)
             end
         end,
-        description = "Show recent URLs",
-        usage = "/urls [count]",
+        description = &quot;Show recent URLs&quot;,
+        usage = &quot;/urls [count]&quot;
     })
 end
 </code></pre>
 <h2>Highlight monitor</h2>
-<p>Print a notification when your nick is mentioned:</p>
+<p>Copy highlighted messages to a dedicated buffer:</p>
 <pre><code class="language-lua">meta = {
-    name = "hilight",
-    version = "1.0",
-    description = "Monitor highlighted messages",
+    name = &quot;hilight&quot;,
+    version = &quot;1.0&quot;,
+    description = &quot;Monitor highlighted messages&quot;
 }
 
 function setup(api)
-    api.on("irc.privmsg", function(ev)
+    api.on(&quot;irc.privmsg&quot;, function(event)
         local my_nick = api.store.our_nick()
-        if my_nick and ev.message:lower():find(my_nick:lower(), 1, true) then
-            local msg = "[" .. ev.target .. "] <" .. ev.nick .. "> " .. ev.message
+        if my_nick and event.message:lower():find(my_nick:lower(), 1, true) then
+            local msg = &quot;[&quot; .. event.target .. &quot;] &lt;&quot; .. event.nick .. &quot;&gt; &quot; .. event.message
             api.ui.print(msg)
         end
     end)
@@ -200,116 +169,80 @@ end
 <h2>Custom slap command</h2>
 <p>The classic IRC <code>/slap</code> command:</p>
 <pre><code class="language-lua">meta = {
-    name = "slap",
-    version = "1.0",
-    description = "Slap someone with a large trout",
+    name = &quot;slap&quot;,
+    version = &quot;1.0&quot;,
+    description = &quot;Slap someone with a large trout&quot;
 }
 
 function setup(api)
     local items = {
-        "a large trout",
-        "a mass of wet noodles",
-        "a mass-produced plastic toy",
-        "a mass of jello",
-        "a mass of cotton candy",
+        &quot;a large trout&quot;,
+        &quot;a mass of wet noodles&quot;,
+        &quot;a mass-produced plastic toy&quot;,
+        &quot;a mass of jello&quot;,
+        &quot;a mass of cotton candy&quot;,
     }
 
-    api.command("slap", {
+    api.command(&quot;slap&quot;, {
         handler = function(args)
             local target = args[1]
             if not target then
-                api.ui.print("Usage: /slap <nick>")
+                api.ui.print(&quot;Usage: /slap &lt;nick&gt;&quot;)
                 return
             end
             local item = items[math.random(#items)]
             local buf = api.store.active_buffer()
             if buf then
-                api.irc.action(buf, "slaps " .. target .. " around a bit with " .. item)
+                api.irc.action(buf, &quot;slaps &quot; .. target .. &quot; around a bit with &quot; .. item)
             end
         end,
-        description = "Slap someone with a random object",
-        usage = "/slap <nick>",
+        description = &quot;Slap someone with a random object&quot;,
+        usage = &quot;/slap &lt;nick&gt;&quot;
     })
 end
 </code></pre>
 <h2>Spam filter</h2>
-<p>Block messages matching patterns (runs at high priority to suppress before display):</p>
+<p>Block messages matching patterns:</p>
 <pre><code class="language-lua">meta = {
-    name = "spamfilter",
-    version = "1.0",
-    description = "Filter spam messages",
+    name = &quot;spamfilter&quot;,
+    version = &quot;1.0&quot;,
+    description = &quot;Filter spam messages&quot;
 }
 
 function setup(api)
     local patterns = {
-        "buy cheap",
-        "free bitcoins",
-        "click here now",
+        &quot;buy cheap&quot;,
+        &quot;free bitcoins&quot;,
+        &quot;click here now&quot;,
     }
 
     -- High priority so we run before default handlers
-    api.on("irc.privmsg", function(ev)
-        local lower = ev.message:lower()
+    api.on(&quot;irc.privmsg&quot;, function(event)
+        local lower = event.message:lower()
         for _, pattern in ipairs(patterns) do
             if lower:find(pattern, 1, true) then
-                api.log("Blocked spam from " .. ev.nick .. ": " .. ev.message)
+                api.log(&quot;Blocked spam from &quot; .. event.nick .. &quot;: &quot; .. event.message)
                 return true  -- suppress the event
             end
         end
     end, api.PRIORITY_HIGH)
 end
 </code></pre>
-<h2>Reminder timer</h2>
-<p>Set a reminder with <code>/remind &lt;minutes&gt; &lt;message&gt;</code>:</p>
+<h2>Nick highlight with sound</h2>
+<p>Print an alert when your nick is mentioned:</p>
 <pre><code class="language-lua">meta = {
-    name = "reminder",
-    version = "1.0",
-    description = "Set reminders",
+    name = &quot;nickbell&quot;,
+    version = &quot;1.0&quot;,
+    description = &quot;Print alert on nick mention&quot;
 }
 
 function setup(api)
-    api.command("remind", {
-        handler = function(args)
-            local minutes = tonumber(args[1]) or 5
-            local message = table.concat(args, " ", 2)
-            if message == "" then message = "Time's up!" end
-
-            api.timeout(minutes * 60 * 1000, function()
-                api.ui.print("Reminder: " .. message)
-            end)
-            api.ui.print("Reminder set for " .. minutes .. " minutes")
-        end,
-        description = "Set a reminder",
-        usage = "/remind <minutes> <message>",
-    })
-end
-</code></pre>
-<h2>Custom command example</h2>
-<p>Register a command that shows connection info:</p>
-<pre><code class="language-lua">meta = {
-    name = "conninfo",
-    version = "1.0",
-    description = "Show connection details",
-}
-
-function setup(api)
-    api.command("conninfo", {
-        handler = function(args)
-            local conns = api.store.connections()
-            if #conns == 0 then
-                api.ui.print("No connections")
-                return
-            end
-            for _, id in ipairs(conns) do
-                local info = api.store.connection_info(id)
-                if info then
-                    api.ui.print(id .. ": " .. (info.server or "unknown") .. " as " .. (info.nick or "?"))
-                end
-            end
-        end,
-        description = "Show all connection details",
-        usage = "/conninfo",
-    })
+    api.on(&quot;irc.privmsg&quot;, function(event)
+        local my_nick = api.store.our_nick()
+        if my_nick and event.message:lower():find(my_nick:lower(), 1, true) then
+            api.ui.print(&quot;** Mentioned in &quot; .. event.target .. &quot; by &quot; .. event.nick)
+        end
+    end)
 end
 </code></pre>
 

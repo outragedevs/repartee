@@ -62,8 +62,9 @@ api.on("irc.privmsg", function(event)
     -- event.ident          (string)
     -- event.hostname       (string)
     -- event.target         (string) channel or your nick
+    -- event.channel        (string) same as target
     -- event.message        (string)
-    -- event.is_channel     (boolean)
+    -- event.is_channel     (string) "true" or "false"
 end)
 ```
 
@@ -111,6 +112,8 @@ Same as `irc.join` plus `message` (part reason).
 |---|---|---|
 | `connection_id` | string | |
 | `nick` | string | Who kicked |
+| `ident` | string | |
+| `hostname` | string | |
 | `channel` | string | |
 | `kicked` | string | Who was kicked |
 | `message` | string | Kick reason |
@@ -122,6 +125,8 @@ Same as `irc.join` plus `message` (part reason).
 | `connection_id` | string | |
 | `nick` | string | Old nick |
 | `new_nick` | string | New nick |
+| `ident` | string | |
+| `hostname` | string | |
 
 ### `irc.topic`
 
@@ -148,6 +153,7 @@ Same as `irc.join` plus `message` (part reason).
 | `connection_id` | string | |
 | `nick` | string | Who invited |
 | `channel` | string | |
+| `invited` | string | Who was invited |
 
 ### `irc.ctcp_request` / `irc.ctcp_response`
 
@@ -169,7 +175,7 @@ Same as `irc.join` plus `message` (part reason).
 
 ---
 
-## App Events
+## Lifecycle Events
 
 ### `connected`
 
@@ -194,13 +200,6 @@ Fired before a command executes. Return `true` to suppress.
 | `args` | table |
 | `connection_id` | string |
 
-### `buffer_switch`
-
-| Field | Type |
-|---|---|
-| `from_buffer_id` | string |
-| `to_buffer_id` | string |
-
 ---
 
 ## Commands
@@ -219,10 +218,6 @@ api.command("greet", {
     usage = "/greet <nick>",
 })
 ```
-
-### `api.remove_command(name)`
-
-Remove a command registered by this script.
 
 ---
 
@@ -278,45 +273,53 @@ Send a CTCP request.
 
 ## UI Methods
 
-### `api.print(text)`
+### `api.ui.print(text)`
 
 Display a local event message in the active buffer.
 
-### `api.print_to(buffer_id, text)`
+### `api.ui.print_to(buffer_id, text)`
 
 Display a local event message in a specific buffer.
 
-### `api.switch_buffer(buffer_id)`
+### `api.ui.switch_buffer(buffer_id)`
 
 Switch to a buffer.
 
-### `api.execute(command_line)`
+### `api.ui.execute(command_line)`
 
-Execute a client command (e.g. `api.execute("/set theme default")`).
+Execute a client command (e.g. `api.ui.execute("/set theme default")`).
 
 ---
 
 ## State Access
 
-### `api.active_buffer()`
+### `api.store.active_buffer()`
 
 Returns the active buffer ID, or nil.
 
-### `api.our_nick(connection_id?)`
+### `api.store.our_nick(connection_id?)`
 
-Returns your current nick, or nil if not connected.
+Returns your current nick, or nil if not connected. If no `connection_id` is given, uses the active buffer's connection.
 
-### `api.connections()`
+### `api.store.connections()`
 
-Returns a table of all connections.
+Returns a table of all connections. Each entry has: `id`, `label`, `nick`, `connected`, `user_modes`.
 
-### `api.buffers()`
+### `api.store.connection_info(connection_id)`
 
-Returns a table of all buffers.
+Returns info for a specific connection, or nil.
 
-### `api.nicks(buffer_id)`
+### `api.store.buffers()`
 
-Returns a table of nicks in a buffer.
+Returns a table of all buffers. Each entry has: `id`, `connection_id`, `name`, `buffer_type`, `topic`, `unread_count`.
+
+### `api.store.buffer_info(buffer_id)`
+
+Returns info for a specific buffer, or nil.
+
+### `api.store.nicks(buffer_id)`
+
+Returns a table of nicks in a buffer. Each entry has: `nick`, `prefix`, `modes`, `away`.
 
 ---
 
@@ -329,6 +332,15 @@ Get a per-script config value.
 ### `api.config.set(key, value)`
 
 Set a per-script config value at runtime.
+
+### `api.config.app_get(key_path)`
+
+Read an app-level config value using dot-separated path. Returns the value as a string, or nil.
+
+```lua
+local theme = api.config.app_get("general.theme")
+local nick_width = api.config.app_get("display.nick_width")
+```
 
 ---
 
