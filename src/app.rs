@@ -317,6 +317,8 @@ pub struct App {
     pub script_manager: Option<crate::scripting::engine::ScriptManager>,
     /// Persistent `ScriptAPI` used when loading/reloading scripts.
     pub script_api: Option<crate::scripting::engine::ScriptAPI>,
+    /// Shared snapshot of app state for script callbacks.
+    pub script_state: Arc<std::sync::RwLock<crate::scripting::engine::ScriptStateSnapshot>>,
     /// Receiver for actions requested by script callbacks.
     script_action_rx: mpsc::UnboundedReceiver<crate::scripting::ScriptAction>,
     /// Script-registered command names (tracked so we can show them in /help).
@@ -393,7 +395,10 @@ impl App {
 
         // --- Scripting system ---
         let (script_action_tx, script_action_rx) = mpsc::unbounded_channel();
-        let script_api = Self::build_script_api(script_action_tx);
+        let script_state = Arc::new(std::sync::RwLock::new(
+            state.script_snapshot(),
+        ));
+        let script_api = Self::build_script_api(script_action_tx, Arc::clone(&script_state));
         let mut script_manager = crate::scripting::engine::ScriptManager::new(constants::scripts_dir());
         match crate::scripting::lua::LuaEngine::new() {
             Ok(lua_engine) => {
@@ -433,6 +438,7 @@ impl App {
             pending_channel_queries: VecDeque::new(),
             script_manager: Some(script_manager),
             script_api: Some(script_api),
+            script_state,
             script_action_rx,
             script_commands: HashMap::new(),
         })
@@ -653,12 +659,14 @@ impl App {
                         while let Ok(ev) = term_rx.try_recv() {
                             self.handle_event(ev);
                         }
+                        self.update_script_snapshot();
                     }
                     None => break,
                 },
                 irc_ev = self.irc_rx.recv() => {
                     if let Some(event) = irc_ev {
                         self.handle_irc_event(event);
+                        self.update_script_snapshot();
                     }
                 },
                 preview_ev = self.preview_rx.recv() => {
@@ -671,6 +679,7 @@ impl App {
                     self.purge_expired_batches();
                     self.check_reconnects();
                     self.measure_lag();
+                    self.update_script_snapshot();
                 },
                 _ = query_tick.tick() => {
                     self.drain_pending_channel_query();
@@ -682,6 +691,7 @@ impl App {
                         while let Ok(action) = self.script_action_rx.try_recv() {
                             self.handle_script_action(action);
                         }
+                        self.update_script_snapshot();
                     }
                 }
             }
@@ -1924,6 +1934,7 @@ impl App {
     #[allow(clippy::too_many_lines, clippy::type_complexity)]
     fn build_script_api(
         tx: mpsc::UnboundedSender<crate::scripting::ScriptAction>,
+        snapshot: Arc<std::sync::RwLock<crate::scripting::engine::ScriptStateSnapshot>>,
     ) -> crate::scripting::engine::ScriptAPI {
         use crate::scripting::ScriptAction;
 
@@ -2034,29 +2045,69 @@ impl App {
                 let _ = tx.send(ScriptAction::Log { script, message });
             });
 
-        // Read-only state queries: return empty/defaults for now.
-        // These run synchronously inside the Lua VM so they can't easily
-        // reach into App state. A future improvement could use Arc<RwLock<>>
-        // snapshots, but for the initial wiring empty results are fine.
+        // Read-only state queries: read from the shared snapshot.
+        let snap = Arc::clone(&snapshot);
         let active_buffer_id: Arc<dyn Fn(()) -> Option<String> + Send + Sync> =
-            Arc::new(|()| None);
+            Arc::new(move |()| {
+                snap.read().ok().and_then(|s| s.active_buffer_id.clone())
+            });
+
+        let snap = Arc::clone(&snapshot);
         let our_nick: Arc<dyn Fn(Option<String>) -> Option<String> + Send + Sync> =
-            Arc::new(|_| None);
+            Arc::new(move |conn_id| {
+                let s = snap.read().ok()?;
+                if let Some(id) = conn_id {
+                    s.connections.iter().find(|c| c.id == id).map(|c| c.nick.clone())
+                } else {
+                    // No conn_id — use active buffer's connection
+                    let active_buf_id = s.active_buffer_id.as_ref()?;
+                    let buf = s.buffers.iter().find(|b| b.id == *active_buf_id)?;
+                    s.connections
+                        .iter()
+                        .find(|c| c.id == buf.connection_id)
+                        .map(|c| c.nick.clone())
+                }
+            });
+
+        let snap = Arc::clone(&snapshot);
         let connection_info: Arc<
             dyn Fn(String) -> Option<crate::scripting::engine::ConnectionInfo> + Send + Sync,
-        > = Arc::new(|_| None);
+        > = Arc::new(move |id| {
+            let s = snap.read().ok()?;
+            s.connections.iter().find(|c| c.id == id).cloned()
+        });
+
+        let snap = Arc::clone(&snapshot);
         let connections: Arc<
             dyn Fn(()) -> Vec<crate::scripting::engine::ConnectionInfo> + Send + Sync,
-        > = Arc::new(|()| Vec::new());
+        > = Arc::new(move |()| {
+            snap.read().map_or_else(|_| Vec::new(), |s| s.connections.clone())
+        });
+
+        let snap = Arc::clone(&snapshot);
         let buffer_info: Arc<
             dyn Fn(String) -> Option<crate::scripting::engine::BufferInfo> + Send + Sync,
-        > = Arc::new(|_| None);
+        > = Arc::new(move |id| {
+            let s = snap.read().ok()?;
+            s.buffers.iter().find(|b| b.id == id).cloned()
+        });
+
+        let snap = Arc::clone(&snapshot);
         let buffers: Arc<
             dyn Fn(()) -> Vec<crate::scripting::engine::BufferInfo> + Send + Sync,
-        > = Arc::new(|()| Vec::new());
+        > = Arc::new(move |()| {
+            snap.read().map_or_else(|_| Vec::new(), |s| s.buffers.clone())
+        });
+
+        let snap = Arc::clone(&snapshot);
         let buffer_nicks: Arc<
             dyn Fn(String) -> Vec<crate::scripting::engine::NickInfo> + Send + Sync,
-        > = Arc::new(|_| Vec::new());
+        > = Arc::new(move |buffer_id| {
+            snap.read().map_or_else(
+                |_| Vec::new(),
+                |s| s.buffer_nicks.get(&buffer_id).cloned().unwrap_or_default(),
+            )
+        });
 
         // Timers: stub — returns 0 / does nothing.
         let start_timer: Arc<dyn Fn(u64) -> u64 + Send + Sync> = Arc::new(|_| 0);
@@ -2103,6 +2154,13 @@ impl App {
             config_set,
             app_config_get,
             log,
+        }
+    }
+
+    /// Push the current `AppState` into the shared script snapshot.
+    fn update_script_snapshot(&self) {
+        if let Ok(mut snap) = self.script_state.write() {
+            *snap = self.state.script_snapshot();
         }
     }
 

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -46,6 +47,18 @@ pub struct NickInfo {
     pub prefix: String,
     pub modes: String,
     pub away: bool,
+}
+
+/// Lightweight snapshot of app state, updated once per tick (or after
+/// state-mutating events). Script callbacks close over an
+/// `Arc<RwLock<ScriptStateSnapshot>>` so they can read current state
+/// without reaching into `AppState` directly.
+#[derive(Debug, Clone, Default)]
+pub struct ScriptStateSnapshot {
+    pub active_buffer_id: Option<String>,
+    pub connections: Vec<ConnectionInfo>,
+    pub buffers: Vec<BufferInfo>,
+    pub buffer_nicks: HashMap<String, Vec<NickInfo>>,
 }
 
 // ─── ScriptEngine trait ──────────────────────────────────────
