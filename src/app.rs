@@ -329,6 +329,7 @@ impl App {
         let mut state = AppState::new();
         state.flood_protection = config.general.flood_protection;
         state.ignores.clone_from(&config.ignores);
+        state.scrollback_limit = config.display.scrollback_lines;
         let (irc_tx, irc_rx) = mpsc::unbounded_channel();
 
         // Initialize storage if logging is enabled
@@ -638,6 +639,7 @@ impl App {
                 },
                 _ = tick.tick() => {
                     self.handle_netsplit_tick();
+                    self.purge_expired_batches();
                     self.check_reconnects();
                     self.measure_lag();
                 },
@@ -805,6 +807,13 @@ impl App {
                     },
                 );
             }
+        }
+    }
+
+    /// Discard any batches that have been open too long (e.g. dropped `-BATCH`).
+    fn purge_expired_batches(&mut self) {
+        for tracker in self.batch_trackers.values_mut() {
+            tracker.purge_expired();
         }
     }
 

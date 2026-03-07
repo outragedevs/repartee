@@ -17,18 +17,20 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> Result<()> {
     color_eyre::install()?;
 
-    // Log to ~/.repartee/repartee.log — level controlled by RUST_LOG env var.
-    // Default: info. Use RUST_LOG=debug or RUST_LOG=repartee=debug for more detail.
-    let log_dir = constants::home_dir();
-    std::fs::create_dir_all(&log_dir)?;
-    let log_file = std::fs::File::create(log_dir.join("repartee.log"))?;
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .with_writer(log_file)
-        .with_ansi(false)
-        .init();
+    // Debug logging is opt-in: set RUST_LOG env var to enable.
+    // e.g. RUST_LOG=info or RUST_LOG=repartee=debug
+    if std::env::var("RUST_LOG").is_ok() {
+        let log_dir = constants::home_dir();
+        std::fs::create_dir_all(&log_dir)?;
+        let log_file = std::fs::File::create(log_dir.join("repartee.log"))?;
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            )
+            .with_writer(log_file)
+            .with_ansi(false)
+            .init();
+    }
 
     ui::install_panic_hook();
 

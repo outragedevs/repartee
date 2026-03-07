@@ -34,4 +34,6 @@ pub struct AppState {
     pub log_tx: Option<mpsc::UnboundedSender<LogRow>>,
     /// Message types excluded from logging (e.g. "event" to skip quit/join/nick fan-out).
     pub log_exclude_types: Vec<String>,
+    /// Maximum messages per buffer (FIFO eviction). 0 = unlimited.
+    pub scrollback_limit: usize,
 }

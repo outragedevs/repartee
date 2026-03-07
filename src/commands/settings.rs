@@ -372,6 +372,11 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                 ev(app, &format!("{C_ERR}Failed to save config: {e}{C_RST}"));
             }
 
+            // Sync runtime state from config
+            if path == "display.scrollback_lines" {
+                app.state.scrollback_limit = app.config.display.scrollback_lines;
+            }
+
             // Special handling: reload theme if theme name changed
             if path == "general.theme" {
                 let theme_path = crate::constants::theme_dir()

@@ -18,6 +18,7 @@ impl AppState {
             ignores: Vec::new(),
             log_tx: None,
             log_exclude_types: Vec::new(),
+            scrollback_limit: 0,
         }
     }
 
@@ -92,6 +93,7 @@ impl AppState {
         self.maybe_log(buffer_id, &message);
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
             buf.messages.push(message);
+            enforce_scrollback(buf, self.scrollback_limit);
         }
     }
 
@@ -104,6 +106,7 @@ impl AppState {
         self.maybe_log(buffer_id, &message);
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
             buf.messages.push(message);
+            enforce_scrollback(buf, self.scrollback_limit);
             // Only escalate activity if this is not the active buffer
             let is_active = self.active_buffer_id.as_deref() == Some(buffer_id);
             if !is_active && level > buf.activity {
@@ -257,6 +260,14 @@ impl AppState {
         };
         let prev_id = sorted[prev_idx].clone();
         self.set_active_buffer(&prev_id);
+    }
+}
+
+/// Trim oldest messages from the buffer if it exceeds the scrollback limit.
+fn enforce_scrollback(buf: &mut Buffer, limit: usize) {
+    if limit > 0 && buf.messages.len() > limit {
+        let excess = buf.messages.len() - limit;
+        buf.messages.drain(..excess);
     }
 }
 
@@ -587,5 +598,51 @@ mod tests {
         let row2 = rx.try_recv().unwrap();
         assert!(row2.text.is_empty(), "reference row should have empty text");
         assert_eq!(row2.ref_id, Some(primary_id));
+    }
+
+    #[test]
+    fn scrollback_limit_evicts_oldest() {
+        let mut state = make_test_state();
+        state.scrollback_limit = 3;
+
+        for i in 0..5 {
+            let msg = make_test_message(&mut state, &format!("msg{i}"));
+            state.add_message("libera/#rust", msg);
+        }
+
+        let buf = state.buffers.get("libera/#rust").unwrap();
+        assert_eq!(buf.messages.len(), 3);
+        assert_eq!(buf.messages[0].text, "msg2");
+        assert_eq!(buf.messages[2].text, "msg4");
+    }
+
+    #[test]
+    fn scrollback_limit_zero_means_unlimited() {
+        let mut state = make_test_state();
+        state.scrollback_limit = 0;
+
+        for i in 0..100 {
+            let msg = make_test_message(&mut state, &format!("msg{i}"));
+            state.add_message("libera/#rust", msg);
+        }
+
+        let buf = state.buffers.get("libera/#rust").unwrap();
+        assert_eq!(buf.messages.len(), 100);
+    }
+
+    #[test]
+    fn scrollback_limit_with_activity() {
+        let mut state = make_test_state();
+        state.scrollback_limit = 2;
+        state.set_active_buffer("libera/#rust");
+
+        for i in 0..5 {
+            let msg = make_test_message(&mut state, &format!("msg{i}"));
+            state.add_message_with_activity("libera/#linux", msg, ActivityLevel::Activity);
+        }
+
+        let buf = state.buffers.get("libera/#linux").unwrap();
+        assert_eq!(buf.messages.len(), 2);
+        assert_eq!(buf.messages[0].text, "msg3");
     }
 }

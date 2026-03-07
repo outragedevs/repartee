@@ -9,6 +9,7 @@
 // QUIT/JOIN events, providing server-authoritative netsplit information.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use irc::proto::{Command, Message as IrcMessage};
 
@@ -19,6 +20,9 @@ use crate::state::buffer::{Message, MessageType, NickEntry, make_buffer_id};
 /// Maximum number of nicks to show in a netsplit/netjoin summary line.
 const MAX_NICKS_DISPLAY: usize = 15;
 
+/// Maximum time a batch can remain open before being discarded (60 seconds).
+const BATCH_TIMEOUT_SECS: u64 = 60;
+
 /// Information about an in-progress batch.
 #[derive(Debug, Clone)]
 pub struct BatchInfo {
@@ -28,6 +32,8 @@ pub struct BatchInfo {
     pub params: Vec<String>,
     /// Messages collected while the batch was open.
     pub messages: Vec<IrcMessage>,
+    /// When this batch was opened.
+    pub started_at: Instant,
 }
 
 /// Tracks open `IRCv3` batches for a single connection.
@@ -46,8 +52,30 @@ impl BatchTracker {
                 batch_type: batch_type.to_uppercase(),
                 params,
                 messages: Vec::new(),
+                started_at: Instant::now(),
             },
         );
+    }
+
+    /// Remove batches that have been open longer than `BATCH_TIMEOUT_SECS`.
+    ///
+    /// Returns the number of expired batches discarded. Should be called
+    /// periodically (e.g. once per second from the main tick).
+    pub fn purge_expired(&mut self) -> usize {
+        let timeout = std::time::Duration::from_secs(BATCH_TIMEOUT_SECS);
+        let before = self.open.len();
+        self.open.retain(|tag, info| {
+            let expired = info.started_at.elapsed() >= timeout;
+            if expired {
+                tracing::warn!(
+                    "discarding expired batch tag={tag} type={} msgs={}",
+                    info.batch_type,
+                    info.messages.len()
+                );
+            }
+            !expired
+        });
+        before - self.open.len()
     }
 
     /// Check whether a message belongs to an open batch via its `@batch` tag.
@@ -500,6 +528,7 @@ mod tests {
         let batch = BatchInfo {
             batch_type: "NETSPLIT".to_string(),
             params: vec!["hub.net".to_string(), "leaf.net".to_string()],
+            started_at: Instant::now(),
             messages: vec![
                 make_quit_msg("alice", "hub.net leaf.net", "ref1"),
                 make_quit_msg("bob", "hub.net leaf.net", "ref1"),
@@ -581,5 +610,38 @@ mod tests {
 
         let batch = tracker.end_batch("ref1").expect("batch should exist");
         assert_eq!(batch.batch_type, "NETSPLIT");
+    }
+
+    #[test]
+    fn purge_expired_removes_old_batches() {
+        let mut tracker = BatchTracker::default();
+        // Manually insert a batch with an old timestamp
+        tracker.open.insert(
+            "old".to_string(),
+            BatchInfo {
+                batch_type: "NETSPLIT".to_string(),
+                params: vec![],
+                messages: vec![],
+                started_at: Instant::now().checked_sub(std::time::Duration::from_secs(120)).unwrap(),
+            },
+        );
+        // Fresh batch should survive
+        tracker.start_batch("fresh", "NETJOIN", vec![]);
+
+        let purged = tracker.purge_expired();
+        assert_eq!(purged, 1);
+        assert!(tracker.end_batch("old").is_none());
+        assert!(tracker.end_batch("fresh").is_some());
+    }
+
+    #[test]
+    fn purge_expired_keeps_fresh_batches() {
+        let mut tracker = BatchTracker::default();
+        tracker.start_batch("a", "NETSPLIT", vec![]);
+        tracker.start_batch("b", "NETJOIN", vec![]);
+
+        let purged = tracker.purge_expired();
+        assert_eq!(purged, 0);
+        assert_eq!(tracker.open.len(), 2);
     }
 }
