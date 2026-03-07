@@ -1255,6 +1255,11 @@ impl App {
                 {
                     let y_offset = (mouse.row - nick_area.y) as usize;
                     self.handle_nick_list_click(y_offset);
+                } else if let Some(chat_area) = regions.chat_area
+                    && chat_area.contains(pos)
+                {
+                    let y_offset = (mouse.row - chat_area.y) as usize;
+                    self.handle_chat_click(y_offset);
                 }
             }
             _ => {}
@@ -1357,6 +1362,38 @@ impl App {
         self.state.set_active_buffer(&query_buf_id);
         self.scroll_offset = 0;
         self.nick_list_scroll = 0;
+    }
+
+    fn handle_chat_click(&mut self, y_offset: usize) {
+        if !self.config.image_preview.enabled {
+            return;
+        }
+
+        let Some(buf) = self.state.active_buffer() else {
+            return;
+        };
+
+        // Map the clicked row to the corresponding message, same logic as chat_view render.
+        let total = buf.messages.len();
+        let chat_height = self
+            .ui_regions
+            .and_then(|r| r.chat_area)
+            .map_or(0, |a| a.height as usize);
+        let max_scroll = total.saturating_sub(chat_height);
+        let scroll = self.scroll_offset.min(max_scroll);
+        let skip = total.saturating_sub(chat_height + scroll);
+        let msg_index = skip + y_offset;
+
+        let Some(msg) = buf.messages.get(msg_index) else {
+            return;
+        };
+
+        // Extract URLs from message text and preview the first classifiable one.
+        let urls = crate::image_preview::detect::extract_urls(&msg.text);
+        for classification in &urls {
+            self.show_image_preview(&classification.url);
+            return;
+        }
     }
 
     fn handle_tab(&mut self) {
