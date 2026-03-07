@@ -161,6 +161,13 @@ impl App {
     /// fetch, cache, decode, and encode the image. Results arrive on
     /// `self.preview_rx` and are handled in the event loop.
     pub fn show_image_preview(&mut self, url: &str) {
+        // Don't re-fetch if already loading or showing this URL.
+        match &self.image_preview {
+            crate::image_preview::PreviewStatus::Loading { url: u }
+            | crate::image_preview::PreviewStatus::Ready { url: u, .. } if u == url => return,
+            _ => {}
+        }
+
         self.image_preview = crate::image_preview::PreviewStatus::Loading {
             url: url.to_string(),
         };
@@ -1390,9 +1397,8 @@ impl App {
 
         // Extract URLs from message text and preview the first classifiable one.
         let urls = crate::image_preview::detect::extract_urls(&msg.text);
-        for classification in &urls {
+        if let Some(classification) = urls.first() {
             self.show_image_preview(&classification.url);
-            return;
         }
     }
 

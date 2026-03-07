@@ -113,34 +113,6 @@ pub fn classify_url(url: &str) -> Option<UrlClassification> {
     })
 }
 
-/// Quick predicate: is this URL likely to resolve to a previewable image?
-///
-/// Returns `true` for direct images and known image-hosting pages, `false`
-/// for generic pages and non-HTTP URLs.
-#[must_use]
-pub fn is_likely_image_url(url: &str) -> bool {
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return false;
-    }
-
-    let (host, path) = parse_host_and_path(url);
-
-    if IMAGE_EXT_RE.is_match(&path) {
-        return true;
-    }
-
-    if DIRECT_HOST_RE.is_match(&host) {
-        return true;
-    }
-
-    let host_path = format!("{host}/{}", path.trim_start_matches('/'));
-    if IMGUR_PAGE_RE.is_match(&host_path) || IMGBB_PAGE_RE.is_match(&host_path) {
-        return true;
-    }
-
-    false
-}
-
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -524,40 +496,6 @@ mod tests {
         let results = extract_urls(r#""https://example.com/pic.png""#);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].url, "https://example.com/pic.png");
-    }
-
-    // -----------------------------------------------------------------------
-    // is_likely_image_url
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn likely_direct_image() {
-        assert!(is_likely_image_url("https://example.com/photo.jpg"));
-    }
-
-    #[test]
-    fn likely_imgur_host() {
-        assert!(is_likely_image_url("https://i.imgur.com/abc123"));
-    }
-
-    #[test]
-    fn likely_imgur_page() {
-        assert!(is_likely_image_url("https://imgur.com/gallery/abc"));
-    }
-
-    #[test]
-    fn likely_imgbb_page() {
-        assert!(is_likely_image_url("https://ibb.co/abc123"));
-    }
-
-    #[test]
-    fn not_likely_generic_page() {
-        assert!(!is_likely_image_url("https://news.ycombinator.com/"));
-    }
-
-    #[test]
-    fn not_likely_ftp() {
-        assert!(!is_likely_image_url("ftp://example.com/file.jpg"));
     }
 
     // -----------------------------------------------------------------------

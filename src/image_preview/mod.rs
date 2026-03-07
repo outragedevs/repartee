@@ -23,7 +23,6 @@ use crate::config::ImagePreviewConfig;
 
 /// Current state of the image preview overlay.
 #[derive(Default)]
-#[allow(dead_code)]
 pub enum PreviewStatus {
     /// No preview is active.
     #[default]

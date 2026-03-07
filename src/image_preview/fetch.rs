@@ -11,11 +11,21 @@
 //! Open Graph image tag. Only one level of recursion is performed — if the
 //! og:image URL itself returns HTML, that is an error.
 
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use regex::Regex;
 use reqwest::Client;
 use thiserror::Error;
+
+/// Pre-compiled regex for extracting og:image meta tags. Handles both
+/// attribute orderings (`property` before `content` and vice versa).
+static OG_IMAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?i)<meta\s+(?:property="og:image"\s+content="([^"]+)"|content="([^"]+)"\s+property="og:image")"#,
+    )
+    .expect("og:image regex is valid")
+});
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -50,10 +60,6 @@ pub struct FetchResult {
     pub data: Vec<u8>,
     /// MIME type of the image (e.g. `"image/png"`).
     pub content_type: String,
-    /// The URL that was originally requested.
-    pub original_url: String,
-    /// The URL that was actually fetched (may differ when og:image is used).
-    pub final_url: String,
 }
 
 /// Errors that can occur during image fetching.
@@ -104,8 +110,6 @@ pub async fn fetch_image(
     config: &FetchConfig,
     client: &Client,
 ) -> Result<FetchResult, FetchError> {
-    let original_url = url.to_owned();
-
     // Phase 1 — fetch the URL directly.
     let (data, content_type, resolved_url) = fetch_url(url, config, client).await?;
 
@@ -113,8 +117,6 @@ pub async fn fetch_image(
         return Ok(FetchResult {
             data,
             content_type,
-            original_url,
-            final_url: resolved_url,
         });
     }
 
@@ -126,7 +128,7 @@ pub async fn fetch_image(
         // Resolve relative URLs against the original page.
         let image_url = resolve_url(&og_url, &resolved_url);
 
-        let (img_data, img_ct, img_final_url) =
+        let (img_data, img_ct, _) =
             fetch_url(&image_url, config, client).await?;
 
         if !is_image_content_type(&img_ct) {
@@ -136,8 +138,6 @@ pub async fn fetch_image(
         return Ok(FetchResult {
             data: img_data,
             content_type: img_ct,
-            original_url,
-            final_url: img_final_url,
         });
     }
 
@@ -191,9 +191,7 @@ async fn fetch_url(
         });
     }
 
-    // Stream the body, enforcing the size limit as we go.
-    let mut data = Vec::new();
-    let stream = response.bytes().await.map_err(|e| {
+    let bytes = response.bytes().await.map_err(|e| {
         if e.is_timeout() {
             FetchError::Timeout
         } else {
@@ -201,17 +199,14 @@ async fn fetch_url(
         }
     })?;
 
-    // reqwest's `bytes()` returns the entire body at once, so we check once.
-    if stream.len() as u64 > config.max_file_size {
+    if bytes.len() as u64 > config.max_file_size {
         return Err(FetchError::TooLarge {
-            size: stream.len() as u64,
+            size: bytes.len() as u64,
             max: config.max_file_size,
         });
     }
 
-    data.append(&mut stream.to_vec());
-
-    Ok((data, content_type, final_url))
+    Ok((bytes.to_vec(), content_type, final_url))
 }
 
 /// Return `true` if the content-type string indicates an image.
@@ -227,13 +222,7 @@ fn is_image_content_type(ct: &str) -> bool {
 ///
 /// Returns `None` when no og:image tag is found.
 fn extract_og_image(html: &str) -> Option<String> {
-    // The regex handles both orderings of `property` and `content` attributes.
-    let re = Regex::new(
-        r#"(?i)<meta\s+(?:property="og:image"\s+content="([^"]+)"|content="([^"]+)"\s+property="og:image")"#,
-    )
-    .expect("og:image regex is valid");
-
-    let caps = re.captures(html)?;
+    let caps = OG_IMAGE_RE.captures(html)?;
     caps.get(1)
         .or_else(|| caps.get(2))
         .map(|m| m.as_str().to_owned())

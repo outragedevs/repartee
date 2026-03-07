@@ -31,8 +31,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         } => {
             render_ready(frame, area, &app.theme.colors, title.as_deref(), &mut *image, *width, *height);
         }
-        PreviewStatus::Error { message, .. } => {
-            render_error(frame, area, &app.theme.colors, message);
+        PreviewStatus::Error { url, message } => {
+            render_error(frame, area, &app.theme.colors, url, message);
         }
     }
 }
@@ -76,7 +76,7 @@ fn render_loading(
 
     frame.render_widget(Clear, popup_area);
 
-    let title_text = truncate_title(url, (popup_width.saturating_sub(4)) as usize);
+    let title_text = truncate_title(url, usize::from(popup_width.saturating_sub(4)));
     let block = Block::default()
         .title(Line::from(title_text).style(Style::default().fg(accent)))
         .borders(Borders::ALL)
@@ -111,7 +111,7 @@ fn render_ready(
     frame.render_widget(Clear, popup_area);
 
     let title_text = title
-        .map(|t| truncate_title(t, (popup_area.width.saturating_sub(4)) as usize))
+        .map(|t| truncate_title(t, usize::from(popup_area.width.saturating_sub(4))))
         .unwrap_or_default();
 
     let block = Block::default()
@@ -133,6 +133,7 @@ fn render_error(
     frame: &mut Frame,
     area: Rect,
     colors: &crate::theme::ThemeColors,
+    url: &str,
     message: &str,
 ) {
     let bg_alt = hex_to_color(&colors.bg_alt).unwrap_or(Color::Black);
@@ -145,9 +146,10 @@ fn render_error(
 
     frame.render_widget(Clear, popup_area);
 
+    let title_text = truncate_title(url, usize::from(popup_width.saturating_sub(4)));
     let block = Block::default()
         .title(
-            Line::from("Image Preview Error")
+            Line::from(title_text)
                 .style(Style::default().fg(error_color).add_modifier(Modifier::BOLD)),
         )
         .borders(Borders::ALL)
