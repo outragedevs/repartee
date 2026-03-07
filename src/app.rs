@@ -1555,6 +1555,11 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                // Dismiss image preview on any click (same as ESC).
+                if !matches!(self.image_preview, crate::image_preview::PreviewStatus::Hidden) {
+                    self.dismiss_image_preview();
+                    return;
+                }
                 if let Some(buf_area) = regions.buffer_list_area
                     && buf_area.contains(pos)
                 {
