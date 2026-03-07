@@ -448,6 +448,94 @@ fn log_status(app: &mut App) {
     }
 }
 
+// === Image Preview ===
+
+pub(crate) fn cmd_preview(app: &mut App, args: &[String]) {
+    if args.is_empty() {
+        add_local_event(app, "Usage: /preview <url>");
+        return;
+    }
+    let url = &args[0];
+
+    if !app.config.image_preview.enabled {
+        add_local_event(
+            app,
+            &format!("{C_ERR}Image preview is disabled. Use /set image_preview.enabled true{C_RST}"),
+        );
+        return;
+    }
+
+    if crate::image_preview::detect::classify_url(url).is_none() {
+        add_local_event(
+            app,
+            &format!("{C_ERR}URL does not appear to be a valid HTTP(S) link{C_RST}"),
+        );
+        return;
+    }
+
+    app.show_image_preview(url);
+}
+
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn cmd_image(app: &mut App, args: &[String]) {
+    let subcmd = args.first().map_or("", String::as_str);
+    match subcmd {
+        "stats" => match crate::image_preview::cache::stats() {
+            Ok(s) => {
+                let size_mb = s.total_bytes as f64 / 1_048_576.0;
+                let age_days = s.oldest_age_secs / 86400;
+                add_local_event(
+                    app,
+                    &format!(
+                        "Image cache: {C_CMD}{}{C_RST} files, {C_CMD}{size_mb:.1}{C_RST} MB, oldest: {C_CMD}{age_days}{C_RST} days",
+                        s.total_files
+                    ),
+                );
+            }
+            Err(e) => add_local_event(app, &format!("{C_ERR}Cache stats error: {e}{C_RST}")),
+        },
+        "clear" => match crate::image_preview::cache::clear() {
+            Ok(count) => add_local_event(
+                app,
+                &format!("{C_OK}Cleared {count} cached images{C_RST}"),
+            ),
+            Err(e) => add_local_event(app, &format!("{C_ERR}Cache clear error: {e}{C_RST}")),
+        },
+        "cleanup" => {
+            let max_mb = app.config.image_preview.cache_max_mb;
+            let max_days = app.config.image_preview.cache_max_days;
+            match crate::image_preview::cache::cleanup(max_mb, max_days) {
+                Ok(s) => {
+                    let mb = s.bytes_freed as f64 / 1_048_576.0;
+                    add_local_event(
+                        app,
+                        &format!(
+                            "{C_OK}Cleanup: removed {} files, freed {mb:.1} MB{C_RST}",
+                            s.files_removed
+                        ),
+                    );
+                }
+                Err(e) => add_local_event(app, &format!("{C_ERR}Cleanup error: {e}{C_RST}")),
+            }
+        }
+        _ => {
+            let cfg = &app.config.image_preview;
+            let lines = vec![
+                divider("Image Preview"),
+                format!("  {C_DIM}Enabled:{C_RST}     {C_CMD}{}{C_RST}", cfg.enabled),
+                format!("  {C_DIM}Protocol:{C_RST}    {C_CMD}{}{C_RST}", cfg.protocol),
+                format!("  {C_DIM}Max width:{C_RST}   {C_CMD}{}{C_RST}", cfg.max_width),
+                format!("  {C_DIM}Max height:{C_RST}  {C_CMD}{}{C_RST}", cfg.max_height),
+                format!("  {C_DIM}Cache limit:{C_RST} {C_CMD}{} MB / {} days{C_RST}", cfg.cache_max_mb, cfg.cache_max_days),
+                divider(""),
+            ];
+            for line in &lines {
+                add_local_event(app, line);
+            }
+        }
+    }
+}
+
 fn log_search(app: &mut App, query: &str) {
     // Collect output lines to avoid borrow conflicts between storage and app
     let lines: Vec<String> = if let Some(ref storage) = app.storage {

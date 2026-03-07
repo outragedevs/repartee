@@ -15,6 +15,7 @@ use super::handlers_irc::{
 use super::handlers_admin::{
     cmd_reload, cmd_ignore, cmd_unignore, cmd_server, cmd_autoconnect,
     cmd_oper, cmd_kill, cmd_wallops, cmd_stats, cmd_log,
+    cmd_preview, cmd_image,
 };
 
 static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| vec![
@@ -83,6 +84,9 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| ve
         ("clear",      CommandDef { handler: cmd_clear,      description: "Clear active buffer",              aliases: &[],             category: CommandCategory::Other }),
         ("close",      CommandDef { handler: cmd_close,      description: "Close active buffer",              aliases: &["wc"],         category: CommandCategory::Other }),
         ("quote",      CommandDef { handler: cmd_quote,      description: "Send a raw IRC command",           aliases: &["raw"],        category: CommandCategory::Other }),
+        // === Media ===
+        ("preview",    CommandDef { handler: cmd_preview,    description: "Preview an image URL",             aliases: &[],             category: CommandCategory::Other }),
+        ("image",      CommandDef { handler: cmd_image,      description: "Image cache management",           aliases: &["img"],        category: CommandCategory::Other }),
     ]);
 
 /// Command table — handler + short description + aliases + category.

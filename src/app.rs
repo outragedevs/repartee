@@ -73,6 +73,16 @@ pub struct App {
     pub storage: Option<crate::storage::Storage>,
     /// Custom quit message set by `/quit [msg]`.
     pub quit_message: Option<String>,
+    /// Current image preview overlay state.
+    pub image_preview: crate::image_preview::PreviewStatus,
+    /// Channel receiver for image preview results from background tasks.
+    preview_rx: mpsc::UnboundedReceiver<crate::image_preview::ImagePreviewEvent>,
+    /// Channel sender cloned into each preview task.
+    preview_tx: mpsc::UnboundedSender<crate::image_preview::ImagePreviewEvent>,
+    /// Shared HTTP client for image fetching.
+    pub http_client: reqwest::Client,
+    /// Terminal image protocol picker (for ratatui-image).
+    pub picker: ratatui_image::picker::Picker,
 }
 
 impl App {
@@ -108,6 +118,15 @@ impl App {
             None
         };
 
+        let (preview_tx, preview_rx) = mpsc::unbounded_channel();
+
+        // Detect terminal image protocol capabilities.
+        // Must be called before entering raw mode (setup_terminal).
+        let picker = ratatui_image::picker::Picker::from_query_stdio()
+            .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
+
+        let http_client = reqwest::Client::new();
+
         Ok(Self {
             state,
             config,
@@ -128,7 +147,39 @@ impl App {
             batch_trackers: HashMap::new(),
             storage,
             quit_message: None,
+            image_preview: crate::image_preview::PreviewStatus::default(),
+            preview_rx,
+            preview_tx,
+            http_client,
+            picker,
         })
+    }
+
+    /// Show an image preview for the given URL.
+    ///
+    /// Sets the preview status to `Loading` and spawns a background task to
+    /// fetch, cache, decode, and encode the image. Results arrive on
+    /// `self.preview_rx` and are handled in the event loop.
+    pub fn show_image_preview(&mut self, url: &str) {
+        self.image_preview = crate::image_preview::PreviewStatus::Loading {
+            url: url.to_string(),
+        };
+
+        let term_size = crossterm::terminal::size().unwrap_or((80, 24));
+
+        crate::image_preview::spawn_preview(
+            url,
+            &self.config.image_preview,
+            &self.picker,
+            &self.http_client,
+            self.preview_tx.clone(),
+            term_size,
+        );
+    }
+
+    /// Dismiss the image preview overlay (e.g. on Escape press).
+    pub fn dismiss_image_preview(&mut self) {
+        self.image_preview = crate::image_preview::PreviewStatus::Hidden;
     }
 
     /// Set up connection state, server buffer, and "Connecting..." message.
@@ -316,6 +367,11 @@ impl App {
                         self.handle_irc_event(event);
                     }
                 },
+                preview_ev = self.preview_rx.recv() => {
+                    if let Some(ev) = preview_ev {
+                        self.handle_preview_event(ev);
+                    }
+                },
                 _ = tick.tick() => {
                     self.handle_netsplit_tick();
                     self.check_reconnects();
@@ -437,6 +493,27 @@ impl App {
         if !has_real_buffers {
             Self::create_default_status(&mut self.state);
         }
+    }
+
+    /// Handle a completed image preview event from a background task.
+    fn handle_preview_event(&mut self, event: crate::image_preview::ImagePreviewEvent) {
+        use crate::image_preview::{ImagePreviewEvent, PreviewStatus};
+        self.image_preview = match event {
+            ImagePreviewEvent::Ready {
+                url,
+                title,
+                image,
+                width,
+                height,
+            } => PreviewStatus::Ready {
+                url,
+                title,
+                image,
+                width,
+                height,
+            },
+            ImagePreviewEvent::Error { url, message } => PreviewStatus::Error { url, message },
+        };
     }
 
     /// Tick the netsplit state and emit batched netsplit/netjoin messages.
@@ -1053,9 +1130,13 @@ impl App {
         }
 
         match (key.modifiers, key.code) {
-            // ESC — record timestamp for potential ESC+key combo
+            // ESC — dismiss image preview if active, otherwise record for ESC+key combo
             (_, KeyCode::Esc) => {
-                self.last_esc_time = Some(Instant::now());
+                if matches!(self.image_preview, crate::image_preview::PreviewStatus::Hidden) {
+                    self.last_esc_time = Some(Instant::now());
+                } else {
+                    self.dismiss_image_preview();
+                }
             }
             (KeyModifiers::CONTROL, KeyCode::Char('q' | 'c')) => self.should_quit = true,
             (KeyModifiers::CONTROL, KeyCode::Char('l')) => {

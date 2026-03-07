@@ -106,4 +106,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     regions.input_area = Some(input_area);
 
     app.ui_regions = Some(regions);
+
+    // Image preview overlay (drawn last, on top of everything).
+    super::image_overlay::render(frame, frame.area(), app);
 }

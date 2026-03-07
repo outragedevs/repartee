@@ -1,5 +1,6 @@
 pub mod buffer_list;
 pub mod chat_view;
+pub mod image_overlay;
 pub mod input;
 pub mod layout;
 pub mod message_line;
