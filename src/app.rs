@@ -895,6 +895,32 @@ impl App {
                     self.execute_autosendcmd(&conn_id, &cmds);
                 }
 
+                // Eager buffer creation (erssi pattern): create all channel
+                // buffers upfront so the buffer list is stable from the start.
+                // Buffers are destroyed on join failure (474, 471, etc.).
+                for entry in &all_channels {
+                    let chan_name = entry.split(' ').next().unwrap_or(entry);
+                    let buf_id = make_buffer_id(&conn_id, chan_name);
+                    if !self.state.buffers.contains_key(&buf_id) {
+                        self.state.add_buffer(Buffer {
+                            id: buf_id,
+                            connection_id: conn_id.clone(),
+                            buffer_type: BufferType::Channel,
+                            name: chan_name.to_string(),
+                            messages: Vec::new(),
+                            activity: ActivityLevel::None,
+                            unread_count: 0,
+                            last_read: Utc::now(),
+                            topic: None,
+                            topic_set_by: None,
+                            users: HashMap::new(),
+                            modes: None,
+                            mode_params: None,
+                            list_modes: HashMap::new(),
+                        });
+                    }
+                }
+
                 // Throttled join: batch 4 channels per JOIN, 2s delay between batches.
                 // Channel entries may contain keys: "#channel key" → split on first space.
                 if !all_channels.is_empty()

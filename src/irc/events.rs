@@ -2135,6 +2135,39 @@ fn handle_response(
             );
         }
 
+        // === Channel join failures ===
+        // Destroy eagerly-created buffers when the server rejects a JOIN.
+        // args: [our_nick, channel, reason]
+
+        Response::ERR_CHANNELISFULL       // 471
+        | Response::ERR_INVITEONLYCHAN    // 473
+        | Response::ERR_BANNEDFROMCHAN    // 474
+        | Response::ERR_BADCHANNELKEY     // 475
+        | Response::ERR_TOOMANYCHANNELS   // 405
+        => {
+            let channel = if args.len() >= 2 { &args[1] } else { "?" };
+            let reason = if args.len() >= 3 { &args[2] } else { "Cannot join channel" };
+            let buffer_id = make_buffer_id(conn_id, channel);
+
+            // Show the error in the server buffer.
+            let target_buf = server_buffer(state, conn_id);
+            emit(
+                state,
+                &target_buf,
+                &format!("%Zff6b6bCannot join {channel}: {reason}%N"),
+            );
+
+            // Destroy the pre-created buffer if no one has joined it yet
+            // (no users means we never received our own JOIN confirmation).
+            let should_remove = state
+                .buffers
+                .get(&buffer_id)
+                .is_some_and(|buf| buf.users.is_empty());
+            if should_remove {
+                state.remove_buffer(&buffer_id);
+            }
+        }
+
         // === Away responses ===
 
         Response::RPL_NOWAWAY => {
@@ -2636,6 +2669,25 @@ mod tests {
             },
         );
         state
+    }
+
+    fn make_channel_buffer(conn_id: &str, name: &str) -> Buffer {
+        Buffer {
+            id: make_buffer_id(conn_id, name),
+            connection_id: conn_id.to_string(),
+            buffer_type: BufferType::Channel,
+            name: name.to_string(),
+            messages: Vec::new(),
+            activity: ActivityLevel::None,
+            unread_count: 0,
+            last_read: Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: std::collections::HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: std::collections::HashMap::new(),
+        }
     }
 
     fn make_irc_msg(prefix: Option<&str>, command: Command) -> IrcMessage {
@@ -4499,5 +4551,107 @@ mod tests {
         let conn = state.connections.get("test").unwrap();
         assert_eq!(conn.status, ConnectionStatus::Error);
         assert_eq!(conn.error.as_deref(), Some("Banned"));
+    }
+
+    // === Join failure: eager buffer cleanup ===
+
+    #[test]
+    fn join_failure_removes_empty_buffer() {
+        let mut state = make_test_state();
+        // Pre-create a channel buffer (erssi-style eager creation).
+        state.add_buffer(make_channel_buffer("test", "#locked"));
+        assert!(state.buffers.contains_key("test/#locked"));
+
+        // Server responds with 474 ERR_BANNEDFROMCHAN.
+        let msg = make_irc_msg(
+            None,
+            Command::Response(
+                Response::ERR_BANNEDFROMCHAN,
+                vec!["me".into(), "#locked".into(), "Cannot join channel (+b)".into()],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        // Buffer should be destroyed since it had no users.
+        assert!(!state.buffers.contains_key("test/#locked"));
+    }
+
+    #[test]
+    fn join_failure_keeps_active_buffer() {
+        let mut state = make_test_state();
+        // Pre-create buffer AND add a user (simulating a successful prior join).
+        state.add_buffer(make_channel_buffer("test", "#active"));
+        state.add_nick("test/#active", NickEntry {
+            nick: "me".into(),
+            prefix: String::new(),
+            modes: String::new(),
+            away: false,
+            account: None,
+            ident: None,
+            host: None,
+        });
+
+        let msg = make_irc_msg(
+            None,
+            Command::Response(
+                Response::ERR_BANNEDFROMCHAN,
+                vec!["me".into(), "#active".into(), "Cannot join channel (+b)".into()],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        // Buffer should NOT be destroyed — it has users.
+        assert!(state.buffers.contains_key("test/#active"));
+    }
+
+    #[test]
+    fn join_failure_invite_only() {
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#secret"));
+
+        let msg = make_irc_msg(
+            None,
+            Command::Response(
+                Response::ERR_INVITEONLYCHAN,
+                vec!["me".into(), "#secret".into(), "Cannot join channel (+i)".into()],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        assert!(!state.buffers.contains_key("test/#secret"));
+    }
+
+    #[test]
+    fn join_failure_channel_full() {
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#crowded"));
+
+        let msg = make_irc_msg(
+            None,
+            Command::Response(
+                Response::ERR_CHANNELISFULL,
+                vec!["me".into(), "#crowded".into(), "Cannot join channel (+l)".into()],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        assert!(!state.buffers.contains_key("test/#crowded"));
+    }
+
+    #[test]
+    fn join_failure_bad_key() {
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#keyed"));
+
+        let msg = make_irc_msg(
+            None,
+            Command::Response(
+                Response::ERR_BADCHANNELKEY,
+                vec!["me".into(), "#keyed".into(), "Cannot join channel (+k)".into()],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        assert!(!state.buffers.contains_key("test/#keyed"));
     }
 }
