@@ -323,9 +323,15 @@ pub struct App {
     script_action_rx: mpsc::UnboundedReceiver<crate::scripting::ScriptAction>,
     /// Script-registered command names (tracked so we can show them in /help).
     pub script_commands: HashMap<String, (String, String)>,
+    /// Handles for active timer tasks, keyed by timer ID. Used to abort on cancel.
+    active_timers: HashMap<u64, tokio::task::JoinHandle<()>>,
+    /// Sender for script actions — cloned into timer tasks so they can send
+    /// `TimerFired` back to the event loop.
+    script_action_tx: mpsc::UnboundedSender<crate::scripting::ScriptAction>,
 }
 
 impl App {
+    #[allow(clippy::too_many_lines)]
     pub fn new() -> Result<Self> {
         constants::ensure_config_dir();
         let mut config = config::load_config(&constants::config_path())?;
@@ -398,7 +404,12 @@ impl App {
         let script_state = Arc::new(std::sync::RwLock::new(
             state.script_snapshot(),
         ));
-        let script_api = Self::build_script_api(script_action_tx, Arc::clone(&script_state));
+        let next_timer_id = Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let script_api = Self::build_script_api(
+            script_action_tx.clone(),
+            Arc::clone(&script_state),
+            Arc::clone(&next_timer_id),
+        );
         let mut script_manager = crate::scripting::engine::ScriptManager::new(constants::scripts_dir());
         match crate::scripting::lua::LuaEngine::new() {
             Ok(lua_engine) => {
@@ -441,6 +452,8 @@ impl App {
             script_state,
             script_action_rx,
             script_commands: HashMap::new(),
+            active_timers: HashMap::new(),
+            script_action_tx,
         })
     }
 
@@ -1931,10 +1944,11 @@ impl App {
 
     /// Build a `ScriptAPI` whose callbacks send `ScriptAction` messages
     /// through the provided channel. The App event loop drains these.
-    #[allow(clippy::too_many_lines, clippy::type_complexity)]
+    #[allow(clippy::too_many_lines, clippy::type_complexity, clippy::needless_pass_by_value)]
     fn build_script_api(
         tx: mpsc::UnboundedSender<crate::scripting::ScriptAction>,
         snapshot: Arc<std::sync::RwLock<crate::scripting::engine::ScriptStateSnapshot>>,
+        timer_id_counter: Arc<std::sync::atomic::AtomicU64>,
     ) -> crate::scripting::engine::ScriptAPI {
         use crate::scripting::ScriptAction;
 
@@ -2040,9 +2054,10 @@ impl App {
                 let _ = t.send(ScriptAction::UnregisterCommand { name });
             });
 
+        let t = tx.clone();
         let log: Arc<dyn Fn((String, String)) + Send + Sync> =
             Arc::new(move |(script, message)| {
-                let _ = tx.send(ScriptAction::Log { script, message });
+                let _ = t.send(ScriptAction::Log { script, message });
             });
 
         // Read-only state queries: read from the shared snapshot.
@@ -2109,10 +2124,29 @@ impl App {
             )
         });
 
-        // Timers: stub — returns 0 / does nothing.
-        let start_timer: Arc<dyn Fn(u64) -> u64 + Send + Sync> = Arc::new(|_| 0);
-        let start_timeout: Arc<dyn Fn(u64) -> u64 + Send + Sync> = Arc::new(|_| 0);
-        let cancel_timer: Arc<dyn Fn(u64) + Send + Sync> = Arc::new(|_| {});
+        // Timers: allocate ID and send ScriptAction to spawn the tokio task.
+        let t = tx.clone();
+        let counter = Arc::clone(&timer_id_counter);
+        let start_timer: Arc<dyn Fn(u64) -> u64 + Send + Sync> =
+            Arc::new(move |interval_ms| {
+                let id = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let _ = t.send(ScriptAction::StartTimer { id, interval_ms });
+                id
+            });
+
+        let t = tx.clone();
+        let counter = Arc::clone(&timer_id_counter);
+        let start_timeout: Arc<dyn Fn(u64) -> u64 + Send + Sync> =
+            Arc::new(move |delay_ms| {
+                let id = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let _ = t.send(ScriptAction::StartTimeout { id, delay_ms });
+                id
+            });
+
+        let cancel_timer: Arc<dyn Fn(u64) + Send + Sync> =
+            Arc::new(move |id| {
+                let _ = tx.send(ScriptAction::CancelTimer { id });
+            });
 
         // Config: stub — returns None / does nothing.
         let config_get: Arc<dyn Fn((String, String)) -> Option<String> + Send + Sync> =
@@ -2313,6 +2347,38 @@ impl App {
             ScriptAction::Log { script, message } => {
                 tracing::info!(script = %script, "[script] {message}");
             }
+            ScriptAction::StartTimer { id, interval_ms } => {
+                let tx = self.script_action_tx.clone();
+                let handle = tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+                    interval.tick().await; // skip first immediate tick
+                    loop {
+                        interval.tick().await;
+                        if tx.send(crate::scripting::ScriptAction::TimerFired { id }).is_err() {
+                            break;
+                        }
+                    }
+                });
+                self.active_timers.insert(id, handle);
+            }
+            ScriptAction::StartTimeout { id, delay_ms } => {
+                let tx = self.script_action_tx.clone();
+                let handle = tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    let _ = tx.send(crate::scripting::ScriptAction::TimerFired { id });
+                });
+                self.active_timers.insert(id, handle);
+            }
+            ScriptAction::CancelTimer { id } => {
+                if let Some(handle) = self.active_timers.remove(&id) {
+                    handle.abort();
+                }
+            }
+            ScriptAction::TimerFired { id } => {
+                if let Some(manager) = self.script_manager.as_ref() {
+                    manager.fire_timer(id);
+                }
+            }
         }
     }
 
@@ -2500,14 +2566,14 @@ impl App {
             ::irc::proto::Command::ChannelMODE(target, modes) => {
                 params.insert("nick".to_string(), extract_nick(msg.prefix.as_ref()));
                 params.insert("target".to_string(), target.clone());
-                let mode_str: Vec<String> = modes.iter().map(|m| m.to_string()).collect();
+                let mode_str: Vec<String> = modes.iter().map(std::string::ToString::to_string).collect();
                 params.insert("modes".to_string(), mode_str.join(" "));
                 events::MODE
             }
             ::irc::proto::Command::UserMODE(target, modes) => {
                 params.insert("nick".to_string(), extract_nick(msg.prefix.as_ref()));
                 params.insert("target".to_string(), target.clone());
-                let mode_str: Vec<String> = modes.iter().map(|m| m.to_string()).collect();
+                let mode_str: Vec<String> = modes.iter().map(std::string::ToString::to_string).collect();
                 params.insert("modes".to_string(), mode_str.join(" "));
                 events::MODE
             }

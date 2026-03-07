@@ -30,10 +30,17 @@ struct LoadedScript {
     env_key: String,
 }
 
+/// Timer entry stored in `HandlerState`.
+struct LuaTimer {
+    registry_key: String,
+    script_name: String,
+}
+
 /// Shared mutable state accessible from Lua closures.
 struct HandlerState {
     handlers: Vec<LuaHandler>,
     commands: HashMap<String, LuaCommand>,
+    timers: HashMap<u64, LuaTimer>,
     next_id: u64,
 }
 
@@ -42,6 +49,7 @@ impl HandlerState {
         Self {
             handlers: Vec::new(),
             commands: HashMap::new(),
+            timers: HashMap::new(),
             next_id: 0,
         }
     }
@@ -131,7 +139,7 @@ impl LuaEngine {
         Self::register_ui_api(lua, &api_table, api)?;
         Self::register_store_api(lua, &api_table, api)?;
         Self::register_command_api(lua, &api_table, api, script_name, state)?;
-        Self::register_timer_api(lua, &api_table, api)?;
+        Self::register_timer_api(lua, &api_table, api, script_name, state)?;
         Self::register_config_api(lua, &api_table, api, script_name)?;
 
         // ── api.log(message) ──
@@ -585,20 +593,50 @@ impl LuaEngine {
 
     // ── Timer API: api.timer / api.timeout / api.cancel_timer
 
-    fn register_timer_api(lua: &Lua, api_table: &LuaTable, api: &ScriptAPI) -> Result<()> {
+    fn register_timer_api(
+        lua: &Lua,
+        api_table: &LuaTable,
+        api: &ScriptAPI,
+        script_name: &str,
+        state: &Arc<Mutex<HandlerState>>,
+    ) -> Result<()> {
         let start_timer = Arc::clone(&api.start_timer);
+        let st = Arc::clone(state);
+        let sn = script_name.to_string();
         api_table.set(
             "timer",
-            lua.create_function(move |_, (ms, _callback): (u64, LuaFunction)| -> LuaResult<u64> {
-                Ok(start_timer(ms))
+            lua.create_function(move |lua, (ms, callback): (u64, LuaFunction)| -> LuaResult<u64> {
+                let id = start_timer(ms);
+                let key = format!("timer_{id}");
+                lua.set_named_registry_value(&key, callback)?;
+                st.lock()
+                    .map_err(|e| mlua::Error::runtime(e.to_string()))?
+                    .timers
+                    .insert(id, LuaTimer {
+                        registry_key: key,
+                        script_name: sn.clone(),
+                    });
+                Ok(id)
             })?,
         )?;
 
         let start_timeout = Arc::clone(&api.start_timeout);
+        let st = Arc::clone(state);
+        let sn = script_name.to_string();
         api_table.set(
             "timeout",
-            lua.create_function(move |_, (ms, _callback): (u64, LuaFunction)| -> LuaResult<u64> {
-                Ok(start_timeout(ms))
+            lua.create_function(move |lua, (ms, callback): (u64, LuaFunction)| -> LuaResult<u64> {
+                let id = start_timeout(ms);
+                let key = format!("timer_{id}");
+                lua.set_named_registry_value(&key, callback)?;
+                st.lock()
+                    .map_err(|e| mlua::Error::runtime(e.to_string()))?
+                    .timers
+                    .insert(id, LuaTimer {
+                        registry_key: key,
+                        script_name: sn.clone(),
+                    });
+                Ok(id)
             })?,
         )?;
 
@@ -787,6 +825,22 @@ impl ScriptEngine for LuaEngine {
             let _ = self.lua.unset_named_registry_value(key);
         }
 
+        // Remove timers
+        let timer_keys: Vec<String> = {
+            let mut st = self.state.lock().map_err(|e| eyre!("handler state poisoned: {e}"))?;
+            let keys: Vec<String> = st
+                .timers
+                .values()
+                .filter(|t| t.script_name == name)
+                .map(|t| t.registry_key.clone())
+                .collect();
+            st.timers.retain(|_, t| t.script_name != name);
+            keys
+        };
+        for key in &timer_keys {
+            let _ = self.lua.unset_named_registry_value(key);
+        }
+
         Ok(())
     }
 
@@ -892,6 +946,31 @@ impl ScriptEngine for LuaEngine {
                 tracing::warn!("command '{name}' error: {e}");
                 Some(EventResult::Continue)
             }
+        }
+    }
+
+    fn fire_timer(&self, timer_id: u64) {
+        let key = {
+            let Ok(st) = self.state.lock() else {
+                tracing::error!("handler state poisoned in fire_timer");
+                return;
+            };
+            match st.timers.get(&timer_id) {
+                Some(t) => t.registry_key.clone(),
+                None => return,
+            }
+        };
+
+        let func = match self.lua.named_registry_value::<LuaFunction>(&key) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("timer {timer_id} callback missing from registry: {e}");
+                return;
+            }
+        };
+
+        if let Err(e) = func.call::<()>(()) {
+            tracing::warn!("timer {timer_id} callback error: {e}");
         }
     }
 

@@ -89,4 +89,18 @@ pub enum ScriptAction {
         script: String,
         message: String,
     },
+    StartTimer {
+        id: u64,
+        interval_ms: u64,
+    },
+    StartTimeout {
+        id: u64,
+        delay_ms: u64,
+    },
+    CancelTimer {
+        id: u64,
+    },
+    TimerFired {
+        id: u64,
+    },
 }

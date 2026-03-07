@@ -90,6 +90,10 @@ pub trait ScriptEngine: Send {
         connection_id: Option<&str>,
     ) -> Option<EventResult>;
 
+    /// Fire a timer callback by ID. The engine looks up the stored Lua
+    /// callback and invokes it. No-op if the timer ID is unknown.
+    fn fire_timer(&self, timer_id: u64);
+
     /// List currently loaded scripts.
     fn loaded_scripts(&self) -> Vec<ScriptMeta>;
 }
@@ -309,6 +313,14 @@ impl ScriptManager {
             }
         }
         false
+    }
+
+    /// Fire a timer callback. Routes to all engines (only the one that owns
+    /// the timer ID will actually invoke it).
+    pub fn fire_timer(&self, timer_id: u64) {
+        for engine in &self.engines {
+            engine.fire_timer(timer_id);
+        }
     }
 
     /// List all loaded scripts across all engines.
