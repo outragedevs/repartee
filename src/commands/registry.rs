@@ -15,7 +15,7 @@ use super::handlers_irc::{
 use super::handlers_admin::{
     cmd_reload, cmd_ignore, cmd_unignore, cmd_server, cmd_autoconnect,
     cmd_oper, cmd_kill, cmd_wallops, cmd_stats, cmd_log,
-    cmd_preview, cmd_image,
+    cmd_preview, cmd_image, cmd_script,
 };
 
 static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| vec![
@@ -76,6 +76,7 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| ve
         ("autoconnect",CommandDef { handler: cmd_autoconnect,description: "Toggle server autoconnect",        aliases: &[],             category: CommandCategory::Configuration }),
         ("items",      CommandDef { handler: cmd_items,      description: "Manage statusbar items",           aliases: &[],             category: CommandCategory::Configuration }),
         ("log",        CommandDef { handler: cmd_log,        description: "Log status and search",            aliases: &[],             category: CommandCategory::Configuration }),
+        ("script",     CommandDef { handler: cmd_script,     description: "Manage Lua scripts",               aliases: &[],             category: CommandCategory::Configuration }),
         // === Other ===
         ("oper",       CommandDef { handler: cmd_oper,       description: "Authenticate as IRC operator",     aliases: &[],             category: CommandCategory::Other }),
         ("kill",       CommandDef { handler: cmd_kill,       description: "Disconnect a user (oper only)",    aliases: &[],             category: CommandCategory::Other }),

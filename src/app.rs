@@ -313,6 +313,14 @@ pub struct App {
     /// Queued (`conn_id`, channel) pairs for deferred WHO/MODE after join.
     /// Drained one-at-a-time by a periodic timer to avoid Excess Flood.
     pending_channel_queries: VecDeque<(String, String)>,
+    /// Script manager (owns all scripting engines).
+    pub script_manager: Option<crate::scripting::engine::ScriptManager>,
+    /// Persistent `ScriptAPI` used when loading/reloading scripts.
+    pub script_api: Option<crate::scripting::engine::ScriptAPI>,
+    /// Receiver for actions requested by script callbacks.
+    script_action_rx: mpsc::UnboundedReceiver<crate::scripting::ScriptAction>,
+    /// Script-registered command names (tracked so we can show them in /help).
+    pub script_commands: HashMap<String, (String, String)>,
 }
 
 impl App {
@@ -383,6 +391,20 @@ impl App {
 
         let http_client = reqwest::Client::new();
 
+        // --- Scripting system ---
+        let (script_action_tx, script_action_rx) = mpsc::unbounded_channel();
+        let script_api = Self::build_script_api(script_action_tx);
+        let mut script_manager = crate::scripting::engine::ScriptManager::new(constants::scripts_dir());
+        match crate::scripting::lua::LuaEngine::new() {
+            Ok(lua_engine) => {
+                script_manager.register_engine(Box::new(lua_engine));
+                tracing::info!("Lua scripting engine registered");
+            }
+            Err(e) => {
+                tracing::error!("failed to initialize Lua engine: {e}");
+            }
+        }
+
         Ok(Self {
             state,
             config,
@@ -409,6 +431,10 @@ impl App {
             http_client,
             picker,
             pending_channel_queries: VecDeque::new(),
+            script_manager: Some(script_manager),
+            script_api: Some(script_api),
+            script_action_rx,
+            script_commands: HashMap::new(),
         })
     }
 
@@ -589,6 +615,9 @@ impl App {
             Self::create_default_status(&mut self.state);
         }
 
+        // Autoload scripts from ~/.repartee/scripts/
+        self.autoload_scripts();
+
         // Spawn a dedicated blocking task for terminal event reading.
         // Uses poll() with a short timeout so the thread can check the
         // stop flag and exit cleanly when the app quits.
@@ -645,6 +674,15 @@ impl App {
                 },
                 _ = query_tick.tick() => {
                     self.drain_pending_channel_query();
+                },
+                action = self.script_action_rx.recv() => {
+                    if let Some(action) = action {
+                        self.handle_script_action(action);
+                        // Drain any queued actions
+                        while let Ok(action) = self.script_action_rx.try_recv() {
+                            self.handle_script_action(action);
+                        }
+                    }
                 }
             }
         }
@@ -1339,6 +1377,16 @@ impl App {
                         conn.nick.clone_from(confirmed_nick);
                     }
 
+                    // Emit to scripts before default handling. If suppressed, skip.
+                    if self.emit_irc_to_scripts(&conn_id, &msg) {
+                        // Script suppressed this event — skip default handling
+                        // but still process endofnames for channel queries.
+                        if let Some(channel) = endofnames_channel {
+                            self.pending_channel_queries.push_back((conn_id.clone(), channel));
+                        }
+                        return;
+                    }
+
                     crate::irc::events::handle_irc_message(&mut self.state, &conn_id, &msg);
 
                     // Queue auto-WHO and auto-MODE for later — sending them
@@ -1755,6 +1803,11 @@ impl App {
             } else {
                 self.handle_plain_message(expanded);
             }
+        } else if self.script_manager.as_ref().is_some_and(|m| {
+            let conn_id = self.state.active_buffer().map(|b| b.connection_id.as_str());
+            m.handle_command(&parsed.name, &parsed.args, conn_id)
+        }) {
+            // Script handled the command
         } else {
             crate::commands::helpers::add_local_event(
                 self,
@@ -1833,6 +1886,512 @@ impl App {
         self.state
             .active_buffer()
             .map(|buf| buf.connection_id.as_str())
+    }
+
+    /// Build a `ScriptAPI` whose callbacks send `ScriptAction` messages
+    /// through the provided channel. The App event loop drains these.
+    #[allow(clippy::too_many_lines, clippy::type_complexity)]
+    fn build_script_api(
+        tx: mpsc::UnboundedSender<crate::scripting::ScriptAction>,
+    ) -> crate::scripting::engine::ScriptAPI {
+        use crate::scripting::ScriptAction;
+
+        let t = tx.clone();
+        let say: Arc<dyn Fn((String, String, Option<String>)) + Send + Sync> =
+            Arc::new(move |(target, text, conn_id)| {
+                let _ = t.send(ScriptAction::Say { target, text, conn_id });
+            });
+
+        let t = tx.clone();
+        let action: Arc<dyn Fn((String, String, Option<String>)) + Send + Sync> =
+            Arc::new(move |(target, text, conn_id)| {
+                let _ = t.send(ScriptAction::Action { target, text, conn_id });
+            });
+
+        let t = tx.clone();
+        let notice: Arc<dyn Fn((String, String, Option<String>)) + Send + Sync> =
+            Arc::new(move |(target, text, conn_id)| {
+                let _ = t.send(ScriptAction::Notice { target, text, conn_id });
+            });
+
+        let t = tx.clone();
+        let raw: Arc<dyn Fn((String, Option<String>)) + Send + Sync> =
+            Arc::new(move |(line, conn_id)| {
+                let _ = t.send(ScriptAction::Raw { line, conn_id });
+            });
+
+        let t = tx.clone();
+        let join: Arc<dyn Fn((String, Option<String>, Option<String>)) + Send + Sync> =
+            Arc::new(move |(channel, key, conn_id)| {
+                let _ = t.send(ScriptAction::Join { channel, key, conn_id });
+            });
+
+        let t = tx.clone();
+        let part: Arc<dyn Fn((String, Option<String>, Option<String>)) + Send + Sync> =
+            Arc::new(move |(channel, msg, conn_id)| {
+                let _ = t.send(ScriptAction::Part { channel, msg, conn_id });
+            });
+
+        let t = tx.clone();
+        let change_nick: Arc<dyn Fn((String, Option<String>)) + Send + Sync> =
+            Arc::new(move |(nick, conn_id)| {
+                let _ = t.send(ScriptAction::ChangeNick { nick, conn_id });
+            });
+
+        let t = tx.clone();
+        let whois: Arc<dyn Fn((String, Option<String>)) + Send + Sync> =
+            Arc::new(move |(nick, conn_id)| {
+                let _ = t.send(ScriptAction::Whois { nick, conn_id });
+            });
+
+        let t = tx.clone();
+        let mode: Arc<dyn Fn((String, String, Option<String>)) + Send + Sync> =
+            Arc::new(move |(channel, mode_string, conn_id)| {
+                let _ = t.send(ScriptAction::Mode { channel, mode_string, conn_id });
+            });
+
+        let t = tx.clone();
+        let kick: Arc<dyn Fn((String, String, Option<String>, Option<String>)) + Send + Sync> =
+            Arc::new(move |(channel, nick, reason, conn_id)| {
+                let _ = t.send(ScriptAction::Kick { channel, nick, reason, conn_id });
+            });
+
+        let t = tx.clone();
+        let ctcp: Arc<dyn Fn((String, String, Option<String>, Option<String>)) + Send + Sync> =
+            Arc::new(move |(target, ctcp_type, message, conn_id)| {
+                let _ = t.send(ScriptAction::Ctcp { target, ctcp_type, message, conn_id });
+            });
+
+        let t = tx.clone();
+        let add_local_event: Arc<dyn Fn(String) + Send + Sync> =
+            Arc::new(move |text| {
+                let _ = t.send(ScriptAction::LocalEvent { text });
+            });
+
+        let t = tx.clone();
+        let add_buffer_event: Arc<dyn Fn((String, String)) + Send + Sync> =
+            Arc::new(move |(buffer_id, text)| {
+                let _ = t.send(ScriptAction::BufferEvent { buffer_id, text });
+            });
+
+        let t = tx.clone();
+        let switch_buffer: Arc<dyn Fn(String) + Send + Sync> =
+            Arc::new(move |buffer_id| {
+                let _ = t.send(ScriptAction::SwitchBuffer { buffer_id });
+            });
+
+        let t = tx.clone();
+        let execute_command: Arc<dyn Fn(String) + Send + Sync> =
+            Arc::new(move |line| {
+                let _ = t.send(ScriptAction::ExecuteCommand { line });
+            });
+
+        let t = tx.clone();
+        let register_command: Arc<dyn Fn((String, String, String)) + Send + Sync> =
+            Arc::new(move |(name, description, usage)| {
+                let _ = t.send(ScriptAction::RegisterCommand { name, description, usage });
+            });
+
+        let t = tx.clone();
+        let unregister_command: Arc<dyn Fn(String) + Send + Sync> =
+            Arc::new(move |name| {
+                let _ = t.send(ScriptAction::UnregisterCommand { name });
+            });
+
+        let log: Arc<dyn Fn((String, String)) + Send + Sync> =
+            Arc::new(move |(script, message)| {
+                let _ = tx.send(ScriptAction::Log { script, message });
+            });
+
+        // Read-only state queries: return empty/defaults for now.
+        // These run synchronously inside the Lua VM so they can't easily
+        // reach into App state. A future improvement could use Arc<RwLock<>>
+        // snapshots, but for the initial wiring empty results are fine.
+        let active_buffer_id: Arc<dyn Fn(()) -> Option<String> + Send + Sync> =
+            Arc::new(|()| None);
+        let our_nick: Arc<dyn Fn(Option<String>) -> Option<String> + Send + Sync> =
+            Arc::new(|_| None);
+        let connection_info: Arc<
+            dyn Fn(String) -> Option<crate::scripting::engine::ConnectionInfo> + Send + Sync,
+        > = Arc::new(|_| None);
+        let connections: Arc<
+            dyn Fn(()) -> Vec<crate::scripting::engine::ConnectionInfo> + Send + Sync,
+        > = Arc::new(|()| Vec::new());
+        let buffer_info: Arc<
+            dyn Fn(String) -> Option<crate::scripting::engine::BufferInfo> + Send + Sync,
+        > = Arc::new(|_| None);
+        let buffers: Arc<
+            dyn Fn(()) -> Vec<crate::scripting::engine::BufferInfo> + Send + Sync,
+        > = Arc::new(|()| Vec::new());
+        let buffer_nicks: Arc<
+            dyn Fn(String) -> Vec<crate::scripting::engine::NickInfo> + Send + Sync,
+        > = Arc::new(|_| Vec::new());
+
+        // Timers: stub — returns 0 / does nothing.
+        let start_timer: Arc<dyn Fn(u64) -> u64 + Send + Sync> = Arc::new(|_| 0);
+        let start_timeout: Arc<dyn Fn(u64) -> u64 + Send + Sync> = Arc::new(|_| 0);
+        let cancel_timer: Arc<dyn Fn(u64) + Send + Sync> = Arc::new(|_| {});
+
+        // Config: stub — returns None / does nothing.
+        let config_get: Arc<dyn Fn((String, String)) -> Option<String> + Send + Sync> =
+            Arc::new(|_| None);
+        let config_set: Arc<dyn Fn((String, String, String)) + Send + Sync> =
+            Arc::new(|_| {});
+        let app_config_get: Arc<dyn Fn(String) -> Option<String> + Send + Sync> =
+            Arc::new(|_| None);
+
+        crate::scripting::engine::ScriptAPI {
+            say,
+            action,
+            notice,
+            raw,
+            join,
+            part,
+            change_nick,
+            whois,
+            mode,
+            kick,
+            ctcp,
+            add_local_event,
+            add_buffer_event,
+            switch_buffer,
+            execute_command,
+            active_buffer_id,
+            our_nick,
+            connection_info,
+            connections,
+            buffer_info,
+            buffers,
+            buffer_nicks,
+            register_command,
+            unregister_command,
+            start_timer,
+            start_timeout,
+            cancel_timer,
+            config_get,
+            config_set,
+            app_config_get,
+            log,
+        }
+    }
+
+    /// Resolve the connection ID for a script action.
+    /// If `conn_id` is None, uses the active buffer's connection.
+    fn resolve_conn_id(&self, conn_id: Option<&str>) -> Option<String> {
+        conn_id.map_or_else(
+            || self.active_conn_id().map(str::to_owned),
+            |id| Some(id.to_string()),
+        )
+    }
+
+    /// Get an IRC sender for a resolved connection ID.
+    fn irc_sender_for(&self, conn_id: &str) -> Option<&::irc::client::Sender> {
+        self.irc_handles.get(conn_id).map(|h| &h.sender)
+    }
+
+    /// Process a single `ScriptAction` from the scripting channel.
+    #[allow(clippy::too_many_lines)]
+    fn handle_script_action(&mut self, action: crate::scripting::ScriptAction) {
+        use crate::scripting::ScriptAction;
+        match action {
+            ScriptAction::Say { target, text, conn_id } => {
+                if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
+                    && let Some(sender) = self.irc_sender_for(&cid)
+                {
+                    let _ = sender.send_privmsg(&target, &text);
+                }
+            }
+            ScriptAction::Action { target, text, conn_id } => {
+                if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
+                    && let Some(sender) = self.irc_sender_for(&cid)
+                {
+                    let _ = sender.send(::irc::proto::Command::Raw(
+                        "PRIVMSG".to_string(),
+                        vec![target, format!("\x01ACTION {text}\x01")],
+                    ));
+                }
+            }
+            ScriptAction::Notice { target, text, conn_id } => {
+                if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
+                    && let Some(sender) = self.irc_sender_for(&cid)
+                {
+                    let _ = sender.send_notice(&target, &text);
+                }
+            }
+            ScriptAction::Raw { line, conn_id } => {
+                if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
+                    && let Some(sender) = self.irc_sender_for(&cid)
+                {
+                    let _ = sender.send(::irc::proto::Command::Raw(
+                        line,
+                        vec![],
+                    ));
+                }
+            }
+            ScriptAction::Join { channel, key, conn_id } => {
+                if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
+                    && let Some(sender) = self.irc_sender_for(&cid)
+                {
+                    let _ = sender.send(::irc::proto::Command::JOIN(
+                        channel,
+                        key,
+                        None,
+                    ));
+                }
+            }
+            ScriptAction::Part { channel, msg, conn_id } => {
+                if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
+                    && let Some(sender) = self.irc_sender_for(&cid)
+                {
+                    let _ = sender.send(::irc::proto::Command::PART(
+                        channel,
+                        msg,
+                    ));
+                }
+            }
+            ScriptAction::ChangeNick { nick, conn_id } => {
+                if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
+                    && let Some(sender) = self.irc_sender_for(&cid)
+                {
+                    let _ = sender.send(::irc::proto::Command::NICK(nick));
+                }
+            }
+            ScriptAction::Whois { nick, conn_id } => {
+                if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
+                    && let Some(sender) = self.irc_sender_for(&cid)
+                {
+                    let _ = sender.send(::irc::proto::Command::WHOIS(
+                        None,
+                        nick,
+                    ));
+                }
+            }
+            ScriptAction::Mode { channel, mode_string, conn_id } => {
+                if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
+                    && let Some(sender) = self.irc_sender_for(&cid)
+                {
+                    let _ = sender.send(::irc::proto::Command::Raw(
+                        "MODE".to_string(),
+                        vec![channel, mode_string],
+                    ));
+                }
+            }
+            ScriptAction::Kick { channel, nick, reason, conn_id } => {
+                if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
+                    && let Some(sender) = self.irc_sender_for(&cid)
+                {
+                    let _ = sender.send(::irc::proto::Command::KICK(
+                        channel,
+                        nick,
+                        reason,
+                    ));
+                }
+            }
+            ScriptAction::Ctcp { target, ctcp_type, message, conn_id } => {
+                if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
+                    && let Some(sender) = self.irc_sender_for(&cid)
+                {
+                    let ctcp_text = message.map_or_else(
+                        || format!("\x01{ctcp_type}\x01"),
+                        |msg| format!("\x01{ctcp_type} {msg}\x01"),
+                    );
+                    let _ = sender.send_privmsg(&target, &ctcp_text);
+                }
+            }
+            ScriptAction::LocalEvent { text } => {
+                crate::commands::helpers::add_local_event(self, &text);
+            }
+            ScriptAction::BufferEvent { buffer_id, text } => {
+                self.add_event_to_buffer(&buffer_id, text);
+            }
+            ScriptAction::SwitchBuffer { buffer_id } => {
+                if self.state.buffers.contains_key(&buffer_id) {
+                    self.state.set_active_buffer(&buffer_id);
+                    self.scroll_offset = 0;
+                }
+            }
+            ScriptAction::ExecuteCommand { line } => {
+                if let Some(parsed) = crate::commands::parser::parse_command(&line) {
+                    self.execute_command(&parsed);
+                }
+            }
+            ScriptAction::RegisterCommand { name, description, usage } => {
+                self.script_commands.insert(name, (description, usage));
+            }
+            ScriptAction::UnregisterCommand { name } => {
+                self.script_commands.remove(&name);
+            }
+            ScriptAction::Log { script, message } => {
+                tracing::info!(script = %script, "[script] {message}");
+            }
+        }
+    }
+
+    /// Autoload all scripts from the scripts directory.
+    pub fn autoload_scripts(&mut self) {
+        let Some(manager) = self.script_manager.as_mut() else {
+            return;
+        };
+        let available = manager.available_scripts();
+        if available.is_empty() {
+            return;
+        }
+        // Take api out temporarily
+        let api = self.script_api.as_ref().expect("script_api must be set");
+        let mut loaded = 0u32;
+        let mut errors = Vec::new();
+        for (name, _path, is_loaded) in &available {
+            if *is_loaded {
+                continue;
+            }
+            match manager.load(name, api) {
+                Ok(meta) => {
+                    tracing::info!("autoloaded script: {}", meta.name);
+                    loaded += 1;
+                }
+                Err(e) => {
+                    tracing::warn!("failed to autoload script {name}: {e}");
+                    errors.push(format!("{name}: {e}"));
+                }
+            }
+        }
+        if loaded > 0 || !errors.is_empty() {
+            tracing::info!("autoloaded {loaded} script(s), {} error(s)", errors.len());
+        }
+    }
+
+    /// Emit an IRC event to scripts before default handling.
+    /// Returns true if any script suppressed the event.
+    fn emit_script_event(
+        &self,
+        event_name: &str,
+        params: std::collections::HashMap<String, String>,
+    ) -> bool {
+        let Some(manager) = self.script_manager.as_ref() else {
+            return false;
+        };
+        let event = crate::scripting::event_bus::Event {
+            name: event_name.to_string(),
+            params,
+        };
+        manager.emit(&event)
+    }
+
+    /// Extract event params from an IRC message and emit to scripts.
+    /// Returns true if any script suppressed the event.
+    #[allow(clippy::too_many_lines)]
+    fn emit_irc_to_scripts(
+        &self,
+        conn_id: &str,
+        msg: &::irc::proto::Message,
+    ) -> bool {
+        use crate::scripting::api::events;
+
+        let extract_nick = |prefix: Option<&::irc::proto::Prefix>| -> String {
+            match prefix {
+                Some(::irc::proto::Prefix::Nickname(nick, _, _)) => nick.clone(),
+                Some(::irc::proto::Prefix::ServerName(name)) => name.clone(),
+                None => String::new(),
+            }
+        };
+        let extract_ident = |prefix: Option<&::irc::proto::Prefix>| -> String {
+            match prefix {
+                Some(::irc::proto::Prefix::Nickname(_, user, _)) => user.clone(),
+                _ => String::new(),
+            }
+        };
+        let extract_host = |prefix: Option<&::irc::proto::Prefix>| -> String {
+            match prefix {
+                Some(::irc::proto::Prefix::Nickname(_, _, host)) => host.clone(),
+                _ => String::new(),
+            }
+        };
+
+        let mut params = HashMap::new();
+        params.insert("connection_id".to_string(), conn_id.to_string());
+
+        let event_name = match &msg.command {
+            ::irc::proto::Command::PRIVMSG(target, text) => {
+                params.insert("nick".to_string(), extract_nick(msg.prefix.as_ref()));
+                params.insert("ident".to_string(), extract_ident(msg.prefix.as_ref()));
+                params.insert("hostname".to_string(), extract_host(msg.prefix.as_ref()));
+                params.insert("target".to_string(), target.clone());
+                params.insert("channel".to_string(), target.clone());
+                params.insert("is_channel".to_string(), target.starts_with('#').to_string());
+                // Check for CTCP ACTION
+                if let Some(action_text) = text.strip_prefix("\x01ACTION ")
+                    .and_then(|t| t.strip_suffix('\x01'))
+                {
+                    params.insert("message".to_string(), action_text.to_string());
+                    events::ACTION
+                } else {
+                    params.insert("message".to_string(), text.clone());
+                    events::PRIVMSG
+                }
+            }
+            ::irc::proto::Command::NOTICE(target, text) => {
+                params.insert("nick".to_string(), extract_nick(msg.prefix.as_ref()));
+                params.insert("target".to_string(), target.clone());
+                params.insert("message".to_string(), text.clone());
+                let from_server = matches!(msg.prefix, Some(::irc::proto::Prefix::ServerName(_)) | None);
+                params.insert("from_server".to_string(), from_server.to_string());
+                events::NOTICE
+            }
+            ::irc::proto::Command::JOIN(channel, _, _) => {
+                params.insert("nick".to_string(), extract_nick(msg.prefix.as_ref()));
+                params.insert("ident".to_string(), extract_ident(msg.prefix.as_ref()));
+                params.insert("hostname".to_string(), extract_host(msg.prefix.as_ref()));
+                params.insert("channel".to_string(), channel.clone());
+                events::JOIN
+            }
+            ::irc::proto::Command::PART(channel, reason) => {
+                params.insert("nick".to_string(), extract_nick(msg.prefix.as_ref()));
+                params.insert("ident".to_string(), extract_ident(msg.prefix.as_ref()));
+                params.insert("hostname".to_string(), extract_host(msg.prefix.as_ref()));
+                params.insert("channel".to_string(), channel.clone());
+                params.insert("message".to_string(), reason.clone().unwrap_or_default());
+                events::PART
+            }
+            ::irc::proto::Command::QUIT(reason) => {
+                params.insert("nick".to_string(), extract_nick(msg.prefix.as_ref()));
+                params.insert("ident".to_string(), extract_ident(msg.prefix.as_ref()));
+                params.insert("hostname".to_string(), extract_host(msg.prefix.as_ref()));
+                params.insert("message".to_string(), reason.clone().unwrap_or_default());
+                events::QUIT
+            }
+            ::irc::proto::Command::NICK(new_nick) => {
+                params.insert("nick".to_string(), extract_nick(msg.prefix.as_ref()));
+                params.insert("new_nick".to_string(), new_nick.clone());
+                params.insert("ident".to_string(), extract_ident(msg.prefix.as_ref()));
+                params.insert("hostname".to_string(), extract_host(msg.prefix.as_ref()));
+                events::NICK
+            }
+            ::irc::proto::Command::KICK(channel, kicked, reason) => {
+                params.insert("nick".to_string(), extract_nick(msg.prefix.as_ref()));
+                params.insert("ident".to_string(), extract_ident(msg.prefix.as_ref()));
+                params.insert("hostname".to_string(), extract_host(msg.prefix.as_ref()));
+                params.insert("channel".to_string(), channel.clone());
+                params.insert("kicked".to_string(), kicked.clone());
+                params.insert("message".to_string(), reason.clone().unwrap_or_default());
+                events::KICK
+            }
+            ::irc::proto::Command::TOPIC(channel, topic) => {
+                params.insert("nick".to_string(), extract_nick(msg.prefix.as_ref()));
+                params.insert("channel".to_string(), channel.clone());
+                params.insert("topic".to_string(), topic.clone().unwrap_or_default());
+                events::TOPIC
+            }
+            ::irc::proto::Command::INVITE(nick, channel) => {
+                params.insert("nick".to_string(), extract_nick(msg.prefix.as_ref()));
+                params.insert("channel".to_string(), channel.clone());
+                params.insert("invited".to_string(), nick.clone());
+                events::INVITE
+            }
+            // For non-scriptable events, don't emit
+            _ => return false,
+        };
+
+        self.emit_script_event(event_name, params)
     }
 }
 

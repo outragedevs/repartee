@@ -536,6 +536,159 @@ pub(crate) fn cmd_image(app: &mut App, args: &[String]) {
     }
 }
 
+// === Scripting ===
+
+#[allow(clippy::too_many_lines)]
+pub(crate) fn cmd_script(app: &mut App, args: &[String]) {
+    let sub = args.first().map_or("", String::as_str);
+
+    match sub {
+        "load" => {
+            if args.len() < 2 {
+                add_local_event(app, &format!("{C_ERR}Usage: /script load <name>{C_RST}"));
+                return;
+            }
+            let name = &args[1];
+            let Some(manager) = app.script_manager.as_mut() else {
+                add_local_event(app, &format!("{C_ERR}Script manager not available{C_RST}"));
+                return;
+            };
+            let Some(api) = app.script_api.as_ref() else {
+                add_local_event(app, &format!("{C_ERR}Script API not available{C_RST}"));
+                return;
+            };
+            match manager.load(name, api) {
+                Ok(meta) => {
+                    let desc = meta.description.as_deref().unwrap_or("");
+                    let ver = meta.version.as_deref().unwrap_or("?");
+                    add_local_event(
+                        app,
+                        &format!("{C_OK}Loaded script: {C_CMD}{}{C_OK} v{ver} — {desc}{C_RST}", meta.name),
+                    );
+                }
+                Err(e) => {
+                    add_local_event(
+                        app,
+                        &format!("{C_ERR}Failed to load script '{name}': {e}{C_RST}"),
+                    );
+                }
+            }
+        }
+        "unload" => {
+            if args.len() < 2 {
+                add_local_event(app, &format!("{C_ERR}Usage: /script unload <name>{C_RST}"));
+                return;
+            }
+            let name = &args[1];
+            let Some(manager) = app.script_manager.as_mut() else {
+                add_local_event(app, &format!("{C_ERR}Script manager not available{C_RST}"));
+                return;
+            };
+            match manager.unload(name) {
+                Ok(()) => {
+                    add_local_event(
+                        app,
+                        &format!("{C_OK}Unloaded script: {name}{C_RST}"),
+                    );
+                }
+                Err(e) => {
+                    add_local_event(
+                        app,
+                        &format!("{C_ERR}Failed to unload '{name}': {e}{C_RST}"),
+                    );
+                }
+            }
+        }
+        "reload" => {
+            if args.len() < 2 {
+                add_local_event(app, &format!("{C_ERR}Usage: /script reload <name>{C_RST}"));
+                return;
+            }
+            let name = &args[1];
+            let Some(manager) = app.script_manager.as_mut() else {
+                add_local_event(app, &format!("{C_ERR}Script manager not available{C_RST}"));
+                return;
+            };
+            let Some(api) = app.script_api.as_ref() else {
+                add_local_event(app, &format!("{C_ERR}Script API not available{C_RST}"));
+                return;
+            };
+            match manager.reload(name, api) {
+                Ok(meta) => {
+                    let desc = meta.description.as_deref().unwrap_or("");
+                    let ver = meta.version.as_deref().unwrap_or("?");
+                    add_local_event(
+                        app,
+                        &format!("{C_OK}Reloaded script: {C_CMD}{}{C_OK} v{ver} — {desc}{C_RST}", meta.name),
+                    );
+                }
+                Err(e) => {
+                    add_local_event(
+                        app,
+                        &format!("{C_ERR}Failed to reload '{name}': {e}{C_RST}"),
+                    );
+                }
+            }
+        }
+        "list" | "" => {
+            let Some(manager) = app.script_manager.as_ref() else {
+                add_local_event(app, &format!("{C_ERR}Script manager not available{C_RST}"));
+                return;
+            };
+            let loaded = manager.loaded_scripts();
+            let available = manager.available_scripts();
+
+            let mut lines = vec![divider("Scripts")];
+
+            if loaded.is_empty() && available.is_empty() {
+                lines.push(format!(
+                    "  {C_DIM}No scripts found. Place .lua files in {}{C_RST}",
+                    crate::constants::scripts_dir().display()
+                ));
+            } else {
+                if !loaded.is_empty() {
+                    lines.push(format!("  {C_CMD}Loaded:{C_RST}"));
+                    for meta in &loaded {
+                        let ver = meta.version.as_deref().unwrap_or("?");
+                        let desc = meta.description.as_deref().unwrap_or("");
+                        lines.push(format!(
+                            "    {C_OK}{}{C_RST} {C_DIM}v{ver} — {desc}{C_RST}",
+                            meta.name
+                        ));
+                    }
+                }
+
+                let unloaded: Vec<_> = available.iter().filter(|(_, _, loaded)| !loaded).collect();
+                if !unloaded.is_empty() {
+                    lines.push(format!("  {C_CMD}Available:{C_RST}"));
+                    for (name, _path, _) in &unloaded {
+                        lines.push(format!("    {C_DIM}{name}{C_RST}"));
+                    }
+                }
+            }
+            lines.push(divider(""));
+            for line in &lines {
+                add_local_event(app, line);
+            }
+        }
+        "autoload" => {
+            app.autoload_scripts();
+            let loaded_count = app.script_manager.as_ref()
+                .map_or(0, |m| m.loaded_scripts().len());
+            add_local_event(
+                app,
+                &format!("{C_OK}Autoloaded scripts ({loaded_count} loaded){C_RST}"),
+            );
+        }
+        _ => {
+            add_local_event(
+                app,
+                &format!("{C_ERR}Usage: /script [load|unload|reload|list|autoload] [name]{C_RST}"),
+            );
+        }
+    }
+}
+
 fn log_search(app: &mut App, query: &str) {
     // Collect output lines to avoid borrow conflicts between storage and app
     let lines: Vec<String> = if let Some(ref storage) = app.storage {
