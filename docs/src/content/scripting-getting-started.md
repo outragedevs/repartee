@@ -19,7 +19,7 @@ meta = {
 
 function setup(api)
     api.on("irc.join", function(event)
-        if event.nick ~= api.our_nick() then
+        if event.nick ~= api.store.our_nick() then
             api.irc.say(event.channel, "Welcome, " .. event.nick .. "!")
         end
     end)

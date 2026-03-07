@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -48,6 +49,22 @@ pub struct NickInfo {
     pub away: bool,
 }
 
+/// Lightweight snapshot of app state, updated once per tick (or after
+/// state-mutating events). Script callbacks close over an
+/// `Arc<RwLock<ScriptStateSnapshot>>` so they can read current state
+/// without reaching into `AppState` directly.
+#[derive(Debug, Clone, Default)]
+pub struct ScriptStateSnapshot {
+    pub active_buffer_id: Option<String>,
+    pub connections: Vec<ConnectionInfo>,
+    pub buffers: Vec<BufferInfo>,
+    pub buffer_nicks: HashMap<String, Vec<NickInfo>>,
+    /// Per-script config: (script_name, key) → value.
+    pub script_config: HashMap<(String, String), String>,
+    /// Serialized app config as TOML for `api.config.app_get()` dot-path lookups.
+    pub app_config_toml: Option<toml::Value>,
+}
+
 // ─── ScriptEngine trait ──────────────────────────────────────
 
 /// Trait that each scripting language backend implements.
@@ -76,6 +93,10 @@ pub trait ScriptEngine: Send {
         args: &[String],
         connection_id: Option<&str>,
     ) -> Option<EventResult>;
+
+    /// Fire a timer callback by ID. The engine looks up the stored Lua
+    /// callback and invokes it. No-op if the timer ID is unknown.
+    fn fire_timer(&self, timer_id: u64);
 
     /// List currently loaded scripts.
     fn loaded_scripts(&self) -> Vec<ScriptMeta>;
@@ -296,6 +317,14 @@ impl ScriptManager {
             }
         }
         false
+    }
+
+    /// Fire a timer callback. Routes to all engines (only the one that owns
+    /// the timer ID will actually invoke it).
+    pub fn fire_timer(&self, timer_id: u64) {
+        for engine in &self.engines {
+            engine.fire_timer(timer_id);
+        }
     }
 
     /// List all loaded scripts across all engines.

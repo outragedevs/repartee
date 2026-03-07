@@ -91,7 +91,7 @@
       <main class="content">
         <h1>Scripting — Examples</h1>
 <blockquote>
-<p><strong>Note:</strong> Scripts run in a sandboxed Lua environment. The <code>os</code>, <code>io</code>, <code>loadfile</code>, <code>dofile</code>, and <code>package</code> globals are removed. Use <code>api.log()</code> for debug output and <code>api.print()</code> for UI messages.</p>
+<p><strong>Note:</strong> Scripts run in a sandboxed Lua environment. The <code>os</code>, <code>io</code>, <code>loadfile</code>, <code>dofile</code>, and <code>package</code> globals are removed. Use <code>api.log()</code> for debug output and <code>api.ui.print()</code> for UI messages.</p>
 </blockquote>
 <p>Practical Lua script examples for repartee.</p>
 <h2>Auto-greet on join</h2>
@@ -106,7 +106,7 @@ function setup(api)
     local greet_channels = { [&quot;#mychannel&quot;] = true }
 
     api.on(&quot;irc.join&quot;, function(event)
-        if greet_channels[event.channel] and event.nick ~= api.our_nick() then
+        if greet_channels[event.channel] and event.nick ~= api.store.our_nick() then
             api.irc.say(event.channel, &quot;Welcome, &quot; .. event.nick .. &quot;!&quot;)
         end
     end)
@@ -140,7 +140,7 @@ function setup(api)
             local start = math.max(1, #urls - count + 1)
             for i = start, #urls do
                 local u = urls[i]
-                api.print(u.nick .. &quot; &gt; &quot; .. u.url)
+                api.ui.print(u.nick .. &quot; &gt; &quot; .. u.url)
             end
         end,
         description = &quot;Show recent URLs&quot;,
@@ -158,10 +158,10 @@ end
 
 function setup(api)
     api.on(&quot;irc.privmsg&quot;, function(event)
-        local my_nick = api.our_nick()
+        local my_nick = api.store.our_nick()
         if my_nick and event.message:lower():find(my_nick:lower(), 1, true) then
             local msg = &quot;[&quot; .. event.target .. &quot;] &lt;&quot; .. event.nick .. &quot;&gt; &quot; .. event.message
-            api.print(msg)
+            api.ui.print(msg)
         end
     end)
 end
@@ -187,11 +187,11 @@ function setup(api)
         handler = function(args)
             local target = args[1]
             if not target then
-                api.print(&quot;Usage: /slap &lt;nick&gt;&quot;)
+                api.ui.print(&quot;Usage: /slap &lt;nick&gt;&quot;)
                 return
             end
             local item = items[math.random(#items)]
-            local buf = api.active_buffer()
+            local buf = api.store.active_buffer()
             if buf then
                 api.irc.action(buf, &quot;slaps &quot; .. target .. &quot; around a bit with &quot; .. item)
             end
@@ -225,7 +225,7 @@ function setup(api)
                 return true  -- suppress the event
             end
         end
-    end, 90)  -- priority 90 = high
+    end, api.PRIORITY_HIGH)
 end
 </code></pre>
 <h2>Nick highlight with sound</h2>
@@ -238,9 +238,9 @@ end
 
 function setup(api)
     api.on(&quot;irc.privmsg&quot;, function(event)
-        local my_nick = api.our_nick()
+        local my_nick = api.store.our_nick()
         if my_nick and event.message:lower():find(my_nick:lower(), 1, true) then
-            api.print(&quot;** Mentioned in &quot; .. event.target .. &quot; by &quot; .. event.nick)
+            api.ui.print(&quot;** Mentioned in &quot; .. event.target .. &quot; by &quot; .. event.nick)
         end
     end)
 end

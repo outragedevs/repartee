@@ -81,10 +81,14 @@ pub mod events {
 
     /// A message was added to a buffer (after processing).
     /// Params: `buffer_id`, `message_type`, nick, text
+    /// Planned: requires state→scripting bridge to emit from `add_message`.
+    #[expect(dead_code, reason = "planned event — needs state→scripting bridge")]
     pub const MESSAGE_ADD: &str = "message_add";
 
     /// User switched to a different buffer.
     /// Params: `from_buffer_id`, `to_buffer_id`
+    /// Planned: requires state→scripting bridge to emit from `set_active_buffer`.
+    #[expect(dead_code, reason = "planned event — needs state→scripting bridge")]
     pub const BUFFER_SWITCH: &str = "buffer_switch";
 
     /// User typed a command (before execution). Can be suppressed.

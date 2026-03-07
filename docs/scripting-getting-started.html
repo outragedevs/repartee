@@ -103,7 +103,7 @@
 
 function setup(api)
     api.on(&quot;irc.join&quot;, function(event)
-        if event.nick ~= api.our_nick() then
+        if event.nick ~= api.store.our_nick() then
             api.irc.say(event.channel, &quot;Welcome, &quot; .. event.nick .. &quot;!&quot;)
         end
     end)

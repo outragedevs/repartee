@@ -7,15 +7,15 @@ description: Manage user scripts
 
 ## Syntax
 
-    /script [list|available|load|unload|reload] [name]
+    /script [list|load|unload|reload|autoload|template] [name]
 
 ## Description
 
-Manage user scripts. Scripts are TypeScript files in `~/.kokoirc/scripts/`
-that extend kokoIRC with custom commands, event hooks, filters, and automation.
+Manage user scripts. Scripts are Lua 5.4 files in `~/.repartee/scripts/`
+that extend Repartee with custom commands, event hooks, filters, and automation.
 
-Scripts have full access to the IRC client, store, and UI — same trust model
-as irssi Perl scripts.
+Scripts run in a sandboxed Lua environment — `os`, `io`, `loadfile`, `dofile`,
+and `package` are removed. Each script gets its own isolated environment.
 
 ## Subcommands
 
@@ -27,39 +27,45 @@ Show currently loaded scripts with version and description.
 
 This is the default when no subcommand is given.
 
-### available
-
-Show all script files found in `~/.kokoirc/scripts/`.
-
-    /script available
-
-Loaded scripts are marked with a filled circle (●).
-
 ### load
 
-Load a script by name or absolute path.
+Load a script by name.
 
     /script load <name>
-    /script load /path/to/script.ts
 
-When given a name without a path, looks for `~/.kokoirc/scripts/<name>.ts`.
+Looks for `~/.repartee/scripts/<name>.lua`.
 
 ### unload
 
 Unload a script. All event handlers, commands, and timers registered by
-the script are automatically cleaned up.
+the script are automatically cleaned up. If the script returned a cleanup
+function from `setup()`, it is called.
 
     /script unload <name>
 
 ### reload
 
-Unload and reload a script (cache-busted import).
+Unload and reload a script.
 
     /script reload <name>
 
+### autoload
+
+Show or manage scripts that load automatically on startup.
+
+    /script autoload
+
+### template
+
+Create a starter script file with the standard boilerplate.
+
+    /script template
+
 ## Autoloading
 
-Add script names to `config.toml` to load them on startup:
+All `.lua` files in `~/.repartee/scripts/` are loaded automatically on startup.
+
+You can also explicitly list scripts in `config.toml`:
 
 ```toml
 [scripts]
@@ -69,29 +75,34 @@ debug = false
 
 ## Writing Scripts
 
-Scripts are `.ts` files that export a default init function:
+Scripts are `.lua` files with a `meta` table and a `setup` function:
 
-```ts
-import type { KokoAPI, IrcMessageEvent } from "@/core/scripts/types"
-
-export const meta = { name: "my-script", version: "1.0.0", description: "..." }
-export const config = { timeout: 300 }  // defaults for [scripts.my-script]
-
-export default function init(api: KokoAPI) {
-  // Use api.EventPriority for priority constants (HIGHEST, HIGH, NORMAL, LOW, LOWEST)
-  api.on("irc.privmsg", (event: IrcMessageEvent, ctx) => {
-    // ctx.stop() prevents lower-priority handlers + built-in store update
-  }, api.EventPriority.LOW)
-
-  api.command("mycommand", { handler(args, connId) { /* ... */ }, description: "..." })
-
-  return () => { /* cleanup on unload */ }
+```lua
+meta = {
+    name = "my-script",
+    version = "1.0",
+    description = "What it does",
 }
-```
 
-**Import rules:** Scripts live outside the project, so `@/` path aliases only work
-with `import type` (stripped at runtime). For values like `EventPriority`, use
-`api.EventPriority` instead of importing.
+function setup(api)
+    -- Register event handlers
+    api.on("irc.privmsg", function(ev)
+        -- handle message
+    end)
+
+    -- Register custom commands
+    api.command("mycommand", {
+        handler = function(args, conn_id) --[[ ... ]] end,
+        description = "Does something",
+        usage = "/mycommand <arg>",
+    })
+
+    -- Optional: return cleanup function
+    return function()
+        api.log("my-script unloaded")
+    end
+end
+```
 
 ### Available Events
 
@@ -99,28 +110,43 @@ with `import type` (stripped at runtime). For values like `EventPriority`, use
 `irc.quit`, `irc.kick`, `irc.nick`, `irc.topic`, `irc.mode`, `irc.invite`,
 `irc.ctcp_request`, `irc.ctcp_response`, `irc.wallops`
 
-**App events:** `command_input`, `connected`, `disconnected`
+**Lifecycle events:** `command_input`, `connected`, `disconnected`
+
+### Event Priority
+
+Handlers run in descending priority order. Use priority constants:
+
+- `api.PRIORITY_HIGHEST` (100)
+- `api.PRIORITY_HIGH` (75)
+- `api.PRIORITY_NORMAL` (50) — default
+- `api.PRIORITY_LOW` (25)
+- `api.PRIORITY_LOWEST` (0)
+
+Return `true` from a handler to suppress the event.
 
 ### Per-Script Config
 
-Declare defaults with `export const config = {...}`. Users override in TOML:
+Access per-script config values at runtime:
 
-```toml
-[scripts.auto-away]
-timeout = 300
-message = "AFK"
+```lua
+local val = api.config.get("timeout", 300)
+api.config.set("timeout", 600)
 ```
 
-Access via `api.config.get("timeout", 300)`.
+Read app-level config with dot-path notation:
+
+```lua
+local theme = api.config.app_get("general.theme")
+```
 
 ## Examples
 
-    /script available
-    /script load auto-away
     /script list
+    /script load auto-away
     /script reload auto-away
     /script unload auto-away
+    /script template
 
 ## See Also
 
-/set, /alias
+/set

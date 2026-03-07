@@ -147,8 +147,9 @@ api.off(id)  -- remove the handler
     -- event.ident          (string)
     -- event.hostname       (string)
     -- event.target         (string) channel or your nick
+    -- event.channel        (string) same as target
     -- event.message        (string)
-    -- event.is_channel     (boolean)
+    -- event.is_channel     (string) &quot;true&quot; or &quot;false&quot;
 end)
 </code></pre>
 <h3><code>irc.action</code></h3>
@@ -280,6 +281,16 @@ end)
 <td>Who kicked</td>
 </tr>
 <tr>
+<td><code>ident</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>hostname</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
 <td><code>channel</code></td>
 <td>string</td>
 <td></td>
@@ -318,6 +329,16 @@ end)
 <td><code>new_nick</code></td>
 <td>string</td>
 <td>New nick</td>
+</tr>
+<tr>
+<td><code>ident</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>hostname</code></td>
+<td>string</td>
+<td></td>
 </tr>
 </tbody></table>
 <h3><code>irc.topic</code></h3>
@@ -404,6 +425,11 @@ end)
 <td>string</td>
 <td></td>
 </tr>
+<tr>
+<td><code>invited</code></td>
+<td>string</td>
+<td>Who was invited</td>
+</tr>
 </tbody></table>
 <h3><code>irc.ctcp_request</code> / <code>irc.ctcp_response</code></h3>
 <table>
@@ -466,7 +492,7 @@ end)
 </tr>
 </tbody></table>
 <hr>
-<h2>App Events</h2>
+<h2>Lifecycle Events</h2>
 <h3><code>connected</code></h3>
 <table>
 <thead>
@@ -519,23 +545,6 @@ end)
 <td>string</td>
 </tr>
 </tbody></table>
-<h3><code>buffer_switch</code></h3>
-<table>
-<thead>
-<tr>
-<th>Field</th>
-<th>Type</th>
-</tr>
-</thead>
-<tbody><tr>
-<td><code>from_buffer_id</code></td>
-<td>string</td>
-</tr>
-<tr>
-<td><code>to_buffer_id</code></td>
-<td>string</td>
-</tr>
-</tbody></table>
 <hr>
 <h2>Commands</h2>
 <h3><code>api.command(name, def)</code></h3>
@@ -549,8 +558,6 @@ end)
     usage = &quot;/greet &lt;nick&gt;&quot;,
 })
 </code></pre>
-<h3><code>api.remove_command(name)</code></h3>
-<p>Remove a command registered by this script.</p>
 <hr>
 <h2>IRC Methods</h2>
 <p>All IRC methods take an optional <code>connection_id</code> as the last parameter. If omitted, the active buffer&#39;s connection is used.</p>
@@ -578,32 +585,41 @@ end)
 <p>Send a CTCP request.</p>
 <hr>
 <h2>UI Methods</h2>
-<h3><code>api.print(text)</code></h3>
+<h3><code>api.ui.print(text)</code></h3>
 <p>Display a local event message in the active buffer.</p>
-<h3><code>api.print_to(buffer_id, text)</code></h3>
+<h3><code>api.ui.print_to(buffer_id, text)</code></h3>
 <p>Display a local event message in a specific buffer.</p>
-<h3><code>api.switch_buffer(buffer_id)</code></h3>
+<h3><code>api.ui.switch_buffer(buffer_id)</code></h3>
 <p>Switch to a buffer.</p>
-<h3><code>api.execute(command_line)</code></h3>
-<p>Execute a client command (e.g. <code>api.execute(&quot;/set theme default&quot;)</code>).</p>
+<h3><code>api.ui.execute(command_line)</code></h3>
+<p>Execute a client command (e.g. <code>api.ui.execute(&quot;/set theme default&quot;)</code>).</p>
 <hr>
 <h2>State Access</h2>
-<h3><code>api.active_buffer()</code></h3>
+<h3><code>api.store.active_buffer()</code></h3>
 <p>Returns the active buffer ID, or nil.</p>
-<h3><code>api.our_nick(connection_id?)</code></h3>
-<p>Returns your current nick, or nil if not connected.</p>
-<h3><code>api.connections()</code></h3>
-<p>Returns a table of all connections.</p>
-<h3><code>api.buffers()</code></h3>
-<p>Returns a table of all buffers.</p>
-<h3><code>api.nicks(buffer_id)</code></h3>
-<p>Returns a table of nicks in a buffer.</p>
+<h3><code>api.store.our_nick(connection_id?)</code></h3>
+<p>Returns your current nick, or nil if not connected. If no <code>connection_id</code> is given, uses the active buffer&#39;s connection.</p>
+<h3><code>api.store.connections()</code></h3>
+<p>Returns a table of all connections. Each entry has: <code>id</code>, <code>label</code>, <code>nick</code>, <code>connected</code>, <code>user_modes</code>.</p>
+<h3><code>api.store.connection_info(connection_id)</code></h3>
+<p>Returns info for a specific connection, or nil.</p>
+<h3><code>api.store.buffers()</code></h3>
+<p>Returns a table of all buffers. Each entry has: <code>id</code>, <code>connection_id</code>, <code>name</code>, <code>buffer_type</code>, <code>topic</code>, <code>unread_count</code>.</p>
+<h3><code>api.store.buffer_info(buffer_id)</code></h3>
+<p>Returns info for a specific buffer, or nil.</p>
+<h3><code>api.store.nicks(buffer_id)</code></h3>
+<p>Returns a table of nicks in a buffer. Each entry has: <code>nick</code>, <code>prefix</code>, <code>modes</code>, <code>away</code>.</p>
 <hr>
 <h2>Config</h2>
 <h3><code>api.config.get(key)</code></h3>
 <p>Get a per-script config value.</p>
 <h3><code>api.config.set(key, value)</code></h3>
 <p>Set a per-script config value at runtime.</p>
+<h3><code>api.config.app_get(key_path)</code></h3>
+<p>Read an app-level config value using dot-separated path. Returns the value as a string, or nil.</p>
+<pre><code class="language-lua">local theme = api.config.app_get(&quot;general.theme&quot;)
+local nick_width = api.config.app_get(&quot;display.nick_width&quot;)
+</code></pre>
 <hr>
 <h2>Timers</h2>
 <h3><code>api.timer(ms, handler)</code></h3>

@@ -1098,87 +1098,108 @@ channel operator to use this command.</p>
 <div class="command-entry" data-command="script" data-category="Scripts">
 <h1>/script</h1>
 <h2>Syntax</h2>
-<pre><code>/script [list|available|load|unload|reload] [name]
+<pre><code>/script [list|load|unload|reload|autoload|template] [name]
 </code></pre>
 <h2>Description</h2>
-<p>Manage user scripts. Scripts are TypeScript files in <code>~/.kokoirc/scripts/</code>
-that extend kokoIRC with custom commands, event hooks, filters, and automation.</p>
-<p>Scripts have full access to the IRC client, store, and UI — same trust model
-as irssi Perl scripts.</p>
+<p>Manage user scripts. Scripts are Lua 5.4 files in <code>~/.repartee/scripts/</code>
+that extend Repartee with custom commands, event hooks, filters, and automation.</p>
+<p>Scripts run in a sandboxed Lua environment — <code>os</code>, <code>io</code>, <code>loadfile</code>, <code>dofile</code>,
+and <code>package</code> are removed. Each script gets its own isolated environment.</p>
 <h2>Subcommands</h2>
 <h3>list</h3>
 <p>Show currently loaded scripts with version and description.</p>
 <pre><code>/script list
 </code></pre>
 <p>This is the default when no subcommand is given.</p>
-<h3>available</h3>
-<p>Show all script files found in <code>~/.kokoirc/scripts/</code>.</p>
-<pre><code>/script available
-</code></pre>
-<p>Loaded scripts are marked with a filled circle (●).</p>
 <h3>load</h3>
-<p>Load a script by name or absolute path.</p>
+<p>Load a script by name.</p>
 <pre><code>/script load &lt;name&gt;
-/script load /path/to/script.ts
 </code></pre>
-<p>When given a name without a path, looks for <code>~/.kokoirc/scripts/&lt;name&gt;.ts</code>.</p>
+<p>Looks for <code>~/.repartee/scripts/&lt;name&gt;.lua</code>.</p>
 <h3>unload</h3>
 <p>Unload a script. All event handlers, commands, and timers registered by
-the script are automatically cleaned up.</p>
+the script are automatically cleaned up. If the script returned a cleanup
+function from <code>setup()</code>, it is called.</p>
 <pre><code>/script unload &lt;name&gt;
 </code></pre>
 <h3>reload</h3>
-<p>Unload and reload a script (cache-busted import).</p>
+<p>Unload and reload a script.</p>
 <pre><code>/script reload &lt;name&gt;
 </code></pre>
+<h3>autoload</h3>
+<p>Show or manage scripts that load automatically on startup.</p>
+<pre><code>/script autoload
+</code></pre>
+<h3>template</h3>
+<p>Create a starter script file with the standard boilerplate.</p>
+<pre><code>/script template
+</code></pre>
 <h2>Autoloading</h2>
-<p>Add script names to <code>config.toml</code> to load them on startup:</p>
+<p>All <code>.lua</code> files in <code>~/.repartee/scripts/</code> are loaded automatically on startup.</p>
+<p>You can also explicitly list scripts in <code>config.toml</code>:</p>
 <pre><code class="language-toml">[scripts]
 autoload = [&quot;auto-away&quot;, &quot;spam-filter&quot;]
 debug = false
 </code></pre>
 <h2>Writing Scripts</h2>
-<p>Scripts are <code>.ts</code> files that export a default init function:</p>
-<pre><code class="language-ts">import type { KokoAPI, IrcMessageEvent } from &quot;@/core/scripts/types&quot;
-
-export const meta = { name: &quot;my-script&quot;, version: &quot;1.0.0&quot;, description: &quot;...&quot; }
-export const config = { timeout: 300 }  // defaults for [scripts.my-script]
-
-export default function init(api: KokoAPI) {
-  // Use api.EventPriority for priority constants (HIGHEST, HIGH, NORMAL, LOW, LOWEST)
-  api.on(&quot;irc.privmsg&quot;, (event: IrcMessageEvent, ctx) =&gt; {
-    // ctx.stop() prevents lower-priority handlers + built-in store update
-  }, api.EventPriority.LOW)
-
-  api.command(&quot;mycommand&quot;, { handler(args, connId) { /* ... */ }, description: &quot;...&quot; })
-
-  return () =&gt; { /* cleanup on unload */ }
+<p>Scripts are <code>.lua</code> files with a <code>meta</code> table and a <code>setup</code> function:</p>
+<pre><code class="language-lua">meta = {
+    name = &quot;my-script&quot;,
+    version = &quot;1.0&quot;,
+    description = &quot;What it does&quot;,
 }
+
+function setup(api)
+    -- Register event handlers
+    api.on(&quot;irc.privmsg&quot;, function(ev)
+        -- handle message
+    end)
+
+    -- Register custom commands
+    api.command(&quot;mycommand&quot;, {
+        handler = function(args, conn_id) --[[ ... ]] end,
+        description = &quot;Does something&quot;,
+        usage = &quot;/mycommand &lt;arg&gt;&quot;,
+    })
+
+    -- Optional: return cleanup function
+    return function()
+        api.log(&quot;my-script unloaded&quot;)
+    end
+end
 </code></pre>
-<p><strong>Import rules:</strong> Scripts live outside the project, so <code>@/</code> path aliases only work
-with <code>import type</code> (stripped at runtime). For values like <code>EventPriority</code>, use
-<code>api.EventPriority</code> instead of importing.</p>
 <h3>Available Events</h3>
 <p><strong>IRC events:</strong> <code>irc.privmsg</code>, <code>irc.action</code>, <code>irc.notice</code>, <code>irc.join</code>, <code>irc.part</code>,
 <code>irc.quit</code>, <code>irc.kick</code>, <code>irc.nick</code>, <code>irc.topic</code>, <code>irc.mode</code>, <code>irc.invite</code>,
 <code>irc.ctcp_request</code>, <code>irc.ctcp_response</code>, <code>irc.wallops</code></p>
-<p><strong>App events:</strong> <code>command_input</code>, <code>connected</code>, <code>disconnected</code></p>
+<p><strong>Lifecycle events:</strong> <code>command_input</code>, <code>connected</code>, <code>disconnected</code></p>
+<h3>Event Priority</h3>
+<p>Handlers run in descending priority order. Use priority constants:</p>
+<ul>
+<li><code>api.PRIORITY_HIGHEST</code> (100)</li>
+<li><code>api.PRIORITY_HIGH</code> (75)</li>
+<li><code>api.PRIORITY_NORMAL</code> (50) — default</li>
+<li><code>api.PRIORITY_LOW</code> (25)</li>
+<li><code>api.PRIORITY_LOWEST</code> (0)</li>
+</ul>
+<p>Return <code>true</code> from a handler to suppress the event.</p>
 <h3>Per-Script Config</h3>
-<p>Declare defaults with <code>export const config = {...}</code>. Users override in TOML:</p>
-<pre><code class="language-toml">[scripts.auto-away]
-timeout = 300
-message = &quot;AFK&quot;
+<p>Access per-script config values at runtime:</p>
+<pre><code class="language-lua">local val = api.config.get(&quot;timeout&quot;, 300)
+api.config.set(&quot;timeout&quot;, 600)
 </code></pre>
-<p>Access via <code>api.config.get(&quot;timeout&quot;, 300)</code>.</p>
+<p>Read app-level config with dot-path notation:</p>
+<pre><code class="language-lua">local theme = api.config.app_get(&quot;general.theme&quot;)
+</code></pre>
 <h2>Examples</h2>
-<pre><code>/script available
+<pre><code>/script list
 /script load auto-away
-/script list
 /script reload auto-away
 /script unload auto-away
+/script template
 </code></pre>
 <h2>See Also</h2>
-<p>/set, /alias</p>
+<p>/set</p>
 </div>
 <h2 id="cat-server">Server</h2>
 <div class="command-entry" data-command="oper" data-category="Server">
