@@ -112,6 +112,7 @@ fn flush(
         return queue;
     }
 
+    let mut failed = 0_usize;
     for row in &queue {
         let msg_type_str = format!("{:?}", row.msg_type).to_lowercase();
         let highlight_int = i32::from(row.highlight);
@@ -121,8 +122,8 @@ fn flush(
                 Ok(enc) => (enc.ciphertext, Some(enc.iv)),
                 Err(e) => {
                     tracing::error!("encryption failed for msg_id={}: {e}", row.msg_id);
-                    let _ = conn.execute_batch("ROLLBACK");
-                    return queue;
+                    failed += 1;
+                    continue;
                 }
             },
             None => (row.text.clone(), None),
@@ -145,10 +146,16 @@ fn flush(
                 row.tags,
             ],
         ) {
+            // Log once and skip — do NOT return the queue for retry, as
+            // persistent errors (e.g. schema mismatch) would cause infinite
+            // retry loops that spam the log and block all future inserts.
             tracing::error!("failed to insert msg_id={}: {e}", row.msg_id);
-            let _ = conn.execute_batch("ROLLBACK");
-            return queue;
+            failed += 1;
         }
+    }
+
+    if failed > 0 {
+        tracing::warn!("dropped {failed} message(s) due to insert errors");
     }
 
     if let Err(e) = conn.execute_batch("COMMIT") {

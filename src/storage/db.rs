@@ -64,7 +64,21 @@ fn create_schema(db: &Connection, encrypt: bool) -> rusqlite::Result<()> {
         db.execute_batch(CREATE_FTS)?;
         db.execute_batch(CREATE_FTS_TRIGGERS)?;
     }
+    migrate_schema(db);
     Ok(())
+}
+
+/// Add columns that may be missing from older database files.
+///
+/// `ALTER TABLE ADD COLUMN` is a no-op if the column already exists — `SQLite`
+/// returns an error which we silently ignore.
+fn migrate_schema(db: &Connection) {
+    for col in ["ref_id TEXT", "tags TEXT"] {
+        let sql = format!("ALTER TABLE messages ADD COLUMN {col}");
+        if db.execute_batch(&sql).is_ok() {
+            tracing::info!("migrated messages table: added {col}");
+        }
+    }
 }
 
 pub fn open_database(encrypt: bool) -> rusqlite::Result<Connection> {
