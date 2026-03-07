@@ -19,7 +19,11 @@ pub const APP_NAME: &str = "repartee";
 
 - **TUI**: ratatui 0.30+ with crossterm backend
 - **Async**: tokio with crossterm event-stream
-- **IRC**: `irc` crate v1.1.0
+- **IRC**: custom fork `kofany/irc` branch `develop-custom` (upstream v1.1.0 + 3 patches)
+  - **Bind address**: `Config::bind_address` — bind to specific local IP (our config field: `bind_ip`)
+  - **rustls-pemfile replaced**: security fix (RUSTSEC-2025-0134), uses `rustls-pki-types` PemObject
+  - **Immediate send flush**: outgoing messages flush immediately via spawned tokio task (not buffered until next poll)
+  - Switch to crates.io version when upstream merges these PRs (#279, #280, #281)
 - **Config**: TOML (`config.toml`), same format as kokoirc
 - **Credentials**: `.env` file (never written to config.toml)
 - **Theming**: TOML `.theme` files with irssi-compatible format strings

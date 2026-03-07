@@ -313,6 +313,8 @@ pub struct App {
     /// Queued (`conn_id`, channel) pairs for deferred WHO/MODE after join.
     /// Drained one-at-a-time by a periodic timer to avoid Excess Flood.
     pending_channel_queries: VecDeque<(String, String)>,
+    /// Queued lines from multiline paste, drained one per 500ms tick.
+    paste_queue: VecDeque<String>,
     /// Script manager (owns all scripting engines).
     pub script_manager: Option<crate::scripting::engine::ScriptManager>,
     /// Persistent `ScriptAPI` used when loading/reloading scripts.
@@ -449,6 +451,7 @@ impl App {
             http_client,
             picker,
             pending_channel_queries: VecDeque::new(),
+            paste_queue: VecDeque::new(),
             script_manager: Some(script_manager),
             script_api: Some(script_api),
             script_state,
@@ -663,6 +666,7 @@ impl App {
 
         let mut tick = interval(Duration::from_secs(1));
         let mut query_tick = interval(Duration::from_secs(2));
+        let mut paste_tick = interval(Duration::from_millis(500));
 
         while !self.should_quit {
             terminal.draw(|frame| ui::layout::draw(frame, self))?;
@@ -699,6 +703,9 @@ impl App {
                 },
                 _ = query_tick.tick() => {
                     self.drain_pending_channel_query();
+                },
+                _ = paste_tick.tick() => {
+                    self.drain_paste_queue();
                 },
                 action = self.script_action_rx.recv() => {
                     if let Some(action) = action {
@@ -1609,12 +1616,43 @@ impl App {
     }
 
     fn handle_paste(&mut self, text: &str) {
-        // Replace newlines with spaces for single-line input (standard IRC behavior).
-        // Multiline paste in IRC clients typically collapses to one line or sends
-        // multiple lines — we collapse to avoid accidental message floods.
-        let cleaned = text.replace('\n', " ").replace('\r', "");
-        for ch in cleaned.chars() {
-            self.input.insert_char(ch);
+        let lines: Vec<&str> = text.split('\n').collect();
+        let non_empty: Vec<&str> = lines.iter().map(|l| l.trim_end_matches('\r')).filter(|l| !l.is_empty()).collect();
+
+        if non_empty.len() <= 1 {
+            // Single line (or empty): insert into input buffer at cursor.
+            let single = non_empty.first().copied().unwrap_or("");
+            for ch in single.chars() {
+                self.input.insert_char(ch);
+            }
+            return;
+        }
+
+        // Multiline paste: prepend any existing input to the first line,
+        // send it immediately, queue the rest with 500ms spacing.
+        // Matches kokoirc and erssi behavior.
+        self.paste_queue.clear();
+
+        let current_input = self.input.submit();
+        let first = if current_input.is_empty() {
+            non_empty[0].to_string()
+        } else {
+            format!("{current_input}{}", non_empty[0])
+        };
+
+        // Send first line immediately
+        self.handle_submit(first);
+
+        // Queue remaining lines
+        for line in &non_empty[1..] {
+            self.paste_queue.push_back((*line).to_string());
+        }
+    }
+
+    /// Send one queued paste line. Called every 500ms by the paste timer.
+    fn drain_paste_queue(&mut self) {
+        if let Some(line) = self.paste_queue.pop_front() {
+            self.handle_submit(line);
         }
     }
 
@@ -2158,12 +2196,10 @@ impl App {
             Arc::new(move |(script, key)| {
                 snap.read().ok()?.script_config.get(&(script, key)).cloned()
             });
-        let config_set: Arc<dyn Fn((String, String, String)) + Send + Sync> = {
-            let t = tx.clone();
+        let config_set: Arc<dyn Fn((String, String, String)) + Send + Sync> =
             Arc::new(move |(script, key, value)| {
-                let _ = t.send(ScriptAction::SetScriptConfig { script, key, value });
-            })
-        };
+                let _ = tx.send(ScriptAction::SetScriptConfig { script, key, value });
+            });
         let snap = Arc::clone(&snapshot);
         let app_config_get: Arc<dyn Fn(String) -> Option<String> + Send + Sync> =
             Arc::new(move |key_path| {

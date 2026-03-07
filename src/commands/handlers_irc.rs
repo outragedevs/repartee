@@ -522,51 +522,10 @@ pub(crate) fn cmd_ban(app: &mut App, args: &[String]) {
 
 pub(crate) fn cmd_unban(app: &mut App, args: &[String]) {
     if args.is_empty() {
-        add_local_event(app, "Usage: /unban <number|mask> [number2|mask2 ...]");
+        add_local_event(app, "Usage: /unban <number|mask|wildcard> [...]");
         return;
     }
-    let Some(sender) = app.active_irc_sender().cloned() else {
-        add_local_event(app, "Not connected");
-        return;
-    };
-    let channel = match app.state.active_buffer() {
-        Some(b) if b.buffer_type == crate::state::buffer::BufferType::Channel => b.name.clone(),
-        _ => {
-            add_local_event(app, "Not in a channel");
-            return;
-        }
-    };
-
-    // Resolve masks: numeric references index into stored ban list, others are literal
-    let ban_entries: Vec<crate::state::buffer::ListEntry> = app
-        .state
-        .active_buffer()
-        .and_then(|b| b.list_modes.get("b"))
-        .cloned()
-        .unwrap_or_default();
-
-    let mut masks: Vec<String> = Vec::new();
-    for arg in args {
-        if let Ok(num) = arg.parse::<usize>() {
-            if num >= 1 && num <= ban_entries.len() {
-                masks.push(ban_entries[num - 1].mask.clone());
-            } else {
-                add_local_event(app, &format!(
-                    "Ban list #{num} out of range (1-{})",
-                    ban_entries.len()
-                ));
-            }
-        } else {
-            masks.push(arg.clone());
-        }
-    }
-
-    for mask in &masks {
-        let _ = sender.send(irc::proto::Command::Raw(
-            "MODE".to_string(),
-            vec![channel.clone(), "-b".to_string(), mask.clone()],
-        ));
-    }
+    list_mode_unset_smart(app, args, 'b', "unban");
 }
 
 pub(crate) fn cmd_kickban(app: &mut App, args: &[String]) {
@@ -651,9 +610,14 @@ fn list_mode_set(app: &mut App, args: &[String], mode_char: char) {
     }
 }
 
-fn list_mode_unset(app: &mut App, args: &[String], mode_char: char, cmd_name: &str) {
+/// Unset list modes with support for numeric indices and wildcard patterns.
+///
+/// - Numeric args (e.g. `1`, `3`) index into the stored list (1-based).
+/// - Args containing `*` or `?` are matched against stored entries (like irssi's `/unban *`).
+/// - Everything else is sent as a literal mask.
+fn list_mode_unset_smart(app: &mut App, args: &[String], mode_char: char, cmd_name: &str) {
     if args.is_empty() {
-        add_local_event(app, &format!("Usage: /{cmd_name} <mask>"));
+        add_local_event(app, &format!("Usage: /{cmd_name} <number|mask|wildcard> [...]"));
         return;
     }
     let Some(sender) = app.active_irc_sender().cloned() else {
@@ -667,7 +631,47 @@ fn list_mode_unset(app: &mut App, args: &[String], mode_char: char, cmd_name: &s
             return;
         }
     };
-    for mask in args {
+
+    let mode_key = mode_char.to_string();
+    let entries: Vec<crate::state::buffer::ListEntry> = app
+        .state
+        .active_buffer()
+        .and_then(|b| b.list_modes.get(&mode_key))
+        .cloned()
+        .unwrap_or_default();
+
+    let mut masks: Vec<String> = Vec::new();
+    for arg in args {
+        if let Ok(num) = arg.parse::<usize>() {
+            // Numeric index into stored list (1-based)
+            if num >= 1 && num <= entries.len() {
+                masks.push(entries[num - 1].mask.clone());
+            } else {
+                add_local_event(app, &format!(
+                    "{cmd_name}: #{num} out of range (1-{})",
+                    entries.len()
+                ));
+            }
+        } else if arg.contains('*') || arg.contains('?') {
+            // Wildcard pattern — match against stored list entries
+            let re = crate::irc::ignore::wildcard_to_regex(arg);
+            let mut found = false;
+            for entry in &entries {
+                if re.is_match(&entry.mask) {
+                    masks.push(entry.mask.clone());
+                    found = true;
+                }
+            }
+            if !found {
+                add_local_event(app, &format!("{cmd_name}: no entries matching '{arg}'"));
+            }
+        } else {
+            // Literal mask — send as-is
+            masks.push(arg.clone());
+        }
+    }
+
+    for mask in &masks {
         let _ = sender.send(irc::proto::Command::Raw(
             "MODE".to_string(),
             vec![channel.clone(), format!("-{mode_char}"), mask.clone()],
@@ -680,7 +684,7 @@ pub(crate) fn cmd_except(app: &mut App, args: &[String]) {
 }
 
 pub(crate) fn cmd_unexcept(app: &mut App, args: &[String]) {
-    list_mode_unset(app, args, 'e', "unexcept");
+    list_mode_unset_smart(app, args, 'e', "unexcept");
 }
 
 pub(crate) fn cmd_invex(app: &mut App, args: &[String]) {
@@ -688,7 +692,7 @@ pub(crate) fn cmd_invex(app: &mut App, args: &[String]) {
 }
 
 pub(crate) fn cmd_uninvex(app: &mut App, args: &[String]) {
-    list_mode_unset(app, args, 'I', "uninvex");
+    list_mode_unset_smart(app, args, 'I', "uninvex");
 }
 
 pub(crate) fn cmd_reop(app: &mut App, args: &[String]) {
@@ -696,7 +700,7 @@ pub(crate) fn cmd_reop(app: &mut App, args: &[String]) {
 }
 
 pub(crate) fn cmd_unreop(app: &mut App, args: &[String]) {
-    list_mode_unset(app, args, 'R', "unreop");
+    list_mode_unset_smart(app, args, 'R', "unreop");
 }
 
 pub(crate) fn cmd_cycle(app: &mut App, args: &[String]) {

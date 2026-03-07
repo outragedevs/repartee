@@ -173,6 +173,7 @@ pub async fn connect_server(
         encoding: server_config.encoding.clone(),
         version: Some(general.ctcp_version.clone()),
         client_cert_path: server_config.client_cert_path.clone(),
+        bind_address: server_config.bind_ip.clone(),
         ..Config::default()
     };
 

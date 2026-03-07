@@ -37,7 +37,7 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| ve
         ("voice",      CommandDef { handler: cmd_voice,      description: "Give voice status",                aliases: &["v"],          category: CommandCategory::Channel }),
         ("devoice",    CommandDef { handler: cmd_devoice,    description: "Remove voice status",              aliases: &[],             category: CommandCategory::Channel }),
         ("ban",        CommandDef { handler: cmd_ban,        description: "Add ban or show ban list",         aliases: &["b"],          category: CommandCategory::Channel }),
-        ("unban",      CommandDef { handler: cmd_unban,      description: "Remove ban by number or mask",     aliases: &[],             category: CommandCategory::Channel }),
+        ("unban",      CommandDef { handler: cmd_unban,      description: "Remove ban(s) by number, mask, or wildcard (* = all)", aliases: &[], category: CommandCategory::Channel }),
         ("kb",         CommandDef { handler: cmd_kickban,    description: "Kickban a user (*!*ident@host)",   aliases: &["kickban"],    category: CommandCategory::Channel }),
         ("except",     CommandDef { handler: cmd_except,     description: "Add exception or show list",       aliases: &[],             category: CommandCategory::Channel }),
         ("unexcept",   CommandDef { handler: cmd_unexcept,   description: "Remove an exception",              aliases: &[],             category: CommandCategory::Channel }),
