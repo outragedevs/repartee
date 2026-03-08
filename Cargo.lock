@@ -1701,9 +1701,9 @@ checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 
 [[package]]
 name = "irc-proto-repartee"
-version = "1.1.1"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "942402b5632dba7dd3a6a0f58aa7471a03776a89311f8d12981f37fd80b13dc7"
+checksum = "c13ef47acb8f5bf4377e06572e41cf44241539b0d6fbcc4594d2b0b8442a143c"
 dependencies = [
  "bytes",
  "encoding",
@@ -1714,9 +1714,9 @@ dependencies = [
 
 [[package]]
 name = "irc-repartee"
-version = "1.1.1"
+version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0131a6ba0e88d6558014758efba84163bc8b4f63fa02cf8d2590f8b4dcc99d1"
+checksum = "2badfa6950c9148e6c6ef26add78127c4ecbbecc8826154a428c6a7cceb233e5"
 dependencies = [
  "chrono",
  "encoding",

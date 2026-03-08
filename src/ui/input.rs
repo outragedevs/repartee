@@ -328,24 +328,43 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .replace("$channel", channel_name)
         .replace("$nick", nick);
 
-    let (before_cursor, after_cursor) = app.input.value.split_at(app.input.cursor_pos);
-    let cursor_char = after_cursor.chars().next().unwrap_or(' ');
-    let after_cursor_rest = if after_cursor.len() > cursor_char.len_utf8() {
-        &after_cursor[cursor_char.len_utf8()..]
+    let prompt_width = prompt.chars().count();
+    let available_width = (area.width as usize).saturating_sub(prompt_width);
+
+    // Calculate cursor position in chars (not bytes)
+    let cursor_char_pos = app.input.value[..app.input.cursor_pos].chars().count();
+
+    // Scroll offset: keep cursor visible within available_width
+    let scroll_offset = if available_width == 0 {
+        0
+    } else if cursor_char_pos >= available_width {
+        cursor_char_pos - available_width + 1
     } else {
-        ""
+        0
+    };
+
+    // Extract visible slice of chars
+    let all_chars: Vec<char> = app.input.value.chars().collect();
+    let visible_end = (scroll_offset + available_width).min(all_chars.len());
+
+    let before_cursor: String = all_chars[scroll_offset..cursor_char_pos].iter().collect();
+    let cursor_char = all_chars.get(cursor_char_pos).copied().unwrap_or(' ');
+    let after_cursor: String = if cursor_char_pos + 1 < visible_end {
+        all_chars[cursor_char_pos + 1..visible_end].iter().collect()
+    } else {
+        String::new()
     };
 
     let cursor_color = hex_to_color(&colors.cursor).unwrap_or(Color::White);
 
     let line = Line::from(vec![
         Span::styled(prompt, Style::default().fg(fg_muted)),
-        Span::styled(before_cursor.to_string(), Style::default().fg(fg)),
+        Span::styled(before_cursor, Style::default().fg(fg)),
         Span::styled(
             cursor_char.to_string(),
             Style::default().fg(Color::Black).bg(cursor_color),
         ),
-        Span::styled(after_cursor_rest.to_string(), Style::default().fg(fg)),
+        Span::styled(after_cursor, Style::default().fg(fg)),
     ]);
 
     let paragraph = Paragraph::new(line);

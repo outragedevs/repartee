@@ -43,98 +43,13 @@ fn split_channel_keys(entries: &[String]) -> (Vec<&str>, Vec<&str>) {
 
 use ratatui_image::picker::ProtocolType;
 
-/// Resolve the image protocol to use, combining config override with env-var
-/// detection (matching kokoirc's multi-phase approach).
+/// Detect the outer terminal program name and its image protocol capability.
 ///
-/// Returns `(Some(protocol), source)` if an override should be applied to the
-/// picker, or `(None, source)` if the picker's auto-detected protocol is fine.
-fn resolve_image_protocol(
-    config_protocol: &str,
-    picker: &ratatui_image::picker::Picker,
-) -> (Option<ProtocolType>, String) {
-    // 1. Config override — user explicitly chose a protocol.
-    match config_protocol {
-        "kitty" => return (Some(ProtocolType::Kitty), "config:kitty".into()),
-        "iterm2" => return (Some(ProtocolType::Iterm2), "config:iterm2".into()),
-        "sixel" => return (Some(ProtocolType::Sixel), "config:sixel".into()),
-        "halfblocks" => return (Some(ProtocolType::Halfblocks), "config:halfblocks".into()),
-        _ => {} // "auto" or anything else — proceed to detection
-    }
-
-    // 2. iTerm2 override — iTerm2 3.5+ responds to the Kitty graphics probe,
-    //    so ratatui-image detects Kitty. But iTerm2's Kitty implementation is
-    //    incomplete; the native iTerm2 (OSC 1337) protocol works correctly.
-    //    Check env vars BEFORE trusting the IO result to catch this case.
-    if is_iterm2_env() {
-        return (Some(ProtocolType::Iterm2), detect_iterm2_source());
-    }
-
-    // 3. If the IO-based picker already found a real protocol, trust it.
-    if picker.protocol_type() != ProtocolType::Halfblocks {
-        return (None, format!("io-query:{:?}", picker.protocol_type()));
-    }
-
-    // 4. Picker fell back to Halfblocks — run kokoirc-style env detection.
-    detect_protocol_from_env()
-}
-
-/// Check if we're running inside iTerm2 (directly or via tmux).
+/// This always runs — not just as a fallback — so we know WHO we're talking
+/// to for protocol selection, cleanup strategy, and debug logging.
 ///
-/// iTerm2 3.5+ responds to the Kitty graphics protocol probe, causing
-/// ratatui-image to incorrectly select Kitty over the native iTerm2 protocol.
-fn is_iterm2_env() -> bool {
-    // Direct: TERM_PROGRAM=iTerm.app
-    let tp = std::env::var("TERM_PROGRAM").unwrap_or_default();
-    if tp.eq_ignore_ascii_case("iterm.app") || tp.eq_ignore_ascii_case("iterm2") {
-        return true;
-    }
-    // LC_TERMINAL=iTerm2 (survives tmux)
-    if std::env::var("LC_TERMINAL")
-        .unwrap_or_default()
-        .eq_ignore_ascii_case("iterm2")
-    {
-        return true;
-    }
-    // ITERM_SESSION_ID is set (survives tmux)
-    if std::env::var("ITERM_SESSION_ID").is_ok_and(|s| !s.is_empty()) {
-        return true;
-    }
-    // Inside tmux — query the outer terminal
-    if std::env::var("TMUX").is_ok_and(|s| !s.is_empty())
-        && tmux_query_raw("#{client_termtype}")
-            .is_some_and(|tt| tt.to_lowercase().contains("iterm"))
-    {
-        return true;
-    }
-    false
-}
-
-/// Build a debug source string for iTerm2 detection.
-fn detect_iterm2_source() -> String {
-    let tp = std::env::var("TERM_PROGRAM").unwrap_or_default();
-    if tp.eq_ignore_ascii_case("iterm.app") || tp.eq_ignore_ascii_case("iterm2") {
-        return format!("env:TERM_PROGRAM={tp}");
-    }
-    let lc = std::env::var("LC_TERMINAL").unwrap_or_default();
-    if lc.eq_ignore_ascii_case("iterm2") {
-        return format!("env:LC_TERMINAL={lc}");
-    }
-    if std::env::var("ITERM_SESSION_ID").is_ok_and(|s| !s.is_empty()) {
-        return "env:ITERM_SESSION_ID".into();
-    }
-    if let Some(tt) = tmux_query_raw("#{client_termtype}") {
-        return format!("tmux:{tt}");
-    }
-    "iterm2:unknown".into()
-}
-
-/// Detect image protocol from environment variables and tmux queries.
-///
-/// Mirrors kokoirc's `detectProtocol()` fallback chain:
-/// tmux `client_termtype` / `client_termname` → env vars → `TERM` value.
-fn detect_protocol_from_env() -> (Option<ProtocolType>, String) {
-    let in_tmux = std::env::var("TMUX").is_ok_and(|s| !s.is_empty());
-
+/// Returns `(terminal_name, protocol, source)`.
+fn detect_outer_terminal(in_tmux: bool) -> (&'static str, Option<ProtocolType>, String) {
     // Dump all relevant env vars for debugging.
     tracing::debug!(
         TMUX = ?std::env::var("TMUX").ok(),
@@ -149,7 +64,7 @@ fn detect_protocol_from_env() -> (Option<ProtocolType>, String) {
         WT_SESSION = ?std::env::var("WT_SESSION").ok(),
         COLORTERM = ?std::env::var("COLORTERM").ok(),
         in_tmux,
-        "image protocol env vars"
+        "outer terminal env vars"
     );
 
     // ── tmux: query the REAL outer terminal ──
@@ -165,98 +80,207 @@ fn detect_protocol_from_env() -> (Option<ProtocolType>, String) {
         );
 
         if let Some(ref tt) = termtype
-            && let Some(proto) = match_term_name(tt)
+            && let Some((name, proto)) = match_terminal(tt)
         {
-            return (Some(proto), format!("tmux:{tt}"));
+            return (name, Some(proto), format!("tmux:client_termtype={tt}"));
         }
         if let Some(ref tn) = termname
-            && let Some(proto) = match_term_name(tn)
+            && let Some((name, proto)) = match_terminal(tn)
         {
-            return (Some(proto), format!("tmux:{tn}"));
+            return (name, Some(proto), format!("tmux:client_termname={tn}"));
+        }
+
+        // Alacritty: generic termtype like "xterm-256color" + empty termname.
+        // No image protocol support — use halfblocks.
+        let tt_generic = termtype.as_deref().unwrap_or("").starts_with("xterm");
+        let tn_empty = termname.as_deref().unwrap_or("").is_empty();
+        if tt_generic && tn_empty {
+            return ("alacritty", Some(ProtocolType::Halfblocks), "tmux:generic-xterm+empty-termname".into());
         }
     }
 
-    // ── env var detection ──
-    let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default().to_lowercase();
-    let lc_terminal = std::env::var("LC_TERMINAL").unwrap_or_default().to_lowercase();
+    // ── env var detection (works both direct and in tmux) ──
+    let lc_terminal = std::env::var("LC_TERMINAL").unwrap_or_default();
 
-    // iTerm2
-    if term_program == "iterm.app" || term_program == "iterm2" || lc_terminal == "iterm2" {
-        return (Some(ProtocolType::Iterm2), format!("env:TERM_PROGRAM={term_program}"));
+    // LC_TERMINAL survives tmux and SSH — most reliable after tmux queries.
+    if !lc_terminal.is_empty() {
+        if lc_terminal.eq_ignore_ascii_case("iterm2") || lc_terminal.to_ascii_lowercase().contains("iterm") {
+            return ("iterm2", Some(ProtocolType::Iterm2), format!("env:LC_TERMINAL={lc_terminal}"));
+        }
+        if lc_terminal.eq_ignore_ascii_case("ghostty") {
+            return ("ghostty", Some(ProtocolType::Kitty), format!("env:LC_TERMINAL={lc_terminal}"));
+        }
+        if lc_terminal.eq_ignore_ascii_case("subterm") {
+            return ("subterm", Some(ProtocolType::Kitty), format!("env:LC_TERMINAL={lc_terminal}"));
+        }
     }
-    // Subterm (Kitty protocol)
-    if lc_terminal == "subterm" || term_program == "subterm" {
-        return (Some(ProtocolType::Kitty), format!("env:LC_TERMINAL={lc_terminal}"));
+
+    // Terminal-specific env vars.
+    if std::env::var("ITERM_SESSION_ID").is_ok_and(|s| !s.is_empty()) {
+        return ("iterm2", Some(ProtocolType::Iterm2), "env:ITERM_SESSION_ID".into());
     }
-    // WezTerm (Kitty protocol, but ratatui-image uses Iterm2 for it — match ratatui-image)
-    if term_program == "wezterm" {
-        return (Some(ProtocolType::Iterm2), "env:TERM_PROGRAM=wezterm".into());
+
+    // GHOSTTY_RESOURCES_DIR — validate it's a real path, not just "1" or garbage.
+    if let Ok(grd) = std::env::var("GHOSTTY_RESOURCES_DIR")
+        && !grd.is_empty()
+        && grd.len() > 1
+    {
+        return ("ghostty", Some(ProtocolType::Kitty), format!("env:GHOSTTY_RESOURCES_DIR={grd}"));
     }
-    // Rio (Kitty protocol)
-    if term_program == "rio" {
-        return (Some(ProtocolType::Kitty), "env:TERM_PROGRAM=rio".into());
-    }
-    // mintty (Sixel)
-    if term_program == "mintty" {
-        return (Some(ProtocolType::Sixel), "env:TERM_PROGRAM=mintty".into());
-    }
-    // Kitty PID
+
     if std::env::var("KITTY_PID").is_ok_and(|s| !s.is_empty()) {
-        return (Some(ProtocolType::Kitty), "env:KITTY_PID".into());
+        return ("kitty", Some(ProtocolType::Kitty), "env:KITTY_PID".into());
     }
-    // Ghostty
-    if std::env::var("GHOSTTY_RESOURCES_DIR").is_ok_and(|s| !s.is_empty()) {
-        return (Some(ProtocolType::Kitty), "env:GHOSTTY_RESOURCES_DIR".into());
+    if std::env::var("WEZTERM_EXECUTABLE").is_ok_and(|s| !s.is_empty()) {
+        return ("wezterm", Some(ProtocolType::Iterm2), "env:WEZTERM_EXECUTABLE".into());
     }
-    // Windows Terminal (Sixel)
     if std::env::var("WT_SESSION").is_ok_and(|s| !s.is_empty()) {
-        return (Some(ProtocolType::Sixel), "env:WT_SESSION".into());
+        return ("windows-terminal", Some(ProtocolType::Sixel), "env:WT_SESSION".into());
+    }
+
+    // Non-tmux: TERM_PROGRAM is the actual terminal.
+    if !in_tmux {
+        let tp = std::env::var("TERM_PROGRAM").unwrap_or_default();
+        if !tp.is_empty()
+            && tp != "tmux"
+            && let Some((name, proto)) = match_terminal(&tp)
+        {
+            return (name, Some(proto), format!("env:TERM_PROGRAM={tp}"));
+        }
     }
 
     // ── Generic TERM value — last resort ──
-    let term = std::env::var("TERM").unwrap_or_default().to_lowercase();
-    if let Some(proto) = match_term_name(&term) {
-        return (Some(proto), format!("env:TERM={term}"));
+    let term = std::env::var("TERM").unwrap_or_default();
+    if let Some((name, proto)) = match_terminal(&term) {
+        return (name, Some(proto), format!("env:TERM={term}"));
     }
 
-    (None, "auto:halfblocks".into())
+    ("unknown", None, "auto:unknown".into())
 }
 
-/// Match a terminal identifier string to an image protocol.
+/// Match a terminal identifier string to a terminal name and image protocol.
 ///
-/// Works with both `#{client_termtype}` (e.g. "iTerm2 3.6.8") and
-/// `#{client_termname}` (e.g. "xterm-ghostty", "xterm-kitty").
-fn match_term_name(name: &str) -> Option<ProtocolType> {
-    let t = name.to_lowercase();
+/// Works with `#{client_termtype}` (e.g. "iTerm2 3.6.8"), `#{client_termname}`
+/// (e.g. "xterm-ghostty"), `TERM_PROGRAM`, and `TERM` values.
+///
+/// Returns `(&'static str, ProtocolType)` — terminal names are all known
+/// constants, so no heap allocation is needed.
+fn match_terminal(name: &str) -> Option<(&'static str, ProtocolType)> {
+    // Case-insensitive ASCII substring check — avoids heap-allocating
+    // a lowercased copy on every call (terminal names are always ASCII).
+    let contains = |needle: &str| -> bool {
+        name.as_bytes()
+            .windows(needle.len())
+            .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+    };
 
     // iTerm2
-    if t.contains("iterm") {
-        return Some(ProtocolType::Iterm2);
+    if contains("iterm") {
+        return Some(("iterm2", ProtocolType::Iterm2));
     }
     // Kitty protocol family
-    if t.contains("kitty") || t.contains("ghostty") || t.contains("wezterm") || t.contains("rio")
-    {
-        return Some(ProtocolType::Kitty);
+    if contains("ghostty") {
+        return Some(("ghostty", ProtocolType::Kitty));
     }
-    // Subterm (Kitty protocol — same as kokoirc)
-    if t.contains("subterm") {
-        return Some(ProtocolType::Kitty);
+    if contains("kitty") {
+        return Some(("kitty", ProtocolType::Kitty));
+    }
+    if contains("subterm") {
+        return Some(("subterm", ProtocolType::Kitty));
+    }
+    if contains("wezterm") {
+        return Some(("wezterm", ProtocolType::Iterm2));
+    }
+    if contains("rio") {
+        return Some(("rio", ProtocolType::Kitty));
     }
     // Sixel-capable terminals
-    if t.contains("foot")
-        || t.contains("contour")
-        || t.contains("konsole")
-        || t.contains("mintty")
-        || t.contains("mlterm")
-    {
-        return Some(ProtocolType::Sixel);
+    if contains("foot") {
+        return Some(("foot", ProtocolType::Sixel));
+    }
+    if contains("contour") {
+        return Some(("contour", ProtocolType::Sixel));
+    }
+    if contains("konsole") {
+        return Some(("konsole", ProtocolType::Sixel));
+    }
+    if contains("mintty") {
+        return Some(("mintty", ProtocolType::Sixel));
+    }
+    if contains("mlterm") {
+        return Some(("mlterm", ProtocolType::Sixel));
     }
 
     None
 }
 
+/// Resolve the image protocol to use, combining config override, tmux
+/// client detection, and IO-based detection.
+///
+/// Priority order:
+///   1. Config override (`protocol = "kitty"`)
+///   2. tmux `#{client_termtype}` / `#{client_termname}` — authoritative when
+///      in tmux because it identifies the REAL terminal displaying the pane.
+///   3. iTerm2 env-based override (non-tmux) — iTerm2 responds to Kitty IO
+///      probe but its Kitty implementation is incomplete.
+///   4. IO-based detection (`from_query_stdio`) — direct terminal only.
+///   5. Env-based outer terminal detection fallback.
+///
+/// Returns `(Some(protocol), source)` if an override should be applied to the
+/// picker, or `(None, source)` if the picker's auto-detected protocol is fine.
+fn resolve_image_protocol(
+    config_protocol: &str,
+    picker: &ratatui_image::picker::Picker,
+    outer_terminal: &str,
+    outer_proto: Option<ProtocolType>,
+    outer_source: String,
+) -> (Option<ProtocolType>, String) {
+    // 1. Config override — user explicitly chose a protocol.
+    match config_protocol {
+        "kitty" => return (Some(ProtocolType::Kitty), "config:kitty".into()),
+        "iterm2" => return (Some(ProtocolType::Iterm2), "config:iterm2".into()),
+        "sixel" => return (Some(ProtocolType::Sixel), "config:sixel".into()),
+        "halfblocks" => return (Some(ProtocolType::Halfblocks), "config:halfblocks".into()),
+        _ => {} // "auto" or anything else — proceed to detection
+    }
+
+    // 2. tmux client detection is authoritative — #{client_termtype} tells us
+    //    the REAL terminal program attached to the pane.  IO queries go through
+    //    DCS passthrough and might hit the wrong client when multiple are
+    //    attached; env vars can be stale.  Always trust tmux over IO.
+    if outer_source.starts_with("tmux:")
+        && let Some(proto) = outer_proto
+    {
+        return (Some(proto), outer_source);
+    }
+
+    // 3. iTerm2 env-based override (non-tmux path) — iTerm2 3.5+ responds to
+    //    the Kitty graphics probe, so ratatui-image detects Kitty. But iTerm2's
+    //    Kitty implementation is incomplete; the native iTerm2 (OSC 1337)
+    //    protocol works correctly.
+    if outer_terminal == "iterm2" {
+        return (Some(ProtocolType::Iterm2), format!("iterm2-override:{outer_source}"));
+    }
+
+    // 4. IO-based detection — trust it when running directly (not tmux).
+    if picker.protocol_type() != ProtocolType::Halfblocks {
+        return (None, format!("io-query:{:?}", picker.protocol_type()));
+    }
+
+    // 5. Env-based outer terminal detection fallback.
+    if let Some(proto) = outer_proto {
+        return (Some(proto), outer_source);
+    }
+
+    (None, "auto:halfblocks".into())
+}
+
+/// Check if we're running inside iTerm2 (directly or via tmux).
+///
+/// iTerm2 3.5+ responds to the Kitty graphics protocol probe, causing
+/// ratatui-image to incorrectly select Kitty over the native iTerm2 protocol.
 /// Run a tmux `display-message -p` query and return the trimmed stdout.
-fn tmux_query_raw(format_str: &str) -> Option<String> {
+pub fn tmux_query_raw(format_str: &str) -> Option<String> {
     let output = std::process::Command::new("tmux")
         .args(["display-message", "-p", format_str])
         .stdin(std::process::Stdio::null())
@@ -310,6 +334,12 @@ pub struct App {
     pub http_client: reqwest::Client,
     /// Terminal image protocol picker (for ratatui-image).
     pub picker: ratatui_image::picker::Picker,
+    /// Whether we're running inside tmux (for image cleanup DCS wrapping).
+    pub in_tmux: bool,
+    /// Detected outer terminal name (e.g. "ghostty", "iterm2", "kitty").
+    pub outer_terminal: String,
+    /// How the image protocol was resolved (for diagnostics).
+    pub image_proto_source: String,
     /// Queued (`conn_id`, channel) pairs for deferred WHO/MODE after join.
     /// Drained one-at-a-time by a periodic timer to avoid Excess Flood.
     pending_channel_queries: VecDeque<(String, String)>,
@@ -325,7 +355,7 @@ pub struct App {
     script_action_rx: mpsc::UnboundedReceiver<crate::scripting::ScriptAction>,
     /// Script-registered command names (tracked so we can show them in /help).
     pub script_commands: HashMap<String, (String, String)>,
-    /// Per-script config storage: (script_name, key) → value.
+    /// Per-script config storage: (`script_name`, key) → value.
     pub script_config: HashMap<(String, String), String>,
     /// Handles for active timer tasks, keyed by timer ID. Used to abort on cancel.
     active_timers: HashMap<u64, tokio::task::JoinHandle<()>>,
@@ -373,6 +403,7 @@ impl App {
 
         // Detect terminal image protocol capabilities.
         // Must be called before entering raw mode (setup_terminal).
+        let in_tmux = std::env::var("TMUX").is_ok_and(|s| !s.is_empty());
         let picker_result = ratatui_image::picker::Picker::from_query_stdio();
         tracing::debug!(
             result = ?picker_result.as_ref().map(ratatui_image::picker::Picker::protocol_type),
@@ -383,10 +414,25 @@ impl App {
         let mut picker =
             picker_result.unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
 
-        // Apply protocol override from config or env-var fallback detection
-        // (mirrors kokoirc's multi-phase detection: config > tmux query > env vars > TERM).
+        // Detect outer terminal — always runs, not just as a fallback.
+        // (mirrors kokoirc's detectProtocol: tmux query > env vars > TERM)
+        let (outer_terminal, outer_proto, outer_source) = detect_outer_terminal(in_tmux);
+        tracing::info!(
+            outer_terminal = %outer_terminal,
+            outer_proto = ?outer_proto,
+            outer_source = %outer_source,
+            "outer terminal detected"
+        );
+
+        // Apply protocol override from config, outer terminal, or IO result.
         let (resolved_proto, source) =
-            resolve_image_protocol(&config.image_preview.protocol, &picker);
+            resolve_image_protocol(
+                &config.image_preview.protocol,
+                &picker,
+                outer_terminal,
+                outer_proto,
+                outer_source,
+            );
         if let Some(proto) = resolved_proto {
             tracing::debug!(
                 from = ?picker.protocol_type(),
@@ -398,7 +444,7 @@ impl App {
         tracing::info!(
             protocol = ?picker.protocol_type(),
             source = %source,
-            "image preview protocol detected"
+            "image preview protocol selected"
         );
 
         let http_client = reqwest::Client::new();
@@ -450,6 +496,9 @@ impl App {
             preview_tx,
             http_client,
             picker,
+            in_tmux,
+            outer_terminal: outer_terminal.to_string(),
+            image_proto_source: source,
             pending_channel_queries: VecDeque::new(),
             paste_queue: VecDeque::new(),
             script_manager: Some(script_manager),
@@ -465,9 +514,9 @@ impl App {
 
     /// Show an image preview for the given URL.
     ///
-    /// Sets the preview status to `Loading` and spawns a background task to
-    /// fetch, cache, decode, and encode the image. Results arrive on
-    /// `self.preview_rx` and are handled in the event loop.
+    /// Re-detects the outer terminal and image protocol every time — the user
+    /// may have attached from a different terminal (e.g. `tmux a` from iTerm2
+    /// after starting in Ghostty).
     pub fn show_image_preview(&mut self, url: &str) {
         // Don't re-fetch if already loading or showing this URL.
         match &self.image_preview {
@@ -475,6 +524,9 @@ impl App {
             | crate::image_preview::PreviewStatus::Ready { url: u, .. } if u == url => return,
             _ => {}
         }
+
+        // Re-detect terminal and protocol before every preview.
+        self.refresh_image_protocol();
 
         self.image_preview = crate::image_preview::PreviewStatus::Loading {
             url: url.to_string(),
@@ -492,9 +544,184 @@ impl App {
         );
     }
 
+    /// Re-detect outer terminal and update the picker's protocol.
+    pub fn refresh_image_protocol(&mut self) {
+        let in_tmux = std::env::var("TMUX").is_ok_and(|s| !s.is_empty());
+        self.in_tmux = in_tmux;
+
+        let (outer_terminal, outer_proto, outer_source) = detect_outer_terminal(in_tmux);
+
+        let (resolved_proto, source) = resolve_image_protocol(
+            &self.config.image_preview.protocol,
+            &self.picker,
+            outer_terminal,
+            outer_proto,
+            outer_source,
+        );
+
+        if let Some(proto) = resolved_proto {
+            if proto != self.picker.protocol_type() {
+                tracing::info!(
+                    from = ?self.picker.protocol_type(),
+                    to = ?proto,
+                    source = %source,
+                    outer = %outer_terminal,
+                    "image protocol changed"
+                );
+            }
+            self.picker.set_protocol_type(proto);
+        }
+
+        self.outer_terminal = outer_terminal.to_string();
+        self.image_proto_source = source;
+    }
+
     /// Dismiss the image preview overlay (e.g. on Escape press).
     pub fn dismiss_image_preview(&mut self) {
+        // Send protocol-specific cleanup before clearing the state.
+        // Kitty graphics persist on a separate layer — terminals like Subterm
+        // don't auto-remove them when the unicode placeholders disappear,
+        // leaving pixel "garbage". Send an explicit delete command.
+        if matches!(self.image_preview, crate::image_preview::PreviewStatus::Ready { .. }) {
+            self.cleanup_image_graphics();
+        }
         self.image_preview = crate::image_preview::PreviewStatus::Hidden;
+    }
+
+    /// Send protocol-specific escape sequences to clear image graphics.
+    ///
+    /// For Kitty protocol: `ESC_Ga=d,q=2 ESC\` deletes all graphics.
+    /// In tmux: wrapped in DCS passthrough so it reaches the outer terminal.
+    fn cleanup_image_graphics(&self) {
+        use std::io::Write;
+
+        if self.picker.protocol_type() == ProtocolType::Kitty {
+            let seq = if self.in_tmux {
+                // DCS passthrough: ESC P tmux; <escaped-seq> ESC backslash
+                "\x1bPtmux;\x1b\x1b_Ga=d,q=2\x1b\x1b\\\x1b\\"
+            } else {
+                "\x1b_Ga=d,q=2\x1b\\"
+            };
+            let _ = std::io::stdout().write_all(seq.as_bytes());
+            let _ = std::io::stdout().flush();
+        }
+        // iTerm2 / Sixel / Halfblocks: image is in the cell buffer,
+        // ratatui's Clear widget + redraw handles cleanup.
+    }
+
+    /// Write iTerm2 image directly to stdout for tmux passthrough.
+    ///
+    /// ratatui-image embeds the entire DCS-wrapped sequence as a cell symbol,
+    /// but that approach doesn't work reliably through tmux. Instead, write
+    /// the OSC 1337 sequence directly to stdout (wrapped in DCS passthrough),
+    /// matching kokoirc's proven approach.
+    ///
+    /// Called AFTER `terminal.draw()` so ratatui has already flushed the
+    /// border/popup. The image is drawn on top at the correct position.
+    ///
+    /// Matches kokoirc's write strategy exactly:
+    ///   1. Disable mouse tracking (prevents interference during DCS write)
+    ///   2. Save cursor + position at inner area
+    ///   3. Write DCS-wrapped OSC 1337 with immediate flush
+    ///   4. Restore cursor
+    ///   5. Re-enable mouse tracking
+    pub fn write_iterm2_tmux_direct(&self) {
+        use std::io::Write;
+
+        // Mouse tracking modes — must be disabled during DCS image write to
+        // prevent interference with tmux passthrough (matches kokoirc).
+        const MOUSE_DISABLE: &[u8] =
+            b"\x1b[?1003l\x1b[?1006l\x1b[?1002l\x1b[?1000l";
+        const MOUSE_ENABLE: &[u8] =
+            b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h";
+
+        // Only for iTerm2+tmux with a Ready preview.
+        if !self.in_tmux || self.picker.protocol_type() != ProtocolType::Iterm2 {
+            return;
+        }
+
+        let (raw_png, popup_width, popup_height) = match &self.image_preview {
+            crate::image_preview::PreviewStatus::Ready {
+                raw_png,
+                width,
+                height,
+                ..
+            } => (raw_png, *width, *height),
+            _ => return,
+        };
+
+        if raw_png.is_empty() {
+            return;
+        }
+
+        // Calculate popup position (must match image_overlay::centered_rect).
+        let term_size = crossterm::terminal::size().unwrap_or((80, 24));
+        let popup_w = popup_width.min(term_size.0);
+        let popup_h = popup_height.min(term_size.1);
+        let popup_x = (term_size.0.saturating_sub(popup_w)) / 2;
+        let popup_y = (term_size.1.saturating_sub(popup_h)) / 2;
+
+        // Inner area (1-cell border).
+        let inner_x = popup_x + 1;
+        let inner_y = popup_y + 1;
+        let inner_w = popup_w.saturating_sub(2);
+        let inner_h = popup_h.saturating_sub(2);
+
+        if inner_w == 0 || inner_h == 0 {
+            return;
+        }
+
+        tracing::debug!(
+            inner_w,
+            inner_h,
+            inner_x,
+            inner_y,
+            png_len = raw_png.len(),
+            "writing iTerm2+tmux direct image"
+        );
+
+        // Encode: base64 the PNG data.
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, raw_png);
+
+        // Build the iTerm2 OSC 1337 sequence (kokoirc-style: cell dims, preserveAspectRatio=0).
+        let osc = format!(
+            "\x1b]1337;File=inline=1;width={inner_w};height={inner_h};preserveAspectRatio=0:{b64}\x07"
+        );
+
+        // Wrap in tmux DCS passthrough: double all ESC bytes in the payload.
+        let escaped = osc.replace('\x1b', "\x1b\x1b");
+        let dcs = format!("\x1bPtmux;{escaped}\x1b\\");
+
+        // ── Write sequence (matches kokoirc render.ts exactly) ──
+        //
+        // Use per-step flush for immediate delivery to tmux,
+        // matching kokoirc's writeSync(1, ...) pattern.
+        // Terminal rows/cols are 1-based for CUP.
+        let row = inner_y + 1;
+        let col = inner_x + 1;
+        let cursor_save = format!("\x1b7\x1b[{row};{col}H");
+
+        let mut out = std::io::stdout().lock();
+
+        // Step 1: Disable mouse tracking.
+        let _ = out.write_all(MOUSE_DISABLE);
+        let _ = out.flush();
+
+        // Step 2: Save cursor + position.
+        let _ = out.write_all(cursor_save.as_bytes());
+        let _ = out.flush();
+
+        // Step 3: Write DCS-wrapped image data.
+        let _ = out.write_all(dcs.as_bytes());
+        let _ = out.flush();
+
+        // Step 4: Restore cursor.
+        let _ = out.write_all(b"\x1b8");
+        let _ = out.flush();
+
+        // Step 5: Re-enable mouse tracking.
+        let _ = out.write_all(MOUSE_ENABLE);
+        let _ = out.flush();
     }
 
     /// Set up connection state, server buffer, and "Connecting..." message.
@@ -671,6 +898,10 @@ impl App {
         while !self.should_quit {
             terminal.draw(|frame| ui::layout::draw(frame, self))?;
 
+            // iTerm2+tmux: write image directly to stdout after ratatui
+            // has flushed the frame (border/popup already drawn).
+            self.write_iterm2_tmux_direct();
+
             tokio::select! {
                 ev = term_rx.recv() => match ev {
                     Some(ev) => {
@@ -843,12 +1074,14 @@ impl App {
                 url,
                 title,
                 image,
+                raw_png,
                 width,
                 height,
             } => PreviewStatus::Ready {
                 url,
                 title,
                 image,
+                raw_png,
                 width,
                 height,
             },
@@ -1264,30 +1497,25 @@ impl App {
                     }
                 }
 
-                // Throttled join: batch 4 channels per JOIN, 2s delay between batches.
-                // Channel entries may contain keys: "#channel key" → split on first space.
+                // Batch channels into comma-separated JOINs (4 per command).
+                // The irc crate's penalty-based flood protection handles pacing.
                 if !all_channels.is_empty()
                     && let Some(handle) = self.irc_handles.get(&conn_id)
                 {
-                    let sender = handle.sender.clone();
-                    let channels = all_channels;
-                    tokio::spawn(async move {
-                        for batch in channels.chunks(4) {
-                            let (names, keys) = split_channel_keys(batch);
-                            let keys_param =
-                                if keys.iter().all(|k| k.is_empty()) {
-                                    None
-                                } else {
-                                    Some(keys.join(","))
-                                };
-                            let _ = sender.send(::irc::proto::Command::JOIN(
-                                names.join(","),
-                                keys_param,
-                                None,
-                            ));
-                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                        }
-                    });
+                    for batch in all_channels.chunks(4) {
+                        let (names, keys) = split_channel_keys(batch);
+                        let keys_param =
+                            if keys.iter().all(|k| k.is_empty()) {
+                                None
+                            } else {
+                                Some(keys.join(","))
+                            };
+                        let _ = handle.sender.send(::irc::proto::Command::JOIN(
+                            names.join(","),
+                            keys_param,
+                            None,
+                        ));
+                    }
                 }
             }
             IrcEvent::Disconnected(conn_id, error) => {
@@ -1590,7 +1818,7 @@ impl App {
             (_, KeyCode::Enter) => {
                 let text = self.input.submit();
                 if !text.is_empty() {
-                    self.handle_submit(text);
+                    self.handle_submit(&text);
                 }
             }
             (_, KeyCode::Backspace) => self.input.backspace(),
@@ -1641,7 +1869,7 @@ impl App {
         };
 
         // Send first line immediately
-        self.handle_submit(first);
+        self.handle_submit(&first);
 
         // Queue remaining lines
         for line in &non_empty[1..] {
@@ -1652,7 +1880,7 @@ impl App {
     /// Send one queued paste line. Called every 500ms by the paste timer.
     fn drain_paste_queue(&mut self) {
         if let Some(line) = self.paste_queue.pop_front() {
-            self.handle_submit(line);
+            self.handle_submit(&line);
         }
     }
 
@@ -1859,8 +2087,8 @@ impl App {
         self.input.tab_complete(&nicks, &commands, &setting_paths);
     }
 
-    fn handle_submit(&mut self, text: String) {
-        if let Some(parsed) = crate::commands::parser::parse_command(&text) {
+    fn handle_submit(&mut self, text: &str) {
+        if let Some(parsed) = crate::commands::parser::parse_command(text) {
             self.execute_command(&parsed);
         } else {
             self.handle_plain_message(text);
@@ -1896,7 +2124,7 @@ impl App {
             if let Some(reparsed) = crate::commands::parser::parse_command(&expanded) {
                 self.execute_command(&reparsed);
             } else {
-                self.handle_plain_message(expanded);
+                self.handle_plain_message(&expanded);
             }
         } else if self.script_manager.as_ref().is_some_and(|m| {
             let conn_id = self.state.active_buffer().map(|b| b.connection_id.as_str());
@@ -1911,7 +2139,7 @@ impl App {
         }
     }
 
-    fn handle_plain_message(&mut self, text: String) {
+    fn handle_plain_message(&mut self, text: &str) {
         let Some(active_id) = self.state.active_buffer_id.clone() else {
             return;
         };
@@ -1933,13 +2161,8 @@ impl App {
             (buf.connection_id.clone(), nick, buf.name.clone())
         };
 
-        // Try to send via IRC if connected
-        if let Some(handle) = self.irc_handles.get(&conn_id)
-            && handle.sender.send_privmsg(&buffer_name, &text).is_err()
-        {
-            crate::commands::helpers::add_local_event(self, "Failed to send message");
-            return;
-        }
+        // Split long messages at word boundaries to stay within IRC byte limits.
+        let chunks = crate::irc::split_irc_message(text, crate::irc::MESSAGE_MAX_BYTES);
 
         // When echo-message is enabled, the server will echo our message back
         // with authoritative server-time — skip local display and wait for echo.
@@ -1949,23 +2172,33 @@ impl App {
             .get(&conn_id)
             .is_some_and(|c| c.enabled_caps.contains("echo-message"));
 
-        if !echo_message_enabled {
-            let id = self.state.next_message_id();
-            self.state.add_message(
-                &active_id,
-                Message {
-                    id,
-                    timestamp: Utc::now(),
-                    message_type: MessageType::Message,
-                    nick: Some(nick),
-                    nick_mode: None,
-                    text,
-                    highlight: false,
-                    event_key: None,
-                    event_params: None, log_msg_id: None, log_ref_id: None,
-                    tags: std::collections::HashMap::new(),
-                },
-            );
+        for chunk in chunks {
+            // Try to send via IRC if connected
+            if let Some(handle) = self.irc_handles.get(&conn_id)
+                && handle.sender.send_privmsg(&buffer_name, &chunk).is_err()
+            {
+                crate::commands::helpers::add_local_event(self, "Failed to send message");
+                return;
+            }
+
+            if !echo_message_enabled {
+                let id = self.state.next_message_id();
+                self.state.add_message(
+                    &active_id,
+                    Message {
+                        id,
+                        timestamp: Utc::now(),
+                        message_type: MessageType::Message,
+                        nick: Some(nick.clone()),
+                        nick_mode: None,
+                        text: chunk,
+                        highlight: false,
+                        event_key: None,
+                        event_params: None, log_msg_id: None, log_ref_id: None,
+                        tags: std::collections::HashMap::new(),
+                    },
+                );
+            }
         }
     }
 
@@ -2210,10 +2443,12 @@ impl App {
                 for segment in key_path.split('.') {
                     current = current.get(segment)?;
                 }
-                match current {
-                    toml::Value::String(s) => Some(s.clone()),
+                let result = match current {
+                    toml::Value::String(v) => Some(v.clone()),
                     other => Some(other.to_string()),
-                }
+                };
+                drop(s);
+                result
             });
 
         crate::scripting::engine::ScriptAPI {
@@ -2284,7 +2519,9 @@ impl App {
                 if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
                     && let Some(sender) = self.irc_sender_for(&cid)
                 {
-                    let _ = sender.send_privmsg(&target, &text);
+                    for chunk in crate::irc::split_irc_message(&text, crate::irc::MESSAGE_MAX_BYTES) {
+                        let _ = sender.send_privmsg(&target, &chunk);
+                    }
                 }
             }
             ScriptAction::Action { target, text, conn_id } => {
@@ -2714,48 +2951,63 @@ mod tests {
         assert!(keys.is_empty());
     }
 
-    // ── match_term_name tests ──
+    // ── match_terminal tests ──
 
     #[test]
-    fn match_term_iterm2_termtype() {
-        assert_eq!(match_term_name("iTerm2 3.6.8"), Some(ProtocolType::Iterm2));
+    fn match_terminal_iterm2_termtype() {
+        let (name, proto) = match_terminal("iTerm2 3.6.8").unwrap();
+        assert_eq!(name, "iterm2");
+        assert_eq!(proto, ProtocolType::Iterm2);
     }
 
     #[test]
-    fn match_term_ghostty() {
-        assert_eq!(match_term_name("ghostty 1.3.0"), Some(ProtocolType::Kitty));
-        assert_eq!(match_term_name("xterm-ghostty"), Some(ProtocolType::Kitty));
+    fn match_terminal_ghostty() {
+        let (name, proto) = match_terminal("ghostty 1.3.0").unwrap();
+        assert_eq!(name, "ghostty");
+        assert_eq!(proto, ProtocolType::Kitty);
+        let (name, proto) = match_terminal("xterm-ghostty").unwrap();
+        assert_eq!(name, "ghostty");
+        assert_eq!(proto, ProtocolType::Kitty);
     }
 
     #[test]
-    fn match_term_kitty() {
-        assert_eq!(match_term_name("xterm-kitty"), Some(ProtocolType::Kitty));
+    fn match_terminal_kitty() {
+        let (name, proto) = match_terminal("xterm-kitty").unwrap();
+        assert_eq!(name, "kitty");
+        assert_eq!(proto, ProtocolType::Kitty);
     }
 
     #[test]
-    fn match_term_subterm() {
-        assert_eq!(match_term_name("Subterm 1.0"), Some(ProtocolType::Kitty));
-        assert_eq!(match_term_name("subterm"), Some(ProtocolType::Kitty));
+    fn match_terminal_subterm() {
+        let (name, proto) = match_terminal("Subterm 1.0").unwrap();
+        assert_eq!(name, "subterm");
+        assert_eq!(proto, ProtocolType::Kitty);
     }
 
     #[test]
-    fn match_term_wezterm() {
-        assert_eq!(match_term_name("WezTerm 20240203"), Some(ProtocolType::Kitty));
+    fn match_terminal_wezterm() {
+        let (name, proto) = match_terminal("WezTerm 20240203").unwrap();
+        assert_eq!(name, "wezterm");
+        assert_eq!(proto, ProtocolType::Iterm2);
     }
 
     #[test]
-    fn match_term_foot() {
-        assert_eq!(match_term_name("foot"), Some(ProtocolType::Sixel));
+    fn match_terminal_foot() {
+        let (name, proto) = match_terminal("foot").unwrap();
+        assert_eq!(name, "foot");
+        assert_eq!(proto, ProtocolType::Sixel);
     }
 
     #[test]
-    fn match_term_konsole() {
-        assert_eq!(match_term_name("konsole"), Some(ProtocolType::Sixel));
+    fn match_terminal_konsole() {
+        let (name, proto) = match_terminal("konsole").unwrap();
+        assert_eq!(name, "konsole");
+        assert_eq!(proto, ProtocolType::Sixel);
     }
 
     #[test]
-    fn match_term_unknown() {
-        assert_eq!(match_term_name("some-random-terminal"), None);
+    fn match_terminal_unknown() {
+        assert!(match_terminal("some-random-terminal").is_none());
     }
 
     // ── resolve_image_protocol tests ──
@@ -2763,7 +3015,7 @@ mod tests {
     #[test]
     fn resolve_config_override_kitty() {
         let picker = ratatui_image::picker::Picker::halfblocks();
-        let (proto, source) = resolve_image_protocol("kitty", &picker);
+        let (proto, source) = resolve_image_protocol("kitty", &picker, "unknown", None, String::new());
         assert_eq!(proto, Some(ProtocolType::Kitty));
         assert_eq!(source, "config:kitty");
     }
@@ -2771,17 +3023,62 @@ mod tests {
     #[test]
     fn resolve_config_override_iterm2() {
         let picker = ratatui_image::picker::Picker::halfblocks();
-        let (proto, source) = resolve_image_protocol("iterm2", &picker);
+        let (proto, source) = resolve_image_protocol("iterm2", &picker, "unknown", None, String::new());
         assert_eq!(proto, Some(ProtocolType::Iterm2));
         assert_eq!(source, "config:iterm2");
     }
 
     #[test]
-    fn resolve_auto_trusts_io_detection() {
+    fn resolve_tmux_overrides_io_detection() {
+        // tmux client_termtype says Kitty — should override IO even if IO
+        // also detected Kitty (they agree here, but tmux is authoritative).
         let mut picker = ratatui_image::picker::Picker::halfblocks();
         picker.set_protocol_type(ProtocolType::Kitty);
-        let (proto, source) = resolve_image_protocol("auto", &picker);
-        assert_eq!(proto, None);
+        let (proto, source) = resolve_image_protocol(
+            "auto", &picker, "ghostty", Some(ProtocolType::Kitty),
+            "tmux:client_termtype=ghostty 1.3.0".into(),
+        );
+        assert_eq!(proto, Some(ProtocolType::Kitty));
+        assert!(source.starts_with("tmux:"));
+    }
+
+    #[test]
+    fn resolve_tmux_iterm2_overrides_kitty_io() {
+        // tmux says iTerm2, IO detected Kitty (iTerm2 responds to Kitty probe).
+        // tmux is authoritative — use iTerm2 protocol.
+        let mut picker = ratatui_image::picker::Picker::halfblocks();
+        picker.set_protocol_type(ProtocolType::Kitty);
+        let (proto, source) = resolve_image_protocol(
+            "auto", &picker, "iterm2", Some(ProtocolType::Iterm2),
+            "tmux:client_termtype=iTerm2 3.6.8".into(),
+        );
+        assert_eq!(proto, Some(ProtocolType::Iterm2));
+        assert!(source.starts_with("tmux:"));
+    }
+
+    #[test]
+    fn resolve_direct_trusts_io_detection() {
+        // Not in tmux — outer terminal from env, IO detection is fine.
+        let mut picker = ratatui_image::picker::Picker::halfblocks();
+        picker.set_protocol_type(ProtocolType::Kitty);
+        let (proto, source) = resolve_image_protocol(
+            "auto", &picker, "ghostty", Some(ProtocolType::Kitty),
+            "env:LC_TERMINAL=Ghostty".into(),
+        );
+        assert_eq!(proto, None); // trust IO
         assert!(source.starts_with("io-query:"));
+    }
+
+    #[test]
+    fn resolve_env_iterm2_override_over_kitty_io() {
+        // Not in tmux, env says iTerm2, IO detected Kitty.
+        // iTerm2 override still works via env path.
+        let mut picker = ratatui_image::picker::Picker::halfblocks();
+        picker.set_protocol_type(ProtocolType::Kitty);
+        let (proto, _source) = resolve_image_protocol(
+            "auto", &picker, "iterm2", Some(ProtocolType::Iterm2),
+            "env:ITERM_SESSION_ID".into(),
+        );
+        assert_eq!(proto, Some(ProtocolType::Iterm2));
     }
 }

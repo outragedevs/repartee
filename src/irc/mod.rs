@@ -123,6 +123,107 @@ pub fn select_sasl_mechanism(
     None
 }
 
+/// Default maximum message body length in bytes.
+///
+/// IRC protocol limits total message length to 512 bytes including `\r\n`.
+/// The server prepends `:nick!user@host ` when relaying, which can consume
+/// up to ~160 bytes. Using 350 bytes for the body (matching irc-framework)
+/// leaves safe headroom.
+pub const MESSAGE_MAX_BYTES: usize = 350;
+
+/// Split a message into chunks that each fit within `max_bytes` of UTF-8.
+///
+/// Prefers word boundaries; falls back to character boundaries for very
+/// long words. Matches the behaviour of irc-framework's `lineBreak()`.
+#[must_use]
+pub fn split_irc_message(text: &str, max_bytes: usize) -> Vec<String> {
+    if text.len() <= max_bytes {
+        return vec![text.to_string()];
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for word in WordSplitter::new(text) {
+        let combined_len = if current.is_empty() {
+            word.len()
+        } else {
+            current.len() + word.len()
+        };
+
+        if combined_len <= max_bytes {
+            current.push_str(word);
+            continue;
+        }
+
+        // Word alone fits on a new line — flush current, start new line.
+        if word.trim().len() <= max_bytes {
+            if !current.is_empty() {
+                lines.push(current);
+                current = String::new();
+            }
+            // Don't carry leading whitespace onto a continuation line.
+            current.push_str(word.trim_start());
+            continue;
+        }
+
+        // Word is too long even for a line — break at char boundaries.
+        for ch in word.chars() {
+            if current.len() + ch.len_utf8() > max_bytes
+                && !current.is_empty()
+            {
+                lines.push(current);
+                current = String::new();
+            }
+            current.push(ch);
+        }
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+
+    lines
+}
+
+/// Iterator that yields "word + trailing whitespace" chunks from a string,
+/// keeping whitespace attached to the preceding word so the caller can
+/// decide where to break.
+struct WordSplitter<'a> {
+    remaining: &'a str,
+}
+
+impl<'a> WordSplitter<'a> {
+    const fn new(s: &'a str) -> Self {
+        Self { remaining: s }
+    }
+}
+
+impl<'a> Iterator for WordSplitter<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<&'a str> {
+        if self.remaining.is_empty() {
+            return None;
+        }
+
+        // Find end of non-whitespace (the word).
+        let word_end = self
+            .remaining
+            .find(char::is_whitespace)
+            .unwrap_or(self.remaining.len());
+
+        // Find end of trailing whitespace.
+        let ws_end = self.remaining[word_end..]
+            .find(|c: char| !c.is_whitespace())
+            .map_or(self.remaining.len(), |pos| word_end + pos);
+
+        let chunk = &self.remaining[..ws_end];
+        self.remaining = &self.remaining[ws_end..];
+        Some(chunk)
+    }
+}
+
 /// Connect to an IRC server, returning a handle and the event receiver.
 ///
 /// Always performs capability negotiation (CAP LS 302), requesting all
@@ -174,6 +275,11 @@ pub async fn connect_server(
         version: Some(general.ctcp_version.clone()),
         client_cert_path: server_config.client_cert_path.clone(),
         bind_address: server_config.bind_ip.clone(),
+        flood_penalty_threshold: Some(if general.flood_protection {
+            10_000 // default: 10s, matches IRCd excess flood limit
+        } else {
+            0 // disabled
+        }),
         ..Config::default()
     };
 
@@ -818,5 +924,91 @@ mod tests {
         ];
         let result = select_sasl_mechanism(&server_mechs, None, true, true);
         assert_eq!(result, Some(SaslMechanism::External));
+    }
+
+    // ── split_irc_message tests ─────────────────────────────
+
+    #[test]
+    fn short_message_not_split() {
+        let result = split_irc_message("hello world", 350);
+        assert_eq!(result, vec!["hello world"]);
+    }
+
+    #[test]
+    fn split_at_word_boundary() {
+        // 10-byte limit: "hello " is 6 bytes, "world" is 5 bytes — total 11 > 10
+        let result = split_irc_message("hello world", 10);
+        assert_eq!(result, vec!["hello ", "world"]);
+    }
+
+    #[test]
+    fn split_long_text_multiple_chunks() {
+        let text = "aaa bbb ccc ddd eee fff";
+        let result = split_irc_message(text, 12);
+        // "aaa bbb ccc " = 12, "ddd eee fff" = 11
+        assert_eq!(result.len(), 2);
+        // Each chunk should be <= 12 bytes
+        for chunk in &result {
+            assert!(chunk.len() <= 12, "chunk too long: '{chunk}'");
+        }
+    }
+
+    #[test]
+    fn very_long_word_split_at_chars() {
+        let text = "abcdefghij";
+        let result = split_irc_message(text, 5);
+        assert_eq!(result, vec!["abcde", "fghij"]);
+    }
+
+    #[test]
+    fn empty_message() {
+        let result = split_irc_message("", 350);
+        assert_eq!(result, vec![""]);
+    }
+
+    #[test]
+    fn unicode_message_split() {
+        // Each emoji is 4 bytes. 3 emojis = 12 bytes.
+        let text = "🦀🦀🦀";
+        let result = split_irc_message(text, 8);
+        assert_eq!(result, vec!["🦀🦀", "🦀"]);
+    }
+
+    #[test]
+    fn lorem_ipsum_split() {
+        let text = "Lorem ipsum dolor sit amet, consetetur sadipscing elitr, \
+                    sed diam nonumy eirmod tempor invidunt ut labore et dolore \
+                    magna aliquyam erat, sed diam voluptua.";
+        let result = split_irc_message(text, MESSAGE_MAX_BYTES);
+        // The full text is ~170 bytes, well under 350 — should not be split.
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn lorem_ipsum_long_split() {
+        let text = "Lorem ipsum dolor sit amet, consetetur sadipscing elitr, \
+                    sed diam nonumy eirmod tempor invidunt ut labore et dolore \
+                    magna aliquyam erat, sed diam voluptua. At vero eos et accusam \
+                    et justo duo dolores et ea rebum. Stet clita kasd gubergren, \
+                    no sea takimata sanctus est Lorem ipsum dolor sit amet. Lorem \
+                    ipsum dolor sit amet, consetetur sadipscing elitr, sed diam \
+                    nonumy eirmod tempor invidunt ut labore et dolore magna \
+                    aliquyam erat, sed diam voluptua.";
+        let result = split_irc_message(text, MESSAGE_MAX_BYTES);
+        assert!(result.len() >= 2, "expected multiple chunks, got {}", result.len());
+        // Every chunk must fit within the limit.
+        for (i, chunk) in result.iter().enumerate() {
+            assert!(
+                chunk.len() <= MESSAGE_MAX_BYTES,
+                "chunk {i} is {} bytes (max {MESSAGE_MAX_BYTES}): '{chunk}'",
+                chunk.len(),
+            );
+        }
+        // Reassembled text should equal original (minus whitespace trimming at break points).
+        let reassembled: String = result.join(" ");
+        // Word-level comparison (whitespace at break points may differ).
+        let orig_words: Vec<&str> = text.split_whitespace().collect();
+        let re_words: Vec<&str> = reassembled.split_whitespace().collect();
+        assert_eq!(orig_words, re_words);
     }
 }

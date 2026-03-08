@@ -35,6 +35,8 @@ pub enum PreviewStatus {
         title: Option<String>,
         /// Pre-encoded image for the ratatui-image widget.
         image: Box<StatefulProtocol>,
+        /// Raw PNG bytes for direct-write path (iTerm2+tmux).
+        raw_png: Vec<u8>,
         /// Width in terminal cells (including border).
         width: u16,
         /// Height in terminal cells (including border).
@@ -55,6 +57,7 @@ pub enum ImagePreviewEvent {
         url: String,
         title: Option<String>,
         image: Box<StatefulProtocol>,
+        raw_png: Vec<u8>,
         width: u16,
         height: u16,
     },
@@ -95,10 +98,11 @@ pub fn spawn_preview(
     tokio::task::spawn_blocking(move || {
         let result = fetch_decode_encode(&url, &config, &picker, &client, term_size);
         let event = match result {
-            Ok((title, protocol, width, height)) => ImagePreviewEvent::Ready {
+            Ok((title, protocol, png_buf, width, height)) => ImagePreviewEvent::Ready {
                 url,
                 title,
                 image: Box::new(protocol),
+                raw_png: png_buf,
                 width,
                 height,
             },
@@ -121,13 +125,16 @@ pub fn spawn_preview(
 ///
 /// Called inside `spawn_blocking` because image decoding and protocol encoding
 /// are CPU-bound operations.
+/// (title, protocol, `raw_png`, width, height)
+type DecodeResult = (Option<String>, StatefulProtocol, Vec<u8>, u16, u16);
+
 fn fetch_decode_encode(
     url: &str,
     config: &ImagePreviewConfig,
     picker: &Picker,
     client: &reqwest::Client,
     term_size: (u16, u16),
-) -> color_eyre::eyre::Result<(Option<String>, StatefulProtocol, u16, u16)> {
+) -> color_eyre::eyre::Result<DecodeResult> {
     // 1. Check the disk cache first.
     let (data, title) = if let Some(cached_path) = cache::is_cached(url) {
         let data = std::fs::read(&cached_path)?;
@@ -166,10 +173,14 @@ fn fetch_decode_encode(
     // 6. Calculate display dimensions (matching kokoirc aspect ratio logic).
     let (width, height) = calculate_display_size(config, term_size, &dyn_img);
 
-    // 7. Create the protocol image via the picker.
+    // 7. Encode as PNG for the direct-write path (iTerm2+tmux).
+    let mut png_buf: Vec<u8> = Vec::new();
+    dyn_img.write_to(&mut Cursor::new(&mut png_buf), image::ImageFormat::Png)?;
+
+    // 8. Create the protocol image via the picker.
     let protocol = picker.new_resize_protocol(dyn_img);
 
-    Ok((title, protocol, width, height))
+    Ok((title, protocol, png_buf, width, height))
 }
 
 /// Calculate the popup dimensions in terminal cells.

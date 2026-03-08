@@ -785,17 +785,7 @@ pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
         (conn_id, nick)
     };
 
-    if let Some(handle) = app.irc_handles.get(&conn_id)
-        && let Err(e) = handle.sender.send_privmsg(target, text)
-    {
-        add_local_event(
-            app,
-            &format!("Failed to send message: {e}"),
-        );
-        return;
-    }
-
-    // Create query buffer if needed and echo
+    // Create query buffer if needed
     let buffer_id = crate::state::buffer::make_buffer_id(&conn_id, target);
     if !app.state.buffers.contains_key(&buffer_id) && !crate::irc::formatting::is_channel(target) {
         app.state.add_buffer(crate::state::buffer::Buffer {
@@ -823,23 +813,34 @@ pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
         .get(&conn_id)
         .is_some_and(|c| c.enabled_caps.contains("echo-message"));
 
-    if !echo_message_enabled {
-        let id = app.state.next_message_id();
-        app.state.add_message(
-            &buffer_id,
-            crate::state::buffer::Message {
-                id,
-                timestamp: chrono::Utc::now(),
-                message_type: crate::state::buffer::MessageType::Message,
-                nick: Some(nick),
-                nick_mode: None,
-                text: text.clone(),
-                highlight: false,
-                event_key: None,
-                event_params: None, log_msg_id: None, log_ref_id: None,
-                tags: std::collections::HashMap::new(),
-            },
-        );
+    // Split long messages at word boundaries to stay within IRC byte limits.
+    let chunks = crate::irc::split_irc_message(text, crate::irc::MESSAGE_MAX_BYTES);
+    for chunk in chunks {
+        if let Some(handle) = app.irc_handles.get(&conn_id)
+            && let Err(e) = handle.sender.send_privmsg(target, &chunk)
+        {
+            add_local_event(app, &format!("Failed to send message: {e}"));
+            return;
+        }
+
+        if !echo_message_enabled {
+            let id = app.state.next_message_id();
+            app.state.add_message(
+                &buffer_id,
+                crate::state::buffer::Message {
+                    id,
+                    timestamp: chrono::Utc::now(),
+                    message_type: crate::state::buffer::MessageType::Message,
+                    nick: Some(nick.clone()),
+                    nick_mode: None,
+                    text: chunk,
+                    highlight: false,
+                    event_key: None,
+                    event_params: None, log_msg_id: None, log_ref_id: None,
+                    tags: std::collections::HashMap::new(),
+                },
+            );
+        }
     }
     app.state.set_active_buffer(&buffer_id);
 }

@@ -17,6 +17,9 @@ use crate::theme::hex_to_color;
 /// the popup appears on top. When the preview status is `Hidden`, this is a
 /// no-op.
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
+    let iterm2_tmux = app.in_tmux
+        && app.picker.protocol_type() == ratatui_image::picker::ProtocolType::Iterm2;
+
     match &mut app.image_preview {
         PreviewStatus::Hidden => {}
         PreviewStatus::Loading { url } => {
@@ -29,7 +32,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             height,
             ..
         } => {
-            render_ready(frame, area, &app.theme.colors, title.as_deref(), &mut *image, *width, *height);
+            render_ready(
+                frame, area, &app.theme.colors, title.as_deref(),
+                &mut *image, *width, *height, iterm2_tmux,
+            );
         }
         PreviewStatus::Error { url, message } => {
             render_error(frame, area, &app.theme.colors, url, message);
@@ -93,6 +99,12 @@ fn render_loading(
 }
 
 /// Render the image preview popup with the decoded image.
+///
+/// When `iterm2_tmux` is true, the image content is skipped here — it will
+/// be written directly to stdout after `terminal.draw()` completes, matching
+/// how kokoirc handles iTerm2+tmux (direct `writeSync` bypassing the TUI
+/// buffer). The popup border and title are still rendered through ratatui.
+#[expect(clippy::too_many_arguments, reason = "render params are all needed")]
 fn render_ready(
     frame: &mut Frame,
     area: Rect,
@@ -101,6 +113,7 @@ fn render_ready(
     image: &mut ratatui_image::protocol::StatefulProtocol,
     width: u16,
     height: u16,
+    iterm2_tmux: bool,
 ) {
     let bg_alt = hex_to_color(&colors.bg_alt).unwrap_or(Color::Black);
     let border_color = hex_to_color(&colors.border).unwrap_or(Color::DarkGray);
@@ -123,9 +136,17 @@ fn render_ready(
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
 
-    // Render the image using StatefulImage widget.
-    let stateful_image = ratatui_image::StatefulImage::default();
-    frame.render_stateful_widget(stateful_image, inner, image);
+    if iterm2_tmux {
+        // Skip ratatui-image widget — image will be written directly to
+        // stdout after the frame completes (see App::write_iterm2_direct).
+        // Fill the inner area with bg so there's no stale text behind.
+        let fill = Paragraph::new("").style(Style::default().bg(bg_alt));
+        frame.render_widget(fill, inner);
+    } else {
+        // Standard path: render via ratatui-image StatefulImage widget.
+        let stateful_image = ratatui_image::StatefulImage::default();
+        frame.render_stateful_widget(stateful_image, inner, image);
+    }
 }
 
 /// Render an error popup.

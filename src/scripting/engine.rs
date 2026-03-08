@@ -59,7 +59,7 @@ pub struct ScriptStateSnapshot {
     pub connections: Vec<ConnectionInfo>,
     pub buffers: Vec<BufferInfo>,
     pub buffer_nicks: HashMap<String, Vec<NickInfo>>,
-    /// Per-script config: (script_name, key) → value.
+    /// Per-script config: (`script_name`, key) → value.
     pub script_config: HashMap<(String, String), String>,
     /// Serialized app config as TOML for `api.config.app_get()` dot-path lookups.
     pub app_config_toml: Option<toml::Value>,

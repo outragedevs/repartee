@@ -518,6 +518,7 @@ pub(crate) fn cmd_image(app: &mut App, args: &[String]) {
                 Err(e) => add_local_event(app, &format!("{C_ERR}Cleanup error: {e}{C_RST}")),
             }
         }
+        "debug" => image_debug(app),
         _ => {
             let cfg = &app.config.image_preview;
             let lines = vec![
@@ -692,6 +693,84 @@ pub(crate) fn cmd_script(app: &mut App, args: &[String]) {
                 &format!("{C_ERR}Usage: /script [load|unload|reload|list|autoload|template] [name]{C_RST}"),
             );
         }
+    }
+}
+
+fn image_debug(app: &mut App) {
+    // Re-detect now so debug shows current state, not stale startup state.
+    app.refresh_image_protocol();
+
+    let proto = app.picker.protocol_type();
+    let font = app.picker.font_size();
+    let caps = app.picker.capabilities();
+
+    // Collect env vars
+    let term = std::env::var("TERM").unwrap_or_default();
+    let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
+    let lc_terminal = std::env::var("LC_TERMINAL").unwrap_or_default();
+    let iterm_sess = std::env::var("ITERM_SESSION_ID").unwrap_or_default();
+    let ghostty_res = std::env::var("GHOSTTY_RESOURCES_DIR").unwrap_or_default();
+    let kitty_pid = std::env::var("KITTY_PID").unwrap_or_default();
+    let colorterm = std::env::var("COLORTERM").unwrap_or_default();
+
+    // tmux queries (only if in tmux)
+    let (tmux_termtype, tmux_termname, tmux_passthrough, tmux_version) = if app.in_tmux {
+        let tt = crate::app::tmux_query_raw("#{client_termtype}").unwrap_or_default();
+        let tn = crate::app::tmux_query_raw("#{client_termname}").unwrap_or_default();
+        let pt = std::process::Command::new("tmux")
+            .args(["show", "-p", "allow-passthrough"])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        let ver = std::process::Command::new("tmux")
+            .args(["-V"])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        (tt, tn, pt, ver)
+    } else {
+        (String::new(), String::new(), String::new(), String::new())
+    };
+
+    let mut lines = vec![divider("Image Debug")];
+
+    // Detection results
+    lines.push(format!("  {C_DIM}Protocol:{C_RST}        {C_CMD}{proto:?}{C_RST}"));
+    lines.push(format!("  {C_DIM}Source:{C_RST}          {C_CMD}{}{C_RST}", app.image_proto_source));
+    lines.push(format!("  {C_DIM}Outer terminal:{C_RST}  {C_CMD}{}{C_RST}", app.outer_terminal));
+    lines.push(format!("  {C_DIM}In tmux:{C_RST}         {C_CMD}{}{C_RST}", app.in_tmux));
+    lines.push(format!("  {C_DIM}Font size:{C_RST}       {C_CMD}{}x{}{C_RST}", font.0, font.1));
+    lines.push(format!("  {C_DIM}Capabilities:{C_RST}    {C_CMD}{caps:?}{C_RST}"));
+    lines.push(format!("  {C_DIM}Config proto:{C_RST}    {C_CMD}{}{C_RST}", app.config.image_preview.protocol));
+
+    // tmux info
+    if app.in_tmux {
+        lines.push(format!("  {C_DIM}tmux version:{C_RST}   {C_CMD}{tmux_version}{C_RST}"));
+        lines.push(format!("  {C_DIM}passthrough:{C_RST}    {C_CMD}{tmux_passthrough}{C_RST}"));
+        lines.push(format!("  {C_DIM}client_termtype:{C_RST}{C_CMD} {tmux_termtype}{C_RST}"));
+        lines.push(format!("  {C_DIM}client_termname:{C_RST}{C_CMD} {tmux_termname}{C_RST}"));
+    }
+
+    // Env vars
+    lines.push(format!("  {C_DIM}TERM:{C_RST}            {C_CMD}{term}{C_RST}"));
+    lines.push(format!("  {C_DIM}TERM_PROGRAM:{C_RST}    {C_CMD}{term_program}{C_RST}"));
+    lines.push(format!("  {C_DIM}LC_TERMINAL:{C_RST}     {C_CMD}{lc_terminal}{C_RST}"));
+    lines.push(format!("  {C_DIM}COLORTERM:{C_RST}       {C_CMD}{colorterm}{C_RST}"));
+    if !iterm_sess.is_empty() {
+        lines.push(format!("  {C_DIM}ITERM_SESSION_ID:{C_RST}{C_CMD}{iterm_sess}{C_RST}"));
+    }
+    if !ghostty_res.is_empty() {
+        lines.push(format!("  {C_DIM}GHOSTTY_RESOURCES_DIR:{C_RST}{C_CMD}{ghostty_res}{C_RST}"));
+    }
+    if !kitty_pid.is_empty() {
+        lines.push(format!("  {C_DIM}KITTY_PID:{C_RST}       {C_CMD}{kitty_pid}{C_RST}"));
+    }
+
+    lines.push(divider(""));
+    for line in &lines {
+        add_local_event(app, line);
     }
 }
 
