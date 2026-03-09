@@ -280,6 +280,10 @@ pub struct App {
     pub theme: ThemeFile,
     pub input: ui::input::InputState,
     pub should_quit: bool,
+    /// Splash screen: number of logo lines currently visible (progressive reveal).
+    pub splash_visible: usize,
+    /// Splash screen dismissed — set to true after animation or keypress.
+    pub splash_done: bool,
     pub scroll_offset: usize,
     pub ui_regions: Option<UiRegions>,
     /// IRC connection handles keyed by connection ID.
@@ -463,6 +467,8 @@ impl App {
             theme,
             input: ui::input::InputState::new(),
             should_quit: false,
+            splash_visible: 0,
+            splash_done: false,
             scroll_offset: 0,
             ui_regions: None,
             irc_handles: HashMap::new(),
@@ -836,7 +842,66 @@ impl App {
         Ok(())
     }
 
+    /// Animated splash screen: progressively reveals the logo, then holds
+    /// for 2.5s. Any keypress dismisses immediately.
+    async fn run_splash(&mut self, terminal: &mut ui::Tui) -> Result<()> {
+        const LINE_DELAY_MS: u64 = 50;
+        const HOLD_MS: u64 = 2500;
+        let total_lines = include_str!("../logo.txt").lines().count();
+
+        let mut line_tick = interval(Duration::from_millis(LINE_DELAY_MS));
+
+        // Phase 1: progressive reveal.
+        while self.splash_visible < total_lines {
+            terminal.draw(|frame| ui::splash::render(frame, self.splash_visible))?;
+
+            tokio::select! {
+                _ = line_tick.tick() => {
+                    self.splash_visible += 1;
+                }
+                ev = tokio::task::spawn_blocking(|| {
+                    if event::poll(std::time::Duration::from_millis(1)).unwrap_or(false) {
+                        event::read().ok()
+                    } else {
+                        None
+                    }
+                }) => {
+                    if let Ok(Some(Event::Key(_))) = ev {
+                        self.splash_done = true;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        // Phase 2: hold fully revealed logo.
+        terminal.draw(|frame| ui::splash::render(frame, total_lines))?;
+        let hold_start = Instant::now();
+        while hold_start.elapsed() < Duration::from_millis(HOLD_MS) {
+            let remaining = Duration::from_millis(HOLD_MS)
+                .saturating_sub(hold_start.elapsed());
+            if remaining.is_zero() {
+                break;
+            }
+            if let Ok(Some(Event::Key(_))) = tokio::task::spawn_blocking(move || {
+                if event::poll(remaining.min(Duration::from_millis(100))).unwrap_or(false) {
+                    event::read().ok()
+                } else {
+                    None
+                }
+            }).await {
+                break;
+            }
+        }
+
+        self.splash_done = true;
+        Ok(())
+    }
+
     pub async fn run(&mut self, terminal: &mut ui::Tui) -> Result<()> {
+        // --- Splash screen ---
+        self.run_splash(terminal).await?;
+
         // Auto-connect to servers marked with autoconnect
         let autoconnect_ids: Vec<String> = self
             .config

@@ -5,6 +5,7 @@ pub mod input;
 pub mod layout;
 pub mod message_line;
 pub mod nick_list;
+pub mod splash;
 pub mod status_line;
 pub mod styled_text;
 pub mod topic_bar;
