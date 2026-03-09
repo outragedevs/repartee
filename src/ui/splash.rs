@@ -26,9 +26,14 @@ pub fn render(frame: &mut Frame, visible_lines: usize) {
     let lines: Vec<&str> = LOGO.lines().collect();
     let total_lines = lines.len();
 
+    // Use the widest line for consistent horizontal centering across all lines.
+    #[expect(clippy::cast_possible_truncation, reason = "logo chars ≪ u16::MAX")]
+    let max_width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
+
     // Vertical centering.
     #[expect(clippy::cast_possible_truncation, reason = "logo lines ≪ u16::MAX")]
     let start_y = area.y + area.height.saturating_sub(total_lines as u16) / 2;
+    let x = area.x + area.width.saturating_sub(max_width) / 2;
 
     let bird_fg = hex_to_color(BIRD_COLOR).unwrap_or(Color::Yellow);
     let text_fg = hex_to_color(TEXT_COLOR).unwrap_or(Color::Blue);
@@ -50,11 +55,6 @@ pub fn render(frame: &mut Frame, visible_lines: usize) {
         let spans = colorize_line(line_str, i, bird_fg, text_fg, dim_fg, bg);
 
         let line = Line::from(spans);
-        // Horizontal centering: use the character count of the raw line.
-        #[expect(clippy::cast_possible_truncation, reason = "line chars ≪ u16::MAX")]
-        let line_width = line_str.chars().count() as u16;
-        let x = area.x + area.width.saturating_sub(line_width) / 2;
-
         let render_area = Rect {
             x,
             y,
