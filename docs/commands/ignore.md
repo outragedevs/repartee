@@ -18,6 +18,9 @@ A bare nick pattern (e.g., `troll`) matches the nick only.
 A pattern containing `!` (e.g., `*!*@bad.host`) matches the
 full `nick!user@host` mask with wildcard support (`*`, `?`).
 
+Use `-channels` to restrict the ignore to specific channels
+(comma-separated). Without it, the ignore applies everywhere.
+
 ## Levels
 
     MSGS      Private messages
@@ -40,7 +43,7 @@ If no levels are specified, ALL is assumed.
     /ignore troll
     /ignore *!*@bad.host.com
     /ignore spammer PUBLIC NOTICES
-    /ignore bot CTCPS -channels #help,#support
+    /ignore troll ALL -channels #chat,#help
 
 ## See Also
 

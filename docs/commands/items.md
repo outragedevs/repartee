@@ -11,15 +11,13 @@ description: Manage statusbar items and formats
 
 ## Description
 
-Manage the statusbar layout. Add, remove, reorder items and customize
-their format strings. Use `/items available` to see all possible items
-and their format variables.
+Manage the statusbar layout. Add, remove, reorder, and format statusbar items.
 
 ## Subcommands
 
 ### list
 
-Show current statusbar items with their positions and formats.
+Show current statusbar items with their positions.
 
     /items list
 
@@ -37,41 +35,35 @@ Remove an item from the statusbar.
 
     /items remove <item>
 
-Aliases: del
-
 ### move
 
-Move an item to a new position.
+Move an item to a different position in the statusbar.
 
     /items move <item> <position>
 
-Position is 1-based.
+Position is 1-based (1 = first item).
 
 ### format
 
-View or set the format string for an item.
+Set or view the format string for a statusbar item.
 
     /items format <item> [format_string]
 
-Format variables: `$win`, `$activity`, `$nick`, `$modes`, `$name`, `$lag`, `$time`.
-
-Aliases: fmt
+Without a format string, shows the current format.
 
 ### separator
 
-View or set the separator string between items.
+Set or view the separator between statusbar items.
 
     /items separator [string]
 
-Aliases: sep
+Without a string, shows the current separator.
 
 ### available
 
-List all available statusbar items and their default formats.
+List all available statusbar item types.
 
     /items available
-
-Shows which items are currently active and which are unused.
 
 ### reset
 
@@ -79,14 +71,22 @@ Reset statusbar to default items, formats, and separator.
 
     /items reset
 
+## Available Items
+
+- `time` — Current time
+- `nick_info` — Current nick and user modes
+- `channel_info` — Channel/buffer name and modes
+- `lag` — Server lag measurement
+- `active_windows` — Windows with unread activity
+
 ## Examples
 
     /items list
-    /items add clock
+    /items add time
     /items remove lag
-    /items move clock 1
-    /items format window_name [$win] $name
-    /items separator  |
+    /items move time 1
+    /items format time %H:%M
+    /items separator  -
     /items available
     /items reset
 

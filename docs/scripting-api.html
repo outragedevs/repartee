@@ -129,6 +129,45 @@ end)
 </tr>
 </tbody></table>
 <p>Handlers run in descending priority order. Return <code>true</code> from a handler to suppress the event (prevent lower-priority handlers and built-in handling from running).</p>
+<p><strong>Priority constants:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Constant</th>
+<th>Value</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>api.PRIORITY_HIGHEST</code></td>
+<td>100</td>
+<td>Run before all other handlers</td>
+</tr>
+<tr>
+<td><code>api.PRIORITY_HIGH</code></td>
+<td>75</td>
+<td>Run early</td>
+</tr>
+<tr>
+<td><code>api.PRIORITY_NORMAL</code></td>
+<td>50</td>
+<td>Default priority</td>
+</tr>
+<tr>
+<td><code>api.PRIORITY_LOW</code></td>
+<td>25</td>
+<td>Run late</td>
+</tr>
+<tr>
+<td><code>api.PRIORITY_LOWEST</code></td>
+<td>0</td>
+<td>Run after all other handlers</td>
+</tr>
+</tbody></table>
+<pre><code class="language-lua">api.on(&quot;irc.privmsg&quot;, function(event)
+    -- this handler runs before normal-priority handlers
+end, api.PRIORITY_HIGH)
+</code></pre>
 <h3><code>api.once(event, handler, priority?)</code></h3>
 <p>Same as <code>api.on()</code> but the handler fires only once, then removes itself.</p>
 <h3><code>api.off(id)</code></h3>

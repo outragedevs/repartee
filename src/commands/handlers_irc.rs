@@ -815,6 +815,7 @@ pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
 
     // Split long messages at word boundaries to stay within IRC byte limits.
     let chunks = crate::irc::split_irc_message(text, crate::irc::MESSAGE_MAX_BYTES);
+    let own_mode = app.state.nick_prefix(&buffer_id, &nick);
     for chunk in chunks {
         if let Some(handle) = app.irc_handles.get(&conn_id)
             && let Err(e) = handle.sender.send_privmsg(target, &chunk)
@@ -832,7 +833,7 @@ pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
                     timestamp: chrono::Utc::now(),
                     message_type: crate::state::buffer::MessageType::Message,
                     nick: Some(nick.clone()),
-                    nick_mode: None,
+                    nick_mode: own_mode.clone(),
                     text: chunk,
                     highlight: false,
                     event_key: None,
@@ -906,6 +907,7 @@ pub(crate) fn cmd_query(app: &mut App, args: &[String]) {
             .is_some_and(|c| c.enabled_caps.contains("echo-message"));
 
         if !echo_message_enabled {
+            let own_mode = app.state.nick_prefix(&buffer_id, &nick);
             let id = app.state.next_message_id();
             app.state.add_message(
                 &buffer_id,
@@ -914,7 +916,7 @@ pub(crate) fn cmd_query(app: &mut App, args: &[String]) {
                     timestamp: chrono::Utc::now(),
                     message_type: crate::state::buffer::MessageType::Message,
                     nick: Some(nick),
-                    nick_mode: None,
+                    nick_mode: own_mode,
                     text: text.clone(),
                     highlight: false,
                     event_key: None,
@@ -964,6 +966,7 @@ pub(crate) fn cmd_me(app: &mut App, args: &[String]) {
 
     if !echo_message_enabled {
         let buffer_id = app.state.active_buffer_id.clone().unwrap_or_default();
+        let own_mode = app.state.nick_prefix(&buffer_id, &nick);
         let id = app.state.next_message_id();
         app.state.add_message(
             &buffer_id,
@@ -972,7 +975,7 @@ pub(crate) fn cmd_me(app: &mut App, args: &[String]) {
                 timestamp: chrono::Utc::now(),
                 message_type: crate::state::buffer::MessageType::Action,
                 nick: Some(nick),
-                nick_mode: None,
+                nick_mode: own_mode,
                 text: action_text.clone(),
                 highlight: false,
                 event_key: None,

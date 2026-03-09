@@ -69,6 +69,11 @@ enabled = true
 protocol = "auto"              # "auto", "kitty", "iterm2", "sixel", "symbols"
 max_width = 0                  # 0 = auto
 max_height = 0                 # 0 = auto
+cache_max_mb = 100
+cache_max_days = 7
+fetch_timeout = 30             # seconds
+max_file_size = 10485760       # bytes (10 MB)
+kitty_format = "rgba"
 
 [logging]
 enabled = true
@@ -85,7 +90,7 @@ autoload = ["slap"]
 # debug = true
 
 [[ignores]]
-pattern = "*!*@spammer.host"
+mask = "*!*@spammer.host"
 levels = ["ALL"]
 ```
 

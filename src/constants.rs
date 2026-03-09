@@ -6,7 +6,7 @@ pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Fields requested: t=token, c=channel, u=user, i=ip, h=host,
 /// n=nick, f=flags, a=account, r=realname.
 /// Note: `s` (server), `d` (hopcount), `l` (idle) are omitted because
-/// IRCnet ircd 2.12 silently drops unsupported fields, causing arg count
+/// `IRCnet` ircd 2.12 silently drops unsupported fields, causing arg count
 /// mismatches in the parser.
 pub const WHOX_FIELDS: &str = "%tcuihnfar";
 

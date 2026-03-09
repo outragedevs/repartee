@@ -7,7 +7,7 @@ description: Manage image preview cache
 
 ## Syntax
 
-    /image [stats|clear]
+    /image [stats|clear|cleanup|debug]
 
 ## Description
 
@@ -34,11 +34,29 @@ Delete all cached images.
 
     /image clear
 
+### cleanup
+
+Remove cached images that exceed the configured size or age limits
+(`image_preview.cache_max_mb` and `image_preview.cache_max_days`).
+Reports the number of files removed and disk space freed.
+
+    /image cleanup
+
+### debug
+
+Show detailed image preview diagnostics including detected protocol,
+terminal capabilities, font size, environment variables, and tmux
+passthrough status.
+
+    /image debug
+
 ## Examples
 
     /image
     /image stats
     /image clear
+    /image cleanup
+    /image debug
     /set image_preview.enabled false
     /set image_preview.protocol kitty
 

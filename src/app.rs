@@ -1317,7 +1317,7 @@ impl App {
     /// limit, sends one batched WHO (WHOX if supported) and one batched
     /// MODE query. Waits for `RPL_ENDOFWHO` before sending the next batch.
     fn send_channel_query_batch(&mut self, conn_id: &str) {
-        /// Max channels per WHO command. IRCnet ircd 2.12 silently drops
+        /// Max channels per WHO command. `IRCnet` ircd 2.12 silently drops
         /// targets beyond ~11 in comma-separated WHO. Use 5 for safety.
         const MAX_WHO_TARGETS: usize = 5;
 
@@ -1449,7 +1449,7 @@ impl App {
     }
 
     /// Detect stale WHO batches where the server silently dropped some targets.
-    /// If a batch has been in-flight for >30s, clear the silent_who_channels for
+    /// If a batch has been in-flight for >30s, clear the `silent_who_channels` for
     /// the stuck channels, discard the in-flight set, and send the next batch.
     fn check_stale_who_batches(&mut self) {
         let stale_conns: Vec<String> = self
@@ -2396,6 +2396,8 @@ impl App {
             .get(&conn_id)
             .is_some_and(|c| c.enabled_caps.contains("echo-message"));
 
+        let own_mode = self.state.nick_prefix(&active_id, &nick);
+
         for chunk in chunks {
             // Try to send via IRC if connected
             if let Some(handle) = self.irc_handles.get(&conn_id)
@@ -2414,7 +2416,7 @@ impl App {
                         timestamp: Utc::now(),
                         message_type: MessageType::Message,
                         nick: Some(nick.clone()),
-                        nick_mode: None,
+                        nick_mode: own_mode.clone(),
                         text: chunk,
                         highlight: false,
                         event_key: None,

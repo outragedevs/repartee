@@ -218,6 +218,15 @@ impl AppState {
         self.buffers.get_mut(id)
     }
 
+    /// Look up the highest channel mode prefix for a nick in a buffer.
+    ///
+    /// Returns `Some("@")` for ops, `Some("+")` for voice, etc.
+    pub fn nick_prefix(&self, buffer_id: &str, nick: &str) -> Option<String> {
+        let buf = self.buffers.get(buffer_id)?;
+        let entry = buf.users.get(&nick.to_lowercase())?;
+        entry.prefix.chars().next().map(|c| c.to_string())
+    }
+
     // === Navigation ===
 
     pub fn sorted_buffer_ids(&self) -> Vec<String> {

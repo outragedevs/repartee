@@ -253,8 +253,29 @@ pub(crate) fn cmd_alias(app: &mut App, args: &[String]) {
         return;
     }
 
+    // `/alias -name` removes the alias (irssi compat)
+    if let Some(removal) = args.first()
+        .and_then(|a| a.strip_prefix('-'))
+        .filter(|_| args.len() == 1)
+    {
+        let name = removal.to_lowercase();
+        if app.config.aliases.remove(&name).is_some() {
+            let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
+            add_local_event(
+                app,
+                &format!("{C_OK}Removed alias: /{name}{C_RST}"),
+            );
+        } else {
+            add_local_event(
+                app,
+                &format!("{C_ERR}No alias named: /{name}{C_RST}"),
+            );
+        }
+        return;
+    }
+
     if args.len() < 2 {
-        add_local_event(app, "Usage: /alias <name> <template>");
+        add_local_event(app, "Usage: /alias <name> <template> | /alias -<name> (to remove)");
         return;
     }
 
@@ -303,6 +324,7 @@ pub(crate) fn cmd_unalias(app: &mut App, args: &[String]) {
 
 // === Items command ===
 
+#[expect(clippy::too_many_lines, reason = "single match dispatching all /items subcommands")]
 pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
     if args.is_empty() || args[0] == "list" {
         let mut lines = vec![divider("Statusbar Items")];
@@ -315,7 +337,7 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
             }
         }
         lines.push(format!(
-            "  {C_DIM}Available: time, nick_info, channel_info, lag, active_windows{C_RST}"
+            "  {C_DIM}Available: {AVAILABLE_ITEMS}{C_RST}"
         ));
         lines.push(divider(""));
         for line in &lines {
@@ -354,7 +376,7 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
                 None => {
                     add_local_event(
                         app,
-                        &format!("{C_ERR}Unknown item: {item_name}. Available: time, nick_info, channel_info, lag, active_windows{C_RST}"),
+                        &format!("{C_ERR}Unknown item: {item_name}. Available: {AVAILABLE_ITEMS}{C_RST}"),
                     );
                 }
             }
@@ -387,16 +409,134 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
                 None => {
                     add_local_event(
                         app,
-                        &format!("{C_ERR}Unknown item: {item_name}. Available: time, nick_info, channel_info, lag, active_windows{C_RST}"),
+                        &format!("{C_ERR}Unknown item: {item_name}. Available: {AVAILABLE_ITEMS}{C_RST}"),
                     );
                 }
             }
         }
+        "move" => {
+            if args.len() < 3 {
+                add_local_event(app, "Usage: /items move <item_name> <position>");
+                return;
+            }
+            let item_name = &args[1];
+            let Some(item) = parse_statusbar_item(item_name) else {
+                add_local_event(
+                    app,
+                    &format!("{C_ERR}Unknown item: {item_name}. Available: {AVAILABLE_ITEMS}{C_RST}"),
+                );
+                return;
+            };
+            let Some(current_pos) = app.config.statusbar.items.iter().position(|i| *i == item)
+            else {
+                add_local_event(
+                    app,
+                    &format!("{C_ERR}{item_name} is not in the statusbar{C_RST}"),
+                );
+                return;
+            };
+            let Ok(new_pos) = args[2].parse::<usize>() else {
+                add_local_event(app, &format!("{C_ERR}Invalid position: {}{C_RST}", args[2]));
+                return;
+            };
+            if new_pos == 0 || new_pos > app.config.statusbar.items.len() {
+                add_local_event(
+                    app,
+                    &format!(
+                        "{C_ERR}Position must be 1-{}{C_RST}",
+                        app.config.statusbar.items.len()
+                    ),
+                );
+                return;
+            }
+            let removed = app.config.statusbar.items.remove(current_pos);
+            app.config.statusbar.items.insert(new_pos - 1, removed);
+            let _ =
+                crate::config::save_config(&crate::constants::config_path(), &app.config);
+            add_local_event(
+                app,
+                &format!("{C_OK}Moved {item_name} to position {new_pos}{C_RST}"),
+            );
+        }
+        "format" => {
+            if args.len() < 2 {
+                add_local_event(app, "Usage: /items format <item_name> [format_string]");
+                return;
+            }
+            let item_name = args[1].to_lowercase();
+            if parse_statusbar_item(&item_name).is_none() {
+                add_local_event(
+                    app,
+                    &format!("{C_ERR}Unknown item: {item_name}. Available: {AVAILABLE_ITEMS}{C_RST}"),
+                );
+                return;
+            }
+            if args.len() < 3 {
+                // Show current format
+                let fmt = app
+                    .config
+                    .statusbar
+                    .item_formats
+                    .get(&item_name)
+                    .map_or("(default)", String::as_str);
+                add_local_event(
+                    app,
+                    &format!("{C_CMD}{item_name}{C_RST} format: {C_TEXT}{fmt}{C_RST}"),
+                );
+                return;
+            }
+            let fmt = args[2].clone();
+            app.config
+                .statusbar
+                .item_formats
+                .insert(item_name.clone(), fmt.clone());
+            let _ =
+                crate::config::save_config(&crate::constants::config_path(), &app.config);
+            add_local_event(
+                app,
+                &format!("{C_OK}Set {item_name} format: {fmt}{C_RST}"),
+            );
+        }
+        "separator" => {
+            if args.len() < 2 {
+                add_local_event(
+                    app,
+                    &format!(
+                        "Current separator: {C_CMD}{}{C_RST}",
+                        app.config.statusbar.separator
+                    ),
+                );
+                return;
+            }
+            app.config.statusbar.separator.clone_from(&args[1]);
+            let _ =
+                crate::config::save_config(&crate::constants::config_path(), &app.config);
+            add_local_event(
+                app,
+                &format!("{C_OK}Separator set to: {}{C_RST}", args[1]),
+            );
+        }
+        "available" => {
+            add_local_event(app, &format!("Available statusbar items: {C_CMD}{AVAILABLE_ITEMS}{C_RST}"));
+        }
+        "reset" => {
+            app.config.statusbar.items = crate::config::StatusbarConfig::default().items;
+            app.config.statusbar.item_formats.clear();
+            app.config.statusbar.separator = " | ".to_string();
+            let _ =
+                crate::config::save_config(&crate::constants::config_path(), &app.config);
+            add_local_event(app, &format!("{C_OK}Statusbar reset to defaults{C_RST}"));
+        }
         _ => {
-            add_local_event(app, "Usage: /items [list|add|remove] [item_name]");
+            add_local_event(
+                app,
+                "Usage: /items [list|add|remove|move|format|separator|available|reset]",
+            );
         }
     }
 }
+
+const AVAILABLE_ITEMS: &str = "time, nick_info, channel_info, lag, active_windows";
 
 fn parse_statusbar_item(name: &str) -> Option<crate::config::StatusbarItem> {
     use crate::config::StatusbarItem;

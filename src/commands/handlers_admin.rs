@@ -58,8 +58,13 @@ pub(crate) fn cmd_ignore(app: &mut App, args: &[String]) {
                         .collect::<Vec<_>>()
                         .join(", ")
                 };
+                let chan_str = entry
+                    .channels
+                    .as_ref()
+                    .map(|chs| format!(" channels:{}", chs.join(",")))
+                    .unwrap_or_default();
                 lines.push(format!(
-                    "  {C_CMD}{}. {}{C_RST} {C_DIM}[{level_str}]{C_RST}",
+                    "  {C_CMD}{}. {}{C_RST} {C_DIM}[{level_str}]{chan_str}{C_RST}",
                     i + 1,
                     entry.mask
                 ));
@@ -73,15 +78,31 @@ pub(crate) fn cmd_ignore(app: &mut App, args: &[String]) {
     }
 
     let mask = args[0].clone();
-    let levels: Vec<crate::config::IgnoreLevel> = args[1..]
-        .iter()
-        .filter_map(|s| parse_ignore_level(s))
-        .collect();
+    let mut levels: Vec<crate::config::IgnoreLevel> = Vec::new();
+    let mut channels: Option<Vec<String>> = None;
+
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "-channels" || args[i] == "-channel" {
+            if i + 1 < args.len() {
+                i += 1;
+                channels = Some(
+                    args[i]
+                        .split(',')
+                        .map(|s| s.trim().to_lowercase())
+                        .collect(),
+                );
+            }
+        } else if let Some(level) = parse_ignore_level(&args[i]) {
+            levels.push(level);
+        }
+        i += 1;
+    }
 
     app.config.ignores.push(crate::config::IgnoreEntry {
         mask: mask.clone(),
         levels,
-        channels: None,
+        channels,
     });
 
     // Save config
@@ -195,23 +216,48 @@ pub(crate) fn cmd_server(app: &mut App, args: &[String]) {
     match args[0].as_str() {
         "add" => {
             if args.len() < 3 {
-                add_local_event(app, "Usage: /server add <id> <address> [port] [-tls] [-label=<name>]");
+                add_local_event(app, "Usage: /server add <id> <address> [port] [-tls] [-notlsverify] [-noauto] [-label=<name>] [-nick=<nick>] [-password=<pass>] [-sasl=<user>:<pass>] [-bind=<ip>] [-autosendcmd=<cmds>]");
                 return;
             }
             let id = args[1].to_lowercase();
             let address = args[2].clone();
             let mut port: u16 = 6667;
             let mut tls = false;
+            let mut tls_verify = true;
             let mut label = address.clone();
             let mut autoconnect = true;
+            let mut nick: Option<String> = None;
+            let mut password: Option<String> = None;
+            let mut sasl_user: Option<String> = None;
+            let mut sasl_pass: Option<String> = None;
+            let mut bind_ip: Option<String> = None;
+            let mut autosendcmd: Option<String> = None;
 
             for arg in args.iter().skip(3) {
                 if arg == "-tls" {
                     tls = true;
+                } else if arg == "-notlsverify" {
+                    tls_verify = false;
                 } else if arg == "-noauto" {
                     autoconnect = false;
                 } else if let Some(l) = arg.strip_prefix("-label=") {
                     label = l.to_string();
+                } else if let Some(n) = arg.strip_prefix("-nick=") {
+                    nick = Some(n.to_string());
+                } else if let Some(p) = arg.strip_prefix("-password=") {
+                    password = Some(p.to_string());
+                } else if let Some(s) = arg.strip_prefix("-sasl=") {
+                    if let Some((user, pass)) = s.split_once(':') {
+                        sasl_user = Some(user.to_string());
+                        sasl_pass = Some(pass.to_string());
+                    } else {
+                        add_local_event(app, &format!("{C_ERR}SASL format: -sasl=user:pass{C_RST}"));
+                        return;
+                    }
+                } else if let Some(ip) = arg.strip_prefix("-bind=") {
+                    bind_ip = Some(ip.to_string());
+                } else if let Some(cmd) = arg.strip_prefix("-autosendcmd=") {
+                    autosendcmd = Some(cmd.to_string());
                 } else if let Ok(p) = arg.parse::<u16>() {
                     port = p;
                 }
@@ -228,21 +274,21 @@ pub(crate) fn cmd_server(app: &mut App, args: &[String]) {
                     address,
                     port,
                     tls,
-                    tls_verify: true,
+                    tls_verify,
                     autoconnect,
                     channels: vec![],
-                    nick: None,
+                    nick,
                     username: None,
                     realname: None,
-                    password: None,
-                    sasl_user: None,
-                    sasl_pass: None,
-                    bind_ip: None,
+                    password,
+                    sasl_user,
+                    sasl_pass,
+                    bind_ip,
                     encoding: None,
                     auto_reconnect: None,
                     reconnect_delay: None,
                     reconnect_max_retries: None,
-                    autosendcmd: None,
+                    autosendcmd,
                     sasl_mechanism: None,
                     client_cert_path: None,
                 },

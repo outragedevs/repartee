@@ -152,6 +152,11 @@ enabled = true
 protocol = &quot;auto&quot;              # &quot;auto&quot;, &quot;kitty&quot;, &quot;iterm2&quot;, &quot;sixel&quot;, &quot;symbols&quot;
 max_width = 0                  # 0 = auto
 max_height = 0                 # 0 = auto
+cache_max_mb = 100
+cache_max_days = 7
+fetch_timeout = 30             # seconds
+max_file_size = 10485760       # bytes (10 MB)
+kitty_format = &quot;rgba&quot;
 
 [logging]
 enabled = true
@@ -168,7 +173,7 @@ autoload = [&quot;slap&quot;]
 # debug = true
 
 [[ignores]]
-pattern = &quot;*!*@spammer.host&quot;
+mask = &quot;*!*@spammer.host&quot;
 levels = [&quot;ALL&quot;]
 </code></pre>
 <h2>Sections explained</h2>

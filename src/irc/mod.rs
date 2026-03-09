@@ -233,6 +233,7 @@ impl<'a> Iterator for WordSplitter<'a> {
 ///
 /// Spawns a tokio task that reads from the message stream and forwards
 /// events over an unbounded channel.
+#[expect(clippy::too_many_lines, reason = "IRC config builder with many fields")]
 pub async fn connect_server(
     conn_id: &str,
     server_config: &crate::config::ServerConfig,

@@ -7,7 +7,8 @@ description: Define, list, or remove user aliases
 
 ## Syntax
 
-    /alias [[-]name] [body]
+    /alias [name] [body]
+    /alias -<name>
 
 ## Description
 
@@ -15,9 +16,8 @@ Define custom command aliases. Aliases expand before execution and support
 template variables and command chaining with semicolons.
 
 With no arguments, lists all defined aliases.
-With just a name, shows that alias's body.
-With `-name`, removes the alias.
 With name and body, defines or replaces the alias.
+With `-name`, removes the alias (e.g. `/alias -ns`).
 
 Template variables:
 - `$0`-`$9` — positional arguments

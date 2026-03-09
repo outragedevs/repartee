@@ -320,15 +320,15 @@ automatically re-op users matching the mask when they rejoin.</p>
 <div class="command-entry" data-command="alias" data-category="Configuration">
 <h1>/alias</h1>
 <h2>Syntax</h2>
-<pre><code>/alias [[-]name] [body]
+<pre><code>/alias [name] [body]
+/alias -&lt;name&gt;
 </code></pre>
 <h2>Description</h2>
 <p>Define custom command aliases. Aliases expand before execution and support
 template variables and command chaining with semicolons.</p>
 <p>With no arguments, lists all defined aliases.
-With just a name, shows that alias&#39;s body.
-With <code>-name</code>, removes the alias.
-With name and body, defines or replaces the alias.</p>
+With name and body, defines or replaces the alias.
+With <code>-name</code>, removes the alias (e.g. <code>/alias -ns</code>).</p>
 <p>Template variables:</p>
 <ul>
 <li><code>$0</code>-<code>$9</code> — positional arguments</li>
@@ -488,19 +488,15 @@ Server credentials (passwords, SASL) are stored in <code>.env</code>.</p>
 <p><strong>Flags:</strong></p>
 <ul>
 <li><code>-tls</code> — Enable TLS (auto-sets port to 6697)</li>
-<li><code>-noauto</code> — Don&#39;t auto-connect on startup</li>
 <li><code>-notlsverify</code> — Skip TLS certificate verification</li>
-<li><code>-bind=&lt;ip&gt;</code> — Bind to local IP (vhost)</li>
-<li><code>-nick=&lt;nick&gt;</code> — Server-specific nick override</li>
+<li><code>-noauto</code> — Don&#39;t auto-connect on startup</li>
 <li><code>-label=&lt;name&gt;</code> — Display name</li>
-<li><code>-password=&lt;pass&gt;</code> — Server password (saved to .env)</li>
-<li><code>-sasl=&lt;user&gt;:&lt;pass&gt;</code> — SASL auth (saved to .env)</li>
-<li><code>-autosendcmd=&lt;cmds&gt;</code> — Commands to run on connect, before autojoin (must be last flag)</li>
+<li><code>-nick=&lt;nick&gt;</code> — Use a different nick for this server</li>
+<li><code>-password=&lt;pass&gt;</code> — Server password (PASS command)</li>
+<li><code>-sasl=&lt;user&gt;:&lt;pass&gt;</code> — SASL PLAIN authentication credentials</li>
+<li><code>-bind=&lt;ip&gt;</code> — Bind to a specific local IP address</li>
+<li><code>-autosendcmd=&lt;cmds&gt;</code> — Commands to run on connect (semicolon-separated)</li>
 </ul>
-<p>Autosendcmd uses erssi-style syntax: commands separated by <code>;</code>, with <code>WAIT &lt;ms&gt;</code>
-for delays. <code>$N</code> is replaced with your nick.</p>
-<pre><code>/server add libera irc.libera.chat:6697 -tls -autosendcmd=MSG NickServ identify pass; WAIT 2000; MODE $N +i
-</code></pre>
 <h3>remove</h3>
 <p>Remove a server and disconnect if connected.</p>
 <pre><code>/server remove &lt;id&gt;
@@ -508,15 +504,30 @@ for delays. <code>$N</code> is replaced with your nick.</p>
 <p>Aliases: del</p>
 <h2>Examples</h2>
 <pre><code>/server list
-/server add libera irc.libera.chat:6697 -tls
-/server add libera irc.libera.chat:6697 -tls -sasl=user:pass
-/server add local 127.0.0.1:6667 -noauto -label=dev
+/server add libera irc.libera.chat 6697 -tls
+/server add local 127.0.0.1 6667 -noauto -label=dev
+/server add ircnet irc.ircnet.net 6697 -tls -nick=mynick -sasl=user:pass
+/server add bouncer bnc.example.com 6697 -tls -password=secret -bind=192.168.1.10
 /server remove libera
 </code></pre>
 <h2>See Also</h2>
 <p>/connect, /disconnect, /set</p>
 </div>
 <h2 id="cat-info">Info</h2>
+<div class="command-entry" data-command="admin" data-category="Info">
+<h1>/admin</h1>
+<h2>Syntax</h2>
+<pre><code>/admin [server]
+</code></pre>
+<h2>Description</h2>
+<p>Request administrative information about the IRC server, typically including the admin&#39;s name, email, and other contact details. If a server name is given, the request is forwarded to that server.</p>
+<h2>Examples</h2>
+<pre><code>/admin
+/admin irc.libera.chat
+</code></pre>
+<h2>See Also</h2>
+<p>/info, /stats, /time</p>
+</div>
 <div class="command-entry" data-command="help" data-category="Info">
 <h1>/help</h1>
 <h2>Syntax</h2>
@@ -536,6 +547,35 @@ specific subcommand.</p>
 <h2>See Also</h2>
 <p>/set</p>
 </div>
+<div class="command-entry" data-command="info" data-category="Info">
+<h1>/info</h1>
+<h2>Syntax</h2>
+<pre><code>/info [server]
+</code></pre>
+<h2>Description</h2>
+<p>Request information from the IRC server, such as software version, patch level, and compile date. If a server name is given, the request is forwarded to that server.</p>
+<h2>Examples</h2>
+<pre><code>/info
+/info irc.libera.chat
+</code></pre>
+<h2>See Also</h2>
+<p>/admin, /stats, /time, /version</p>
+</div>
+<div class="command-entry" data-command="links" data-category="Info">
+<h1>/links</h1>
+<h2>Syntax</h2>
+<pre><code>/links [remote] [mask]
+</code></pre>
+<h2>Description</h2>
+<p>List the servers linked to the IRC network. Optionally provide a remote server to query from, and a mask pattern to filter the results.</p>
+<h2>Examples</h2>
+<pre><code>/links
+/links *.libera.chat
+/links irc.libera.chat *.eu
+</code></pre>
+<h2>See Also</h2>
+<p>/info, /stats, /lusers</p>
+</div>
 <div class="command-entry" data-command="list" data-category="Info">
 <h1>/list</h1>
 <h2>Syntax</h2>
@@ -552,6 +592,21 @@ specific subcommand.</p>
 </code></pre>
 <h2>See Also</h2>
 <p>/join, /names</p>
+</div>
+<div class="command-entry" data-command="lusers" data-category="Info">
+<h1>/lusers</h1>
+<h2>Syntax</h2>
+<pre><code>/lusers [mask] [server]
+</code></pre>
+<h2>Description</h2>
+<p>Request user statistics from the IRC server, including total users, invisible users, servers, operators, and channels. Optionally provide a mask to filter results, and a server name to query a specific server.</p>
+<h2>Examples</h2>
+<pre><code>/lusers
+/lusers *.fi
+/lusers * irc.libera.chat
+</code></pre>
+<h2>See Also</h2>
+<p>/stats, /info, /who</p>
 </div>
 <div class="command-entry" data-command="mode" data-category="Info">
 <h1>/mode</h1>
@@ -594,6 +649,20 @@ is treated as the target.</p>
 </code></pre>
 <h2>See Also</h2>
 <p>/quote</p>
+</div>
+<div class="command-entry" data-command="time" data-category="Info">
+<h1>/time</h1>
+<h2>Syntax</h2>
+<pre><code>/time [server]
+</code></pre>
+<h2>Description</h2>
+<p>Request the current local time from the IRC server. If a server name is given, the request is forwarded to that server.</p>
+<h2>Examples</h2>
+<pre><code>/time
+/time irc.libera.chat
+</code></pre>
+<h2>See Also</h2>
+<p>/info, /stats, /admin</p>
 </div>
 <div class="command-entry" data-command="version" data-category="Info">
 <h1>/version</h1>
@@ -729,7 +798,7 @@ log rows. Adding <code>&quot;event&quot;</code> to <code>exclude_types</code> pr
 <div class="command-entry" data-command="image" data-category="Media">
 <h1>/image</h1>
 <h2>Syntax</h2>
-<pre><code>/image [stats|clear]
+<pre><code>/image [stats|clear|cleanup|debug]
 </code></pre>
 <h2>Description</h2>
 <p>Manage the image preview cache. Without arguments, shows current status.</p>
@@ -748,10 +817,24 @@ log rows. Adding <code>&quot;event&quot;</code> to <code>exclude_types</code> pr
 <p>Delete all cached images.</p>
 <pre><code>/image clear
 </code></pre>
+<h3>cleanup</h3>
+<p>Remove cached images that exceed the configured size or age limits
+(<code>image_preview.cache_max_mb</code> and <code>image_preview.cache_max_days</code>).
+Reports the number of files removed and disk space freed.</p>
+<pre><code>/image cleanup
+</code></pre>
+<h3>debug</h3>
+<p>Show detailed image preview diagnostics including detected protocol,
+terminal capabilities, font size, environment variables, and tmux
+passthrough status.</p>
+<pre><code>/image debug
+</code></pre>
 <h2>Examples</h2>
 <pre><code>/image
 /image stats
 /image clear
+/image cleanup
+/image debug
 /set image_preview.enabled false
 /set image_preview.protocol kitty
 </code></pre>
@@ -953,6 +1036,8 @@ users. Without arguments, lists current ignore rules.</p>
 <p>A bare nick pattern (e.g., <code>troll</code>) matches the nick only.
 A pattern containing <code>!</code> (e.g., <code>*!*@bad.host</code>) matches the
 full <code>nick!user@host</code> mask with wildcard support (<code>*</code>, <code>?</code>).</p>
+<p>Use <code>-channels</code> to restrict the ignore to specific channels
+(comma-separated). Without it, the ignore applies everywhere.</p>
 <h2>Levels</h2>
 <pre><code>MSGS      Private messages
 PUBLIC    Channel messages
@@ -972,7 +1057,7 @@ ALL       All of the above
 /ignore troll
 /ignore *!*@bad.host.com
 /ignore spammer PUBLIC NOTICES
-/ignore bot CTCPS -channels #help,#support
+/ignore troll ALL -channels #chat,#help
 </code></pre>
 <h2>See Also</h2>
 <p>/unignore</p>
@@ -1247,12 +1332,10 @@ commands not yet implemented, testing, or advanced protocol interaction.</p>
 <pre><code>/items [list|add|remove|move|format|separator|available|reset] [args...]
 </code></pre>
 <h2>Description</h2>
-<p>Manage the statusbar layout. Add, remove, reorder items and customize
-their format strings. Use <code>/items available</code> to see all possible items
-and their format variables.</p>
+<p>Manage the statusbar layout. Add, remove, reorder, and format statusbar items.</p>
 <h2>Subcommands</h2>
 <h3>list</h3>
-<p>Show current statusbar items with their positions and formats.</p>
+<p>Show current statusbar items with their positions.</p>
 <pre><code>/items list
 </code></pre>
 <p>This is the default when no subcommand is given.</p>
@@ -1264,39 +1347,44 @@ and their format variables.</p>
 <p>Remove an item from the statusbar.</p>
 <pre><code>/items remove &lt;item&gt;
 </code></pre>
-<p>Aliases: del</p>
 <h3>move</h3>
-<p>Move an item to a new position.</p>
+<p>Move an item to a different position in the statusbar.</p>
 <pre><code>/items move &lt;item&gt; &lt;position&gt;
 </code></pre>
-<p>Position is 1-based.</p>
+<p>Position is 1-based (1 = first item).</p>
 <h3>format</h3>
-<p>View or set the format string for an item.</p>
+<p>Set or view the format string for a statusbar item.</p>
 <pre><code>/items format &lt;item&gt; [format_string]
 </code></pre>
-<p>Format variables: <code>$win</code>, <code>$activity</code>, <code>$nick</code>, <code>$modes</code>, <code>$name</code>, <code>$lag</code>, <code>$time</code>.</p>
-<p>Aliases: fmt</p>
+<p>Without a format string, shows the current format.</p>
 <h3>separator</h3>
-<p>View or set the separator string between items.</p>
+<p>Set or view the separator between statusbar items.</p>
 <pre><code>/items separator [string]
 </code></pre>
-<p>Aliases: sep</p>
+<p>Without a string, shows the current separator.</p>
 <h3>available</h3>
-<p>List all available statusbar items and their default formats.</p>
+<p>List all available statusbar item types.</p>
 <pre><code>/items available
 </code></pre>
-<p>Shows which items are currently active and which are unused.</p>
 <h3>reset</h3>
 <p>Reset statusbar to default items, formats, and separator.</p>
 <pre><code>/items reset
 </code></pre>
+<h2>Available Items</h2>
+<ul>
+<li><code>time</code> — Current time</li>
+<li><code>nick_info</code> — Current nick and user modes</li>
+<li><code>channel_info</code> — Channel/buffer name and modes</li>
+<li><code>lag</code> — Server lag measurement</li>
+<li><code>active_windows</code> — Windows with unread activity</li>
+</ul>
 <h2>Examples</h2>
 <pre><code>/items list
-/items add clock
+/items add time
 /items remove lag
-/items move clock 1
-/items format window_name [$win] $name
-/items separator  |
+/items move time 1
+/items format time %H:%M
+/items separator  -
 /items available
 /items reset
 </code></pre>

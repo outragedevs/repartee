@@ -63,18 +63,6 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                         buf.name.clone(),
                         Style::default().fg(name_color),
                     ));
-                    // Show our own channel mode prefix (e.g. @ for op)
-                    if buf.buffer_type == BufferType::Channel {
-                        let our_nick = conn.map_or("", |c| c.nick.as_str());
-                        if let Some(entry) = buf.users.get(&our_nick.to_lowercase())
-                            && !entry.prefix.is_empty()
-                        {
-                            spans.push(Span::styled(
-                                format!("({})", entry.prefix),
-                                Style::default().fg(fg_muted),
-                            ));
-                        }
-                    }
                     if let Some(modes) = &buf.modes
                         && !modes.is_empty()
                     {

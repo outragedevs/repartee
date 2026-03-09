@@ -485,15 +485,14 @@ pub fn handle_cap_nak(
     );
 }
 
-/// Look up a nick's mode prefix (e.g. "@", "+") from the buffer's user list.
-/// Get the highest-rank prefix for a nick in a buffer (for chat message display).
+/// Look up a nick's highest mode prefix (e.g. `'@'`, `'+'`) from the buffer's user list.
 ///
-/// Returns only the single highest prefix character (e.g. `"@"` for an op+voice user),
-/// not the full multi-prefix string. The nick list handles its own display via theme formats.
+/// Thin wrapper around [`AppState::nick_prefix`] returning `char` for
+/// internal callers that use `.map(String::from)`.
 fn nick_prefix(state: &AppState, buffer_id: &str, nick: &str) -> Option<char> {
-    let buf = state.buffers.get(buffer_id)?;
-    let entry = buf.users.get(&nick.to_lowercase())?;
-    entry.prefix.chars().next()
+    state
+        .nick_prefix(buffer_id, nick)
+        .and_then(|s| s.chars().next())
 }
 
 /// Extract `IRCv3` message tags from an `irc::proto::Message`.

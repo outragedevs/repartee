@@ -32,6 +32,22 @@ end)
 
 Handlers run in descending priority order. Return `true` from a handler to suppress the event (prevent lower-priority handlers and built-in handling from running).
 
+**Priority constants:**
+
+| Constant | Value | Description |
+|---|---|---|
+| `api.PRIORITY_HIGHEST` | 100 | Run before all other handlers |
+| `api.PRIORITY_HIGH` | 75 | Run early |
+| `api.PRIORITY_NORMAL` | 50 | Default priority |
+| `api.PRIORITY_LOW` | 25 | Run late |
+| `api.PRIORITY_LOWEST` | 0 | Run after all other handlers |
+
+```lua
+api.on("irc.privmsg", function(event)
+    -- this handler runs before normal-priority handlers
+end, api.PRIORITY_HIGH)
+```
+
 ### `api.once(event, handler, priority?)`
 
 Same as `api.on()` but the handler fires only once, then removes itself.
