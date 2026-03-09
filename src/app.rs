@@ -22,24 +22,6 @@ use crate::theme::{self, ThemeFile};
 use crate::ui;
 use crate::ui::layout::UiRegions;
 
-/// Split channel entries into parallel (names, keys) vectors for IRC JOIN.
-///
-/// Each entry may be `"#channel"` or `"#channel key"` (space-separated).
-/// The returned vectors have the same length — keyless channels get an empty string.
-fn split_channel_keys(entries: &[String]) -> (Vec<&str>, Vec<&str>) {
-    let mut names = Vec::with_capacity(entries.len());
-    let mut keys = Vec::with_capacity(entries.len());
-    for entry in entries {
-        if let Some(idx) = entry.find(' ') {
-            names.push(&entry[..idx]);
-            keys.push(&entry[idx + 1..]);
-        } else {
-            names.push(entry.as_str());
-            keys.push("");
-        }
-    }
-    (names, keys)
-}
 
 use ratatui_image::picker::ProtocolType;
 
@@ -340,9 +322,13 @@ pub struct App {
     pub outer_terminal: String,
     /// How the image protocol was resolved (for diagnostics).
     pub image_proto_source: String,
-    /// Queued (`conn_id`, channel) pairs for deferred WHO/MODE after join.
-    /// Drained one-at-a-time by a periodic timer to avoid Excess Flood.
-    pending_channel_queries: VecDeque<(String, String)>,
+    /// Per-connection queues of channels awaiting batched WHO + MODE after join.
+    channel_query_queues: HashMap<String, VecDeque<String>>,
+    /// Per-connection set of channels in the current WHO batch (awaiting `RPL_ENDOFWHO`).
+    /// When all channels receive their `RPL_ENDOFWHO`, the next batch is sent.
+    channel_query_in_flight: HashMap<String, HashSet<String>>,
+    /// When the current in-flight batch was sent (for stale batch timeout).
+    channel_query_sent_at: HashMap<String, Instant>,
     /// Queued lines from multiline paste, drained one per 500ms tick.
     paste_queue: VecDeque<String>,
     /// Script manager (owns all scripting engines).
@@ -499,7 +485,9 @@ impl App {
             in_tmux,
             outer_terminal: outer_terminal.to_string(),
             image_proto_source: source,
-            pending_channel_queries: VecDeque::new(),
+            channel_query_queues: HashMap::new(),
+            channel_query_in_flight: HashMap::new(),
+            channel_query_sent_at: HashMap::new(),
             paste_queue: VecDeque::new(),
             script_manager: Some(script_manager),
             script_api: Some(script_api),
@@ -892,7 +880,6 @@ impl App {
         });
 
         let mut tick = interval(Duration::from_secs(1));
-        let mut query_tick = interval(Duration::from_secs(2));
         let mut paste_tick = interval(Duration::from_millis(500));
 
         while !self.should_quit {
@@ -931,9 +918,7 @@ impl App {
                     self.check_reconnects();
                     self.measure_lag();
                     self.update_script_snapshot();
-                },
-                _ = query_tick.tick() => {
-                    self.drain_pending_channel_query();
+                    self.check_stale_who_batches();
                 },
                 _ = paste_tick.tick() => {
                     self.drain_paste_queue();
@@ -1245,46 +1230,194 @@ impl App {
         }
     }
 
-    /// Send IRC PING every 30 seconds per connection to measure lag.
+    /// Queue a channel for batched auto-WHO + auto-MODE after joining.
+    ///
+    /// If no batch is currently in-flight for this connection, starts one
+    /// immediately. Otherwise the channel is queued for the next batch.
+    fn queue_channel_query(&mut self, conn_id: &str, channel: String) {
+        tracing::trace!(conn_id, %channel, "queue_channel_query");
+        self.channel_query_queues
+            .entry(conn_id.to_string())
+            .or_default()
+            .push_back(channel);
+
+        if !self.channel_query_in_flight.contains_key(conn_id) {
+            self.send_channel_query_batch(conn_id);
+        }
+    }
+
+    /// Send the next batch of WHO + MODE queries for a connection.
+    ///
+    /// Builds comma-separated channel lists within the 512-byte IRC line
+    /// limit, sends one batched WHO (WHOX if supported) and one batched
+    /// MODE query. Waits for `RPL_ENDOFWHO` before sending the next batch.
+    fn send_channel_query_batch(&mut self, conn_id: &str) {
+        /// Max channels per WHO command. IRCnet ircd 2.12 silently drops
+        /// targets beyond ~11 in comma-separated WHO. Use 5 for safety.
+        const MAX_WHO_TARGETS: usize = 5;
+
+        let queue = match self.channel_query_queues.get_mut(conn_id) {
+            Some(q) if !q.is_empty() => q,
+            _ => {
+                self.channel_query_in_flight.remove(conn_id);
+                self.channel_query_sent_at.remove(conn_id);
+                return;
+            }
+        };
+
+        let has_whox = self
+            .state
+            .connections
+            .get(conn_id)
+            .is_some_and(|c| c.isupport_parsed.has_whox());
+
+        // WHO overhead: "WHO " (4) + " %tcuihnfar,NNN" (~16 for WHOX) + "\r\n" (2)
+        let who_overhead = if has_whox { 22 } else { 6 };
+        let who_budget = 512 - who_overhead;
+
+        // MODE overhead: "MODE " (5) + "\r\n" (2)
+        let mode_budget = 512 - 7;
+
+        // Use the smaller budget so both commands fit their channels.
+        let budget = who_budget.min(mode_budget);
+
+        let mut batch = Vec::new();
+        let mut len = 0;
+
+        while let Some(ch) = queue.front() {
+            if batch.len() >= MAX_WHO_TARGETS {
+                break;
+            }
+            let add = if batch.is_empty() {
+                ch.len()
+            } else {
+                1 + ch.len() // comma + channel name
+            };
+            if len + add > budget && !batch.is_empty() {
+                break;
+            }
+            len += add;
+            batch.push(queue.pop_front().expect("front() was Some"));
+        }
+
+        if batch.is_empty() {
+            self.channel_query_in_flight.remove(conn_id);
+            return;
+        }
+
+        let Some(handle) = self.irc_handles.get(conn_id) else {
+            self.channel_query_in_flight.remove(conn_id);
+            return;
+        };
+
+        // Track in-flight channels for RPL_ENDOFWHO completion.
+        let batch_set: HashSet<String> = batch.iter().cloned().collect();
+        self.channel_query_in_flight
+            .insert(conn_id.to_string(), batch_set);
+        self.channel_query_sent_at
+            .insert(conn_id.to_string(), Instant::now());
+
+        // Mark all batch channels as silent (no display for auto-WHO replies).
+        if let Some(conn) = self.state.connections.get_mut(conn_id) {
+            for ch in &batch {
+                conn.silent_who_channels.insert(ch.clone());
+            }
+        }
+
+        // Send batched WHO (single command, comma-separated channels).
+        let chanlist = batch.join(",");
+        tracing::trace!(conn_id, %chanlist, has_whox, "send_channel_query_batch: sending WHO+MODE");
+        if has_whox {
+            let token = crate::irc::events::next_who_token(&mut self.state, conn_id);
+            let fields = format!("{},{token}", crate::constants::WHOX_FIELDS);
+            tracing::trace!(conn_id, %chanlist, %fields, "WHOX command");
+            let _ = handle.sender.send(::irc::proto::Command::Raw(
+                "WHO".to_string(),
+                vec![chanlist.clone(), fields],
+            ));
+        } else {
+            tracing::trace!(conn_id, %chanlist, "standard WHO (no WHOX)");
+            let _ = handle.sender.send(::irc::proto::Command::WHO(
+                Some(chanlist.clone()),
+                None,
+            ));
+        }
+
+        // Send batched MODE (single command, comma-separated channels).
+        let _ = handle.sender.send(::irc::proto::Command::Raw(
+            "MODE".to_string(),
+            vec![chanlist],
+        ));
+    }
+
+    /// Handle `RPL_ENDOFWHO` for batch tracking.
+    ///
+    /// Removes completed channels from the in-flight set. Handles both
+    /// individual per-channel responses and a single response with the
+    /// comma-separated batch target. Starts the next batch when complete.
+    fn handle_who_batch_complete(&mut self, conn_id: &str, target: &str) {
+        tracing::trace!(conn_id, %target, "handle_who_batch_complete");
+        let Some(in_flight) = self.channel_query_in_flight.get_mut(conn_id) else {
+            tracing::trace!(conn_id, "no in-flight batch for this connection");
+            return;
+        };
+
+        // Try removing as individual channel.
+        in_flight.remove(target);
+
+        // Also split comma-separated (server may send one EOW for the batch).
+        if target.contains(',') {
+            for ch in target.split(',') {
+                in_flight.remove(ch);
+            }
+        }
+
+        tracing::trace!(conn_id, remaining = in_flight.len(), "in-flight after removal");
+
+        if in_flight.is_empty() {
+            let remaining_queued = self.channel_query_queues.get(conn_id).map_or(0, VecDeque::len);
+            tracing::trace!(conn_id, remaining_queued, "batch complete, sending next");
+            let conn_id = conn_id.to_string();
+            self.channel_query_in_flight.remove(&conn_id);
+            self.send_channel_query_batch(&conn_id);
+        }
+    }
+
+    /// Detect stale WHO batches where the server silently dropped some targets.
+    /// If a batch has been in-flight for >30s, clear the silent_who_channels for
+    /// the stuck channels, discard the in-flight set, and send the next batch.
+    fn check_stale_who_batches(&mut self) {
+        let stale_conns: Vec<String> = self
+            .channel_query_sent_at
+            .iter()
+            .filter(|(_, sent_at)| sent_at.elapsed() > Duration::from_secs(30))
+            .map(|(conn_id, _)| conn_id.clone())
+            .collect();
+
+        for conn_id in stale_conns {
+            if let Some(stale) = self.channel_query_in_flight.remove(&conn_id) {
+                tracing::warn!(
+                    %conn_id,
+                    stale_channels = ?stale,
+                    "WHO batch timed out — server likely dropped targets, moving on"
+                );
+                // Clean up silent_who_channels for the stuck channels.
+                if let Some(conn) = self.state.connections.get_mut(&conn_id) {
+                    for ch in &stale {
+                        conn.silent_who_channels.remove(ch.as_str());
+                    }
+                }
+            }
+            self.channel_query_sent_at.remove(&conn_id);
+            self.send_channel_query_batch(&conn_id);
+        }
+    }
+
+    /// Send IRC PING every 30s per connection to measure lag.
     ///
     /// Uses the current timestamp (ms since UNIX epoch) as the PING token.
     /// When the server responds with PONG containing the same token, we
     /// compute the round-trip time in `handle_irc_event`.
-    ///
-    /// If a PONG hasn't been received within 5 minutes, the connection is
-    /// considered dead and we trigger a disconnect (like irssi/erssi).
-    /// Drain one pending channel query (WHO + MODE) from the queue.
-    ///
-    /// Called every 2 seconds by the query timer. Sends at most 2 commands
-    /// (one WHO/WHOX + one MODE) per tick, avoiding Excess Flood on servers
-    /// with aggressive rate limiting like `IRCnet`.
-    fn drain_pending_channel_query(&mut self) {
-        let Some((conn_id, channel)) = self.pending_channel_queries.pop_front() else {
-            return;
-        };
-
-        // Skip if disconnected or handle gone.
-        let Some(handle) = self.irc_handles.get(&conn_id) else {
-            return;
-        };
-
-        // Send WHOX WHO if supported (silent — updates state without display).
-        if let Some((target, fields)) =
-            crate::irc::events::build_whox_who(&mut self.state, &conn_id, &channel, true)
-        {
-            let _ = handle.sender.send(::irc::proto::Command::Raw(
-                "WHO".to_string(),
-                vec![target, fields],
-            ));
-        }
-
-        // Request channel modes for status bar display.
-        let _ = handle.sender.send(::irc::proto::Command::Raw(
-            "MODE".to_string(),
-            vec![channel],
-        ));
-    }
-
     fn measure_lag(&mut self) {
         let now = Instant::now();
         let conn_ids: Vec<String> = self.irc_handles.keys().cloned().collect();
@@ -1438,7 +1571,7 @@ impl App {
                     self.emit_script_event(events::CONNECTED, params);
                 }
 
-                // Merge config channels with rejoin channels (dedup, config order first)
+                // Config channels (used for eager buffer creation + rejoin filtering)
                 let config_channels: Vec<String> = self
                     .config
                     .servers
@@ -1447,7 +1580,8 @@ impl App {
                     .map(|(_, cfg)| cfg.channels.clone())
                     .unwrap_or_default();
 
-                let mut all_channels = config_channels;
+                // Merge config + rejoin for buffer creation
+                let mut all_channels = config_channels.clone();
                 for ch in &rejoin_channels {
                     if !all_channels.iter().any(|c| c.eq_ignore_ascii_case(ch)) {
                         all_channels.push(ch.clone());
@@ -1497,22 +1631,30 @@ impl App {
                     }
                 }
 
-                // Batch channels into comma-separated JOINs (4 per command).
-                // The irc crate's penalty-based flood protection handles pacing.
-                if !all_channels.is_empty()
+                // Channel joining is handled by the irc crate on ENDOFMOTD:
+                // it batches channels into comma-separated JOINs with keys-first
+                // ordering and 512-byte splitting. Channels are passed via Config.
+                // Rejoin channels (from reconnect) need manual joining since
+                // they aren't in the library's config.
+                if !rejoin_channels.is_empty()
                     && let Some(handle) = self.irc_handles.get(&conn_id)
                 {
-                    for batch in all_channels.chunks(4) {
-                        let (names, keys) = split_channel_keys(batch);
-                        let keys_param =
-                            if keys.iter().all(|k| k.is_empty()) {
-                                None
-                            } else {
-                                Some(keys.join(","))
-                            };
+                    let extra: Vec<&str> = rejoin_channels
+                        .iter()
+                        .filter(|ch| {
+                            !config_channels.iter().any(|c| {
+                                c.split_once(' ')
+                                    .map_or(c.as_str(), |(n, _)| n)
+                                    .eq_ignore_ascii_case(ch)
+                            })
+                        })
+                        .map(String::as_str)
+                        .collect();
+                    if !extra.is_empty() {
+                        let chanlist = extra.join(",");
                         let _ = handle.sender.send(::irc::proto::Command::JOIN(
-                            names.join(","),
-                            keys_param,
+                            chanlist,
+                            None,
                             None,
                         ));
                     }
@@ -1534,6 +1676,9 @@ impl App {
                 self.irc_handles.remove(&conn_id);
                 self.lag_pings.remove(&conn_id);
                 self.batch_trackers.remove(&conn_id);
+                self.channel_query_queues.remove(&conn_id);
+                self.channel_query_in_flight.remove(&conn_id);
+                self.channel_query_sent_at.remove(&conn_id);
             }
             IrcEvent::Message(conn_id, msg) => {
                 // Intercept PONG to update lag measurement
@@ -1634,12 +1779,19 @@ impl App {
                 } else {
                     // Normal message processing
 
-                    // Detect RPL_ENDOFNAMES to trigger auto-WHO (WHOX) after channel join.
-                    // Extract the channel name before handle_irc_message borrows state.
+                    // Extract channel from RPL_ENDOFNAMES (for auto-WHO/MODE batch).
                     let endofnames_channel = if let ::irc::proto::Command::Response(
                         ::irc::proto::Response::RPL_ENDOFNAMES, ref args
                     ) = msg.command {
-                        // args: [our_nick, channel, "End of /NAMES list."]
+                        args.get(1).cloned()
+                    } else {
+                        None
+                    };
+
+                    // Extract target from RPL_ENDOFWHO (for batch completion).
+                    let endofwho_target = if let ::irc::proto::Command::Response(
+                        ::irc::proto::Response::RPL_ENDOFWHO, ref args
+                    ) = msg.command {
                         args.get(1).cloned()
                     } else {
                         None
@@ -1658,21 +1810,26 @@ impl App {
 
                     // Emit to scripts before default handling. If suppressed, skip.
                     if self.emit_irc_to_scripts(&conn_id, &msg) {
-                        // Script suppressed this event — skip default handling
-                        // but still process endofnames for channel queries.
+                        // Script suppressed — still process channel queries.
                         if let Some(channel) = endofnames_channel {
-                            self.pending_channel_queries.push_back((conn_id.clone(), channel));
+                            self.queue_channel_query(&conn_id, channel);
+                        }
+                        if let Some(ref target) = endofwho_target {
+                            self.handle_who_batch_complete(&conn_id, target);
                         }
                         return;
                     }
 
                     crate::irc::events::handle_irc_message(&mut self.state, &conn_id, &msg);
 
-                    // Queue auto-WHO and auto-MODE for later — sending them
-                    // immediately after ENDOFNAMES causes Excess Flood on servers
-                    // with aggressive rate limiting (e.g. IRCnet).
+                    // Queue channel for batched WHO + MODE after join.
                     if let Some(channel) = endofnames_channel {
-                        self.pending_channel_queries.push_back((conn_id.clone(), channel));
+                        self.queue_channel_query(&conn_id, channel);
+                    }
+
+                    // Check if a WHO batch completed.
+                    if let Some(ref target) = endofwho_target {
+                        self.handle_who_batch_complete(&conn_id, target);
                     }
                 }
             }
@@ -1815,7 +1972,9 @@ impl App {
                 self.scroll_offset = 0;
                 self.reset_sidepanel_scrolls();
             }
-            (_, KeyCode::Enter) => {
+            // Enter key, or newline chars arriving individually when bracketed
+            // paste isn't supported — submit the current input line.
+            (_, KeyCode::Enter | KeyCode::Char('\n' | '\r')) => {
                 let text = self.input.submit();
                 if !text.is_empty() {
                     self.handle_submit(&text);
@@ -2922,34 +3081,6 @@ fn expand_alias_template(template: &str, args: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn split_channel_keys_no_keys() {
-        let entries = vec!["#linux".to_string(), "#rust".to_string()];
-        let (names, keys) = split_channel_keys(&entries);
-        assert_eq!(names, vec!["#linux", "#rust"]);
-        assert_eq!(keys, vec!["", ""]);
-    }
-
-    #[test]
-    fn split_channel_keys_with_keys() {
-        let entries = vec![
-            "#public".to_string(),
-            "#secret mykey".to_string(),
-            "#other pass123".to_string(),
-        ];
-        let (names, keys) = split_channel_keys(&entries);
-        assert_eq!(names, vec!["#public", "#secret", "#other"]);
-        assert_eq!(keys, vec!["", "mykey", "pass123"]);
-    }
-
-    #[test]
-    fn split_channel_keys_empty() {
-        let entries: Vec<String> = vec![];
-        let (names, keys) = split_channel_keys(&entries);
-        assert!(names.is_empty());
-        assert!(keys.is_empty());
-    }
 
     // ── match_terminal tests ──
 

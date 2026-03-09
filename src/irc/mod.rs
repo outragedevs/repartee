@@ -267,10 +267,22 @@ pub async fn connect_server(
         use_tls: Some(server_config.tls),
         dangerously_accept_invalid_certs: Some(!server_config.tls_verify),
         password: server_config.password.clone(),
-        // Do NOT pass channels here — the irc crate auto-joins after ENDOFMOTD
-        // which combined with our own join logic causes Excess Flood.
-        // Our app handles channel joining with throttling via IrcEvent::Connected.
-        channels: vec![],
+        // Pass channels to the irc crate so it handles batched autojoin
+        // on ENDOFMOTD. Entries like "#channel key" are split into the
+        // channels vec (name only) and channel_keys map.
+        channels: server_config
+            .channels
+            .iter()
+            .map(|e| e.split_once(' ').map_or_else(|| e.clone(), |(c, _)| c.to_string()))
+            .collect(),
+        channel_keys: server_config
+            .channels
+            .iter()
+            .filter_map(|e| {
+                e.split_once(' ')
+                    .map(|(c, k)| (c.to_string(), k.to_string()))
+            })
+            .collect(),
         encoding: server_config.encoding.clone(),
         version: Some(general.ctcp_version.clone()),
         client_cert_path: server_config.client_cert_path.clone(),

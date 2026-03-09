@@ -2229,11 +2229,22 @@ fn handle_response(
         }
         Response::RPL_ENDOFWHO => {
             // args: [our_nick, target, "End of WHO list"]
+            // Target may be a single channel or comma-separated (batched WHO).
             let target = args.get(1).map_or("", String::as_str);
-            let was_silent = state
-                .connections
-                .get_mut(conn_id)
-                .is_some_and(|c| c.silent_who_channels.remove(target));
+            let was_silent = if let Some(conn) = state.connections.get_mut(conn_id) {
+                if target.contains(',') {
+                    // Batched WHO — remove each channel individually.
+                    let mut any_silent = false;
+                    for ch in target.split(',') {
+                        any_silent |= conn.silent_who_channels.remove(ch);
+                    }
+                    any_silent
+                } else {
+                    conn.silent_who_channels.remove(target)
+                }
+            } else {
+                false
+            };
             if !was_silent {
                 let target_buf = active_or_server_buffer(state, conn_id);
                 emit(state, &target_buf, "%Z565f89End of WHO list%N");
@@ -2505,15 +2516,17 @@ pub fn build_whox_who(state: &mut AppState, conn_id: &str, channel: &str, silent
 
 /// Handle a WHOX reply (numeric 354 / `RPL_WHOSPCRPL`).
 ///
-/// Our field selector `%tcuihsnfdlar` produces responses with fields:
-///   `[our_nick, token, channel, user, ip, host, server, nick, flags, hopcount, idle, account, realname]`
+/// Our field selector `%tcuihnfar` produces responses with fields:
+///   `[our_nick, token, channel, user, ip, host, nick, flags, account, realname]`
 ///
 /// Note: The irc crate treats 354 as `Command::Raw("354", args)` since it's non-standard.
 /// The `args` vec already has `our_nick` as the first element (the trailing prefix from the Raw parse).
 fn handle_whox_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
+    tracing::trace!(conn_id, args_len = args.len(), ?args, "handle_whox_reply");
     // Minimum fields: our_nick(0) + token(1) + channel(2) + user(3) + ip(4) + host(5)
-    //                + server(6) + nick(7) + flags(8) + hopcount(9) + idle(10) + account(11) + realname(12)
-    if args.len() < 13 {
+    //                + nick(6) + flags(7) + account(8) + realname(9)
+    if args.len() < 10 {
+        tracing::warn!(conn_id, args_len = args.len(), "WHOX reply too short, skipping");
         return;
     }
 
@@ -2522,12 +2535,10 @@ fn handle_whox_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
     let user = &args[3];
     // args[4] is IP
     let host = &args[5];
-    // args[6] is server
-    let nick = &args[7];
-    let flags = &args[8];
-    // args[9] is hopcount, args[10] is idle
-    let account_raw = &args[11];
-    let realname = &args[12];
+    let nick = &args[6];
+    let flags = &args[7];
+    let account_raw = &args[8];
+    let realname = &args[9];
 
     // Auto-WHO replies are silent — update state only, no display
     let silent = state
@@ -2539,21 +2550,20 @@ fn handle_whox_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
     let away = flags.starts_with('G');
 
     // Parse account: "0" means not logged in
-    let account = if account_raw == "0" {
-        None
-    } else {
-        Some(account_raw.clone())
-    };
+    let account = (account_raw != "0").then(|| account_raw.clone());
 
     // Update NickEntry in the channel buffer
     let buffer_id = make_buffer_id(conn_id, channel);
     if let Some(buf) = state.buffers.get_mut(&buffer_id)
         && let Some(entry) = buf.users.get_mut(&nick.to_lowercase())
     {
+        tracing::trace!(%nick, %channel, %away, ?account, "WHOX: updating nick entry");
         entry.ident = Some(user.clone());
         entry.host = Some(host.clone());
         entry.account.clone_from(&account);
         entry.away = away;
+    } else {
+        tracing::warn!(%nick, %channel, %buffer_id, "WHOX: buffer or nick not found for update");
     }
 
     // Only display for manual /who — auto-WHO on join is silent
@@ -4205,7 +4215,7 @@ mod tests {
         let mut state = make_whox_state();
         state.set_active_buffer("test/testserver");
 
-        // WHOX 354 response: our_nick, token, channel, user, ip, host, server, nick, flags, hopcount, idle, account, realname
+        // WHOX 354 response: our_nick, token, channel, user, ip, host, nick, flags, account, realname
         let msg = make_irc_msg(
             None,
             Command::Raw(
@@ -4217,11 +4227,8 @@ mod tests {
                     "~alice".to_string(),     // user
                     "1.2.3.4".to_string(),    // ip
                     "host.example.com".to_string(), // host
-                    "irc.server.net".to_string(),   // server
                     "alice".to_string(),      // nick
                     "H".to_string(),          // flags (H=here)
-                    "0".to_string(),          // hopcount
-                    "42".to_string(),         // idle
                     "patrick".to_string(),    // account
                     "Alice Smith".to_string(), // realname
                 ],
@@ -4253,11 +4260,8 @@ mod tests {
                     "~bob".to_string(),
                     "5.6.7.8".to_string(),
                     "bob.host.net".to_string(),
-                    "irc.server.net".to_string(),
                     "bob".to_string(),
                     "H@".to_string(),
-                    "0".to_string(),
-                    "0".to_string(),
                     "0".to_string(),          // account="0" → not logged in
                     "Bob Jones".to_string(),
                 ],
@@ -4286,11 +4290,8 @@ mod tests {
                     "~alice".to_string(),
                     "1.2.3.4".to_string(),
                     "host.example.com".to_string(),
-                    "irc.server.net".to_string(),
                     "alice".to_string(),
                     "G".to_string(),          // G = gone/away
-                    "0".to_string(),
-                    "100".to_string(),
                     "alice_acct".to_string(),
                     "Alice".to_string(),
                 ],
@@ -4327,11 +4328,8 @@ mod tests {
                     "~alice".to_string(),
                     "1.2.3.4".to_string(),
                     "host.example.com".to_string(),
-                    "irc.server.net".to_string(),
                     "alice".to_string(),
                     "H".to_string(),          // H = here (not away)
-                    "0".to_string(),
-                    "0".to_string(),
                     "0".to_string(),
                     "Alice".to_string(),
                 ],
@@ -4399,7 +4397,7 @@ mod tests {
         assert!(result.is_some());
         let (target, fields) = result.unwrap();
         assert_eq!(target, "#test");
-        assert!(fields.starts_with("%tcuihsnfdlar,"));
+        assert!(fields.starts_with("%tcuihnfar,"));
         // Token should be "1" (first call)
         assert!(fields.ends_with(",1"));
     }
@@ -4442,11 +4440,8 @@ mod tests {
                     "~alice".to_string(),
                     "1.2.3.4".to_string(),
                     "host.example.com".to_string(),
-                    "irc.server.net".to_string(),
                     "alice".to_string(),
                     "H".to_string(),
-                    "0".to_string(),
-                    "42".to_string(),
                     "alice_acct".to_string(),
                     "Alice Smith".to_string(),
                 ],

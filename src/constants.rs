@@ -3,9 +3,12 @@ pub const APP_NAME: &str = "repartee";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// WHOX field selector string.
-/// Fields requested: t=token, c=channel, u=user, i=ip, h=host, s=server,
-/// n=nick, f=flags, d=hopcount, l=idle, a=account, r=realname.
-pub const WHOX_FIELDS: &str = "%tcuihsnfdlar";
+/// Fields requested: t=token, c=channel, u=user, i=ip, h=host,
+/// n=nick, f=flags, a=account, r=realname.
+/// Note: `s` (server), `d` (hopcount), `l` (idle) are omitted because
+/// IRCnet ircd 2.12 silently drops unsupported fields, causing arg count
+/// mismatches in the parser.
+pub const WHOX_FIELDS: &str = "%tcuihnfar";
 
 /// Bundled default theme shipped with the binary.
 const DEFAULT_THEME: &str = include_str!("../themes/default.theme");

@@ -40,6 +40,12 @@ impl InputState {
     }
 
     pub fn insert_char(&mut self, c: char) {
+        // Reject control characters — newlines, tabs, etc. must not enter
+        // the input buffer. Multiline paste is handled by Event::Paste or
+        // the '\n' key handler in handle_key().
+        if c.is_control() {
+            return;
+        }
         self.value.insert(self.cursor_pos, c);
         self.cursor_pos += c.len_utf8();
         self.tab_state = None;
