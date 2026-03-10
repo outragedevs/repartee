@@ -2163,7 +2163,7 @@ impl App {
                 } else if let Some(r) = regions.buffer_list_area
                     && r.contains(pos)
                 {
-                    let visible_h = r.height.saturating_sub(1) as usize; // account for border
+                    let visible_h = r.height as usize;
                     let max = self.buffer_list_total.saturating_sub(visible_h);
                     if self.buffer_list_scroll < max {
                         self.buffer_list_scroll += 1;
@@ -2171,7 +2171,7 @@ impl App {
                 } else if let Some(r) = regions.nick_list_area
                     && r.contains(pos)
                 {
-                    let visible_h = r.height.saturating_sub(1) as usize;
+                    let visible_h = r.height as usize;
                     let max = self.nick_list_total.saturating_sub(visible_h);
                     if self.nick_list_scroll < max {
                         self.nick_list_scroll += 1;
