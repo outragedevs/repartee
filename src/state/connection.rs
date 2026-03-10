@@ -27,8 +27,6 @@ pub struct Connection {
     pub lag_pending: bool,
     /// Number of reconnect attempts made so far.
     pub reconnect_attempts: u32,
-    /// Maximum number of reconnect attempts before giving up.
-    pub max_reconnect_attempts: u32,
     /// Base delay in seconds between reconnect attempts.
     pub reconnect_delay_secs: u64,
     /// When the next reconnect attempt should be made.

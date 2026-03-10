@@ -220,11 +220,11 @@ impl AppState {
 
     /// Look up the highest channel mode prefix for a nick in a buffer.
     ///
-    /// Returns `Some("@")` for ops, `Some("+")` for voice, etc.
-    pub fn nick_prefix(&self, buffer_id: &str, nick: &str) -> Option<String> {
+    /// Returns `Some('@')` for ops, `Some('+')` for voice, etc.
+    pub fn nick_prefix(&self, buffer_id: &str, nick: &str) -> Option<char> {
         let buf = self.buffers.get(buffer_id)?;
         let entry = buf.users.get(&nick.to_lowercase())?;
-        entry.prefix.chars().next().map(|c| c.to_string())
+        entry.prefix.chars().next()
     }
 
     // === Navigation ===
@@ -301,7 +301,7 @@ mod tests {
             lag: None,
             lag_pending: false,
             reconnect_attempts: 0,
-            max_reconnect_attempts: 10,
+
             reconnect_delay_secs: 30,
             next_reconnect: None,
             should_reconnect: true,

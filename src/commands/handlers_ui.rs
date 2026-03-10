@@ -239,7 +239,7 @@ pub(crate) fn cmd_alias(app: &mut App, args: &[String]) {
             lines.push(format!("  {C_DIM}No aliases defined{C_RST}"));
         } else {
             let mut sorted: Vec<_> = app.config.aliases.iter().collect();
-            sorted.sort_by_key(|(k, _)| (*k).clone());
+            sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
             for (name, template) in sorted {
                 lines.push(format!(
                     "  {C_CMD}/{name}{C_RST} = {C_TEXT}{template}{C_RST}"
@@ -260,6 +260,7 @@ pub(crate) fn cmd_alias(app: &mut App, args: &[String]) {
     {
         let name = removal.to_lowercase();
         if app.config.aliases.remove(&name).is_some() {
+            app.cached_config_toml = None;
             let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
             add_local_event(
                 app,
@@ -293,6 +294,7 @@ pub(crate) fn cmd_alias(app: &mut App, args: &[String]) {
     }
 
     app.config.aliases.insert(name.clone(), template.clone());
+    app.cached_config_toml = None;
     let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
     add_local_event(
         app,
@@ -309,6 +311,7 @@ pub(crate) fn cmd_unalias(app: &mut App, args: &[String]) {
     let name = args[0].strip_prefix('/').unwrap_or(&args[0]).to_lowercase();
 
     if app.config.aliases.remove(&name).is_some() {
+        app.cached_config_toml = None;
         let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
         add_local_event(
             app,
@@ -364,6 +367,7 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
                         return;
                     }
                     app.config.statusbar.items.push(item);
+                    app.cached_config_toml = None;
                     let _ = crate::config::save_config(
                         &crate::constants::config_path(),
                         &app.config,
@@ -391,6 +395,7 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
                 Some(item) => {
                     if let Some(pos) = app.config.statusbar.items.iter().position(|i| *i == item) {
                         app.config.statusbar.items.remove(pos);
+                        app.cached_config_toml = None;
                         let _ = crate::config::save_config(
                             &crate::constants::config_path(),
                             &app.config,
@@ -451,6 +456,7 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
             }
             let removed = app.config.statusbar.items.remove(current_pos);
             app.config.statusbar.items.insert(new_pos - 1, removed);
+            app.cached_config_toml = None;
             let _ =
                 crate::config::save_config(&crate::constants::config_path(), &app.config);
             add_local_event(
@@ -490,6 +496,7 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
                 .statusbar
                 .item_formats
                 .insert(item_name.clone(), fmt.clone());
+            app.cached_config_toml = None;
             let _ =
                 crate::config::save_config(&crate::constants::config_path(), &app.config);
             add_local_event(
@@ -509,6 +516,7 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
                 return;
             }
             app.config.statusbar.separator.clone_from(&args[1]);
+            app.cached_config_toml = None;
             let _ =
                 crate::config::save_config(&crate::constants::config_path(), &app.config);
             add_local_event(
@@ -523,6 +531,7 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
             app.config.statusbar.items = crate::config::StatusbarConfig::default().items;
             app.config.statusbar.item_formats.clear();
             app.config.statusbar.separator = " | ".to_string();
+            app.cached_config_toml = None;
             let _ =
                 crate::config::save_config(&crate::constants::config_path(), &app.config);
             add_local_event(app, &format!("{C_OK}Statusbar reset to defaults{C_RST}"));

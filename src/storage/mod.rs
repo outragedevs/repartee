@@ -13,7 +13,6 @@ pub use types::{ReadMarker, StorageStats, StoredMessage};
 
 use std::sync::{Arc, Mutex};
 
-use aes_gcm::{Aes256Gcm, Key};
 use rusqlite::Connection;
 use tokio::sync::mpsc;
 
@@ -22,18 +21,14 @@ use crate::constants;
 
 /// High-level handle to the storage subsystem.
 ///
-/// Owns the database connection, the background writer task, and the
-/// encryption key (if configured). Created once at startup and shut
-/// down when the app exits.
+/// Owns the database connection and the background writer task.
+/// Created once at startup and shut down when the app exits.
 #[allow(dead_code)]
 pub struct Storage {
     pub db: Arc<Mutex<Connection>>,
     pub log_tx: mpsc::UnboundedSender<LogRow>,
     writer: writer::LogWriterHandle,
-    #[allow(dead_code)]
     pub encrypt: bool,
-    #[allow(dead_code)]
-    pub crypto_key: Option<Key<Aes256Gcm>>,
 }
 
 impl Storage {
@@ -72,14 +67,13 @@ impl Storage {
 
         let db = Arc::new(Mutex::new(conn));
         let (writer, log_tx) =
-            writer::LogWriterHandle::spawn(Arc::clone(&db), config.encrypt, crypto_key);
+            writer::LogWriterHandle::spawn(Arc::clone(&db), crypto_key);
 
         Ok(Self {
             db,
             log_tx,
             writer,
             encrypt: config.encrypt,
-            crypto_key,
         })
     }
 

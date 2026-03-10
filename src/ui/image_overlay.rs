@@ -71,7 +71,7 @@ fn render_loading(
     colors: &crate::theme::ThemeColors,
     url: &str,
 ) {
-    let bg_alt = hex_to_color(&colors.bg_alt).unwrap_or(Color::Black);
+    let bg_alt = hex_to_color(&colors.bg_alt).unwrap_or(Color::Reset);
     let border_color = hex_to_color(&colors.border).unwrap_or(Color::DarkGray);
     let fg_muted = hex_to_color(&colors.fg_muted).unwrap_or(Color::Gray);
     let accent = hex_to_color(&colors.accent).unwrap_or(Color::Blue);
@@ -115,7 +115,7 @@ fn render_ready(
     height: u16,
     iterm2_tmux: bool,
 ) {
-    let bg_alt = hex_to_color(&colors.bg_alt).unwrap_or(Color::Black);
+    let bg_alt = hex_to_color(&colors.bg_alt).unwrap_or(Color::Reset);
     let border_color = hex_to_color(&colors.border).unwrap_or(Color::DarkGray);
     let accent = hex_to_color(&colors.accent).unwrap_or(Color::Blue);
 
@@ -157,7 +157,7 @@ fn render_error(
     url: &str,
     message: &str,
 ) {
-    let bg_alt = hex_to_color(&colors.bg_alt).unwrap_or(Color::Black);
+    let bg_alt = hex_to_color(&colors.bg_alt).unwrap_or(Color::Reset);
     let border_color = hex_to_color(&colors.border).unwrap_or(Color::DarkGray);
     let error_color = Color::Rgb(0xf7, 0x76, 0x8e); // soft red
 

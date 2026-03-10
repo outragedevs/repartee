@@ -1,5 +1,4 @@
 pub const APP_NAME: &str = "repartee";
-#[allow(dead_code)]
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// WHOX field selector string.
@@ -28,7 +27,6 @@ pub fn theme_dir() -> PathBuf {
     home_dir().join("themes")
 }
 
-#[allow(dead_code)]
 pub fn env_path() -> PathBuf {
     home_dir().join(".env")
 }
@@ -44,22 +42,34 @@ pub fn scripts_dir() -> PathBuf {
 /// Create config directory and write default files on first run.
 pub fn ensure_config_dir() {
     let home = home_dir();
-    let _ = std::fs::create_dir_all(theme_dir());
-    let _ = std::fs::create_dir_all(log_dir());
-    let _ = std::fs::create_dir_all(scripts_dir());
+    if let Err(e) = std::fs::create_dir_all(theme_dir()) {
+        tracing::warn!("failed to create theme dir: {e}");
+    }
+    if let Err(e) = std::fs::create_dir_all(log_dir()) {
+        tracing::warn!("failed to create log dir: {e}");
+    }
+    if let Err(e) = std::fs::create_dir_all(scripts_dir()) {
+        tracing::warn!("failed to create scripts dir: {e}");
+    }
 
     // Write default config if missing
     let cfg = config_path();
     if !cfg.exists() {
         let default_cfg = crate::config::default_config();
-        let _ = crate::config::save_config(&cfg, &default_cfg);
-        tracing::info!("Created default config at {}", cfg.display());
+        if let Err(e) = crate::config::save_config(&cfg, &default_cfg) {
+            tracing::warn!("failed to write default config: {e}");
+        } else {
+            tracing::info!("Created default config at {}", cfg.display());
+        }
     }
 
     // Write default theme if missing
     let theme = home.join("themes/default.theme");
     if !theme.exists() {
-        let _ = std::fs::write(&theme, DEFAULT_THEME);
-        tracing::info!("Created default theme at {}", theme.display());
+        if let Err(e) = std::fs::write(&theme, DEFAULT_THEME) {
+            tracing::warn!("failed to write default theme: {e}");
+        } else {
+            tracing::info!("Created default theme at {}", theme.display());
+        }
     }
 }

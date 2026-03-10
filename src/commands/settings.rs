@@ -364,6 +364,7 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
 
     match set_config_value(&mut app.config, path, raw) {
         Ok(()) => {
+            app.cached_config_toml = None;
             ev(app, &format!("{C_OK}{path}{C_RST} = {C_CMD}{raw}{C_RST}"));
 
             // Save config
@@ -390,6 +391,14 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                         ev(app, &format!("{C_ERR}Failed to load theme: {e}{C_RST}"));
                     }
                 }
+            }
+
+            // Recompute cached wrap-indent when relevant settings change.
+            if path == "general.timestamp_format"
+                || path == "display.nick_column_width"
+                || path == "general.theme"
+            {
+                app.recompute_wrap_indent();
             }
         }
         Err(e) => {

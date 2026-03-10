@@ -304,19 +304,19 @@ impl ScriptManager {
         false
     }
 
-    /// Try to dispatch a command to script engines. Returns true if handled.
+    /// Try to dispatch a command to script engines. Returns `Some(result)` if handled.
     pub fn handle_command(
         &self,
         name: &str,
         args: &[String],
         connection_id: Option<&str>,
-    ) -> bool {
+    ) -> Option<EventResult> {
         for engine in &self.engines {
-            if engine.handle_command(name, args, connection_id).is_some() {
-                return true;
+            if let Some(result) = engine.handle_command(name, args, connection_id) {
+                return Some(result);
             }
         }
-        false
+        None
     }
 
     /// Fire a timer callback. Routes to all engines (only the one that owns

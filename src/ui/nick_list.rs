@@ -10,7 +10,7 @@ use super::{truncate_with_plus, visible_len};
 /// Render the nick list sidebar. Returns total line count for scroll clamping.
 pub fn render(frame: &mut Frame, area: Rect, app: &App, scroll_offset: usize) -> usize {
     let colors = &app.theme.colors;
-    let bg = hex_to_color(&colors.bg).unwrap_or(Color::Black);
+    let bg = hex_to_color(&colors.bg).unwrap_or(Color::Reset);
     let border_color = hex_to_color(&colors.border).unwrap_or(Color::DarkGray);
     let fg_muted = hex_to_color(&colors.fg_muted).unwrap_or(Color::DarkGray);
 
@@ -65,12 +65,18 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, scroll_offset: usize) ->
             .unwrap_or_else(|| " $0".to_string());
         let resolved = resolve_abstractions(&format, abstracts, 0);
 
-        // Measure format overhead (visible chars besides $0 nick)
-        let overhead = visible_len(&parse_format_string(&resolved, &[""]));
+        // Single parse: use full nick, then truncate if needed
+        let full_spans = parse_format_string(&resolved, &[&entry.nick]);
+        let total_visible = visible_len(&full_spans);
+        let nick_chars = entry.nick.chars().count();
+        let overhead = total_visible.saturating_sub(nick_chars);
         let max_nick_len = panel_width.saturating_sub(1 + overhead);
-        let display_nick = truncate_with_plus(&entry.nick, max_nick_len);
-
-        let spans = parse_format_string(&resolved, &[&display_nick]);
+        let spans = if nick_chars > max_nick_len {
+            let display_nick = truncate_with_plus(&entry.nick, max_nick_len);
+            parse_format_string(&resolved, &[&display_nick])
+        } else {
+            full_spans
+        };
         lines.push(styled_spans_to_line(&spans));
     }
 

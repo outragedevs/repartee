@@ -199,7 +199,12 @@ pub fn chunk_authenticate(payload: &str) -> Vec<String> {
     let mut chunks: Vec<String> = payload
         .as_bytes()
         .chunks(400)
-        .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+        .map(|chunk| {
+            // base64 output is always ASCII, so from_utf8 is infallible here
+            std::str::from_utf8(chunk)
+                .expect("base64 is always ASCII")
+                .to_string()
+        })
         .collect();
 
     // If the last chunk is exactly 400 bytes, append "+" terminator

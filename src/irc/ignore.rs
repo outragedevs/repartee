@@ -13,7 +13,7 @@ static REGEX_CACHE: std::sync::LazyLock<Mutex<HashMap<String, Regex>>> =
 
 /// Get a compiled regex for a wildcard pattern, using a cache to avoid recompilation.
 fn cached_wildcard_regex(pattern: &str) -> Regex {
-    let mut cache = REGEX_CACHE.lock().expect("regex cache lock poisoned");
+    let mut cache = REGEX_CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     cache
         .entry(pattern.to_string())
         .or_insert_with(|| wildcard_to_regex(pattern))

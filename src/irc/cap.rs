@@ -58,8 +58,7 @@ impl ServerCaps {
     /// Check whether the server advertised a given capability (case-insensitive).
     #[must_use]
     pub fn has(&self, cap: &str) -> bool {
-        let lower = cap.to_ascii_lowercase();
-        self.caps.iter().any(|(name, _)| *name == lower)
+        self.caps.iter().any(|(name, _)| name.eq_ignore_ascii_case(cap))
     }
 
     /// Get the value associated with a capability, if any.
@@ -67,10 +66,9 @@ impl ServerCaps {
     /// Returns `None` if the capability is absent or has no value.
     #[must_use]
     pub fn value(&self, cap: &str) -> Option<&str> {
-        let lower = cap.to_ascii_lowercase();
         self.caps
             .iter()
-            .find(|(name, _)| *name == lower)
+            .find(|(name, _)| name.eq_ignore_ascii_case(cap))
             .and_then(|(_, v)| v.as_deref())
     }
 

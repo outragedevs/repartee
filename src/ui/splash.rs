@@ -18,7 +18,7 @@ const BG_COLOR: &str = "#1a1b26";
 /// (drawn in the background color to create a progressive reveal effect).
 pub fn render(frame: &mut Frame, visible_lines: usize) {
     let area = frame.area();
-    let bg = hex_to_color(BG_COLOR).unwrap_or(Color::Black);
+    let bg = hex_to_color(BG_COLOR).unwrap_or(Color::Reset);
 
     // Clear entire screen with background.
     frame.render_widget(Block::default().style(Style::default().bg(bg)), area);

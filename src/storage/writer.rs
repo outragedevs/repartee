@@ -23,14 +23,12 @@ impl LogWriterHandle {
     /// Returns the handle and an unbounded sender for submitting log rows.
     pub fn spawn(
         db: Arc<Mutex<Connection>>,
-        encrypt: bool,
         crypto_key: Option<Key<Aes256Gcm>>,
     ) -> (Self, mpsc::UnboundedSender<LogRow>) {
         let (row_tx, row_rx) = mpsc::unbounded_channel();
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
-        let has_fts = !encrypt;
 
-        let join = tokio::spawn(writer_loop(db, row_rx, shutdown_rx, has_fts, crypto_key));
+        let join = tokio::spawn(writer_loop(db, row_rx, shutdown_rx, crypto_key));
 
         let handle = Self { shutdown_tx, join };
         (handle, row_tx)
@@ -47,7 +45,6 @@ async fn writer_loop(
     db: Arc<Mutex<Connection>>,
     mut row_rx: mpsc::UnboundedReceiver<LogRow>,
     mut shutdown_rx: mpsc::Receiver<()>,
-    has_fts: bool,
     crypto_key: Option<Key<Aes256Gcm>>,
 ) {
     let mut queue: Vec<LogRow> = Vec::new();
@@ -60,12 +57,12 @@ async fn writer_loop(
             Some(row) = row_rx.recv() => {
                 queue.push(row);
                 if queue.len() >= BATCH_SIZE {
-                    queue = flush_blocking(&db, queue, has_fts, crypto_key).await;
+                    queue = flush_blocking(&db, queue, crypto_key).await;
                 }
             }
             _ = tick.tick() => {
                 if !queue.is_empty() {
-                    queue = flush_blocking(&db, queue, has_fts, crypto_key).await;
+                    queue = flush_blocking(&db, queue, crypto_key).await;
                 }
             }
             _ = shutdown_rx.recv() => {
@@ -73,7 +70,7 @@ async fn writer_loop(
                     queue.push(row);
                 }
                 if !queue.is_empty() {
-                    flush_blocking(&db, queue, has_fts, crypto_key).await;
+                    flush_blocking(&db, queue, crypto_key).await;
                 }
                 return;
             }
@@ -84,7 +81,6 @@ async fn writer_loop(
 async fn flush_blocking(
     db: &Arc<Mutex<Connection>>,
     queue: Vec<LogRow>,
-    _has_fts: bool,
     crypto_key: Option<Key<Aes256Gcm>>,
 ) -> Vec<LogRow> {
     let db = Arc::clone(db);
@@ -161,7 +157,7 @@ fn flush(
     if let Err(e) = conn.execute_batch("COMMIT") {
         tracing::error!("failed to commit transaction: {e}");
         let _ = conn.execute_batch("ROLLBACK");
-        return queue;
+        return Vec::new(); // Don't retry — prevents duplicate inserts
     }
 
     Vec::new()
@@ -197,7 +193,7 @@ mod tests {
     #[tokio::test]
     async fn writer_flushes_on_shutdown() {
         let db = Arc::new(Mutex::new(open_database(false).unwrap()));
-        let (handle, tx) = LogWriterHandle::spawn(Arc::clone(&db), false, None);
+        let (handle, tx) = LogWriterHandle::spawn(Arc::clone(&db), None);
 
         for _ in 0..5 {
             tx.send(make_row("hello")).unwrap();
@@ -212,7 +208,7 @@ mod tests {
     #[tokio::test]
     async fn writer_flushes_at_batch_size() {
         let db = Arc::new(Mutex::new(open_database(false).unwrap()));
-        let (handle, tx) = LogWriterHandle::spawn(Arc::clone(&db), false, None);
+        let (handle, tx) = LogWriterHandle::spawn(Arc::clone(&db), None);
 
         for _ in 0..BATCH_SIZE {
             tx.send(make_row("batch")).unwrap();
@@ -235,7 +231,7 @@ mod tests {
     #[tokio::test]
     async fn writer_populates_fts() {
         let db = Arc::new(Mutex::new(open_database(false).unwrap()));
-        let (handle, tx) = LogWriterHandle::spawn(Arc::clone(&db), false, None);
+        let (handle, tx) = LogWriterHandle::spawn(Arc::clone(&db), None);
 
         let unique = "xyzzyplughmagicword";
         tx.send(make_row(unique)).unwrap();
@@ -261,7 +257,7 @@ mod tests {
         let key = import_key(&key_hex).unwrap();
 
         let db = Arc::new(Mutex::new(open_database(true).unwrap()));
-        let (handle, tx) = LogWriterHandle::spawn(Arc::clone(&db), true, Some(key));
+        let (handle, tx) = LogWriterHandle::spawn(Arc::clone(&db), Some(key));
 
         let plaintext = "super secret message";
         tx.send(make_row(plaintext)).unwrap();

@@ -7,8 +7,8 @@ use crate::ui::styled_text::styled_spans_to_line_with_fg;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let colors = &app.theme.colors;
-    let bg_alt = hex_to_color(&colors.bg_alt).unwrap_or(Color::Black);
-    let fg = hex_to_color(&colors.fg).unwrap_or(Color::White);
+    let bg_alt = hex_to_color(&colors.bg_alt).unwrap_or(Color::Reset);
+    let fg = hex_to_color(&colors.fg).unwrap_or(Color::Reset);
     let accent = hex_to_color(&colors.accent).unwrap_or(Color::Cyan);
     let fg_muted = hex_to_color(&colors.fg_muted).unwrap_or(Color::DarkGray);
 

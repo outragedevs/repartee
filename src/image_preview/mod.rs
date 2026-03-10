@@ -74,6 +74,12 @@ pub enum ImagePreviewEvent {
 /// Results are sent back via the provided channel. The caller should set the
 /// preview status to `Loading` before calling this.
 ///
+/// The pipeline is split into two phases:
+/// 1. **Async I/O** (fetch from network or read from disk cache) — runs in the
+///    tokio async context with `.await`.
+/// 2. **CPU-bound** (image decode + protocol encode) — runs in
+///    `spawn_blocking` to avoid blocking the async runtime.
+///
 /// # Arguments
 ///
 /// * `url` - The image URL to fetch.
@@ -95,19 +101,46 @@ pub fn spawn_preview(
     let client = http_client.clone();
     let url = url.to_owned();
 
-    tokio::task::spawn_blocking(move || {
-        let result = fetch_decode_encode(&url, &config, &picker, &client, term_size);
-        let event = match result {
-            Ok((title, protocol, png_buf, width, height)) => ImagePreviewEvent::Ready {
-                url,
-                title,
-                image: Box::new(protocol),
-                raw_png: png_buf,
-                width,
-                height,
-            },
+    tokio::spawn(async move {
+        // Phase 1: Async I/O — fetch image bytes (network or disk cache).
+        let fetch_result = fetch_image_data(&url, &config, &client).await;
+
+        let event = match fetch_result {
+            Ok((data, title)) => {
+                // Phase 2: CPU-bound — decode image + encode for terminal protocol.
+                // Run in spawn_blocking to avoid blocking the async runtime.
+                let decode_result = tokio::task::spawn_blocking(move || {
+                    decode_and_encode(&data, &config, &picker, term_size)
+                })
+                .await;
+
+                match decode_result {
+                    Ok(Ok((protocol, png_buf, width, height))) => ImagePreviewEvent::Ready {
+                        url,
+                        title,
+                        image: Box::new(protocol),
+                        raw_png: png_buf,
+                        width,
+                        height,
+                    },
+                    Ok(Err(e)) => {
+                        error!(url = %url, error = %e, "image preview decode failed");
+                        ImagePreviewEvent::Error {
+                            url,
+                            message: e.to_string(),
+                        }
+                    }
+                    Err(e) => {
+                        error!(url = %url, error = %e, "image preview task panicked");
+                        ImagePreviewEvent::Error {
+                            url,
+                            message: e.to_string(),
+                        }
+                    }
+                }
+            }
             Err(e) => {
-                error!(url = %url, error = %e, "image preview failed");
+                error!(url = %url, error = %e, "image preview fetch failed");
                 ImagePreviewEvent::Error {
                     url,
                     message: e.to_string(),
@@ -121,52 +154,59 @@ pub fn spawn_preview(
     });
 }
 
-/// Synchronous pipeline: fetch (or load from cache) -> validate -> decode -> encode.
+/// Phase 1: Fetch image bytes from the network or disk cache (async I/O).
 ///
-/// Called inside `spawn_blocking` because image decoding and protocol encoding
-/// are CPU-bound operations.
-/// (title, protocol, `raw_png`, width, height)
-type DecodeResult = (Option<String>, StatefulProtocol, Vec<u8>, u16, u16);
-
-fn fetch_decode_encode(
+/// Returns the raw image data and an optional title extracted from the URL.
+async fn fetch_image_data(
     url: &str,
     config: &ImagePreviewConfig,
-    picker: &Picker,
     client: &reqwest::Client,
+) -> color_eyre::eyre::Result<(Vec<u8>, Option<String>)> {
+    // 1. Check the disk cache first.
+    if let Some(cached_path) = cache::is_cached(url) {
+        let data = tokio::fs::read(&cached_path).await?;
+        let title = detect::classify_url(url).and_then(|c| c.title);
+        return Ok((data, title));
+    }
+
+    // 2. Fetch from network (async).
+    let fetch_config = fetch::FetchConfig {
+        timeout_secs: config.fetch_timeout,
+        max_file_size: config.max_file_size,
+    };
+    let result = fetch::fetch_image(url, &fetch_config, client).await?;
+
+    // 3. Validate magic bytes.
+    if !cache::validate_magic_bytes(&result.data) {
+        return Err(color_eyre::eyre::eyre!(
+            "downloaded data does not appear to be a valid image"
+        ));
+    }
+
+    // 4. Store in cache.
+    if let Err(e) = cache::store(url, &result.data, &result.content_type) {
+        warn!(url, error = %e, "failed to cache image");
+    }
+
+    let title = detect::classify_url(url).and_then(|c| c.title);
+    Ok((result.data, title))
+}
+
+/// Phase 2: Decode image and encode for terminal display (CPU-bound).
+///
+/// Called inside `spawn_blocking` because image decoding and protocol encoding
+/// are CPU-intensive operations.
+/// Returns (protocol, `raw_png`, width, height).
+type DecodeResult = (StatefulProtocol, Vec<u8>, u16, u16);
+
+fn decode_and_encode(
+    data: &[u8],
+    config: &ImagePreviewConfig,
+    picker: &Picker,
     term_size: (u16, u16),
 ) -> color_eyre::eyre::Result<DecodeResult> {
-    // 1. Check the disk cache first.
-    let (data, title) = if let Some(cached_path) = cache::is_cached(url) {
-        let data = std::fs::read(&cached_path)?;
-        let title = detect::classify_url(url).and_then(|c| c.title);
-        (data, title)
-    } else {
-        // 2. Fetch from network using the tokio runtime handle.
-        let handle = tokio::runtime::Handle::current();
-        let fetch_config = fetch::FetchConfig {
-            timeout_secs: config.fetch_timeout,
-            max_file_size: config.max_file_size,
-        };
-        let result = handle.block_on(fetch::fetch_image(url, &fetch_config, client))?;
-
-        // 3. Validate magic bytes.
-        if !cache::validate_magic_bytes(&result.data) {
-            return Err(color_eyre::eyre::eyre!(
-                "downloaded data does not appear to be a valid image"
-            ));
-        }
-
-        // 4. Store in cache.
-        if let Err(e) = cache::store(url, &result.data, &result.content_type) {
-            warn!(url, error = %e, "failed to cache image");
-        }
-
-        let title = detect::classify_url(url).and_then(|c| c.title);
-        (result.data, title)
-    };
-
     // 5. Decode the image.
-    let dyn_img = ImageReader::new(Cursor::new(&data))
+    let dyn_img = ImageReader::new(Cursor::new(data))
         .with_guessed_format()?
         .decode()?;
 
@@ -180,7 +220,7 @@ fn fetch_decode_encode(
     // 8. Create the protocol image via the picker.
     let protocol = picker.new_resize_protocol(dyn_img);
 
-    Ok((title, protocol, png_buf, width, height))
+    Ok((protocol, png_buf, width, height))
 }
 
 /// Calculate the popup dimensions in terminal cells.

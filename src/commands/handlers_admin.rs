@@ -12,6 +12,7 @@ pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
     match crate::config::load_config(&crate::constants::config_path()) {
         Ok(new_config) => {
             app.config = new_config;
+            app.cached_config_toml = None;
             add_local_event(app, &format!("{C_OK}Config reloaded{C_RST}"));
         }
         Err(e) => {
@@ -38,6 +39,9 @@ pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
             );
         }
     }
+
+    // Recompute cached wrap-indent (depends on config + theme).
+    app.recompute_wrap_indent();
 }
 
 pub(crate) fn cmd_ignore(app: &mut App, args: &[String]) {
@@ -106,6 +110,7 @@ pub(crate) fn cmd_ignore(app: &mut App, args: &[String]) {
     });
 
     // Save config
+    app.cached_config_toml = None;
     let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
     add_local_event(
         app,
@@ -127,6 +132,7 @@ pub(crate) fn cmd_unignore(app: &mut App, args: &[String]) {
         && n <= app.config.ignores.len()
     {
         let removed = app.config.ignores.remove(n - 1);
+        app.cached_config_toml = None;
         let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
         add_local_event(
             app,
@@ -143,6 +149,7 @@ pub(crate) fn cmd_unignore(app: &mut App, args: &[String]) {
         .position(|e| e.mask == *target)
     {
         let removed = app.config.ignores.remove(pos);
+        app.cached_config_toml = None;
         let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
         add_local_event(
             app,
@@ -293,6 +300,7 @@ pub(crate) fn cmd_server(app: &mut App, args: &[String]) {
                     client_cert_path: None,
                 },
             );
+            app.cached_config_toml = None;
             let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
             add_local_event(app, &format!("{C_OK}Server '{id}' added{C_RST}"));
         }
@@ -303,6 +311,7 @@ pub(crate) fn cmd_server(app: &mut App, args: &[String]) {
             }
             let id = &args[1];
             if app.config.servers.remove(id).is_some() {
+                app.cached_config_toml = None;
                 let _ =
                     crate::config::save_config(&crate::constants::config_path(), &app.config);
                 add_local_event(app, &format!("{C_OK}Server '{id}' removed{C_RST}"));
@@ -350,6 +359,7 @@ pub(crate) fn cmd_autoconnect(app: &mut App, args: &[String]) {
 
     let status = if server.autoconnect { "on" } else { "off" };
     let label = server.label.clone();
+    app.cached_config_toml = None;
     let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
     add_local_event(
         app,

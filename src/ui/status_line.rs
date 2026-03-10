@@ -13,7 +13,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     let colors = &app.theme.colors;
-    let fg = hex_to_color(&colors.fg).unwrap_or(Color::White);
+    let fg = hex_to_color(&colors.fg).unwrap_or(Color::Reset);
     let fg_muted = hex_to_color(&colors.fg_muted).unwrap_or(Color::DarkGray);
     let fg_dim = hex_to_color(&colors.fg_dim).unwrap_or(Color::DarkGray);
     let accent = hex_to_color(&colors.accent).unwrap_or(Color::Cyan);
@@ -30,7 +30,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     for (i, item) in app.config.statusbar.items.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(
-                separator.clone(),
+                separator.as_str(),
                 Style::default().fg(fg_dim),
             ));
         }

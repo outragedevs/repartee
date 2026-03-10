@@ -19,8 +19,8 @@ pub struct UiRegions {
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let colors = &app.theme.colors;
-    let bg = hex_to_color(&colors.bg).unwrap_or(Color::Black);
-    let bg_alt = hex_to_color(&colors.bg_alt).unwrap_or(Color::Black);
+    let bg = hex_to_color(&colors.bg).unwrap_or(Color::Reset);
+    let bg_alt = hex_to_color(&colors.bg_alt).unwrap_or(Color::Reset);
     let border_color = hex_to_color(&colors.border).unwrap_or(Color::DarkGray);
 
     // Clear background
@@ -47,44 +47,57 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     super::topic_bar::render(frame, topic_area, app);
 
-    let mut main_constraints: Vec<Constraint> = Vec::new();
-    if left_visible {
-        main_constraints.push(Constraint::Length(left_width));
-    }
-    main_constraints.push(Constraint::Fill(1));
-    if show_nicklist {
-        main_constraints.push(Constraint::Length(right_width));
-    }
-
-    let main_chunks = Layout::horizontal(main_constraints).split(main_area);
-    let mut chunk_idx = 0;
-
     let mut regions = UiRegions {
         topic_area: Some(topic_area),
         ..Default::default()
     };
 
-    if left_visible {
-        let buf_list_area = main_chunks[chunk_idx];
-        app.buffer_list_total =
-            super::buffer_list::render(frame, buf_list_area, app, app.buffer_list_scroll);
-        regions.buffer_list_area = Some(buf_list_area);
-        chunk_idx += 1;
+    match (left_visible, show_nicklist) {
+        (true, true) => {
+            let [buf_list_area, chat_area, nick_area] = Layout::horizontal([
+                Constraint::Length(left_width),
+                Constraint::Fill(1),
+                Constraint::Length(right_width),
+            ])
+            .areas(main_area);
+            app.buffer_list_total =
+                super::buffer_list::render(frame, buf_list_area, app, app.buffer_list_scroll);
+            regions.buffer_list_area = Some(buf_list_area);
+            super::chat_view::render(frame, chat_area, app);
+            regions.chat_area = Some(chat_area);
+            app.nick_list_total =
+                super::nick_list::render(frame, nick_area, app, app.nick_list_scroll);
+            regions.nick_list_area = Some(nick_area);
+        }
+        (true, false) => {
+            let [buf_list_area, chat_area] = Layout::horizontal([
+                Constraint::Length(left_width),
+                Constraint::Fill(1),
+            ])
+            .areas(main_area);
+            app.buffer_list_total =
+                super::buffer_list::render(frame, buf_list_area, app, app.buffer_list_scroll);
+            regions.buffer_list_area = Some(buf_list_area);
+            super::chat_view::render(frame, chat_area, app);
+            regions.chat_area = Some(chat_area);
+        }
+        (false, true) => {
+            let [chat_area, nick_area] = Layout::horizontal([
+                Constraint::Fill(1),
+                Constraint::Length(right_width),
+            ])
+            .areas(main_area);
+            super::chat_view::render(frame, chat_area, app);
+            regions.chat_area = Some(chat_area);
+            app.nick_list_total =
+                super::nick_list::render(frame, nick_area, app, app.nick_list_scroll);
+            regions.nick_list_area = Some(nick_area);
+        }
+        (false, false) => {
+            super::chat_view::render(frame, main_area, app);
+            regions.chat_area = Some(main_area);
+        }
     }
-
-    let chat_area = main_chunks[chunk_idx];
-    super::chat_view::render(frame, chat_area, app);
-    regions.chat_area = Some(chat_area);
-    chunk_idx += 1;
-
-    if show_nicklist {
-        let nick_area = main_chunks[chunk_idx];
-        app.nick_list_total =
-            super::nick_list::render(frame, nick_area, app, app.nick_list_scroll);
-        regions.nick_list_area = Some(nick_area);
-    }
-
-    let _ = chunk_idx;
 
     let bottom_block = Block::default()
         .borders(Borders::TOP)

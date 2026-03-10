@@ -81,14 +81,15 @@ impl StyleState {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Read exactly 6 hex chars from position in a char slice, or return None.
-fn read_hex6(chars: &[char], pos: usize) -> Option<String> {
-    if pos + 6 > chars.len() {
+/// Read exactly 6 hex bytes from position in a byte slice, or return None.
+fn read_hex6_bytes(bytes: &[u8], pos: usize) -> Option<String> {
+    if pos + 6 > bytes.len() {
         return None;
     }
-    let slice: String = chars[pos..pos + 6].iter().collect();
-    if slice.chars().all(|c| c.is_ascii_hexdigit()) {
-        Some(slice)
+    let slice = &bytes[pos..pos + 6];
+    if slice.iter().all(u8::is_ascii_hexdigit) {
+        // Safety: all bytes are ASCII hex digits, so this is valid UTF-8.
+        Some(std::str::from_utf8(slice).unwrap().to_string())
     } else {
         None
     }
@@ -316,8 +317,10 @@ pub fn parse_format_string(input: &str, params: &[&str]) -> Vec<StyledSpan> {
     // Step 1: Substitute variables
     let text = substitute_vars(input, params);
 
-    // Step 2: Walk char by char, parse color/style codes, build spans
-    let chars: Vec<char> = text.chars().collect();
+    // Step 2: Walk bytes (all control/format chars are single-byte ASCII), build spans.
+    // For text content between control sequences, decode chars with proper UTF-8 handling.
+    let bytes = text.as_bytes();
+    let len = bytes.len();
     let mut spans: Vec<StyledSpan> = Vec::new();
     let mut current = StyleState::default();
     let mut buffer = String::new();
@@ -329,184 +332,166 @@ pub fn parse_format_string(input: &str, params: &[&str]) -> Vec<StyledSpan> {
         }
     };
 
-    while i < chars.len() {
-        if chars[i] == '%' {
-            i += 1;
-            if i >= chars.len() {
-                buffer.push('%');
-                break;
-            }
-
-            let code = chars[i];
-
-            // %N or %n -- reset all
-            if code == 'N' || code == 'n' {
-                flush(&mut buffer, &mut spans, &current);
-                current = StyleState::default();
+    while i < len {
+        match bytes[i] {
+            b'%' => {
                 i += 1;
-                continue;
-            }
-
-            // %_ -- toggle bold
-            if code == '_' {
-                flush(&mut buffer, &mut spans, &current);
-                current.bold = !current.bold;
-                i += 1;
-                continue;
-            }
-
-            // %u -- toggle underline
-            if code == 'u' {
-                flush(&mut buffer, &mut spans, &current);
-                current.underline = !current.underline;
-                i += 1;
-                continue;
-            }
-
-            // %i -- toggle italic
-            if code == 'i' {
-                flush(&mut buffer, &mut spans, &current);
-                current.italic = !current.italic;
-                i += 1;
-                continue;
-            }
-
-            // %d -- toggle dim
-            if code == 'd' {
-                flush(&mut buffer, &mut spans, &current);
-                current.dim = !current.dim;
-                i += 1;
-                continue;
-            }
-
-            // %Z -- 24-bit hex fg color: %ZRRGGBB
-            if code == 'Z' {
-                flush(&mut buffer, &mut spans, &current);
-                if let Some(hex) = read_hex6(&chars, i + 1) {
-                    current.fg = hex_to_color(&hex);
-                    i += 7; // skip Z + 6 hex chars
-                } else {
-                    // Not enough hex digits, treat as literal
+                if i >= len {
                     buffer.push('%');
-                    buffer.push('Z');
-                    i += 1;
+                    break;
                 }
-                continue;
-            }
 
-            // %z -- 24-bit hex bg color: %zRRGGBB
-            if code == 'z' {
-                flush(&mut buffer, &mut spans, &current);
-                if let Some(hex) = read_hex6(&chars, i + 1) {
-                    current.bg = hex_to_color(&hex);
-                    i += 7; // skip z + 6 hex chars
-                } else {
-                    buffer.push('%');
-                    buffer.push('z');
-                    i += 1;
+                let code = bytes[i];
+
+                match code {
+                    // %N or %n -- reset all
+                    b'N' | b'n' => {
+                        flush(&mut buffer, &mut spans, &current);
+                        current = StyleState::default();
+                        i += 1;
+                    }
+                    // %_ -- toggle bold
+                    b'_' => {
+                        flush(&mut buffer, &mut spans, &current);
+                        current.bold = !current.bold;
+                        i += 1;
+                    }
+                    // %u -- toggle underline
+                    b'u' => {
+                        flush(&mut buffer, &mut spans, &current);
+                        current.underline = !current.underline;
+                        i += 1;
+                    }
+                    // %i -- toggle italic
+                    b'i' => {
+                        flush(&mut buffer, &mut spans, &current);
+                        current.italic = !current.italic;
+                        i += 1;
+                    }
+                    // %d -- toggle dim
+                    b'd' => {
+                        flush(&mut buffer, &mut spans, &current);
+                        current.dim = !current.dim;
+                        i += 1;
+                    }
+                    // %Z -- 24-bit hex fg color: %ZRRGGBB
+                    b'Z' => {
+                        flush(&mut buffer, &mut spans, &current);
+                        if let Some(hex) = read_hex6_bytes(bytes, i + 1) {
+                            current.fg = hex_to_color(&hex);
+                            i += 7; // skip Z + 6 hex chars
+                        } else {
+                            buffer.push('%');
+                            buffer.push('Z');
+                            i += 1;
+                        }
+                    }
+                    // %z -- 24-bit hex bg color: %zRRGGBB
+                    b'z' => {
+                        flush(&mut buffer, &mut spans, &current);
+                        if let Some(hex) = read_hex6_bytes(bytes, i + 1) {
+                            current.bg = hex_to_color(&hex);
+                            i += 7; // skip z + 6 hex chars
+                        } else {
+                            buffer.push('%');
+                            buffer.push('z');
+                            i += 1;
+                        }
+                    }
+                    // %| -- indent marker, skip
+                    b'|' => {
+                        i += 1;
+                    }
+                    // %% -- literal percent
+                    b'%' => {
+                        buffer.push('%');
+                        i += 1;
+                    }
+                    _ => {
+                        // Color code from irssi color map (ASCII letter)
+                        let code_char = code as char;
+                        if let Some(hex) = color_map(code_char) {
+                            flush(&mut buffer, &mut spans, &current);
+                            current.fg = hex_to_color(hex);
+                        } else {
+                            // Unknown code -- keep as-is
+                            buffer.push('%');
+                            buffer.push(code_char);
+                        }
+                        i += 1;
+                    }
                 }
-                continue;
             }
-
-            // %| -- indent marker, skip
-            if code == '|' {
-                i += 1;
-                continue;
-            }
-
-            // %% -- literal percent
-            if code == '%' {
-                buffer.push('%');
-                i += 1;
-                continue;
-            }
-
-            // Color code from irssi color map
-            if let Some(hex) = color_map(code) {
-                flush(&mut buffer, &mut spans, &current);
-                current.fg = hex_to_color(hex);
-                i += 1;
-                continue;
-            }
-
-            // Unknown code -- keep as-is
-            buffer.push('%');
-            buffer.push(code);
-        } else {
-            // -- mIRC control characters --
-            let ch = chars[i] as u32;
-
             // \x02 -- bold toggle
-            if ch == 0x02 {
+            0x02 => {
                 flush(&mut buffer, &mut spans, &current);
                 current.bold = !current.bold;
                 i += 1;
-                continue;
             }
-
             // \x03 -- mIRC color: \x03[FG[,BG]]
-            if ch == 0x03 {
+            0x03 => {
                 flush(&mut buffer, &mut spans, &current);
                 i += 1;
 
                 // Read up to 2 digits for foreground
-                let mut fg_str = String::new();
-                if i < chars.len() && chars[i].is_ascii_digit() {
-                    fg_str.push(chars[i]);
+                let mut fg_num: Option<usize> = None;
+                let mut fg_digits = 0;
+                if i < len && bytes[i].is_ascii_digit() {
+                    let mut n = (bytes[i] - b'0') as usize;
+                    fg_digits = 1;
                     i += 1;
-                    if i < chars.len() && chars[i].is_ascii_digit() {
-                        fg_str.push(chars[i]);
+                    if i < len && bytes[i].is_ascii_digit() {
+                        n = n * 10 + (bytes[i] - b'0') as usize;
+                        fg_digits = 2;
                         i += 1;
                     }
+                    fg_num = Some(n);
                 }
 
                 // Read optional ,BG (only if comma is followed by a digit)
-                let mut bg_str = String::new();
-                if !fg_str.is_empty()
-                    && i < chars.len()
-                    && chars[i] == ','
-                    && i + 1 < chars.len()
-                    && chars[i + 1].is_ascii_digit()
+                let bg_num = if fg_digits > 0
+                    && i < len
+                    && bytes[i] == b','
+                    && i + 1 < len
+                    && bytes[i + 1].is_ascii_digit()
                 {
                     i += 1; // skip comma
-                    bg_str.push(chars[i]);
+                    let mut n = (bytes[i] - b'0') as usize;
                     i += 1;
-                    if i < chars.len() && chars[i].is_ascii_digit() {
-                        bg_str.push(chars[i]);
+                    if i < len && bytes[i].is_ascii_digit() {
+                        n = n * 10 + (bytes[i] - b'0') as usize;
                         i += 1;
                     }
-                }
+                    Some(n)
+                } else {
+                    None
+                };
 
-                if fg_str.is_empty() {
+                if let Some(fg) = fg_num {
+                    if fg < MIRC_COLORS.len() {
+                        current.fg = hex_to_color(MIRC_COLORS[fg]);
+                    }
+                    if let Some(bg) = bg_num
+                        && bg < MIRC_COLORS.len() {
+                            current.bg = hex_to_color(MIRC_COLORS[bg]);
+                    }
+                } else {
                     // \x03 alone = reset color
                     current.fg = None;
                     current.bg = None;
-                } else {
-                    let fg_num: usize = fg_str.parse().unwrap_or(0);
-                    if fg_num < MIRC_COLORS.len() {
-                        current.fg = hex_to_color(MIRC_COLORS[fg_num]);
-                    }
-                    if !bg_str.is_empty() {
-                        let bg_num: usize = bg_str.parse().unwrap_or(0);
-                        if bg_num < MIRC_COLORS.len() {
-                            current.bg = hex_to_color(MIRC_COLORS[bg_num]);
-                        }
-                    }
                 }
-                continue;
             }
-
             // \x04 -- hex color: \x04[RRGGBB[,RRGGBB]]
-            if ch == 0x04 {
+            0x04 => {
                 flush(&mut buffer, &mut spans, &current);
                 i += 1;
 
-                if let Some(fg_hex) = read_hex6(&chars, i) {
+                if let Some(fg_hex) = read_hex6_bytes(bytes, i) {
                     current.fg = hex_to_color(&fg_hex);
                     i += 6;
-                    if i < chars.len()
-                        && chars[i] == ','
-                        && let Some(bg_hex) = read_hex6(&chars, i + 1)
+                    if i < len
+                        && bytes[i] == b','
+                        && let Some(bg_hex) = read_hex6_bytes(bytes, i + 1)
                     {
                         current.bg = hex_to_color(&bg_hex);
                         i += 7; // comma + 6 hex chars
@@ -516,58 +501,49 @@ pub fn parse_format_string(input: &str, params: &[&str]) -> Vec<StyledSpan> {
                     current.fg = None;
                     current.bg = None;
                 }
-                continue;
             }
-
             // \x0F -- reset all formatting
-            if ch == 0x0F {
+            0x0F => {
                 flush(&mut buffer, &mut spans, &current);
                 current = StyleState::default();
                 i += 1;
-                continue;
             }
-
             // \x16 -- reverse (swap fg/bg)
-            if ch == 0x16 {
+            0x16 => {
                 flush(&mut buffer, &mut spans, &current);
                 std::mem::swap(&mut current.fg, &mut current.bg);
                 i += 1;
-                continue;
             }
-
             // \x1D -- italic toggle
-            if ch == 0x1D {
+            0x1D => {
                 flush(&mut buffer, &mut spans, &current);
                 current.italic = !current.italic;
                 i += 1;
-                continue;
             }
-
             // \x1E -- strikethrough toggle (mapped to dim)
-            if ch == 0x1E {
+            0x1E => {
                 flush(&mut buffer, &mut spans, &current);
                 current.dim = !current.dim;
                 i += 1;
-                continue;
             }
-
             // \x1F -- underline toggle
-            if ch == 0x1F {
+            0x1F => {
                 flush(&mut buffer, &mut spans, &current);
                 current.underline = !current.underline;
                 i += 1;
-                continue;
             }
-
             // \x11 -- monospace (no-op in terminal)
-            if ch == 0x11 {
+            0x11 => {
                 i += 1;
-                continue;
             }
-
-            buffer.push(chars[i]);
+            // Regular text content -- decode char with proper UTF-8 handling
+            _ => {
+                // Safety: `text` is a valid String, so decoding from byte position is safe.
+                let ch = text[i..].chars().next().unwrap();
+                buffer.push(ch);
+                i += ch.len_utf8();
+            }
         }
-        i += 1;
     }
 
     flush(&mut buffer, &mut spans, &current);

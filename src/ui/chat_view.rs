@@ -6,9 +6,12 @@ use ratatui::widgets::Paragraph;
 use crate::app::App;
 use crate::theme::hex_to_color;
 
+// Wrap-indent is cached on `App::wrap_indent` and recomputed only when
+// config or theme changes (see `App::recompute_wrap_indent`).
+
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let colors = &app.theme.colors;
-    let bg = hex_to_color(&colors.bg).unwrap_or(Color::Black);
+    let bg = hex_to_color(&colors.bg).unwrap_or(Color::Reset);
     let fg_muted = hex_to_color(&colors.fg_muted).unwrap_or(Color::DarkGray);
 
     if let Some(buf) = app.state.active_buffer() {
@@ -25,14 +28,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             return;
         }
 
-        // Calculate indent for wrapped continuation lines:
-        // timestamp visual width + separator + nick column + space before text.
-        let indent = calculate_wrap_indent(app);
+        // Wrap-indent is pre-computed and cached on App.
+        let indent = app.wrap_indent;
 
         // Process messages from the end of the buffer, wrapping each into
         // visual lines.  Stop once we have enough to fill the screen plus
         // the current scroll offset.
-        let needed = visible_height + app.scroll_offset + visible_height;
+        let needed = visible_height + app.scroll_offset;
         let mut visual_lines: VecDeque<Line<'_>> = VecDeque::new();
 
         for msg in buf.messages.iter().rev() {
@@ -72,26 +74,3 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// Calculate the wrap-indent width (in columns) for continuation lines.
-///
-/// This equals the visual width of everything before the message body:
-/// `timestamp_visual_width + 1 (separator) + nick_column_width + 1 (space)`.
-fn calculate_wrap_indent(app: &App) -> usize {
-    // Sample timestamp to get its visual width after theme formatting.
-    let ts_sample = chrono::Local::now()
-        .format(&app.config.general.timestamp_format)
-        .to_string();
-    let ts_format = app
-        .theme
-        .abstracts
-        .get("timestamp")
-        .cloned()
-        .unwrap_or_else(|| "$*".to_string());
-    let ts_resolved =
-        crate::theme::resolve_abstractions(&ts_format, &app.theme.abstracts, 0);
-    let ts_spans = crate::theme::parse_format_string(&ts_resolved, &[&ts_sample]);
-    let ts_visual_width: usize = ts_spans.iter().map(|s| s.text.chars().count()).sum();
-
-    // timestamp + " " separator + nick column + " " before text
-    ts_visual_width + 1 + app.config.display.nick_column_width as usize + 1
-}

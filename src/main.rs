@@ -22,7 +22,10 @@ async fn main() -> Result<()> {
     if std::env::var("RUST_LOG").is_ok() {
         let log_dir = constants::home_dir();
         std::fs::create_dir_all(&log_dir)?;
-        let log_file = std::fs::File::create(log_dir.join("repartee.log"))?;
+        let log_file = std::fs::File::options()
+            .create(true)
+            .append(true)
+            .open(log_dir.join("repartee.log"))?;
         tracing_subscriber::fmt()
             .with_env_filter(
                 EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),

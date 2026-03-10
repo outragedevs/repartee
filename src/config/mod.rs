@@ -86,7 +86,7 @@ pub struct GeneralConfig {
 
 impl Default for GeneralConfig {
     fn default() -> Self {
-        use crate::constants::APP_NAME;
+        use crate::constants::{APP_NAME, APP_VERSION};
         Self {
             nick: APP_NAME.to_string(),
             username: APP_NAME.to_lowercase(),
@@ -94,7 +94,7 @@ impl Default for GeneralConfig {
             theme: "default".to_string(),
             timestamp_format: "%H:%M:%S".to_string(),
             flood_protection: true,
-            ctcp_version: APP_NAME.to_string(),
+            ctcp_version: format!("{APP_NAME} {APP_VERSION}"),
         }
     }
 }
@@ -319,12 +319,14 @@ pub struct ScriptsConfig {
 /// Load config from TOML file, merging with defaults for missing fields.
 /// Uses serde's `#[serde(default)]` on `AppConfig` to handle missing fields.
 pub fn load_config(path: &Path) -> Result<AppConfig> {
-    if !path.exists() {
-        return Ok(default_config());
+    match std::fs::read_to_string(path) {
+        Ok(content) => {
+            let config: AppConfig = toml::from_str(&content)?;
+            Ok(config)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(default_config()),
+        Err(e) => Err(e.into()),
     }
-    let content = std::fs::read_to_string(path)?;
-    let config: AppConfig = toml::from_str(&content)?;
-    Ok(config)
 }
 
 /// Save config to TOML file.
@@ -347,7 +349,10 @@ mod tests {
     fn default_config_uses_app_name() {
         let config = default_config();
         assert_eq!(config.general.nick, crate::constants::APP_NAME);
-        assert_eq!(config.general.ctcp_version, crate::constants::APP_NAME);
+        assert_eq!(
+            config.general.ctcp_version,
+            format!("{} {}", crate::constants::APP_NAME, crate::constants::APP_VERSION),
+        );
     }
 
     #[test]

@@ -97,18 +97,21 @@ pub fn get_commands() -> &'static [(&'static str, CommandDef)] {
 }
 
 /// Get all command names including aliases.
-pub fn get_command_names() -> Vec<&'static str> {
-    let commands = get_commands();
-    let mut names: Vec<&'static str> = Vec::new();
-    for &(name, ref def) in commands {
-        names.push(name);
-        for alias in def.aliases {
-            names.push(alias);
+pub fn get_command_names() -> &'static [&'static str] {
+    static NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+        let commands = get_commands();
+        let mut names: Vec<&'static str> = Vec::new();
+        for &(name, ref def) in commands {
+            names.push(name);
+            for alias in def.aliases {
+                names.push(alias);
+            }
         }
-    }
-    names.sort_unstable();
-    names.dedup();
-    names
+        names.sort_unstable();
+        names.dedup();
+        names
+    });
+    &NAMES
 }
 
 /// Resolve an alias to its canonical command name.

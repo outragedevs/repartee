@@ -10,7 +10,7 @@ use super::{truncate_with_plus, visible_len};
 /// Render the buffer list sidebar. Returns total line count for scroll clamping.
 pub fn render(frame: &mut Frame, area: Rect, app: &App, scroll_offset: usize) -> usize {
     let colors = &app.theme.colors;
-    let bg = hex_to_color(&colors.bg).unwrap_or(Color::Black);
+    let bg = hex_to_color(&colors.bg).unwrap_or(Color::Reset);
     let border_color = hex_to_color(&colors.border).unwrap_or(Color::DarkGray);
 
     let block = Block::default()
@@ -55,11 +55,18 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, scroll_offset: usize) ->
                 .unwrap_or_else(|| "$0".to_string());
             let resolved = resolve_abstractions(&header_fmt, abstracts, 0);
 
-            let overhead = visible_len(&parse_format_string(&resolved, &[""]));
+            // Single parse: use full label, then truncate if needed
+            let full_spans = parse_format_string(&resolved, &[conn_label]);
+            let total_visible = visible_len(&full_spans);
+            let label_chars = conn_label.chars().count();
+            let overhead = total_visible.saturating_sub(label_chars);
             let max_label_len = panel_width.saturating_sub(1 + overhead);
-            let display_label = truncate_with_plus(conn_label, max_label_len);
-
-            let spans = parse_format_string(&resolved, &[&display_label]);
+            let spans = if label_chars > max_label_len {
+                let display_label = truncate_with_plus(conn_label, max_label_len);
+                parse_format_string(&resolved, &[&display_label])
+            } else {
+                full_spans
+            };
             lines.push(styled_spans_to_line(&spans));
         }
 
@@ -83,11 +90,18 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, scroll_offset: usize) ->
         let resolved = resolve_abstractions(&format, abstracts, 0);
 
         let num_str = ref_num.to_string();
-        let overhead = visible_len(&parse_format_string(&resolved, &[&num_str, ""]));
-        let max_name_len = panel_width.saturating_sub(1 + overhead);
-        let display_name = truncate_with_plus(&buf.name, max_name_len);
-
-        let spans = parse_format_string(&resolved, &[&num_str, &display_name]);
+        let full_spans = parse_format_string(&resolved, &[&num_str, &buf.name]);
+        let total_visible = visible_len(&full_spans);
+        let name_chars = buf.name.chars().count();
+        let num_chars = num_str.chars().count();
+        let overhead = total_visible.saturating_sub(name_chars + num_chars);
+        let max_name_len = panel_width.saturating_sub(1 + overhead + num_chars);
+        let spans = if name_chars > max_name_len {
+            let display_name = truncate_with_plus(&buf.name, max_name_len);
+            parse_format_string(&resolved, &[&num_str, &display_name])
+        } else {
+            full_spans
+        };
         lines.push(styled_spans_to_line(&spans));
 
         ref_num += 1;

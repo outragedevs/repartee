@@ -20,6 +20,10 @@ const CREATE_MESSAGES_IDX: &str = "
 CREATE INDEX IF NOT EXISTS idx_messages_network_buffer
 ON messages (network, buffer, timestamp)";
 
+const CREATE_MESSAGES_MSG_ID_IDX: &str = "
+CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_msg_id
+ON messages (msg_id) WHERE msg_id IS NOT NULL";
+
 const CREATE_READ_MARKERS: &str = "
 CREATE TABLE IF NOT EXISTS read_markers (
     network   TEXT NOT NULL,
@@ -59,6 +63,7 @@ fn apply_pragmas(db: &Connection) -> rusqlite::Result<()> {
 fn create_schema(db: &Connection, encrypt: bool) -> rusqlite::Result<()> {
     db.execute_batch(CREATE_MESSAGES)?;
     db.execute_batch(CREATE_MESSAGES_IDX)?;
+    db.execute_batch(CREATE_MESSAGES_MSG_ID_IDX)?;
     db.execute_batch(CREATE_READ_MARKERS)?;
     if !encrypt {
         db.execute_batch(CREATE_FTS)?;
@@ -70,17 +75,24 @@ fn create_schema(db: &Connection, encrypt: bool) -> rusqlite::Result<()> {
 
 /// Add columns that may be missing from older database files.
 ///
-/// `ALTER TABLE ADD COLUMN` is a no-op if the column already exists — `SQLite`
-/// returns an error which we silently ignore.
+/// `ALTER TABLE ADD COLUMN` returns a "duplicate column name" error if the
+/// column already exists — that is expected and silenced.  Any *other* error
+/// (permissions, corruption, wrong table) is logged as a warning so it does
+/// not go unnoticed.
 fn migrate_schema(db: &Connection) {
     for col in ["ref_id TEXT", "tags TEXT"] {
         let sql = format!("ALTER TABLE messages ADD COLUMN {col}");
-        if db.execute_batch(&sql).is_ok() {
+        if let Err(e) = db.execute_batch(&sql) {
+            if !e.to_string().contains("duplicate column name") {
+                tracing::warn!("migration warning for '{col}': {e}");
+            }
+        } else {
             tracing::info!("migrated messages table: added {col}");
         }
     }
 }
 
+#[cfg(test)]
 pub fn open_database(encrypt: bool) -> rusqlite::Result<Connection> {
     let db = Connection::open_in_memory()?;
     apply_pragmas(&db)?;

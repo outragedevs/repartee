@@ -288,6 +288,8 @@ pub struct App {
     pub ui_regions: Option<UiRegions>,
     /// IRC connection handles keyed by connection ID.
     pub irc_handles: HashMap<String, IrcHandle>,
+    /// Forwarder task handles keyed by connection ID — aborted on disconnect/shutdown.
+    forwarder_handles: HashMap<String, tokio::task::JoinHandle<()>>,
     /// Shared event sender — each connection's reader task sends here.
     pub irc_tx: mpsc::UnboundedSender<IrcEvent>,
     /// Single receiver for all IRC events.
@@ -352,6 +354,11 @@ pub struct App {
     /// Sender for script actions — cloned into timer tasks so they can send
     /// `TimerFired` back to the event loop.
     script_action_tx: mpsc::UnboundedSender<crate::scripting::ScriptAction>,
+    /// Cached wrap-indent width (columns) for chat continuation lines.
+    /// Recomputed when config or theme changes.
+    pub wrap_indent: usize,
+    /// Cached TOML serialization of `config`, invalidated on config change.
+    pub cached_config_toml: Option<toml::Value>,
 }
 
 impl App {
@@ -461,7 +468,7 @@ impl App {
             }
         }
 
-        Ok(Self {
+        let mut app = Self {
             state,
             config,
             theme,
@@ -472,6 +479,7 @@ impl App {
             scroll_offset: 0,
             ui_regions: None,
             irc_handles: HashMap::new(),
+            forwarder_handles: HashMap::new(),
             irc_tx,
             irc_rx,
             last_esc_time: None,
@@ -503,7 +511,33 @@ impl App {
             script_config: HashMap::new(),
             active_timers: HashMap::new(),
             script_action_tx,
-        })
+            wrap_indent: 0,
+            cached_config_toml: None,
+        };
+        app.recompute_wrap_indent();
+        Ok(app)
+    }
+
+    /// Recompute the cached wrap-indent width used by `chat_view`.
+    ///
+    /// Call this after any change to `config.general.timestamp_format`,
+    /// `config.display.nick_column_width`, or `theme.abstracts`.
+    pub fn recompute_wrap_indent(&mut self) {
+        let ts_sample = chrono::Local::now()
+            .format(&self.config.general.timestamp_format)
+            .to_string();
+        let ts_format = self
+            .theme
+            .abstracts
+            .get("timestamp")
+            .cloned()
+            .unwrap_or_else(|| "$*".to_string());
+        let ts_resolved =
+            crate::theme::resolve_abstractions(&ts_format, &self.theme.abstracts, 0);
+        let ts_spans = crate::theme::parse_format_string(&ts_resolved, &[&ts_sample]);
+        let ts_visual_width: usize = ts_spans.iter().map(|s| s.text.chars().count()).sum();
+        self.wrap_indent =
+            ts_visual_width + 1 + self.config.display.nick_column_width as usize + 1;
     }
 
     /// Show an image preview for the given URL.
@@ -734,7 +768,6 @@ impl App {
 
         let auto_reconnect = server_config.auto_reconnect.unwrap_or(true);
         let reconnect_delay = server_config.reconnect_delay.unwrap_or(30);
-        let reconnect_max = server_config.reconnect_max_retries.unwrap_or(10);
 
         self.state.add_connection(Connection {
             id: conn_id.to_string(),
@@ -752,7 +785,6 @@ impl App {
             lag: None,
             lag_pending: false,
             reconnect_attempts: 0,
-            max_reconnect_attempts: reconnect_max,
             reconnect_delay_secs: reconnect_delay,
             next_reconnect: None,
             should_reconnect: auto_reconnect,
@@ -822,13 +854,14 @@ impl App {
                 self.irc_handles.insert(conn_id.clone(), handle);
 
                 // Spawn task to forward events from per-connection receiver to shared channel
-                tokio::spawn(async move {
+                let fwd_handle = tokio::spawn(async move {
                     while let Some(event) = rx.recv().await {
                         if tx.send(event).is_err() {
                             break;
                         }
                     }
                 });
+                self.forwarder_handles.insert(conn_id.clone(), fwd_handle);
             }
             Err(e) => {
                 crate::irc::events::handle_disconnected(
@@ -1001,6 +1034,16 @@ impl App {
             }
         }
 
+        // Abort all outstanding script timer tasks so they don't send on a dropped channel.
+        for (_, handle) in self.active_timers.drain() {
+            handle.abort();
+        }
+
+        // Abort forwarder tasks so they don't spin on a dropped receiver.
+        for (_, handle) in self.forwarder_handles.drain() {
+            handle.abort();
+        }
+
         // Stop the terminal reader thread so it doesn't interfere with restore.
         reader_stop.store(true, Ordering::Relaxed);
 
@@ -1035,7 +1078,6 @@ impl App {
             lag: None,
             lag_pending: false,
             reconnect_attempts: 0,
-            max_reconnect_attempts: 0,
             reconnect_delay_secs: 0,
             next_reconnect: None,
             should_reconnect: false,
@@ -1094,7 +1136,7 @@ impl App {
                 message_type: MessageType::Event,
                 nick: None,
                 nick_mode: None,
-                text: "Welcome to repartee! Use /connect <server> to connect.".to_string(),
+                text: format!("Welcome to {}! Use /connect <server> to connect.", crate::constants::APP_NAME),
                 highlight: false,
                 event_key: None,
                 event_params: None, log_msg_id: None, log_ref_id: None,
@@ -1221,19 +1263,7 @@ impl App {
 
             conn.reconnect_attempts += 1;
             let attempts = conn.reconnect_attempts;
-            let max = conn.max_reconnect_attempts;
             conn.next_reconnect = None;
-
-            if attempts > max {
-                conn.should_reconnect = false;
-                let label = conn.label.clone();
-                let buffer_id = make_buffer_id(&conn_id, &label);
-                self.add_event_to_buffer(
-                    &buffer_id,
-                    format!("Reconnect failed after {max} attempts. Use /connect to retry."),
-                );
-                continue;
-            }
 
             let conn = self.state.connections.get(&conn_id);
             let label = conn.map_or_else(|| conn_id.clone(), |c| c.label.clone());
@@ -1242,7 +1272,7 @@ impl App {
             let buffer_id = make_buffer_id(&conn_id, &label);
             self.add_event_to_buffer(
                 &buffer_id,
-                format!("Reconnecting to {label} (attempt {attempts}/{max})..."),
+                format!("Reconnecting to {label} (attempt {attempts})..."),
             );
 
             if let Some(conn) = self.state.connections.get_mut(&conn_id) {
@@ -1739,6 +1769,9 @@ impl App {
                     self.emit_script_event(events::DISCONNECTED, params);
                 }
                 self.irc_handles.remove(&conn_id);
+                if let Some(fwd) = self.forwarder_handles.remove(&conn_id) {
+                    fwd.abort();
+                }
                 self.lag_pings.remove(&conn_id);
                 self.batch_trackers.remove(&conn_id);
                 self.channel_query_queues.remove(&conn_id);
@@ -1837,10 +1870,9 @@ impl App {
                     .is_batched(&msg)
                 {
                     // Message belongs to an open batch — collect it, don't process now
-                    self.batch_trackers
-                        .get_mut(&conn_id)
-                        .expect("just inserted")
-                        .add_message(*msg);
+                    if let Some(tracker) = self.batch_trackers.get_mut(&conn_id) {
+                        tracker.add_message(*msg);
+                    }
                 } else {
                     // Normal message processing
 
@@ -2154,17 +2186,17 @@ impl App {
                 if let Some(buf_area) = regions.buffer_list_area
                     && buf_area.contains(pos)
                 {
-                    let y_offset = (mouse.row - buf_area.y) as usize;
+                    let y_offset = mouse.row.saturating_sub(buf_area.y) as usize;
                     self.handle_buffer_list_click(y_offset);
                 } else if let Some(nick_area) = regions.nick_list_area
                     && nick_area.contains(pos)
                 {
-                    let y_offset = (mouse.row - nick_area.y) as usize;
+                    let y_offset = mouse.row.saturating_sub(nick_area.y) as usize;
                     self.handle_nick_list_click(y_offset);
                 } else if let Some(chat_area) = regions.chat_area
                     && chat_area.contains(pos)
                 {
-                    let y_offset = (mouse.row - chat_area.y) as usize;
+                    let y_offset = mouse.row.saturating_sub(chat_area.y) as usize;
                     self.handle_chat_click(y_offset);
                 }
             }
@@ -2308,7 +2340,7 @@ impl App {
             .map_or_else(Vec::new, |buf| buf.users.values().map(|e| e.nick.clone()).collect());
         let commands = crate::commands::registry::get_command_names();
         let setting_paths = crate::commands::settings::get_setting_paths(&self.config);
-        self.input.tab_complete(&nicks, &commands, &setting_paths);
+        self.input.tab_complete(&nicks, commands, &setting_paths);
     }
 
     fn handle_submit(&mut self, text: &str) {
@@ -2352,7 +2384,7 @@ impl App {
             }
         } else if self.script_manager.as_ref().is_some_and(|m| {
             let conn_id = self.state.active_buffer().map(|b| b.connection_id.as_str());
-            m.handle_command(&parsed.name, &parsed.args, conn_id)
+            m.handle_command(&parsed.name, &parsed.args, conn_id).is_some()
         }) {
             // Script handled the command
         } else {
@@ -2416,7 +2448,7 @@ impl App {
                         timestamp: Utc::now(),
                         message_type: MessageType::Message,
                         nick: Some(nick.clone()),
-                        nick_mode: own_mode.clone(),
+                        nick_mode: own_mode.map(|c| c.to_string()),
                         text: chunk,
                         highlight: false,
                         event_key: None,
@@ -2713,12 +2745,15 @@ impl App {
     }
 
     /// Push the current `AppState` into the shared script snapshot.
-    fn update_script_snapshot(&self) {
+    fn update_script_snapshot(&mut self) {
+        let config_toml = self.cached_config_toml.get_or_insert_with(|| {
+            toml::Value::try_from(&self.config)
+                .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()))
+        });
         if let Ok(mut snap) = self.script_state.write() {
             *snap = self.state.script_snapshot();
             snap.script_config.clone_from(&self.script_config);
-            // Serialize app config to TOML value for dot-path lookups
-            snap.app_config_toml = toml::Value::try_from(&self.config).ok();
+            snap.app_config_toml = Some(config_toml.clone());
         }
     }
 
@@ -2921,7 +2956,7 @@ impl App {
             return;
         }
         // Take api out temporarily
-        let api = self.script_api.as_ref().expect("script_api must be set");
+        let Some(api) = self.script_api.as_ref() else { return; };
         let mut loaded = 0u32;
         let mut errors = Vec::new();
         for (name, _path, is_loaded) in &available {

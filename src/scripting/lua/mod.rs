@@ -83,18 +83,45 @@ impl LuaEngine {
     /// Remove dangerous globals from the Lua VM.
     fn sandbox(lua: &Lua) -> Result<()> {
         let globals = lua.globals();
-        for name in &["os", "io", "loadfile", "dofile", "package"] {
+        for name in &[
+            "os",
+            "io",
+            "loadfile",
+            "dofile",
+            "package",
+            "debug",
+            "load",
+            "loadstring",
+            "rawset",
+            "rawget",
+        ] {
             globals.raw_set(*name, LuaNil)?;
         }
         Ok(())
     }
 
     /// Create an isolated environment table for a script.
-    /// Reads fall through to the real globals via __index.
+    /// Reads fall through to the real globals via `__index`.
+    /// Writes are redirected to the env table via `__newindex` so scripts
+    /// cannot pollute the shared global table.
     fn create_script_env(lua: &Lua) -> LuaResult<LuaTable> {
         let env = lua.create_table()?;
         let mt = lua.create_table()?;
         mt.set("__index", lua.globals())?;
+        // Redirect all writes to the env table, not the shared globals
+        let env_clone = env.clone();
+        mt.set(
+            "__newindex",
+            lua.create_function(
+                move |_lua, (_, key, value): (LuaTable, LuaValue, LuaValue)| {
+                    env_clone.raw_set(key, value)?;
+                    Ok(())
+                },
+            )?,
+        )?;
+        // Protect the metatable so scripts cannot strip __newindex via
+        // getmetatable()/setmetatable().
+        mt.set("__metatable", false)?;
         env.set_metatable(Some(mt))?;
         Ok(env)
     }
@@ -1342,6 +1369,11 @@ mod tests {
                 assert(loadfile == nil, "loadfile should be nil")
                 assert(dofile == nil, "dofile should be nil")
                 assert(package == nil, "package should be nil")
+                assert(debug == nil, "debug should be nil")
+                assert(load == nil, "load should be nil")
+                assert(loadstring == nil, "loadstring should be nil")
+                assert(rawset == nil, "rawset should be nil")
+                assert(rawget == nil, "rawget should be nil")
             end
         "#,
         );
@@ -1586,5 +1618,52 @@ mod tests {
             params: HashMap::new(),
         });
         assert_eq!(result, EventResult::Continue);
+    }
+
+    #[test]
+    fn script_env_isolation_prevents_global_pollution() {
+        let mut engine = LuaEngine::new().unwrap();
+        let api = mock_api();
+
+        // Script A sets a global variable in its environment
+        let f1 = write_script(
+            r#"
+            meta = { name = "script_a" }
+            function setup(api)
+                my_secret = "from_script_a"
+            end
+        "#,
+        );
+
+        // Script B tries to read the variable set by Script A
+        let f2 = write_script(
+            r#"
+            meta = { name = "script_b" }
+            function setup(api)
+                assert(my_secret == nil, "script_b should not see script_a globals, got: " .. tostring(my_secret))
+            end
+        "#,
+        );
+
+        engine.load_script(f1.path(), &api).unwrap();
+        // If isolation is broken, script_b's assert will fail and load_script returns Err
+        engine.load_script(f2.path(), &api).unwrap();
+    }
+
+    #[test]
+    fn script_env_rawset_rawget_are_nil() {
+        let mut engine = LuaEngine::new().unwrap();
+        let api = mock_api();
+        let f = write_script(
+            r#"
+            meta = { name = "rawcheck" }
+            function setup(api)
+                assert(rawset == nil, "rawset should be nil in script env")
+                assert(rawget == nil, "rawget should be nil in script env")
+            end
+        "#,
+        );
+
+        engine.load_script(f.path(), &api).unwrap();
     }
 }

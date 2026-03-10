@@ -414,10 +414,14 @@ pub(crate) fn cmd_mode(app: &mut App, args: &[String]) {
 
     if args.is_empty() {
         // Query own user modes
+        let Some(conn_id) = app.active_conn_id() else {
+            add_local_event(app, "Not connected");
+            return;
+        };
         let nick = app
             .state
             .connections
-            .get(app.active_conn_id().unwrap_or(""))
+            .get(conn_id)
             .map(|c| c.nick.clone())
             .unwrap_or_default();
         let _ = sender.send(irc::proto::Command::Raw("MODE".to_string(), vec![nick]));
@@ -760,6 +764,33 @@ pub(crate) fn cmd_cycle(app: &mut App, args: &[String]) {
     }
 }
 
+/// Create a query buffer for `target` if one doesn't already exist.
+/// When `skip_channels` is true, channel targets are not created (used by /msg).
+fn ensure_query_buffer(app: &mut App, conn_id: &str, target: &str, skip_channels: bool) -> String {
+    let buffer_id = crate::state::buffer::make_buffer_id(conn_id, target);
+    let should_create = !app.state.buffers.contains_key(&buffer_id)
+        && (!skip_channels || !crate::irc::formatting::is_channel(target));
+    if should_create {
+        app.state.add_buffer(crate::state::buffer::Buffer {
+            id: buffer_id.clone(),
+            connection_id: conn_id.to_string(),
+            buffer_type: crate::state::buffer::BufferType::Query,
+            name: target.to_string(),
+            messages: Vec::new(),
+            activity: crate::state::buffer::ActivityLevel::None,
+            unread_count: 0,
+            last_read: chrono::Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: std::collections::HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: std::collections::HashMap::new(),
+        });
+    }
+    buffer_id
+}
+
 // === Messaging ===
 
 pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
@@ -785,26 +816,8 @@ pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
         (conn_id, nick)
     };
 
-    // Create query buffer if needed
-    let buffer_id = crate::state::buffer::make_buffer_id(&conn_id, target);
-    if !app.state.buffers.contains_key(&buffer_id) && !crate::irc::formatting::is_channel(target) {
-        app.state.add_buffer(crate::state::buffer::Buffer {
-            id: buffer_id.clone(),
-            connection_id: conn_id.clone(),
-            buffer_type: crate::state::buffer::BufferType::Query,
-            name: target.clone(),
-            messages: Vec::new(),
-            activity: crate::state::buffer::ActivityLevel::None,
-            unread_count: 0,
-            last_read: chrono::Utc::now(),
-            topic: None,
-            topic_set_by: None,
-            users: std::collections::HashMap::new(),
-            modes: None,
-            mode_params: None,
-            list_modes: std::collections::HashMap::new(),
-        });
-    }
+    // Create query buffer if needed (skip channels for /msg)
+    let buffer_id = ensure_query_buffer(app, &conn_id, target, true);
 
     // When echo-message is enabled, skip local display — the server echo is authoritative.
     let echo_message_enabled = app
@@ -833,7 +846,7 @@ pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
                     timestamp: chrono::Utc::now(),
                     message_type: crate::state::buffer::MessageType::Message,
                     nick: Some(nick.clone()),
-                    nick_mode: own_mode.clone(),
+                    nick_mode: own_mode.map(|c| c.to_string()),
                     text: chunk,
                     highlight: false,
                     event_key: None,
@@ -858,26 +871,8 @@ pub(crate) fn cmd_query(app: &mut App, args: &[String]) {
         return;
     };
 
-    // Create query buffer if it doesn't exist
-    let buffer_id = crate::state::buffer::make_buffer_id(&conn_id, target);
-    if !app.state.buffers.contains_key(&buffer_id) {
-        app.state.add_buffer(crate::state::buffer::Buffer {
-            id: buffer_id.clone(),
-            connection_id: conn_id.clone(),
-            buffer_type: crate::state::buffer::BufferType::Query,
-            name: target.clone(),
-            messages: Vec::new(),
-            activity: crate::state::buffer::ActivityLevel::None,
-            unread_count: 0,
-            last_read: chrono::Utc::now(),
-            topic: None,
-            topic_set_by: None,
-            users: std::collections::HashMap::new(),
-            modes: None,
-            mode_params: None,
-            list_modes: std::collections::HashMap::new(),
-        });
-    }
+    // Create query buffer if it doesn't exist (allow channels for /query)
+    let buffer_id = ensure_query_buffer(app, &conn_id, target, false);
 
     // Switch to the query buffer
     app.state.set_active_buffer(&buffer_id);
@@ -916,7 +911,7 @@ pub(crate) fn cmd_query(app: &mut App, args: &[String]) {
                     timestamp: chrono::Utc::now(),
                     message_type: crate::state::buffer::MessageType::Message,
                     nick: Some(nick),
-                    nick_mode: own_mode,
+                    nick_mode: own_mode.map(|c| c.to_string()),
                     text: text.clone(),
                     highlight: false,
                     event_key: None,
@@ -975,7 +970,7 @@ pub(crate) fn cmd_me(app: &mut App, args: &[String]) {
                 timestamp: chrono::Utc::now(),
                 message_type: crate::state::buffer::MessageType::Action,
                 nick: Some(nick),
-                nick_mode: own_mode,
+                nick_mode: own_mode.map(|c| c.to_string()),
                 text: action_text.clone(),
                 highlight: false,
                 event_key: None,

@@ -53,10 +53,17 @@ pub fn load_theme(path: &Path) -> Result<ThemeFile> {
         });
 
     let abstracts: HashMap<String, String> = if let Some(abs) = parsed.get("abstracts") {
-        abs.clone().try_into().unwrap_or_else(|e| {
-            tracing::warn!("Failed to parse theme [abstracts]: {e}, using defaults");
-            default.abstracts
-        })
+        match abs.clone().try_into::<HashMap<String, String>>() {
+            Ok(user_abs) => {
+                let mut merged = default.abstracts;
+                merged.extend(user_abs);
+                merged
+            }
+            Err(e) => {
+                tracing::warn!("Failed to parse theme [abstracts]: {e}, using defaults");
+                default.abstracts
+            }
+        }
     } else {
         default.abstracts
     };

@@ -84,14 +84,19 @@ fn render_chat_message(
     let nick_width = config.display.nick_column_width as usize;
     let max_len = config.display.nick_max_length as usize;
 
-    // Truncate nick if needed
+    // Truncate nick if needed (char-based to avoid splitting multi-byte UTF-8)
     let mut display_nick = nick.to_string();
-    if config.display.nick_truncation && display_nick.len() > max_len {
-        display_nick.truncate(max_len);
+    let char_len = display_nick.chars().count();
+    if config.display.nick_truncation && char_len > max_len {
+        let byte_idx = display_nick
+            .char_indices()
+            .nth(max_len)
+            .map_or(display_nick.len(), |(i, _)| i);
+        display_nick.truncate(byte_idx);
     }
 
-    // Pad combined mode+nick to fill column width
-    let total_len = nick_mode.len() + display_nick.len();
+    // Pad combined mode+nick to fill column width (use char count, not bytes)
+    let total_len = nick_mode.chars().count() + display_nick.chars().count();
     let pad_size = nick_width.saturating_sub(total_len);
 
     let padded_nick_mode = match config.display.nick_alignment {
@@ -171,6 +176,36 @@ mod tests {
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(text.contains("bob"));
         assert!(text.contains("hi there"));
+    }
+
+    #[test]
+    fn render_non_ascii_nick_does_not_panic() {
+        // Nick "Ñóçk" is 4 chars but 8 bytes — byte-based truncation would panic
+        let msg = test_message("Ñóçk", "hola mundo", MessageType::Message);
+        let theme = default_theme();
+        let mut config = default_config();
+        config.display.nick_truncation = true;
+        config.display.nick_max_length = 4;
+        let line = render_message(&msg, false, &theme, &config);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("Ñóçk"));
+        assert!(text.contains("hola mundo"));
+    }
+
+    #[test]
+    fn render_non_ascii_nick_truncation() {
+        // Nick with 6 multi-byte chars, truncated to 4 chars
+        let msg = test_message("Ñóçkéd", "hi", MessageType::Message);
+        let theme = default_theme();
+        let mut config = default_config();
+        config.display.nick_truncation = true;
+        config.display.nick_max_length = 4;
+        let line = render_message(&msg, false, &theme, &config);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        // Should be truncated to first 4 chars: "Ñóçk"
+        assert!(text.contains("Ñóçk"));
+        assert!(!text.contains("Ñóçké"));
+        assert!(text.contains("hi"));
     }
 
     #[test]

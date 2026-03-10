@@ -187,7 +187,7 @@ pub fn handle_disconnected(state: &mut AppState, conn_id: &str, error: Option<&s
         if !current_channels.is_empty() {
             conn.joined_channels = current_channels;
         }
-        if conn.should_reconnect && conn.reconnect_attempts < conn.max_reconnect_attempts {
+        if conn.should_reconnect {
             let delay = calculate_reconnect_delay(conn.reconnect_delay_secs, conn.reconnect_attempts);
             conn.next_reconnect = Some(std::time::Instant::now() + std::time::Duration::from_secs(delay));
         }
@@ -206,10 +206,10 @@ pub fn handle_disconnected(state: &mut AppState, conn_id: &str, error: Option<&s
 
     // Append reconnect info if applicable
     if let Some(conn) = state.connections.get(conn_id)
-        && conn.should_reconnect && conn.reconnect_attempts < conn.max_reconnect_attempts
+        && conn.should_reconnect
     {
         let delay = calculate_reconnect_delay(conn.reconnect_delay_secs, conn.reconnect_attempts);
-        write!(msg_text, " — reconnecting in {delay}s").unwrap();
+        let _ = write!(msg_text, " — reconnecting in {delay}s");
     }
 
     let id = state.next_message_id();
@@ -230,8 +230,14 @@ pub fn handle_disconnected(state: &mut AppState, conn_id: &str, error: Option<&s
     );
 }
 
-/// Calculate reconnect delay with exponential backoff, capped at 300 seconds.
+/// Calculate reconnect delay with exponential backoff.
+///
+/// For the first 10 attempts, uses exponential backoff capped at 300s.
+/// After 10 attempts, switches to a fixed 600s (10min) interval.
 fn calculate_reconnect_delay(base_delay: u64, attempts: u32) -> u64 {
+    if attempts >= 10 {
+        return 600;
+    }
     let delay = base_delay.saturating_mul(2u64.saturating_pow(attempts));
     delay.min(300)
 }
@@ -487,12 +493,10 @@ pub fn handle_cap_nak(
 
 /// Look up a nick's highest mode prefix (e.g. `'@'`, `'+'`) from the buffer's user list.
 ///
-/// Thin wrapper around [`AppState::nick_prefix`] returning `char` for
-/// internal callers that use `.map(String::from)`.
+/// Thin wrapper around [`AppState::nick_prefix`] for internal callers
+/// that use `.map(String::from)` when constructing `Message` structs.
 fn nick_prefix(state: &AppState, buffer_id: &str, nick: &str) -> Option<char> {
-    state
-        .nick_prefix(buffer_id, nick)
-        .and_then(|s| s.chars().next())
+    state.nick_prefix(buffer_id, nick)
 }
 
 /// Extract `IRCv3` message tags from an `irc::proto::Message`.
@@ -1320,6 +1324,7 @@ fn handle_nick_change(
     let text = format!("{old_nick} is now known as {new_nick}");
     let mut primary_assigned = false;
     let ts = message_timestamp(&tags);
+    let now = Instant::now();
 
     for buf_id in &affected {
         state.update_nick(buf_id, &old_nick, new_nick);
@@ -1329,7 +1334,7 @@ fn handle_nick_change(
             && old_nick != our_nick
             && state
                 .flood_state
-                .should_suppress_nick_flood(buf_id, Instant::now())
+                .should_suppress_nick_flood(buf_id, now)
         {
             // Suppress the message display but nick was already updated above
             continue;
@@ -1969,7 +1974,7 @@ fn handle_response(
                     let dt = chrono::DateTime::from_timestamp(ts, 0)
                         .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
                         .unwrap_or_default();
-                    write!(line, "%Z565f89, signon: %Za9b1d6{dt}").unwrap();
+                    let _ = write!(line, "%Z565f89, signon: %Za9b1d6{dt}");
                 }
                 line.push_str("%N");
                 emit(state, &target_buf, &line);
@@ -2370,14 +2375,21 @@ fn server_buffer(state: &AppState, conn_id: &str) -> String {
 }
 
 /// Get the active buffer, or fall back to the server buffer.
+///
+/// Uses `as_deref()` to inspect the active buffer ID without cloning,
+/// then clones only when needed (the `Some` branch) or constructs a
+/// new ID (the `None` branch).
 fn active_or_server_buffer(state: &AppState, conn_id: &str) -> String {
-    state.active_buffer_id.clone().unwrap_or_else(|| {
-        let label = state
-            .connections
-            .get(conn_id)
-            .map_or("Status", |c| c.label.as_str());
-        make_buffer_id(conn_id, label)
-    })
+    state.active_buffer_id.as_deref().map_or_else(
+        || {
+            let label = state
+                .connections
+                .get(conn_id)
+                .map_or("Status", |c| c.label.as_str());
+            make_buffer_id(conn_id, label)
+        },
+        str::to_owned,
+    )
 }
 
 /// Get the buffer where WHOIS output should go.
@@ -2597,7 +2609,6 @@ mod tests {
             lag: None,
             lag_pending: false,
             reconnect_attempts: 0,
-            max_reconnect_attempts: 10,
             reconnect_delay_secs: 30,
             next_reconnect: None,
             should_reconnect: true,

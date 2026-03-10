@@ -318,7 +318,7 @@ fn detect_subcommand_context(text_before: &str) -> Option<SubcommandContext> {
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let colors = &app.theme.colors;
     let fg_muted = hex_to_color(&colors.fg_muted).unwrap_or(Color::DarkGray);
-    let fg = hex_to_color(&colors.fg).unwrap_or(Color::White);
+    let fg = hex_to_color(&colors.fg).unwrap_or(Color::Reset);
 
     let active_buf = app.state.active_buffer();
     let conn = active_buf.and_then(|b| app.state.connections.get(&b.connection_id));
@@ -349,19 +349,25 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         0
     };
 
-    // Extract visible slice of chars
-    let all_chars: Vec<char> = app.input.value.chars().collect();
-    let visible_end = (scroll_offset + available_width).min(all_chars.len());
+    // Build byte-index lookup for char positions (Vec<usize> — no char data copied)
+    let byte_indices: Vec<usize> = app.input.value.char_indices().map(|(i, _)| i).collect();
+    let total_chars = byte_indices.len();
+    let string_len = app.input.value.len();
+    let visible_end = (scroll_offset + available_width).min(total_chars);
 
-    let before_cursor: String = all_chars[scroll_offset..cursor_char_pos].iter().collect();
-    let cursor_char = all_chars.get(cursor_char_pos).copied().unwrap_or(' ');
-    let after_cursor: String = if cursor_char_pos + 1 < visible_end {
-        all_chars[cursor_char_pos + 1..visible_end].iter().collect()
-    } else {
-        String::new()
+    let byte_at = |char_idx: usize| -> usize {
+        if char_idx >= total_chars { string_len } else { byte_indices[char_idx] }
     };
 
-    let cursor_color = hex_to_color(&colors.cursor).unwrap_or(Color::White);
+    let before_cursor = &app.input.value[byte_at(scroll_offset)..byte_at(cursor_char_pos)];
+    let cursor_char = app.input.value[byte_at(cursor_char_pos)..].chars().next().unwrap_or(' ');
+    let after_cursor = if cursor_char_pos + 1 < visible_end {
+        &app.input.value[byte_at(cursor_char_pos + 1)..byte_at(visible_end)]
+    } else {
+        ""
+    };
+
+    let cursor_color = hex_to_color(&colors.cursor).unwrap_or(Color::Reset);
 
     let line = Line::from(vec![
         Span::styled(prompt, Style::default().fg(fg_muted)),

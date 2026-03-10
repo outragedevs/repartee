@@ -164,20 +164,22 @@ fn process_netsplit_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo
                 continue;
             };
 
-            // Find all buffers this nick is in on this connection
+            // Find all buffers this nick is in on this connection.
+            // Nick HashMap keys are always lowercase (case-insensitive IRC nicks).
+            let nick_lower = nick.to_lowercase();
             let shared: Vec<String> = state
                 .buffers
                 .iter()
                 .filter(|(_, buf)| {
                     buf.connection_id == conn_id
-                        && buf.users.contains_key(&nick)
+                        && buf.users.contains_key(&nick_lower)
                 })
                 .map(|(id, _)| id.clone())
                 .collect();
 
             // Remove nick from all buffers
             for buf_id in &shared {
-                state.remove_nick(buf_id, &nick);
+                state.remove_nick(buf_id, &nick_lower);
                 affected_buffers
                     .entry(buf_id.clone())
                     .or_default()
@@ -469,7 +471,6 @@ mod tests {
             lag: None,
             lag_pending: false,
             reconnect_attempts: 0,
-            max_reconnect_attempts: 10,
             reconnect_delay_secs: 30,
             next_reconnect: None,
             should_reconnect: true,
@@ -643,5 +644,103 @@ mod tests {
         let purged = tracker.purge_expired();
         assert_eq!(purged, 0);
         assert_eq!(tracker.open.len(), 2);
+    }
+
+    #[test]
+    fn netsplit_batch_removes_nicks_case_insensitive() {
+        let mut state = AppState::new();
+        let conn_id = "test";
+
+        state.add_connection(crate::state::connection::Connection {
+            id: conn_id.to_string(),
+            label: "Test".to_string(),
+            status: crate::state::connection::ConnectionStatus::Connected,
+            nick: "me".to_string(),
+            user_modes: String::new(),
+            isupport: HashMap::new(),
+            isupport_parsed: crate::irc::isupport::Isupport::new(),
+            error: None,
+            lag: None,
+            lag_pending: false,
+            reconnect_attempts: 0,
+            reconnect_delay_secs: 30,
+            next_reconnect: None,
+            should_reconnect: true,
+            joined_channels: vec!["#test".to_string()],
+            origin_config: make_test_server_config(),
+            enabled_caps: std::collections::HashSet::new(),
+            who_token_counter: 0,
+            silent_who_channels: std::collections::HashSet::new(),
+        });
+
+        let buf_id = make_buffer_id(conn_id, "#test");
+        state.add_buffer(crate::state::buffer::Buffer {
+            id: buf_id.clone(),
+            connection_id: conn_id.to_string(),
+            buffer_type: crate::state::buffer::BufferType::Channel,
+            name: "#test".to_string(),
+            messages: Vec::new(),
+            activity: crate::state::buffer::ActivityLevel::None,
+            unread_count: 0,
+            last_read: chrono::Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: HashMap::new(),
+        });
+
+        // Add users — add_nick stores keys as lowercase
+        state.add_nick(
+            &buf_id,
+            NickEntry {
+                nick: "Alice".to_string(),
+                prefix: String::new(),
+                modes: String::new(),
+                away: false,
+                account: None,
+                ident: None,
+                host: None,
+            },
+        );
+        state.add_nick(
+            &buf_id,
+            NickEntry {
+                nick: "BOB".to_string(),
+                prefix: String::new(),
+                modes: String::new(),
+                away: false,
+                account: None,
+                ident: None,
+                host: None,
+            },
+        );
+
+        // QUIT messages use mixed-case nicks (as received from IRC)
+        let batch = BatchInfo {
+            batch_type: "NETSPLIT".to_string(),
+            params: vec!["hub.net".to_string(), "leaf.net".to_string()],
+            started_at: Instant::now(),
+            messages: vec![
+                make_quit_msg("Alice", "hub.net leaf.net", "ref1"),
+                make_quit_msg("BOB", "hub.net leaf.net", "ref1"),
+            ],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch);
+
+        // Nicks should be removed despite case mismatch between IRC prefix and HashMap key
+        let buf = state.buffers.get(&buf_id).expect("buffer should exist");
+        assert!(!buf.users.contains_key("alice"), "alice should be removed");
+        assert!(!buf.users.contains_key("bob"), "bob should be removed");
+        assert_eq!(buf.users.len(), 0, "all users should be removed");
+
+        // Summary message should still be present
+        assert!(!buf.messages.is_empty());
+        let last_msg = buf.messages.last().unwrap();
+        assert!(last_msg.text.contains("Netsplit"));
+        assert!(last_msg.text.contains("Alice"));
+        assert!(last_msg.text.contains("BOB"));
     }
 }

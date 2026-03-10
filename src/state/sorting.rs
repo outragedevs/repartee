@@ -8,32 +8,31 @@ pub fn sort_buffers<'a, F>(buffers: &[&'a Buffer], label_fn: F) -> Vec<&'a Buffe
 where
     F: Fn(&str) -> String,
 {
-    let mut keyed: Vec<(String, &'a Buffer)> = buffers
+    let mut keyed: Vec<(String, String, &'a Buffer)> = buffers
         .iter()
-        .map(|&b| (label_fn(&b.connection_id).to_lowercase(), b))
+        .map(|&b| (label_fn(&b.connection_id).to_lowercase(), b.name.to_lowercase(), b))
         .collect();
-    keyed.sort_by(|(la, a), (lb, b)| {
+    keyed.sort_by(|(la, na, a), (lb, nb, b)| {
         la.cmp(lb)
             .then_with(|| a.buffer_type.sort_group().cmp(&b.buffer_type.sort_group()))
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| na.cmp(nb))
     });
-    keyed.into_iter().map(|(_, b)| b).collect()
+    keyed.into_iter().map(|(_, _, b)| b).collect()
 }
 
 /// Sort nicks by prefix rank (using `prefix_order`), then alphabetically (case-insensitive).
 /// Nicks with no prefix (empty string) sort last.
 pub fn sort_nicks<'a>(nicks: &[&'a NickEntry], prefix_order: &str) -> Vec<&'a NickEntry> {
-    let mut sorted: Vec<&NickEntry> = nicks.to_vec();
-    sorted.sort_by(|a, b| {
+    let mut keyed: Vec<(String, &'a NickEntry)> = nicks
+        .iter()
+        .map(|&n| (n.nick.to_lowercase(), n))
+        .collect();
+    keyed.sort_by(|(la, a), (lb, b)| {
         let rank_a = prefix_rank(&a.prefix, prefix_order);
         let rank_b = prefix_rank(&b.prefix, prefix_order);
-        let rank_cmp = rank_a.cmp(&rank_b);
-        if rank_cmp != std::cmp::Ordering::Equal {
-            return rank_cmp;
-        }
-        a.nick.to_lowercase().cmp(&b.nick.to_lowercase())
+        rank_a.cmp(&rank_b).then_with(|| la.cmp(lb))
     });
-    sorted
+    keyed.into_iter().map(|(_, n)| n).collect()
 }
 
 /// Return the sort rank for a prefix string.

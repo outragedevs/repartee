@@ -123,6 +123,51 @@ pub fn select_sasl_mechanism(
     None
 }
 
+/// Timeout in seconds for SASL authentication steps.
+const SASL_TIMEOUT_SECS: u64 = 30;
+
+/// Wait for the server's `AUTHENTICATE +` reply with a timeout.
+///
+/// Handles SASL error numerics and connection closure. Used by all three
+/// SASL mechanism implementations to avoid duplicating the timeout + error
+/// handling logic.
+async fn await_authenticate_plus(
+    stream: &mut irc::client::ClientStream,
+) -> Result<()> {
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(SASL_TIMEOUT_SECS),
+        async {
+            while let Some(msg_result) = stream.next().await {
+                let msg = msg_result?;
+                match &msg.command {
+                    Command::AUTHENTICATE(param) if param == "+" => return Ok(()),
+                    Command::Response(response, _) => match response {
+                        Response::ERR_SASLFAIL => return Err(eyre!("SASL authentication failed")),
+                        Response::ERR_SASLABORT => {
+                            return Err(eyre!("SASL authentication aborted"));
+                        }
+                        Response::ERR_SASLTOOLONG => {
+                            return Err(eyre!("SASL message too long"));
+                        }
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
+            Err(eyre!("connection closed waiting for AUTHENTICATE +"))
+        },
+    )
+    .await;
+
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(eyre!(
+            "SASL authentication timed out waiting for AUTHENTICATE +"
+        )),
+    }
+}
+
 /// Default maximum message body length in bytes.
 ///
 /// IRC protocol limits total message length to 512 bytes including `\r\n`.
@@ -614,15 +659,8 @@ async fn run_sasl_plain(
     // Send AUTHENTICATE PLAIN
     sender.send(Command::AUTHENTICATE("PLAIN".to_string()))?;
 
-    // Wait for AUTHENTICATE + from server
-    while let Some(result) = stream.next().await {
-        let msg = result?;
-        if let Command::AUTHENTICATE(ref param) = msg.command
-            && param == "+"
-        {
-            break;
-        }
-    }
+    // Wait for AUTHENTICATE + from server (with timeout and error handling)
+    await_authenticate_plus(stream).await?;
 
     // Send base64-encoded credentials: authzid\0authcid\0password
     let auth_string = format!("{sasl_user}\x00{sasl_user}\x00{sasl_pass}");
@@ -668,15 +706,8 @@ async fn run_sasl_scram(
     // Step 1: Initiate SCRAM-SHA-256
     sender.send(Command::AUTHENTICATE("SCRAM-SHA-256".to_string()))?;
 
-    // Wait for AUTHENTICATE + from server
-    while let Some(result) = stream.next().await {
-        let msg = result?;
-        if let Command::AUTHENTICATE(ref param) = msg.command
-            && param == "+"
-        {
-            break;
-        }
-    }
+    // Wait for AUTHENTICATE + from server (with timeout and error handling)
+    await_authenticate_plus(stream).await?;
 
     // Step 2: Send client-first message
     let (client_first_bare, client_first_full, client_nonce) =
@@ -781,15 +812,8 @@ async fn run_sasl_external(
     // Send AUTHENTICATE EXTERNAL
     sender.send(Command::AUTHENTICATE("EXTERNAL".to_string()))?;
 
-    // Wait for AUTHENTICATE + from server
-    while let Some(result) = stream.next().await {
-        let msg = result?;
-        if let Command::AUTHENTICATE(ref param) = msg.command
-            && param == "+"
-        {
-            break;
-        }
-    }
+    // Wait for AUTHENTICATE + from server (with timeout and error handling)
+    await_authenticate_plus(stream).await?;
 
     // Send AUTHENTICATE + (base64 encoding of an empty string is "+")
     sender.send(Command::AUTHENTICATE("+".to_string()))?;
