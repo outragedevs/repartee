@@ -15,6 +15,13 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Handle --version / -v before any setup
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--version" || a == "-v") {
+        println!("{} {}", constants::APP_NAME, constants::APP_VERSION);
+        return Ok(());
+    }
+
     color_eyre::install()?;
 
     // Debug logging is opt-in: set RUST_LOG env var to enable.
