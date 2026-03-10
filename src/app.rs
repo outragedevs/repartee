@@ -1048,7 +1048,8 @@ impl App {
         reader_stop.store(true, Ordering::Relaxed);
 
         // Send QUIT to all connected servers (once — cmd_quit defers to here)
-        let quit_msg = self.quit_message.as_deref().unwrap_or("Leaving");
+        let default_quit = crate::constants::default_quit_message();
+        let quit_msg = self.quit_message.as_deref().unwrap_or(&default_quit);
         for handle in self.irc_handles.values() {
             let _ = handle.sender.send_quit(quit_msg);
         }

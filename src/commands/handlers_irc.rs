@@ -172,8 +172,9 @@ fn spawn_connection(app: &mut App, conn_id: &str, server_config: &crate::config:
 }
 
 pub(crate) fn cmd_disconnect(app: &mut App, args: &[String]) {
+    let default_quit = crate::constants::default_quit_message();
     let quit_msg = if args.is_empty() {
-        "Leaving"
+        default_quit.as_str()
     } else {
         &args[0]
     };
@@ -272,11 +273,9 @@ pub(crate) fn cmd_part(app: &mut App, args: &[String]) {
         (args[0].clone(), Some(args[1].as_str()))
     };
 
-    let result = if let Some(reason) = reason {
-        sender.send(irc::proto::Command::PART(channel, Some(reason.to_string())))
-    } else {
-        sender.send(irc::proto::Command::PART(channel, None))
-    };
+    let default_part = crate::constants::default_quit_message();
+    let part_reason = reason.unwrap_or(default_part.as_str());
+    let result = sender.send(irc::proto::Command::PART(channel, Some(part_reason.to_string())));
     if let Err(e) = result {
         add_local_event(app, &format!("Failed to part: {e}"));
     }

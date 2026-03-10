@@ -1,5 +1,11 @@
 pub const APP_NAME: &str = "repartee";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const APP_URL: &str = "https://github.com/outragedevs/repartee";
+
+/// Default quit/part message: "repartee 0.1.2 — <https://github.com/outragedevs/repartee>"
+pub fn default_quit_message() -> String {
+    format!("{APP_NAME} {APP_VERSION} — {APP_URL}")
+}
 
 /// WHOX field selector string.
 /// Fields requested: t=token, c=channel, u=user, i=ip, h=host,

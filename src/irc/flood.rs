@@ -3,6 +3,24 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+/// Result of a flood check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloodResult {
+    /// Message is allowed through.
+    Allow,
+    /// Flood just triggered — caller should show ONE notification.
+    Triggered,
+    /// Already blocking — suppress silently (no notification).
+    Blocked,
+}
+
+impl FloodResult {
+    /// Returns `true` if the message should be suppressed.
+    pub const fn suppressed(self) -> bool {
+        matches!(self, Self::Triggered | Self::Blocked)
+    }
+}
+
 // === Constants (proven thresholds from kokoirc/erssi) ===
 
 const CTCP_THRESHOLD: usize = 5;
@@ -58,13 +76,13 @@ impl FloodState {
         }
     }
 
-    /// Check for CTCP flood. Returns `true` if the CTCP request should be suppressed.
-    pub fn check_ctcp_flood(&mut self, now: Instant) -> bool {
-        // If currently blocked, extend the block and suppress
+    /// Check for CTCP flood. Returns whether the message is allowed, just triggered, or already blocked.
+    pub fn check_ctcp_flood(&mut self, now: Instant) -> FloodResult {
+        // If currently blocked, extend the block and suppress silently
         if let Some(until) = self.ctcp_blocked_until {
             if now < until {
                 self.ctcp_blocked_until = Some(now + CTCP_BLOCK);
-                return true;
+                return FloodResult::Blocked;
             }
             self.ctcp_blocked_until = None;
         }
@@ -75,19 +93,19 @@ impl FloodState {
         if count >= CTCP_THRESHOLD {
             self.ctcp_blocked_until = Some(now + CTCP_BLOCK);
             self.ctcp_times.clear();
-            return true;
+            return FloodResult::Triggered;
         }
 
-        false
+        FloodResult::Allow
     }
 
-    /// Check for tilde (~ident) flood. Returns `true` if the message should be suppressed.
-    pub fn check_tilde_flood(&mut self, now: Instant) -> bool {
-        // If currently blocked, extend the block and suppress
+    /// Check for tilde (~ident) flood. Returns whether the message is allowed, just triggered, or already blocked.
+    pub fn check_tilde_flood(&mut self, now: Instant) -> FloodResult {
+        // If currently blocked, extend the block and suppress silently
         if let Some(until) = self.tilde_blocked_until {
             if now < until {
                 self.tilde_blocked_until = Some(now + TILDE_BLOCK);
-                return true;
+                return FloodResult::Blocked;
             }
             self.tilde_blocked_until = None;
         }
@@ -98,25 +116,25 @@ impl FloodState {
         if count >= TILDE_THRESHOLD {
             self.tilde_blocked_until = Some(now + TILDE_BLOCK);
             self.tilde_times.clear();
-            return true;
+            return FloodResult::Triggered;
         }
 
-        false
+        FloodResult::Allow
     }
 
-    /// Check for duplicate text flood. Returns `true` if the message should be suppressed.
+    /// Check for duplicate text flood. Returns whether the message is allowed, just triggered, or already blocked.
     /// Only checks duplicates for channel messages (`is_channel = true`).
-    pub fn check_duplicate_flood(&mut self, text: &str, is_channel: bool, now: Instant) -> bool {
+    pub fn check_duplicate_flood(&mut self, text: &str, is_channel: bool, now: Instant) -> FloodResult {
         if !is_channel || text.is_empty() {
-            return false;
+            return FloodResult::Allow;
         }
 
-        // Check if this exact text is already blocked
+        // Check if this exact text is already blocked — suppress silently
         if let Some(&until) = self.blocked_texts.get(text)
             && now < until
         {
             self.blocked_texts.insert(text.to_string(), now + DUP_BLOCK);
-            return true;
+            return FloodResult::Blocked;
         }
 
         // Add to sliding message window
@@ -131,7 +149,7 @@ impl FloodState {
             let dupes = self.msg_window.iter().filter(|(t, _)| t == text).count();
             if dupes >= DUP_THRESHOLD {
                 self.blocked_texts.insert(text.to_string(), now + DUP_BLOCK);
-                return true;
+                return FloodResult::Triggered;
             }
         }
 
@@ -140,7 +158,7 @@ impl FloodState {
             self.blocked_texts.retain(|_, until| *until > now);
         }
 
-        false
+        FloodResult::Allow
     }
 
     /// Check for nick change flood in a specific buffer.
@@ -218,7 +236,7 @@ mod tests {
         let now = Instant::now();
         for i in 0..4 {
             let t = now + Duration::from_millis(i * 100);
-            assert!(!state.check_ctcp_flood(t), "request {i} should pass");
+            assert_eq!(state.check_ctcp_flood(t), FloodResult::Allow, "request {i} should pass");
         }
     }
 
@@ -228,10 +246,10 @@ mod tests {
         let now = Instant::now();
         for i in 0..4 {
             let t = now + Duration::from_millis(i * 100);
-            assert!(!state.check_ctcp_flood(t));
+            assert_eq!(state.check_ctcp_flood(t), FloodResult::Allow);
         }
-        // 5th request triggers
-        assert!(state.check_ctcp_flood(now + Duration::from_millis(400)));
+        // 5th request triggers — should be Triggered (not Blocked)
+        assert_eq!(state.check_ctcp_flood(now + Duration::from_millis(400)), FloodResult::Triggered);
     }
 
     #[test]
@@ -242,8 +260,8 @@ mod tests {
         for i in 0..5 {
             state.check_ctcp_flood(now + Duration::from_millis(i * 100));
         }
-        // Subsequent requests during block should still be suppressed
-        assert!(state.check_ctcp_flood(now + Duration::from_secs(30)));
+        // Subsequent requests during block should be Blocked (silent), not Triggered
+        assert_eq!(state.check_ctcp_flood(now + Duration::from_secs(30)), FloodResult::Blocked);
     }
 
     #[test]
@@ -255,7 +273,7 @@ mod tests {
             state.check_ctcp_flood(now + Duration::from_millis(i * 100));
         }
         // After 61 seconds, should no longer be blocked
-        assert!(!state.check_ctcp_flood(now + Duration::from_secs(61)));
+        assert_eq!(state.check_ctcp_flood(now + Duration::from_secs(61)), FloodResult::Allow);
     }
 
     #[test]
@@ -265,7 +283,7 @@ mod tests {
         // Spread 5 requests over 10 seconds (window is 5s)
         for i in 0..5 {
             let t = now + Duration::from_secs(i * 3);
-            assert!(!state.check_ctcp_flood(t));
+            assert_eq!(state.check_ctcp_flood(t), FloodResult::Allow);
         }
     }
 
@@ -274,7 +292,7 @@ mod tests {
         let mut state = FloodState::new();
         let now = Instant::now();
         for i in 0..4 {
-            assert!(!state.check_tilde_flood(now + Duration::from_millis(i * 100)));
+            assert_eq!(state.check_tilde_flood(now + Duration::from_millis(i * 100)), FloodResult::Allow);
         }
     }
 
@@ -285,9 +303,9 @@ mod tests {
         for i in 0..5 {
             let result = state.check_tilde_flood(now + Duration::from_millis(i * 100));
             if i < 4 {
-                assert!(!result);
+                assert_eq!(result, FloodResult::Allow);
             } else {
-                assert!(result);
+                assert_eq!(result, FloodResult::Triggered);
             }
         }
     }
@@ -299,7 +317,7 @@ mod tests {
         for i in 0..5 {
             state.check_tilde_flood(now + Duration::from_millis(i * 100));
         }
-        assert!(!state.check_tilde_flood(now + Duration::from_secs(61)));
+        assert_eq!(state.check_tilde_flood(now + Duration::from_secs(61)), FloodResult::Allow);
     }
 
     #[test]
@@ -308,11 +326,11 @@ mod tests {
         let now = Instant::now();
         // Private messages should never trigger duplicate detection
         for i in 0..10 {
-            assert!(!state.check_duplicate_flood(
+            assert_eq!(state.check_duplicate_flood(
                 "same text",
                 false,
                 now + Duration::from_millis(i * 100)
-            ));
+            ), FloodResult::Allow);
         }
     }
 
@@ -320,7 +338,7 @@ mod tests {
     fn duplicate_empty_text_ignored() {
         let mut state = FloodState::new();
         let now = Instant::now();
-        assert!(!state.check_duplicate_flood("", true, now));
+        assert_eq!(state.check_duplicate_flood("", true, now), FloodResult::Allow);
     }
 
     #[test]
@@ -329,11 +347,11 @@ mod tests {
         let now = Instant::now();
         // 4 messages isn't enough to trigger analysis (need DUP_MIN_IN_WINDOW=5)
         for i in 0..4 {
-            assert!(!state.check_duplicate_flood(
+            assert_eq!(state.check_duplicate_flood(
                 "spam",
                 true,
                 now + Duration::from_millis(i * 100)
-            ));
+            ), FloodResult::Allow);
         }
     }
 
@@ -342,16 +360,16 @@ mod tests {
         let mut state = FloodState::new();
         let now = Instant::now();
         // 5 messages, 3 of which are identical -> should trigger on the 5th
-        assert!(!state.check_duplicate_flood("spam", true, now));
-        assert!(!state.check_duplicate_flood("other1", true, now + Duration::from_millis(100)));
-        assert!(!state.check_duplicate_flood("spam", true, now + Duration::from_millis(200)));
-        assert!(!state.check_duplicate_flood("other2", true, now + Duration::from_millis(300)));
+        assert_eq!(state.check_duplicate_flood("spam", true, now), FloodResult::Allow);
+        assert_eq!(state.check_duplicate_flood("other1", true, now + Duration::from_millis(100)), FloodResult::Allow);
+        assert_eq!(state.check_duplicate_flood("spam", true, now + Duration::from_millis(200)), FloodResult::Allow);
+        assert_eq!(state.check_duplicate_flood("other2", true, now + Duration::from_millis(300)), FloodResult::Allow);
         // 5th msg, 3rd "spam" — window now has 5 msgs and 3 are "spam"
-        assert!(state.check_duplicate_flood(
+        assert_eq!(state.check_duplicate_flood(
             "spam",
             true,
             now + Duration::from_millis(400)
-        ));
+        ), FloodResult::Triggered);
     }
 
     #[test]
@@ -359,21 +377,21 @@ mod tests {
         let mut state = FloodState::new();
         let now = Instant::now();
         // Trigger block
-        assert!(!state.check_duplicate_flood("spam", true, now));
-        assert!(!state.check_duplicate_flood("a", true, now + Duration::from_millis(100)));
-        assert!(!state.check_duplicate_flood("spam", true, now + Duration::from_millis(200)));
-        assert!(!state.check_duplicate_flood("b", true, now + Duration::from_millis(300)));
-        assert!(state.check_duplicate_flood(
+        assert_eq!(state.check_duplicate_flood("spam", true, now), FloodResult::Allow);
+        assert_eq!(state.check_duplicate_flood("a", true, now + Duration::from_millis(100)), FloodResult::Allow);
+        assert_eq!(state.check_duplicate_flood("spam", true, now + Duration::from_millis(200)), FloodResult::Allow);
+        assert_eq!(state.check_duplicate_flood("b", true, now + Duration::from_millis(300)), FloodResult::Allow);
+        assert_eq!(state.check_duplicate_flood(
             "spam",
             true,
             now + Duration::from_millis(400)
-        ));
-        // Now "spam" is blocked — subsequent messages with same text should be suppressed
-        assert!(state.check_duplicate_flood(
+        ), FloodResult::Triggered);
+        // Now "spam" is blocked — subsequent messages should be Blocked (silent)
+        assert_eq!(state.check_duplicate_flood(
             "spam",
             true,
             now + Duration::from_secs(10)
-        ));
+        ), FloodResult::Blocked);
     }
 
     #[test]
@@ -382,11 +400,11 @@ mod tests {
         let now = Instant::now();
         // All different messages should pass even with many in window
         for i in 0..10 {
-            assert!(!state.check_duplicate_flood(
+            assert_eq!(state.check_duplicate_flood(
                 &format!("unique msg {i}"),
                 true,
                 now + Duration::from_millis(i * 100)
-            ));
+            ), FloodResult::Allow);
         }
     }
 

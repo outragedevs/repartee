@@ -652,8 +652,11 @@ fn handle_privmsg(
         // Other CTCP — flood check
         if state.flood_protection {
             let now = Instant::now();
-            if state.flood_state.check_ctcp_flood(now) {
-                emit(state, &buffer_id, "CTCP flood detected — suppressing");
+            let result = state.flood_state.check_ctcp_flood(now);
+            if result.suppressed() {
+                if result == crate::irc::flood::FloodResult::Triggered {
+                    emit(state, &buffer_id, "CTCP flood detected — suppressing");
+                }
                 return;
             }
         }
@@ -666,25 +669,32 @@ fn handle_privmsg(
         let now = Instant::now();
 
         // Tilde (~ident) flood check
-        if ident.starts_with('~') && state.flood_state.check_tilde_flood(now) {
-            emit(
-                state,
-                &buffer_id,
-                "Tilde-ident flood detected — suppressing",
-            );
-            return;
+        if ident.starts_with('~') {
+            let result = state.flood_state.check_tilde_flood(now);
+            if result.suppressed() {
+                if result == crate::irc::flood::FloodResult::Triggered {
+                    emit(
+                        state,
+                        &buffer_id,
+                        "Tilde-ident flood detected — suppressing",
+                    );
+                }
+                return;
+            }
         }
 
         // Duplicate text flood check (channel messages only)
-        if state
+        let dup_result = state
             .flood_state
-            .check_duplicate_flood(text, target_is_channel, now)
-        {
-            emit(
-                state,
-                &buffer_id,
-                "Duplicate text flood detected — suppressing",
-            );
+            .check_duplicate_flood(text, target_is_channel, now);
+        if dup_result.suppressed() {
+            if dup_result == crate::irc::flood::FloodResult::Triggered {
+                emit(
+                    state,
+                    &buffer_id,
+                    "Duplicate text flood detected — suppressing",
+                );
+            }
             return;
         }
     }

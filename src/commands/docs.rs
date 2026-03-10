@@ -28,6 +28,15 @@ pub fn help(name: &str) -> Option<&'static CommandHelp> {
     HELP_CACHE.get(name)
 }
 
+/// Get subcommand names for a command (for tab completion).
+/// Returns empty slice if the command has no subcommands.
+pub fn get_subcommand_names(cmd: &str) -> Vec<&'static str> {
+    HELP_CACHE
+        .get(cmd)
+        .map(|h| h.subcommands.iter().map(|s| s.name.as_str()).collect())
+        .unwrap_or_default()
+}
+
 
 /// Load all command docs from the embedded directory.
 fn load_all_docs() -> HashMap<String, CommandHelp> {
@@ -336,5 +345,18 @@ Add a new server.
         let join = help("join");
         assert!(join.is_some());
         assert_eq!(join.unwrap().description, "Join a channel");
+    }
+
+    #[test]
+    fn get_subcommand_names_returns_names() {
+        let names = get_subcommand_names("server");
+        assert!(names.contains(&"list"), "server should have 'list' subcommand");
+        assert!(names.contains(&"add"), "server should have 'add' subcommand");
+    }
+
+    #[test]
+    fn get_subcommand_names_empty_for_no_subcommands() {
+        let names = get_subcommand_names("join");
+        assert!(names.is_empty(), "join should have no subcommands");
     }
 }

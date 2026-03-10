@@ -255,6 +255,14 @@ impl InputState {
                         .cloned()
                         .collect()
                 }
+                Some(SubcommandContext::Subcommand(ref subcmds)) => {
+                    // Complete with doc-driven subcommand names
+                    subcmds
+                        .iter()
+                        .filter(|s| s.to_lowercase().starts_with(&prefix.to_lowercase()))
+                        .cloned()
+                        .collect()
+                }
                 None if is_command => {
                     let cmd_prefix = &prefix[1..]; // strip leading /
                     commands
@@ -297,10 +305,14 @@ impl InputState {
 enum SubcommandContext {
     Help,
     Set,
+    Subcommand(Vec<String>),
 }
 
-/// Detect if the user is typing a subcommand for /help or /set.
+/// Detect if the user is typing a subcommand for a command.
 /// `text_before` is the text before the word being completed (including trailing space).
+///
+/// Special cases: `/help` completes command names, `/set` completes setting paths.
+/// For any other command with `## Subcommands` in its docs, complete subcommand names.
 fn detect_subcommand_context(text_before: &str) -> Option<SubcommandContext> {
     let trimmed = text_before.trim();
     let lower = trimmed.to_lowercase();
@@ -311,6 +323,18 @@ fn detect_subcommand_context(text_before: &str) -> Option<SubcommandContext> {
     // "/set <partial>" (first arg is path)
     if lower == "/set" {
         return Some(SubcommandContext::Set);
+    }
+    // Check if this is a command with subcommands in docs.
+    // Only match "/command" (single command, no further args yet)
+    if let Some(cmd) = lower.strip_prefix('/')
+        && !cmd.contains(' ')
+    {
+        let names = crate::commands::docs::get_subcommand_names(cmd);
+        if !names.is_empty() {
+            return Some(SubcommandContext::Subcommand(
+                names.into_iter().map(String::from).collect(),
+            ));
+        }
     }
     None
 }

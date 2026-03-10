@@ -84,16 +84,14 @@ fn render_chat_message(
     let nick_width = config.display.nick_column_width as usize;
     let max_len = config.display.nick_max_length as usize;
 
-    // Truncate nick if needed (char-based to avoid splitting multi-byte UTF-8)
-    let mut display_nick = nick.to_string();
-    let char_len = display_nick.chars().count();
-    if config.display.nick_truncation && char_len > max_len {
-        let byte_idx = display_nick
-            .char_indices()
-            .nth(max_len)
-            .map_or(display_nick.len(), |(i, _)| i);
-        display_nick.truncate(byte_idx);
-    }
+    // Truncate nick accounting for mode prefix width, so mode+nick fits the column
+    let mode_width = nick_mode.chars().count();
+    let nick_budget = max_len.saturating_sub(mode_width);
+    let mut display_nick = if config.display.nick_truncation {
+        super::truncate_with_plus(nick, nick_budget)
+    } else {
+        nick.to_string()
+    };
 
     // Pad combined mode+nick to fill column width (use char count, not bytes)
     let total_len = nick_mode.chars().count() + display_nick.chars().count();
@@ -194,7 +192,7 @@ mod tests {
 
     #[test]
     fn render_non_ascii_nick_truncation() {
-        // Nick with 6 multi-byte chars, truncated to 4 chars
+        // Nick with 6 multi-byte chars, truncated to 4 chars with '+' indicator
         let msg = test_message("Ñóçkéd", "hi", MessageType::Message);
         let theme = default_theme();
         let mut config = default_config();
@@ -202,10 +200,47 @@ mod tests {
         config.display.nick_max_length = 4;
         let line = render_message(&msg, false, &theme, &config);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
-        // Should be truncated to first 4 chars: "Ñóçk"
-        assert!(text.contains("Ñóçk"));
-        assert!(!text.contains("Ñóçké"));
+        // Should be truncated to first 3 chars + '+': "Ñóç+"
+        assert!(text.contains("Ñóç+"));
+        assert!(!text.contains("Ñóçk"));
         assert!(text.contains("hi"));
+    }
+
+    #[test]
+    fn render_long_ascii_nick_truncation() {
+        // "verylongnick" truncated to 7 chars → "verylo+"
+        let msg = test_message("verylongnick", "test", MessageType::Message);
+        let theme = default_theme();
+        let mut config = default_config();
+        config.display.nick_truncation = true;
+        config.display.nick_max_length = 7;
+        let line = render_message(&msg, false, &theme, &config);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("verylo+"));
+        assert!(!text.contains("verylon"));
+    }
+
+    #[test]
+    fn render_nick_truncation_accounts_for_mode_prefix() {
+        // With @ mode prefix (1 char), max_len=8: nick budget = 8-1 = 7
+        // "verylongnick" truncated to 7 → "verylo+"
+        let mut msg = test_message("verylongnick", "test", MessageType::Message);
+        msg.nick_mode = Some("@".to_string());
+        let theme = default_theme();
+        let mut config = default_config();
+        config.display.nick_truncation = true;
+        config.display.nick_max_length = 8;
+        let line = render_message(&msg, false, &theme, &config);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        // Nick should be "verylo+" (7 chars), not "verylon+" (8 chars)
+        assert!(text.contains("verylo+"), "expected 'verylo+' in: {text}");
+        assert!(!text.contains("verylon"), "mode prefix should reduce nick budget");
+
+        // Without mode prefix, same nick gets full budget: "verylon+" (8 chars)
+        let msg2 = test_message("verylongnick", "test", MessageType::Message);
+        let line2 = render_message(&msg2, false, &theme, &config);
+        let text2: String = line2.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text2.contains("verylon+"), "without mode, nick should be 'verylon+' in: {text2}");
     }
 
     #[test]
