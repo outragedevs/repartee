@@ -274,6 +274,7 @@ pub fn tmux_query_raw(format_str: &str) -> Option<String> {
     if name.is_empty() { None } else { Some(name) }
 }
 
+#[expect(clippy::struct_excessive_bools, reason = "App is the root state container")]
 pub struct App {
     pub state: AppState,
     pub config: AppConfig,
@@ -324,6 +325,12 @@ pub struct App {
     pub picker: ratatui_image::picker::Picker,
     /// Whether we're running inside tmux (for image cleanup DCS wrapping).
     pub in_tmux: bool,
+    /// Force a full terminal redraw on the next frame (clears ratatui diff state).
+    ///
+    /// Set after image preview dismiss to ensure graphics artifacts are fully
+    /// overwritten — Kitty graphics persist on a separate layer, and iTerm2+tmux
+    /// direct-written images exist outside ratatui's buffer knowledge.
+    pub needs_full_redraw: bool,
     /// Detected outer terminal name (e.g. "ghostty", "iterm2", "kitty").
     pub outer_terminal: String,
     /// How the image protocol was resolved (for diagnostics).
@@ -497,6 +504,7 @@ impl App {
             http_client,
             picker,
             in_tmux,
+            needs_full_redraw: false,
             outer_terminal: outer_terminal.to_string(),
             image_proto_source: source,
             channel_query_queues: HashMap::new(),
@@ -605,76 +613,147 @@ impl App {
     }
 
     /// Dismiss the image preview overlay (e.g. on Escape press).
+    ///
+    /// Sends protocol-specific cleanup sequences and forces a full terminal
+    /// redraw on the next frame. The full redraw is essential because:
+    /// - **Kitty**: images live on a separate graphics layer; `set_skip(true)`
+    ///   on ratatui cells means the diff algorithm won't detect changes in the
+    ///   underlying chat content, so stale graphics persist without a full repaint.
+    /// - **iTerm2+tmux**: images are written directly to stdout after ratatui's
+    ///   buffer flush, so ratatui has no knowledge of those pixels. A diff-based
+    ///   update may not rewrite every cell the image covered.
     pub fn dismiss_image_preview(&mut self) {
-        // Send protocol-specific cleanup before clearing the state.
-        // Kitty graphics persist on a separate layer — terminals like Subterm
-        // don't auto-remove them when the unicode placeholders disappear,
-        // leaving pixel "garbage". Send an explicit delete command.
         if matches!(self.image_preview, crate::image_preview::PreviewStatus::Ready { .. }) {
             self.cleanup_image_graphics();
         }
         self.image_preview = crate::image_preview::PreviewStatus::Hidden;
+        // Force full terminal redraw on next frame — ensures all cells are
+        // rewritten, covering any graphics artifacts from Kitty's separate
+        // layer or iTerm2's direct stdout writes.
+        self.needs_full_redraw = true;
     }
 
     /// Send protocol-specific escape sequences to clear image graphics.
     ///
-    /// For Kitty protocol: `ESC_Ga=d,q=2 ESC\` deletes all graphics.
-    /// In tmux: wrapped in DCS passthrough so it reaches the outer terminal.
+    /// **Kitty**: Send `ESC_Ga=d,d=A,q=2 ESC\` to delete all visible image
+    /// placements. In tmux, wrapped in DCS passthrough. Matches yazi's cleanup
+    /// approach (`a=d,d=A` = delete all visible placements).
+    ///
+    /// **iTerm2+tmux**: Write spaces over the image area directly to stdout
+    /// (same path as the image was written), ensuring the direct-written pixels
+    /// are overwritten immediately.
     fn cleanup_image_graphics(&self) {
         use std::io::Write;
 
-        if self.picker.protocol_type() == ProtocolType::Kitty {
-            let seq = if self.in_tmux {
-                // DCS passthrough: ESC P tmux; <escaped-seq> ESC backslash
-                "\x1bPtmux;\x1b\x1b_Ga=d,q=2\x1b\x1b\\\x1b\\"
-            } else {
-                "\x1b_Ga=d,q=2\x1b\\"
-            };
-            let _ = std::io::stdout().write_all(seq.as_bytes());
-            let _ = std::io::stdout().flush();
+        match self.picker.protocol_type() {
+            ProtocolType::Kitty => {
+                // Delete all visible Kitty image placements.
+                // d=A = all visible placements, q=2 = suppress response.
+                let seq = if self.in_tmux {
+                    "\x1bPtmux;\x1b\x1b_Ga=d,d=A,q=2\x1b\x1b\\\x1b\\"
+                } else {
+                    "\x1b_Ga=d,d=A,q=2\x1b\\"
+                };
+                let _ = std::io::stdout().write_all(seq.as_bytes());
+                let _ = std::io::stdout().flush();
+                // Also clear the area with spaces for tmux direct writes.
+                if self.in_tmux {
+                    self.clear_direct_image_area();
+                }
+            }
+            ProtocolType::Iterm2 if self.in_tmux => {
+                // iTerm2+tmux: image was written directly to stdout.
+                // Write spaces over the same area to clear the pixels.
+                self.clear_direct_image_area();
+            }
+            _ => {
+                // Sixel / Halfblocks / iTerm2 direct: ratatui's full redraw
+                // (triggered by needs_full_redraw) handles cleanup.
+            }
         }
-        // iTerm2 / Sixel / Halfblocks: image is in the cell buffer,
-        // ratatui's Clear widget + redraw handles cleanup.
     }
 
-    /// Write iTerm2 image directly to stdout for tmux passthrough.
+    /// Write spaces over the image area directly to stdout for tmux cleanup.
     ///
-    /// ratatui-image embeds the entire DCS-wrapped sequence as a cell symbol,
-    /// but that approach doesn't work reliably through tmux. Instead, write
-    /// the OSC 1337 sequence directly to stdout (wrapped in DCS passthrough),
-    /// matching kokoirc's proven approach.
+    /// Mirrors the cursor positioning from `write_tmux_direct_image()` but
+    /// writes space characters instead of an image, clearing any direct-written
+    /// image pixels.
+    fn clear_direct_image_area(&self) {
+        use std::io::Write;
+
+        let (popup_width, popup_height) = match &self.image_preview {
+            crate::image_preview::PreviewStatus::Ready { width, height, .. } => (*width, *height),
+            _ => return,
+        };
+
+        let term_size = crossterm::terminal::size().unwrap_or((80, 24));
+        let popup_w = popup_width.min(term_size.0);
+        let popup_h = popup_height.min(term_size.1);
+        let popup_x = (term_size.0.saturating_sub(popup_w)) / 2;
+        let popup_y = (term_size.1.saturating_sub(popup_h)) / 2;
+
+        let inner_x = popup_x + 1;
+        let inner_y = popup_y + 1;
+        let inner_w = popup_w.saturating_sub(2);
+        let inner_h = popup_h.saturating_sub(2);
+
+        if inner_w == 0 || inner_h == 0 {
+            return;
+        }
+
+        let mut out = std::io::stdout().lock();
+        // Save cursor, move to inner area, fill with spaces row by row.
+        let _ = write!(out, "\x1b7");
+        let spaces: String = " ".repeat(usize::from(inner_w));
+        for row in 0..inner_h {
+            let r = inner_y + row + 1; // 1-based for CUP
+            let c = inner_x + 1;
+            let _ = write!(out, "\x1b[{r};{c}H{spaces}");
+        }
+        let _ = write!(out, "\x1b8");
+        let _ = out.flush();
+    }
+
+    /// Write image directly to stdout for tmux passthrough (all protocols).
+    ///
+    /// ratatui-image embeds escape sequences as cell symbols, which causes:
+    /// - Quality loss (pre-downscales to `cell×font_size` pixels)
+    /// - Cleanup issues (`set_skip(true)` breaks ratatui diff)
+    ///
+    /// Instead, write the image directly to stdout with DCS passthrough,
+    /// sending the original PNG at full resolution. The terminal handles
+    /// scaling, producing much better quality.
     ///
     /// Called AFTER `terminal.draw()` so ratatui has already flushed the
     /// border/popup. The image is drawn on top at the correct position.
     ///
-    /// Matches kokoirc's write strategy exactly:
-    ///   1. Disable mouse tracking (prevents interference during DCS write)
-    ///   2. Save cursor + position at inner area
-    ///   3. Write DCS-wrapped OSC 1337 with immediate flush
-    ///   4. Restore cursor
-    ///   5. Re-enable mouse tracking
-    pub fn write_iterm2_tmux_direct(&self) {
-        use std::io::Write;
-
-        // Mouse tracking modes — must be disabled during DCS image write to
-        // prevent interference with tmux passthrough (matches kokoirc).
-        const MOUSE_DISABLE: &[u8] =
-            b"\x1b[?1003l\x1b[?1006l\x1b[?1002l\x1b[?1000l";
-        const MOUSE_ENABLE: &[u8] =
-            b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h";
-
-        // Only for iTerm2+tmux with a Ready preview.
-        if !self.in_tmux || self.picker.protocol_type() != ProtocolType::Iterm2 {
+    /// Supports:
+    /// - **Kitty**: PNG format (`f=100`), `c`/`r` params for cell area scaling
+    /// - **iTerm2**: OSC 1337 inline image with cell dimensions
+    pub fn write_tmux_direct_image(&mut self) {
+        if !self.in_tmux {
             return;
         }
 
-        let (raw_png, popup_width, popup_height) = match &self.image_preview {
+        let proto = self.picker.protocol_type();
+        if proto == ProtocolType::Halfblocks || proto == ProtocolType::Sixel {
+            return;
+        }
+
+        let (raw_png, popup_width, popup_height) = match &mut self.image_preview {
             crate::image_preview::PreviewStatus::Ready {
                 raw_png,
                 width,
                 height,
+                direct_written,
                 ..
-            } => (raw_png, *width, *height),
+            } => {
+                if *direct_written {
+                    return;
+                }
+                *direct_written = true;
+                (&*raw_png, *width, *height)
+            }
             _ => return,
         };
 
@@ -700,56 +779,20 @@ impl App {
         }
 
         tracing::debug!(
-            inner_w,
-            inner_h,
-            inner_x,
-            inner_y,
+            ?proto, inner_w, inner_h, inner_x, inner_y,
             png_len = raw_png.len(),
-            "writing iTerm2+tmux direct image"
+            "writing tmux direct image"
         );
 
-        // Encode: base64 the PNG data.
-        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, raw_png);
-
-        // Build the iTerm2 OSC 1337 sequence (kokoirc-style: cell dims, preserveAspectRatio=0).
-        let osc = format!(
-            "\x1b]1337;File=inline=1;width={inner_w};height={inner_h};preserveAspectRatio=0:{b64}\x07"
-        );
-
-        // Wrap in tmux DCS passthrough: double all ESC bytes in the payload.
-        let escaped = osc.replace('\x1b', "\x1b\x1b");
-        let dcs = format!("\x1bPtmux;{escaped}\x1b\\");
-
-        // ── Write sequence (matches kokoirc render.ts exactly) ──
-        //
-        // Use per-step flush for immediate delivery to tmux,
-        // matching kokoirc's writeSync(1, ...) pattern.
-        // Terminal rows/cols are 1-based for CUP.
-        let row = inner_y + 1;
-        let col = inner_x + 1;
-        let cursor_save = format!("\x1b7\x1b[{row};{col}H");
-
-        let mut out = std::io::stdout().lock();
-
-        // Step 1: Disable mouse tracking.
-        let _ = out.write_all(MOUSE_DISABLE);
-        let _ = out.flush();
-
-        // Step 2: Save cursor + position.
-        let _ = out.write_all(cursor_save.as_bytes());
-        let _ = out.flush();
-
-        // Step 3: Write DCS-wrapped image data.
-        let _ = out.write_all(dcs.as_bytes());
-        let _ = out.flush();
-
-        // Step 4: Restore cursor.
-        let _ = out.write_all(b"\x1b8");
-        let _ = out.flush();
-
-        // Step 5: Re-enable mouse tracking.
-        let _ = out.write_all(MOUSE_ENABLE);
-        let _ = out.flush();
+        match proto {
+            ProtocolType::Kitty => {
+                write_kitty_tmux_direct(raw_png, inner_x, inner_y, inner_w, inner_h);
+            }
+            ProtocolType::Iterm2 => {
+                write_iterm2_tmux_direct(raw_png, inner_x, inner_y, inner_w, inner_h);
+            }
+            _ => {}
+        }
     }
 
     /// Set up connection state, server buffer, and "Connecting..." message.
@@ -931,6 +974,7 @@ impl App {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     pub async fn run(&mut self, terminal: &mut ui::Tui) -> Result<()> {
         // --- Splash screen ---
         self.run_splash(terminal).await?;
@@ -981,11 +1025,20 @@ impl App {
         let mut paste_tick = interval(Duration::from_millis(500));
 
         while !self.should_quit {
+            // Force full redraw when needed (e.g. after image preview dismiss).
+            // terminal.clear() resets ratatui's diff state so every cell is
+            // rewritten on the next draw, overwriting any graphics artifacts.
+            if self.needs_full_redraw {
+                terminal.clear()?;
+                self.needs_full_redraw = false;
+            }
+
             terminal.draw(|frame| ui::layout::draw(frame, self))?;
 
-            // iTerm2+tmux: write image directly to stdout after ratatui
-            // has flushed the frame (border/popup already drawn).
-            self.write_iterm2_tmux_direct();
+            // tmux: write image directly to stdout after ratatui has
+            // flushed the frame (border/popup already drawn). Handles
+            // Kitty and iTerm2 protocols with full-resolution PNG.
+            self.write_tmux_direct_image();
 
             tokio::select! {
                 ev = term_rx.recv() => match ev {
@@ -1177,6 +1230,7 @@ impl App {
                 raw_png,
                 width,
                 height,
+                direct_written: false,
             },
             ImagePreviewEvent::Error { url, message } => PreviewStatus::Error { url, message },
         };
@@ -3179,6 +3233,133 @@ fn expand_alias_template(template: &str, args: &[String]) -> String {
     }
 
     result
+}
+
+// ---------------------------------------------------------------------------
+// Direct-write image functions (free functions, called from App methods)
+// ---------------------------------------------------------------------------
+
+/// Write Kitty graphics image directly to stdout via tmux DCS passthrough.
+///
+/// Sends the original PNG (`f=100`) at full resolution with `c`/`r` params
+/// telling the terminal to scale the image to fit the cell area. This
+/// produces much better quality than ratatui-image's pre-downscaled RGBA.
+///
+/// Image data is chunked into 4096-byte base64 pieces, each individually
+/// wrapped in DCS passthrough (tmux has a ~1MB limit per passthrough block).
+fn write_kitty_tmux_direct(
+    raw_png: &[u8],
+    inner_x: u16,
+    inner_y: u16,
+    inner_w: u16,
+    inner_h: u16,
+) {
+    use std::io::Write;
+
+    const CHARS_PER_CHUNK: usize = 4096;
+    const CHUNK_SIZE: usize = (CHARS_PER_CHUNK / 4) * 3;
+
+    let mut out = std::io::stdout().lock();
+
+    // Save cursor + position at inner area (1-based for CUP).
+    let row = inner_y + 1;
+    let col = inner_x + 1;
+    let _ = write!(out, "\x1b7\x1b[{row};{col}H");
+    let _ = out.flush();
+
+    let chunks: Vec<&[u8]> = raw_png.chunks(CHUNK_SIZE).collect();
+    let chunk_count = chunks.len();
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        let b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            chunk,
+        );
+        let more = u8::from(i + 1 < chunk_count);
+
+        // DCS passthrough: \x1bPtmux; <escaped-kitty-cmd> \x1b\\
+        // Inside DCS, ESC is doubled: \x1b → \x1b\x1b
+        if i == 0 {
+            // First chunk: transmit with display params.
+            // f=100 = PNG format (terminal decodes at native quality)
+            // a=T   = transmit and display
+            // c/r   = cell area (terminal scales image to fit)
+            // q=2   = suppress response
+            let _ = write!(
+                out,
+                "\x1bPtmux;\x1b\x1b_Gq=2,a=T,f=100,t=d,c={inner_w},r={inner_h},m={more};{b64}\x1b\x1b\\\x1b\\"
+            );
+        } else {
+            // Continuation chunks: just data + more flag.
+            let _ = write!(
+                out,
+                "\x1bPtmux;\x1b\x1b_Gm={more};{b64}\x1b\x1b\\\x1b\\"
+            );
+        }
+        let _ = out.flush();
+    }
+
+    // Restore cursor.
+    let _ = write!(out, "\x1b8");
+    let _ = out.flush();
+}
+
+/// Write iTerm2 image directly to stdout via tmux DCS passthrough.
+///
+/// Sends the original PNG via OSC 1337 at full resolution with cell-based
+/// dimensions. The terminal handles scaling.
+fn write_iterm2_tmux_direct(
+    raw_png: &[u8],
+    inner_x: u16,
+    inner_y: u16,
+    inner_w: u16,
+    inner_h: u16,
+) {
+    use std::io::Write;
+
+    // Mouse tracking modes — must be disabled during DCS image write to
+    // prevent interference with tmux passthrough (matches kokoirc).
+    const MOUSE_DISABLE: &[u8] =
+        b"\x1b[?1003l\x1b[?1006l\x1b[?1002l\x1b[?1000l";
+    const MOUSE_ENABLE: &[u8] =
+        b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h";
+
+    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, raw_png);
+
+    // Build the iTerm2 OSC 1337 sequence.
+    let osc = format!(
+        "\x1b]1337;File=inline=1;width={inner_w};height={inner_h};preserveAspectRatio=0:{b64}\x07"
+    );
+
+    // Wrap in tmux DCS passthrough: double all ESC bytes in the payload.
+    let escaped = osc.replace('\x1b', "\x1b\x1b");
+    let dcs = format!("\x1bPtmux;{escaped}\x1b\\");
+
+    // Terminal rows/cols are 1-based for CUP.
+    let row = inner_y + 1;
+    let col = inner_x + 1;
+
+    let mut out = std::io::stdout().lock();
+
+    // Step 1: Disable mouse tracking.
+    let _ = out.write_all(MOUSE_DISABLE);
+    let _ = out.flush();
+
+    // Step 2: Save cursor + position.
+    let _ = write!(out, "\x1b7\x1b[{row};{col}H");
+    let _ = out.flush();
+
+    // Step 3: Write DCS-wrapped image data.
+    let _ = out.write_all(dcs.as_bytes());
+    let _ = out.flush();
+
+    // Step 4: Restore cursor.
+    let _ = out.write_all(b"\x1b8");
+    let _ = out.flush();
+
+    // Step 5: Re-enable mouse tracking.
+    let _ = out.write_all(MOUSE_ENABLE);
+    let _ = out.flush();
 }
 
 #[cfg(test)]

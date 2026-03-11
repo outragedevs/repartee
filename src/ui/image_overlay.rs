@@ -17,8 +17,11 @@ use crate::theme::hex_to_color;
 /// the popup appears on top. When the preview status is `Hidden`, this is a
 /// no-op.
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
-    let iterm2_tmux = app.in_tmux
-        && app.picker.protocol_type() == ratatui_image::picker::ProtocolType::Iterm2;
+    // For tmux, skip ratatui-image widget entirely — image will be written
+    // directly to stdout after the frame completes (better quality, proper
+    // cleanup). Only Halfblocks goes through ratatui (it's just Unicode chars).
+    let tmux_direct = app.in_tmux
+        && app.picker.protocol_type() != ratatui_image::picker::ProtocolType::Halfblocks;
 
     match &mut app.image_preview {
         PreviewStatus::Hidden => {}
@@ -34,7 +37,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         } => {
             render_ready(
                 frame, area, &app.theme.colors, title.as_deref(),
-                &mut *image, *width, *height, iterm2_tmux,
+                &mut *image, *width, *height, tmux_direct,
             );
         }
         PreviewStatus::Error { url, message } => {
@@ -100,10 +103,11 @@ fn render_loading(
 
 /// Render the image preview popup with the decoded image.
 ///
-/// When `iterm2_tmux` is true, the image content is skipped here — it will
-/// be written directly to stdout after `terminal.draw()` completes, matching
-/// how kokoirc handles iTerm2+tmux (direct `writeSync` bypassing the TUI
-/// buffer). The popup border and title are still rendered through ratatui.
+/// When `tmux_direct` is true, the image content is skipped here — it will
+/// be written directly to stdout after `terminal.draw()` completes. This
+/// applies to all graphics protocols through tmux (Kitty, iTerm2, Sixel)
+/// for better quality and proper cleanup. The popup border and title are
+/// still rendered through ratatui.
 #[expect(clippy::too_many_arguments, reason = "render params are all needed")]
 fn render_ready(
     frame: &mut Frame,
@@ -113,7 +117,7 @@ fn render_ready(
     image: &mut ratatui_image::protocol::StatefulProtocol,
     width: u16,
     height: u16,
-    iterm2_tmux: bool,
+    tmux_direct: bool,
 ) {
     let bg_alt = hex_to_color(&colors.bg_alt).unwrap_or(Color::Reset);
     let border_color = hex_to_color(&colors.border).unwrap_or(Color::DarkGray);
@@ -136,9 +140,9 @@ fn render_ready(
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
 
-    if iterm2_tmux {
+    if tmux_direct {
         // Skip ratatui-image widget — image will be written directly to
-        // stdout after the frame completes (see App::write_iterm2_direct).
+        // stdout after the frame completes (see App::write_tmux_direct_image).
         // Fill the inner area with bg so there's no stale text behind.
         let fill = Paragraph::new("").style(Style::default().bg(bg_alt));
         frame.render_widget(fill, inner);

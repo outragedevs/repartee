@@ -41,6 +41,9 @@ pub enum PreviewStatus {
         width: u16,
         /// Height in terminal cells (including border).
         height: u16,
+        /// Whether the direct-write (stdout) path has already sent the image.
+        /// Prevents re-sending ~500KB of PNG on every render frame.
+        direct_written: bool,
     },
     /// Fetching or decoding failed.
     Error { url: String, message: String },
