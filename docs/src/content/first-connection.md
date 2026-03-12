@@ -85,8 +85,27 @@ sasl_user = "mynick"
 
 Supported SASL mechanisms: **PLAIN**, **EXTERNAL** (client TLS certificate), **SCRAM-SHA-256** (secure challenge-response — preferred when available).
 
+## Detaching
+
+You can detach from repartee and leave it running in the background. IRC connections stay alive and messages continue to be logged.
+
+```
+/detach
+```
+
+Or press `Ctrl+\` or `Ctrl+Z`. Your terminal is restored and the shell prompt returns.
+
+Reattach from any terminal:
+
+```bash
+repartee a
+```
+
+See [Sessions & Detach](sessions.html) for the full guide.
+
 ## Next steps
 
+- [Sessions & Detach](sessions.html) — background sessions and reattaching
 - [Configuration](configuration.html) — full config reference
 - [Commands](commands.html) — all available commands
 - [Theming](theming.html) — customize colors and layout

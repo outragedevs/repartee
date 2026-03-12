@@ -25,6 +25,18 @@ cargo build --release
 ./target/release/repartee
 ```
 
+## Command-line usage
+
+```
+repartee                  # normal start (fork + terminal)
+repartee -d / --detach    # start headless (no terminal)
+repartee a [pid]          # attach to a running session
+repartee attach [pid]     # same as above
+repartee -v / --version   # print version
+```
+
+See [Sessions & Detach](sessions.html) for details on background sessions.
+
 ## Binary size
 
 The release binary is approximately 5MB (includes bundled SQLite and Lua). The `--release` profile enables LTO, single codegen unit, and symbol stripping for minimal size.

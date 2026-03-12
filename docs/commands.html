@@ -68,6 +68,12 @@
     </ul>
   </div>
   <div class="nav-section">
+    <span class="nav-section-title">Usage</span>
+    <ul>
+      <li><a href="sessions.html">Sessions & Detach</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
     <span class="nav-section-title">Project</span>
     <ul>
       <li><a href="architecture.html">Architecture</a></li>
@@ -434,6 +440,40 @@ flags override its settings for this connection only.</p>
 </code></pre>
 <h2>See Also</h2>
 <p>/server, /disconnect, /quit</p>
+</div>
+<div class="command-entry" data-command="detach" data-category="Connection">
+<h1>/detach</h1>
+<h2>Syntax</h2>
+<pre><code>/detach
+</code></pre>
+<h2>Description</h2>
+<p>Detaches from the current terminal session. The repartee backend continues running in the background — IRC connections stay alive, messages are logged, and scripts keep executing.</p>
+<p>After detaching, your terminal is restored and your shell prompt returns.</p>
+<h2>Reattaching</h2>
+<p>Use <code>repartee a</code> (or <code>repartee attach</code>) from any terminal to reconnect:</p>
+<pre><code class="language-bash">repartee a           # attach to the only running session
+repartee a &lt;pid&gt;     # attach to a specific session by PID
+</code></pre>
+<h2>Keyboard shortcuts</h2>
+<p>You can also detach with keyboard chords instead of typing the command:</p>
+<ul>
+<li><strong>Ctrl+\</strong> (Ctrl + backslash)</li>
+<li><strong>Ctrl+Z</strong></li>
+</ul>
+<h2>Examples</h2>
+<pre><code>/detach              # detach from terminal
+</code></pre>
+<p>From your shell after detaching:</p>
+<pre><code class="language-bash">repartee a           # reattach to the session
+</code></pre>
+<h2>Aliases</h2>
+<ul>
+<li><code>/dt</code></li>
+</ul>
+<h2>See Also</h2>
+<ul>
+<li><a href="../sessions.html">Sessions &amp; Detach</a> — full documentation on session management</li>
+</ul>
 </div>
 <div class="command-entry" data-command="disconnect" data-category="Connection">
 <h1>/disconnect</h1>

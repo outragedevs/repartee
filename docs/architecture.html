@@ -68,6 +68,12 @@
     </ul>
   </div>
   <div class="nav-section">
+    <span class="nav-section-title">Usage</span>
+    <ul>
+      <li><a href="sessions.html">Sessions & Detach</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
     <span class="nav-section-title">Project</span>
     <ul>
       <li><a href="architecture.html" class="active">Architecture</a></li>
@@ -113,7 +119,7 @@
 </tr>
 <tr>
 <td>IRC protocol</td>
-<td><code>irc</code> crate v1.1.0</td>
+<td><code>irc-repartee</code> crate v1.3.1</td>
 </tr>
 <tr>
 <td>Scripting</td>
@@ -149,11 +155,16 @@
 <p>State is UI-agnostic — the <code>state/</code> module has no ratatui imports.</p>
 <h2>Module structure</h2>
 <pre><code>src/
-  main.rs              # Entry point, terminal setup
+  main.rs              # Entry point, fork, terminal setup
   app.rs               # Main event loop, App struct
   constants.rs         # APP_NAME and global constants
   config/              # TOML config loading
   state/               # Application state (buffers, connections, sorting)
+  session/             # Detach/reattach infrastructure
+    mod.rs             # Socket paths, session listing, PID liveness
+    protocol.rs        # Shim ↔ backend message types (bincode framing)
+    shim.rs            # Terminal shim (relay loop, splash, input)
+    writer.rs          # SocketWriter (impl Write for socket output)
   irc/                 # IRC connection, event handling, formatting
     events.rs          # IRC message → state update
     mod.rs             # Connection setup, CAP negotiation, SASL
@@ -196,9 +207,20 @@
     handlers_admin.rs  # Admin commands (/set, /reload, etc.)
     docs.rs            # Command documentation loader
 </code></pre>
+<h2>Session architecture</h2>
+<p>On startup, repartee forks into two processes:</p>
+<pre><code>repartee
+  ├── Backend (child)     # headless daemon — IRC, state, socket listener
+  │     └── Unix socket   # ~/.repartee/sessions/{pid}.sock
+  └── Shim (parent)       # terminal bridge — renders UI, forwards input
+</code></pre>
+<p>The <strong>backend</strong> runs the tokio event loop, manages IRC connections, state, scripts, and logging. It listens on a Unix socket for shim connections.</p>
+<p>The <strong>shim</strong> captures terminal events (keyboard, mouse, resize) and sends them to the backend as <code>ShimMessage</code> variants. The backend renders ratatui frames and sends raw terminal output back as <code>MainMessage::Output</code>. Communication uses length-prefixed bincode serialization.</p>
+<p>On <strong>detach</strong>, the shim exits (shell gets its prompt back). The backend continues running. On <strong>reattach</strong>, a new shim connects to the socket. The shim sends a <code>TerminalEnv</code> snapshot (dimensions, font size, terminal type env vars) so the backend can adapt to the new terminal.</p>
+<p>On <strong>SIGHUP</strong> (terminal closed unexpectedly), the backend auto-detaches instead of crashing.</p>
 <h2>Event flow</h2>
 <ol>
-<li><strong>Terminal events</strong> (keyboard, mouse) arrive via crossterm <code>event::poll</code> in a <code>spawn_blocking</code> thread</li>
+<li><strong>Terminal events</strong> (keyboard, mouse) arrive via crossterm <code>event::poll</code> in a <code>spawn_blocking</code> thread (or via socket from the shim)</li>
 <li>Events are sent through a tokio mpsc channel to the main loop</li>
 <li><strong>IRC events</strong> arrive via the <code>irc</code> crate&#39;s async reader, converted to <code>IrcEvent</code> enum variants</li>
 <li>The main loop in <code>App::run()</code> processes all events sequentially, updating <code>AppState</code></li>
@@ -295,9 +317,9 @@
 
         <!-- Prev / Next navigation -->
         <nav class="page-nav">
-          <a href="logging.html" class="page-nav-link prev">
+          <a href="sessions.html" class="page-nav-link prev">
   <span class="page-nav-label">&larr; Previous</span>
-  <span class="page-nav-title">Logging & Search</span>
+  <span class="page-nav-title">Sessions & Detach</span>
 </a>
           <a href="faq.html" class="page-nav-link next">
   <span class="page-nav-label">Next &rarr;</span>

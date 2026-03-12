@@ -46,6 +46,10 @@ A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by ir
     <div class="card-body">WHOX account tracking and extban support — ban by account name with <code>/ban -a accountname</code>.</div>
   </div>
   <div class="card">
+    <div class="card-title">Detach & Reattach</div>
+    <div class="card-body">Detach from your terminal and reattach later — IRC connections stay alive. Like tmux, built in.</div>
+  </div>
+  <div class="card">
     <div class="card-title">Single Binary</div>
     <div class="card-body">Compiles to a ~5MB standalone executable. Zero runtime dependencies.</div>
   </div>

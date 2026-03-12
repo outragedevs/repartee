@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="repartee — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
+  <meta name="keywords" content="irc, terminal, tui, client, chat, repartee, ratatui, tokio, rust">
+  <meta name="author" content="outragedevs">
+  <meta property="og:title" content="Sessions & Detach — repartee">
+  <meta property="og:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by irssi, designed for the future.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://outragedevs.github.io/repartee/">
+  <meta property="og:image" content="https://outragedevs.github.io/repartee/images/chat.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{title}} — repartee">
+  <meta name="twitter:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust.">
+  <meta name="twitter:image" content="https://outragedevs.github.io/repartee/images/chat.png">
+  <title>{{title}} — repartee</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- Mobile hamburger toggle -->
+  <button class="hamburger" aria-label="Toggle navigation">
+    <span></span>
+    <span></span>
+    <span></span>
+  </button>
+
+  <div class="page-wrapper">
+    <!-- Sidebar navigation -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <a href="index.html" class="brand">repartee</a>
+        <span class="brand-tagline">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+          <ul>
+    <li><a href="index.html">Home</a></li>
+  </ul>
+  <div class="nav-section">
+    <span class="nav-section-title">Getting Started</span>
+    <ul>
+      <li><a href="installation.html">Installation</a></li>
+      <li><a href="first-connection.html">First Connection</a></li>
+      <li><a href="configuration.html">Configuration</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Reference</span>
+    <ul>
+      <li><a href="commands.html">Commands</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Scripting</span>
+    <ul>
+      <li><a href="scripting-getting-started.html">Getting Started</a></li>
+      <li><a href="scripting-api.html">API Reference</a></li>
+      <li><a href="scripting-examples.html">Examples</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Customization</span>
+    <ul>
+      <li><a href="theming.html">Theming</a></li>
+      <li><a href="theming-format-strings.html">Format Strings</a></li>
+      <li><a href="logging.html">Logging & Search</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Usage</span>
+    <ul>
+      <li><a href="sessions.html" class="active">Sessions & Detach</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Project</span>
+    <ul>
+      <li><a href="architecture.html">Architecture</a></li>
+      <li><a href="faq.html">FAQ</a></li>
+    </ul>
+  </div>
+
+      </nav>
+      <div class="sidebar-footer">
+        Built with <a href="https://www.rust-lang.org">Rust</a>
+        &middot;
+        <a href="https://github.com/outragedevs/repartee">GitHub</a>
+      </div>
+    </aside>
+
+    <!-- Overlay for mobile sidebar -->
+    <div class="sidebar-overlay"></div>
+
+    <!-- Main content -->
+    <div class="content-wrapper">
+      <main class="content">
+        <h1>Sessions &amp; Detach</h1>
+<p>repartee can run in the background while you close your terminal and reattach later — like tmux or screen, but built into the client.</p>
+<h2>How it works</h2>
+<p>When you launch <code>repartee</code>, it forks into two processes:</p>
+<ul>
+<li><strong>Backend</strong> — headless daemon that manages IRC connections, state, and the Unix socket</li>
+<li><strong>Shim</strong> — lightweight terminal bridge that renders the UI and forwards your input</li>
+</ul>
+<p>When you detach, the shim exits and your shell prompt returns. The backend keeps running — IRC connections stay alive, messages continue to be logged, and scripts keep executing. When you reattach, a new shim connects to the backend&#39;s socket and you pick up right where you left off.</p>
+<h2>Detaching</h2>
+<p>Three ways to detach from a running session:</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>/detach</code></td>
+<td>Type the command in the input bar</td>
+</tr>
+<tr>
+<td><code>Ctrl+\</code></td>
+<td>Keyboard chord (backslash)</td>
+</tr>
+<tr>
+<td><code>Ctrl+Z</code></td>
+<td>Keyboard chord</td>
+</tr>
+</tbody></table>
+<p>After detaching, your terminal is restored and the shell prompt returns. The repartee process continues running in the background.</p>
+<h2>Reattaching</h2>
+<pre><code class="language-bash">repartee a           # attach to the only running session
+repartee a 12345     # attach to a specific session by PID
+repartee attach      # long form
+</code></pre>
+<p>If multiple sessions are running, <code>repartee a</code> lists them so you can pick one:</p>
+<pre><code>Active repartee sessions:
+  PID 12345 — ~/.repartee/sessions/12345.sock
+  PID 67890 — ~/.repartee/sessions/67890.sock
+Specify a PID: repartee a &lt;pid&gt;
+</code></pre>
+<h2>Starting headless</h2>
+<p>You can start repartee without a terminal at all:</p>
+<pre><code class="language-bash">repartee -d          # start detached (headless)
+repartee --detach    # long form
+</code></pre>
+<p>This starts the backend directly — no terminal is opened, no splash screen is shown. IRC connections are established, scripts are loaded, and the socket is created immediately. Attach when you&#39;re ready with <code>repartee a</code>.</p>
+<p>Useful for servers, startup scripts, or running repartee in a <code>systemd</code> service.</p>
+<h2>Session files</h2>
+<p>Sessions are tracked via Unix sockets in <code>~/.repartee/sessions/</code>:</p>
+<pre><code>~/.repartee/sessions/
+  12345.sock    # socket for PID 12345
+  67890.sock    # socket for PID 67890
+</code></pre>
+<p>Stale sockets from crashed or killed processes are cleaned up automatically on startup and when listing sessions.</p>
+<h2>Multiple sessions</h2>
+<p>You can run multiple independent repartee instances, each with its own PID and socket. This is useful for connecting to separate networks with different identities.</p>
+<p>Each session runs its own event loop, IRC connections, and scripts. Use <code>repartee a &lt;pid&gt;</code> to attach to a specific one.</p>
+<h2>What survives detach</h2>
+<p>Everything:</p>
+<ul>
+<li><strong>IRC connections</strong> — stay connected, continue receiving messages</li>
+<li><strong>Chat history</strong> — scrollback buffers are preserved in memory</li>
+<li><strong>Log storage</strong> — messages continue to be written to SQLite</li>
+<li><strong>Scripts</strong> — Lua scripts keep running (timers, event handlers)</li>
+<li><strong>Channel state</strong> — nick lists, topics, modes, ban lists</li>
+<li><strong>Input history</strong> — your command history is preserved</li>
+</ul>
+<h2>Terminal switching</h2>
+<p>When you reattach from a different terminal (or a different terminal emulator), repartee automatically:</p>
+<ul>
+<li>Detects the new terminal&#39;s image protocol capabilities (Kitty, iTerm2, Sixel)</li>
+<li>Updates font size measurements for correct image scaling</li>
+<li>Resizes the UI to fit the new terminal dimensions</li>
+</ul>
+<p>This means you can detach from iTerm2 on your laptop and reattach from kitty on your desktop — image previews will use the correct protocol for each terminal.</p>
+<h2>SIGHUP handling</h2>
+<p>If your terminal is closed unexpectedly (window closed, SSH disconnection, etc.), repartee catches <code>SIGHUP</code> and auto-detaches instead of crashing. The session remains running and can be reattached.</p>
+<h2>Tips</h2>
+<ul>
+<li><strong>Check running sessions</strong>: <code>repartee a</code> with no arguments lists all live sessions</li>
+<li><strong>Clean shutdown</strong>: use <code>/quit</code> from an attached session to disconnect from IRC and exit the backend</li>
+<li><strong>Force kill</strong>: <code>kill &lt;pid&gt;</code> sends SIGTERM — repartee sends QUIT to IRC servers and shuts down cleanly</li>
+<li><strong>Startup script</strong>: add <code>repartee -d</code> to your shell profile or system startup to always have a session ready</li>
+</ul>
+
+
+        <!-- Prev / Next navigation -->
+        <nav class="page-nav">
+          <a href="logging.html" class="page-nav-link prev">
+  <span class="page-nav-label">&larr; Previous</span>
+  <span class="page-nav-title">Logging & Search</span>
+</a>
+          <a href="architecture.html" class="page-nav-link next">
+  <span class="page-nav-label">Next &rarr;</span>
+  <span class="page-nav-title">Architecture</span>
+</a>
+        </nav>
+
+        <footer class="site-footer">
+          Built with <a href="https://www.rust-lang.org">Rust</a> &middot;
+          <a href="https://github.com/outragedevs/repartee">GitHub</a> &middot;
+          MIT License
+        </footer>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    // Mobile sidebar toggle
+    (function() {
+      const hamburger = document.querySelector('.hamburger');
+      const sidebar = document.querySelector('.sidebar');
+      const overlay = document.querySelector('.sidebar-overlay');
+
+      function toggleSidebar() {
+        hamburger.classList.toggle('active');
+        sidebar.classList.toggle('open');
+        overlay.classList.toggle('visible');
+        document.body.style.overflow = sidebar.classList.contains('open') ? 'hidden' : '';
+      }
+
+      function closeSidebar() {
+        hamburger.classList.remove('active');
+        sidebar.classList.remove('open');
+        overlay.classList.remove('visible');
+        document.body.style.overflow = '';
+      }
+
+      hamburger.addEventListener('click', toggleSidebar);
+      overlay.addEventListener('click', closeSidebar);
+
+      // Close sidebar on Escape key
+      document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && sidebar.classList.contains('open')) {
+          closeSidebar();
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

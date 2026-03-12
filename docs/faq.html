@@ -68,6 +68,12 @@
     </ul>
   </div>
   <div class="nav-section">
+    <span class="nav-section-title">Usage</span>
+    <ul>
+      <li><a href="sessions.html">Sessions & Detach</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
     <span class="nav-section-title">Project</span>
     <ul>
       <li><a href="architecture.html">Architecture</a></li>
@@ -174,6 +180,13 @@
 <li><strong>WHOX</strong>: auto-detected for account name and full host tracking</li>
 <li><strong>Extban</strong>: <code>$a:account</code> ban type with <code>/ban -a</code> shorthand</li>
 </ul>
+<h2>How do I keep repartee running in the background?</h2>
+<p>Use <code>/detach</code> (or press <code>Ctrl+\</code> / <code>Ctrl+Z</code>) to detach from the terminal. repartee continues running — IRC connections stay alive, messages are logged, and scripts keep executing.</p>
+<p>Reattach with <code>repartee a</code> from any terminal. You can also start headless with <code>repartee -d</code> and attach later.</p>
+<p>See <a href="sessions.html">Sessions &amp; Detach</a> for the full guide.</p>
+<h2>Can I close my terminal and reconnect later?</h2>
+<p>Yes. When you close your terminal window, repartee catches SIGHUP and auto-detaches. The session stays running and you can reattach with <code>repartee a</code>.</p>
+<p>This also works across SSH disconnections — start with <code>repartee -d</code> on a remote server, disconnect SSH, reconnect later, and <code>repartee a</code> picks up your session.</p>
 <h2>What does /cycle do?</h2>
 <p><code>/cycle</code> parts and immediately rejoins a channel. Useful for refreshing your nick list, re-triggering auto-op, or clearing stale channel state. Channel keys are preserved. Alias: <code>/rejoin</code>.</p>
 <h2>How do I report bugs?</h2>

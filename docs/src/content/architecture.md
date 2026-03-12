@@ -9,7 +9,7 @@ Technical overview of repartee's internal design.
 | Language | Rust 2024 edition |
 | TUI framework | ratatui 0.30+ with crossterm backend |
 | Async runtime | tokio (full features) |
-| IRC protocol | `irc` crate v1.1.0 |
+| IRC protocol | `irc-repartee` crate v1.3.1 |
 | Scripting | Lua 5.4 via mlua 0.11 |
 | Storage | SQLite via rusqlite (bundled) |
 | Encryption | AES-256-GCM via aes-gcm |
@@ -35,11 +35,16 @@ State is UI-agnostic — the `state/` module has no ratatui imports.
 
 ```
 src/
-  main.rs              # Entry point, terminal setup
+  main.rs              # Entry point, fork, terminal setup
   app.rs               # Main event loop, App struct
   constants.rs         # APP_NAME and global constants
   config/              # TOML config loading
   state/               # Application state (buffers, connections, sorting)
+  session/             # Detach/reattach infrastructure
+    mod.rs             # Socket paths, session listing, PID liveness
+    protocol.rs        # Shim ↔ backend message types (bincode framing)
+    shim.rs            # Terminal shim (relay loop, splash, input)
+    writer.rs          # SocketWriter (impl Write for socket output)
   irc/                 # IRC connection, event handling, formatting
     events.rs          # IRC message → state update
     mod.rs             # Connection setup, CAP negotiation, SASL
@@ -83,9 +88,28 @@ src/
     docs.rs            # Command documentation loader
 ```
 
+## Session architecture
+
+On startup, repartee forks into two processes:
+
+```
+repartee
+  ├── Backend (child)     # headless daemon — IRC, state, socket listener
+  │     └── Unix socket   # ~/.repartee/sessions/{pid}.sock
+  └── Shim (parent)       # terminal bridge — renders UI, forwards input
+```
+
+The **backend** runs the tokio event loop, manages IRC connections, state, scripts, and logging. It listens on a Unix socket for shim connections.
+
+The **shim** captures terminal events (keyboard, mouse, resize) and sends them to the backend as `ShimMessage` variants. The backend renders ratatui frames and sends raw terminal output back as `MainMessage::Output`. Communication uses length-prefixed bincode serialization.
+
+On **detach**, the shim exits (shell gets its prompt back). The backend continues running. On **reattach**, a new shim connects to the socket. The shim sends a `TerminalEnv` snapshot (dimensions, font size, terminal type env vars) so the backend can adapt to the new terminal.
+
+On **SIGHUP** (terminal closed unexpectedly), the backend auto-detaches instead of crashing.
+
 ## Event flow
 
-1. **Terminal events** (keyboard, mouse) arrive via crossterm `event::poll` in a `spawn_blocking` thread
+1. **Terminal events** (keyboard, mouse) arrive via crossterm `event::poll` in a `spawn_blocking` thread (or via socket from the shim)
 2. Events are sent through a tokio mpsc channel to the main loop
 3. **IRC events** arrive via the `irc` crate's async reader, converted to `IrcEvent` enum variants
 4. The main loop in `App::run()` processes all events sequentially, updating `AppState`

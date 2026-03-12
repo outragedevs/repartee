@@ -22,6 +22,7 @@ Inspired by irssi. Designed for the future.
 - **Netsplit detection** — batches join/part floods into single events
 - **Flood protection** — blocks CTCP spam and nick-change floods automatically
 - **Theming** — irssi-compatible format strings with 24-bit color support and custom abstracts
+- **Detach & reattach** — detach from your terminal and reattach later; IRC connections stay alive
 - **Extban** — `$a:account` ban type with `/ban -a` shorthand
 - **Single binary** — ~5MB, zero runtime dependencies (SQLite and Lua bundled)
 
@@ -85,6 +86,8 @@ channels = ["#repartee"]
 | `Up` / `Down` | Input history |
 | `Mouse click` | Select buffer or nick |
 | `Mouse wheel` | Scroll chat |
+| `Ctrl+\` | Detach from terminal |
+| `Ctrl+Z` | Detach from terminal |
 
 ---
 
@@ -97,7 +100,26 @@ channels = ["#repartee"]
   themes/            # custom .theme files
   scripts/           # Lua scripts
   logs/messages.db   # chat logs (SQLite)
+  sessions/          # Unix sockets for detached sessions
 ```
+
+---
+
+## Sessions & Detach
+
+repartee can run in the background while you close your terminal:
+
+```bash
+# Detach: press Ctrl+\ or type /detach — terminal is restored
+# Reattach from any terminal:
+repartee a
+
+# Or start headless (no terminal needed):
+repartee -d
+repartee a       # attach when ready
+```
+
+Everything survives detach — IRC connections, scrollback, scripts, and channel state.
 
 ---
 
@@ -169,6 +191,7 @@ Full documentation is available at **[outragedevs.github.io/repartee](https://ou
 - [First Connection](https://outragedevs.github.io/repartee/first-connection.html)
 - [Configuration Reference](https://outragedevs.github.io/repartee/configuration.html)
 - [Command List](https://outragedevs.github.io/repartee/commands.html)
+- [Sessions & Detach](https://outragedevs.github.io/repartee/sessions.html)
 - [Scripting API](https://outragedevs.github.io/repartee/scripting-api.html)
 - [Theming](https://outragedevs.github.io/repartee/theming.html)
 - [Logging & Search](https://outragedevs.github.io/repartee/logging.html)

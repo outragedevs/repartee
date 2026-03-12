@@ -68,6 +68,12 @@
     </ul>
   </div>
   <div class="nav-section">
+    <span class="nav-section-title">Usage</span>
+    <ul>
+      <li><a href="sessions.html">Sessions & Detach</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
     <span class="nav-section-title">Project</span>
     <ul>
       <li><a href="architecture.html">Architecture</a></li>
@@ -107,6 +113,14 @@ cd repartee
 cargo build --release
 ./target/release/repartee
 </code></pre>
+<h2>Command-line usage</h2>
+<pre><code>repartee                  # normal start (fork + terminal)
+repartee -d / --detach    # start headless (no terminal)
+repartee a [pid]          # attach to a running session
+repartee attach [pid]     # same as above
+repartee -v / --version   # print version
+</code></pre>
+<p>See <a href="sessions.html">Sessions &amp; Detach</a> for details on background sessions.</p>
 <h2>Binary size</h2>
 <p>The release binary is approximately 5MB (includes bundled SQLite and Lua). The <code>--release</code> profile enables LTO, single codegen unit, and symbol stripping for minimal size.</p>
 <h2>Build options</h2>

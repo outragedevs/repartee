@@ -60,6 +60,20 @@ Yes — repartee has comprehensive IRCv3 support negotiated at connection time:
 - **WHOX**: auto-detected for account name and full host tracking
 - **Extban**: `$a:account` ban type with `/ban -a` shorthand
 
+## How do I keep repartee running in the background?
+
+Use `/detach` (or press `Ctrl+\` / `Ctrl+Z`) to detach from the terminal. repartee continues running — IRC connections stay alive, messages are logged, and scripts keep executing.
+
+Reattach with `repartee a` from any terminal. You can also start headless with `repartee -d` and attach later.
+
+See [Sessions & Detach](sessions.html) for the full guide.
+
+## Can I close my terminal and reconnect later?
+
+Yes. When you close your terminal window, repartee catches SIGHUP and auto-detaches. The session stays running and you can reattach with `repartee a`.
+
+This also works across SSH disconnections — start with `repartee -d` on a remote server, disconnect SSH, reconnect later, and `repartee a` picks up your session.
+
 ## What does /cycle do?
 
 `/cycle` parts and immediately rejoins a channel. Useful for refreshing your nick list, re-triggering auto-op, or clearing stale channel state. Channel keys are preserved. Alias: `/rejoin`.

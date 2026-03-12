@@ -68,6 +68,12 @@
     </ul>
   </div>
   <div class="nav-section">
+    <span class="nav-section-title">Usage</span>
+    <ul>
+      <li><a href="sessions.html">Sessions & Detach</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
     <span class="nav-section-title">Project</span>
     <ul>
       <li><a href="architecture.html">Architecture</a></li>
@@ -146,8 +152,18 @@ sasl_user = &quot;mynick&quot;
 # sasl_mechanism = &quot;SCRAM-SHA-256&quot;  # or PLAIN (default), EXTERNAL
 </code></pre>
 <p>Supported SASL mechanisms: <strong>PLAIN</strong>, <strong>EXTERNAL</strong> (client TLS certificate), <strong>SCRAM-SHA-256</strong> (secure challenge-response — preferred when available).</p>
+<h2>Detaching</h2>
+<p>You can detach from repartee and leave it running in the background. IRC connections stay alive and messages continue to be logged.</p>
+<pre><code>/detach
+</code></pre>
+<p>Or press <code>Ctrl+\</code> or <code>Ctrl+Z</code>. Your terminal is restored and the shell prompt returns.</p>
+<p>Reattach from any terminal:</p>
+<pre><code class="language-bash">repartee a
+</code></pre>
+<p>See <a href="sessions.html">Sessions &amp; Detach</a> for the full guide.</p>
 <h2>Next steps</h2>
 <ul>
+<li><a href="sessions.html">Sessions &amp; Detach</a> — background sessions and reattaching</li>
 <li><a href="configuration.html">Configuration</a> — full config reference</li>
 <li><a href="commands.html">Commands</a> — all available commands</li>
 <li><a href="theming.html">Theming</a> — customize colors and layout</li>

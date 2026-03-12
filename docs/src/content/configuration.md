@@ -13,6 +13,7 @@ The full directory layout:
   themes/              # custom themes
   scripts/             # user scripts (Lua)
   logs/messages.db     # chat logs (SQLite)
+  sessions/            # Unix sockets for detached sessions
 ```
 
 ## Full annotated example
