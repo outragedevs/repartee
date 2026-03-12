@@ -133,8 +133,14 @@ pub struct SidepanelConfig {
 impl Default for SidepanelConfig {
     fn default() -> Self {
         Self {
-            left: PanelConfig { width: 20, visible: true },
-            right: PanelConfig { width: 18, visible: true },
+            left: PanelConfig {
+                width: 20,
+                visible: true,
+            },
+            right: PanelConfig {
+                width: 18,
+                visible: true,
+            },
         }
     }
 }
@@ -258,7 +264,10 @@ pub struct ServerConfig {
     pub bind_ip: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoding: Option<String>,
-    #[serde(default = "default_true_option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default = "default_true_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub auto_reconnect: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reconnect_delay: Option<u64>,
@@ -274,7 +283,10 @@ pub struct ServerConfig {
     pub client_cert_path: Option<String>,
 }
 
-#[expect(clippy::unnecessary_wraps, reason = "serde default requires Option<bool> return type")]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "serde default requires Option<bool> return type"
+)]
 const fn default_true_option() -> Option<bool> {
     Some(true)
 }
@@ -351,7 +363,11 @@ mod tests {
         assert_eq!(config.general.nick, crate::constants::APP_NAME);
         assert_eq!(
             config.general.ctcp_version,
-            format!("{} {}", crate::constants::APP_NAME, crate::constants::APP_VERSION),
+            format!(
+                "{} {}",
+                crate::constants::APP_NAME,
+                crate::constants::APP_VERSION
+            ),
         );
     }
 
@@ -383,7 +399,10 @@ channels = ["#rust", "#linux"]
         assert_eq!(server.label, "Libera");
         assert_eq!(server.port, 6697);
         assert!(server.tls);
-        assert_eq!(server.channels, vec!["#rust".to_string(), "#linux".to_string()]);
+        assert_eq!(
+            server.channels,
+            vec!["#rust".to_string(), "#linux".to_string()]
+        );
         // Defaults for optional fields
         assert!(server.tls_verify);
         assert!(!server.autoconnect);
@@ -458,7 +477,10 @@ channels = ["#general"]
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.ignores.len(), 2);
         assert_eq!(config.ignores[0].mask, "*!*@spam.host");
-        assert_eq!(config.ignores[0].levels, vec![IgnoreLevel::Msgs, IgnoreLevel::Notices]);
+        assert_eq!(
+            config.ignores[0].levels,
+            vec![IgnoreLevel::Msgs, IgnoreLevel::Notices]
+        );
         assert!(config.ignores[0].channels.is_none());
         assert_eq!(
             config.ignores[1].channels.as_ref().unwrap(),

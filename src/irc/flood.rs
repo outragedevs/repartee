@@ -53,7 +53,7 @@ pub struct FloodState {
     tilde_blocked_until: Option<Instant>,
 
     // Duplicate text flood
-    msg_window: Vec<(String, Instant)>, // (text, timestamp)
+    msg_window: Vec<(String, Instant)>,      // (text, timestamp)
     blocked_texts: HashMap<String, Instant>, // text -> blocked_until
 
     // Nick change flood (per buffer)
@@ -124,7 +124,12 @@ impl FloodState {
 
     /// Check for duplicate text flood. Returns whether the message is allowed, just triggered, or already blocked.
     /// Only checks duplicates for channel messages (`is_channel = true`).
-    pub fn check_duplicate_flood(&mut self, text: &str, is_channel: bool, now: Instant) -> FloodResult {
+    pub fn check_duplicate_flood(
+        &mut self,
+        text: &str,
+        is_channel: bool,
+        now: Instant,
+    ) -> FloodResult {
         if !is_channel || text.is_empty() {
             return FloodResult::Allow;
         }
@@ -175,10 +180,7 @@ impl FloodState {
         }
 
         // Track nick change timestamp
-        let times = self
-            .nick_times
-            .entry(buffer_id.to_string())
-            .or_default();
+        let times = self.nick_times.entry(buffer_id.to_string()).or_default();
         times.push(now);
         prune_window(times, now, NICK_WINDOW);
 
@@ -236,7 +238,11 @@ mod tests {
         let now = Instant::now();
         for i in 0..4 {
             let t = now + Duration::from_millis(i * 100);
-            assert_eq!(state.check_ctcp_flood(t), FloodResult::Allow, "request {i} should pass");
+            assert_eq!(
+                state.check_ctcp_flood(t),
+                FloodResult::Allow,
+                "request {i} should pass"
+            );
         }
     }
 
@@ -249,7 +255,10 @@ mod tests {
             assert_eq!(state.check_ctcp_flood(t), FloodResult::Allow);
         }
         // 5th request triggers — should be Triggered (not Blocked)
-        assert_eq!(state.check_ctcp_flood(now + Duration::from_millis(400)), FloodResult::Triggered);
+        assert_eq!(
+            state.check_ctcp_flood(now + Duration::from_millis(400)),
+            FloodResult::Triggered
+        );
     }
 
     #[test]
@@ -261,7 +270,10 @@ mod tests {
             state.check_ctcp_flood(now + Duration::from_millis(i * 100));
         }
         // Subsequent requests during block should be Blocked (silent), not Triggered
-        assert_eq!(state.check_ctcp_flood(now + Duration::from_secs(30)), FloodResult::Blocked);
+        assert_eq!(
+            state.check_ctcp_flood(now + Duration::from_secs(30)),
+            FloodResult::Blocked
+        );
     }
 
     #[test]
@@ -273,7 +285,10 @@ mod tests {
             state.check_ctcp_flood(now + Duration::from_millis(i * 100));
         }
         // After 61 seconds, should no longer be blocked
-        assert_eq!(state.check_ctcp_flood(now + Duration::from_secs(61)), FloodResult::Allow);
+        assert_eq!(
+            state.check_ctcp_flood(now + Duration::from_secs(61)),
+            FloodResult::Allow
+        );
     }
 
     #[test]
@@ -292,7 +307,10 @@ mod tests {
         let mut state = FloodState::new();
         let now = Instant::now();
         for i in 0..4 {
-            assert_eq!(state.check_tilde_flood(now + Duration::from_millis(i * 100)), FloodResult::Allow);
+            assert_eq!(
+                state.check_tilde_flood(now + Duration::from_millis(i * 100)),
+                FloodResult::Allow
+            );
         }
     }
 
@@ -317,7 +335,10 @@ mod tests {
         for i in 0..5 {
             state.check_tilde_flood(now + Duration::from_millis(i * 100));
         }
-        assert_eq!(state.check_tilde_flood(now + Duration::from_secs(61)), FloodResult::Allow);
+        assert_eq!(
+            state.check_tilde_flood(now + Duration::from_secs(61)),
+            FloodResult::Allow
+        );
     }
 
     #[test]
@@ -326,11 +347,14 @@ mod tests {
         let now = Instant::now();
         // Private messages should never trigger duplicate detection
         for i in 0..10 {
-            assert_eq!(state.check_duplicate_flood(
-                "same text",
-                false,
-                now + Duration::from_millis(i * 100)
-            ), FloodResult::Allow);
+            assert_eq!(
+                state.check_duplicate_flood(
+                    "same text",
+                    false,
+                    now + Duration::from_millis(i * 100)
+                ),
+                FloodResult::Allow
+            );
         }
     }
 
@@ -338,7 +362,10 @@ mod tests {
     fn duplicate_empty_text_ignored() {
         let mut state = FloodState::new();
         let now = Instant::now();
-        assert_eq!(state.check_duplicate_flood("", true, now), FloodResult::Allow);
+        assert_eq!(
+            state.check_duplicate_flood("", true, now),
+            FloodResult::Allow
+        );
     }
 
     #[test]
@@ -347,11 +374,10 @@ mod tests {
         let now = Instant::now();
         // 4 messages isn't enough to trigger analysis (need DUP_MIN_IN_WINDOW=5)
         for i in 0..4 {
-            assert_eq!(state.check_duplicate_flood(
-                "spam",
-                true,
-                now + Duration::from_millis(i * 100)
-            ), FloodResult::Allow);
+            assert_eq!(
+                state.check_duplicate_flood("spam", true, now + Duration::from_millis(i * 100)),
+                FloodResult::Allow
+            );
         }
     }
 
@@ -360,16 +386,27 @@ mod tests {
         let mut state = FloodState::new();
         let now = Instant::now();
         // 5 messages, 3 of which are identical -> should trigger on the 5th
-        assert_eq!(state.check_duplicate_flood("spam", true, now), FloodResult::Allow);
-        assert_eq!(state.check_duplicate_flood("other1", true, now + Duration::from_millis(100)), FloodResult::Allow);
-        assert_eq!(state.check_duplicate_flood("spam", true, now + Duration::from_millis(200)), FloodResult::Allow);
-        assert_eq!(state.check_duplicate_flood("other2", true, now + Duration::from_millis(300)), FloodResult::Allow);
+        assert_eq!(
+            state.check_duplicate_flood("spam", true, now),
+            FloodResult::Allow
+        );
+        assert_eq!(
+            state.check_duplicate_flood("other1", true, now + Duration::from_millis(100)),
+            FloodResult::Allow
+        );
+        assert_eq!(
+            state.check_duplicate_flood("spam", true, now + Duration::from_millis(200)),
+            FloodResult::Allow
+        );
+        assert_eq!(
+            state.check_duplicate_flood("other2", true, now + Duration::from_millis(300)),
+            FloodResult::Allow
+        );
         // 5th msg, 3rd "spam" — window now has 5 msgs and 3 are "spam"
-        assert_eq!(state.check_duplicate_flood(
-            "spam",
-            true,
-            now + Duration::from_millis(400)
-        ), FloodResult::Triggered);
+        assert_eq!(
+            state.check_duplicate_flood("spam", true, now + Duration::from_millis(400)),
+            FloodResult::Triggered
+        );
     }
 
     #[test]
@@ -377,21 +414,31 @@ mod tests {
         let mut state = FloodState::new();
         let now = Instant::now();
         // Trigger block
-        assert_eq!(state.check_duplicate_flood("spam", true, now), FloodResult::Allow);
-        assert_eq!(state.check_duplicate_flood("a", true, now + Duration::from_millis(100)), FloodResult::Allow);
-        assert_eq!(state.check_duplicate_flood("spam", true, now + Duration::from_millis(200)), FloodResult::Allow);
-        assert_eq!(state.check_duplicate_flood("b", true, now + Duration::from_millis(300)), FloodResult::Allow);
-        assert_eq!(state.check_duplicate_flood(
-            "spam",
-            true,
-            now + Duration::from_millis(400)
-        ), FloodResult::Triggered);
+        assert_eq!(
+            state.check_duplicate_flood("spam", true, now),
+            FloodResult::Allow
+        );
+        assert_eq!(
+            state.check_duplicate_flood("a", true, now + Duration::from_millis(100)),
+            FloodResult::Allow
+        );
+        assert_eq!(
+            state.check_duplicate_flood("spam", true, now + Duration::from_millis(200)),
+            FloodResult::Allow
+        );
+        assert_eq!(
+            state.check_duplicate_flood("b", true, now + Duration::from_millis(300)),
+            FloodResult::Allow
+        );
+        assert_eq!(
+            state.check_duplicate_flood("spam", true, now + Duration::from_millis(400)),
+            FloodResult::Triggered
+        );
         // Now "spam" is blocked — subsequent messages should be Blocked (silent)
-        assert_eq!(state.check_duplicate_flood(
-            "spam",
-            true,
-            now + Duration::from_secs(10)
-        ), FloodResult::Blocked);
+        assert_eq!(
+            state.check_duplicate_flood("spam", true, now + Duration::from_secs(10)),
+            FloodResult::Blocked
+        );
     }
 
     #[test]
@@ -400,11 +447,14 @@ mod tests {
         let now = Instant::now();
         // All different messages should pass even with many in window
         for i in 0..10 {
-            assert_eq!(state.check_duplicate_flood(
-                &format!("unique msg {i}"),
-                true,
-                now + Duration::from_millis(i * 100)
-            ), FloodResult::Allow);
+            assert_eq!(
+                state.check_duplicate_flood(
+                    &format!("unique msg {i}"),
+                    true,
+                    now + Duration::from_millis(i * 100)
+                ),
+                FloodResult::Allow
+            );
         }
     }
 
@@ -413,10 +463,10 @@ mod tests {
         let mut state = FloodState::new();
         let now = Instant::now();
         for i in 0..4 {
-            assert!(!state.should_suppress_nick_flood(
-                "conn/chan",
-                now + Duration::from_millis(i * 100)
-            ));
+            assert!(
+                !state
+                    .should_suppress_nick_flood("conn/chan", now + Duration::from_millis(i * 100))
+            );
         }
     }
 
@@ -425,10 +475,8 @@ mod tests {
         let mut state = FloodState::new();
         let now = Instant::now();
         for i in 0..5 {
-            let result = state.should_suppress_nick_flood(
-                "conn/#channel",
-                now + Duration::from_millis(i * 100),
-            );
+            let result = state
+                .should_suppress_nick_flood("conn/#channel", now + Duration::from_millis(i * 100));
             if i < 4 {
                 assert!(!result, "nick change {i} should pass");
             } else {
@@ -443,16 +491,12 @@ mod tests {
         let now = Instant::now();
         // Fill buffer A almost to threshold
         for i in 0..4 {
-            assert!(!state.should_suppress_nick_flood(
-                "buf_a",
-                now + Duration::from_millis(i * 100)
-            ));
+            assert!(
+                !state.should_suppress_nick_flood("buf_a", now + Duration::from_millis(i * 100))
+            );
         }
         // Buffer B should be unaffected
-        assert!(!state.should_suppress_nick_flood(
-            "buf_b",
-            now + Duration::from_millis(500)
-        ));
+        assert!(!state.should_suppress_nick_flood("buf_b", now + Duration::from_millis(500)));
     }
 
     #[test]

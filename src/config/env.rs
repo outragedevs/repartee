@@ -18,7 +18,11 @@ pub fn load_env(path: &Path) -> Result<HashMap<String, String>> {
         }
         if let Some((key, value)) = trimmed.split_once('=') {
             let key = key.trim().to_string();
-            let value = value.trim().trim_matches('"').trim_matches('\'').to_string();
+            let value = value
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string();
             vars.insert(key, value);
         }
     }

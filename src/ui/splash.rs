@@ -122,12 +122,7 @@ fn colorize_line<'a>(
 /// The transition point is detected by finding runs of non-braille characters
 /// (the repartee text / URL). Braille chars (U+2800..U+28FF) get `bird_fg`,
 /// and the rest gets `text_fg`.
-fn colorize_mixed_line<'a>(
-    line: &str,
-    bird_fg: Color,
-    text_fg: Color,
-    bg: Color,
-) -> Vec<Span<'a>> {
+fn colorize_mixed_line<'a>(line: &str, bird_fg: Color, text_fg: Color, bg: Color) -> Vec<Span<'a>> {
     let mut spans = Vec::new();
     let mut current_text = String::new();
     let mut current_is_braille = None;
@@ -168,10 +163,7 @@ fn colorize_mixed_line<'a>(
         } else {
             text_fg
         };
-        spans.push(Span::styled(
-            current_text,
-            Style::default().fg(fg).bg(bg),
-        ));
+        spans.push(Span::styled(current_text, Style::default().fg(fg).bg(bg)));
     }
 
     spans

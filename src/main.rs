@@ -135,7 +135,8 @@ fn main() -> Result<()> {
         child_pid => {
             // Parent: terminal shim connecting to the child's socket.
             // The splash screen runs while the daemon starts up in the background.
-            let child_pid = u32::try_from(child_pid).unwrap_or(0);
+            let child_pid = u32::try_from(child_pid)
+                .map_err(|_| color_eyre::eyre::eyre!("fork returned invalid PID: {child_pid}"))?;
             color_eyre::install()?;
             setup_logging()?;
             tokio::runtime::Builder::new_current_thread()

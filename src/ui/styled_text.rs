@@ -1,6 +1,6 @@
-use ratatui::text::{Line, Span};
-use ratatui::style::{Color, Style, Modifier};
 use crate::theme::StyledSpan;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 
 /// Convert a slice of `StyledSpan`s (from the theme parser) into a ratatui `Line`.
 pub fn styled_spans_to_line(spans: &[StyledSpan]) -> Line<'static> {
@@ -15,10 +15,18 @@ pub fn styled_spans_to_line(spans: &[StyledSpan]) -> Line<'static> {
                 style = style.bg(bg);
             }
             let mut modifiers = Modifier::empty();
-            if s.bold { modifiers |= Modifier::BOLD; }
-            if s.italic { modifiers |= Modifier::ITALIC; }
-            if s.underline { modifiers |= Modifier::UNDERLINED; }
-            if s.dim { modifiers |= Modifier::DIM; }
+            if s.bold {
+                modifiers |= Modifier::BOLD;
+            }
+            if s.italic {
+                modifiers |= Modifier::ITALIC;
+            }
+            if s.underline {
+                modifiers |= Modifier::UNDERLINED;
+            }
+            if s.dim {
+                modifiers |= Modifier::DIM;
+            }
             if !modifiers.is_empty() {
                 style = style.add_modifier(modifiers);
             }
@@ -38,10 +46,18 @@ pub fn styled_spans_to_line_with_fg(spans: &[StyledSpan], default_fg: Color) -> 
                 style = style.bg(bg);
             }
             let mut modifiers = Modifier::empty();
-            if s.bold { modifiers |= Modifier::BOLD; }
-            if s.italic { modifiers |= Modifier::ITALIC; }
-            if s.underline { modifiers |= Modifier::UNDERLINED; }
-            if s.dim { modifiers |= Modifier::DIM; }
+            if s.bold {
+                modifiers |= Modifier::BOLD;
+            }
+            if s.italic {
+                modifiers |= Modifier::ITALIC;
+            }
+            if s.underline {
+                modifiers |= Modifier::UNDERLINED;
+            }
+            if s.dim {
+                modifiers |= Modifier::DIM;
+            }
             if !modifiers.is_empty() {
                 style = style.add_modifier(modifiers);
             }
@@ -60,8 +76,12 @@ mod tests {
     fn converts_plain_span() {
         let spans = vec![StyledSpan {
             text: "hello".into(),
-            fg: None, bg: None,
-            bold: false, italic: false, underline: false, dim: false,
+            fg: None,
+            bg: None,
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
         }];
         let line = styled_spans_to_line(&spans);
         assert_eq!(line.spans.len(), 1);
@@ -74,7 +94,10 @@ mod tests {
             text: "colored".into(),
             fg: Some(Color::Rgb(0x7a, 0xa2, 0xf7)),
             bg: None,
-            bold: true, italic: false, underline: false, dim: false,
+            bold: true,
+            italic: false,
+            underline: false,
+            dim: false,
         }];
         let line = styled_spans_to_line(&spans);
         let style = line.spans[0].style;
@@ -86,12 +109,22 @@ mod tests {
     fn converts_multiple_spans() {
         let spans = vec![
             StyledSpan {
-                text: "a".into(), fg: None, bg: None,
-                bold: false, italic: false, underline: false, dim: false,
+                text: "a".into(),
+                fg: None,
+                bg: None,
+                bold: false,
+                italic: false,
+                underline: false,
+                dim: false,
             },
             StyledSpan {
-                text: "b".into(), fg: Some(Color::Red), bg: None,
-                bold: false, italic: true, underline: false, dim: false,
+                text: "b".into(),
+                fg: Some(Color::Red),
+                bg: None,
+                bold: false,
+                italic: true,
+                underline: false,
+                dim: false,
             },
         ];
         let line = styled_spans_to_line(&spans);

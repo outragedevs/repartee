@@ -120,7 +120,6 @@ type Cb<Args, Ret = ()> = Arc<dyn Fn(Args) -> Ret + Send + Sync>;
 pub struct ScriptAPI {
     // ── IRC operations ───────────────────────────────────────
     // All take an optional connection_id; None = active connection.
-
     /// Send a PRIVMSG. Args: (target, text, `connection_id`?)
     pub say: Cb<(String, String, Option<String>)>,
     /// Send a CTCP ACTION. Args: (target, text, `connection_id`?)
@@ -145,7 +144,6 @@ pub struct ScriptAPI {
     pub ctcp: Cb<(String, String, Option<String>, Option<String>)>,
 
     // ── UI / output ──────────────────────────────────────────
-
     /// Display a local event message in the active buffer. Args: text
     pub add_local_event: Cb<String>,
     /// Display a local event in a specific buffer. Args: (`buffer_id`, text)
@@ -156,7 +154,6 @@ pub struct ScriptAPI {
     pub execute_command: Cb<String>,
 
     // ── State queries (read-only) ────────────────────────────
-
     /// Get the active buffer ID. Returns None if no buffer active.
     pub active_buffer_id: Cb<(), Option<String>>,
     /// Get our current nick. Args: `connection_id`? Returns None if not connected.
@@ -176,7 +173,6 @@ pub struct ScriptAPI {
     //
     // Scripts register custom commands. The manager stores them
     // keyed by (script_name, command_name) so unload can clean up.
-
     /// Register a script command. Args: (`command_name`, description, `usage_hint`).
     /// The actual handler is registered inside the engine; this just
     /// tells the command registry about it.
@@ -188,7 +184,6 @@ pub struct ScriptAPI {
     //
     // Timer callbacks live inside the engine. These return a timer ID
     // so scripts can cancel them.
-
     /// Start a repeating timer. Args: `interval_ms`. Returns `timer_id`.
     pub start_timer: Cb<u64, u64>,
     /// Start a one-shot timeout. Args: `delay_ms`. Returns `timer_id`.
@@ -200,7 +195,6 @@ pub struct ScriptAPI {
     //
     // Per-script config stored under [scripts.<name>] in config.toml.
     // Also provides read access to the app config.
-
     /// Get a per-script config value. Args: (`script_name`, key). Returns None if unset.
     pub config_get: Cb<(String, String), Option<String>>,
     /// Set a per-script config value. Args: (`script_name`, key, value).
@@ -209,7 +203,6 @@ pub struct ScriptAPI {
     pub app_config_get: Cb<String, Option<String>>,
 
     // ── Logging ──────────────────────────────────────────────
-
     /// Script debug log. Args: (`script_name`, message). Only emits if scripts.debug = true.
     pub log: Cb<(String, String)>,
 }
@@ -359,10 +352,7 @@ impl ScriptManager {
             if !path.is_file() {
                 continue;
             }
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             if !known_exts.iter().any(|k| k == ext) {
                 continue;
             }

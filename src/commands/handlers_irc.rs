@@ -1,7 +1,7 @@
 #![allow(clippy::redundant_pub_crate)]
 
-use crate::app::App;
 use super::helpers::add_local_event;
+use crate::app::App;
 
 // === Connection ===
 
@@ -275,7 +275,10 @@ pub(crate) fn cmd_part(app: &mut App, args: &[String]) {
 
     let default_part = crate::constants::default_quit_message();
     let part_reason = reason.unwrap_or(default_part.as_str());
-    let result = sender.send(irc::proto::Command::PART(channel, Some(part_reason.to_string())));
+    let result = sender.send(irc::proto::Command::PART(
+        channel,
+        Some(part_reason.to_string()),
+    ));
     if let Err(e) = result {
         add_local_event(app, &format!("Failed to part: {e}"));
     }
@@ -291,20 +294,14 @@ pub(crate) fn cmd_topic(app: &mut App, args: &[String]) {
         if let Some(buf) = app.state.active_buffer() {
             match &buf.topic {
                 Some(topic) => {
-                    let setter = buf
-                        .topic_set_by
-                        .as_deref()
-                        .unwrap_or("unknown");
+                    let setter = buf.topic_set_by.as_deref().unwrap_or("unknown");
                     add_local_event(
                         app,
                         &format!("Topic for {}: {} (set by {setter})", buf.name, topic),
                     );
                 }
                 None => {
-                    add_local_event(
-                        app,
-                        &format!("No topic set for {}", buf.name),
-                    );
+                    add_local_event(app, &format!("No topic set for {}", buf.name));
                 }
             }
         }
@@ -563,11 +560,9 @@ pub(crate) fn cmd_kickban(app: &mut App, args: &[String]) {
         .state
         .active_buffer()
         .and_then(|buf| buf.users.get(&nick.to_lowercase()))
-        .and_then(|entry| {
-            match (&entry.ident, &entry.host) {
-                (Some(ident), Some(host)) => Some(format!("*!*{ident}@{host}")),
-                _ => None,
-            }
+        .and_then(|entry| match (&entry.ident, &entry.host) {
+            (Some(ident), Some(host)) => Some(format!("*!*{ident}@{host}")),
+            _ => None,
         })
         .unwrap_or_else(|| format!("{nick}!*@*"));
 
@@ -620,7 +615,10 @@ fn list_mode_set(app: &mut App, args: &[String], mode_char: char) {
 /// - Everything else is sent as a literal mask.
 fn list_mode_unset_smart(app: &mut App, args: &[String], mode_char: char, cmd_name: &str) {
     if args.is_empty() {
-        add_local_event(app, &format!("Usage: /{cmd_name} <number|mask|wildcard> [...]"));
+        add_local_event(
+            app,
+            &format!("Usage: /{cmd_name} <number|mask|wildcard> [...]"),
+        );
         return;
     }
     let Some(sender) = app.active_irc_sender().cloned() else {
@@ -650,10 +648,10 @@ fn list_mode_unset_smart(app: &mut App, args: &[String], mode_char: char, cmd_na
             if num >= 1 && num <= entries.len() {
                 masks.push(entries[num - 1].mask.clone());
             } else {
-                add_local_event(app, &format!(
-                    "{cmd_name}: #{num} out of range (1-{})",
-                    entries.len()
-                ));
+                add_local_event(
+                    app,
+                    &format!("{cmd_name}: #{num} out of range (1-{})", entries.len()),
+                );
             }
         } else if arg.contains('*') || arg.contains('?') {
             // Wildcard pattern — match against stored list entries
@@ -722,7 +720,11 @@ pub(crate) fn cmd_cycle(app: &mut App, args: &[String]) {
         }
         (buf.name.clone(), None)
     } else if crate::irc::formatting::is_channel(&args[0]) {
-        let reason = if args.len() > 1 { Some(args[1].as_str()) } else { None };
+        let reason = if args.len() > 1 {
+            Some(args[1].as_str())
+        } else {
+            None
+        };
         (args[0].clone(), reason)
     } else {
         // Treat first arg as reason for current channel
@@ -746,7 +748,12 @@ pub(crate) fn cmd_cycle(app: &mut App, args: &[String]) {
     // PART
     let part_result = reason.map_or_else(
         || sender.send(irc::proto::Command::PART(channel.clone(), None)),
-        |reason| sender.send(irc::proto::Command::PART(channel.clone(), Some(reason.to_string()))),
+        |reason| {
+            sender.send(irc::proto::Command::PART(
+                channel.clone(),
+                Some(reason.to_string()),
+            ))
+        },
     );
     if let Err(e) = part_result {
         add_local_event(app, &format!("Failed to cycle {channel}: {e}"));
@@ -849,7 +856,9 @@ pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
                     text: chunk,
                     highlight: false,
                     event_key: None,
-                    event_params: None, log_msg_id: None, log_ref_id: None,
+                    event_params: None,
+                    log_msg_id: None,
+                    log_ref_id: None,
                     tags: std::collections::HashMap::new(),
                 },
             );
@@ -914,7 +923,9 @@ pub(crate) fn cmd_query(app: &mut App, args: &[String]) {
                     text: text.clone(),
                     highlight: false,
                     event_key: None,
-                    event_params: None, log_msg_id: None, log_ref_id: None,
+                    event_params: None,
+                    log_msg_id: None,
+                    log_ref_id: None,
                     tags: std::collections::HashMap::new(),
                 },
             );
@@ -973,7 +984,9 @@ pub(crate) fn cmd_me(app: &mut App, args: &[String]) {
                 text: action_text.clone(),
                 highlight: false,
                 event_key: None,
-                event_params: None, log_msg_id: None, log_ref_id: None,
+                event_params: None,
+                log_msg_id: None,
+                log_ref_id: None,
                 tags: std::collections::HashMap::new(),
             },
         );
@@ -1085,8 +1098,10 @@ pub(crate) fn cmd_quote(app: &mut App, args: &[String]) {
             if let Some(colon_pos) = rest.find(" :") {
                 let before_trailing = &rest[..colon_pos];
                 let trailing = &rest[colon_pos + 2..];
-                let mut args: Vec<String> =
-                    before_trailing.split_whitespace().map(String::from).collect();
+                let mut args: Vec<String> = before_trailing
+                    .split_whitespace()
+                    .map(String::from)
+                    .collect();
                 args.push(trailing.to_string());
                 args
             } else if let Some(trailing) = rest.strip_prefix(':') {

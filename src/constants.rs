@@ -61,6 +61,9 @@ pub fn ensure_config_dir() {
     if let Err(e) = std::fs::create_dir_all(scripts_dir()) {
         tracing::warn!("failed to create scripts dir: {e}");
     }
+    if let Err(e) = std::fs::create_dir_all(sessions_dir()) {
+        tracing::warn!("failed to create sessions dir: {e}");
+    }
 
     // Write default config if missing
     let cfg = config_path();

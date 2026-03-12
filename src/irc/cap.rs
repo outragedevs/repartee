@@ -58,7 +58,9 @@ impl ServerCaps {
     /// Check whether the server advertised a given capability (case-insensitive).
     #[must_use]
     pub fn has(&self, cap: &str) -> bool {
-        self.caps.iter().any(|(name, _)| name.eq_ignore_ascii_case(cap))
+        self.caps
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(cap))
     }
 
     /// Get the value associated with a capability, if any.
@@ -94,9 +96,7 @@ impl ServerCaps {
             return Vec::new();
         }
         match self.value("sasl") {
-            Some(value) if !value.is_empty() => {
-                value.split(',').map(str::to_uppercase).collect()
-            }
+            Some(value) if !value.is_empty() => value.split(',').map(str::to_uppercase).collect(),
             _ => vec!["PLAIN".to_string()],
         }
     }

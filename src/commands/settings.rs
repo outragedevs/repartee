@@ -32,7 +32,10 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 "ctcp_version" => config.general.ctcp_version.clone(),
                 _ => return None,
             };
-            Some(Resolved { value: val, is_credential: false })
+            Some(Resolved {
+                value: val,
+                is_credential: false,
+            })
         }
         "display" => {
             let val = match parts[1] {
@@ -44,7 +47,10 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 "scrollback_lines" => config.display.scrollback_lines.to_string(),
                 _ => return None,
             };
-            Some(Resolved { value: val, is_credential: false })
+            Some(Resolved {
+                value: val,
+                is_credential: false,
+            })
         }
         "sidepanel" if parts.len() >= 3 => {
             let panel = match parts[1] {
@@ -57,7 +63,10 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 "visible" => panel.visible.to_string(),
                 _ => return None,
             };
-            Some(Resolved { value: val, is_credential: false })
+            Some(Resolved {
+                value: val,
+                is_credential: false,
+            })
         }
         "statusbar" => {
             let val = match parts[1] {
@@ -74,7 +83,10 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 "cursor_color" => config.statusbar.cursor_color.clone(),
                 _ => return None,
             };
-            Some(Resolved { value: val, is_credential: false })
+            Some(Resolved {
+                value: val,
+                is_credential: false,
+            })
         }
         "image_preview" => {
             let val = match parts[1] {
@@ -89,7 +101,10 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 "kitty_format" => config.image_preview.kitty_format.clone(),
                 _ => return None,
             };
-            Some(Resolved { value: val, is_credential: false })
+            Some(Resolved {
+                value: val,
+                is_credential: false,
+            })
         }
         "servers" if parts.len() >= 3 => {
             let server = config.servers.get(parts[1])?;
@@ -110,7 +125,10 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 "sasl_pass" => server.sasl_pass.clone().unwrap_or_default(),
                 _ => return None,
             };
-            Some(Resolved { value: val, is_credential: is_cred })
+            Some(Resolved {
+                value: val,
+                is_credential: is_cred,
+            })
         }
         _ => None,
     }
@@ -306,13 +324,27 @@ const BASE_PATHS: &[&str] = &[
 ];
 
 const SERVER_FIELDS: &[&str] = &[
-    "label", "address", "port", "tls", "tls_verify", "autoconnect", "channels",
-    "nick", "username", "realname", "password", "sasl_user", "sasl_pass",
+    "label",
+    "address",
+    "port",
+    "tls",
+    "tls_verify",
+    "autoconnect",
+    "channels",
+    "nick",
+    "username",
+    "realname",
+    "password",
+    "sasl_user",
+    "sasl_pass",
 ];
 
 /// Get all valid setting paths for tab completion.
 pub fn get_setting_paths(config: &AppConfig) -> Vec<String> {
-    let mut paths: Vec<String> = BASE_PATHS.iter().map(std::string::ToString::to_string).collect();
+    let mut paths: Vec<String> = BASE_PATHS
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     for server_id in config.servers.keys() {
         for field in SERVER_FIELDS {
             paths.push(format!("servers.{server_id}.{field}"));
@@ -380,8 +412,7 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
 
             // Special handling: reload theme if theme name changed
             if path == "general.theme" {
-                let theme_path = crate::constants::theme_dir()
-                    .join(format!("{raw}.theme"));
+                let theme_path = crate::constants::theme_dir().join(format!("{raw}.theme"));
                 match crate::theme::load_theme(&theme_path) {
                     Ok(theme) => {
                         app.theme = theme;
@@ -424,15 +455,24 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
         (
             "general",
             &[
-                "nick", "username", "realname", "theme", "timestamp_format",
-                "flood_protection", "ctcp_version",
+                "nick",
+                "username",
+                "realname",
+                "theme",
+                "timestamp_format",
+                "flood_protection",
+                "ctcp_version",
             ],
         ),
         (
             "display",
             &[
-                "nick_column_width", "nick_max_length", "nick_alignment",
-                "nick_truncation", "show_timestamps", "scrollback_lines",
+                "nick_column_width",
+                "nick_max_length",
+                "nick_alignment",
+                "nick_truncation",
+                "show_timestamps",
+                "scrollback_lines",
             ],
         ),
     ];
@@ -469,9 +509,17 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
     // Statusbar
     lines.push(format!("  {C_DIM}[statusbar]{C_RST}"));
     for field in &[
-        "enabled", "separator", "prompt", "background", "text_color",
-        "accent_color", "muted_color", "dim_color", "prompt_color",
-        "input_color", "cursor_color",
+        "enabled",
+        "separator",
+        "prompt",
+        "background",
+        "text_color",
+        "accent_color",
+        "muted_color",
+        "dim_color",
+        "prompt_color",
+        "input_color",
+        "cursor_color",
     ] {
         let path = format!("statusbar.{field}");
         if let Some(resolved) = get_config_value(config, &path) {
@@ -576,7 +624,10 @@ mod tests {
     fn set_alignment() {
         let mut config = default_config();
         set_config_value(&mut config, "display.nick_alignment", "left").unwrap();
-        assert_eq!(config.display.nick_alignment, crate::config::NickAlignment::Left);
+        assert_eq!(
+            config.display.nick_alignment,
+            crate::config::NickAlignment::Left
+        );
     }
 
     #[test]

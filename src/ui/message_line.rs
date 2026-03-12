@@ -149,7 +149,9 @@ mod tests {
             text: text.to_string(),
             highlight: false,
             event_key: None,
-            event_params: None, log_msg_id: None, log_ref_id: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
             tags: std::collections::HashMap::new(),
         }
     }
@@ -234,13 +236,19 @@ mod tests {
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         // Nick should be "verylo+" (7 chars), not "verylon+" (8 chars)
         assert!(text.contains("verylo+"), "expected 'verylo+' in: {text}");
-        assert!(!text.contains("verylon"), "mode prefix should reduce nick budget");
+        assert!(
+            !text.contains("verylon"),
+            "mode prefix should reduce nick budget"
+        );
 
         // Without mode prefix, same nick gets full budget: "verylon+" (8 chars)
         let msg2 = test_message("verylongnick", "test", MessageType::Message);
         let line2 = render_message(&msg2, false, &theme, &config);
         let text2: String = line2.spans.iter().map(|s| s.content.to_string()).collect();
-        assert!(text2.contains("verylon+"), "without mode, nick should be 'verylon+' in: {text2}");
+        assert!(
+            text2.contains("verylon+"),
+            "without mode, nick should be 'verylon+' in: {text2}"
+        );
     }
 
     #[test]
@@ -254,7 +262,9 @@ mod tests {
             text: "system message".to_string(),
             highlight: false,
             event_key: None,
-            event_params: None, log_msg_id: None, log_ref_id: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
             tags: std::collections::HashMap::new(),
         };
         let theme = default_theme();

@@ -201,12 +201,7 @@ impl InputState {
         self.tab_state = None;
     }
 
-    pub fn tab_complete(
-        &mut self,
-        nicks: &[String],
-        commands: &[&str],
-        setting_paths: &[String],
-    ) {
+    pub fn tab_complete(&mut self, nicks: &[String], commands: &[&str], setting_paths: &[String]) {
         if let Some(ref mut tab) = self.tab_state {
             if tab.matches.is_empty() {
                 return;
@@ -271,13 +266,11 @@ impl InputState {
                         .map(|c| format!("/{c}"))
                         .collect()
                 }
-                None => {
-                    nicks
-                        .iter()
-                        .filter(|n| n.to_lowercase().starts_with(&prefix.to_lowercase()))
-                        .cloned()
-                        .collect()
-                }
+                None => nicks
+                    .iter()
+                    .filter(|n| n.to_lowercase().starts_with(&prefix.to_lowercase()))
+                    .cloned()
+                    .collect(),
             };
             matches.sort_by_key(|a| a.to_lowercase());
 
@@ -286,7 +279,13 @@ impl InputState {
             }
 
             let completion = &matches[0];
-            let suffix = if is_command { " " } else if is_start_of_line { ": " } else { " " };
+            let suffix = if is_command {
+                " "
+            } else if is_start_of_line {
+                ": "
+            } else {
+                " "
+            };
             self.value = format!("{text_before}{completion}{suffix}");
             self.cursor_pos = self.value.len();
 
@@ -380,11 +379,18 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let visible_end = (scroll_offset + available_width).min(total_chars);
 
     let byte_at = |char_idx: usize| -> usize {
-        if char_idx >= total_chars { string_len } else { byte_indices[char_idx] }
+        if char_idx >= total_chars {
+            string_len
+        } else {
+            byte_indices[char_idx]
+        }
     };
 
     let before_cursor = &app.input.value[byte_at(scroll_offset)..byte_at(cursor_char_pos)];
-    let cursor_char = app.input.value[byte_at(cursor_char_pos)..].chars().next().unwrap_or(' ');
+    let cursor_char = app.input.value[byte_at(cursor_char_pos)..]
+        .chars()
+        .next()
+        .unwrap_or(' ');
     let after_cursor = if cursor_char_pos + 1 < visible_end {
         &app.input.value[byte_at(cursor_char_pos + 1)..byte_at(visible_end)]
     } else {
@@ -483,7 +489,10 @@ mod tests {
         input.cursor_pos = 6;
         input.submit();
 
-        assert_eq!(input.history, VecDeque::from(["first".to_string(), "second".to_string()]));
+        assert_eq!(
+            input.history,
+            VecDeque::from(["first".to_string(), "second".to_string()])
+        );
 
         // Navigate up
         input.value = "current".to_string();
@@ -560,11 +569,7 @@ mod tests {
         input.value = "h".to_string();
         input.cursor_pos = 1;
 
-        let nicks = vec![
-            "helper".to_string(),
-            "hank".to_string(),
-            "hiro".to_string(),
-        ];
+        let nicks = vec!["helper".to_string(), "hank".to_string(), "hiro".to_string()];
         input.tab_complete(&nicks, &[], &[]);
         assert_eq!(input.value, "hank: "); // sorted: hank, helper, hiro
 

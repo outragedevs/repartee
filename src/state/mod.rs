@@ -15,9 +15,7 @@ use connection::ConnectionStatus;
 use crate::config::IgnoreEntry;
 use crate::irc::flood::FloodState;
 use crate::irc::netsplit::NetsplitState;
-use crate::scripting::engine::{
-    BufferInfo, ConnectionInfo, NickInfo, ScriptStateSnapshot,
-};
+use crate::scripting::engine::{BufferInfo, ConnectionInfo, NickInfo, ScriptStateSnapshot};
 use crate::storage::LogRow;
 
 pub struct AppState {

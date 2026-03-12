@@ -53,7 +53,10 @@ const MAX_ABSTRACTION_DEPTH: usize = 10;
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default)]
-#[expect(clippy::struct_excessive_bools, reason = "each bool maps to an independent text style attribute")]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool maps to an independent text style attribute"
+)]
 struct StyleState {
     fg: Option<Color>,
     bg: Option<Color>,
@@ -141,11 +144,7 @@ pub fn substitute_vars(input: &str, params: &[&str]) -> String {
                     i += 1;
                 }
                 let idx: usize = idx_str.parse().unwrap_or(0);
-                let value = if idx < params.len() {
-                    params[idx]
-                } else {
-                    ""
-                };
+                let value = if idx < params.len() { params[idx] } else { "" };
 
                 let abs_width = pad_width.unsigned_abs() as usize;
                 if pad_width < 0 {
@@ -251,10 +250,9 @@ pub fn resolve_abstractions(
             // Find matching closing brace (respecting nesting)
             if let Some(close_idx) = find_matching_brace(&chars, i) {
                 let inner: String = chars[i + 1..close_idx].iter().collect();
-                let (name, args_str) = inner.find(' ').map_or(
-                    (inner.as_str(), ""),
-                    |idx| (&inner[..idx], &inner[idx + 1..]),
-                );
+                let (name, args_str) = inner.find(' ').map_or((inner.as_str(), ""), |idx| {
+                    (&inner[..idx], &inner[idx + 1..])
+                });
 
                 if abstracts.contains_key(name) {
                     let template = &abstracts[name];
@@ -301,7 +299,10 @@ pub fn resolve_abstractions(
 // parse_format_string
 // ---------------------------------------------------------------------------
 
-#[expect(clippy::too_many_lines, reason = "monolithic state machine parser, splitting would reduce readability")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "monolithic state machine parser, splitting would reduce readability"
+)]
 /// Parse an irssi-compatible format string into styled spans.
 ///
 /// Supports:
@@ -472,8 +473,9 @@ pub fn parse_format_string(input: &str, params: &[&str]) -> Vec<StyledSpan> {
                         current.fg = hex_to_color(MIRC_COLORS[fg]);
                     }
                     if let Some(bg) = bg_num
-                        && bg < MIRC_COLORS.len() {
-                            current.bg = hex_to_color(MIRC_COLORS[bg]);
+                        && bg < MIRC_COLORS.len()
+                    {
+                        current.bg = hex_to_color(MIRC_COLORS[bg]);
                     }
                 } else {
                     // \x03 alone = reset color
@@ -829,8 +831,7 @@ mod tests {
     fn full_kokoirc_pubmsg_format() {
         // After abstraction resolution, a pubmsg might look like:
         // "%Z565f89#%Z7aa2f7%_Bob%_%N%Z7aa2f7❯%N%| %Za9b1d6Hello%N"
-        let format_str =
-            "%Z565f89#%Z7aa2f7%_Bob%_%N%Z7aa2f7\u{276F}%N%| %Za9b1d6Hello%N";
+        let format_str = "%Z565f89#%Z7aa2f7%_Bob%_%N%Z7aa2f7\u{276F}%N%| %Za9b1d6Hello%N";
         let spans = parse_format_string(format_str, &[]);
 
         // Walk through:

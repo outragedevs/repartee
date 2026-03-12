@@ -36,8 +36,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             ..
         } => {
             render_ready(
-                frame, area, &app.theme.colors, title.as_deref(),
-                &mut *image, *width, *height, tmux_direct,
+                frame,
+                area,
+                &app.theme.colors,
+                title.as_deref(),
+                &mut *image,
+                *width,
+                *height,
+                tmux_direct,
             );
         }
         PreviewStatus::Error { url, message } => {
@@ -68,12 +74,7 @@ fn truncate_title(s: &str, max_len: usize) -> String {
 }
 
 /// Render the "Loading image..." popup.
-fn render_loading(
-    frame: &mut Frame,
-    area: Rect,
-    colors: &crate::theme::ThemeColors,
-    url: &str,
-) {
+fn render_loading(frame: &mut Frame, area: Rect, colors: &crate::theme::ThemeColors, url: &str) {
     let bg_alt = hex_to_color(&colors.bg_alt).unwrap_or(Color::Reset);
     let border_color = hex_to_color(&colors.border).unwrap_or(Color::DarkGray);
     let fg_muted = hex_to_color(&colors.fg_muted).unwrap_or(Color::Gray);
@@ -125,7 +126,7 @@ fn render_ready(
 
     let popup_area = centered_rect(area, width, height);
 
-    tracing::debug!(
+    tracing::trace!(
         terminal_area = ?area,
         requested_w = width,
         requested_h = height,
@@ -148,7 +149,7 @@ fn render_ready(
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
 
-    tracing::debug!(
+    tracing::trace!(
         inner_area = ?inner,
         tmux_direct,
         "image_overlay: inner render area"
@@ -188,8 +189,11 @@ fn render_error(
     let title_text = truncate_title(url, usize::from(popup_width.saturating_sub(4)));
     let block = Block::default()
         .title(
-            Line::from(title_text)
-                .style(Style::default().fg(error_color).add_modifier(Modifier::BOLD)),
+            Line::from(title_text).style(
+                Style::default()
+                    .fg(error_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
         )
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))

@@ -10,16 +10,14 @@ pub mod status_line;
 pub mod styled_text;
 pub mod topic_bar;
 
-use std::io::{self, Write};
 use color_eyre::eyre::Result;
 use crossterm::{
-    event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    },
+    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::prelude::*;
+use std::io::{self, Write};
 
 pub type Tui = Terminal<CrosstermBackend<Box<dyn Write + Send>>>;
 
@@ -231,8 +229,8 @@ pub fn install_panic_hook() {
 #[cfg(test)]
 mod wrap_tests {
     use super::*;
-    use ratatui::text::{Line, Span};
     use ratatui::style::Style;
+    use ratatui::text::{Line, Span};
 
     fn plain_line(text: &str) -> Line<'static> {
         Line::from(text.to_string())

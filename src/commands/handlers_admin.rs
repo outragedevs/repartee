@@ -1,9 +1,9 @@
 #![allow(clippy::redundant_pub_crate)]
 
+use super::helpers::add_local_event;
+use super::types::{C_CMD, C_DIM, C_ERR, C_OK, C_RST, C_TEXT, divider};
 use crate::app::App;
 use crate::storage;
-use super::helpers::add_local_event;
-use super::types::{divider, C_CMD, C_DIM, C_ERR, C_OK, C_RST, C_TEXT};
 
 // === Configuration ===
 
@@ -16,10 +16,7 @@ pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
             add_local_event(app, &format!("{C_OK}Config reloaded{C_RST}"));
         }
         Err(e) => {
-            add_local_event(
-                app,
-                &format!("{C_ERR}Failed to reload config: {e}{C_RST}"),
-            );
+            add_local_event(app, &format!("{C_ERR}Failed to reload config: {e}{C_RST}"));
             return;
         }
     }
@@ -33,10 +30,7 @@ pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
             add_local_event(app, &format!("{C_OK}Theme reloaded{C_RST}"));
         }
         Err(e) => {
-            add_local_event(
-                app,
-                &format!("{C_ERR}Failed to reload theme: {e}{C_RST}"),
-            );
+            add_local_event(app, &format!("{C_ERR}Failed to reload theme: {e}{C_RST}"));
         }
     }
 
@@ -112,10 +106,7 @@ pub(crate) fn cmd_ignore(app: &mut App, args: &[String]) {
     // Save config
     app.cached_config_toml = None;
     let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
-    add_local_event(
-        app,
-        &format!("{C_OK}Added ignore rule: {mask}{C_RST}"),
-    );
+    add_local_event(app, &format!("{C_OK}Added ignore rule: {mask}{C_RST}"));
 }
 
 pub(crate) fn cmd_unignore(app: &mut App, args: &[String]) {
@@ -142,12 +133,7 @@ pub(crate) fn cmd_unignore(app: &mut App, args: &[String]) {
     }
 
     // Try as mask
-    if let Some(pos) = app
-        .config
-        .ignores
-        .iter()
-        .position(|e| e.mask == *target)
-    {
+    if let Some(pos) = app.config.ignores.iter().position(|e| e.mask == *target) {
         let removed = app.config.ignores.remove(pos);
         app.cached_config_toml = None;
         let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
@@ -200,11 +186,10 @@ pub(crate) fn cmd_server(app: &mut App, args: &[String]) {
             lines.push(format!("  {C_DIM}No servers configured{C_RST}"));
         } else {
             for (id, srv) in &app.config.servers {
-                let status = app
-                    .state
-                    .connections
-                    .get(id.as_str())
-                    .map_or_else(|| "Not connected".to_string(), |c| format!("{:?}", c.status));
+                let status = app.state.connections.get(id.as_str()).map_or_else(
+                    || "Not connected".to_string(),
+                    |c| format!("{:?}", c.status),
+                );
                 let tls = if srv.tls { " [TLS]" } else { "" };
                 let auto = if srv.autoconnect { " [auto]" } else { "" };
                 lines.push(format!(
@@ -223,7 +208,10 @@ pub(crate) fn cmd_server(app: &mut App, args: &[String]) {
     match args[0].as_str() {
         "add" => {
             if args.len() < 3 {
-                add_local_event(app, "Usage: /server add <id> <address> [port] [-tls] [-notlsverify] [-noauto] [-label=<name>] [-nick=<nick>] [-password=<pass>] [-sasl=<user>:<pass>] [-bind=<ip>] [-autosendcmd=<cmds>]");
+                add_local_event(
+                    app,
+                    "Usage: /server add <id> <address> [port] [-tls] [-notlsverify] [-noauto] [-label=<name>] [-nick=<nick>] [-password=<pass>] [-sasl=<user>:<pass>] [-bind=<ip>] [-autosendcmd=<cmds>]",
+                );
                 return;
             }
             let id = args[1].to_lowercase();
@@ -258,7 +246,10 @@ pub(crate) fn cmd_server(app: &mut App, args: &[String]) {
                         sasl_user = Some(user.to_string());
                         sasl_pass = Some(pass.to_string());
                     } else {
-                        add_local_event(app, &format!("{C_ERR}SASL format: -sasl=user:pass{C_RST}"));
+                        add_local_event(
+                            app,
+                            &format!("{C_ERR}SASL format: -sasl=user:pass{C_RST}"),
+                        );
                         return;
                     }
                 } else if let Some(ip) = arg.strip_prefix("-bind=") {
@@ -312,14 +303,10 @@ pub(crate) fn cmd_server(app: &mut App, args: &[String]) {
             let id = &args[1];
             if app.config.servers.remove(id).is_some() {
                 app.cached_config_toml = None;
-                let _ =
-                    crate::config::save_config(&crate::constants::config_path(), &app.config);
+                let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
                 add_local_event(app, &format!("{C_OK}Server '{id}' removed{C_RST}"));
             } else {
-                add_local_event(
-                    app,
-                    &format!("{C_ERR}No server with id '{id}'{C_RST}"),
-                );
+                add_local_event(app, &format!("{C_ERR}No server with id '{id}'{C_RST}"));
             }
         }
         _ => {
@@ -376,10 +363,7 @@ pub(crate) fn cmd_oper(app: &mut App, args: &[String]) {
     }
 
     if let Some(sender) = app.active_irc_sender() {
-        let _ = sender.send(irc::proto::Command::OPER(
-            args[0].clone(),
-            args[1].clone(),
-        ));
+        let _ = sender.send(irc::proto::Command::OPER(args[0].clone(), args[1].clone()));
     } else {
         add_local_event(app, "Not connected");
     }
@@ -423,10 +407,7 @@ pub(crate) fn cmd_stats(app: &mut App, args: &[String]) {
     if let Some(sender) = app.active_irc_sender() {
         let query = args.first().cloned();
         let server = args.get(1).cloned();
-        let _ = sender.send(irc::proto::Command::STATS(
-            query,
-            server,
-        ));
+        let _ = sender.send(irc::proto::Command::STATS(query, server));
     } else {
         add_local_event(app, "Not connected");
     }
@@ -447,19 +428,28 @@ pub(crate) fn cmd_log(app: &mut App, args: &[String]) {
                 log_search(app, &query);
             }
         }
-        _ => add_local_event(app, &format!("{C_ERR}Usage: /log [status|search <query>]{C_RST}")),
+        _ => add_local_event(
+            app,
+            &format!("{C_ERR}Usage: /log [status|search <query>]{C_RST}"),
+        ),
     }
 }
 
 fn log_status(app: &mut App) {
     // Collect all output lines first to avoid borrow conflicts
     let lines: Vec<String> = if let Some(ref storage) = app.storage {
-        let count = storage.db.lock()
+        let count = storage
+            .db
+            .lock()
             .ok()
             .and_then(|db| storage::query::get_message_count(&db).ok())
             .unwrap_or(0);
         let encrypt_str = if storage.encrypt { "on" } else { "off" };
-        let fts_str = if storage.encrypt { "unavailable (encrypted)" } else { "available" };
+        let fts_str = if storage.encrypt {
+            "unavailable (encrypted)"
+        } else {
+            "available"
+        };
 
         let db_path = crate::constants::log_dir().join("messages.db");
         let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
@@ -516,7 +506,9 @@ pub(crate) fn cmd_preview(app: &mut App, args: &[String]) {
     if !app.config.image_preview.enabled {
         add_local_event(
             app,
-            &format!("{C_ERR}Image preview is disabled. Use /set image_preview.enabled true{C_RST}"),
+            &format!(
+                "{C_ERR}Image preview is disabled. Use /set image_preview.enabled true{C_RST}"
+            ),
         );
         return;
     }
@@ -551,10 +543,9 @@ pub(crate) fn cmd_image(app: &mut App, args: &[String]) {
             Err(e) => add_local_event(app, &format!("{C_ERR}Cache stats error: {e}{C_RST}")),
         },
         "clear" => match crate::image_preview::cache::clear() {
-            Ok(count) => add_local_event(
-                app,
-                &format!("{C_OK}Cleared {count} cached images{C_RST}"),
-            ),
+            Ok(count) => {
+                add_local_event(app, &format!("{C_OK}Cleared {count} cached images{C_RST}"))
+            }
             Err(e) => add_local_event(app, &format!("{C_ERR}Cache clear error: {e}{C_RST}")),
         },
         "cleanup" => {
@@ -580,10 +571,22 @@ pub(crate) fn cmd_image(app: &mut App, args: &[String]) {
             let lines = vec![
                 divider("Image Preview"),
                 format!("  {C_DIM}Enabled:{C_RST}     {C_CMD}{}{C_RST}", cfg.enabled),
-                format!("  {C_DIM}Protocol:{C_RST}    {C_CMD}{}{C_RST}", cfg.protocol),
-                format!("  {C_DIM}Max width:{C_RST}   {C_CMD}{}{C_RST}", cfg.max_width),
-                format!("  {C_DIM}Max height:{C_RST}  {C_CMD}{}{C_RST}", cfg.max_height),
-                format!("  {C_DIM}Cache limit:{C_RST} {C_CMD}{} MB / {} days{C_RST}", cfg.cache_max_mb, cfg.cache_max_days),
+                format!(
+                    "  {C_DIM}Protocol:{C_RST}    {C_CMD}{}{C_RST}",
+                    cfg.protocol
+                ),
+                format!(
+                    "  {C_DIM}Max width:{C_RST}   {C_CMD}{}{C_RST}",
+                    cfg.max_width
+                ),
+                format!(
+                    "  {C_DIM}Max height:{C_RST}  {C_CMD}{}{C_RST}",
+                    cfg.max_height
+                ),
+                format!(
+                    "  {C_DIM}Cache limit:{C_RST} {C_CMD}{} MB / {} days{C_RST}",
+                    cfg.cache_max_mb, cfg.cache_max_days
+                ),
                 divider(""),
             ];
             for line in &lines {
@@ -620,7 +623,10 @@ pub(crate) fn cmd_script(app: &mut App, args: &[String]) {
                     let ver = meta.version.as_deref().unwrap_or("?");
                     add_local_event(
                         app,
-                        &format!("{C_OK}Loaded script: {C_CMD}{}{C_OK} v{ver} — {desc}{C_RST}", meta.name),
+                        &format!(
+                            "{C_OK}Loaded script: {C_CMD}{}{C_OK} v{ver} — {desc}{C_RST}",
+                            meta.name
+                        ),
                     );
                 }
                 Err(e) => {
@@ -643,10 +649,7 @@ pub(crate) fn cmd_script(app: &mut App, args: &[String]) {
             };
             match manager.unload(name) {
                 Ok(()) => {
-                    add_local_event(
-                        app,
-                        &format!("{C_OK}Unloaded script: {name}{C_RST}"),
-                    );
+                    add_local_event(app, &format!("{C_OK}Unloaded script: {name}{C_RST}"));
                 }
                 Err(e) => {
                     add_local_event(
@@ -676,7 +679,10 @@ pub(crate) fn cmd_script(app: &mut App, args: &[String]) {
                     let ver = meta.version.as_deref().unwrap_or("?");
                     add_local_event(
                         app,
-                        &format!("{C_OK}Reloaded script: {C_CMD}{}{C_OK} v{ver} — {desc}{C_RST}", meta.name),
+                        &format!(
+                            "{C_OK}Reloaded script: {C_CMD}{}{C_OK} v{ver} — {desc}{C_RST}",
+                            meta.name
+                        ),
                     );
                 }
                 Err(e) => {
@@ -730,7 +736,9 @@ pub(crate) fn cmd_script(app: &mut App, args: &[String]) {
         }
         "autoload" => {
             app.autoload_scripts();
-            let loaded_count = app.script_manager.as_ref()
+            let loaded_count = app
+                .script_manager
+                .as_ref()
                 .map_or(0, |m| m.loaded_scripts().len());
             add_local_event(
                 app,
@@ -746,7 +754,9 @@ pub(crate) fn cmd_script(app: &mut App, args: &[String]) {
         _ => {
             add_local_event(
                 app,
-                &format!("{C_ERR}Usage: /script [load|unload|reload|list|autoload|template] [name]{C_RST}"),
+                &format!(
+                    "{C_ERR}Usage: /script [load|unload|reload|list|autoload|template] [name]{C_RST}"
+                ),
             );
         }
     }
@@ -761,13 +771,12 @@ fn image_debug(app: &mut App) {
     let caps = app.picker.capabilities();
 
     // Collect env vars — use shim's env when socket-attached, daemon's env otherwise.
-    let env_override: Option<&std::collections::HashMap<String, String>> = app.shim_term_env.as_ref();
+    let env_override = app.shim_term_env.as_ref();
     let get_env = |key: &str| -> String {
-        if let Some(vars) = env_override {
-            vars.get(key).cloned().unwrap_or_default()
-        } else {
-            std::env::var(key).unwrap_or_default()
-        }
+        env_override.map_or_else(
+            || std::env::var(key).unwrap_or_default(),
+            |vars| vars.get(key).cloned().unwrap_or_default(),
+        )
     };
     let term = get_env("TERM");
     let term_program = get_env("TERM_PROGRAM");
@@ -801,35 +810,76 @@ fn image_debug(app: &mut App) {
     let mut lines = vec![divider("Image Debug")];
 
     // Detection results
-    lines.push(format!("  {C_DIM}Protocol:{C_RST}        {C_CMD}{proto:?}{C_RST}"));
-    lines.push(format!("  {C_DIM}Source:{C_RST}          {C_CMD}{}{C_RST}", app.image_proto_source));
-    lines.push(format!("  {C_DIM}Outer terminal:{C_RST}  {C_CMD}{}{C_RST}", app.outer_terminal));
-    lines.push(format!("  {C_DIM}In tmux:{C_RST}         {C_CMD}{}{C_RST}", app.in_tmux));
-    lines.push(format!("  {C_DIM}Font size:{C_RST}       {C_CMD}{}x{}{C_RST}", font.0, font.1));
-    lines.push(format!("  {C_DIM}Capabilities:{C_RST}    {C_CMD}{caps:?}{C_RST}"));
-    lines.push(format!("  {C_DIM}Config proto:{C_RST}    {C_CMD}{}{C_RST}", app.config.image_preview.protocol));
+    lines.push(format!(
+        "  {C_DIM}Protocol:{C_RST}        {C_CMD}{proto:?}{C_RST}"
+    ));
+    lines.push(format!(
+        "  {C_DIM}Source:{C_RST}          {C_CMD}{}{C_RST}",
+        app.image_proto_source
+    ));
+    lines.push(format!(
+        "  {C_DIM}Outer terminal:{C_RST}  {C_CMD}{}{C_RST}",
+        app.outer_terminal
+    ));
+    lines.push(format!(
+        "  {C_DIM}In tmux:{C_RST}         {C_CMD}{}{C_RST}",
+        app.in_tmux
+    ));
+    lines.push(format!(
+        "  {C_DIM}Font size:{C_RST}       {C_CMD}{}x{}{C_RST}",
+        font.0, font.1
+    ));
+    lines.push(format!(
+        "  {C_DIM}Capabilities:{C_RST}    {C_CMD}{caps:?}{C_RST}"
+    ));
+    lines.push(format!(
+        "  {C_DIM}Config proto:{C_RST}    {C_CMD}{}{C_RST}",
+        app.config.image_preview.protocol
+    ));
 
     // tmux info
     if app.in_tmux {
-        lines.push(format!("  {C_DIM}tmux version:{C_RST}   {C_CMD}{tmux_version}{C_RST}"));
-        lines.push(format!("  {C_DIM}passthrough:{C_RST}    {C_CMD}{tmux_passthrough}{C_RST}"));
-        lines.push(format!("  {C_DIM}client_termtype:{C_RST}{C_CMD} {tmux_termtype}{C_RST}"));
-        lines.push(format!("  {C_DIM}client_termname:{C_RST}{C_CMD} {tmux_termname}{C_RST}"));
+        lines.push(format!(
+            "  {C_DIM}tmux version:{C_RST}   {C_CMD}{tmux_version}{C_RST}"
+        ));
+        lines.push(format!(
+            "  {C_DIM}passthrough:{C_RST}    {C_CMD}{tmux_passthrough}{C_RST}"
+        ));
+        lines.push(format!(
+            "  {C_DIM}client_termtype:{C_RST}{C_CMD} {tmux_termtype}{C_RST}"
+        ));
+        lines.push(format!(
+            "  {C_DIM}client_termname:{C_RST}{C_CMD} {tmux_termname}{C_RST}"
+        ));
     }
 
     // Env vars
-    lines.push(format!("  {C_DIM}TERM:{C_RST}            {C_CMD}{term}{C_RST}"));
-    lines.push(format!("  {C_DIM}TERM_PROGRAM:{C_RST}    {C_CMD}{term_program}{C_RST}"));
-    lines.push(format!("  {C_DIM}LC_TERMINAL:{C_RST}     {C_CMD}{lc_terminal}{C_RST}"));
-    lines.push(format!("  {C_DIM}COLORTERM:{C_RST}       {C_CMD}{colorterm}{C_RST}"));
+    lines.push(format!(
+        "  {C_DIM}TERM:{C_RST}            {C_CMD}{term}{C_RST}"
+    ));
+    lines.push(format!(
+        "  {C_DIM}TERM_PROGRAM:{C_RST}    {C_CMD}{term_program}{C_RST}"
+    ));
+    lines.push(format!(
+        "  {C_DIM}LC_TERMINAL:{C_RST}     {C_CMD}{lc_terminal}{C_RST}"
+    ));
+    lines.push(format!(
+        "  {C_DIM}COLORTERM:{C_RST}       {C_CMD}{colorterm}{C_RST}"
+    ));
     if !iterm_sess.is_empty() {
-        lines.push(format!("  {C_DIM}ITERM_SESSION_ID:{C_RST}{C_CMD}{iterm_sess}{C_RST}"));
+        lines.push(format!(
+            "  {C_DIM}ITERM_SESSION_ID:{C_RST}{C_CMD}{iterm_sess}{C_RST}"
+        ));
     }
     if !ghostty_res.is_empty() {
-        lines.push(format!("  {C_DIM}GHOSTTY_RESOURCES_DIR:{C_RST}{C_CMD}{ghostty_res}{C_RST}"));
+        lines.push(format!(
+            "  {C_DIM}GHOSTTY_RESOURCES_DIR:{C_RST}{C_CMD}{ghostty_res}{C_RST}"
+        ));
     }
     if !kitty_pid.is_empty() {
-        lines.push(format!("  {C_DIM}KITTY_PID:{C_RST}       {C_CMD}{kitty_pid}{C_RST}"));
+        lines.push(format!(
+            "  {C_DIM}KITTY_PID:{C_RST}       {C_CMD}{kitty_pid}{C_RST}"
+        ));
     }
 
     lines.push(divider(""));
@@ -842,12 +892,17 @@ fn log_search(app: &mut App, query: &str) {
     // Collect output lines to avoid borrow conflicts between storage and app
     let lines: Vec<String> = if let Some(ref storage) = app.storage {
         if storage.encrypt {
-            vec![format!("{C_ERR}Search is not available in encrypted mode{C_RST}")]
+            vec![format!(
+                "{C_ERR}Search is not available in encrypted mode{C_RST}"
+            )]
         } else if let Ok(db) = storage.db.lock() {
             // Determine current network/buffer context for scoped search
             let (network, buffer) = if let Some(ref buf_id) = app.state.active_buffer_id {
                 if let Some((conn_id, buf_name)) = buf_id.split_once('/') {
-                    let net = app.state.connections.get(conn_id)
+                    let net = app
+                        .state
+                        .connections
+                        .get(conn_id)
                         .map_or_else(|| conn_id.to_string(), |c| c.label.clone());
                     (Some(net), Some(buf_name.to_string()))
                 } else {
@@ -858,10 +913,16 @@ fn log_search(app: &mut App, query: &str) {
             };
 
             match storage::query::search_messages(
-                &db, query, network.as_deref(), buffer.as_deref(), 20,
+                &db,
+                query,
+                network.as_deref(),
+                buffer.as_deref(),
+                20,
             ) {
                 Ok(results) if results.is_empty() => {
-                    vec![format!("{C_DIM}No results for \"{C_CMD}{query}{C_DIM}\"{C_RST}")]
+                    vec![format!(
+                        "{C_DIM}No results for \"{C_CMD}{query}{C_DIM}\"{C_RST}"
+                    )]
                 }
                 Ok(results) => {
                     let mut out = vec![divider(&format!("Search: {query}"))];

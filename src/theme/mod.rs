@@ -82,7 +82,10 @@ impl Default for ThemeFormats {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[expect(clippy::struct_excessive_bools, reason = "each bool maps to an independent text style attribute")]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool maps to an independent text style attribute"
+)]
 pub struct StyledSpan {
     pub text: String,
     pub fg: Option<Color>,
@@ -116,10 +119,7 @@ mod tests {
 
     #[test]
     fn hex_to_color_with_hash() {
-        assert_eq!(
-            hex_to_color("#1a1b26"),
-            Some(Color::Rgb(0x1a, 0x1b, 0x26))
-        );
+        assert_eq!(hex_to_color("#1a1b26"), Some(Color::Rgb(0x1a, 0x1b, 0x26)));
     }
 
     #[test]

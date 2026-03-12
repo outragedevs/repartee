@@ -78,12 +78,7 @@ impl Isupport {
     #[must_use]
     pub fn chanmode_types(&self) -> (String, String, String, String) {
         let Some(value) = self.tokens.get("CHANMODES") else {
-            return (
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-            );
+            return (String::new(), String::new(), String::new(), String::new());
         };
 
         let mut parts = value.splitn(4, ',');
@@ -121,9 +116,7 @@ impl Isupport {
     /// Defaults to `""`.
     #[must_use]
     pub fn statusmsg(&self) -> &str {
-        self.tokens
-            .get("STATUSMSG")
-            .map_or("", String::as_str)
+        self.tokens.get("STATUSMSG").map_or("", String::as_str)
     }
 
     /// The case-mapping model used by the server for nick/channel comparison.
@@ -166,9 +159,7 @@ impl Isupport {
     /// Allowed channel-name prefix characters.  Defaults to `#&`.
     #[must_use]
     pub fn chan_types(&self) -> &str {
-        self.tokens
-            .get("CHANTYPES")
-            .map_or("#&", String::as_str)
+        self.tokens.get("CHANTYPES").map_or("#&", String::as_str)
     }
 
     /// Parse `EXTBAN=prefix,types` into `(prefix_char, types_string)`.
@@ -241,13 +232,7 @@ mod tests {
         let map = is.prefix_map();
         assert_eq!(
             map,
-            vec![
-                ('q', '~'),
-                ('a', '&'),
-                ('o', '@'),
-                ('h', '%'),
-                ('v', '+'),
-            ]
+            vec![('q', '~'), ('a', '&'), ('o', '@'), ('h', '%'), ('v', '+'),]
         );
     }
 

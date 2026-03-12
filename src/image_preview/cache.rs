@@ -69,7 +69,11 @@ fn url_hash(url: &str) -> String {
 #[must_use]
 fn extension_for_content_type(content_type: &str) -> &'static str {
     // Normalize: take the part before any `;` (e.g. "image/jpeg; charset=…")
-    let mime = content_type.split(';').next().unwrap_or(content_type).trim();
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim();
     match mime {
         "image/jpeg" => ".jpg",
         "image/png" => ".png",
@@ -95,10 +99,7 @@ pub fn validate_magic_bytes(data: &[u8]) -> bool {
         return true;
     }
     // WEBP: RIFF header at offset 0, "WEBP" at offset 8
-    if data.len() >= 12
-        && data[..MAGIC_RIFF.len()] == *MAGIC_RIFF
-        && data[8..12] == *MAGIC_WEBP
-    {
+    if data.len() >= 12 && data[..MAGIC_RIFF.len()] == *MAGIC_RIFF && data[8..12] == *MAGIC_WEBP {
         return true;
     }
     false
@@ -179,7 +180,10 @@ pub fn cleanup_in(dir: &Path, max_mb: u32, max_days: u32) -> Result<CleanupStats
     let entries = match fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(CleanupStats { files_removed: 0, bytes_freed: 0 });
+            return Ok(CleanupStats {
+                files_removed: 0,
+                bytes_freed: 0,
+            });
         }
         Err(e) => return Err(e.into()),
     };
@@ -232,7 +236,10 @@ pub fn cleanup_in(dir: &Path, max_mb: u32, max_days: u32) -> Result<CleanupStats
         }
     }
 
-    Ok(CleanupStats { files_removed, bytes_freed })
+    Ok(CleanupStats {
+        files_removed,
+        bytes_freed,
+    })
 }
 
 /// Return statistics about the current cache contents.
@@ -249,7 +256,11 @@ pub fn stats_in(dir: &Path) -> Result<CacheStats> {
     let entries = match fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(CacheStats { total_files: 0, total_bytes: 0, oldest_age_secs: 0 });
+            return Ok(CacheStats {
+                total_files: 0,
+                total_bytes: 0,
+                oldest_age_secs: 0,
+            });
         }
         Err(e) => return Err(e.into()),
     };
@@ -357,13 +368,22 @@ mod tests {
         assert_eq!(extension_for_content_type("image/gif"), ".gif");
         assert_eq!(extension_for_content_type("image/webp"), ".webp");
         assert_eq!(extension_for_content_type("image/bmp"), ".bmp");
-        assert_eq!(extension_for_content_type("application/octet-stream"), ".bin");
+        assert_eq!(
+            extension_for_content_type("application/octet-stream"),
+            ".bin"
+        );
     }
 
     #[test]
     fn content_type_with_params() {
-        assert_eq!(extension_for_content_type("image/jpeg; charset=utf-8"), ".jpg");
-        assert_eq!(extension_for_content_type("image/png; boundary=something"), ".png");
+        assert_eq!(
+            extension_for_content_type("image/jpeg; charset=utf-8"),
+            ".jpg"
+        );
+        assert_eq!(
+            extension_for_content_type("image/png; boundary=something"),
+            ".png"
+        );
     }
 
     // -- validate_magic_bytes -----------------------------------------------
@@ -458,7 +478,13 @@ mod tests {
     #[test]
     fn store_unknown_content_type_uses_bin() {
         let dir = temp_cache();
-        let path = store_in(dir.path(), "https://x.com/f", b"data", "application/octet-stream").unwrap();
+        let path = store_in(
+            dir.path(),
+            "https://x.com/f",
+            b"data",
+            "application/octet-stream",
+        )
+        .unwrap();
         assert!(path.to_string_lossy().ends_with(".bin"));
     }
 
@@ -586,10 +612,8 @@ mod tests {
         // Backdate the file's mtime to 100 days ago using std::fs::File::set_times.
         let old_time = SystemTime::now() - Duration::from_secs(100 * 24 * 60 * 60);
         let file = fs::File::options().write(true).open(&path).unwrap();
-        file.set_times(
-            fs::FileTimes::new().set_modified(old_time),
-        )
-        .unwrap();
+        file.set_times(fs::FileTimes::new().set_modified(old_time))
+            .unwrap();
         drop(file);
 
         let result = cleanup_in(dir.path(), 1000, 30).unwrap();

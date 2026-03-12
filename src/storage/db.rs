@@ -177,14 +177,32 @@ mod tests {
         db.execute(
             "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params!["old1", "net", "#chan", old, "Message", "alice", "old message", 0],
+            params![
+                "old1",
+                "net",
+                "#chan",
+                old,
+                "Message",
+                "alice",
+                "old message",
+                0
+            ],
         )
         .unwrap();
 
         db.execute(
             "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params!["new1", "net", "#chan", now, "Message", "bob", "new message", 0],
+            params![
+                "new1",
+                "net",
+                "#chan",
+                now,
+                "Message",
+                "bob",
+                "new message",
+                0
+            ],
         )
         .unwrap();
 

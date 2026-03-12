@@ -64,7 +64,10 @@ impl MessageType {
 pub struct Message {
     pub id: u64,
     pub timestamp: DateTime<Utc>,
-    #[expect(clippy::struct_field_names, reason = "message_type is the canonical IRC term")]
+    #[expect(
+        clippy::struct_field_names,
+        reason = "message_type is the canonical IRC term"
+    )]
     pub message_type: MessageType,
     pub nick: Option<String>,
     pub nick_mode: Option<String>,
@@ -113,7 +116,10 @@ pub struct ListEntry {
 pub struct Buffer {
     pub id: String,
     pub connection_id: String,
-    #[expect(clippy::struct_field_names, reason = "buffer_type clarifies the field vs the type enum")]
+    #[expect(
+        clippy::struct_field_names,
+        reason = "buffer_type clarifies the field vs the type enum"
+    )]
     pub buffer_type: BufferType,
     pub name: String,
     pub messages: Vec<Message>,

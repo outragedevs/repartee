@@ -70,9 +70,11 @@ pub fn client_final(
         }
     }
 
-    let combined_nonce = combined_nonce.ok_or_else(|| eyre!("SCRAM: server-first missing nonce (r=)"))?;
+    let combined_nonce =
+        combined_nonce.ok_or_else(|| eyre!("SCRAM: server-first missing nonce (r=)"))?;
     let salt_b64 = salt_b64.ok_or_else(|| eyre!("SCRAM: server-first missing salt (s=)"))?;
-    let iterations_str = iterations.ok_or_else(|| eyre!("SCRAM: server-first missing iterations (i=)"))?;
+    let iterations_str =
+        iterations.ok_or_else(|| eyre!("SCRAM: server-first missing iterations (i=)"))?;
 
     // Verify combined nonce starts with client nonce
     if !combined_nonce.starts_with(client_nonce) {
@@ -160,8 +162,7 @@ pub fn verify_server(server_final: &str, expected_signature: &[u8]) -> bool {
 
 /// Compute HMAC-SHA-256(key, data) and return the 32-byte result.
 fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
-    let mut mac =
-        HmacSha256::new_from_slice(key).expect("HMAC-SHA-256 accepts any key length");
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC-SHA-256 accepts any key length");
     mac.update(data);
     mac.finalize().into_bytes().into()
 }
@@ -223,7 +224,10 @@ mod tests {
     fn client_first_format() {
         let (bare, full, nonce) = client_first("testuser");
         // Full message starts with gs2-header "n,,"
-        assert!(full.starts_with("n,,"), "full message must start with 'n,,'");
+        assert!(
+            full.starts_with("n,,"),
+            "full message must start with 'n,,'"
+        );
         // Bare message starts with "n=testuser,r="
         assert!(
             bare.starts_with("n=testuser,r="),
@@ -257,14 +261,18 @@ mod tests {
 
         // Server-first with known salt and iterations
         let salt = base64::engine::general_purpose::STANDARD.encode(b"QSXCR+Q6sek8bf92");
-        let server_first = format!("r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s={salt},i=4096");
+        let server_first =
+            format!("r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s={salt},i=4096");
 
         let result = client_final(&server_first, client_first_bare, client_nonce, password);
         assert!(result.is_ok(), "client_final should succeed");
 
         let (client_final_msg, server_sig) = result.unwrap();
         // Verify format: starts with "c=biws,r=<combined_nonce>,p="
-        assert!(client_final_msg.starts_with("c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p="));
+        assert!(
+            client_final_msg
+                .starts_with("c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=")
+        );
         // Server signature should be 32 bytes
         assert_eq!(server_sig.len(), 32);
     }
@@ -407,9 +415,13 @@ mod tests {
         assert!(verify_server(&format!("v={sig_b64}"), &server_sig));
 
         // Verify wrong password produces different signature
-        let (_, wrong_sig) =
-            client_final(&server_first, &client_first_bare, &client_nonce, "wrong_password")
-                .expect("client_final should succeed even with wrong password");
+        let (_, wrong_sig) = client_final(
+            &server_first,
+            &client_first_bare,
+            &client_nonce,
+            "wrong_password",
+        )
+        .expect("client_final should succeed even with wrong password");
         assert_ne!(server_sig, wrong_sig);
     }
 }

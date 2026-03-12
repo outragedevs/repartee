@@ -8,20 +8,19 @@ use color_eyre::eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Position;
 use tokio::sync::mpsc;
-use tokio::time::{interval, Duration};
+use tokio::time::{Duration, interval};
 
 use crate::config::{self, AppConfig};
 use crate::constants;
 use crate::irc::{self, IrcEvent, IrcHandle};
 use crate::state::AppState;
 use crate::state::buffer::{
-    make_buffer_id, ActivityLevel, Buffer, BufferType, Message, MessageType,
+    ActivityLevel, Buffer, BufferType, Message, MessageType, make_buffer_id,
 };
 use crate::state::connection::{Connection, ConnectionStatus};
 use crate::theme::{self, ThemeFile};
 use crate::ui;
 use crate::ui::layout::UiRegions;
-
 
 use ratatui_image::picker::ProtocolType;
 
@@ -38,11 +37,10 @@ fn detect_outer_terminal(
     // When a shim is connected, use the shim's env vars (it knows the real terminal).
     // Otherwise fall back to the daemon's own env vars.
     let get_env = |key: &str| -> Option<String> {
-        if let Some(vars) = env_override {
-            vars.get(key).cloned()
-        } else {
-            std::env::var(key).ok().filter(|s| !s.is_empty())
-        }
+        env_override.map_or_else(
+            || std::env::var(key).ok().filter(|s| !s.is_empty()),
+            |vars| vars.get(key).cloned(),
+        )
     };
 
     // Dump all relevant env vars for debugging.
@@ -91,7 +89,11 @@ fn detect_outer_terminal(
         let tt_generic = termtype.as_deref().unwrap_or("").starts_with("xterm");
         let tn_empty = termname.as_deref().unwrap_or("").is_empty();
         if tt_generic && tn_empty {
-            return ("alacritty", Some(ProtocolType::Halfblocks), "tmux:generic-xterm+empty-termname".into());
+            return (
+                "alacritty",
+                Some(ProtocolType::Halfblocks),
+                "tmux:generic-xterm+empty-termname".into(),
+            );
         }
     }
 
@@ -100,37 +102,67 @@ fn detect_outer_terminal(
 
     // LC_TERMINAL survives tmux and SSH — most reliable after tmux queries.
     if !lc_terminal.is_empty() {
-        if lc_terminal.eq_ignore_ascii_case("iterm2") || lc_terminal.to_ascii_lowercase().contains("iterm") {
-            return ("iterm2", Some(ProtocolType::Iterm2), format!("env:LC_TERMINAL={lc_terminal}"));
+        if lc_terminal.eq_ignore_ascii_case("iterm2")
+            || lc_terminal.to_ascii_lowercase().contains("iterm")
+        {
+            return (
+                "iterm2",
+                Some(ProtocolType::Iterm2),
+                format!("env:LC_TERMINAL={lc_terminal}"),
+            );
         }
         if lc_terminal.eq_ignore_ascii_case("ghostty") {
-            return ("ghostty", Some(ProtocolType::Kitty), format!("env:LC_TERMINAL={lc_terminal}"));
+            return (
+                "ghostty",
+                Some(ProtocolType::Kitty),
+                format!("env:LC_TERMINAL={lc_terminal}"),
+            );
         }
         if lc_terminal.eq_ignore_ascii_case("subterm") {
-            return ("subterm", Some(ProtocolType::Kitty), format!("env:LC_TERMINAL={lc_terminal}"));
+            return (
+                "subterm",
+                Some(ProtocolType::Kitty),
+                format!("env:LC_TERMINAL={lc_terminal}"),
+            );
         }
     }
 
     // Terminal-specific env vars.
     if get_env("ITERM_SESSION_ID").is_some() {
-        return ("iterm2", Some(ProtocolType::Iterm2), "env:ITERM_SESSION_ID".into());
+        return (
+            "iterm2",
+            Some(ProtocolType::Iterm2),
+            "env:ITERM_SESSION_ID".into(),
+        );
     }
 
     // GHOSTTY_RESOURCES_DIR — validate it's a real path, not just "1" or garbage.
     if let Some(grd) = get_env("GHOSTTY_RESOURCES_DIR")
         && grd.len() > 1
     {
-        return ("ghostty", Some(ProtocolType::Kitty), format!("env:GHOSTTY_RESOURCES_DIR={grd}"));
+        return (
+            "ghostty",
+            Some(ProtocolType::Kitty),
+            format!("env:GHOSTTY_RESOURCES_DIR={grd}"),
+        );
     }
 
     if get_env("KITTY_PID").is_some() {
         return ("kitty", Some(ProtocolType::Kitty), "env:KITTY_PID".into());
     }
     if get_env("WEZTERM_EXECUTABLE").is_some() {
-        return ("wezterm", Some(ProtocolType::Iterm2), "env:WEZTERM_EXECUTABLE".into());
+        return (
+            "wezterm",
+            Some(ProtocolType::Iterm2),
+            "env:WEZTERM_EXECUTABLE".into(),
+        );
     }
     if get_env("WT_SESSION").is_some() {
-        return ("windows-terminal", Some(ProtocolType::Sixel), "env:WT_SESSION".into());
+        return (
+            "windows-terminal",
+            Some(ProtocolType::Sixel),
+            "env:WT_SESSION".into(),
+        );
     }
 
     // Non-tmux: TERM_PROGRAM is the actual terminal.
@@ -257,7 +289,10 @@ fn resolve_image_protocol(
     //    But iTerm2's Kitty implementation is incomplete; the native iTerm2
     //    (OSC 1337) protocol works correctly.
     if outer_terminal == "iterm2" {
-        return (Some(ProtocolType::Iterm2), format!("iterm2-override:{outer_source}"));
+        return (
+            Some(ProtocolType::Iterm2),
+            format!("iterm2-override:{outer_source}"),
+        );
     }
 
     // 4. IO-based detection — trust it when running directly (not tmux/socket).
@@ -290,7 +325,10 @@ pub fn tmux_query_raw(format_str: &str) -> Option<String> {
     if name.is_empty() { None } else { Some(name) }
 }
 
-#[expect(clippy::struct_excessive_bools, reason = "App is the root state container")]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "App is the root state container"
+)]
 pub struct App {
     pub state: AppState,
     pub config: AppConfig,
@@ -394,9 +432,11 @@ pub struct App {
     /// Unix socket listener for shim connections (active when detached or always).
     socket_listener: Option<tokio::net::UnixListener>,
     /// Sender for output/control messages to the connected shim.
-    socket_output_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::session::protocol::MainMessage>>,
+    socket_output_tx:
+        Option<tokio::sync::mpsc::UnboundedSender<crate::session::protocol::MainMessage>>,
     /// Receiver for messages from a connected shim.
-    shim_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::session::protocol::ShimMessage>>,
+    shim_event_rx:
+        Option<tokio::sync::mpsc::UnboundedReceiver<crate::session::protocol::ShimMessage>>,
     /// True when terminal is socket-backed (vs local stdout).
     pub is_socket_attached: bool,
     /// Stop flag for the terminal reader thread.
@@ -439,7 +479,9 @@ impl App {
             match crate::storage::Storage::init(&config.logging) {
                 Ok(s) => {
                     state.log_tx = Some(s.log_tx.clone());
-                    state.log_exclude_types.clone_from(&config.logging.exclude_types);
+                    state
+                        .log_exclude_types
+                        .clone_from(&config.logging.exclude_types);
                     Some(s)
                 }
                 Err(e) => {
@@ -477,15 +519,14 @@ impl App {
         );
 
         // Apply protocol override from config, outer terminal, or IO result.
-        let (resolved_proto, source) =
-            resolve_image_protocol(
-                &config.image_preview.protocol,
-                &picker,
-                outer_terminal,
-                outer_proto,
-                outer_source,
-                false, // no shim at startup
-            );
+        let (resolved_proto, source) = resolve_image_protocol(
+            &config.image_preview.protocol,
+            &picker,
+            outer_terminal,
+            outer_proto,
+            outer_source,
+            false, // no shim at startup
+        );
         if let Some(proto) = resolved_proto {
             tracing::debug!(
                 from = ?picker.protocol_type(),
@@ -504,16 +545,15 @@ impl App {
 
         // --- Scripting system ---
         let (script_action_tx, script_action_rx) = mpsc::unbounded_channel();
-        let script_state = Arc::new(std::sync::RwLock::new(
-            state.script_snapshot(),
-        ));
+        let script_state = Arc::new(std::sync::RwLock::new(state.script_snapshot()));
         let next_timer_id = Arc::new(std::sync::atomic::AtomicU64::new(1));
         let script_api = Self::build_script_api(
             script_action_tx.clone(),
             Arc::clone(&script_state),
             Arc::clone(&next_timer_id),
         );
-        let mut script_manager = crate::scripting::engine::ScriptManager::new(constants::scripts_dir());
+        let mut script_manager =
+            crate::scripting::engine::ScriptManager::new(constants::scripts_dir());
         match crate::scripting::lua::LuaEngine::new() {
             Ok(lua_engine) => {
                 script_manager.register_engine(Box::new(lua_engine));
@@ -603,12 +643,10 @@ impl App {
             .get("timestamp")
             .cloned()
             .unwrap_or_else(|| "$*".to_string());
-        let ts_resolved =
-            crate::theme::resolve_abstractions(&ts_format, &self.theme.abstracts, 0);
+        let ts_resolved = crate::theme::resolve_abstractions(&ts_format, &self.theme.abstracts, 0);
         let ts_spans = crate::theme::parse_format_string(&ts_resolved, &[&ts_sample]);
         let ts_visual_width: usize = ts_spans.iter().map(|s| s.text.chars().count()).sum();
-        self.wrap_indent =
-            ts_visual_width + 1 + self.config.display.nick_column_width as usize + 1;
+        self.wrap_indent = ts_visual_width + 1 + self.config.display.nick_column_width as usize + 1;
     }
 
     /// Show an image preview for the given URL.
@@ -620,7 +658,11 @@ impl App {
         // Don't re-fetch if already loading or showing this URL.
         match &self.image_preview {
             crate::image_preview::PreviewStatus::Loading { url: u }
-            | crate::image_preview::PreviewStatus::Ready { url: u, .. } if u == url => return,
+            | crate::image_preview::PreviewStatus::Ready { url: u, .. }
+                if u == url =>
+            {
+                return;
+            }
             _ => {}
         }
 
@@ -648,14 +690,14 @@ impl App {
         // When socket-attached, use the shim's env vars for terminal detection
         // (the daemon's own env vars are frozen from fork time).
         let env_override = self.shim_term_env.as_ref();
-        let in_tmux = if let Some(vars) = env_override {
-            vars.get("TMUX").is_some_and(|s| !s.is_empty())
-        } else {
-            std::env::var("TMUX").is_ok_and(|s| !s.is_empty())
-        };
+        let in_tmux = env_override.map_or_else(
+            || std::env::var("TMUX").is_ok_and(|s| !s.is_empty()),
+            |vars| vars.get("TMUX").is_some_and(|s| !s.is_empty()),
+        );
         self.in_tmux = in_tmux;
 
-        let (outer_terminal, outer_proto, outer_source) = detect_outer_terminal(in_tmux, env_override);
+        let (outer_terminal, outer_proto, outer_source) =
+            detect_outer_terminal(in_tmux, env_override);
 
         let (resolved_proto, source) = resolve_image_protocol(
             &self.config.image_preview.protocol,
@@ -694,7 +736,10 @@ impl App {
     ///   buffer flush, so ratatui has no knowledge of those pixels. A diff-based
     ///   update may not rewrite every cell the image covered.
     pub fn dismiss_image_preview(&mut self) {
-        if matches!(self.image_preview, crate::image_preview::PreviewStatus::Ready { .. }) {
+        if matches!(
+            self.image_preview,
+            crate::image_preview::PreviewStatus::Ready { .. }
+        ) {
             self.cleanup_image_graphics();
         }
         self.image_preview = crate::image_preview::PreviewStatus::Hidden;
@@ -855,7 +900,11 @@ impl App {
         }
 
         tracing::debug!(
-            ?proto, inner_w, inner_h, inner_x, inner_y,
+            ?proto,
+            inner_w,
+            inner_h,
+            inner_x,
+            inner_y,
             png_len = raw_png.len(),
             "writing tmux direct image"
         );
@@ -945,7 +994,9 @@ impl App {
                 text: format!("Connecting to {}...", server_config.label),
                 highlight: false,
                 event_key: None,
-                event_params: None, log_msg_id: None, log_ref_id: None,
+                event_params: None,
+                log_msg_id: None,
+                log_ref_id: None,
                 tags: std::collections::HashMap::new(),
             },
         );
@@ -1037,8 +1088,7 @@ impl App {
         terminal.draw(|frame| ui::splash::render(frame, total_lines))?;
         let hold_start = Instant::now();
         while hold_start.elapsed() < Duration::from_millis(HOLD_MS) {
-            let remaining = Duration::from_millis(HOLD_MS)
-                .saturating_sub(hold_start.elapsed());
+            let remaining = Duration::from_millis(HOLD_MS).saturating_sub(hold_start.elapsed());
             if remaining.is_zero() {
                 break;
             }
@@ -1048,7 +1098,9 @@ impl App {
                 } else {
                     None
                 }
-            }).await {
+            })
+            .await
+            {
                 break;
             }
         }
@@ -1091,7 +1143,7 @@ impl App {
     /// startup. Does NOT call `terminal.size()` / `backend.size()` because
     /// that does `ioctl(stdout)` which returns garbage when stdout is
     /// `/dev/null` (daemon/fork mode).
-    pub fn terminal_size(&self) -> (u16, u16) {
+    pub const fn terminal_size(&self) -> (u16, u16) {
         (self.cached_term_cols, self.cached_term_rows)
     }
 
@@ -1100,7 +1152,7 @@ impl App {
         if self.socket_listener.is_some() {
             return Ok(());
         }
-        let dir = crate::session::sessions_dir();
+        let dir = crate::constants::sessions_dir();
         std::fs::create_dir_all(&dir)?;
         let path = crate::session::socket_path(std::process::id());
         // Remove stale socket from a previous run.
@@ -1132,13 +1184,14 @@ impl App {
         let mut read_half = tokio::io::BufReader::new(read_half);
 
         // Read the initial TerminalEnv message to get dimensions + env vars.
-        let term_env = match protocol::read_message::<_, protocol::TerminalEnv>(&mut read_half).await {
-            Ok(env) => env,
-            Err(e) => {
-                tracing::warn!("failed to read initial shim message: {e}");
-                return Ok(());
-            }
-        };
+        let term_env =
+            match protocol::read_message::<_, protocol::TerminalEnv>(&mut read_half).await {
+                Ok(env) => env,
+                Err(e) => {
+                    tracing::warn!("failed to read initial shim message: {e}");
+                    return Ok(());
+                }
+            };
         let cols = term_env.cols;
         let rows = term_env.rows;
 
@@ -1149,7 +1202,10 @@ impl App {
         let output_handle = tokio::spawn(async move {
             let mut write_half = write_half;
             while let Some(msg) = output_rx.recv().await {
-                if protocol::write_message(&mut write_half, &msg).await.is_err() {
+                if protocol::write_message(&mut write_half, &msg)
+                    .await
+                    .is_err()
+                {
                     tracing::warn!("shim output write failed, closing output task");
                     break;
                 }
@@ -1159,11 +1215,7 @@ impl App {
 
         // Create socket-backed terminal.
         let socket_writer = SocketWriter::new(output_tx.clone());
-        let terminal = ui::setup_socket_terminal(
-            Box::new(socket_writer),
-            cols,
-            rows,
-        )?;
+        let terminal = ui::setup_socket_terminal(Box::new(socket_writer), cols, rows)?;
 
         // Set up input reader: read ShimMessages from socket → mpsc.
         let (shim_tx, shim_rx) = mpsc::unbounded_channel::<ShimMessage>();
@@ -1255,15 +1307,19 @@ impl App {
     /// Tear down the shim connection (terminal, tasks, channels).
     fn teardown_shim(&mut self) {
         self.terminal = None;
-        // Drop the sender so the output task drains remaining messages
-        // (including the Detached control message) then exits naturally.
+        // Drop the sender — the output task will drain remaining messages
+        // (including the Detached control message we just sent) then exit
+        // when the channel closes.
         self.socket_output_tx = None;
         self.shim_event_rx = None;
         self.is_socket_attached = false;
         self.shim_term_env = None;
-        // Don't abort the output task — let it finish sending queued messages.
+        // Detach the output task handle (sender is already dropped above,
+        // so the task exits naturally after draining queued messages).
         self.shim_output_handle.take();
-        if let Some(h) = self.shim_input_handle.take() { h.abort(); }
+        if let Some(h) = self.shim_input_handle.take() {
+            h.abort();
+        }
     }
 
     /// Disconnect the current shim (if any).
@@ -1336,12 +1392,9 @@ impl App {
         }
 
         // Signal handlers for detached mode.
-        let mut sigterm = tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::terminate(),
-        )?;
-        let mut sigint = tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::interrupt(),
-        )?;
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
 
         let mut tick = interval(Duration::from_secs(1));
         let mut paste_tick = interval(Duration::from_millis(500));
@@ -1604,10 +1657,15 @@ impl App {
                 message_type: MessageType::Event,
                 nick: None,
                 nick_mode: None,
-                text: format!("Welcome to {}! Use /connect <server> to connect.", crate::constants::APP_NAME),
+                text: format!(
+                    "Welcome to {}! Use /connect <server> to connect.",
+                    crate::constants::APP_NAME
+                ),
                 highlight: false,
                 event_key: None,
-                event_params: None, log_msg_id: None, log_ref_id: None,
+                event_params: None,
+                log_msg_id: None,
+                log_ref_id: None,
                 tags: std::collections::HashMap::new(),
             },
         );
@@ -1667,7 +1725,9 @@ impl App {
                         text: msg.text.clone(),
                         highlight: false,
                         event_key: Some("netsplit".to_string()),
-                        event_params: None, log_msg_id: None, log_ref_id: None,
+                        event_params: None,
+                        log_msg_id: None,
+                        log_ref_id: None,
                         tags: std::collections::HashMap::new(),
                     },
                 );
@@ -1767,10 +1827,8 @@ impl App {
             tokio::spawn(async move {
                 match crate::irc::connect_server(&id, &cfg, &general).await {
                     Ok((handle, mut rx)) => {
-                        let _ = tx.send(IrcEvent::HandleReady(
-                            handle.conn_id.clone(),
-                            handle.sender,
-                        ));
+                        let _ =
+                            tx.send(IrcEvent::HandleReady(handle.conn_id.clone(), handle.sender));
                         while let Some(event) = rx.recv().await {
                             if tx.send(event).is_err() {
                                 break;
@@ -1901,10 +1959,9 @@ impl App {
             ));
         } else {
             tracing::trace!(conn_id, %chanlist, "standard WHO (no WHOX)");
-            let _ = handle.sender.send(::irc::proto::Command::WHO(
-                Some(chanlist.clone()),
-                None,
-            ));
+            let _ = handle
+                .sender
+                .send(::irc::proto::Command::WHO(Some(chanlist.clone()), None));
         }
 
         // Send batched MODE (single command, comma-separated channels).
@@ -1936,10 +1993,17 @@ impl App {
             }
         }
 
-        tracing::trace!(conn_id, remaining = in_flight.len(), "in-flight after removal");
+        tracing::trace!(
+            conn_id,
+            remaining = in_flight.len(),
+            "in-flight after removal"
+        );
 
         if in_flight.is_empty() {
-            let remaining_queued = self.channel_query_queues.get(conn_id).map_or(0, VecDeque::len);
+            let remaining_queued = self
+                .channel_query_queues
+                .get(conn_id)
+                .map_or(0, VecDeque::len);
             tracing::trace!(conn_id, remaining_queued, "batch complete, sending next");
             let conn_id = conn_id.to_string();
             self.channel_query_in_flight.remove(&conn_id);
@@ -2003,27 +2067,34 @@ impl App {
                     .get(&conn_id)
                     .is_some_and(|c| c.lag_pending);
                 if pending && sent_at.elapsed().as_secs() >= 300 {
-                    let buf_id = self.state.connections.get(&conn_id)
-                        .map_or_else(|| conn_id.clone(), |c| crate::state::buffer::make_buffer_id(&conn_id, &c.label));
+                    let buf_id = self.state.connections.get(&conn_id).map_or_else(
+                        || conn_id.clone(),
+                        |c| crate::state::buffer::make_buffer_id(&conn_id, &c.label),
+                    );
                     let msg_id = self.state.next_message_id();
-                    self.state.add_message(&buf_id, crate::state::buffer::Message {
-                        id: msg_id,
-                        timestamp: chrono::Utc::now(),
-                        message_type: crate::state::buffer::MessageType::Event,
-                        nick: None,
-                        nick_mode: None,
-                        text: format!("Connection to {conn_id} timed out (no PONG for 5 minutes)"),
-                        highlight: false,
-                        tags: std::collections::HashMap::new(),
-                        log_msg_id: None,
-                        log_ref_id: None,
-                        event_key: None,
-                        event_params: Some(Vec::new()),
-                    });
+                    self.state.add_message(
+                        &buf_id,
+                        crate::state::buffer::Message {
+                            id: msg_id,
+                            timestamp: chrono::Utc::now(),
+                            message_type: crate::state::buffer::MessageType::Event,
+                            nick: None,
+                            nick_mode: None,
+                            text: format!(
+                                "Connection to {conn_id} timed out (no PONG for 5 minutes)"
+                            ),
+                            highlight: false,
+                            tags: std::collections::HashMap::new(),
+                            log_msg_id: None,
+                            log_ref_id: None,
+                            event_key: None,
+                            event_params: Some(Vec::new()),
+                        },
+                    );
                     if let Some(handle) = self.irc_handles.get(&conn_id) {
-                        let _ = handle.sender.send(::irc::proto::Command::QUIT(
-                            Some("Ping timeout".to_string()),
-                        ));
+                        let _ = handle.sender.send(::irc::proto::Command::QUIT(Some(
+                            "Ping timeout".to_string(),
+                        )));
                     }
                     continue;
                 }
@@ -2041,10 +2112,9 @@ impl App {
                     .as_millis()
                     .to_string();
                 if let Some(handle) = self.irc_handles.get(&conn_id) {
-                    let _ = handle.sender.send(::irc::proto::Command::Raw(
-                        "PING".to_string(),
-                        vec![ts],
-                    ));
+                    let _ = handle
+                        .sender
+                        .send(::irc::proto::Command::Raw("PING".to_string(), vec![ts]));
                 }
                 self.lag_pings.insert(conn_id.clone(), now);
                 if let Some(conn) = self.state.connections.get_mut(&conn_id) {
@@ -2097,19 +2167,16 @@ impl App {
     fn handle_irc_event(&mut self, event: IrcEvent) {
         match event {
             IrcEvent::HandleReady(conn_id, sender) => {
-                self.irc_handles.insert(
-                    conn_id.clone(),
-                    IrcHandle {
-                        conn_id,
-                        sender,
-                    },
-                );
+                self.irc_handles
+                    .insert(conn_id.clone(), IrcHandle { conn_id, sender });
             }
             IrcEvent::NegotiationInfo(conn_id, diag) => {
                 // Display CAP/SASL diagnostics in status buffer — fires immediately
                 // so they're visible even if connection fails before RPL_WELCOME.
-                let buf_id = self.state.connections.get(&conn_id)
-                    .map_or_else(|| conn_id.clone(), |c| crate::state::buffer::make_buffer_id(&conn_id, &c.label));
+                let buf_id = self.state.connections.get(&conn_id).map_or_else(
+                    || conn_id.clone(),
+                    |c| crate::state::buffer::make_buffer_id(&conn_id, &c.label),
+                );
                 for msg in &diag {
                     crate::irc::events::emit(&mut self.state, &buf_id, &format!("%Z56b6c2{msg}%N"));
                 }
@@ -2120,14 +2187,16 @@ impl App {
                     conn.enabled_caps = enabled_caps;
                 }
                 // Collect channels to rejoin before handle_connected resets state
-                let rejoin_channels =
-                    crate::irc::events::channels_to_rejoin(&self.state, &conn_id);
+                let rejoin_channels = crate::irc::events::channels_to_rejoin(&self.state, &conn_id);
                 crate::irc::events::handle_connected(&mut self.state, &conn_id);
 
                 // Notify scripts
                 {
                     use crate::scripting::api::events;
-                    let nick = self.state.connections.get(&conn_id)
+                    let nick = self
+                        .state
+                        .connections
+                        .get(&conn_id)
                         .map_or_else(String::new, |c| c.nick.clone());
                     let mut params = HashMap::new();
                     params.insert("connection_id".to_string(), conn_id.clone());
@@ -2216,11 +2285,9 @@ impl App {
                         .collect();
                     if !extra.is_empty() {
                         let chanlist = extra.join(",");
-                        let _ = handle.sender.send(::irc::proto::Command::JOIN(
-                            chanlist,
-                            None,
-                            None,
-                        ));
+                        let _ = handle
+                            .sender
+                            .send(::irc::proto::Command::JOIN(chanlist, None, None));
                     }
                 }
             }
@@ -2260,13 +2327,17 @@ impl App {
                     }
                 }
                 // Handle CAP subcommands for cap-notify (runtime capability changes)
-                if let ::irc::proto::Command::CAP(_, ref subcmd, ref field3, ref field4) = msg.command {
+                if let ::irc::proto::Command::CAP(_, ref subcmd, ref field3, ref field4) =
+                    msg.command
+                {
                     use ::irc::proto::command::CapSubCommand;
                     match subcmd {
                         CapSubCommand::NEW => {
                             let to_request = crate::irc::events::handle_cap_new(
-                                &mut self.state, &conn_id,
-                                field3.as_deref(), field4.as_deref(),
+                                &mut self.state,
+                                &conn_id,
+                                field3.as_deref(),
+                                field4.as_deref(),
                             );
                             if !to_request.is_empty()
                                 && let Some(handle) = self.irc_handles.get(&conn_id)
@@ -2283,20 +2354,26 @@ impl App {
                         }
                         CapSubCommand::DEL => {
                             crate::irc::events::handle_cap_del(
-                                &mut self.state, &conn_id,
-                                field3.as_deref(), field4.as_deref(),
+                                &mut self.state,
+                                &conn_id,
+                                field3.as_deref(),
+                                field4.as_deref(),
                             );
                         }
                         CapSubCommand::ACK => {
                             crate::irc::events::handle_cap_ack(
-                                &mut self.state, &conn_id,
-                                field3.as_deref(), field4.as_deref(),
+                                &mut self.state,
+                                &conn_id,
+                                field3.as_deref(),
+                                field4.as_deref(),
                             );
                         }
                         CapSubCommand::NAK => {
                             crate::irc::events::handle_cap_nak(
-                                &mut self.state, &conn_id,
-                                field3.as_deref(), field4.as_deref(),
+                                &mut self.state,
+                                &conn_id,
+                                field3.as_deref(),
+                                field4.as_deref(),
                             );
                         }
                         _ => {}
@@ -2305,10 +2382,9 @@ impl App {
 
                 // --- IRCv3 batch interception ---
                 // Handle BATCH commands (start/end) and collect @batch-tagged messages.
-                if let ::irc::proto::Command::BATCH(ref ref_tag, ref sub, ref params) = msg.command {
-                    let tracker = self.batch_trackers
-                        .entry(conn_id.clone())
-                        .or_default();
+                if let ::irc::proto::Command::BATCH(ref ref_tag, ref sub, ref params) = msg.command
+                {
+                    let tracker = self.batch_trackers.entry(conn_id.clone()).or_default();
                     if let Some(tag) = ref_tag.strip_prefix('+') {
                         // Start batch
                         let batch_type = sub
@@ -2333,7 +2409,8 @@ impl App {
                         }
                     }
                     // BATCH commands themselves are not dispatched further
-                } else if self.batch_trackers
+                } else if self
+                    .batch_trackers
                     .entry(conn_id.clone())
                     .or_default()
                     .is_batched(&msg)
@@ -2347,8 +2424,10 @@ impl App {
 
                     // Extract channel from RPL_ENDOFNAMES (for auto-WHO/MODE batch).
                     let endofnames_channel = if let ::irc::proto::Command::Response(
-                        ::irc::proto::Response::RPL_ENDOFNAMES, ref args
-                    ) = msg.command {
+                        ::irc::proto::Response::RPL_ENDOFNAMES,
+                        ref args,
+                    ) = msg.command
+                    {
                         args.get(1).cloned()
                     } else {
                         None
@@ -2356,8 +2435,10 @@ impl App {
 
                     // Extract target from RPL_ENDOFWHO (for batch completion).
                     let endofwho_target = if let ::irc::proto::Command::Response(
-                        ::irc::proto::Response::RPL_ENDOFWHO, ref args
-                    ) = msg.command {
+                        ::irc::proto::Response::RPL_ENDOFWHO,
+                        ref args,
+                    ) = msg.command
+                    {
                         args.get(1).cloned()
                     } else {
                         None
@@ -2366,7 +2447,8 @@ impl App {
                     // Update conn.nick from RPL_WELCOME — args[0] is our confirmed nick
                     // after any ERR_NICKNAMEINUSE retries by the irc crate.
                     if let ::irc::proto::Command::Response(
-                        ::irc::proto::Response::RPL_WELCOME, ref args
+                        ::irc::proto::Response::RPL_WELCOME,
+                        ref args,
                     ) = msg.command
                         && let Some(confirmed_nick) = args.first()
                         && let Some(conn) = self.state.connections.get_mut(&conn_id)
@@ -2505,15 +2587,14 @@ impl App {
         match (key.modifiers, key.code) {
             // ESC — dismiss image preview if active, otherwise record for ESC+key combo
             (_, KeyCode::Esc) => {
-                if matches!(self.image_preview, crate::image_preview::PreviewStatus::Hidden) {
+                if matches!(
+                    self.image_preview,
+                    crate::image_preview::PreviewStatus::Hidden
+                ) {
                     self.last_esc_time = Some(Instant::now());
                 } else {
                     self.dismiss_image_preview();
                 }
-            }
-            // Ctrl+\ or Ctrl+Z — detach
-            (KeyModifiers::CONTROL, KeyCode::Char('\\' | 'z')) => {
-                self.should_detach = true;
             }
             (KeyModifiers::CONTROL, KeyCode::Char('q' | 'c')) => self.should_quit = true,
             (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
@@ -2526,8 +2607,7 @@ impl App {
             // Ctrl+W — delete word before cursor
             (KeyModifiers::CONTROL, KeyCode::Char('w')) => self.input.delete_word_back(),
             // Ctrl+A — move cursor to start (same as Home)
-            (KeyModifiers::CONTROL, KeyCode::Char('a')) => self.input.home(),
-            (_, KeyCode::Home) => self.input.home(),
+            (KeyModifiers::CONTROL, KeyCode::Char('a')) | (_, KeyCode::Home) => self.input.home(),
             // Ctrl+B — move cursor left (same as Left)
             (KeyModifiers::CONTROL, KeyCode::Char('b')) => self.input.move_left(),
             // Ctrl+E — move cursor to end (same as End)
@@ -2570,9 +2650,7 @@ impl App {
                 self.scroll_offset = self.scroll_offset.saturating_sub(10);
             }
             (_, KeyCode::Tab) => self.handle_tab(),
-            (mods, KeyCode::Char(c))
-                if mods.is_empty() || mods == KeyModifiers::SHIFT =>
-            {
+            (mods, KeyCode::Char(c)) if mods.is_empty() || mods == KeyModifiers::SHIFT => {
                 self.input.insert_char(c);
             }
             _ => {}
@@ -2581,7 +2659,11 @@ impl App {
 
     fn handle_paste(&mut self, text: &str) {
         let lines: Vec<&str> = text.split('\n').collect();
-        let non_empty: Vec<&str> = lines.iter().map(|l| l.trim_end_matches('\r')).filter(|l| !l.is_empty()).collect();
+        let non_empty: Vec<&str> = lines
+            .iter()
+            .map(|l| l.trim_end_matches('\r'))
+            .filter(|l| !l.is_empty())
+            .collect();
 
         if non_empty.len() <= 1 {
             // Single line (or empty): insert into input buffer at cursor.
@@ -2659,7 +2741,10 @@ impl App {
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 // Dismiss image preview on any click (same as ESC).
-                if !matches!(self.image_preview, crate::image_preview::PreviewStatus::Hidden) {
+                if !matches!(
+                    self.image_preview,
+                    crate::image_preview::PreviewStatus::Hidden
+                ) {
                     self.dismiss_image_preview();
                     return;
                 }
@@ -2814,10 +2899,9 @@ impl App {
     }
 
     fn handle_tab(&mut self) {
-        let nicks: Vec<String> = self
-            .state
-            .active_buffer()
-            .map_or_else(Vec::new, |buf| buf.users.values().map(|e| e.nick.clone()).collect());
+        let nicks: Vec<String> = self.state.active_buffer().map_or_else(Vec::new, |buf| {
+            buf.users.values().map(|e| e.nick.clone()).collect()
+        });
         let commands = crate::commands::registry::get_command_names();
         let setting_paths = crate::commands::settings::get_setting_paths(&self.config);
         self.input.tab_complete(&nicks, commands, &setting_paths);
@@ -2864,7 +2948,8 @@ impl App {
             }
         } else if self.script_manager.as_ref().is_some_and(|m| {
             let conn_id = self.state.active_buffer().map(|b| b.connection_id.as_str());
-            m.handle_command(&parsed.name, &parsed.args, conn_id).is_some()
+            m.handle_command(&parsed.name, &parsed.args, conn_id)
+                .is_some()
         }) {
             // Script handled the command
         } else {
@@ -2932,7 +3017,9 @@ impl App {
                         text: chunk,
                         highlight: false,
                         event_key: None,
-                        event_params: None, log_msg_id: None, log_ref_id: None,
+                        event_params: None,
+                        log_msg_id: None,
+                        log_ref_id: None,
                         tags: std::collections::HashMap::new(),
                     },
                 );
@@ -2956,7 +3043,11 @@ impl App {
 
     /// Build a `ScriptAPI` whose callbacks send `ScriptAction` messages
     /// through the provided channel. The App event loop drains these.
-    #[allow(clippy::too_many_lines, clippy::type_complexity, clippy::needless_pass_by_value)]
+    #[allow(
+        clippy::too_many_lines,
+        clippy::type_complexity,
+        clippy::needless_pass_by_value
+    )]
     fn build_script_api(
         tx: mpsc::UnboundedSender<crate::scripting::ScriptAction>,
         snapshot: Arc<std::sync::RwLock<crate::scripting::engine::ScriptStateSnapshot>>,
@@ -2967,19 +3058,31 @@ impl App {
         let t = tx.clone();
         let say: Arc<dyn Fn((String, String, Option<String>)) + Send + Sync> =
             Arc::new(move |(target, text, conn_id)| {
-                let _ = t.send(ScriptAction::Say { target, text, conn_id });
+                let _ = t.send(ScriptAction::Say {
+                    target,
+                    text,
+                    conn_id,
+                });
             });
 
         let t = tx.clone();
         let action: Arc<dyn Fn((String, String, Option<String>)) + Send + Sync> =
             Arc::new(move |(target, text, conn_id)| {
-                let _ = t.send(ScriptAction::Action { target, text, conn_id });
+                let _ = t.send(ScriptAction::Action {
+                    target,
+                    text,
+                    conn_id,
+                });
             });
 
         let t = tx.clone();
         let notice: Arc<dyn Fn((String, String, Option<String>)) + Send + Sync> =
             Arc::new(move |(target, text, conn_id)| {
-                let _ = t.send(ScriptAction::Notice { target, text, conn_id });
+                let _ = t.send(ScriptAction::Notice {
+                    target,
+                    text,
+                    conn_id,
+                });
             });
 
         let t = tx.clone();
@@ -2991,13 +3094,21 @@ impl App {
         let t = tx.clone();
         let join: Arc<dyn Fn((String, Option<String>, Option<String>)) + Send + Sync> =
             Arc::new(move |(channel, key, conn_id)| {
-                let _ = t.send(ScriptAction::Join { channel, key, conn_id });
+                let _ = t.send(ScriptAction::Join {
+                    channel,
+                    key,
+                    conn_id,
+                });
             });
 
         let t = tx.clone();
         let part: Arc<dyn Fn((String, Option<String>, Option<String>)) + Send + Sync> =
             Arc::new(move |(channel, msg, conn_id)| {
-                let _ = t.send(ScriptAction::Part { channel, msg, conn_id });
+                let _ = t.send(ScriptAction::Part {
+                    channel,
+                    msg,
+                    conn_id,
+                });
             });
 
         let t = tx.clone();
@@ -3015,26 +3126,39 @@ impl App {
         let t = tx.clone();
         let mode: Arc<dyn Fn((String, String, Option<String>)) + Send + Sync> =
             Arc::new(move |(channel, mode_string, conn_id)| {
-                let _ = t.send(ScriptAction::Mode { channel, mode_string, conn_id });
+                let _ = t.send(ScriptAction::Mode {
+                    channel,
+                    mode_string,
+                    conn_id,
+                });
             });
 
         let t = tx.clone();
         let kick: Arc<dyn Fn((String, String, Option<String>, Option<String>)) + Send + Sync> =
             Arc::new(move |(channel, nick, reason, conn_id)| {
-                let _ = t.send(ScriptAction::Kick { channel, nick, reason, conn_id });
+                let _ = t.send(ScriptAction::Kick {
+                    channel,
+                    nick,
+                    reason,
+                    conn_id,
+                });
             });
 
         let t = tx.clone();
         let ctcp: Arc<dyn Fn((String, String, Option<String>, Option<String>)) + Send + Sync> =
             Arc::new(move |(target, ctcp_type, message, conn_id)| {
-                let _ = t.send(ScriptAction::Ctcp { target, ctcp_type, message, conn_id });
+                let _ = t.send(ScriptAction::Ctcp {
+                    target,
+                    ctcp_type,
+                    message,
+                    conn_id,
+                });
             });
 
         let t = tx.clone();
-        let add_local_event: Arc<dyn Fn(String) + Send + Sync> =
-            Arc::new(move |text| {
-                let _ = t.send(ScriptAction::LocalEvent { text });
-            });
+        let add_local_event: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |text| {
+            let _ = t.send(ScriptAction::LocalEvent { text });
+        });
 
         let t = tx.clone();
         let add_buffer_event: Arc<dyn Fn((String, String)) + Send + Sync> =
@@ -3043,28 +3167,29 @@ impl App {
             });
 
         let t = tx.clone();
-        let switch_buffer: Arc<dyn Fn(String) + Send + Sync> =
-            Arc::new(move |buffer_id| {
-                let _ = t.send(ScriptAction::SwitchBuffer { buffer_id });
-            });
+        let switch_buffer: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |buffer_id| {
+            let _ = t.send(ScriptAction::SwitchBuffer { buffer_id });
+        });
 
         let t = tx.clone();
-        let execute_command: Arc<dyn Fn(String) + Send + Sync> =
-            Arc::new(move |line| {
-                let _ = t.send(ScriptAction::ExecuteCommand { line });
-            });
+        let execute_command: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |line| {
+            let _ = t.send(ScriptAction::ExecuteCommand { line });
+        });
 
         let t = tx.clone();
         let register_command: Arc<dyn Fn((String, String, String)) + Send + Sync> =
             Arc::new(move |(name, description, usage)| {
-                let _ = t.send(ScriptAction::RegisterCommand { name, description, usage });
+                let _ = t.send(ScriptAction::RegisterCommand {
+                    name,
+                    description,
+                    usage,
+                });
             });
 
         let t = tx.clone();
-        let unregister_command: Arc<dyn Fn(String) + Send + Sync> =
-            Arc::new(move |name| {
-                let _ = t.send(ScriptAction::UnregisterCommand { name });
-            });
+        let unregister_command: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |name| {
+            let _ = t.send(ScriptAction::UnregisterCommand { name });
+        });
 
         let t = tx.clone();
         let log: Arc<dyn Fn((String, String)) + Send + Sync> =
@@ -3075,16 +3200,17 @@ impl App {
         // Read-only state queries: read from the shared snapshot.
         let snap = Arc::clone(&snapshot);
         let active_buffer_id: Arc<dyn Fn(()) -> Option<String> + Send + Sync> =
-            Arc::new(move |()| {
-                snap.read().ok().and_then(|s| s.active_buffer_id.clone())
-            });
+            Arc::new(move |()| snap.read().ok().and_then(|s| s.active_buffer_id.clone()));
 
         let snap = Arc::clone(&snapshot);
         let our_nick: Arc<dyn Fn(Option<String>) -> Option<String> + Send + Sync> =
             Arc::new(move |conn_id| {
                 let s = snap.read().ok()?;
                 if let Some(id) = conn_id {
-                    s.connections.iter().find(|c| c.id == id).map(|c| c.nick.clone())
+                    s.connections
+                        .iter()
+                        .find(|c| c.id == id)
+                        .map(|c| c.nick.clone())
                 } else {
                     // No conn_id — use active buffer's connection
                     let active_buf_id = s.active_buffer_id.as_ref()?;
@@ -3108,7 +3234,8 @@ impl App {
         let connections: Arc<
             dyn Fn(()) -> Vec<crate::scripting::engine::ConnectionInfo> + Send + Sync,
         > = Arc::new(move |()| {
-            snap.read().map_or_else(|_| Vec::new(), |s| s.connections.clone())
+            snap.read()
+                .map_or_else(|_| Vec::new(), |s| s.connections.clone())
         });
 
         let snap = Arc::clone(&snapshot);
@@ -3120,11 +3247,11 @@ impl App {
         });
 
         let snap = Arc::clone(&snapshot);
-        let buffers: Arc<
-            dyn Fn(()) -> Vec<crate::scripting::engine::BufferInfo> + Send + Sync,
-        > = Arc::new(move |()| {
-            snap.read().map_or_else(|_| Vec::new(), |s| s.buffers.clone())
-        });
+        let buffers: Arc<dyn Fn(()) -> Vec<crate::scripting::engine::BufferInfo> + Send + Sync> =
+            Arc::new(move |()| {
+                snap.read()
+                    .map_or_else(|_| Vec::new(), |s| s.buffers.clone())
+            });
 
         let snap = Arc::clone(&snapshot);
         let buffer_nicks: Arc<
@@ -3139,27 +3266,24 @@ impl App {
         // Timers: allocate ID and send ScriptAction to spawn the tokio task.
         let t = tx.clone();
         let counter = Arc::clone(&timer_id_counter);
-        let start_timer: Arc<dyn Fn(u64) -> u64 + Send + Sync> =
-            Arc::new(move |interval_ms| {
-                let id = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let _ = t.send(ScriptAction::StartTimer { id, interval_ms });
-                id
-            });
+        let start_timer: Arc<dyn Fn(u64) -> u64 + Send + Sync> = Arc::new(move |interval_ms| {
+            let id = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _ = t.send(ScriptAction::StartTimer { id, interval_ms });
+            id
+        });
 
         let t = tx.clone();
         let counter = Arc::clone(&timer_id_counter);
-        let start_timeout: Arc<dyn Fn(u64) -> u64 + Send + Sync> =
-            Arc::new(move |delay_ms| {
-                let id = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let _ = t.send(ScriptAction::StartTimeout { id, delay_ms });
-                id
-            });
+        let start_timeout: Arc<dyn Fn(u64) -> u64 + Send + Sync> = Arc::new(move |delay_ms| {
+            let id = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _ = t.send(ScriptAction::StartTimeout { id, delay_ms });
+            id
+        });
 
         let t = tx.clone();
-        let cancel_timer: Arc<dyn Fn(u64) + Send + Sync> =
-            Arc::new(move |id| {
-                let _ = t.send(ScriptAction::CancelTimer { id });
-            });
+        let cancel_timer: Arc<dyn Fn(u64) + Send + Sync> = Arc::new(move |id| {
+            let _ = t.send(ScriptAction::CancelTimer { id });
+        });
 
         // Config: per-script get/set reads from snapshot, set sends ScriptAction.
         let snap = Arc::clone(&snapshot);
@@ -3256,16 +3380,25 @@ impl App {
     fn handle_script_action(&mut self, action: crate::scripting::ScriptAction) {
         use crate::scripting::ScriptAction;
         match action {
-            ScriptAction::Say { target, text, conn_id } => {
+            ScriptAction::Say {
+                target,
+                text,
+                conn_id,
+            } => {
                 if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
                     && let Some(sender) = self.irc_sender_for(&cid)
                 {
-                    for chunk in crate::irc::split_irc_message(&text, crate::irc::MESSAGE_MAX_BYTES) {
+                    for chunk in crate::irc::split_irc_message(&text, crate::irc::MESSAGE_MAX_BYTES)
+                    {
                         let _ = sender.send_privmsg(&target, &chunk);
                     }
                 }
             }
-            ScriptAction::Action { target, text, conn_id } => {
+            ScriptAction::Action {
+                target,
+                text,
+                conn_id,
+            } => {
                 if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
                     && let Some(sender) = self.irc_sender_for(&cid)
                 {
@@ -3275,7 +3408,11 @@ impl App {
                     ));
                 }
             }
-            ScriptAction::Notice { target, text, conn_id } => {
+            ScriptAction::Notice {
+                target,
+                text,
+                conn_id,
+            } => {
                 if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
                     && let Some(sender) = self.irc_sender_for(&cid)
                 {
@@ -3286,31 +3423,29 @@ impl App {
                 if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
                     && let Some(sender) = self.irc_sender_for(&cid)
                 {
-                    let _ = sender.send(::irc::proto::Command::Raw(
-                        line,
-                        vec![],
-                    ));
+                    let _ = sender.send(::irc::proto::Command::Raw(line, vec![]));
                 }
             }
-            ScriptAction::Join { channel, key, conn_id } => {
+            ScriptAction::Join {
+                channel,
+                key,
+                conn_id,
+            } => {
                 if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
                     && let Some(sender) = self.irc_sender_for(&cid)
                 {
-                    let _ = sender.send(::irc::proto::Command::JOIN(
-                        channel,
-                        key,
-                        None,
-                    ));
+                    let _ = sender.send(::irc::proto::Command::JOIN(channel, key, None));
                 }
             }
-            ScriptAction::Part { channel, msg, conn_id } => {
+            ScriptAction::Part {
+                channel,
+                msg,
+                conn_id,
+            } => {
                 if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
                     && let Some(sender) = self.irc_sender_for(&cid)
                 {
-                    let _ = sender.send(::irc::proto::Command::PART(
-                        channel,
-                        msg,
-                    ));
+                    let _ = sender.send(::irc::proto::Command::PART(channel, msg));
                 }
             }
             ScriptAction::ChangeNick { nick, conn_id } => {
@@ -3324,13 +3459,14 @@ impl App {
                 if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
                     && let Some(sender) = self.irc_sender_for(&cid)
                 {
-                    let _ = sender.send(::irc::proto::Command::WHOIS(
-                        None,
-                        nick,
-                    ));
+                    let _ = sender.send(::irc::proto::Command::WHOIS(None, nick));
                 }
             }
-            ScriptAction::Mode { channel, mode_string, conn_id } => {
+            ScriptAction::Mode {
+                channel,
+                mode_string,
+                conn_id,
+            } => {
                 if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
                     && let Some(sender) = self.irc_sender_for(&cid)
                 {
@@ -3340,18 +3476,24 @@ impl App {
                     ));
                 }
             }
-            ScriptAction::Kick { channel, nick, reason, conn_id } => {
+            ScriptAction::Kick {
+                channel,
+                nick,
+                reason,
+                conn_id,
+            } => {
                 if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
                     && let Some(sender) = self.irc_sender_for(&cid)
                 {
-                    let _ = sender.send(::irc::proto::Command::KICK(
-                        channel,
-                        nick,
-                        reason,
-                    ));
+                    let _ = sender.send(::irc::proto::Command::KICK(channel, nick, reason));
                 }
             }
-            ScriptAction::Ctcp { target, ctcp_type, message, conn_id } => {
+            ScriptAction::Ctcp {
+                target,
+                ctcp_type,
+                message,
+                conn_id,
+            } => {
                 if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
                     && let Some(sender) = self.irc_sender_for(&cid)
                 {
@@ -3379,7 +3521,11 @@ impl App {
                     self.execute_command(&parsed);
                 }
             }
-            ScriptAction::RegisterCommand { name, description, usage } => {
+            ScriptAction::RegisterCommand {
+                name,
+                description,
+                usage,
+            } => {
                 self.script_commands.insert(name, (description, usage));
             }
             ScriptAction::UnregisterCommand { name } => {
@@ -3395,7 +3541,10 @@ impl App {
                     interval.tick().await; // skip first immediate tick
                     loop {
                         interval.tick().await;
-                        if tx.send(crate::scripting::ScriptAction::TimerFired { id }).is_err() {
+                        if tx
+                            .send(crate::scripting::ScriptAction::TimerFired { id })
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -3436,7 +3585,9 @@ impl App {
             return;
         }
         // Take api out temporarily
-        let Some(api) = self.script_api.as_ref() else { return; };
+        let Some(api) = self.script_api.as_ref() else {
+            return;
+        };
         let mut loaded = 0u32;
         let mut errors = Vec::new();
         for (name, _path, is_loaded) in &available {
@@ -3479,11 +3630,7 @@ impl App {
     /// Extract event params from an IRC message and emit to scripts.
     /// Returns true if any script suppressed the event.
     #[allow(clippy::too_many_lines)]
-    fn emit_irc_to_scripts(
-        &self,
-        conn_id: &str,
-        msg: &::irc::proto::Message,
-    ) -> bool {
+    fn emit_irc_to_scripts(&self, conn_id: &str, msg: &::irc::proto::Message) -> bool {
         use crate::scripting::api::events;
 
         let extract_nick = |prefix: Option<&::irc::proto::Prefix>| -> String {
@@ -3516,18 +3663,21 @@ impl App {
                 params.insert("hostname".to_string(), extract_host(msg.prefix.as_ref()));
                 params.insert("target".to_string(), target.clone());
                 params.insert("channel".to_string(), target.clone());
-                params.insert("is_channel".to_string(), target.starts_with('#').to_string());
+                params.insert(
+                    "is_channel".to_string(),
+                    target.starts_with('#').to_string(),
+                );
                 // Check for CTCP
-                if let Some(ctcp_body) = text.strip_prefix('\x01')
+                if let Some(ctcp_body) = text
+                    .strip_prefix('\x01')
                     .and_then(|t| t.strip_suffix('\x01'))
                 {
                     if let Some(action_text) = ctcp_body.strip_prefix("ACTION ") {
                         params.insert("message".to_string(), action_text.to_string());
                         events::ACTION
                     } else {
-                        let (ctcp_type, ctcp_msg) = ctcp_body
-                            .split_once(' ')
-                            .unwrap_or((ctcp_body, ""));
+                        let (ctcp_type, ctcp_msg) =
+                            ctcp_body.split_once(' ').unwrap_or((ctcp_body, ""));
                         params.insert("ctcp_type".to_string(), ctcp_type.to_string());
                         params.insert("message".to_string(), ctcp_msg.to_string());
                         events::CTCP_REQUEST
@@ -3540,15 +3690,16 @@ impl App {
             ::irc::proto::Command::NOTICE(target, text) => {
                 params.insert("nick".to_string(), extract_nick(msg.prefix.as_ref()));
                 params.insert("target".to_string(), target.clone());
-                let from_server = matches!(msg.prefix, Some(::irc::proto::Prefix::ServerName(_)) | None);
+                let from_server =
+                    matches!(msg.prefix, Some(::irc::proto::Prefix::ServerName(_)) | None);
                 params.insert("from_server".to_string(), from_server.to_string());
                 // CTCP response comes as NOTICE with \x01...\x01
-                if let Some(ctcp_body) = text.strip_prefix('\x01')
+                if let Some(ctcp_body) = text
+                    .strip_prefix('\x01')
                     .and_then(|t| t.strip_suffix('\x01'))
                 {
-                    let (ctcp_type, ctcp_msg) = ctcp_body
-                        .split_once(' ')
-                        .unwrap_or((ctcp_body, ""));
+                    let (ctcp_type, ctcp_msg) =
+                        ctcp_body.split_once(' ').unwrap_or((ctcp_body, ""));
                     params.insert("ctcp_type".to_string(), ctcp_type.to_string());
                     params.insert("message".to_string(), ctcp_msg.to_string());
                     events::CTCP_RESPONSE
@@ -3610,21 +3761,24 @@ impl App {
             ::irc::proto::Command::ChannelMODE(target, modes) => {
                 params.insert("nick".to_string(), extract_nick(msg.prefix.as_ref()));
                 params.insert("target".to_string(), target.clone());
-                let mode_str: Vec<String> = modes.iter().map(std::string::ToString::to_string).collect();
+                let mode_str: Vec<String> =
+                    modes.iter().map(std::string::ToString::to_string).collect();
                 params.insert("modes".to_string(), mode_str.join(" "));
                 events::MODE
             }
             ::irc::proto::Command::UserMODE(target, modes) => {
                 params.insert("nick".to_string(), extract_nick(msg.prefix.as_ref()));
                 params.insert("target".to_string(), target.clone());
-                let mode_str: Vec<String> = modes.iter().map(std::string::ToString::to_string).collect();
+                let mode_str: Vec<String> =
+                    modes.iter().map(std::string::ToString::to_string).collect();
                 params.insert("modes".to_string(), mode_str.join(" "));
                 events::MODE
             }
             ::irc::proto::Command::WALLOPS(text) => {
                 params.insert("nick".to_string(), extract_nick(msg.prefix.as_ref()));
                 params.insert("message".to_string(), text.clone());
-                let from_server = matches!(msg.prefix, Some(::irc::proto::Prefix::ServerName(_)) | None);
+                let from_server =
+                    matches!(msg.prefix, Some(::irc::proto::Prefix::ServerName(_)) | None);
                 params.insert("from_server".to_string(), from_server.to_string());
                 events::WALLOPS
             }
@@ -3672,13 +3826,7 @@ fn expand_alias_template(template: &str, args: &[String]) -> String {
 ///
 /// Image data is chunked into 4096-byte base64 pieces, each individually
 /// wrapped in DCS passthrough (tmux has a ~1MB limit per passthrough block).
-fn write_kitty_tmux_direct(
-    raw_png: &[u8],
-    inner_x: u16,
-    inner_y: u16,
-    inner_w: u16,
-    inner_h: u16,
-) {
+fn write_kitty_tmux_direct(raw_png: &[u8], inner_x: u16, inner_y: u16, inner_w: u16, inner_h: u16) {
     use std::io::Write;
 
     const CHARS_PER_CHUNK: usize = 4096;
@@ -3696,10 +3844,7 @@ fn write_kitty_tmux_direct(
     let chunk_count = chunks.len();
 
     for (i, chunk) in chunks.iter().enumerate() {
-        let b64 = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            chunk,
-        );
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, chunk);
         let more = u8::from(i + 1 < chunk_count);
 
         // DCS passthrough: \x1bPtmux; <escaped-kitty-cmd> \x1b\\
@@ -3716,10 +3861,7 @@ fn write_kitty_tmux_direct(
             );
         } else {
             // Continuation chunks: just data + more flag.
-            let _ = write!(
-                out,
-                "\x1bPtmux;\x1b\x1b_Gm={more};{b64}\x1b\x1b\\\x1b\\"
-            );
+            let _ = write!(out, "\x1bPtmux;\x1b\x1b_Gm={more};{b64}\x1b\x1b\\\x1b\\");
         }
         let _ = out.flush();
     }
@@ -3744,10 +3886,8 @@ fn write_iterm2_tmux_direct(
 
     // Mouse tracking modes — must be disabled during DCS image write to
     // prevent interference with tmux passthrough (matches kokoirc).
-    const MOUSE_DISABLE: &[u8] =
-        b"\x1b[?1003l\x1b[?1006l\x1b[?1002l\x1b[?1000l";
-    const MOUSE_ENABLE: &[u8] =
-        b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h";
+    const MOUSE_DISABLE: &[u8] = b"\x1b[?1003l\x1b[?1006l\x1b[?1002l\x1b[?1000l";
+    const MOUSE_ENABLE: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h";
 
     let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, raw_png);
 
@@ -3855,7 +3995,8 @@ mod tests {
     #[test]
     fn resolve_config_override_kitty() {
         let picker = ratatui_image::picker::Picker::halfblocks();
-        let (proto, source) = resolve_image_protocol("kitty", &picker, "unknown", None, String::new(), false);
+        let (proto, source) =
+            resolve_image_protocol("kitty", &picker, "unknown", None, String::new(), false);
         assert_eq!(proto, Some(ProtocolType::Kitty));
         assert_eq!(source, "config:kitty");
     }
@@ -3863,7 +4004,8 @@ mod tests {
     #[test]
     fn resolve_config_override_iterm2() {
         let picker = ratatui_image::picker::Picker::halfblocks();
-        let (proto, source) = resolve_image_protocol("iterm2", &picker, "unknown", None, String::new(), false);
+        let (proto, source) =
+            resolve_image_protocol("iterm2", &picker, "unknown", None, String::new(), false);
         assert_eq!(proto, Some(ProtocolType::Iterm2));
         assert_eq!(source, "config:iterm2");
     }
@@ -3875,8 +4017,12 @@ mod tests {
         let mut picker = ratatui_image::picker::Picker::halfblocks();
         picker.set_protocol_type(ProtocolType::Kitty);
         let (proto, source) = resolve_image_protocol(
-            "auto", &picker, "ghostty", Some(ProtocolType::Kitty),
-            "tmux:client_termtype=ghostty 1.3.0".into(), false,
+            "auto",
+            &picker,
+            "ghostty",
+            Some(ProtocolType::Kitty),
+            "tmux:client_termtype=ghostty 1.3.0".into(),
+            false,
         );
         assert_eq!(proto, Some(ProtocolType::Kitty));
         assert!(source.starts_with("tmux:"));
@@ -3889,8 +4035,12 @@ mod tests {
         let mut picker = ratatui_image::picker::Picker::halfblocks();
         picker.set_protocol_type(ProtocolType::Kitty);
         let (proto, source) = resolve_image_protocol(
-            "auto", &picker, "iterm2", Some(ProtocolType::Iterm2),
-            "tmux:client_termtype=iTerm2 3.6.8".into(), false,
+            "auto",
+            &picker,
+            "iterm2",
+            Some(ProtocolType::Iterm2),
+            "tmux:client_termtype=iTerm2 3.6.8".into(),
+            false,
         );
         assert_eq!(proto, Some(ProtocolType::Iterm2));
         assert!(source.starts_with("tmux:"));
@@ -3902,8 +4052,12 @@ mod tests {
         let mut picker = ratatui_image::picker::Picker::halfblocks();
         picker.set_protocol_type(ProtocolType::Kitty);
         let (proto, source) = resolve_image_protocol(
-            "auto", &picker, "ghostty", Some(ProtocolType::Kitty),
-            "env:LC_TERMINAL=Ghostty".into(), false,
+            "auto",
+            &picker,
+            "ghostty",
+            Some(ProtocolType::Kitty),
+            "env:LC_TERMINAL=Ghostty".into(),
+            false,
         );
         assert_eq!(proto, None); // trust IO
         assert!(source.starts_with("io-query:"));
@@ -3916,8 +4070,12 @@ mod tests {
         let mut picker = ratatui_image::picker::Picker::halfblocks();
         picker.set_protocol_type(ProtocolType::Kitty);
         let (proto, _source) = resolve_image_protocol(
-            "auto", &picker, "iterm2", Some(ProtocolType::Iterm2),
-            "env:ITERM_SESSION_ID".into(), false,
+            "auto",
+            &picker,
+            "iterm2",
+            Some(ProtocolType::Iterm2),
+            "env:ITERM_SESSION_ID".into(),
+            false,
         );
         assert_eq!(proto, Some(ProtocolType::Iterm2));
     }
@@ -3928,8 +4086,12 @@ mod tests {
         let mut picker = ratatui_image::picker::Picker::halfblocks();
         picker.set_protocol_type(ProtocolType::Iterm2); // stale IO result
         let (proto, source) = resolve_image_protocol(
-            "auto", &picker, "subterm", Some(ProtocolType::Kitty),
-            "env:LC_TERMINAL=subterm".into(), true,
+            "auto",
+            &picker,
+            "subterm",
+            Some(ProtocolType::Kitty),
+            "env:LC_TERMINAL=subterm".into(),
+            true,
         );
         assert_eq!(proto, Some(ProtocolType::Kitty));
         assert_eq!(source, "env:LC_TERMINAL=subterm");

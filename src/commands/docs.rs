@@ -37,7 +37,6 @@ pub fn get_subcommand_names(cmd: &str) -> Vec<&'static str> {
         .unwrap_or_default()
 }
 
-
 /// Load all command docs from the embedded directory.
 fn load_all_docs() -> HashMap<String, CommandHelp> {
     let mut map = HashMap::new();
@@ -228,10 +227,9 @@ fn parse_subcommands(text: &str) -> Vec<SubcommandHelp> {
             continue;
         }
         let trimmed = part.trim();
-        let (name, body) = trimmed.find('\n').map_or(
-            (trimmed, ""),
-            |idx| (trimmed[..idx].trim(), trimmed[idx + 1..].trim()),
-        );
+        let (name, body) = trimmed.find('\n').map_or((trimmed, ""), |idx| {
+            (trimmed[..idx].trim(), trimmed[idx + 1..].trim())
+        });
         let syntax = extract_indented(body);
         // First non-indented paragraph is description
         let description = body
@@ -350,8 +348,14 @@ Add a new server.
     #[test]
     fn get_subcommand_names_returns_names() {
         let names = get_subcommand_names("server");
-        assert!(names.contains(&"list"), "server should have 'list' subcommand");
-        assert!(names.contains(&"add"), "server should have 'add' subcommand");
+        assert!(
+            names.contains(&"list"),
+            "server should have 'list' subcommand"
+        );
+        assert!(
+            names.contains(&"add"),
+            "server should have 'add' subcommand"
+        );
     }
 
     #[test]

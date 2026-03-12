@@ -7,8 +7,19 @@ pub struct ParsedCommand {
 /// - me, quit, close, quote: single arg (entire rest)
 /// - msg, query, notice, topic, kick, kb, disconnect, set, alias: two args (first word, rest)
 const GREEDY_COMMANDS: &[&str] = &[
-    "msg", "query", "notice", "me", "quit", "topic", "kick", "kb", "close", "disconnect", "set",
-    "alias", "quote",
+    "msg",
+    "query",
+    "notice",
+    "me",
+    "quit",
+    "topic",
+    "kick",
+    "kb",
+    "close",
+    "disconnect",
+    "set",
+    "alias",
+    "quote",
 ];
 
 pub fn parse_command(input: &str) -> Option<ParsedCommand> {

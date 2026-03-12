@@ -61,15 +61,17 @@ impl Extban {
         let remainder = chars.as_str();
 
         // Split at `!` to separate the type+parameter from user@host
-        let (type_part, userhost) = remainder
-            .find('!')
-            .map_or((remainder, "*@*"), |bang_pos| {
-                (&remainder[..bang_pos], &remainder[bang_pos + 1..])
-            });
+        let (type_part, userhost) = remainder.find('!').map_or((remainder, "*@*"), |bang_pos| {
+            (&remainder[..bang_pos], &remainder[bang_pos + 1..])
+        });
 
         // Extract optional parameter (after `:`)
         let parameter = if let Some(param) = type_part.strip_prefix(':') {
-            if param.is_empty() { None } else { Some(param.to_string()) }
+            if param.is_empty() {
+                None
+            } else {
+                Some(param.to_string())
+            }
         } else if type_part.is_empty() {
             None
         } else {

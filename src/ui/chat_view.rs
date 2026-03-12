@@ -39,8 +39,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
         for msg in buf.messages.iter().rev() {
             let is_own = msg.nick.as_deref() == Some(current_nick);
-            let line =
-                super::message_line::render_message(msg, is_own, &app.theme, &app.config);
+            let line = super::message_line::render_message(msg, is_own, &app.theme, &app.config);
             let wrapped = super::wrap_line(line, total_width, indent);
 
             // Push in reverse so the final deque is in chronological order.
@@ -73,4 +72,3 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         frame.render_widget(paragraph, area);
     }
 }
-

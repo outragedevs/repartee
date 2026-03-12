@@ -30,11 +30,10 @@ impl Write for SocketWriter {
 
     fn flush(&mut self) -> io::Result<()> {
         if !self.buffer.is_empty() {
-            let data = std::mem::take(&mut self.buffer);
-            self.buffer = Vec::with_capacity(8192);
-            self.tx
-                .send(MainMessage::Output(data))
-                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "socket output channel closed"))?;
+            let data = std::mem::replace(&mut self.buffer, Vec::with_capacity(8192));
+            self.tx.send(MainMessage::Output(data)).map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "socket output channel closed")
+            })?;
         }
         Ok(())
     }

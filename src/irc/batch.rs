@@ -81,8 +81,7 @@ impl BatchTracker {
     /// Check whether a message belongs to an open batch via its `@batch` tag.
     #[must_use]
     pub fn is_batched(&self, msg: &IrcMessage) -> bool {
-        Self::get_batch_tag(msg)
-            .is_some_and(|tag| self.open.contains_key(tag))
+        Self::get_batch_tag(msg).is_some_and(|tag| self.open.contains_key(tag))
     }
 
     /// Add a message to its batch (identified by the `@batch` tag).
@@ -129,11 +128,7 @@ impl BatchTracker {
 /// - NETSPLIT: Produces a single summary line instead of individual QUIT messages.
 /// - NETJOIN: Produces a single summary line instead of individual JOIN messages.
 /// - Other batch types: Messages are replayed through the normal handler.
-pub fn process_completed_batch(
-    state: &mut AppState,
-    conn_id: &str,
-    batch: &BatchInfo,
-) {
+pub fn process_completed_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo) {
     match batch.batch_type.as_str() {
         "NETSPLIT" => process_netsplit_batch(state, conn_id, batch),
         "NETJOIN" => process_netjoin_batch(state, conn_id, batch),
@@ -171,8 +166,7 @@ fn process_netsplit_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo
                 .buffers
                 .iter()
                 .filter(|(_, buf)| {
-                    buf.connection_id == conn_id
-                        && buf.users.contains_key(&nick_lower)
+                    buf.connection_id == conn_id && buf.users.contains_key(&nick_lower)
                 })
                 .map(|(id, _)| id.clone())
                 .collect();
@@ -623,7 +617,9 @@ mod tests {
                 batch_type: "NETSPLIT".to_string(),
                 params: vec![],
                 messages: vec![],
-                started_at: Instant::now().checked_sub(std::time::Duration::from_secs(120)).unwrap(),
+                started_at: Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(120))
+                    .unwrap(),
             },
         );
         // Fresh batch should survive

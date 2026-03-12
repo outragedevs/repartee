@@ -13,7 +13,9 @@ static REGEX_CACHE: std::sync::LazyLock<Mutex<HashMap<String, Regex>>> =
 
 /// Get a compiled regex for a wildcard pattern, using a cache to avoid recompilation.
 fn cached_wildcard_regex(pattern: &str) -> Regex {
-    let mut cache = REGEX_CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut cache = REGEX_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     cache
         .entry(pattern.to_string())
         .or_insert_with(|| wildcard_to_regex(pattern))
@@ -80,7 +82,11 @@ pub fn should_ignore(
 
     for entry in ignores {
         // Level check: entry must include ALL or the specific level
-        if !entry.levels.iter().any(|l| matches!(l, IgnoreLevel::All) || l == level) {
+        if !entry
+            .levels
+            .iter()
+            .any(|l| matches!(l, IgnoreLevel::All) || l == level)
+        {
             continue;
         }
 
@@ -189,7 +195,10 @@ mod tests {
 
     #[test]
     fn build_mask_missing_ident() {
-        assert_eq!(build_mask("nick", None, Some("host.net")), "nick!*@host.net");
+        assert_eq!(
+            build_mask("nick", None, Some("host.net")),
+            "nick!*@host.net"
+        );
     }
 
     #[test]
@@ -204,7 +213,11 @@ mod tests {
 
     // --- should_ignore tests ---
 
-    fn make_entry(mask: &str, levels: Vec<IgnoreLevel>, channels: Option<Vec<&str>>) -> IgnoreEntry {
+    fn make_entry(
+        mask: &str,
+        levels: Vec<IgnoreLevel>,
+        channels: Option<Vec<&str>>,
+    ) -> IgnoreEntry {
         IgnoreEntry {
             mask: mask.to_string(),
             levels,
@@ -214,7 +227,14 @@ mod tests {
 
     #[test]
     fn empty_ignores_returns_false() {
-        assert!(!should_ignore(&[], "nick", None, None, &IgnoreLevel::Msgs, None));
+        assert!(!should_ignore(
+            &[],
+            "nick",
+            None,
+            None,
+            &IgnoreLevel::Msgs,
+            None
+        ));
     }
 
     #[test]
@@ -397,11 +417,7 @@ mod tests {
 
     #[test]
     fn full_mask_pattern_requires_matching_host() {
-        let ignores = vec![make_entry(
-            "*!*@bad.host",
-            vec![IgnoreLevel::All],
-            None,
-        )];
+        let ignores = vec![make_entry("*!*@bad.host", vec![IgnoreLevel::All], None)];
         // Should match when hostname matches
         assert!(should_ignore(
             &ignores,

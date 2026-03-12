@@ -114,10 +114,7 @@ pub async fn fetch_image(
     let (data, content_type, resolved_url) = fetch_url(url, config, client).await?;
 
     if is_image_content_type(&content_type) {
-        return Ok(FetchResult {
-            data,
-            content_type,
-        });
+        return Ok(FetchResult { data, content_type });
     }
 
     // Phase 2 — if HTML, look for og:image.
@@ -128,11 +125,12 @@ pub async fn fetch_image(
         // Resolve relative URLs against the original page.
         let image_url = resolve_url(&og_url, &resolved_url);
 
-        let (img_data, img_ct, _) =
-            fetch_url(&image_url, config, client).await?;
+        let (img_data, img_ct, _) = fetch_url(&image_url, config, client).await?;
 
         if !is_image_content_type(&img_ct) {
-            return Err(FetchError::NotAnImage { content_type: img_ct });
+            return Err(FetchError::NotAnImage {
+                content_type: img_ct,
+            });
         }
 
         return Ok(FetchResult {
@@ -316,8 +314,7 @@ mod tests {
         // Real-world pages sometimes have extra attributes on the meta tag.
         // Our regex requires property and content adjacent, so this tests
         // the boundary of what we match.
-        let html =
-            r#"<meta property="og:image" content="https://example.com/x.gif">"#;
+        let html = r#"<meta property="og:image" content="https://example.com/x.gif">"#;
         assert_eq!(
             extract_og_image(html),
             Some("https://example.com/x.gif".to_owned())

@@ -12,6 +12,20 @@ use tokio::time::interval;
 use super::protocol::{self, MainMessage, ShimMessage};
 use super::{list_sessions, socket_path};
 
+/// Exit reason from the shim relay loop.
+enum RelayExit {
+    /// Main process shut down — shim should exit.
+    Quit,
+    /// Daemon confirmed detach — shim should restore terminal and exit.
+    Detached,
+    /// Write to the socket failed.
+    WriteError(String),
+    /// Input channel from the terminal reader closed.
+    InputClosed,
+    /// Socket read channel closed (daemon disconnected).
+    ConnectionLost,
+}
+
 /// Run the shim process that bridges a local terminal to a detached repartee instance.
 ///
 /// If `show_splash` is true, runs the splash screen animation while waiting
@@ -25,9 +39,9 @@ pub async fn run_shim(target_pid: Option<u32>, show_splash: bool) -> Result<()> 
     }
 
     // Connect to the Unix socket.
-    let stream = UnixStream::connect(&sock_path).await.map_err(|e| {
-        color_eyre::eyre::eyre!("Failed to connect to session PID {pid}: {e}")
-    })?;
+    let stream = UnixStream::connect(&sock_path)
+        .await
+        .map_err(|e| color_eyre::eyre::eyre!("Failed to connect to session PID {pid}: {e}"))?;
     let (read_half, mut write_half) = tokio::io::split(stream);
     let read_half = tokio::io::BufReader::new(read_half);
 
@@ -72,7 +86,7 @@ pub async fn run_shim(target_pid: Option<u32>, show_splash: bool) -> Result<()> 
     // Main select loop: upstream (input → socket) and downstream (channel → stdout).
     tracing::info!("shim relay loop starting");
     let exit_reason = run_relay_loop(&mut input_rx, &mut write_half, &mut downstream_rx).await;
-    tracing::info!(reason = %exit_reason, "shim relay loop exited");
+    tracing::info!("shim relay loop exited");
 
     // Cleanup.
     input_stop.store(true, Ordering::Relaxed);
@@ -86,10 +100,16 @@ pub async fn run_shim(target_pid: Option<u32>, show_splash: bool) -> Result<()> 
         crossterm::cursor::Show
     );
 
-    match exit_reason.as_str() {
-        "quit" => eprintln!("Session ended."),
-        "detached" => eprintln!("Detached from repartee (PID {pid})."),
-        other => eprintln!("Disconnected from repartee (PID {pid}): {other}"),
+    match exit_reason {
+        RelayExit::Quit => eprintln!("Session ended."),
+        RelayExit::Detached => eprintln!("Detached from repartee (PID {pid})."),
+        RelayExit::WriteError(e) => {
+            eprintln!("Disconnected from repartee (PID {pid}): write error: {e}")
+        }
+        RelayExit::InputClosed => eprintln!("Disconnected from repartee (PID {pid}): input closed"),
+        RelayExit::ConnectionLost => {
+            eprintln!("Disconnected from repartee (PID {pid}): connection lost")
+        }
     }
 
     Ok(())
@@ -132,8 +152,8 @@ fn resolve_session(target_pid: Option<u32>) -> (u32, std::path::PathBuf) {
 /// `sock_path` is optional — when provided, the hold phase exits early once
 /// the socket file appears (daemon is ready).
 pub async fn run_splash(sock_path: Option<&std::path::Path>) -> Result<()> {
+    use crossterm::event::{EnableBracketedPaste, EnableMouseCapture};
     use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
-    use crossterm::event::{EnableMouseCapture, EnableBracketedPaste};
     use ratatui::prelude::*;
 
     const LINE_DELAY_MS: u64 = 50;
@@ -182,13 +202,12 @@ pub async fn run_splash(sock_path: Option<&std::path::Path>) -> Result<()> {
         terminal.draw(|frame| crate::ui::splash::render(frame, total_lines))?;
         let hold_start = Instant::now();
         while hold_start.elapsed() < Duration::from_millis(HOLD_MS) && !dismissed {
-            let remaining = Duration::from_millis(HOLD_MS)
-                .saturating_sub(hold_start.elapsed());
+            let remaining = Duration::from_millis(HOLD_MS).saturating_sub(hold_start.elapsed());
             if remaining.is_zero() {
                 break;
             }
             // Also check if socket is ready — if so, we can finish early.
-            if sock_path.is_some_and(|p| p.exists())
+            if sock_path.is_some_and(std::path::Path::exists)
                 && hold_start.elapsed() >= Duration::from_millis(500)
             {
                 break;
@@ -224,13 +243,22 @@ pub async fn run_splash(sock_path: Option<&std::path::Path>) -> Result<()> {
 }
 
 /// Spawn a blocking task that reads crossterm events and sends them upstream.
+///
+/// Intercepts `Ctrl+\` and `Ctrl+Z` at the shim level, converting them to
+/// `ShimMessage::Detach` instead of forwarding the raw key event. This keeps
+/// detach as a protocol-level concept — the daemon never sees the keystroke.
 fn spawn_input_reader(tx: mpsc::UnboundedSender<ShimMessage>, stop: Arc<AtomicBool>) {
     tokio::task::spawn_blocking(move || {
         while !stop.load(Ordering::Relaxed) {
             if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
                 match event::read() {
                     Ok(ev) => {
-                        if tx.send(ShimMessage::TermEvent(ev)).is_err() {
+                        let msg = if is_detach_key(&ev) {
+                            ShimMessage::Detach
+                        } else {
+                            ShimMessage::TermEvent(ev)
+                        };
+                        if tx.send(msg).is_err() {
                             break;
                         }
                     }
@@ -239,6 +267,19 @@ fn spawn_input_reader(tx: mpsc::UnboundedSender<ShimMessage>, stop: Arc<AtomicBo
             }
         }
     });
+}
+
+/// Check if a crossterm event is a detach chord (`Ctrl+\` or `Ctrl+Z`).
+const fn is_detach_key(ev: &crossterm::event::Event) -> bool {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    matches!(
+        ev,
+        Event::Key(KeyEvent {
+            code: KeyCode::Char('\\' | 'z'),
+            modifiers,
+            ..
+        }) if modifiers.contains(KeyModifiers::CONTROL)
+    )
 }
 
 /// Spawn a task that forwards SIGWINCH as Resize messages.
@@ -267,7 +308,7 @@ async fn run_relay_loop<W>(
     input_rx: &mut mpsc::UnboundedReceiver<ShimMessage>,
     write_half: &mut W,
     downstream_rx: &mut mpsc::UnboundedReceiver<MainMessage>,
-) -> String
+) -> RelayExit
 where
     W: tokio::io::AsyncWriteExt + Unpin + Send,
 {
@@ -276,10 +317,10 @@ where
             msg = input_rx.recv() => {
                 if let Some(shim_msg) = msg {
                     if let Err(e) = protocol::write_message(write_half, &shim_msg).await {
-                        return format!("write error: {e}");
+                        return RelayExit::WriteError(e.to_string());
                     }
                 } else {
-                    return "input channel closed".into();
+                    return RelayExit::InputClosed;
                 }
             }
             msg = downstream_rx.recv() => {
@@ -289,9 +330,9 @@ where
                         let _ = stdout.write_all(&bytes);
                         let _ = stdout.flush();
                     }
-                    Some(MainMessage::Detached) => return "detached".into(),
-                    Some(MainMessage::Quit) => return "quit".into(),
-                    None => return "connection lost".into(),
+                    Some(MainMessage::Detached) => return RelayExit::Detached,
+                    Some(MainMessage::Quit) => return RelayExit::Quit,
+                    None => return RelayExit::ConnectionLost,
                 }
             }
         }

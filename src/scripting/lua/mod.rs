@@ -198,7 +198,9 @@ impl LuaEngine {
             "on",
             lua.create_function(
                 move |lua, (event_name, callback, priority): (String, LuaFunction, Option<i32>)| {
-                    let mut inner = st.lock().map_err(|e| mlua::Error::RuntimeError(format!("handler state poisoned: {e}")))?;
+                    let mut inner = st.lock().map_err(|e| {
+                        mlua::Error::RuntimeError(format!("handler state poisoned: {e}"))
+                    })?;
                     let id = inner.next_id();
                     let key = format!("__handler_{id}");
                     lua.set_named_registry_value(&key, callback)?;
@@ -224,7 +226,9 @@ impl LuaEngine {
             "once",
             lua.create_function(
                 move |lua, (event_name, callback, priority): (String, LuaFunction, Option<i32>)| {
-                    let mut inner = st.lock().map_err(|e| mlua::Error::RuntimeError(format!("handler state poisoned: {e}")))?;
+                    let mut inner = st.lock().map_err(|e| {
+                        mlua::Error::RuntimeError(format!("handler state poisoned: {e}"))
+                    })?;
                     let id = inner.next_id();
                     let key = format!("__handler_{id}");
                     lua.set_named_registry_value(&key, callback)?;
@@ -248,8 +252,13 @@ impl LuaEngine {
         api_table.set(
             "off",
             lua.create_function(move |lua, id: u64| {
-                let mut inner = st.lock().map_err(|e| mlua::Error::RuntimeError(format!("handler state poisoned: {e}")))?;
-                let removed = inner.handlers.iter().position(|h| h.id == id)
+                let mut inner = st.lock().map_err(|e| {
+                    mlua::Error::RuntimeError(format!("handler state poisoned: {e}"))
+                })?;
+                let removed = inner
+                    .handlers
+                    .iter()
+                    .position(|h| h.id == id)
                     .map(|pos| inner.handlers.remove(pos));
                 drop(inner);
                 if let Some(handler) = removed {
@@ -572,30 +581,30 @@ impl LuaEngine {
         let reg_cmd = Arc::clone(&api.register_command);
         api_table.set(
             "command",
-            lua.create_function(
-                move |lua, (name, opts): (String, LuaTable)| {
-                    let handler: LuaFunction = opts.get("handler")?;
-                    let description: String =
-                        opts.get::<Option<String>>("description")?.unwrap_or_default();
-                    let usage: String =
-                        opts.get::<Option<String>>("usage")?.unwrap_or_default();
+            lua.create_function(move |lua, (name, opts): (String, LuaTable)| {
+                let handler: LuaFunction = opts.get("handler")?;
+                let description: String = opts
+                    .get::<Option<String>>("description")?
+                    .unwrap_or_default();
+                let usage: String = opts.get::<Option<String>>("usage")?.unwrap_or_default();
 
-                    let mut inner = st.lock().map_err(|e| mlua::Error::RuntimeError(format!("handler state poisoned: {e}")))?;
-                    let id = inner.next_id();
-                    let key = format!("__cmd_{id}");
-                    lua.set_named_registry_value(&key, handler)?;
-                    inner.commands.insert(
-                        name.clone(),
-                        LuaCommand {
-                            script_name: sn.clone(),
-                            registry_key: key,
-                        },
-                    );
-                    drop(inner);
-                    reg_cmd((name, description, usage));
-                    Ok(())
-                },
-            )?,
+                let mut inner = st.lock().map_err(|e| {
+                    mlua::Error::RuntimeError(format!("handler state poisoned: {e}"))
+                })?;
+                let id = inner.next_id();
+                let key = format!("__cmd_{id}");
+                lua.set_named_registry_value(&key, handler)?;
+                inner.commands.insert(
+                    name.clone(),
+                    LuaCommand {
+                        script_name: sn.clone(),
+                        registry_key: key,
+                    },
+                );
+                drop(inner);
+                reg_cmd((name, description, usage));
+                Ok(())
+            })?,
         )?;
 
         // api.remove_command(name)
@@ -604,7 +613,9 @@ impl LuaEngine {
         api_table.set(
             "remove_command",
             lua.create_function(move |lua, name: String| {
-                let mut inner = st.lock().map_err(|e| mlua::Error::RuntimeError(format!("handler state poisoned: {e}")))?;
+                let mut inner = st.lock().map_err(|e| {
+                    mlua::Error::RuntimeError(format!("handler state poisoned: {e}"))
+                })?;
                 let removed = inner.commands.remove(&name);
                 drop(inner);
                 if let Some(cmd) = removed {
@@ -632,19 +643,24 @@ impl LuaEngine {
         let sn = script_name.to_string();
         api_table.set(
             "timer",
-            lua.create_function(move |lua, (ms, callback): (u64, LuaFunction)| -> LuaResult<u64> {
-                let id = start_timer(ms);
-                let key = format!("timer_{id}");
-                lua.set_named_registry_value(&key, callback)?;
-                st.lock()
-                    .map_err(|e| mlua::Error::runtime(e.to_string()))?
-                    .timers
-                    .insert(id, LuaTimer {
-                        registry_key: key,
-                        script_name: sn.clone(),
-                    });
-                Ok(id)
-            })?,
+            lua.create_function(
+                move |lua, (ms, callback): (u64, LuaFunction)| -> LuaResult<u64> {
+                    let id = start_timer(ms);
+                    let key = format!("timer_{id}");
+                    lua.set_named_registry_value(&key, callback)?;
+                    st.lock()
+                        .map_err(|e| mlua::Error::runtime(e.to_string()))?
+                        .timers
+                        .insert(
+                            id,
+                            LuaTimer {
+                                registry_key: key,
+                                script_name: sn.clone(),
+                            },
+                        );
+                    Ok(id)
+                },
+            )?,
         )?;
 
         let start_timeout = Arc::clone(&api.start_timeout);
@@ -652,19 +668,24 @@ impl LuaEngine {
         let sn = script_name.to_string();
         api_table.set(
             "timeout",
-            lua.create_function(move |lua, (ms, callback): (u64, LuaFunction)| -> LuaResult<u64> {
-                let id = start_timeout(ms);
-                let key = format!("timer_{id}");
-                lua.set_named_registry_value(&key, callback)?;
-                st.lock()
-                    .map_err(|e| mlua::Error::runtime(e.to_string()))?
-                    .timers
-                    .insert(id, LuaTimer {
-                        registry_key: key,
-                        script_name: sn.clone(),
-                    });
-                Ok(id)
-            })?,
+            lua.create_function(
+                move |lua, (ms, callback): (u64, LuaFunction)| -> LuaResult<u64> {
+                    let id = start_timeout(ms);
+                    let key = format!("timer_{id}");
+                    lua.set_named_registry_value(&key, callback)?;
+                    st.lock()
+                        .map_err(|e| mlua::Error::runtime(e.to_string()))?
+                        .timers
+                        .insert(
+                            id,
+                            LuaTimer {
+                                registry_key: key,
+                                script_name: sn.clone(),
+                            },
+                        );
+                    Ok(id)
+                },
+            )?,
         )?;
 
         let cancel_timer = Arc::clone(&api.cancel_timer);
@@ -822,7 +843,10 @@ impl ScriptEngine for LuaEngine {
 
         // Remove event handlers
         let handler_keys: Vec<String> = {
-            let mut st = self.state.lock().map_err(|e| eyre!("handler state poisoned: {e}"))?;
+            let mut st = self
+                .state
+                .lock()
+                .map_err(|e| eyre!("handler state poisoned: {e}"))?;
             let keys: Vec<String> = st
                 .handlers
                 .iter()
@@ -838,7 +862,10 @@ impl ScriptEngine for LuaEngine {
 
         // Remove commands
         let cmd_keys: Vec<String> = {
-            let mut st = self.state.lock().map_err(|e| eyre!("handler state poisoned: {e}"))?;
+            let mut st = self
+                .state
+                .lock()
+                .map_err(|e| eyre!("handler state poisoned: {e}"))?;
             let keys: Vec<String> = st
                 .commands
                 .iter()
@@ -854,7 +881,10 @@ impl ScriptEngine for LuaEngine {
 
         // Remove timers
         let timer_keys: Vec<String> = {
-            let mut st = self.state.lock().map_err(|e| eyre!("handler state poisoned: {e}"))?;
+            let mut st = self
+                .state
+                .lock()
+                .map_err(|e| eyre!("handler state poisoned: {e}"))?;
             let keys: Vec<String> = st
                 .timers
                 .values()
@@ -966,7 +996,10 @@ impl ScriptEngine for LuaEngine {
             args_table.set(i + 1, arg.as_str()).ok()?;
         }
 
-        match func.call::<LuaValue>((args_table, connection_id.map(std::string::ToString::to_string))) {
+        match func.call::<LuaValue>((
+            args_table,
+            connection_id.map(std::string::ToString::to_string),
+        )) {
             Ok(LuaValue::Boolean(true)) => Some(EventResult::Suppress),
             Ok(_) => Some(EventResult::Continue),
             Err(e) => {
@@ -1054,10 +1087,7 @@ mod tests {
     }
 
     fn write_script(source: &str) -> NamedTempFile {
-        let mut f = tempfile::Builder::new()
-            .suffix(".lua")
-            .tempfile()
-            .unwrap();
+        let mut f = tempfile::Builder::new().suffix(".lua").tempfile().unwrap();
         f.write_all(source.as_bytes()).unwrap();
         f.flush().unwrap();
         f
@@ -1294,10 +1324,7 @@ mod tests {
             params: HashMap::new(),
         };
         engine.emit(&event);
-        assert_eq!(
-            *order.lock().unwrap(),
-            vec!["high", "normal", "low"]
-        );
+        assert_eq!(*order.lock().unwrap(), vec!["high", "normal", "low"]);
     }
 
     #[test]

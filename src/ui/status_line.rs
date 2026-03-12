@@ -6,7 +6,10 @@ use crate::config::StatusbarItem;
 use crate::state::buffer::{ActivityLevel, BufferType};
 use crate::theme::hex_to_color;
 
-#[expect(clippy::too_many_lines, reason = "single render function iterating status bar items")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "single render function iterating status bar items"
+)]
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     if !app.config.statusbar.enabled {
         return;
@@ -100,7 +103,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                             ));
                         }
                     } else if let Some(lag) = c.lag {
-                        #[expect(clippy::cast_precision_loss, reason = "lag in ms will never exceed f64 mantissa")]
+                        #[expect(
+                            clippy::cast_precision_loss,
+                            reason = "lag in ms will never exceed f64 mantissa"
+                        )]
                         let secs = lag as f64 / 1000.0;
                         let lag_color = if lag > 5000 {
                             accent
@@ -148,8 +154,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                     };
 
                     if !activity_spans.is_empty() {
-                        activity_spans
-                            .push(Span::styled(",", Style::default().fg(fg_dim)));
+                        activity_spans.push(Span::styled(",", Style::default().fg(fg_dim)));
                     }
                     activity_spans.push(Span::styled(
                         current_num.to_string(),

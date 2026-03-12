@@ -75,7 +75,10 @@ pub fn get_messages(
              ORDER BY timestamp DESC
              LIMIT ?4",
         )?;
-        #[expect(clippy::cast_possible_wrap, reason = "limit will never exceed i64::MAX in practice")]
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "limit will never exceed i64::MAX in practice"
+        )]
         let rows = stmt.query_map(params![network, buffer, before_ts, limit as i64], |row| {
             map_row(row, encrypt, crypto_key)
         })?;
@@ -87,7 +90,10 @@ pub fn get_messages(
              ORDER BY timestamp DESC
              LIMIT ?3",
         )?;
-        #[expect(clippy::cast_possible_wrap, reason = "limit will never exceed i64::MAX in practice")]
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "limit will never exceed i64::MAX in practice"
+        )]
         let rows = stmt.query_map(params![network, buffer, limit as i64], |row| {
             map_row(row, encrypt, crypto_key)
         })?;
@@ -135,7 +141,10 @@ pub fn search_messages(
         use std::fmt::Write;
         let _ = write!(sql, " ORDER BY m.timestamp DESC LIMIT ?{param_idx}");
     }
-    #[expect(clippy::cast_possible_wrap, reason = "limit will never exceed i64::MAX in practice")]
+    #[expect(
+        clippy::cast_possible_wrap,
+        reason = "limit will never exceed i64::MAX in practice"
+    )]
     {
         dyn_params.push(Box::new(limit as i64));
     }
@@ -151,9 +160,8 @@ pub fn search_messages(
 
 /// List distinct buffer names for a given network.
 pub fn get_buffers(db: &Connection, network: &str) -> rusqlite::Result<Vec<String>> {
-    let mut stmt = db.prepare(
-        "SELECT DISTINCT buffer FROM messages WHERE network = ?1 ORDER BY buffer",
-    )?;
+    let mut stmt =
+        db.prepare("SELECT DISTINCT buffer FROM messages WHERE network = ?1 ORDER BY buffer")?;
     let rows = stmt.query_map(params![network], |row| row.get(0))?;
     rows.collect()
 }
@@ -161,7 +169,10 @@ pub fn get_buffers(db: &Connection, network: &str) -> rusqlite::Result<Vec<Strin
 /// Return the total number of messages stored.
 pub fn get_message_count(db: &Connection) -> rusqlite::Result<u64> {
     db.query_row("SELECT COUNT(*) FROM messages", [], |row| {
-        #[expect(clippy::cast_sign_loss, reason = "COUNT(*) always returns non-negative")]
+        #[expect(
+            clippy::cast_sign_loss,
+            reason = "COUNT(*) always returns non-negative"
+        )]
         row.get::<_, i64>(0).map(|c| c as u64)
     })
 }
@@ -233,7 +244,10 @@ pub fn get_unread_count(
     client: &str,
 ) -> rusqlite::Result<u64> {
     let last_read = get_read_marker(db, network, buffer, client)?;
-    #[expect(clippy::cast_sign_loss, reason = "COUNT(*) always returns non-negative")]
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "COUNT(*) always returns non-negative"
+    )]
     last_read.map_or_else(
         || {
             db.query_row(

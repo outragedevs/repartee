@@ -85,9 +85,10 @@ impl NetsplitState {
         let now = Instant::now();
 
         // Find existing group for this server pair that hasn't been printed yet
-        let group_idx = self.groups.iter().position(|g| {
-            g.server1 == server1 && g.server2 == server2 && !g.printed
-        });
+        let group_idx = self
+            .groups
+            .iter()
+            .position(|g| g.server1 == server1 && g.server2 == server2 && !g.printed);
 
         let idx = if let Some(idx) = group_idx {
             idx
@@ -130,9 +131,10 @@ impl NetsplitState {
         let now = Instant::now();
 
         // Find or create netjoin group
-        let nj_idx = self.netjoins.iter().position(|nj| {
-            nj.server1 == server1 && nj.server2 == server2 && !nj.printed
-        });
+        let nj_idx = self
+            .netjoins
+            .iter()
+            .position(|nj| nj.server1 == server1 && nj.server2 == server2 && !nj.printed);
 
         let nj_index = if let Some(idx) = nj_idx {
             idx
@@ -442,16 +444,8 @@ mod tests {
     #[test]
     fn handle_quit_batches_same_server_pair() {
         let mut state = NetsplitState::new();
-        state.handle_quit(
-            "alice",
-            "hub.net leaf.net",
-            &["conn/#chan".to_string()],
-        );
-        state.handle_quit(
-            "bob",
-            "hub.net leaf.net",
-            &["conn/#chan".to_string()],
-        );
+        state.handle_quit("alice", "hub.net leaf.net", &["conn/#chan".to_string()]);
+        state.handle_quit("bob", "hub.net leaf.net", &["conn/#chan".to_string()]);
         assert_eq!(state.groups.len(), 1);
         assert_eq!(state.groups[0].nicks.len(), 2);
     }
@@ -473,11 +467,7 @@ mod tests {
     #[test]
     fn handle_join_returns_true_for_split_nick() {
         let mut state = NetsplitState::new();
-        state.handle_quit(
-            "alice",
-            "hub.net leaf.net",
-            &["conn/#chan".to_string()],
-        );
+        state.handle_quit("alice", "hub.net leaf.net", &["conn/#chan".to_string()]);
         assert!(state.handle_join("alice", "conn/#chan"));
         assert_eq!(state.netjoins.len(), 1);
         assert_eq!(state.netjoins[0].nicks, vec!["alice"]);
@@ -510,11 +500,7 @@ mod tests {
     #[test]
     fn tick_returns_empty_before_batch_wait() {
         let mut state = NetsplitState::new();
-        state.handle_quit(
-            "alice",
-            "hub.net leaf.net",
-            &["conn/#chan".to_string()],
-        );
+        state.handle_quit("alice", "hub.net leaf.net", &["conn/#chan".to_string()]);
         // Immediately calling tick should return nothing (batch wait not elapsed)
         let msgs = state.tick();
         assert!(msgs.is_empty());
@@ -522,13 +508,15 @@ mod tests {
 
     #[test]
     fn format_nick_list_under_limit() {
-        let nicks: Vec<&str> = (0..5).map(|i| match i {
-            0 => "a",
-            1 => "b",
-            2 => "c",
-            3 => "d",
-            _ => "e",
-        }).collect();
+        let nicks: Vec<&str> = (0..5)
+            .map(|i| match i {
+                0 => "a",
+                1 => "b",
+                2 => "c",
+                3 => "d",
+                _ => "e",
+            })
+            .collect();
         let result = format_nick_list(&nicks);
         assert_eq!(result, "a, b, c, d, e");
     }

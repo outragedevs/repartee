@@ -7,7 +7,10 @@ use crate::theme::hex_to_color;
 
 #[derive(Debug, Clone, Copy, Default)]
 #[allow(dead_code)]
-#[expect(clippy::struct_field_names, reason = "_area suffix clarifies these are ratatui Rect regions")]
+#[expect(
+    clippy::struct_field_names,
+    reason = "_area suffix clarifies these are ratatui Rect regions"
+)]
 pub struct UiRegions {
     pub buffer_list_area: Option<Rect>,
     pub chat_area: Option<Rect>,
@@ -70,11 +73,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             regions.nick_list_area = Some(nick_area);
         }
         (true, false) => {
-            let [buf_list_area, chat_area] = Layout::horizontal([
-                Constraint::Length(left_width),
-                Constraint::Fill(1),
-            ])
-            .areas(main_area);
+            let [buf_list_area, chat_area] =
+                Layout::horizontal([Constraint::Length(left_width), Constraint::Fill(1)])
+                    .areas(main_area);
             app.buffer_list_total =
                 super::buffer_list::render(frame, buf_list_area, app, app.buffer_list_scroll);
             regions.buffer_list_area = Some(buf_list_area);
@@ -82,11 +83,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             regions.chat_area = Some(chat_area);
         }
         (false, true) => {
-            let [chat_area, nick_area] = Layout::horizontal([
-                Constraint::Fill(1),
-                Constraint::Length(right_width),
-            ])
-            .areas(main_area);
+            let [chat_area, nick_area] =
+                Layout::horizontal([Constraint::Fill(1), Constraint::Length(right_width)])
+                    .areas(main_area);
             super::chat_view::render(frame, chat_area, app);
             regions.chat_area = Some(chat_area);
             app.nick_list_total =
@@ -106,11 +105,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let bottom_inner = bottom_block.inner(bottom_area);
     frame.render_widget(bottom_block, bottom_area);
 
-    let [status_area, input_area] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .areas(bottom_inner);
+    let [status_area, input_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(bottom_inner);
 
     super::status_line::render(frame, status_area, app);
     super::input::render(frame, input_area, app);

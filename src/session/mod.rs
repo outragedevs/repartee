@@ -6,19 +6,14 @@ use std::path::PathBuf;
 
 use crate::constants;
 
-/// Directory where session Unix sockets live: `~/.repartee/sessions/`.
-pub fn sessions_dir() -> PathBuf {
-    constants::sessions_dir()
-}
-
 /// Socket path for a given PID: `~/.repartee/sessions/{pid}.sock`.
 pub fn socket_path(pid: u32) -> PathBuf {
-    sessions_dir().join(format!("{pid}.sock"))
+    constants::sessions_dir().join(format!("{pid}.sock"))
 }
 
 /// List all active sessions: `(pid, socket_path)` pairs for living PIDs.
 pub fn list_sessions() -> Vec<(u32, PathBuf)> {
-    let dir = sessions_dir();
+    let dir = constants::sessions_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };
@@ -44,7 +39,7 @@ pub fn list_sessions() -> Vec<(u32, PathBuf)> {
 
 /// Remove socket files for dead PIDs.
 pub fn cleanup_stale_sockets() {
-    let dir = sessions_dir();
+    let dir = constants::sessions_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return;
     };
@@ -63,18 +58,24 @@ pub fn cleanup_stale_sockets() {
             continue;
         };
         if !is_pid_alive(pid) {
-            tracing::info!("removing stale socket for dead PID {pid}: {}", path.display());
+            tracing::info!(
+                "removing stale socket for dead PID {pid}: {}",
+                path.display()
+            );
             let _ = std::fs::remove_file(&path);
         }
     }
 }
 
-/// Check if a PID is alive using `kill -0`.
+/// Check if a PID is alive using `kill(pid, 0)`.
+///
+/// # Safety
+/// `libc::kill` with signal 0 is a POSIX-standard liveness check that sends
+/// no signal — it only tests whether the process exists and is reachable.
 pub fn is_pid_alive(pid: u32) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    let Ok(pid_t) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 sends no signal, only checks process existence.
+    unsafe { libc::kill(pid_t, 0) == 0 }
 }

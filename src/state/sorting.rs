@@ -10,7 +10,13 @@ where
 {
     let mut keyed: Vec<(String, String, &'a Buffer)> = buffers
         .iter()
-        .map(|&b| (label_fn(&b.connection_id).to_lowercase(), b.name.to_lowercase(), b))
+        .map(|&b| {
+            (
+                label_fn(&b.connection_id).to_lowercase(),
+                b.name.to_lowercase(),
+                b,
+            )
+        })
         .collect();
     keyed.sort_by(|(la, na, a), (lb, nb, b)| {
         la.cmp(lb)
@@ -23,10 +29,8 @@ where
 /// Sort nicks by prefix rank (using `prefix_order`), then alphabetically (case-insensitive).
 /// Nicks with no prefix (empty string) sort last.
 pub fn sort_nicks<'a>(nicks: &[&'a NickEntry], prefix_order: &str) -> Vec<&'a NickEntry> {
-    let mut keyed: Vec<(String, &'a NickEntry)> = nicks
-        .iter()
-        .map(|&n| (n.nick.to_lowercase(), n))
-        .collect();
+    let mut keyed: Vec<(String, &'a NickEntry)> =
+        nicks.iter().map(|&n| (n.nick.to_lowercase(), n)).collect();
     keyed.sort_by(|(la, a), (lb, b)| {
         let rank_a = prefix_rank(&a.prefix, prefix_order);
         let rank_b = prefix_rank(&b.prefix, prefix_order);
@@ -113,13 +117,8 @@ mod tests {
         let chan_b = make_buffer("net1", BufferType::Channel, "#linux");
 
         let input: Vec<&Buffer> = vec![&srv_b, &chan_b, &srv_a, &chan_a];
-        let labels = std::collections::HashMap::from([
-            ("net1", "IRCnet2"),
-            ("net2", "IRCnet"),
-        ]);
-        let result = sort_buffers(&input, |id| {
-            labels.get(id).unwrap_or(&id).to_string()
-        });
+        let labels = std::collections::HashMap::from([("net1", "IRCnet2"), ("net2", "IRCnet")]);
+        let result = sort_buffers(&input, |id| labels.get(id).unwrap_or(&id).to_string());
 
         // IRCnet (net2) should come before IRCnet2 (net1)
         assert_eq!(result[0].connection_id, "net2");

@@ -6,11 +6,16 @@ use chrono::{DateTime, Utc};
 use irc::proto::{Command, Message as IrcMessage, Prefix, Response};
 
 use crate::config::IgnoreLevel;
-use crate::irc::formatting::{extract_nick, extract_nick_userhost, modes_to_prefix, is_channel, is_server_prefix, strip_irc_formatting};
+use crate::irc::formatting::{
+    extract_nick, extract_nick_userhost, is_channel, is_server_prefix, modes_to_prefix,
+    strip_irc_formatting,
+};
 use crate::irc::ignore::should_ignore;
-use crate::state::buffer::{make_buffer_id, ActivityLevel, Buffer, BufferType, Message, MessageType, NickEntry};
-use crate::state::connection::ConnectionStatus;
 use crate::state::AppState;
+use crate::state::buffer::{
+    ActivityLevel, Buffer, BufferType, Message, MessageType, NickEntry, make_buffer_id,
+};
+use crate::state::connection::ConnectionStatus;
 
 /// Route an incoming IRC protocol message to the appropriate handler,
 /// mutating `AppState` as needed.
@@ -25,13 +30,30 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
 
     match &msg.command {
         Command::PRIVMSG(target, text) => {
-            handle_privmsg(state, conn_id, &our_nick, msg.prefix.as_ref(), target, text, tags);
+            handle_privmsg(
+                state,
+                conn_id,
+                &our_nick,
+                msg.prefix.as_ref(),
+                target,
+                text,
+                tags,
+            );
         }
         Command::NOTICE(target, text) => {
             handle_notice(state, conn_id, msg.prefix.as_ref(), target, text, tags);
         }
         Command::JOIN(channel, account, realname) => {
-            handle_join(state, conn_id, &our_nick, msg.prefix.as_ref(), channel, account.as_deref(), realname.as_deref(), tags);
+            handle_join(
+                state,
+                conn_id,
+                &our_nick,
+                msg.prefix.as_ref(),
+                channel,
+                account.as_deref(),
+                realname.as_deref(),
+                tags,
+            );
         }
         Command::PART(channel, reason) => {
             handle_part(
@@ -45,10 +67,24 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
             );
         }
         Command::QUIT(reason) => {
-            handle_quit(state, conn_id, &our_nick, msg.prefix.as_ref(), reason.as_deref(), tags);
+            handle_quit(
+                state,
+                conn_id,
+                &our_nick,
+                msg.prefix.as_ref(),
+                reason.as_deref(),
+                tags,
+            );
         }
         Command::NICK(new_nick) => {
-            handle_nick_change(state, conn_id, &our_nick, msg.prefix.as_ref(), new_nick, tags);
+            handle_nick_change(
+                state,
+                conn_id,
+                &our_nick,
+                msg.prefix.as_ref(),
+                new_nick,
+                tags,
+            );
         }
         Command::KICK(channel, kicked_user, reason) => {
             handle_kick(
@@ -63,13 +99,28 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
             );
         }
         Command::TOPIC(channel, topic) => {
-            handle_topic(state, conn_id, msg.prefix.as_ref(), channel, topic.as_deref(), tags);
+            handle_topic(
+                state,
+                conn_id,
+                msg.prefix.as_ref(),
+                channel,
+                topic.as_deref(),
+                tags,
+            );
         }
         Command::ChannelMODE(target, _) | Command::UserMODE(target, _) => {
             handle_mode(state, conn_id, msg.prefix.as_ref(), target, msg, tags);
         }
         Command::INVITE(nick, channel) => {
-            handle_invite(state, conn_id, &our_nick, msg.prefix.as_ref(), nick, channel, tags);
+            handle_invite(
+                state,
+                conn_id,
+                &our_nick,
+                msg.prefix.as_ref(),
+                nick,
+                channel,
+                tags,
+            );
         }
         Command::Response(response, args) => {
             handle_response(state, conn_id, *response, args);
@@ -84,7 +135,14 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
             handle_away(state, conn_id, msg.prefix.as_ref(), reason.as_deref());
         }
         Command::CHGHOST(new_user, new_host) => {
-            handle_chghost(state, conn_id, msg.prefix.as_ref(), new_user, new_host, tags);
+            handle_chghost(
+                state,
+                conn_id,
+                msg.prefix.as_ref(),
+                new_user,
+                new_host,
+                tags,
+            );
         }
         Command::ERROR(message) => {
             handle_error(state, conn_id, message);
@@ -128,7 +186,9 @@ pub fn handle_connected(state: &mut AppState, conn_id: &str) {
             text: format!("Connected to {label}"),
             highlight: false,
             event_key: Some("connected".to_string()),
-            event_params: None, log_msg_id: None, log_ref_id: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
             tags: HashMap::new(),
         },
     );
@@ -141,8 +201,7 @@ pub fn channels_to_rejoin(state: &AppState, conn_id: &str) -> Vec<String> {
         .buffers
         .values()
         .filter(|b| {
-            b.connection_id == conn_id
-                && b.buffer_type == crate::state::buffer::BufferType::Channel
+            b.connection_id == conn_id && b.buffer_type == crate::state::buffer::BufferType::Channel
         })
         .map(|b| b.name.clone())
         .collect();
@@ -167,8 +226,7 @@ pub fn handle_disconnected(state: &mut AppState, conn_id: &str, error: Option<&s
         .buffers
         .values()
         .filter(|b| {
-            b.connection_id == conn_id
-                && b.buffer_type == crate::state::buffer::BufferType::Channel
+            b.connection_id == conn_id && b.buffer_type == crate::state::buffer::BufferType::Channel
         })
         .map(|b| b.name.clone())
         .collect();
@@ -188,8 +246,10 @@ pub fn handle_disconnected(state: &mut AppState, conn_id: &str, error: Option<&s
             conn.joined_channels = current_channels;
         }
         if conn.should_reconnect {
-            let delay = calculate_reconnect_delay(conn.reconnect_delay_secs, conn.reconnect_attempts);
-            conn.next_reconnect = Some(std::time::Instant::now() + std::time::Duration::from_secs(delay));
+            let delay =
+                calculate_reconnect_delay(conn.reconnect_delay_secs, conn.reconnect_attempts);
+            conn.next_reconnect =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(delay));
         }
     }
 
@@ -224,7 +284,9 @@ pub fn handle_disconnected(state: &mut AppState, conn_id: &str, error: Option<&s
             text: msg_text,
             highlight: false,
             event_key: Some("disconnected".to_string()),
-            event_params: None, log_msg_id: None, log_ref_id: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
             tags: HashMap::new(),
         },
     );
@@ -287,10 +349,7 @@ pub fn handle_cap_new(
 
     tracing::info!("CAP NEW from {conn_id}: {}", new_caps.join(" "));
 
-    let enabled = state
-        .connections
-        .get(conn_id)
-        .map(|c| &c.enabled_caps);
+    let enabled = state.connections.get(conn_id).map(|c| &c.enabled_caps);
 
     let to_request: Vec<String> = new_caps
         .iter()
@@ -309,7 +368,10 @@ pub fn handle_cap_new(
     let buffer_id = make_buffer_id(conn_id, &label);
 
     let text = if to_request.is_empty() {
-        format!("New capabilities available: {} (none requested)", new_caps.join(", "))
+        format!(
+            "New capabilities available: {} (none requested)",
+            new_caps.join(", ")
+        )
     } else {
         format!(
             "New capabilities available: {} — requesting: {}",
@@ -330,7 +392,9 @@ pub fn handle_cap_new(
             text,
             highlight: false,
             event_key: Some("cap_new".to_string()),
-            event_params: None, log_msg_id: None, log_ref_id: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
             tags: HashMap::new(),
         },
     );
@@ -374,7 +438,10 @@ pub fn handle_cap_del(
     let buffer_id = make_buffer_id(conn_id, &label);
 
     let text = if actually_removed.is_empty() {
-        format!("Capabilities removed: {} (none were enabled)", removed_caps.join(", "))
+        format!(
+            "Capabilities removed: {} (none were enabled)",
+            removed_caps.join(", ")
+        )
     } else {
         format!("Capabilities removed: {}", actually_removed.join(", "))
     };
@@ -391,7 +458,9 @@ pub fn handle_cap_del(
             text,
             highlight: false,
             event_key: Some("cap_del".to_string()),
-            event_params: None, log_msg_id: None, log_ref_id: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
             tags: HashMap::new(),
         },
     );
@@ -442,7 +511,9 @@ pub fn handle_cap_ack(
             text,
             highlight: false,
             event_key: Some("cap_ack".to_string()),
-            event_params: None, log_msg_id: None, log_ref_id: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
             tags: HashMap::new(),
         },
     );
@@ -485,7 +556,9 @@ pub fn handle_cap_nak(
             text,
             highlight: false,
             event_key: Some("cap_nak".to_string()),
-            event_params: None, log_msg_id: None, log_ref_id: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
             tags: HashMap::new(),
         },
     );
@@ -550,9 +623,7 @@ fn handle_privmsg(
 
     // Check if this is a CTCP (ACTION or other)
     let is_ctcp = text.starts_with('\x01') && text.ends_with('\x01');
-    let is_action = is_ctcp
-        && text.len() > 2
-        && text[1..text.len() - 1].starts_with("ACTION ");
+    let is_action = is_ctcp && text.len() > 2 && text[1..text.len() - 1].starts_with("ACTION ");
 
     // --- Ignore check ---
     {
@@ -565,7 +636,11 @@ fn handle_privmsg(
         } else {
             IgnoreLevel::Msgs
         };
-        let channel = if target_is_channel { Some(target) } else { None };
+        let channel = if target_is_channel {
+            Some(target)
+        } else {
+            None
+        };
         if should_ignore(
             &state.ignores,
             &nick,
@@ -641,7 +716,9 @@ fn handle_privmsg(
                     text: action_text.to_string(),
                     highlight: is_mention,
                     event_key: None,
-                    event_params: None, log_msg_id: None, log_ref_id: None,
+                    event_params: None,
+                    log_msg_id: None,
+                    log_ref_id: None,
                     tags,
                 },
                 activity,
@@ -725,7 +802,9 @@ fn handle_privmsg(
             text: text.to_string(),
             highlight: is_mention,
             event_key: None,
-            event_params: None, log_msg_id: None, log_ref_id: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
             tags,
         },
         activity,
@@ -747,7 +826,11 @@ fn handle_notice(
     // --- Ignore check (skip for server notices) ---
     if !is_server_notice {
         let (n, ident, host) = extract_nick_userhost(prefix);
-        let channel = if is_channel(target) { Some(target) } else { None };
+        let channel = if is_channel(target) {
+            Some(target)
+        } else {
+            None
+        };
         if should_ignore(
             &state.ignores,
             &n,
@@ -794,7 +877,9 @@ fn handle_notice(
         make_buffer_id(conn_id, label)
     };
 
-    let mode_prefix = nick.as_deref().and_then(|n| nick_prefix(state, &buffer_id, n));
+    let mode_prefix = nick
+        .as_deref()
+        .and_then(|n| nick_prefix(state, &buffer_id, n));
     let id = state.next_message_id();
     state.add_message(
         &buffer_id,
@@ -807,7 +892,9 @@ fn handle_notice(
             text: text.to_string(),
             highlight: false,
             event_key: None,
-            event_params: None, log_msg_id: None, log_ref_id: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
             tags,
         },
     );
@@ -835,9 +922,8 @@ fn handle_join(
 
     // account-tag: supplementary source (only if extended-join didn't provide one)
     let account = account.or_else(|| {
-        tags.get("account").and_then(|a| {
-            if a == "*" { None } else { Some(a.clone()) }
-        })
+        tags.get("account")
+            .and_then(|a| if a == "*" { None } else { Some(a.clone()) })
     });
 
     // extended-join: realname from third JOIN arg
@@ -932,7 +1018,9 @@ fn handle_join(
             message_type: MessageType::Event,
             nick: None,
             nick_mode: None,
-            text: format!("{nick} ({ident}@{host}) has joined {channel} {account_display} {realname_display}"),
+            text: format!(
+                "{nick} ({ident}@{host}) has joined {channel} {account_display} {realname_display}"
+            ),
             highlight: false,
             event_key: Some("join".to_string()),
             // $0=nick, $1=ident, $2=host, $3=channel, $4=account, $5=realname
@@ -976,7 +1064,10 @@ fn update_nick_account_in_buffers(
 /// sends this command to every channel we share with them.
 ///   - `account == "*"` → logged out (clear account)
 ///   - otherwise → logged in as `account`
-#[expect(clippy::needless_pass_by_value, reason = "tags follows the convention of all other event handlers")]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "tags follows the convention of all other event handlers"
+)]
 fn handle_account(
     state: &mut AppState,
     conn_id: &str,
@@ -988,11 +1079,7 @@ fn handle_account(
         return;
     };
 
-    let resolved: Option<&str> = if account == "*" {
-        None
-    } else {
-        Some(account)
-    };
+    let resolved: Option<&str> = if account == "*" { None } else { Some(account) };
 
     update_nick_account_in_buffers(state, conn_id, &nick, resolved);
 
@@ -1009,11 +1096,18 @@ fn handle_account(
         .collect();
 
     let (text, description) = resolved.map_or_else(
-        || (format!("{nick} has logged out"), "has logged out".to_string()),
-        |acct| (
-            format!("{nick} is now logged in as {acct}"),
-            format!("is now logged in as {acct}"),
-        ),
+        || {
+            (
+                format!("{nick} has logged out"),
+                "has logged out".to_string(),
+            )
+        },
+        |acct| {
+            (
+                format!("{nick} is now logged in as {acct}"),
+                format!("is now logged in as {acct}"),
+            )
+        },
     );
 
     for buf_id in shared_buffers {
@@ -1046,12 +1140,7 @@ fn handle_account(
 ///   - `reason == None` → user is back
 ///
 /// We silently update `NickEntry.away` without adding event messages (too noisy).
-fn handle_away(
-    state: &mut AppState,
-    conn_id: &str,
-    prefix: Option<&Prefix>,
-    reason: Option<&str>,
-) {
+fn handle_away(state: &mut AppState, conn_id: &str, prefix: Option<&Prefix>, reason: Option<&str>) {
     let Some(nick) = extract_nick(prefix) else {
         return;
     };
@@ -1074,7 +1163,10 @@ fn handle_away(
 /// When a user's ident or hostname changes, the server sends CHGHOST to every
 /// channel we share with them. We update the `NickEntry` and add a subtle event
 /// message.
-#[expect(clippy::needless_pass_by_value, reason = "tags follows the convention of all other event handlers")]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "tags follows the convention of all other event handlers"
+)]
 fn handle_chghost(
     state: &mut AppState,
     conn_id: &str,
@@ -1127,7 +1219,11 @@ fn handle_chghost(
                 text: text.clone(),
                 highlight: false,
                 event_key: Some("chghost".to_string()),
-                event_params: Some(vec![nick.clone(), new_user.to_string(), new_host.to_string()]),
+                event_params: Some(vec![
+                    nick.clone(),
+                    new_user.to_string(),
+                    new_host.to_string(),
+                ]),
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: tags.clone(),
@@ -1186,14 +1282,18 @@ fn handle_part(
                     channel.to_string(),
                     reason_str.to_string(),
                 ]),
-                log_msg_id: None, log_ref_id: None,
+                log_msg_id: None,
+                log_ref_id: None,
                 tags,
             },
         );
     }
 }
 
-#[expect(clippy::needless_pass_by_value, reason = "tags are dropped when ignored/netsplit, cloned into fan-out Messages otherwise")]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "tags are dropped when ignored/netsplit, cloned into fan-out Messages otherwise"
+)]
 fn handle_quit(
     state: &mut AppState,
     conn_id: &str,
@@ -1265,15 +1365,26 @@ fn handle_quit(
                     host.clone(),
                     reason_str.to_string(),
                 ]),
-                log_msg_id: if i == 0 { Some(primary_msg_id.clone()) } else { None },
-                log_ref_id: if i == 0 { None } else { Some(primary_msg_id.clone()) },
+                log_msg_id: if i == 0 {
+                    Some(primary_msg_id.clone())
+                } else {
+                    None
+                },
+                log_ref_id: if i == 0 {
+                    None
+                } else {
+                    Some(primary_msg_id.clone())
+                },
                 tags: tags.clone(),
             },
         );
     }
 }
 
-#[expect(clippy::needless_pass_by_value, reason = "tags are cloned into each fan-out Message")]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "tags are cloned into each fan-out Message"
+)]
 fn handle_nick_change(
     state: &mut AppState,
     conn_id: &str,
@@ -1342,9 +1453,7 @@ fn handle_nick_change(
         // --- Nick flood check ---
         if state.flood_protection
             && old_nick != our_nick
-            && state
-                .flood_state
-                .should_suppress_nick_flood(buf_id, now)
+            && state.flood_state.should_suppress_nick_flood(buf_id, now)
         {
             // Suppress the message display but nick was already updated above
             continue;
@@ -1368,8 +1477,16 @@ fn handle_nick_change(
                 highlight: false,
                 event_key: Some("nick_change".to_string()),
                 event_params: Some(vec![old_nick.clone(), new_nick.to_string()]),
-                log_msg_id: if is_primary { Some(primary_msg_id.clone()) } else { None },
-                log_ref_id: if is_primary { None } else { Some(primary_msg_id.clone()) },
+                log_msg_id: if is_primary {
+                    Some(primary_msg_id.clone())
+                } else {
+                    None
+                },
+                log_ref_id: if is_primary {
+                    None
+                } else {
+                    Some(primary_msg_id.clone())
+                },
                 tags: tags.clone(),
             },
         );
@@ -1421,7 +1538,9 @@ fn handle_kick(
                 text: format!("You were kicked from {channel} by {kicker} ({reason_str})"),
                 highlight: false,
                 event_key: None,
-                event_params: None, log_msg_id: None, log_ref_id: None,
+                event_params: None,
+                log_msg_id: None,
+                log_ref_id: None,
                 tags,
             },
         );
@@ -1446,7 +1565,8 @@ fn handle_kick(
                     channel.to_string(),
                     reason_str.to_string(),
                 ]),
-                log_msg_id: None, log_ref_id: None,
+                log_msg_id: None,
+                log_ref_id: None,
                 tags,
             },
         );
@@ -1479,7 +1599,9 @@ fn handle_topic(
                 text: format!("{setter} changed the topic to: {topic_text}"),
                 highlight: false,
                 event_key: Some("topic_changed".to_string()),
-                event_params: Some(vec![setter, topic_text.to_string()]), log_msg_id: None, log_ref_id: None,
+                event_params: Some(vec![setter, topic_text.to_string()]),
+                log_msg_id: None,
+                log_ref_id: None,
                 tags,
             },
         );
@@ -1511,8 +1633,7 @@ fn handle_mode(
             if let Some(conn) = state.connections.get_mut(conn_id) {
                 for mode in modes {
                     let (adding, m) = match mode {
-                        irc::proto::Mode::Plus(m, _)
-                        | irc::proto::Mode::NoPrefix(m) => (true, m),
+                        irc::proto::Mode::Plus(m, _) | irc::proto::Mode::NoPrefix(m) => (true, m),
                         irc::proto::Mode::Minus(m, _) => (false, m),
                     };
                     let c = user_mode_letter(m);
@@ -1545,7 +1666,9 @@ fn handle_mode(
                 text: format!("{nick} sets mode {mode_display} on {target}"),
                 highlight: false,
                 event_key: Some("mode".to_string()),
-                event_params: Some(vec![nick, mode_display, target.to_string()]), log_msg_id: None, log_ref_id: None,
+                event_params: Some(vec![nick, mode_display, target.to_string()]),
+                log_msg_id: None,
+                log_ref_id: None,
                 tags,
             },
         );
@@ -1567,7 +1690,9 @@ fn handle_mode(
                 text: format!("{nick} sets mode {mode_display} on {target}"),
                 highlight: false,
                 event_key: Some("mode".to_string()),
-                event_params: Some(vec![nick, mode_display, target.to_string()]), log_msg_id: None, log_ref_id: None,
+                event_params: Some(vec![nick, mode_display, target.to_string()]),
+                log_msg_id: None,
+                log_ref_id: None,
                 tags,
             },
         );
@@ -1615,7 +1740,8 @@ fn apply_channel_mode(
     // Channel modes (not nick prefix, not list modes) — update buf.modes
     // Skip list modes (b, e, I) and nick prefix modes (already handled above)
     let ch = channel_mode_letter(mode_enum);
-    let is_list_mode = matches!(mode_enum,
+    let is_list_mode = matches!(
+        mode_enum,
         ChannelMode::Ban | ChannelMode::Exception | ChannelMode::InviteException
     );
     if is_list_mode || nick_mode_char.is_some() {
@@ -1770,7 +1896,9 @@ fn handle_invite(
                 text: format!("{inviter} invites you to {channel}"),
                 highlight: true,
                 event_key: None,
-                event_params: None, log_msg_id: None, log_ref_id: None,
+                event_params: None,
+                log_msg_id: None,
+                log_ref_id: None,
                 tags,
             },
         );
@@ -1790,7 +1918,9 @@ fn handle_invite(
                     text: format!("{inviter} invited {nick} to {channel}"),
                     highlight: false,
                     event_key: None,
-                    event_params: None, log_msg_id: None, log_ref_id: None,
+                    event_params: None,
+                    log_msg_id: None,
+                    log_ref_id: None,
                     tags,
                 },
             );
@@ -1811,28 +1941,22 @@ fn handle_error(state: &mut AppState, conn_id: &str, message: &str) {
     emit(state, &buf, &format!("%Zff4444ERROR: {message}%N"));
 }
 
-fn handle_wallops(
-    state: &mut AppState,
-    conn_id: &str,
-    prefix: Option<&Prefix>,
-    text: &str,
-) {
+fn handle_wallops(state: &mut AppState, conn_id: &str, prefix: Option<&Prefix>, text: &str) {
     let from = extract_nick(prefix).unwrap_or_else(|| "server".to_string());
     let label = state
         .connections
         .get(conn_id)
         .map_or("Status", |c| c.label.as_str());
     let buffer_id = make_buffer_id(conn_id, label);
-    emit(state, &buffer_id, &format!("%Ze0af68[Wallops/{from}]%N {text}"));
+    emit(
+        state,
+        &buffer_id,
+        &format!("%Ze0af68[Wallops/{from}]%N {text}"),
+    );
 }
 
 #[expect(clippy::too_many_lines, reason = "dispatcher pattern")]
-fn handle_response(
-    state: &mut AppState,
-    conn_id: &str,
-    response: Response,
-    args: &[String],
-) {
+fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args: &[String]) {
     match response {
         // RPL_MYINFO: informational only, no state changes needed.
 
@@ -2369,7 +2493,9 @@ pub fn emit(state: &mut AppState, buffer_id: &str, text: &str) {
             text: text.to_string(),
             highlight: false,
             event_key: None,
-            event_params: None, log_msg_id: None, log_ref_id: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
             tags: HashMap::new(),
         },
     );
@@ -2444,11 +2570,7 @@ fn format_timestamp(ts_str: &str) -> String {
 /// Standard:   `@nick`         → prefix="@", modes="o", nick="nick"
 /// Multi:      `@+nick`        → prefix="@+", modes="ov", nick="nick"
 /// Userhost:   `@+nick!u@host` → prefix="@+", modes="ov", nick="nick", ident="u", host="host"
-fn parse_names_entry(
-    raw: &str,
-    prefix_map: &[(char, char)],
-    has_userhost: bool,
-) -> NickEntry {
+fn parse_names_entry(raw: &str, prefix_map: &[(char, char)], has_userhost: bool) -> NickEntry {
     // Strip all leading prefix characters, using the server's PREFIX map
     // to determine which characters are valid prefixes and their modes.
     let mut prefix = String::new();
@@ -2491,7 +2613,11 @@ fn parse_userhost(input: &str) -> (String, Option<String>, Option<String>) {
         if let Some(at_pos) = rest.find('@') {
             let ident = &rest[..at_pos];
             let host = &rest[at_pos + 1..];
-            return (nick.to_string(), Some(ident.to_string()), Some(host.to_string()));
+            return (
+                nick.to_string(),
+                Some(ident.to_string()),
+                Some(host.to_string()),
+            );
         }
     }
     (input.to_string(), None, None)
@@ -2515,7 +2641,12 @@ pub fn next_who_token(state: &mut AppState, conn_id: &str) -> String {
 /// When `silent` is true, the channel is added to
 /// `Connection::silent_who_channels` so that reply handlers update
 /// nick state without displaying output (used for auto-WHO on join).
-pub fn build_whox_who(state: &mut AppState, conn_id: &str, channel: &str, silent: bool) -> Option<(String, String)> {
+pub fn build_whox_who(
+    state: &mut AppState,
+    conn_id: &str,
+    channel: &str,
+    silent: bool,
+) -> Option<(String, String)> {
     let has_whox = state
         .connections
         .get(conn_id)
@@ -2523,9 +2654,7 @@ pub fn build_whox_who(state: &mut AppState, conn_id: &str, channel: &str, silent
 
     if has_whox {
         let token = next_who_token(state, conn_id);
-        if silent
-            && let Some(conn) = state.connections.get_mut(conn_id)
-        {
+        if silent && let Some(conn) = state.connections.get_mut(conn_id) {
             conn.silent_who_channels.insert(channel.to_string());
         }
         let fields = format!("{},{token}", crate::constants::WHOX_FIELDS);
@@ -2547,7 +2676,11 @@ fn handle_whox_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
     // Minimum fields: our_nick(0) + token(1) + channel(2) + user(3) + ip(4) + host(5)
     //                + nick(6) + flags(7) + account(8) + realname(9)
     if args.len() < 10 {
-        tracing::warn!(conn_id, args_len = args.len(), "WHOX reply too short, skipping");
+        tracing::warn!(
+            conn_id,
+            args_len = args.len(),
+            "WHOX reply too short, skipping"
+        );
         return;
     }
 
@@ -2591,17 +2724,21 @@ fn handle_whox_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
     if !silent {
         let target_buf = active_or_server_buffer(state, conn_id);
         let account_str = account.as_deref().unwrap_or("");
-        emit(state, &target_buf, &format!(
-            "%Zc0caf5{nick}%Z565f89 ({user}@{host}) [{flags}] {channel}%Za9b1d6 {realname}%Z565f89 [{account_str}]%N"
-        ));
+        emit(
+            state,
+            &target_buf,
+            &format!(
+                "%Zc0caf5{nick}%Z565f89 ({user}@{host}) [{flags}] {channel}%Za9b1d6 {realname}%Z565f89 [{account_str}]%N"
+            ),
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Datelike, Timelike};
     use crate::state::connection::Connection;
+    use chrono::{Datelike, Timelike};
     use irc::proto::Prefix;
     use std::collections::HashMap;
 
@@ -2849,7 +2986,13 @@ mod tests {
         let buf = state.buffers.get("test/#test").unwrap();
         assert!(buf.users.contains_key("carol"));
         // Should also have a join event message
-        assert!(buf.messages.last().unwrap().text.contains("carol (user@host) has joined"));
+        assert!(
+            buf.messages
+                .last()
+                .unwrap()
+                .text
+                .contains("carol (user@host) has joined")
+        );
     }
 
     // === handle_part tests ===
@@ -2890,7 +3033,13 @@ mod tests {
 
         let buf = state.buffers.get("test/#test").unwrap();
         assert!(!buf.users.contains_key("dave"));
-        assert!(buf.messages.last().unwrap().text.contains("dave (user@host) has left"));
+        assert!(
+            buf.messages
+                .last()
+                .unwrap()
+                .text
+                .contains("dave (user@host) has left")
+        );
     }
 
     // === handle_quit tests ===
@@ -2911,15 +3060,18 @@ mod tests {
                 host: None,
             },
         );
-        let msg = make_irc_msg(
-            Some("eve!user@host"),
-            Command::QUIT(Some("gone".into())),
-        );
+        let msg = make_irc_msg(Some("eve!user@host"), Command::QUIT(Some("gone".into())));
         handle_irc_message(&mut state, "test", &msg);
 
         let buf = state.buffers.get("test/#test").unwrap();
         assert!(!buf.users.contains_key("eve"));
-        assert!(buf.messages.last().unwrap().text.contains("eve (user@host) has quit"));
+        assert!(
+            buf.messages
+                .last()
+                .unwrap()
+                .text
+                .contains("eve (user@host) has quit")
+        );
     }
 
     // === handle_nick_change tests ===
@@ -2927,10 +3079,7 @@ mod tests {
     #[test]
     fn nick_change_updates_our_nick() {
         let mut state = make_test_state();
-        let msg = make_irc_msg(
-            Some("me!user@host"),
-            Command::NICK("me_".into()),
-        );
+        let msg = make_irc_msg(Some("me!user@host"), Command::NICK("me_".into()));
         handle_irc_message(&mut state, "test", &msg);
 
         assert_eq!(state.connections.get("test").unwrap().nick, "me_");
@@ -2951,21 +3100,19 @@ mod tests {
                 host: None,
             },
         );
-        let msg = make_irc_msg(
-            Some("frank!user@host"),
-            Command::NICK("frankie".into()),
-        );
+        let msg = make_irc_msg(Some("frank!user@host"), Command::NICK("frankie".into()));
         handle_irc_message(&mut state, "test", &msg);
 
         let buf = state.buffers.get("test/#test").unwrap();
         assert!(!buf.users.contains_key("frank"));
         assert!(buf.users.contains_key("frankie"));
-        assert!(buf
-            .messages
-            .last()
-            .unwrap()
-            .text
-            .contains("frank is now known as frankie"));
+        assert!(
+            buf.messages
+                .last()
+                .unwrap()
+                .text
+                .contains("frank is now known as frankie")
+        );
     }
 
     // === handle_kick tests ===
@@ -3005,12 +3152,13 @@ mod tests {
 
         let buf = state.buffers.get("test/#test").unwrap();
         assert!(!buf.users.contains_key("troll"));
-        assert!(buf
-            .messages
-            .last()
-            .unwrap()
-            .text
-            .contains("troll was kicked by op"));
+        assert!(
+            buf.messages
+                .last()
+                .unwrap()
+                .text
+                .contains("troll was kicked by op")
+        );
     }
 
     // === handle_topic tests ===
@@ -3094,13 +3242,7 @@ mod tests {
 
     #[test]
     fn parse_names_multi_prefix_five_modes() {
-        let prefix_map = vec![
-            ('q', '~'),
-            ('a', '&'),
-            ('o', '@'),
-            ('h', '%'),
-            ('v', '+'),
-        ];
+        let prefix_map = vec![('q', '~'), ('a', '&'), ('o', '@'), ('h', '%'), ('v', '+')];
         let entry = parse_names_entry("~&@%+nick", &prefix_map, false);
         assert_eq!(entry.nick, "nick");
         assert_eq!(entry.prefix, "~&@%+");
@@ -3277,7 +3419,10 @@ mod tests {
 
         let buf = state.buffers.get("test/testserver").unwrap();
         assert!(buf.messages.last().unwrap().text.contains("Looking up"));
-        assert_eq!(buf.messages.last().unwrap().message_type, MessageType::Notice);
+        assert_eq!(
+            buf.messages.last().unwrap().message_type,
+            MessageType::Notice
+        );
     }
 
     // === extended-join tests ===
@@ -3288,7 +3433,11 @@ mod tests {
         // extended-join: JOIN #channel account :Real Name
         let msg = make_irc_msg(
             Some("carol!user@host"),
-            Command::JOIN("#test".into(), Some("patrick".into()), Some("Real Name".into())),
+            Command::JOIN(
+                "#test".into(),
+                Some("patrick".into()),
+                Some("Real Name".into()),
+            ),
         );
         handle_irc_message(&mut state, "test", &msg);
 
@@ -3302,8 +3451,8 @@ mod tests {
         assert!(join_msg.text.contains("[patrick]"));
         assert!(join_msg.text.contains("Real Name"));
         let params = join_msg.event_params.as_ref().unwrap();
-        assert_eq!(params[4], "[patrick]");  // $4 = account
-        assert_eq!(params[5], "Real Name");  // $5 = realname
+        assert_eq!(params[4], "[patrick]"); // $4 = account
+        assert_eq!(params[5], "Real Name"); // $5 = realname
     }
 
     #[test]
@@ -3367,7 +3516,13 @@ mod tests {
         let entry = buf.users.get("alice").unwrap();
         assert_eq!(entry.account.as_deref(), Some("alice_account"));
         // Should have an event message
-        assert!(buf.messages.last().unwrap().text.contains("alice is now logged in as alice_account"));
+        assert!(
+            buf.messages
+                .last()
+                .unwrap()
+                .text
+                .contains("alice is now logged in as alice_account")
+        );
     }
 
     #[test]
@@ -3387,16 +3542,19 @@ mod tests {
             },
         );
 
-        let msg = make_irc_msg(
-            Some("alice!user@host"),
-            Command::ACCOUNT("*".into()),
-        );
+        let msg = make_irc_msg(Some("alice!user@host"), Command::ACCOUNT("*".into()));
         handle_irc_message(&mut state, "test", &msg);
 
         let buf = state.buffers.get("test/#test").unwrap();
         let entry = buf.users.get("alice").unwrap();
         assert_eq!(entry.account, None);
-        assert!(buf.messages.last().unwrap().text.contains("alice has logged out"));
+        assert!(
+            buf.messages
+                .last()
+                .unwrap()
+                .text
+                .contains("alice has logged out")
+        );
     }
 
     #[test]
@@ -3444,9 +3602,21 @@ mod tests {
         handle_irc_message(&mut state, "test", &msg);
 
         // Both buffers should have the account updated
-        let entry1 = state.buffers.get("test/#test").unwrap().users.get("alice").unwrap();
+        let entry1 = state
+            .buffers
+            .get("test/#test")
+            .unwrap()
+            .users
+            .get("alice")
+            .unwrap();
         assert_eq!(entry1.account.as_deref(), Some("alice_acct"));
-        let entry2 = state.buffers.get("test/#other").unwrap().users.get("alice").unwrap();
+        let entry2 = state
+            .buffers
+            .get("test/#other")
+            .unwrap()
+            .users
+            .get("alice")
+            .unwrap();
         assert_eq!(entry2.account.as_deref(), Some("alice_acct"));
     }
 
@@ -3477,7 +3647,10 @@ mod tests {
 
         let buf = state.buffers.get("test/#test").unwrap();
         let entry = buf.users.get("alice").unwrap();
-        assert!(entry.away, "NickEntry.away should be true after AWAY with reason");
+        assert!(
+            entry.away,
+            "NickEntry.away should be true after AWAY with reason"
+        );
         // Should NOT add event messages (too noisy)
         assert!(
             buf.messages.is_empty(),
@@ -3502,15 +3675,15 @@ mod tests {
             },
         );
 
-        let msg = make_irc_msg(
-            Some("alice!user@host"),
-            Command::AWAY(None),
-        );
+        let msg = make_irc_msg(Some("alice!user@host"), Command::AWAY(None));
         handle_irc_message(&mut state, "test", &msg);
 
         let buf = state.buffers.get("test/#test").unwrap();
         let entry = buf.users.get("alice").unwrap();
-        assert!(!entry.away, "NickEntry.away should be false after AWAY without reason");
+        assert!(
+            !entry.away,
+            "NickEntry.away should be false after AWAY without reason"
+        );
         assert!(
             buf.messages.is_empty(),
             "away-notify should not add event messages"
@@ -3555,16 +3728,25 @@ mod tests {
             );
         }
 
-        let msg = make_irc_msg(
-            Some("alice!user@host"),
-            Command::AWAY(Some("BRB".into())),
-        );
+        let msg = make_irc_msg(Some("alice!user@host"), Command::AWAY(Some("BRB".into())));
         handle_irc_message(&mut state, "test", &msg);
 
         // Both buffers should have away = true
-        let entry1 = state.buffers.get("test/#test").unwrap().users.get("alice").unwrap();
+        let entry1 = state
+            .buffers
+            .get("test/#test")
+            .unwrap()
+            .users
+            .get("alice")
+            .unwrap();
         assert!(entry1.away);
-        let entry2 = state.buffers.get("test/#other").unwrap().users.get("alice").unwrap();
+        let entry2 = state
+            .buffers
+            .get("test/#other")
+            .unwrap()
+            .users
+            .get("alice")
+            .unwrap();
         assert!(entry2.away);
     }
 
@@ -3626,7 +3808,11 @@ mod tests {
         assert_eq!(buf.messages.len(), 1);
         let event = &buf.messages[0];
         assert_eq!(event.message_type, MessageType::Event);
-        assert!(event.text.contains("alice changed host to newident@new.host.net"));
+        assert!(
+            event
+                .text
+                .contains("alice changed host to newident@new.host.net")
+        );
         assert_eq!(event.event_key.as_deref(), Some("chghost"));
     }
 
@@ -3675,10 +3861,22 @@ mod tests {
         handle_irc_message(&mut state, "test", &msg);
 
         // Both buffers should have updated ident/host
-        let entry1 = state.buffers.get("test/#test").unwrap().users.get("alice").unwrap();
+        let entry1 = state
+            .buffers
+            .get("test/#test")
+            .unwrap()
+            .users
+            .get("alice")
+            .unwrap();
         assert_eq!(entry1.ident.as_deref(), Some("changed"));
         assert_eq!(entry1.host.as_deref(), Some("vhost.net"));
-        let entry2 = state.buffers.get("test/#other").unwrap().users.get("alice").unwrap();
+        let entry2 = state
+            .buffers
+            .get("test/#other")
+            .unwrap()
+            .users
+            .get("alice")
+            .unwrap();
         assert_eq!(entry2.ident.as_deref(), Some("changed"));
         assert_eq!(entry2.host.as_deref(), Some("vhost.net"));
 
@@ -3711,9 +3909,10 @@ mod tests {
             Some("alice!user@host"),
             Command::PRIVMSG("#test".into(), "hello".into()),
         );
-        msg.tags = Some(vec![
-            irc::proto::message::Tag("account".to_string(), Some("alice_acct".to_string())),
-        ]);
+        msg.tags = Some(vec![irc::proto::message::Tag(
+            "account".to_string(),
+            Some("alice_acct".to_string()),
+        )]);
         handle_irc_message(&mut state, "test", &msg);
 
         let buf = state.buffers.get("test/#test").unwrap();
@@ -3728,7 +3927,11 @@ mod tests {
         // (account tracking for self is less critical but shouldn't break)
         let msg = make_irc_msg(
             Some("me!user@host"),
-            Command::JOIN("#newchan".into(), Some("my_account".into()), Some("My Real Name".into())),
+            Command::JOIN(
+                "#newchan".into(),
+                Some("my_account".into()),
+                Some("My Real Name".into()),
+            ),
         );
         handle_irc_message(&mut state, "test", &msg);
 
@@ -3774,7 +3977,10 @@ mod tests {
 
         let buf = state.buffers.get("test/#test").unwrap();
         let ts = buf.messages[0].timestamp;
-        assert!(ts >= before && ts <= after, "timestamp should be approximately now");
+        assert!(
+            ts >= before && ts <= after,
+            "timestamp should be approximately now"
+        );
     }
 
     #[test]
@@ -3794,7 +4000,10 @@ mod tests {
 
         let buf = state.buffers.get("test/#test").unwrap();
         let ts = buf.messages[0].timestamp;
-        assert!(ts >= before && ts <= after, "malformed tag should fall back to now");
+        assert!(
+            ts >= before && ts <= after,
+            "malformed tag should fall back to now"
+        );
     }
 
     #[test]
@@ -3838,33 +4047,45 @@ mod tests {
 
         // Server advertises new caps: one already enabled, one desired, one unknown
         let to_request = handle_cap_new(
-            &mut state, "test",
-            Some("multi-prefix echo-message unknown-cap"), None,
+            &mut state,
+            "test",
+            Some("multi-prefix echo-message unknown-cap"),
+            None,
         );
 
         // Should only request echo-message (multi-prefix already enabled, unknown-cap not desired)
         assert_eq!(to_request, vec!["echo-message"]);
 
         // Verify status message was logged
-        let buf = state.buffers.get(&make_buffer_id("test", "TestServer")).unwrap();
+        let buf = state
+            .buffers
+            .get(&make_buffer_id("test", "TestServer"))
+            .unwrap();
         let last = buf.messages.last().unwrap();
-        assert!(last.text.contains("echo-message"), "should mention requested cap");
+        assert!(
+            last.text.contains("echo-message"),
+            "should mention requested cap"
+        );
         assert_eq!(last.event_key.as_deref(), Some("cap_new"));
     }
 
     #[test]
     fn cap_new_non_desired_caps_ignored() {
         let mut state = make_test_state();
-        let to_request = handle_cap_new(
-            &mut state, "test",
-            Some("unknown-cap fancy-feature"), None,
-        );
+        let to_request =
+            handle_cap_new(&mut state, "test", Some("unknown-cap fancy-feature"), None);
 
         assert!(to_request.is_empty(), "no desired caps should be requested");
 
-        let buf = state.buffers.get(&make_buffer_id("test", "TestServer")).unwrap();
+        let buf = state
+            .buffers
+            .get(&make_buffer_id("test", "TestServer"))
+            .unwrap();
         let last = buf.messages.last().unwrap();
-        assert!(last.text.contains("none requested"), "should note nothing was requested");
+        assert!(
+            last.text.contains("none requested"),
+            "should note nothing was requested"
+        );
     }
 
     #[test]
@@ -3872,8 +4093,10 @@ mod tests {
         let mut state = make_test_state();
         // Server sends caps with values (e.g. sasl=PLAIN,EXTERNAL)
         let to_request = handle_cap_new(
-            &mut state, "test",
-            Some("sasl=PLAIN,EXTERNAL server-time"), None,
+            &mut state,
+            "test",
+            Some("sasl=PLAIN,EXTERNAL server-time"),
+            None,
         );
 
         // Both are desired caps, neither enabled yet
@@ -3897,9 +4120,15 @@ mod tests {
         let conn = state.connections.get("test").unwrap();
         assert!(!conn.enabled_caps.contains("multi-prefix"));
         assert!(!conn.enabled_caps.contains("server-time"));
-        assert!(conn.enabled_caps.contains("away-notify"), "untouched cap should remain");
+        assert!(
+            conn.enabled_caps.contains("away-notify"),
+            "untouched cap should remain"
+        );
 
-        let buf = state.buffers.get(&make_buffer_id("test", "TestServer")).unwrap();
+        let buf = state
+            .buffers
+            .get(&make_buffer_id("test", "TestServer"))
+            .unwrap();
         let last = buf.messages.last().unwrap();
         assert_eq!(last.event_key.as_deref(), Some("cap_del"));
         assert!(last.text.contains("multi-prefix"));
@@ -3914,7 +4143,10 @@ mod tests {
         let conn = state.connections.get("test").unwrap();
         assert!(conn.enabled_caps.is_empty());
 
-        let buf = state.buffers.get(&make_buffer_id("test", "TestServer")).unwrap();
+        let buf = state
+            .buffers
+            .get(&make_buffer_id("test", "TestServer"))
+            .unwrap();
         let last = buf.messages.last().unwrap();
         assert!(last.text.contains("none were enabled"));
     }
@@ -3928,7 +4160,10 @@ mod tests {
         assert!(conn.enabled_caps.contains("echo-message"));
         assert!(conn.enabled_caps.contains("invite-notify"));
 
-        let buf = state.buffers.get(&make_buffer_id("test", "TestServer")).unwrap();
+        let buf = state
+            .buffers
+            .get(&make_buffer_id("test", "TestServer"))
+            .unwrap();
         let last = buf.messages.last().unwrap();
         assert_eq!(last.event_key.as_deref(), Some("cap_ack"));
         assert!(last.text.contains("echo-message"));
@@ -3943,7 +4178,10 @@ mod tests {
         let conn = state.connections.get("test").unwrap();
         assert!(!conn.enabled_caps.contains("echo-message"));
 
-        let buf = state.buffers.get(&make_buffer_id("test", "TestServer")).unwrap();
+        let buf = state
+            .buffers
+            .get(&make_buffer_id("test", "TestServer"))
+            .unwrap();
         let last = buf.messages.last().unwrap();
         assert_eq!(last.event_key.as_deref(), Some("cap_nak"));
         assert!(last.text.contains("echo-message"));
@@ -3982,9 +4220,7 @@ mod tests {
         let mut state = make_test_state();
 
         // Step 1: CAP NEW announces echo-message and batch
-        let to_request = handle_cap_new(
-            &mut state, "test", Some("echo-message batch"), None,
-        );
+        let to_request = handle_cap_new(&mut state, "test", Some("echo-message batch"), None);
         assert_eq!(to_request.len(), 2);
         assert!(to_request.contains(&"echo-message".to_string()));
         assert!(to_request.contains(&"batch".to_string()));
@@ -4000,8 +4236,14 @@ mod tests {
         handle_cap_del(&mut state, "test", Some("batch"), None);
 
         let conn = state.connections.get("test").unwrap();
-        assert!(conn.enabled_caps.contains("echo-message"), "echo-message should remain");
-        assert!(!conn.enabled_caps.contains("batch"), "batch should be removed");
+        assert!(
+            conn.enabled_caps.contains("echo-message"),
+            "echo-message should remain"
+        );
+        assert!(
+            !conn.enabled_caps.contains("batch"),
+            "batch should be removed"
+        );
     }
 
     // === echo-message tests ===
@@ -4241,16 +4483,16 @@ mod tests {
             Command::Raw(
                 "354".to_string(),
                 vec![
-                    "me".to_string(),        // our_nick
-                    "1".to_string(),          // token
-                    "#test".to_string(),      // channel
-                    "~alice".to_string(),     // user
-                    "1.2.3.4".to_string(),    // ip
+                    "me".to_string(),               // our_nick
+                    "1".to_string(),                // token
+                    "#test".to_string(),            // channel
+                    "~alice".to_string(),           // user
+                    "1.2.3.4".to_string(),          // ip
                     "host.example.com".to_string(), // host
-                    "alice".to_string(),      // nick
-                    "H".to_string(),          // flags (H=here)
-                    "patrick".to_string(),    // account
-                    "Alice Smith".to_string(), // realname
+                    "alice".to_string(),            // nick
+                    "H".to_string(),                // flags (H=here)
+                    "patrick".to_string(),          // account
+                    "Alice Smith".to_string(),      // realname
                 ],
             ),
         );
@@ -4282,7 +4524,7 @@ mod tests {
                     "bob.host.net".to_string(),
                     "bob".to_string(),
                     "H@".to_string(),
-                    "0".to_string(),          // account="0" → not logged in
+                    "0".to_string(), // account="0" → not logged in
                     "Bob Jones".to_string(),
                 ],
             ),
@@ -4311,7 +4553,7 @@ mod tests {
                     "1.2.3.4".to_string(),
                     "host.example.com".to_string(),
                     "alice".to_string(),
-                    "G".to_string(),          // G = gone/away
+                    "G".to_string(), // G = gone/away
                     "alice_acct".to_string(),
                     "Alice".to_string(),
                 ],
@@ -4349,7 +4591,7 @@ mod tests {
                     "1.2.3.4".to_string(),
                     "host.example.com".to_string(),
                     "alice".to_string(),
-                    "H".to_string(),          // H = here (not away)
+                    "H".to_string(), // H = here (not away)
                     "0".to_string(),
                     "Alice".to_string(),
                 ],
@@ -4557,10 +4799,7 @@ mod tests {
     #[test]
     fn error_command_marks_connection_as_errored() {
         let mut state = make_test_state();
-        let msg = make_irc_msg(
-            Some("irc.server.com"),
-            Command::ERROR("Banned".into()),
-        );
+        let msg = make_irc_msg(Some("irc.server.com"), Command::ERROR("Banned".into()));
         handle_irc_message(&mut state, "test", &msg);
 
         let conn = state.connections.get("test").unwrap();
@@ -4582,7 +4821,11 @@ mod tests {
             None,
             Command::Response(
                 Response::ERR_BANNEDFROMCHAN,
-                vec!["me".into(), "#locked".into(), "Cannot join channel (+b)".into()],
+                vec![
+                    "me".into(),
+                    "#locked".into(),
+                    "Cannot join channel (+b)".into(),
+                ],
             ),
         );
         handle_irc_message(&mut state, "test", &msg);
@@ -4596,21 +4839,28 @@ mod tests {
         let mut state = make_test_state();
         // Pre-create buffer AND add a user (simulating a successful prior join).
         state.add_buffer(make_channel_buffer("test", "#active"));
-        state.add_nick("test/#active", NickEntry {
-            nick: "me".into(),
-            prefix: String::new(),
-            modes: String::new(),
-            away: false,
-            account: None,
-            ident: None,
-            host: None,
-        });
+        state.add_nick(
+            "test/#active",
+            NickEntry {
+                nick: "me".into(),
+                prefix: String::new(),
+                modes: String::new(),
+                away: false,
+                account: None,
+                ident: None,
+                host: None,
+            },
+        );
 
         let msg = make_irc_msg(
             None,
             Command::Response(
                 Response::ERR_BANNEDFROMCHAN,
-                vec!["me".into(), "#active".into(), "Cannot join channel (+b)".into()],
+                vec![
+                    "me".into(),
+                    "#active".into(),
+                    "Cannot join channel (+b)".into(),
+                ],
             ),
         );
         handle_irc_message(&mut state, "test", &msg);
@@ -4628,7 +4878,11 @@ mod tests {
             None,
             Command::Response(
                 Response::ERR_INVITEONLYCHAN,
-                vec!["me".into(), "#secret".into(), "Cannot join channel (+i)".into()],
+                vec![
+                    "me".into(),
+                    "#secret".into(),
+                    "Cannot join channel (+i)".into(),
+                ],
             ),
         );
         handle_irc_message(&mut state, "test", &msg);
@@ -4645,7 +4899,11 @@ mod tests {
             None,
             Command::Response(
                 Response::ERR_CHANNELISFULL,
-                vec!["me".into(), "#crowded".into(), "Cannot join channel (+l)".into()],
+                vec![
+                    "me".into(),
+                    "#crowded".into(),
+                    "Cannot join channel (+l)".into(),
+                ],
             ),
         );
         handle_irc_message(&mut state, "test", &msg);
@@ -4662,7 +4920,11 @@ mod tests {
             None,
             Command::Response(
                 Response::ERR_BADCHANNELKEY,
-                vec!["me".into(), "#keyed".into(), "Cannot join channel (+k)".into()],
+                vec![
+                    "me".into(),
+                    "#keyed".into(),
+                    "Cannot join channel (+k)".into(),
+                ],
             ),
         );
         handle_irc_message(&mut state, "test", &msg);

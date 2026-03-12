@@ -17,9 +17,8 @@ use regex::Regex;
 // ---------------------------------------------------------------------------
 
 /// Matches URLs in message text.
-static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"https?://[^\s<>"')\]]+"#).expect("URL_RE is a valid regex")
-});
+static URL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"https?://[^\s<>"')\]]+"#).expect("URL_RE is a valid regex"));
 
 /// Matches common image file extensions at the end of a URL path,
 /// optionally followed by a query string.
@@ -38,9 +37,8 @@ static IMGUR_PAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Matches `ImgBB` page URLs.
-static IMGBB_PAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(www\.)?ibb\.co/").expect("IMGBB_PAGE_RE is a valid regex")
-});
+static IMGBB_PAGE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^(www\.)?ibb\.co/").expect("IMGBB_PAGE_RE is a valid regex"));
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -158,10 +156,12 @@ fn parse_host_and_path(url: &str) -> (String, String) {
     // Split host from path at the first `/`.
     let (host, path) = without_scheme.find('/').map_or_else(
         || (without_scheme.to_ascii_lowercase(), String::from("/")),
-        |idx| (
-            without_scheme[..idx].to_ascii_lowercase(),
-            without_scheme[idx..].to_owned(),
-        ),
+        |idx| {
+            (
+                without_scheme[..idx].to_ascii_lowercase(),
+                without_scheme[idx..].to_owned(),
+            )
+        },
     );
 
     // Strip optional port from host (e.g. "example.com:8080").

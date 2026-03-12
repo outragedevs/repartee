@@ -49,32 +49,42 @@ impl TerminalEnv {
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
 
         // Query pixel dimensions to compute font size.
-        let font_size = crossterm::terminal::window_size()
-            .ok()
-            .and_then(|ws| {
-                if ws.width > 0 && ws.height > 0 && ws.columns > 0 && ws.rows > 0 {
-                    Some((ws.width / ws.columns, ws.height / ws.rows))
-                } else {
-                    None
-                }
-            });
+        let font_size = crossterm::terminal::window_size().ok().and_then(|ws| {
+            if ws.width > 0 && ws.height > 0 && ws.columns > 0 && ws.rows > 0 {
+                Some((ws.width / ws.columns, ws.height / ws.rows))
+            } else {
+                None
+            }
+        });
 
         let keys = [
-            "TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION",
-            "LC_TERMINAL", "LC_TERMINAL_VERSION",
-            "ITERM_SESSION_ID", "KITTY_PID",
-            "GHOSTTY_RESOURCES_DIR", "WT_SESSION",
-            "WEZTERM_EXECUTABLE", "COLORTERM", "TMUX",
+            "TERM",
+            "TERM_PROGRAM",
+            "TERM_PROGRAM_VERSION",
+            "LC_TERMINAL",
+            "LC_TERMINAL_VERSION",
+            "ITERM_SESSION_ID",
+            "KITTY_PID",
+            "GHOSTTY_RESOURCES_DIR",
+            "WT_SESSION",
+            "WEZTERM_EXECUTABLE",
+            "COLORTERM",
+            "TMUX",
         ];
         let mut env_vars = HashMap::new();
         for key in keys {
-            if let Ok(val) = std::env::var(key) {
-                if !val.is_empty() {
-                    env_vars.insert(key.to_string(), val);
-                }
+            if let Ok(val) = std::env::var(key)
+                && !val.is_empty()
+            {
+                env_vars.insert(key.to_string(), val);
             }
         }
-        Self { cols, rows, font_size, env_vars }
+        Self {
+            cols,
+            rows,
+            font_size,
+            env_vars,
+        }
     }
 }
 

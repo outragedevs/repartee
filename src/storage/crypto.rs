@@ -85,8 +85,8 @@ pub fn load_or_create_key_at(path: &Path) -> Result<String, String> {
 
     // Try to read existing key from file
     if path.exists() {
-        let file =
-            std::fs::File::open(path).map_err(|e| format!("failed to open {}: {e}", path.display()))?;
+        let file = std::fs::File::open(path)
+            .map_err(|e| format!("failed to open {}: {e}", path.display()))?;
         let reader = std::io::BufReader::new(file);
         for line in reader.lines() {
             let line = line.map_err(|e| format!("failed to read line: {e}"))?;
@@ -115,8 +115,7 @@ pub fn load_or_create_key_at(path: &Path) -> Result<String, String> {
         .open(path)
         .map_err(|e| format!("failed to open {}: {e}", path.display()))?;
 
-    writeln!(file, "{key_name}={new_key}")
-        .map_err(|e| format!("failed to write key: {e}"))?;
+    writeln!(file, "{key_name}={new_key}").map_err(|e| format!("failed to write key: {e}"))?;
 
     // Set file permissions to 0600 on Unix
     #[cfg(unix)]

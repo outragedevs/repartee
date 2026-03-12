@@ -43,14 +43,12 @@ pub fn load_theme(path: &Path) -> Result<ThemeFile> {
         default.meta
     };
 
-    let colors: ThemeColors = parsed
-        .get("colors")
-        .map_or_else(ThemeColors::default, |v| {
-            v.clone().try_into().unwrap_or_else(|e| {
-                tracing::warn!("Failed to parse theme [colors]: {e}, using defaults");
-                ThemeColors::default()
-            })
-        });
+    let colors: ThemeColors = parsed.get("colors").map_or_else(ThemeColors::default, |v| {
+        v.clone().try_into().unwrap_or_else(|e| {
+            tracing::warn!("Failed to parse theme [colors]: {e}, using defaults");
+            ThemeColors::default()
+        })
+    });
 
     let abstracts: HashMap<String, String> = if let Some(abs) = parsed.get("abstracts") {
         match abs.clone().try_into::<HashMap<String, String>>() {

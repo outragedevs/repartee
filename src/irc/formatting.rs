@@ -53,9 +53,7 @@ pub fn strip_irc_formatting(text: &str) -> String {
                     hex_digits += 1;
                 }
                 // Optional comma + up to 6 hex digits for background
-                if i < len && bytes[i] == b','
-                    && i + 1 < len && bytes[i + 1].is_ascii_hexdigit()
-                {
+                if i < len && bytes[i] == b',' && i + 1 < len && bytes[i + 1].is_ascii_hexdigit() {
                     i += 1; // skip comma
                     let mut bg_hex = 0;
                     while i < len && bytes[i].is_ascii_hexdigit() && bg_hex < 6 {
@@ -182,9 +180,7 @@ pub fn extract_nick(prefix: Option<&irc::proto::Prefix>) -> Option<String> {
 pub fn extract_nick_userhost(prefix: Option<&irc::proto::Prefix>) -> (String, String, String) {
     use irc::proto::Prefix;
     match prefix {
-        Some(Prefix::Nickname(nick, user, host)) => {
-            (nick.clone(), user.clone(), host.clone())
-        }
+        Some(Prefix::Nickname(nick, user, host)) => (nick.clone(), user.clone(), host.clone()),
         Some(Prefix::ServerName(name)) => (name.clone(), String::new(), String::new()),
         None => (String::new(), String::new(), String::new()),
     }
@@ -417,7 +413,10 @@ mod tests {
     fn extract_nick_server_name() {
         use irc::proto::Prefix;
         let prefix = Prefix::ServerName("irc.server.com".into());
-        assert_eq!(extract_nick(Some(&prefix)), Some("irc.server.com".to_string()));
+        assert_eq!(
+            extract_nick(Some(&prefix)),
+            Some("irc.server.com".to_string())
+        );
     }
 
     #[test]

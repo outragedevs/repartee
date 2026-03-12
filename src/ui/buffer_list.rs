@@ -1,11 +1,11 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use super::{truncate_with_plus, visible_len};
 use crate::app::App;
 use crate::state::buffer::BufferType;
 use crate::theme::{hex_to_color, parse_format_string, resolve_abstractions};
 use crate::ui::styled_text::styled_spans_to_line;
-use super::{truncate_with_plus, visible_len};
 
 /// Render the buffer list sidebar. Returns total line count for scroll clamping.
 pub fn render(frame: &mut Frame, area: Rect, app: &App, scroll_offset: usize) -> usize {

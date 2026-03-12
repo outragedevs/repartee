@@ -1,7 +1,7 @@
+use crate::state::AppState;
 use crate::state::buffer::{ActivityLevel, Buffer, Message, NickEntry};
 use crate::state::connection::{Connection, ConnectionStatus};
 use crate::state::sorting::sort_buffers;
-use crate::state::AppState;
 use crate::storage::LogRow;
 
 impl AppState {
@@ -148,13 +148,20 @@ impl AppState {
             serde_json::to_string(&message.tags).ok()
         };
         let row = LogRow {
-            msg_id: message.log_msg_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            msg_id: message
+                .log_msg_id
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             network,
             buffer: buf_name.to_string(),
             timestamp: message.timestamp.timestamp(),
             msg_type: message.message_type.clone(),
             nick: message.nick.clone(),
-            text: if is_ref { String::new() } else { message.text.clone() },
+            text: if is_ref {
+                String::new()
+            } else {
+                message.text.clone()
+            },
             highlight: message.highlight,
             ref_id: message.log_ref_id.clone(),
             tags: tags_json,
@@ -364,7 +371,9 @@ mod tests {
             text: text.to_string(),
             highlight: false,
             event_key: None,
-            event_params: None, log_msg_id: None, log_ref_id: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
             tags: std::collections::HashMap::new(),
         }
     }
@@ -373,16 +382,8 @@ mod tests {
         let mut state = AppState::new();
         state.add_connection(make_test_connection());
         state.add_buffer(make_test_buffer("libera", BufferType::Server, "libera"));
-        state.add_buffer(make_test_buffer(
-            "libera",
-            BufferType::Channel,
-            "#rust",
-        ));
-        state.add_buffer(make_test_buffer(
-            "libera",
-            BufferType::Channel,
-            "#linux",
-        ));
+        state.add_buffer(make_test_buffer("libera", BufferType::Channel, "#rust"));
+        state.add_buffer(make_test_buffer("libera", BufferType::Channel, "#linux"));
         state
     }
 
@@ -392,10 +393,7 @@ mod tests {
         assert!(state.active_buffer().is_none());
 
         state.set_active_buffer("libera/#rust");
-        assert_eq!(
-            state.active_buffer().unwrap().name,
-            "#rust"
-        );
+        assert_eq!(state.active_buffer().unwrap().name, "#rust");
     }
 
     #[test]
@@ -456,10 +454,7 @@ mod tests {
         state.set_active_buffer("libera/#rust");
 
         assert_eq!(state.active_buffer_id.as_deref(), Some("libera/#rust"));
-        assert_eq!(
-            state.previous_buffer_id.as_deref(),
-            Some("libera/libera")
-        );
+        assert_eq!(state.previous_buffer_id.as_deref(), Some("libera/libera"));
 
         // Remove the active buffer; should fall back to previous
         state.remove_buffer("libera/#rust");
@@ -471,7 +466,10 @@ mod tests {
         let mut state = make_test_state();
         // Sorted order: libera/libera (server=1), libera/#linux (chan=2), libera/#rust (chan=2)
         let sorted = state.sorted_buffer_ids();
-        assert_eq!(sorted, vec!["libera/libera", "libera/#linux", "libera/#rust"]);
+        assert_eq!(
+            sorted,
+            vec!["libera/libera", "libera/#linux", "libera/#rust"]
+        );
 
         state.set_active_buffer("libera/libera");
 
@@ -525,34 +523,35 @@ mod tests {
             host: None,
         };
         state.add_nick("libera/#rust", entry);
-        assert!(state
-            .buffers
-            .get("libera/#rust")
-            .unwrap()
-            .users
-            .contains_key("alice"));
+        assert!(
+            state
+                .buffers
+                .get("libera/#rust")
+                .unwrap()
+                .users
+                .contains_key("alice")
+        );
 
         state.update_nick("libera/#rust", "alice", "alice_");
-        assert!(!state
-            .buffers
-            .get("libera/#rust")
-            .unwrap()
-            .users
-            .contains_key("alice"));
-        assert!(state
-            .buffers
-            .get("libera/#rust")
-            .unwrap()
-            .users
-            .contains_key("alice_"));
+        assert!(
+            !state
+                .buffers
+                .get("libera/#rust")
+                .unwrap()
+                .users
+                .contains_key("alice")
+        );
+        assert!(
+            state
+                .buffers
+                .get("libera/#rust")
+                .unwrap()
+                .users
+                .contains_key("alice_")
+        );
 
         state.remove_nick("libera/#rust", "alice_");
-        assert!(state
-            .buffers
-            .get("libera/#rust")
-            .unwrap()
-            .users
-            .is_empty());
+        assert!(state.buffers.get("libera/#rust").unwrap().users.is_empty());
     }
 
     #[test]

@@ -38,8 +38,7 @@ impl Storage {
     /// optionally sets up encryption, and spawns the background writer.
     pub fn init(config: &LoggingConfig) -> Result<Self, String> {
         let db_dir = constants::log_dir();
-        std::fs::create_dir_all(&db_dir)
-            .map_err(|e| format!("failed to create log dir: {e}"))?;
+        std::fs::create_dir_all(&db_dir).map_err(|e| format!("failed to create log dir: {e}"))?;
 
         let db_path = db_dir.join("messages.db");
         let conn = db::open_database_at(
@@ -61,13 +60,15 @@ impl Storage {
         if config.retention_days > 0 {
             let removed = db::purge_old_messages(&conn, config.retention_days, has_fts);
             if removed > 0 {
-                tracing::info!("purged {removed} messages older than {} days", config.retention_days);
+                tracing::info!(
+                    "purged {removed} messages older than {} days",
+                    config.retention_days
+                );
             }
         }
 
         let db = Arc::new(Mutex::new(conn));
-        let (writer, log_tx) =
-            writer::LogWriterHandle::spawn(Arc::clone(&db), crypto_key);
+        let (writer, log_tx) = writer::LogWriterHandle::spawn(Arc::clone(&db), crypto_key);
 
         Ok(Self {
             db,
