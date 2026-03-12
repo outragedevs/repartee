@@ -19,6 +19,10 @@ use crate::state::connection::ConnectionStatus;
 
 /// Route an incoming IRC protocol message to the appropriate handler,
 /// mutating `AppState` as needed.
+#[expect(
+    clippy::too_many_lines,
+    reason = "IRC command dispatcher — one arm per message type"
+)]
 pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage) {
     let our_nick = state
         .connections

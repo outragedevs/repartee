@@ -104,11 +104,11 @@ pub async fn run_shim(target_pid: Option<u32>, show_splash: bool) -> Result<()> 
         RelayExit::Quit => eprintln!("Session ended."),
         RelayExit::Detached => eprintln!("Detached from repartee (PID {pid})."),
         RelayExit::WriteError(e) => {
-            eprintln!("Disconnected from repartee (PID {pid}): write error: {e}")
+            eprintln!("Disconnected from repartee (PID {pid}): write error: {e}");
         }
         RelayExit::InputClosed => eprintln!("Disconnected from repartee (PID {pid}): input closed"),
         RelayExit::ConnectionLost => {
-            eprintln!("Disconnected from repartee (PID {pid}): connection lost")
+            eprintln!("Disconnected from repartee (PID {pid}): connection lost");
         }
     }
 

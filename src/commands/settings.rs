@@ -14,6 +14,10 @@ struct Resolved {
 }
 
 /// Get a config value by dot-notation path.
+#[expect(
+    clippy::too_many_lines,
+    reason = "flat match dispatcher — one arm per config field"
+)]
 fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
     let parts: Vec<&str> = path.split('.').collect();
     if parts.len() < 2 {

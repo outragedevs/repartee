@@ -544,7 +544,7 @@ pub(crate) fn cmd_image(app: &mut App, args: &[String]) {
         },
         "clear" => match crate::image_preview::cache::clear() {
             Ok(count) => {
-                add_local_event(app, &format!("{C_OK}Cleared {count} cached images{C_RST}"))
+                add_local_event(app, &format!("{C_OK}Cleared {count} cached images{C_RST}"));
             }
             Err(e) => add_local_event(app, &format!("{C_ERR}Cache clear error: {e}{C_RST}")),
         },
@@ -762,6 +762,10 @@ pub(crate) fn cmd_script(app: &mut App, args: &[String]) {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "debug output formatter — splitting fragments the template"
+)]
 fn image_debug(app: &mut App) {
     // Re-detect now so debug shows current state, not stale startup state.
     app.refresh_image_protocol();

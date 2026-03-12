@@ -30,6 +30,46 @@ use ratatui_image::picker::ProtocolType;
 /// to for protocol selection, cleanup strategy, and debug logging.
 ///
 /// Returns `(terminal_name, protocol, source)`.
+/// Detect the outer terminal via tmux client queries.
+///
+/// Queries `#{client_termtype}` and `#{client_termname}` to identify the real
+/// terminal hosting the tmux session (e.g. iTerm2, Ghostty, Kitty). Falls back
+/// to Alacritty heuristic (generic xterm + empty termname).
+fn detect_via_tmux() -> Option<(&'static str, Option<ProtocolType>, String)> {
+    let termtype = tmux_query_raw("#{client_termtype}");
+    let termname = tmux_query_raw("#{client_termname}");
+    tracing::debug!(
+        client_termtype = ?termtype,
+        client_termname = ?termname,
+        "tmux outer terminal queries"
+    );
+
+    if let Some(ref tt) = termtype
+        && let Some((name, proto)) = match_terminal(tt)
+    {
+        return Some((name, Some(proto), format!("tmux:client_termtype={tt}")));
+    }
+    if let Some(ref tn) = termname
+        && let Some((name, proto)) = match_terminal(tn)
+    {
+        return Some((name, Some(proto), format!("tmux:client_termname={tn}")));
+    }
+
+    // Alacritty: generic termtype like "xterm-256color" + empty termname.
+    // No image protocol support — use halfblocks.
+    let tt_generic = termtype.as_deref().unwrap_or("").starts_with("xterm");
+    let tn_empty = termname.as_deref().unwrap_or("").is_empty();
+    if tt_generic && tn_empty {
+        return Some((
+            "alacritty",
+            Some(ProtocolType::Halfblocks),
+            "tmux:generic-xterm+empty-termname".into(),
+        ));
+    }
+
+    None
+}
+
 fn detect_outer_terminal(
     in_tmux: bool,
     env_override: Option<&std::collections::HashMap<String, String>>,
@@ -61,40 +101,8 @@ fn detect_outer_terminal(
         "outer terminal env vars"
     );
 
-    // ── tmux: query the REAL outer terminal ──
-    if in_tmux {
-        // #{client_termtype} returns the actual terminal identity
-        // (e.g. "iTerm2 3.6.8", "ghostty 1.3.0", "subterm 1.0")
-        let termtype = tmux_query_raw("#{client_termtype}");
-        let termname = tmux_query_raw("#{client_termname}");
-        tracing::debug!(
-            client_termtype = ?termtype,
-            client_termname = ?termname,
-            "tmux outer terminal queries"
-        );
-
-        if let Some(ref tt) = termtype
-            && let Some((name, proto)) = match_terminal(tt)
-        {
-            return (name, Some(proto), format!("tmux:client_termtype={tt}"));
-        }
-        if let Some(ref tn) = termname
-            && let Some((name, proto)) = match_terminal(tn)
-        {
-            return (name, Some(proto), format!("tmux:client_termname={tn}"));
-        }
-
-        // Alacritty: generic termtype like "xterm-256color" + empty termname.
-        // No image protocol support — use halfblocks.
-        let tt_generic = termtype.as_deref().unwrap_or("").starts_with("xterm");
-        let tn_empty = termname.as_deref().unwrap_or("").is_empty();
-        if tt_generic && tn_empty {
-            return (
-                "alacritty",
-                Some(ProtocolType::Halfblocks),
-                "tmux:generic-xterm+empty-termname".into(),
-            );
-        }
+    if in_tmux && let Some(result) = detect_via_tmux() {
+        return result;
     }
 
     // ── env var detection (works both direct and in tmux) ──
