@@ -24,6 +24,28 @@ use crate::ui::layout::UiRegions;
 
 use ratatui_image::picker::ProtocolType;
 
+/// Redirect stdin/stdout/stderr to `/dev/null`.
+///
+/// Called after terminal restore on detach so library code writing to
+/// stdout doesn't fail or corrupt the user's shell.
+fn redirect_stdio_to_devnull() {
+    // SAFETY: Standard POSIX operations. open() returns a fd to /dev/null,
+    // dup2() atomically redirects each standard fd. The original fds (pointing
+    // to the now-restored terminal) are closed by dup2(). After this, any
+    // write to stdout/stderr goes to /dev/null harmlessly.
+    unsafe {
+        let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
+        if devnull >= 0 {
+            libc::dup2(devnull, libc::STDIN_FILENO);
+            libc::dup2(devnull, libc::STDOUT_FILENO);
+            libc::dup2(devnull, libc::STDERR_FILENO);
+            if devnull > 2 {
+                libc::close(devnull);
+            }
+        }
+    }
+}
+
 /// Detect the outer terminal program name and its image protocol capability.
 ///
 /// This always runs — not just as a fallback — so we know WHO we're talking
@@ -1142,7 +1164,7 @@ impl App {
     /// Uses stored (cols, rows) updated via shim `Resize` messages or at
     /// startup. Does NOT call `terminal.size()` / `backend.size()` because
     /// that does `ioctl(stdout)` which returns garbage when stdout is
-    /// `/dev/null` (daemon/fork mode).
+    /// `/dev/null` (after detach or `-d` mode).
     pub const fn terminal_size(&self) -> (u16, u16) {
         (self.cached_term_cols, self.cached_term_rows)
     }
@@ -1252,18 +1274,15 @@ impl App {
         // Store shim's terminal env for protocol detection.
         self.shim_term_env = Some(term_env.env_vars);
 
-        // Update picker's font_size from the shim's real terminal.
-        // The daemon's picker has stale font_size (10,20) from halfblocks()
-        // fallback because from_query_stdio() fails with /dev/null stdio.
-        // Recreate the picker with the shim's actual font dimensions so
-        // ratatui-image resizes images to match real cell pixel areas.
+        // Update picker font_size — reattaching shim may have different cell
+        // pixel dimensions than the terminal we started with.
         if let Some(font_size) = term_env.font_size {
             tracing::info!(
                 old_font = ?self.picker.font_size(),
                 new_font = ?font_size,
                 "updating picker font_size from shim terminal"
             );
-            #[allow(deprecated)]
+            #[expect(deprecated, reason = "only API to set font dimensions")]
             let mut new_picker = ratatui_image::picker::Picker::from_fontsize(font_size);
             new_picker.set_protocol_type(self.picker.protocol_type());
             self.picker = new_picker;
@@ -1328,19 +1347,109 @@ impl App {
         self.teardown_shim();
     }
 
-    /// Perform detach: save state, drop terminal, start socket listener.
+    /// Perform detach: save state, drop terminal, release the shell.
+    ///
+    /// **Socket mode** (reattached shim): sends `Detached` and tears down the
+    /// socket — the shim process exits, returning the shell prompt.
+    ///
+    /// **Local terminal mode** (first detach): restores the terminal, redirects
+    /// stdio to `/dev/null`, then uses `SIGTSTP` to stop ourselves. The shell
+    /// sees a stopped foreground job and gives the prompt back. A tiny forked
+    /// helper (no tokio — just sleep + signal + `_exit`) sends `SIGCONT` to
+    /// resume us in the background. The tokio runtime, kqueue, IRC connections,
+    /// and socket listener all survive intact because we never fork the runtime.
     fn perform_detach(&mut self) {
         self.should_detach = false;
 
+        // `was_local` is true when we started with a real terminal (not socket,
+        // not already detached). Covers both normal detach (terminal still
+        // present) and draw-error detach (terminal already dropped).
+        let was_local = !self.is_socket_attached && !self.detached;
+
         if self.is_socket_attached {
-            // Send Detached to shim — it will exit, returning the shell prompt.
+            // Socket mode: send Detached to shim — it exits, returning shell prompt.
             self.send_shim_control(crate::session::protocol::MainMessage::Detached);
             self.teardown_shim();
+        } else if was_local {
+            // Local terminal mode: SIGTSTP to release the shell.
+
+            // 1. Stop the local terminal reader thread.
+            self.stop_term_reader();
+
+            // 2. Restore terminal BEFORE redirect (escape sequences need real stdout).
+            if let Some(ref mut terminal) = self.terminal {
+                let _ = ui::restore_terminal(terminal);
+            } else {
+                // Terminal was already dropped (draw error path) — still need to
+                // leave raw mode so the shell isn't garbled after SIGTSTP.
+                let _ = crossterm::terminal::disable_raw_mode();
+                let _ = crossterm::execute!(
+                    std::io::stdout(),
+                    crossterm::terminal::LeaveAlternateScreen
+                );
+            }
+            self.terminal = None;
+
+            // 3. Redirect stdio to /dev/null so writes don't corrupt the shell.
+            redirect_stdio_to_devnull();
+
+            // 4. Fork a tiny helper that will SIGCONT us after we stop.
+            //    The helper never touches tokio — it sleeps, signals, and exits.
+            //    Our kqueue and event loop are completely unaffected.
+            // SAFETY: getpid() is a trivial syscall with no side effects.
+            let our_pid = unsafe { libc::getpid() };
+            // SAFETY: The helper child is trivial (no tokio, no app state access).
+            // It puts itself in a new process group so SIGTSTP doesn't stop it,
+            // then sleeps briefly and sends SIGCONT to resume us.
+            let helper = unsafe { libc::fork() };
+            if helper == 0 {
+                // Helper child: own process group so we aren't stopped by SIGTSTP.
+                // SAFETY: setpgid(0,0) creates a new process group for this process.
+                unsafe {
+                    libc::setpgid(0, 0);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                // SAFETY: SIGCONT resumes the stopped main process.
+                unsafe {
+                    libc::kill(our_pid, libc::SIGCONT);
+                }
+                // SAFETY: _exit avoids running destructors on inherited state.
+                unsafe {
+                    libc::_exit(0);
+                }
+            } else if helper > 0 {
+                // Main process: stop ourselves. Shell gets prompt back.
+                // After the helper sends SIGCONT, execution resumes here.
+                //
+                // SAFETY: SIGTSTP stops us; the shell treats this as a suspended
+                // foreground job and gives the user their prompt. After SIGCONT,
+                // we continue as a background job. The tokio runtime, kqueue fd,
+                // and all I/O registrations survive — we never forked the runtime.
+                unsafe {
+                    libc::kill(libc::getpid(), libc::SIGTSTP);
+                }
+                // --- Execution resumes here after SIGCONT ---
+                // Reap the helper child to prevent a zombie process.
+                // SAFETY: waitpid with the helper's PID blocks until it exits
+                // (which it already has — it sent SIGCONT then _exit'd).
+                unsafe {
+                    libc::waitpid(helper, std::ptr::null_mut(), 0);
+                }
+            }
+            // helper == -1: fork failed for the helper, continue in foreground.
         }
 
         self.detached = true;
 
-        tracing::info!(pid = std::process::id(), "detached");
+        // Ensure socket listener is active for reattachment.
+        if self.socket_listener.is_none()
+            && let Err(e) = self.start_socket_listener()
+        {
+            tracing::warn!("failed to start session socket on detach: {e}");
+        }
+
+        let pid = std::process::id();
+        tracing::info!(pid, "detached — attach with: repartee a");
     }
 
     /// Send Quit to the connected shim before shutdown.
@@ -1354,8 +1463,8 @@ impl App {
         crate::session::cleanup_stale_sockets();
 
         // --- Splash screen ---
-        // In fork mode, the splash runs in the shim process (which owns the
-        // real terminal).  In direct mode (fork failed), run it here.
+        // Show progressive logo reveal on the local terminal.
+        // Skipped when detached (-d mode) or socket-attached (reattach).
         if self.terminal.is_some() && !self.is_socket_attached {
             self.run_splash().await?;
         }
@@ -1395,6 +1504,7 @@ impl App {
         let mut sigterm =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
 
         let mut tick = interval(Duration::from_secs(1));
         let mut paste_tick = interval(Duration::from_millis(500));
@@ -1409,15 +1519,28 @@ impl App {
             // We take() the terminal to avoid borrow conflicts with `self` in the draw closure.
             if let Some(mut terminal) = self.terminal.take() {
                 if self.needs_full_redraw {
-                    terminal.clear()?;
+                    let _ = terminal.clear(); // clear can also fail — ignore
                     self.needs_full_redraw = false;
                 }
-                terminal.draw(|frame| ui::layout::draw(frame, self))?;
-                self.terminal = Some(terminal);
+                match terminal.draw(|frame| ui::layout::draw(frame, self)) {
+                    Ok(_) => {
+                        self.terminal = Some(terminal);
+                    }
+                    Err(e) => {
+                        // Terminal write failed (likely SIGHUP race — terminal already gone).
+                        // Don't put terminal back — it's broken.
+                        // perform_detach() handles all cleanup and fork.
+                        tracing::warn!("terminal draw failed, triggering detach: {e}");
+                        self.should_detach = true;
+                    }
+                }
             }
 
             // tmux: write image directly after ratatui frame flush.
-            self.write_tmux_direct_image();
+            // Only if the draw succeeded (terminal is still valid).
+            if self.terminal.is_some() {
+                self.write_tmux_direct_image();
+            }
 
             tokio::select! {
                 // Local terminal events.
@@ -1545,6 +1668,13 @@ impl App {
                     // (Ctrl+C is handled by the terminal reader).
                     if self.detached {
                         self.should_quit = true;
+                    }
+                },
+                _ = sighup.recv() => {
+                    // Terminal closed externally — auto-detach instead of dying.
+                    if !self.detached {
+                        tracing::info!("SIGHUP received, auto-detaching");
+                        self.should_detach = true;
                     }
                 },
             }
@@ -2597,6 +2727,12 @@ impl App {
                 }
             }
             (KeyModifiers::CONTROL, KeyCode::Char('q' | 'c')) => self.should_quit = true,
+            // Ctrl+\ or Ctrl+Z — detach (single-process: key arrives via term_rx).
+            // In socket mode, the shim intercepts these and sends ShimMessage::Detach
+            // instead, so this arm only fires from the local terminal.
+            (KeyModifiers::CONTROL, KeyCode::Char('\\' | 'z')) => {
+                self.should_detach = true;
+            }
             (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
                 // Force redraw (happens automatically on next iteration)
             }

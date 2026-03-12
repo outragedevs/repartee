@@ -26,11 +26,11 @@ pub enum MainMessage {
     Quit,
 }
 
-/// Terminal environment snapshot sent by the shim on initial connect.
+/// Terminal environment snapshot sent by the shim on connect.
 ///
-/// The daemon uses these values (instead of its own inherited env vars)
-/// for image protocol detection, since the shim may be running in a
-/// different terminal emulator than the one the daemon was forked from.
+/// The main process uses these values (instead of its own env vars, which
+/// may point to a now-closed terminal after detach) for image protocol
+/// detection and font size when rendering through the socket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminalEnv {
     pub cols: u16,
