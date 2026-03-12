@@ -987,6 +987,7 @@ impl App {
             modes: None,
             mode_params: None,
             list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
         });
         self.state.set_active_buffer(&server_buf_id);
 
@@ -1670,6 +1671,7 @@ impl App {
             modes: None,
             mode_params: None,
             list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
         });
         state.set_active_buffer(&buf_id);
 
@@ -2285,6 +2287,7 @@ impl App {
                             modes: None,
                             mode_params: None,
                             list_modes: HashMap::new(),
+                            last_speakers: Vec::new(),
                         });
                     }
                 }
@@ -2885,6 +2888,7 @@ impl App {
                 modes: None,
                 mode_params: None,
                 list_modes: HashMap::new(),
+                last_speakers: Vec::new(),
             });
         }
         self.state.set_active_buffer(&query_buf_id);
@@ -2924,12 +2928,19 @@ impl App {
     }
 
     fn handle_tab(&mut self) {
-        let nicks: Vec<String> = self.state.active_buffer().map_or_else(Vec::new, |buf| {
-            buf.users.values().map(|e| e.nick.clone()).collect()
-        });
+        let (nicks, last_speakers): (Vec<String>, Vec<String>) =
+            self.state.active_buffer().map_or_else(
+                || (Vec::new(), Vec::new()),
+                |buf| {
+                    let nicks = buf.users.values().map(|e| e.nick.clone()).collect();
+                    let speakers = buf.last_speakers.clone();
+                    (nicks, speakers)
+                },
+            );
         let commands = crate::commands::registry::get_command_names();
         let setting_paths = crate::commands::settings::get_setting_paths(&self.config);
-        self.input.tab_complete(&nicks, commands, &setting_paths);
+        self.input
+            .tab_complete(&nicks, &last_speakers, commands, &setting_paths);
     }
 
     fn handle_submit(&mut self, text: &str) {

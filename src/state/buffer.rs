@@ -111,6 +111,9 @@ pub struct ListEntry {
 
 // === Buffer ===
 
+/// Maximum number of recent speakers to track for tab completion.
+const LAST_SPEAKERS_CAP: usize = 50;
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Buffer {
@@ -132,6 +135,24 @@ pub struct Buffer {
     pub modes: Option<String>,
     pub mode_params: Option<HashMap<String, String>>,
     pub list_modes: HashMap<String, Vec<ListEntry>>,
+    /// Recent speakers for tab completion, most recent first.
+    /// Capped at [`LAST_SPEAKERS_CAP`]. Updated on PRIVMSG/NOTICE/ACTION.
+    pub last_speakers: Vec<String>,
+}
+
+impl Buffer {
+    /// Record a nick as having spoken in this buffer.
+    /// Moves them to the front of `last_speakers` (most recent first).
+    pub fn touch_speaker(&mut self, nick: &str) {
+        // Remove if already present (case-insensitive).
+        let nick_lower = nick.to_lowercase();
+        self.last_speakers
+            .retain(|n| n.to_lowercase() != nick_lower);
+        // Prepend.
+        self.last_speakers.insert(0, nick.to_string());
+        // Cap.
+        self.last_speakers.truncate(LAST_SPEAKERS_CAP);
+    }
 }
 
 // === Helpers ===
@@ -143,6 +164,89 @@ pub fn make_buffer_id(connection_id: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn touch_speaker_adds_to_front() {
+        let mut buf = Buffer {
+            id: "test/chan".to_string(),
+            connection_id: "test".to_string(),
+            buffer_type: BufferType::Channel,
+            name: "#chan".to_string(),
+            messages: Vec::new(),
+            activity: ActivityLevel::None,
+            unread_count: 0,
+            last_read: chrono::Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
+        };
+
+        buf.touch_speaker("alice");
+        buf.touch_speaker("bob");
+        buf.touch_speaker("charlie");
+        assert_eq!(buf.last_speakers, vec!["charlie", "bob", "alice"]);
+
+        // Touching an existing nick moves it to front.
+        buf.touch_speaker("alice");
+        assert_eq!(buf.last_speakers, vec!["alice", "charlie", "bob"]);
+    }
+
+    #[test]
+    fn touch_speaker_case_insensitive_dedup() {
+        let mut buf = Buffer {
+            id: "test/chan".to_string(),
+            connection_id: "test".to_string(),
+            buffer_type: BufferType::Channel,
+            name: "#chan".to_string(),
+            messages: Vec::new(),
+            activity: ActivityLevel::None,
+            unread_count: 0,
+            last_read: chrono::Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
+        };
+
+        buf.touch_speaker("Alice");
+        buf.touch_speaker("alice"); // same nick different case
+        assert_eq!(buf.last_speakers.len(), 1);
+        assert_eq!(buf.last_speakers[0], "alice"); // uses the latest casing
+    }
+
+    #[test]
+    fn touch_speaker_respects_cap() {
+        let mut buf = Buffer {
+            id: "test/chan".to_string(),
+            connection_id: "test".to_string(),
+            buffer_type: BufferType::Channel,
+            name: "#chan".to_string(),
+            messages: Vec::new(),
+            activity: ActivityLevel::None,
+            unread_count: 0,
+            last_read: chrono::Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
+        };
+
+        for i in 0..60 {
+            buf.touch_speaker(&format!("user{i}"));
+        }
+        assert_eq!(buf.last_speakers.len(), LAST_SPEAKERS_CAP);
+        assert_eq!(buf.last_speakers[0], "user59"); // most recent
+    }
 
     #[test]
     fn make_buffer_id_lowercases() {

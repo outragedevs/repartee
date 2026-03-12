@@ -792,6 +792,7 @@ fn ensure_query_buffer(app: &mut App, conn_id: &str, target: &str, skip_channels
             modes: None,
             mode_params: None,
             list_modes: std::collections::HashMap::new(),
+            last_speakers: Vec::new(),
         });
     }
     buffer_id

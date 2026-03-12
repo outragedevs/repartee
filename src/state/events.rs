@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use crate::state::buffer::{ActivityLevel, Buffer, Message, NickEntry};
+use crate::state::buffer::{ActivityLevel, Buffer, Message, MessageType, NickEntry};
 use crate::state::connection::{Connection, ConnectionStatus};
 use crate::state::sorting::sort_buffers;
 use crate::storage::LogRow;
@@ -92,6 +92,7 @@ impl AppState {
     pub fn add_message(&mut self, buffer_id: &str, message: Message) {
         self.maybe_log(buffer_id, &message);
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
+            track_speaker(buf, &message);
             buf.messages.push(message);
             enforce_scrollback(buf, self.scrollback_limit);
         }
@@ -105,6 +106,7 @@ impl AppState {
     ) {
         self.maybe_log(buffer_id, &message);
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
+            track_speaker(buf, &message);
             buf.messages.push(message);
             enforce_scrollback(buf, self.scrollback_limit);
             // Only escalate activity if this is not the active buffer
@@ -279,6 +281,19 @@ impl AppState {
     }
 }
 
+/// Track a speaker for tab completion recency ordering.
+/// Only tracks user messages (PRIVMSG, ACTION, NOTICE) — not system events.
+fn track_speaker(buf: &mut Buffer, message: &Message) {
+    if let Some(ref nick) = message.nick {
+        match message.message_type {
+            MessageType::Message | MessageType::Action | MessageType::Notice => {
+                buf.touch_speaker(nick);
+            }
+            MessageType::Event | MessageType::Ctcp => {}
+        }
+    }
+}
+
 /// Trim oldest messages from the buffer if it exceeds the scrollback limit.
 fn enforce_scrollback(buf: &mut Buffer, limit: usize) {
     if limit > 0 && buf.messages.len() > limit {
@@ -358,6 +373,7 @@ mod tests {
             modes: None,
             mode_params: None,
             list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
         }
     }
 

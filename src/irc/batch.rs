@@ -491,6 +491,7 @@ mod tests {
             modes: None,
             mode_params: None,
             list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
         });
 
         // Add users to the channel
@@ -685,6 +686,7 @@ mod tests {
             modes: None,
             mode_params: None,
             list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
         });
 
         // Add users — add_nick stores keys as lowercase

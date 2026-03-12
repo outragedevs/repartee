@@ -76,6 +76,7 @@ mod tests {
             modes: None,
             mode_params: None,
             list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
         }
     }
 

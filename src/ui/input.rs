@@ -201,7 +201,13 @@ impl InputState {
         self.tab_state = None;
     }
 
-    pub fn tab_complete(&mut self, nicks: &[String], commands: &[&str], setting_paths: &[String]) {
+    pub fn tab_complete(
+        &mut self,
+        nicks: &[String],
+        last_speakers: &[String],
+        commands: &[&str],
+        setting_paths: &[String],
+    ) {
         if let Some(ref mut tab) = self.tab_state {
             if tab.matches.is_empty() {
                 return;
@@ -233,46 +239,52 @@ impl InputState {
             let subcommand_ctx = detect_subcommand_context(&text_before);
 
             let prefix = word;
-            let mut matches: Vec<String> = match subcommand_ctx {
+            let matches: Vec<String> = match subcommand_ctx {
                 Some(SubcommandContext::Help) => {
                     // Complete with command names (without /)
-                    commands
+                    let mut m: Vec<String> = commands
                         .iter()
                         .filter(|c| c.to_lowercase().starts_with(&prefix.to_lowercase()))
                         .map(ToString::to_string)
-                        .collect()
+                        .collect();
+                    m.sort_by_key(|a| a.to_lowercase());
+                    m
                 }
                 Some(SubcommandContext::Set) => {
                     // Complete with setting paths
-                    setting_paths
+                    let mut m: Vec<String> = setting_paths
                         .iter()
                         .filter(|p| p.to_lowercase().starts_with(&prefix.to_lowercase()))
                         .cloned()
-                        .collect()
+                        .collect();
+                    m.sort_by_key(|a| a.to_lowercase());
+                    m
                 }
                 Some(SubcommandContext::Subcommand(ref subcmds)) => {
                     // Complete with doc-driven subcommand names
-                    subcmds
+                    let mut m: Vec<String> = subcmds
                         .iter()
                         .filter(|s| s.to_lowercase().starts_with(&prefix.to_lowercase()))
                         .cloned()
-                        .collect()
+                        .collect();
+                    m.sort_by_key(|a| a.to_lowercase());
+                    m
                 }
                 None if is_command => {
                     let cmd_prefix = &prefix[1..]; // strip leading /
-                    commands
+                    let mut m: Vec<String> = commands
                         .iter()
                         .filter(|c| c.to_lowercase().starts_with(&cmd_prefix.to_lowercase()))
                         .map(|c| format!("/{c}"))
-                        .collect()
+                        .collect();
+                    m.sort_by_key(|a| a.to_lowercase());
+                    m
                 }
-                None => nicks
-                    .iter()
-                    .filter(|n| n.to_lowercase().starts_with(&prefix.to_lowercase()))
-                    .cloned()
-                    .collect(),
+                None => {
+                    // Nick completion: recent speakers first, then remaining nicks alphabetically.
+                    nick_completions(nicks, last_speakers, &prefix)
+                }
             };
-            matches.sort_by_key(|a| a.to_lowercase());
 
             if matches.is_empty() {
                 return;
@@ -299,6 +311,36 @@ impl InputState {
             });
         }
     }
+}
+
+/// Build nick completion list with recent speakers first (erssi-style).
+///
+/// 1. Matching nicks from `last_speakers` — in recency order (most recent first)
+/// 2. Remaining matching nicks from the full channel nick list — sorted alphabetically
+fn nick_completions(nicks: &[String], last_speakers: &[String], prefix: &str) -> Vec<String> {
+    let prefix_lower = prefix.to_lowercase();
+
+    // Recent speakers that match the prefix (already in recency order).
+    let mut recent: Vec<String> = last_speakers
+        .iter()
+        .filter(|n| n.to_lowercase().starts_with(&prefix_lower))
+        .cloned()
+        .collect();
+
+    // Collect the rest from the full nick list, excluding already-added recent speakers.
+    let recent_lower: Vec<String> = recent.iter().map(|n| n.to_lowercase()).collect();
+    let mut rest: Vec<String> = nicks
+        .iter()
+        .filter(|n| {
+            let lower = n.to_lowercase();
+            lower.starts_with(&prefix_lower) && !recent_lower.contains(&lower)
+        })
+        .cloned()
+        .collect();
+    rest.sort_by_key(|a| a.to_lowercase());
+
+    recent.extend(rest);
+    recent
 }
 
 enum SubcommandContext {
@@ -544,7 +586,7 @@ mod tests {
         input.cursor_pos = 3;
 
         let nicks = vec!["ferris".to_string(), "helper".to_string()];
-        input.tab_complete(&nicks, &[], &[]);
+        input.tab_complete(&nicks, &[], &[], &[]);
 
         assert_eq!(input.value, "ferris: ");
         assert_eq!(input.cursor_pos, 8);
@@ -557,7 +599,7 @@ mod tests {
         input.cursor_pos = 7;
 
         let nicks = vec!["ferris".to_string(), "helper".to_string()];
-        input.tab_complete(&nicks, &[], &[]);
+        input.tab_complete(&nicks, &[], &[], &[]);
 
         assert_eq!(input.value, "hey ferris ");
         assert_eq!(input.cursor_pos, 11);
@@ -570,17 +612,17 @@ mod tests {
         input.cursor_pos = 1;
 
         let nicks = vec!["helper".to_string(), "hank".to_string(), "hiro".to_string()];
-        input.tab_complete(&nicks, &[], &[]);
+        input.tab_complete(&nicks, &[], &[], &[]);
         assert_eq!(input.value, "hank: "); // sorted: hank, helper, hiro
 
-        input.tab_complete(&nicks, &[], &[]);
+        input.tab_complete(&nicks, &[], &[], &[]);
         assert_eq!(input.value, "helper: ");
 
-        input.tab_complete(&nicks, &[], &[]);
+        input.tab_complete(&nicks, &[], &[], &[]);
         assert_eq!(input.value, "hiro: ");
 
         // Wraps around
-        input.tab_complete(&nicks, &[], &[]);
+        input.tab_complete(&nicks, &[], &[], &[]);
         assert_eq!(input.value, "hank: ");
     }
 
@@ -591,7 +633,7 @@ mod tests {
         input.cursor_pos = 3;
 
         let commands = &["join", "part", "msg", "quit"];
-        input.tab_complete(&[], commands, &[]);
+        input.tab_complete(&[], &[], commands, &[]);
 
         assert_eq!(input.value, "/join ");
     }
@@ -603,7 +645,7 @@ mod tests {
         input.cursor_pos = 8;
 
         let commands = &["connect", "close", "clear", "quit"];
-        input.tab_complete(&[], commands, &[]);
+        input.tab_complete(&[], &[], commands, &[]);
         assert_eq!(input.value, "/help clear ");
     }
 
@@ -614,13 +656,13 @@ mod tests {
         input.cursor_pos = 7;
 
         let commands = &["connect", "close", "clear"];
-        input.tab_complete(&[], commands, &[]);
+        input.tab_complete(&[], &[], commands, &[]);
         assert_eq!(input.value, "/help clear ");
 
-        input.tab_complete(&[], commands, &[]);
+        input.tab_complete(&[], &[], commands, &[]);
         assert_eq!(input.value, "/help close ");
 
-        input.tab_complete(&[], commands, &[]);
+        input.tab_complete(&[], &[], commands, &[]);
         assert_eq!(input.value, "/help connect ");
     }
 
@@ -631,7 +673,7 @@ mod tests {
         input.cursor_pos = 15;
 
         let settings = vec!["general.nick".to_string(), "general.username".to_string()];
-        input.tab_complete(&[], &[], &settings);
+        input.tab_complete(&[], &[], &[], &settings);
         assert_eq!(input.value, "/set general.nick ");
     }
 
@@ -645,7 +687,7 @@ mod tests {
             "display.nick_column_width".to_string(),
             "display.show_timestamps".to_string(),
         ];
-        input.tab_complete(&[], &[], &settings);
+        input.tab_complete(&[], &[], &[], &settings);
         assert_eq!(input.value, "/set display.nick_column_width ");
     }
 
@@ -746,10 +788,79 @@ mod tests {
         input.cursor_pos = 3;
 
         let nicks = vec!["ferris".to_string()];
-        input.tab_complete(&nicks, &[], &[]);
+        input.tab_complete(&nicks, &[], &[], &[]);
         assert!(input.tab_state.is_some());
 
         input.insert_char('x');
         assert!(input.tab_state.is_none());
+    }
+
+    #[test]
+    fn nick_completion_recent_speakers_first() {
+        let mut input = InputState::new();
+        input.value = "h".to_string();
+        input.cursor_pos = 1;
+
+        let nicks = vec!["helper".to_string(), "hank".to_string(), "hiro".to_string()];
+        // hiro spoke most recently, then hank
+        let last_speakers = vec!["hiro".to_string(), "hank".to_string()];
+        input.tab_complete(&nicks, &last_speakers, &[], &[]);
+        assert_eq!(input.value, "hiro: "); // most recent speaker first
+
+        input.tab_complete(&nicks, &last_speakers, &[], &[]);
+        assert_eq!(input.value, "hank: "); // second most recent
+
+        input.tab_complete(&nicks, &last_speakers, &[], &[]);
+        assert_eq!(input.value, "helper: "); // remaining nick (alphabetical)
+
+        // Wraps around
+        input.tab_complete(&nicks, &last_speakers, &[], &[]);
+        assert_eq!(input.value, "hiro: ");
+    }
+
+    #[test]
+    fn nick_completion_recent_speakers_case_insensitive() {
+        let mut input = InputState::new();
+        input.value = "h".to_string();
+        input.cursor_pos = 1;
+
+        let nicks = vec!["Helper".to_string(), "Hank".to_string()];
+        let last_speakers = vec!["hank".to_string()]; // lowercase in speakers list
+        input.tab_complete(&nicks, &last_speakers, &[], &[]);
+        assert_eq!(input.value, "hank: "); // recent speaker first
+
+        input.tab_complete(&nicks, &last_speakers, &[], &[]);
+        assert_eq!(input.value, "Helper: "); // remaining nick
+    }
+
+    #[test]
+    fn nick_completion_no_duplicates() {
+        let mut input = InputState::new();
+        input.value = "h".to_string();
+        input.cursor_pos = 1;
+
+        let nicks = vec!["hank".to_string(), "hiro".to_string()];
+        let last_speakers = vec!["hank".to_string()]; // hank is in both lists
+        input.tab_complete(&nicks, &last_speakers, &[], &[]);
+        assert_eq!(input.value, "hank: ");
+
+        input.tab_complete(&nicks, &last_speakers, &[], &[]);
+        assert_eq!(input.value, "hiro: "); // not hank again
+
+        // Wraps to hank
+        input.tab_complete(&nicks, &last_speakers, &[], &[]);
+        assert_eq!(input.value, "hank: ");
+    }
+
+    #[test]
+    fn nick_completion_empty_speakers_falls_back_to_alphabetical() {
+        let mut input = InputState::new();
+        input.value = "h".to_string();
+        input.cursor_pos = 1;
+
+        let nicks = vec!["hiro".to_string(), "hank".to_string(), "helper".to_string()];
+        let last_speakers: Vec<String> = vec![];
+        input.tab_complete(&nicks, &last_speakers, &[], &[]);
+        assert_eq!(input.value, "hank: "); // alphabetical
     }
 }

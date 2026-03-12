@@ -674,6 +674,7 @@ fn handle_privmsg(
             modes: None,
             mode_params: None,
             list_modes: std::collections::HashMap::new(),
+            last_speakers: Vec::new(),
         });
     }
 
@@ -978,6 +979,7 @@ fn handle_join(
                 modes: None,
                 mode_params: None,
                 list_modes: std::collections::HashMap::new(),
+                last_speakers: Vec::new(),
             });
         }
         state.set_active_buffer(&buffer_id);
@@ -2807,6 +2809,7 @@ mod tests {
             modes: None,
             mode_params: None,
             list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
         });
         // Channel buffer
         let chan_id = make_buffer_id("test", "#test");
@@ -2825,6 +2828,7 @@ mod tests {
             modes: None,
             mode_params: None,
             list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
         });
         // Add ourselves to the channel
         state.add_nick(
@@ -2858,6 +2862,7 @@ mod tests {
             modes: None,
             mode_params: None,
             list_modes: std::collections::HashMap::new(),
+            last_speakers: Vec::new(),
         }
     }
 
@@ -3581,6 +3586,7 @@ mod tests {
             modes: None,
             mode_params: None,
             list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
         });
 
         // Add alice to both channels
@@ -3714,6 +3720,7 @@ mod tests {
             modes: None,
             mode_params: None,
             list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
         });
 
         // Add alice to both channels
@@ -3840,6 +3847,7 @@ mod tests {
             modes: None,
             mode_params: None,
             list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
         });
 
         // Add alice to both channels
@@ -4378,6 +4386,7 @@ mod tests {
             modes: None,
             mode_params: None,
             list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
         });
 
         // Server echoes our NOTICE to "bob"
