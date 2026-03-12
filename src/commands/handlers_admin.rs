@@ -760,14 +760,22 @@ fn image_debug(app: &mut App) {
     let font = app.picker.font_size();
     let caps = app.picker.capabilities();
 
-    // Collect env vars
-    let term = std::env::var("TERM").unwrap_or_default();
-    let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
-    let lc_terminal = std::env::var("LC_TERMINAL").unwrap_or_default();
-    let iterm_sess = std::env::var("ITERM_SESSION_ID").unwrap_or_default();
-    let ghostty_res = std::env::var("GHOSTTY_RESOURCES_DIR").unwrap_or_default();
-    let kitty_pid = std::env::var("KITTY_PID").unwrap_or_default();
-    let colorterm = std::env::var("COLORTERM").unwrap_or_default();
+    // Collect env vars — use shim's env when socket-attached, daemon's env otherwise.
+    let env_override: Option<&std::collections::HashMap<String, String>> = app.shim_term_env.as_ref();
+    let get_env = |key: &str| -> String {
+        if let Some(vars) = env_override {
+            vars.get(key).cloned().unwrap_or_default()
+        } else {
+            std::env::var(key).unwrap_or_default()
+        }
+    };
+    let term = get_env("TERM");
+    let term_program = get_env("TERM_PROGRAM");
+    let lc_terminal = get_env("LC_TERMINAL");
+    let iterm_sess = get_env("ITERM_SESSION_ID");
+    let ghostty_res = get_env("GHOSTTY_RESOURCES_DIR");
+    let kitty_pid = get_env("KITTY_PID");
+    let colorterm = get_env("COLORTERM");
 
     // tmux queries (only if in tmux)
     let (tmux_termtype, tmux_termname, tmux_passthrough, tmux_version) = if app.in_tmux {

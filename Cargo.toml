@@ -22,7 +22,9 @@ exclude = [
 
 [dependencies]
 ratatui = "0.30"
-crossterm = { version = "0.29", features = ["event-stream"] }
+crossterm = { version = "0.29", features = ["event-stream", "serde"] }
+bincode = "1.3"
+libc = "0.2"
 tokio = { version = "1.50", features = ["full"] }
 irc = { version = "1.3.1", package = "irc-repartee" }
 color-eyre = "0.6"

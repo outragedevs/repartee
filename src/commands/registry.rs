@@ -2,7 +2,7 @@ use std::sync::LazyLock;
 
 use super::types::{CommandDef, CommandCategory};
 use super::handlers_ui::{
-    cmd_quit, cmd_help, cmd_clear, cmd_close, cmd_alias, cmd_unalias, cmd_items,
+    cmd_quit, cmd_help, cmd_clear, cmd_close, cmd_alias, cmd_unalias, cmd_items, cmd_detach,
 };
 use super::handlers_irc::{
     cmd_connect, cmd_disconnect, cmd_join, cmd_part, cmd_cycle, cmd_topic, cmd_kick, cmd_invite,
@@ -23,6 +23,7 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| ve
         ("connect",    CommandDef { handler: cmd_connect,    description: "Connect to a server",              aliases: &["c"],          category: CommandCategory::Connection }),
         ("disconnect", CommandDef { handler: cmd_disconnect, description: "Disconnect from current server",   aliases: &[],             category: CommandCategory::Connection }),
         ("quit",       CommandDef { handler: cmd_quit,       description: "Quit the client",                  aliases: &["exit"],       category: CommandCategory::Connection }),
+        ("detach",     CommandDef { handler: cmd_detach,     description: "Detach from terminal (keep running)", aliases: &["dt"],         category: CommandCategory::Connection }),
         ("server",     CommandDef { handler: cmd_server,     description: "Manage server configurations",     aliases: &[],             category: CommandCategory::Connection }),
         // === Channel ===
         ("join",       CommandDef { handler: cmd_join,       description: "Join a channel",                   aliases: &["j"],          category: CommandCategory::Channel }),

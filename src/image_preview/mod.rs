@@ -213,8 +213,27 @@ fn decode_and_encode(
         .with_guessed_format()?
         .decode()?;
 
-    // 6. Calculate display dimensions (matching kokoirc aspect ratio logic).
-    let (width, height) = calculate_display_size(config, term_size, &dyn_img);
+    // 6. Calculate display dimensions using the picker's font_size so the
+    //    popup matches what ratatui-image's StatefulImage will actually render.
+    let font_size = picker.font_size();
+    tracing::debug!(
+        img_w = dyn_img.width(),
+        img_h = dyn_img.height(),
+        term_cols = term_size.0,
+        term_rows = term_size.1,
+        font_w = font_size.0,
+        font_h = font_size.1,
+        protocol = ?picker.protocol_type(),
+        "image decode: input dimensions"
+    );
+    let (width, height) = calculate_display_size(config, term_size, &dyn_img, font_size);
+    tracing::debug!(
+        popup_w = width,
+        popup_h = height,
+        inner_w = width.saturating_sub(2),
+        inner_h = height.saturating_sub(2),
+        "image decode: popup dimensions"
+    );
 
     // 7. Encode as PNG for the direct-write path (iTerm2+tmux).
     let mut png_buf: Vec<u8> = Vec::new();
@@ -232,13 +251,15 @@ fn decode_and_encode(
 /// is `(width - 2, height - 2)`. The image is scaled to fit while preserving
 /// its aspect ratio.
 ///
-/// Terminal cells are roughly twice as tall as they are wide, so a
-/// `cell_aspect` factor of 2 is applied when converting pixel dimensions
-/// to cell dimensions.
+/// Uses the picker's `font_size` to convert between pixels and cells — this
+/// must match what `ratatui-image`'s `StatefulImage` uses internally, otherwise
+/// the popup will be larger than the rendered image (empty space) or smaller
+/// (image clipped).
 fn calculate_display_size(
     config: &ImagePreviewConfig,
     term_size: (u16, u16),
     img: &image::DynamicImage,
+    font_size: (u16, u16),
 ) -> (u16, u16) {
     let max_cols = if config.max_width > 0 {
         u16::try_from(config.max_width).unwrap_or(u16::MAX)
@@ -263,31 +284,38 @@ fn calculate_display_size(
         return (max_cols.min(10), max_rows.min(5));
     }
 
-    // Terminal cells are ~2:1 height:width, so each row of cells represents
-    // about 2x the pixels of a column. To maintain the visual aspect ratio,
-    // we scale the image height by the cell aspect ratio.
-    let cell_aspect: f64 = 2.0;
+    let fw = f64::from(font_size.0.max(1));
+    let fh = f64::from(font_size.1.max(1));
 
-    // How many columns and rows would the image occupy if scaled to fit?
-    let scale_x = f64::from(inner_cols) / f64::from(img_w);
-    let scale_y = f64::from(inner_rows) / (f64::from(img_h) / cell_aspect);
-    let scale = scale_x.min(scale_y).min(1.0); // never upscale
+    // Convert image pixel dimensions to cell dimensions at 1:1 pixel mapping.
+    // This matches ratatui-image's Resize::Fit, which doesn't upscale beyond
+    // the image's native size in cells.
+    let img_cells_w = (f64::from(img_w) / fw).ceil();
+    let img_cells_h = (f64::from(img_h) / fh).ceil();
+
+    // Fit the image into the available inner area, preserving aspect ratio.
+    // Never upscale — cap at the image's natural cell size.
+    let fitted_cols = img_cells_w.min(f64::from(inner_cols));
+    let fitted_rows = img_cells_h.min(f64::from(inner_rows));
+
+    // If the image doesn't fit in one dimension, scale down proportionally.
+    let scale_x = fitted_cols / img_cells_w;
+    let scale_y = fitted_rows / img_cells_h;
+    let scale = scale_x.min(scale_y);
 
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "dimensions are small positive values; truncation is intentional"
     )]
-    let fitted_cols = (f64::from(img_w) * scale).round().max(1.0) as u16;
+    let final_cols = (img_cells_w * scale).round().max(1.0) as u16;
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "dimensions are small positive values; truncation is intentional"
     )]
-    let fitted_rows = (f64::from(img_h) / cell_aspect * scale)
-        .round()
-        .max(1.0) as u16;
+    let final_rows = (img_cells_h * scale).round().max(1.0) as u16;
 
     // Add the border back.
-    (fitted_cols + 2, fitted_rows + 2)
+    (final_cols + 2, final_rows + 2)
 }

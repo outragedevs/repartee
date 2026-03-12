@@ -10,7 +10,7 @@ pub mod status_line;
 pub mod styled_text;
 pub mod topic_bar;
 
-use std::io;
+use std::io::{self, Write};
 use color_eyre::eyre::Result;
 use crossterm::{
     event::{
@@ -21,9 +21,9 @@ use crossterm::{
 };
 use ratatui::prelude::*;
 
-pub type Tui = Terminal<CrosstermBackend<io::Stdout>>;
+pub type Tui = Terminal<CrosstermBackend<Box<dyn Write + Send>>>;
 
-/// Set up the terminal for TUI mode.
+/// Set up the terminal for TUI mode (local stdout).
 pub fn setup_terminal() -> Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -33,8 +33,34 @@ pub fn setup_terminal() -> Result<Tui> {
         EnableMouseCapture,
         EnableBracketedPaste
     )?;
-    let backend = CrosstermBackend::new(stdout);
+    let backend = CrosstermBackend::new(Box::new(stdout) as Box<dyn Write + Send>);
     let terminal = Terminal::new(backend)?;
+    Ok(terminal)
+}
+
+/// Set up a terminal backed by a socket writer (for remote attach).
+pub fn setup_socket_terminal(
+    mut writer: Box<dyn Write + Send>,
+    cols: u16,
+    rows: u16,
+) -> Result<Tui> {
+    // Send terminal setup sequences through the socket to the shim's stdout.
+    execute!(
+        writer,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
+    let backend = CrosstermBackend::new(writer);
+    // Use Fixed viewport — Fullscreen would call backend.size() every frame,
+    // which queries ioctl on stdout (= /dev/null in the daemon) and gets garbage.
+    // Fixed viewport uses the stored area, updated via terminal.resize() on SIGWINCH.
+    let terminal = Terminal::with_options(
+        backend,
+        ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Fixed(ratatui::layout::Rect::new(0, 0, cols, rows)),
+        },
+    )?;
     Ok(terminal)
 }
 

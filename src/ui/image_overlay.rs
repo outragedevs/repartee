@@ -125,6 +125,14 @@ fn render_ready(
 
     let popup_area = centered_rect(area, width, height);
 
+    tracing::debug!(
+        terminal_area = ?area,
+        requested_w = width,
+        requested_h = height,
+        popup_area = ?popup_area,
+        "image_overlay: popup placement"
+    );
+
     frame.render_widget(Clear, popup_area);
 
     let title_text = title
@@ -139,6 +147,12 @@ fn render_ready(
 
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
+
+    tracing::debug!(
+        inner_area = ?inner,
+        tmux_direct,
+        "image_overlay: inner render area"
+    );
 
     if tmux_direct {
         // Skip ratatui-image widget — image will be written directly to

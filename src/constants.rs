@@ -45,6 +45,10 @@ pub fn scripts_dir() -> PathBuf {
     home_dir().join("scripts")
 }
 
+pub fn sessions_dir() -> PathBuf {
+    home_dir().join("sessions")
+}
+
 /// Create config directory and write default files on first run.
 pub fn ensure_config_dir() {
     let home = home_dir();

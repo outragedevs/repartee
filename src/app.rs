@@ -31,21 +31,35 @@ use ratatui_image::picker::ProtocolType;
 /// to for protocol selection, cleanup strategy, and debug logging.
 ///
 /// Returns `(terminal_name, protocol, source)`.
-fn detect_outer_terminal(in_tmux: bool) -> (&'static str, Option<ProtocolType>, String) {
+fn detect_outer_terminal(
+    in_tmux: bool,
+    env_override: Option<&std::collections::HashMap<String, String>>,
+) -> (&'static str, Option<ProtocolType>, String) {
+    // When a shim is connected, use the shim's env vars (it knows the real terminal).
+    // Otherwise fall back to the daemon's own env vars.
+    let get_env = |key: &str| -> Option<String> {
+        if let Some(vars) = env_override {
+            vars.get(key).cloned()
+        } else {
+            std::env::var(key).ok().filter(|s| !s.is_empty())
+        }
+    };
+
     // Dump all relevant env vars for debugging.
     tracing::debug!(
-        TMUX = ?std::env::var("TMUX").ok(),
-        TERM = ?std::env::var("TERM").ok(),
-        TERM_PROGRAM = ?std::env::var("TERM_PROGRAM").ok(),
-        TERM_PROGRAM_VERSION = ?std::env::var("TERM_PROGRAM_VERSION").ok(),
-        LC_TERMINAL = ?std::env::var("LC_TERMINAL").ok(),
-        LC_TERMINAL_VERSION = ?std::env::var("LC_TERMINAL_VERSION").ok(),
-        ITERM_SESSION_ID = ?std::env::var("ITERM_SESSION_ID").ok(),
-        KITTY_PID = ?std::env::var("KITTY_PID").ok(),
-        GHOSTTY_RESOURCES_DIR = ?std::env::var("GHOSTTY_RESOURCES_DIR").ok(),
-        WT_SESSION = ?std::env::var("WT_SESSION").ok(),
-        COLORTERM = ?std::env::var("COLORTERM").ok(),
+        TMUX = ?get_env("TMUX"),
+        TERM = ?get_env("TERM"),
+        TERM_PROGRAM = ?get_env("TERM_PROGRAM"),
+        TERM_PROGRAM_VERSION = ?get_env("TERM_PROGRAM_VERSION"),
+        LC_TERMINAL = ?get_env("LC_TERMINAL"),
+        LC_TERMINAL_VERSION = ?get_env("LC_TERMINAL_VERSION"),
+        ITERM_SESSION_ID = ?get_env("ITERM_SESSION_ID"),
+        KITTY_PID = ?get_env("KITTY_PID"),
+        GHOSTTY_RESOURCES_DIR = ?get_env("GHOSTTY_RESOURCES_DIR"),
+        WT_SESSION = ?get_env("WT_SESSION"),
+        COLORTERM = ?get_env("COLORTERM"),
         in_tmux,
+        env_from_shim = env_override.is_some(),
         "outer terminal env vars"
     );
 
@@ -82,7 +96,7 @@ fn detect_outer_terminal(in_tmux: bool) -> (&'static str, Option<ProtocolType>, 
     }
 
     // ── env var detection (works both direct and in tmux) ──
-    let lc_terminal = std::env::var("LC_TERMINAL").unwrap_or_default();
+    let lc_terminal = get_env("LC_TERMINAL").unwrap_or_default();
 
     // LC_TERMINAL survives tmux and SSH — most reliable after tmux queries.
     if !lc_terminal.is_empty() {
@@ -98,31 +112,30 @@ fn detect_outer_terminal(in_tmux: bool) -> (&'static str, Option<ProtocolType>, 
     }
 
     // Terminal-specific env vars.
-    if std::env::var("ITERM_SESSION_ID").is_ok_and(|s| !s.is_empty()) {
+    if get_env("ITERM_SESSION_ID").is_some() {
         return ("iterm2", Some(ProtocolType::Iterm2), "env:ITERM_SESSION_ID".into());
     }
 
     // GHOSTTY_RESOURCES_DIR — validate it's a real path, not just "1" or garbage.
-    if let Ok(grd) = std::env::var("GHOSTTY_RESOURCES_DIR")
-        && !grd.is_empty()
+    if let Some(grd) = get_env("GHOSTTY_RESOURCES_DIR")
         && grd.len() > 1
     {
         return ("ghostty", Some(ProtocolType::Kitty), format!("env:GHOSTTY_RESOURCES_DIR={grd}"));
     }
 
-    if std::env::var("KITTY_PID").is_ok_and(|s| !s.is_empty()) {
+    if get_env("KITTY_PID").is_some() {
         return ("kitty", Some(ProtocolType::Kitty), "env:KITTY_PID".into());
     }
-    if std::env::var("WEZTERM_EXECUTABLE").is_ok_and(|s| !s.is_empty()) {
+    if get_env("WEZTERM_EXECUTABLE").is_some() {
         return ("wezterm", Some(ProtocolType::Iterm2), "env:WEZTERM_EXECUTABLE".into());
     }
-    if std::env::var("WT_SESSION").is_ok_and(|s| !s.is_empty()) {
+    if get_env("WT_SESSION").is_some() {
         return ("windows-terminal", Some(ProtocolType::Sixel), "env:WT_SESSION".into());
     }
 
     // Non-tmux: TERM_PROGRAM is the actual terminal.
     if !in_tmux {
-        let tp = std::env::var("TERM_PROGRAM").unwrap_or_default();
+        let tp = get_env("TERM_PROGRAM").unwrap_or_default();
         if !tp.is_empty()
             && tp != "tmux"
             && let Some((name, proto)) = match_terminal(&tp)
@@ -132,7 +145,7 @@ fn detect_outer_terminal(in_tmux: bool) -> (&'static str, Option<ProtocolType>, 
     }
 
     // ── Generic TERM value — last resort ──
-    let term = std::env::var("TERM").unwrap_or_default();
+    let term = get_env("TERM").unwrap_or_default();
     if let Some((name, proto)) = match_terminal(&term) {
         return (name, Some(proto), format!("env:TERM={term}"));
     }
@@ -216,6 +229,7 @@ fn resolve_image_protocol(
     outer_terminal: &str,
     outer_proto: Option<ProtocolType>,
     outer_source: String,
+    env_is_authoritative: bool,
 ) -> (Option<ProtocolType>, String) {
     // 1. Config override — user explicitly chose a protocol.
     match config_protocol {
@@ -226,25 +240,27 @@ fn resolve_image_protocol(
         _ => {} // "auto" or anything else — proceed to detection
     }
 
-    // 2. tmux client detection is authoritative — #{client_termtype} tells us
-    //    the REAL terminal program attached to the pane.  IO queries go through
-    //    DCS passthrough and might hit the wrong client when multiple are
-    //    attached; env vars can be stale.  Always trust tmux over IO.
-    if outer_source.starts_with("tmux:")
+    // 2. Authoritative outer terminal detection — trust it over IO queries.
+    //    This applies when:
+    //    - tmux: #{client_termtype} tells us the REAL terminal attached to the pane
+    //    - socket: shim sends its env vars, which reflect the actual terminal
+    //    In both cases the IO query result is stale/wrong (it was probed against
+    //    the original terminal at startup, not the currently attached one).
+    if (outer_source.starts_with("tmux:") || env_is_authoritative)
         && let Some(proto) = outer_proto
     {
         return (Some(proto), outer_source);
     }
 
-    // 3. iTerm2 env-based override (non-tmux path) — iTerm2 3.5+ responds to
-    //    the Kitty graphics probe, so ratatui-image detects Kitty. But iTerm2's
-    //    Kitty implementation is incomplete; the native iTerm2 (OSC 1337)
-    //    protocol works correctly.
+    // 3. iTerm2 env-based override (non-tmux, non-socket path) — iTerm2 3.5+
+    //    responds to the Kitty graphics probe, so ratatui-image detects Kitty.
+    //    But iTerm2's Kitty implementation is incomplete; the native iTerm2
+    //    (OSC 1337) protocol works correctly.
     if outer_terminal == "iterm2" {
         return (Some(ProtocolType::Iterm2), format!("iterm2-override:{outer_source}"));
     }
 
-    // 4. IO-based detection — trust it when running directly (not tmux).
+    // 4. IO-based detection — trust it when running directly (not tmux/socket).
     if picker.protocol_type() != ProtocolType::Halfblocks {
         return (None, format!("io-query:{:?}", picker.protocol_type()));
     }
@@ -335,6 +351,8 @@ pub struct App {
     pub outer_terminal: String,
     /// How the image protocol was resolved (for diagnostics).
     pub image_proto_source: String,
+    /// Terminal env vars from the connected shim (overrides daemon's own env for detection).
+    pub shim_term_env: Option<std::collections::HashMap<String, String>>,
     /// Per-connection queues of channels awaiting batched WHO + MODE after join.
     channel_query_queues: HashMap<String, VecDeque<String>>,
     /// Per-connection set of channels in the current WHO batch (awaiting `RPL_ENDOFWHO`).
@@ -366,6 +384,36 @@ pub struct App {
     pub wrap_indent: usize,
     /// Cached TOML serialization of `config`, invalidated on config change.
     pub cached_config_toml: Option<toml::Value>,
+    // --- Session / detach-reattach ---
+    /// The terminal (None when detached with no terminal attached).
+    pub terminal: Option<ui::Tui>,
+    /// Whether the process is currently detached (no terminal).
+    pub detached: bool,
+    /// Set by /detach or chord — processed at top of event loop iteration.
+    pub should_detach: bool,
+    /// Unix socket listener for shim connections (active when detached or always).
+    socket_listener: Option<tokio::net::UnixListener>,
+    /// Sender for output/control messages to the connected shim.
+    socket_output_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::session::protocol::MainMessage>>,
+    /// Receiver for messages from a connected shim.
+    shim_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::session::protocol::ShimMessage>>,
+    /// True when terminal is socket-backed (vs local stdout).
+    pub is_socket_attached: bool,
+    /// Stop flag for the terminal reader thread.
+    term_reader_stop: Arc<AtomicBool>,
+    /// Receiver for terminal events from the blocking reader thread.
+    term_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crossterm::event::Event>>,
+    /// Handle for the shim output writer task (so we can abort on disconnect).
+    shim_output_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Handle for the shim input reader task.
+    shim_input_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Cached terminal dimensions (cols, rows).
+    ///
+    /// Updated from shim Resize messages or `crossterm::terminal::size()` at startup.
+    /// Used instead of `terminal.size()` which calls `backend.size()` (ioctl on
+    /// stdout) — broken when stdout is `/dev/null` in daemon/fork mode.
+    pub cached_term_cols: u16,
+    pub cached_term_rows: u16,
 }
 
 impl App {
@@ -420,7 +468,7 @@ impl App {
 
         // Detect outer terminal — always runs, not just as a fallback.
         // (mirrors kokoirc's detectProtocol: tmux query > env vars > TERM)
-        let (outer_terminal, outer_proto, outer_source) = detect_outer_terminal(in_tmux);
+        let (outer_terminal, outer_proto, outer_source) = detect_outer_terminal(in_tmux, None);
         tracing::info!(
             outer_terminal = %outer_terminal,
             outer_proto = ?outer_proto,
@@ -436,6 +484,7 @@ impl App {
                 outer_terminal,
                 outer_proto,
                 outer_source,
+                false, // no shim at startup
             );
         if let Some(proto) = resolved_proto {
             tracing::debug!(
@@ -507,6 +556,7 @@ impl App {
             needs_full_redraw: false,
             outer_terminal: outer_terminal.to_string(),
             image_proto_source: source,
+            shim_term_env: None,
             channel_query_queues: HashMap::new(),
             channel_query_in_flight: HashMap::new(),
             channel_query_sent_at: HashMap::new(),
@@ -521,6 +571,19 @@ impl App {
             script_action_tx,
             wrap_indent: 0,
             cached_config_toml: None,
+            terminal: None,
+            detached: false,
+            should_detach: false,
+            socket_listener: None,
+            socket_output_tx: None,
+            shim_event_rx: None,
+            is_socket_attached: false,
+            term_reader_stop: Arc::new(AtomicBool::new(false)),
+            term_rx: None,
+            shim_output_handle: None,
+            shim_input_handle: None,
+            cached_term_cols: 80,
+            cached_term_rows: 24,
         };
         app.recompute_wrap_indent();
         Ok(app)
@@ -568,7 +631,7 @@ impl App {
             url: url.to_string(),
         };
 
-        let term_size = crossterm::terminal::size().unwrap_or((80, 24));
+        let term_size = self.terminal_size();
 
         crate::image_preview::spawn_preview(
             url,
@@ -582,10 +645,17 @@ impl App {
 
     /// Re-detect outer terminal and update the picker's protocol.
     pub fn refresh_image_protocol(&mut self) {
-        let in_tmux = std::env::var("TMUX").is_ok_and(|s| !s.is_empty());
+        // When socket-attached, use the shim's env vars for terminal detection
+        // (the daemon's own env vars are frozen from fork time).
+        let env_override = self.shim_term_env.as_ref();
+        let in_tmux = if let Some(vars) = env_override {
+            vars.get("TMUX").is_some_and(|s| !s.is_empty())
+        } else {
+            std::env::var("TMUX").is_ok_and(|s| !s.is_empty())
+        };
         self.in_tmux = in_tmux;
 
-        let (outer_terminal, outer_proto, outer_source) = detect_outer_terminal(in_tmux);
+        let (outer_terminal, outer_proto, outer_source) = detect_outer_terminal(in_tmux, env_override);
 
         let (resolved_proto, source) = resolve_image_protocol(
             &self.config.image_preview.protocol,
@@ -593,6 +663,7 @@ impl App {
             outer_terminal,
             outer_proto,
             outer_source,
+            env_override.is_some(), // shim env is authoritative
         );
 
         if let Some(proto) = resolved_proto {
@@ -686,7 +757,7 @@ impl App {
             _ => return,
         };
 
-        let term_size = crossterm::terminal::size().unwrap_or((80, 24));
+        let term_size = self.terminal_size();
         let popup_w = popup_width.min(term_size.0);
         let popup_h = popup_height.min(term_size.1);
         let popup_x = (term_size.0.saturating_sub(popup_w)) / 2;
@@ -731,7 +802,10 @@ impl App {
     /// - **Kitty**: PNG format (`f=100`), `c`/`r` params for cell area scaling
     /// - **iTerm2**: OSC 1337 inline image with cell dimensions
     pub fn write_tmux_direct_image(&mut self) {
-        if !self.in_tmux {
+        // tmux direct-write only applies when we're running directly in tmux
+        // with a local terminal. When socket-attached, the shim handles its
+        // own terminal — ratatui-image's widget rendering works correctly.
+        if !self.in_tmux || self.is_socket_attached {
             return;
         }
 
@@ -739,6 +813,9 @@ impl App {
         if proto == ProtocolType::Halfblocks || proto == ProtocolType::Sixel {
             return;
         }
+
+        // Capture terminal size before mutable borrow of image_preview.
+        let term_size = self.terminal_size();
 
         let (raw_png, popup_width, popup_height) = match &mut self.image_preview {
             crate::image_preview::PreviewStatus::Ready {
@@ -762,7 +839,6 @@ impl App {
         }
 
         // Calculate popup position (must match image_overlay::centered_rect).
-        let term_size = crossterm::terminal::size().unwrap_or((80, 24));
         let popup_w = popup_width.min(term_size.0);
         let popup_h = popup_height.min(term_size.1);
         let popup_x = (term_size.0.saturating_sub(popup_w)) / 2;
@@ -920,9 +996,14 @@ impl App {
 
     /// Animated splash screen: progressively reveals the logo, then holds
     /// for 2.5s. Any keypress dismisses immediately.
-    async fn run_splash(&mut self, terminal: &mut ui::Tui) -> Result<()> {
+    async fn run_splash(&mut self) -> Result<()> {
         const LINE_DELAY_MS: u64 = 50;
         const HOLD_MS: u64 = 2500;
+
+        let Some(terminal) = self.terminal.as_mut() else {
+            self.splash_done = true;
+            return Ok(());
+        };
         let total_lines = include_str!("../logo.txt").lines().count();
 
         let mut line_tick = interval(Duration::from_millis(LINE_DELAY_MS));
@@ -951,6 +1032,8 @@ impl App {
         }
 
         // Phase 2: hold fully revealed logo.
+        // Re-borrow terminal since `self` was borrowed mutably in the loop.
+        let terminal = self.terminal.as_mut().unwrap();
         terminal.draw(|frame| ui::splash::render(frame, total_lines))?;
         let hold_start = Instant::now();
         while hold_start.elapsed() < Duration::from_millis(HOLD_MS) {
@@ -974,10 +1057,252 @@ impl App {
         Ok(())
     }
 
+    /// Spawn the blocking terminal event reader thread for local terminal mode.
+    fn start_term_reader(&mut self) {
+        let (term_tx, term_rx) = mpsc::unbounded_channel();
+        let stop = Arc::clone(&self.term_reader_stop);
+        self.term_reader_stop.store(false, Ordering::Relaxed);
+        tokio::task::spawn_blocking(move || {
+            while !stop.load(Ordering::Relaxed) {
+                if event::poll(std::time::Duration::from_millis(100)).unwrap_or(false) {
+                    match event::read() {
+                        Ok(ev) => {
+                            if term_tx.send(ev).is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        });
+        self.term_rx = Some(term_rx);
+    }
+
+    /// Stop the local terminal reader thread.
+    fn stop_term_reader(&mut self) {
+        self.term_reader_stop.store(true, Ordering::Relaxed);
+        self.term_rx = None;
+    }
+
+    /// Get terminal size from cached dimensions.
+    ///
+    /// Uses stored (cols, rows) updated via shim `Resize` messages or at
+    /// startup. Does NOT call `terminal.size()` / `backend.size()` because
+    /// that does `ioctl(stdout)` which returns garbage when stdout is
+    /// `/dev/null` (daemon/fork mode).
+    pub fn terminal_size(&self) -> (u16, u16) {
+        (self.cached_term_cols, self.cached_term_rows)
+    }
+
+    /// Start the Unix socket listener for shim connections.
+    fn start_socket_listener(&mut self) -> Result<()> {
+        if self.socket_listener.is_some() {
+            return Ok(());
+        }
+        let dir = crate::session::sessions_dir();
+        std::fs::create_dir_all(&dir)?;
+        let path = crate::session::socket_path(std::process::id());
+        // Remove stale socket from a previous run.
+        let _ = std::fs::remove_file(&path);
+        let listener = tokio::net::UnixListener::bind(&path)?;
+        tracing::info!("session socket listening at {}", path.display());
+        self.socket_listener = Some(listener);
+        Ok(())
+    }
+
+    /// Clean up own socket file.
+    pub fn remove_own_socket() {
+        let path = crate::session::socket_path(std::process::id());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Handle a new shim connection from the socket listener.
+    async fn handle_shim_connect(&mut self, stream: tokio::net::UnixStream) -> Result<()> {
+        use crate::session::protocol::{self, MainMessage, ShimMessage};
+        use crate::session::writer::SocketWriter;
+
+        // If a shim is already connected, disconnect it first.
+        if self.is_socket_attached {
+            tracing::info!("new shim connecting, disconnecting existing shim");
+        }
+        self.disconnect_shim();
+
+        let (read_half, write_half) = tokio::io::split(stream);
+        let mut read_half = tokio::io::BufReader::new(read_half);
+
+        // Read the initial TerminalEnv message to get dimensions + env vars.
+        let term_env = match protocol::read_message::<_, protocol::TerminalEnv>(&mut read_half).await {
+            Ok(env) => env,
+            Err(e) => {
+                tracing::warn!("failed to read initial shim message: {e}");
+                return Ok(());
+            }
+        };
+        let cols = term_env.cols;
+        let rows = term_env.rows;
+
+        // Set up output channel: SocketWriter → mpsc → write_half.
+        // Both normal output (from terminal.draw()) and control messages
+        // (Detached, Quit) flow through this single typed channel.
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<MainMessage>();
+        let output_handle = tokio::spawn(async move {
+            let mut write_half = write_half;
+            while let Some(msg) = output_rx.recv().await {
+                if protocol::write_message(&mut write_half, &msg).await.is_err() {
+                    tracing::warn!("shim output write failed, closing output task");
+                    break;
+                }
+            }
+            tracing::debug!("shim output task exiting");
+        });
+
+        // Create socket-backed terminal.
+        let socket_writer = SocketWriter::new(output_tx.clone());
+        let terminal = ui::setup_socket_terminal(
+            Box::new(socket_writer),
+            cols,
+            rows,
+        )?;
+
+        // Set up input reader: read ShimMessages from socket → mpsc.
+        let (shim_tx, shim_rx) = mpsc::unbounded_channel::<ShimMessage>();
+        let input_handle = tokio::spawn(async move {
+            let mut reader = read_half;
+            loop {
+                match protocol::read_message::<_, ShimMessage>(&mut reader).await {
+                    Ok(msg) => {
+                        if shim_tx.send(msg).is_err() {
+                            tracing::debug!("shim input channel closed");
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("shim input read error: {e}");
+                        break;
+                    }
+                }
+            }
+            tracing::debug!("shim input reader task exiting");
+        });
+
+        self.terminal = Some(terminal);
+        self.socket_output_tx = Some(output_tx);
+        self.shim_event_rx = Some(shim_rx);
+        self.shim_output_handle = Some(output_handle);
+        self.shim_input_handle = Some(input_handle);
+        self.detached = false;
+        self.is_socket_attached = true;
+        self.needs_full_redraw = true;
+        self.cached_term_cols = cols;
+        self.cached_term_rows = rows;
+
+        // Store shim's terminal env for protocol detection.
+        self.shim_term_env = Some(term_env.env_vars);
+
+        // Update picker's font_size from the shim's real terminal.
+        // The daemon's picker has stale font_size (10,20) from halfblocks()
+        // fallback because from_query_stdio() fails with /dev/null stdio.
+        // Recreate the picker with the shim's actual font dimensions so
+        // ratatui-image resizes images to match real cell pixel areas.
+        if let Some(font_size) = term_env.font_size {
+            tracing::info!(
+                old_font = ?self.picker.font_size(),
+                new_font = ?font_size,
+                "updating picker font_size from shim terminal"
+            );
+            #[allow(deprecated)]
+            let mut new_picker = ratatui_image::picker::Picker::from_fontsize(font_size);
+            new_picker.set_protocol_type(self.picker.protocol_type());
+            self.picker = new_picker;
+        }
+
+        // Re-detect image protocol using the shim's terminal env.
+        self.refresh_image_protocol();
+
+        // Add system message to the active buffer.
+        let buf_id = self.state.active_buffer_id.clone().unwrap_or_default();
+        let id = self.state.next_message_id();
+        self.state.add_message(
+            &buf_id,
+            Message {
+                id,
+                timestamp: Utc::now(),
+                message_type: MessageType::Event,
+                nick: None,
+                nick_mode: None,
+                text: "Terminal attached".to_string(),
+                highlight: false,
+                event_key: None,
+                event_params: None,
+                log_msg_id: None,
+                log_ref_id: None,
+                tags: std::collections::HashMap::new(),
+            },
+        );
+
+        tracing::info!(cols, rows, "shim attached");
+        Ok(())
+    }
+
+    /// Send a control `MainMessage` through the shim output channel.
+    fn send_shim_control(&self, msg: crate::session::protocol::MainMessage) {
+        if let Some(ref tx) = self.socket_output_tx {
+            let _ = tx.send(msg);
+        }
+    }
+
+    /// Tear down the shim connection (terminal, tasks, channels).
+    fn teardown_shim(&mut self) {
+        self.terminal = None;
+        // Drop the sender so the output task drains remaining messages
+        // (including the Detached control message) then exits naturally.
+        self.socket_output_tx = None;
+        self.shim_event_rx = None;
+        self.is_socket_attached = false;
+        self.shim_term_env = None;
+        // Don't abort the output task — let it finish sending queued messages.
+        self.shim_output_handle.take();
+        if let Some(h) = self.shim_input_handle.take() { h.abort(); }
+    }
+
+    /// Disconnect the current shim (if any).
+    fn disconnect_shim(&mut self) {
+        self.send_shim_control(crate::session::protocol::MainMessage::Detached);
+        self.teardown_shim();
+    }
+
+    /// Perform detach: save state, drop terminal, start socket listener.
+    fn perform_detach(&mut self) {
+        self.should_detach = false;
+
+        if self.is_socket_attached {
+            // Send Detached to shim — it will exit, returning the shell prompt.
+            self.send_shim_control(crate::session::protocol::MainMessage::Detached);
+            self.teardown_shim();
+        }
+
+        self.detached = true;
+
+        tracing::info!(pid = std::process::id(), "detached");
+    }
+
+    /// Send Quit to the connected shim before shutdown.
+    fn notify_shim_quit(&self) {
+        self.send_shim_control(crate::session::protocol::MainMessage::Quit);
+    }
+
     #[allow(clippy::too_many_lines)]
-    pub async fn run(&mut self, terminal: &mut ui::Tui) -> Result<()> {
+    pub async fn run(&mut self) -> Result<()> {
+        // Clean up stale sockets from dead PIDs.
+        crate::session::cleanup_stale_sockets();
+
         // --- Splash screen ---
-        self.run_splash(terminal).await?;
+        // In fork mode, the splash runs in the shim process (which owns the
+        // real terminal).  In direct mode (fork failed), run it here.
+        if self.terminal.is_some() && !self.is_socket_attached {
+            self.run_splash().await?;
+        }
 
         // Auto-connect to servers marked with autoconnect
         let autoconnect_ids: Vec<String> = self
@@ -1000,57 +1325,133 @@ impl App {
         // Autoload scripts from ~/.repartee/scripts/
         self.autoload_scripts();
 
-        // Spawn a dedicated blocking task for terminal event reading.
-        // Uses poll() with a short timeout so the thread can check the
-        // stop flag and exit cleanly when the app quits.
-        let (term_tx, mut term_rx) = mpsc::unbounded_channel();
-        let reader_stop = Arc::new(AtomicBool::new(false));
-        let reader_stop2 = Arc::clone(&reader_stop);
-        tokio::task::spawn_blocking(move || {
-            while !reader_stop2.load(Ordering::Relaxed) {
-                if event::poll(std::time::Duration::from_millis(100)).unwrap_or(false) {
-                    match event::read() {
-                        Ok(ev) => {
-                            if term_tx.send(ev).is_err() {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-            }
-        });
+        // Spawn terminal event reader thread (only if we have a local terminal).
+        if self.terminal.is_some() && !self.is_socket_attached {
+            self.start_term_reader();
+        }
+
+        // Start socket listener so we can detach later.
+        if let Err(e) = self.start_socket_listener() {
+            tracing::warn!("failed to start session socket: {e}");
+        }
+
+        // Signal handlers for detached mode.
+        let mut sigterm = tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        )?;
+        let mut sigint = tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::interrupt(),
+        )?;
 
         let mut tick = interval(Duration::from_secs(1));
         let mut paste_tick = interval(Duration::from_millis(500));
 
         while !self.should_quit {
-            // Force full redraw when needed (e.g. after image preview dismiss).
-            // terminal.clear() resets ratatui's diff state so every cell is
-            // rewritten on the next draw, overwriting any graphics artifacts.
-            if self.needs_full_redraw {
-                terminal.clear()?;
-                self.needs_full_redraw = false;
+            // Handle pending detach request.
+            if self.should_detach {
+                self.perform_detach();
             }
 
-            terminal.draw(|frame| ui::layout::draw(frame, self))?;
+            // Draw only when we have a terminal.
+            // We take() the terminal to avoid borrow conflicts with `self` in the draw closure.
+            if let Some(mut terminal) = self.terminal.take() {
+                if self.needs_full_redraw {
+                    terminal.clear()?;
+                    self.needs_full_redraw = false;
+                }
+                terminal.draw(|frame| ui::layout::draw(frame, self))?;
+                self.terminal = Some(terminal);
+            }
 
-            // tmux: write image directly to stdout after ratatui has
-            // flushed the frame (border/popup already drawn). Handles
-            // Kitty and iTerm2 protocols with full-resolution PNG.
+            // tmux: write image directly after ratatui frame flush.
             self.write_tmux_direct_image();
 
             tokio::select! {
-                ev = term_rx.recv() => match ev {
+                // Local terminal events.
+                ev = async {
+                    match self.term_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => match ev {
                     Some(ev) => {
                         self.handle_event(ev);
-                        // Drain all queued events before redrawing.
-                        while let Ok(ev) = term_rx.try_recv() {
-                            self.handle_event(ev);
+                        if let Some(mut rx) = self.term_rx.take() {
+                            while let Ok(ev) = rx.try_recv() {
+                                self.handle_event(ev);
+                            }
+                            self.term_rx = Some(rx);
                         }
                         self.update_script_snapshot();
                     }
-                    None => break,
+                    None => {
+                        // Terminal reader died — if we have a terminal, it's dead.
+                        self.term_rx = None;
+                    }
+                },
+                // Shim events (socket-attached mode).
+                shim_ev = async {
+                    match self.shim_event_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => match shim_ev {
+                    Some(crate::session::protocol::ShimMessage::TermEvent(ev)) => {
+                        self.handle_event(ev);
+                        if let Some(mut rx) = self.shim_event_rx.take() {
+                            while let Ok(msg) = rx.try_recv() {
+                                if let crate::session::protocol::ShimMessage::TermEvent(ev) = msg {
+                                    self.handle_event(ev);
+                                }
+                            }
+                            self.shim_event_rx = Some(rx);
+                        }
+                        self.update_script_snapshot();
+                    }
+                    Some(crate::session::protocol::ShimMessage::Resize { cols, rows }) => {
+                        self.cached_term_cols = cols;
+                        self.cached_term_rows = rows;
+                        if let Some(ref mut terminal) = self.terminal {
+                            let _ = terminal.resize(ratatui::layout::Rect::new(0, 0, cols, rows));
+                            self.needs_full_redraw = true;
+                        }
+                    }
+                    Some(crate::session::protocol::ShimMessage::Detach) => {
+                        self.should_detach = true;
+                    }
+                    None => {
+                        // Shim disconnected — go back to detached mode.
+                        tracing::info!("shim disconnected, returning to detached mode");
+                        self.terminal = None;
+                        self.socket_output_tx = None;
+                        self.shim_event_rx = None;
+                        self.is_socket_attached = false;
+                        self.shim_term_env = None;
+                        if let Some(h) = self.shim_output_handle.take() { h.abort(); }
+                        if let Some(h) = self.shim_input_handle.take() { h.abort(); }
+                        self.detached = true;
+                    }
+                },
+                // Socket listener: accept new shim connections.
+                stream = async {
+                    match self.socket_listener.as_ref() {
+                        Some(listener) => {
+                            match listener.accept().await {
+                                Ok((stream, _)) => Some(stream),
+                                Err(e) => {
+                                    tracing::warn!("socket accept error: {e}");
+                                    None
+                                }
+                            }
+                        }
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Some(stream) = stream
+                        && let Err(e) = self.handle_shim_connect(stream).await
+                    {
+                        tracing::warn!("failed to handle shim connection: {e}");
+                    }
                 },
                 irc_ev = self.irc_rx.recv() => {
                     if let Some(event) = irc_ev {
@@ -1077,13 +1478,22 @@ impl App {
                 action = self.script_action_rx.recv() => {
                     if let Some(action) = action {
                         self.handle_script_action(action);
-                        // Drain any queued actions
                         while let Ok(action) = self.script_action_rx.try_recv() {
                             self.handle_script_action(action);
                         }
                         self.update_script_snapshot();
                     }
-                }
+                },
+                _ = sigterm.recv() => {
+                    self.should_quit = true;
+                },
+                _ = sigint.recv() => {
+                    // In detached mode, SIGINT should quit. With terminal, ignore
+                    // (Ctrl+C is handled by the terminal reader).
+                    if self.detached {
+                        self.should_quit = true;
+                    }
+                },
             }
         }
 
@@ -1097,8 +1507,9 @@ impl App {
             handle.abort();
         }
 
-        // Stop the terminal reader thread so it doesn't interfere with restore.
-        reader_stop.store(true, Ordering::Relaxed);
+        // Notify shim of quit and stop terminal reader.
+        self.notify_shim_quit();
+        self.stop_term_reader();
 
         // Send QUIT to all connected servers (once — cmd_quit defers to here)
         let default_quit = crate::constants::default_quit_message();
@@ -1111,6 +1522,9 @@ impl App {
         if let Some(storage) = self.storage.take() {
             storage.shutdown().await;
         }
+
+        // Clean up socket file.
+        Self::remove_own_socket();
 
         Ok(())
     }
@@ -1993,7 +2407,10 @@ impl App {
             Event::Key(key) => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Paste(text) => self.handle_paste(&text),
-            // Resize and other events: redraw happens automatically on next loop iteration
+            Event::Resize(cols, rows) => {
+                self.cached_term_cols = cols;
+                self.cached_term_rows = rows;
+            }
             _ => {}
         }
     }
@@ -2047,6 +2464,7 @@ impl App {
         self.nick_list_scroll = 0;
     }
 
+    #[allow(clippy::too_many_lines)]
     fn handle_key(&mut self, key: event::KeyEvent) {
         // Check for ESC+key combos (ESC pressed recently, now a follow-up key)
         let esc_active = if key.code == KeyCode::Esc {
@@ -2093,6 +2511,10 @@ impl App {
                     self.dismiss_image_preview();
                 }
             }
+            // Ctrl+\ or Ctrl+Z — detach
+            (KeyModifiers::CONTROL, KeyCode::Char('\\' | 'z')) => {
+                self.should_detach = true;
+            }
             (KeyModifiers::CONTROL, KeyCode::Char('q' | 'c')) => self.should_quit = true,
             (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
                 // Force redraw (happens automatically on next iteration)
@@ -2104,7 +2526,10 @@ impl App {
             // Ctrl+W — delete word before cursor
             (KeyModifiers::CONTROL, KeyCode::Char('w')) => self.input.delete_word_back(),
             // Ctrl+A — move cursor to start (same as Home)
-            (KeyModifiers::CONTROL, KeyCode::Char('a')) | (_, KeyCode::Home) => self.input.home(),
+            (KeyModifiers::CONTROL, KeyCode::Char('a')) => self.input.home(),
+            (_, KeyCode::Home) => self.input.home(),
+            // Ctrl+B — move cursor left (same as Left)
+            (KeyModifiers::CONTROL, KeyCode::Char('b')) => self.input.move_left(),
             // Ctrl+E — move cursor to end (same as End)
             (KeyModifiers::CONTROL, KeyCode::Char('e')) | (_, KeyCode::End) => {
                 self.input.end();
@@ -3430,7 +3855,7 @@ mod tests {
     #[test]
     fn resolve_config_override_kitty() {
         let picker = ratatui_image::picker::Picker::halfblocks();
-        let (proto, source) = resolve_image_protocol("kitty", &picker, "unknown", None, String::new());
+        let (proto, source) = resolve_image_protocol("kitty", &picker, "unknown", None, String::new(), false);
         assert_eq!(proto, Some(ProtocolType::Kitty));
         assert_eq!(source, "config:kitty");
     }
@@ -3438,7 +3863,7 @@ mod tests {
     #[test]
     fn resolve_config_override_iterm2() {
         let picker = ratatui_image::picker::Picker::halfblocks();
-        let (proto, source) = resolve_image_protocol("iterm2", &picker, "unknown", None, String::new());
+        let (proto, source) = resolve_image_protocol("iterm2", &picker, "unknown", None, String::new(), false);
         assert_eq!(proto, Some(ProtocolType::Iterm2));
         assert_eq!(source, "config:iterm2");
     }
@@ -3451,7 +3876,7 @@ mod tests {
         picker.set_protocol_type(ProtocolType::Kitty);
         let (proto, source) = resolve_image_protocol(
             "auto", &picker, "ghostty", Some(ProtocolType::Kitty),
-            "tmux:client_termtype=ghostty 1.3.0".into(),
+            "tmux:client_termtype=ghostty 1.3.0".into(), false,
         );
         assert_eq!(proto, Some(ProtocolType::Kitty));
         assert!(source.starts_with("tmux:"));
@@ -3465,7 +3890,7 @@ mod tests {
         picker.set_protocol_type(ProtocolType::Kitty);
         let (proto, source) = resolve_image_protocol(
             "auto", &picker, "iterm2", Some(ProtocolType::Iterm2),
-            "tmux:client_termtype=iTerm2 3.6.8".into(),
+            "tmux:client_termtype=iTerm2 3.6.8".into(), false,
         );
         assert_eq!(proto, Some(ProtocolType::Iterm2));
         assert!(source.starts_with("tmux:"));
@@ -3473,12 +3898,12 @@ mod tests {
 
     #[test]
     fn resolve_direct_trusts_io_detection() {
-        // Not in tmux — outer terminal from env, IO detection is fine.
+        // Not in tmux, not socket — outer terminal from env, IO detection is fine.
         let mut picker = ratatui_image::picker::Picker::halfblocks();
         picker.set_protocol_type(ProtocolType::Kitty);
         let (proto, source) = resolve_image_protocol(
             "auto", &picker, "ghostty", Some(ProtocolType::Kitty),
-            "env:LC_TERMINAL=Ghostty".into(),
+            "env:LC_TERMINAL=Ghostty".into(), false,
         );
         assert_eq!(proto, None); // trust IO
         assert!(source.starts_with("io-query:"));
@@ -3492,8 +3917,21 @@ mod tests {
         picker.set_protocol_type(ProtocolType::Kitty);
         let (proto, _source) = resolve_image_protocol(
             "auto", &picker, "iterm2", Some(ProtocolType::Iterm2),
-            "env:ITERM_SESSION_ID".into(),
+            "env:ITERM_SESSION_ID".into(), false,
         );
         assert_eq!(proto, Some(ProtocolType::Iterm2));
+    }
+
+    #[test]
+    fn resolve_shim_env_overrides_io_detection() {
+        // Socket-attached shim says Kitty (subterm) — should override stale IO.
+        let mut picker = ratatui_image::picker::Picker::halfblocks();
+        picker.set_protocol_type(ProtocolType::Iterm2); // stale IO result
+        let (proto, source) = resolve_image_protocol(
+            "auto", &picker, "subterm", Some(ProtocolType::Kitty),
+            "env:LC_TERMINAL=subterm".into(), true,
+        );
+        assert_eq!(proto, Some(ProtocolType::Kitty));
+        assert_eq!(source, "env:LC_TERMINAL=subterm");
     }
 }

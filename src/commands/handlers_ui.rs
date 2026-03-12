@@ -15,6 +15,10 @@ pub(crate) fn cmd_quit(app: &mut App, args: &[String]) {
     // double-QUIT which triggers "Excess Flood" on strict servers.
 }
 
+pub(crate) const fn cmd_detach(app: &mut App, _args: &[String]) {
+    app.should_detach = true;
+}
+
 pub(crate) fn cmd_help(app: &mut App, args: &[String]) {
     if args.is_empty() {
         show_command_list(app);
