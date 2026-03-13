@@ -29,13 +29,19 @@ pub struct SplitGroup {
     pub printed: bool,
 }
 
+/// A nick that rejoined after a netsplit, along with which channels it joined.
+#[derive(Debug, Clone)]
+pub struct NetjoinRecord {
+    pub nick: String,
+    pub channels: HashSet<String>,
+}
+
 /// A group of nicks rejoining after a netsplit.
 #[derive(Debug, Clone)]
 pub struct NetjoinGroup {
     pub server1: String,
     pub server2: String,
-    pub nicks: Vec<String>,
-    pub channels: HashSet<String>,
+    pub records: Vec<NetjoinRecord>,
     pub last_join: Instant,
     pub printed: bool,
 }
@@ -142,8 +148,7 @@ impl NetsplitState {
             self.netjoins.push(NetjoinGroup {
                 server1,
                 server2,
-                nicks: Vec::new(),
-                channels: HashSet::new(),
+                records: Vec::new(),
                 last_join: now,
                 printed: false,
             });
@@ -151,10 +156,14 @@ impl NetsplitState {
         };
 
         if let Some(nj) = self.netjoins.get_mut(nj_index) {
-            if !nj.nicks.iter().any(|n| n == nick) {
-                nj.nicks.push(nick.to_string());
+            if let Some(rec) = nj.records.iter_mut().find(|r| r.nick == nick) {
+                rec.channels.insert(buffer_id.to_string());
+            } else {
+                nj.records.push(NetjoinRecord {
+                    nick: nick.to_string(),
+                    channels: HashSet::from([buffer_id.to_string()]),
+                });
             }
-            nj.channels.insert(buffer_id.to_string());
             nj.last_join = now;
         }
 
@@ -173,7 +182,7 @@ impl NetsplitState {
         // Print split groups that have been quiet for SPLIT_BATCH_WAIT
         for group in &mut self.groups {
             if !group.printed && now.duration_since(group.last_quit) >= SPLIT_BATCH_WAIT {
-                messages.push(format_split_message(group));
+                messages.extend(format_split_messages(group));
                 group.printed = true;
             }
         }
@@ -181,7 +190,7 @@ impl NetsplitState {
         // Print netjoin groups that have been quiet for NETJOIN_BATCH_WAIT
         for nj in &mut self.netjoins {
             if !nj.printed && now.duration_since(nj.last_join) >= NETJOIN_BATCH_WAIT {
-                messages.push(format_netjoin_message(nj));
+                messages.extend(format_netjoin_messages(nj));
                 nj.printed = true;
             }
         }
@@ -280,42 +289,55 @@ fn is_valid_split_host(host: &str) -> bool {
 
 // === Message formatting ===
 
-fn format_split_message(group: &SplitGroup) -> NetsplitMessage {
-    // Collect all affected buffer IDs
-    let mut all_buffer_ids = HashSet::new();
+/// Format per-channel netsplit quit messages (erssi/irssi style).
+/// Each channel gets its own message listing only the nicks that were in THAT channel.
+fn format_split_messages(group: &SplitGroup) -> Vec<NetsplitMessage> {
+    // Group nicks by channel.
+    let mut channel_nicks: HashMap<&str, Vec<&str>> = HashMap::new();
     for rec in &group.nicks {
-        for id in &rec.channels {
-            all_buffer_ids.insert(id.clone());
+        for ch in &rec.channels {
+            channel_nicks.entry(ch.as_str()).or_default().push(&rec.nick);
         }
     }
 
-    let nick_names: Vec<&str> = group.nicks.iter().map(|r| r.nick.as_str()).collect();
-    let nick_str = format_nick_list(&nick_names);
-
-    let text = format!(
-        "Netsplit {} \u{21C4} {} quits: {}",
-        group.server1, group.server2, nick_str
-    );
-
-    NetsplitMessage {
-        buffer_ids: all_buffer_ids.into_iter().collect(),
-        text,
-    }
+    channel_nicks
+        .into_iter()
+        .map(|(channel, nicks)| {
+            let nick_str = format_nick_list(&nicks);
+            NetsplitMessage {
+                buffer_ids: vec![channel.to_string()],
+                text: format!(
+                    "Netsplit {} \u{21C4} {} quits: {}",
+                    group.server1, group.server2, nick_str
+                ),
+            }
+        })
+        .collect()
 }
 
-fn format_netjoin_message(group: &NetjoinGroup) -> NetsplitMessage {
-    let nick_names: Vec<&str> = group.nicks.iter().map(String::as_str).collect();
-    let nick_str = format_nick_list(&nick_names);
-
-    let text = format!(
-        "Netsplit over {} \u{21C4} {} joins: {}",
-        group.server1, group.server2, nick_str
-    );
-
-    NetsplitMessage {
-        buffer_ids: group.channels.iter().cloned().collect(),
-        text,
+/// Format per-channel netjoin messages (erssi/irssi style).
+fn format_netjoin_messages(group: &NetjoinGroup) -> Vec<NetsplitMessage> {
+    // Group nicks by channel.
+    let mut channel_nicks: HashMap<&str, Vec<&str>> = HashMap::new();
+    for rec in &group.records {
+        for ch in &rec.channels {
+            channel_nicks.entry(ch.as_str()).or_default().push(&rec.nick);
+        }
     }
+
+    channel_nicks
+        .into_iter()
+        .map(|(channel, nicks)| {
+            let nick_str = format_nick_list(&nicks);
+            NetsplitMessage {
+                buffer_ids: vec![channel.to_string()],
+                text: format!(
+                    "Netsplit over {} \u{21C4} {} joins: {}",
+                    group.server1, group.server2, nick_str
+                ),
+            }
+        })
+        .collect()
 }
 
 fn format_nick_list(nicks: &[&str]) -> String {
@@ -470,7 +492,8 @@ mod tests {
         state.handle_quit("alice", "hub.net leaf.net", &["conn/#chan".to_string()]);
         assert!(state.handle_join("alice", "conn/#chan"));
         assert_eq!(state.netjoins.len(), 1);
-        assert_eq!(state.netjoins[0].nicks, vec!["alice"]);
+        assert_eq!(state.netjoins[0].records.len(), 1);
+        assert_eq!(state.netjoins[0].records[0].nick, "alice");
     }
 
     #[test]
@@ -533,52 +556,66 @@ mod tests {
     }
 
     #[test]
-    fn format_split_message_content() {
+    fn format_split_messages_per_channel() {
         let group = SplitGroup {
             server1: "hub.net".to_string(),
             server2: "leaf.net".to_string(),
             nicks: vec![
                 SplitRecord {
                     nick: "alice".to_string(),
-                    channels: vec!["conn/#chan".to_string()],
+                    channels: vec!["conn/#a".to_string(), "conn/#b".to_string()],
                 },
                 SplitRecord {
                     nick: "bob".to_string(),
-                    channels: vec!["conn/#chan".to_string()],
+                    channels: vec!["conn/#a".to_string()],
                 },
             ],
             last_quit: Instant::now(),
             printed: false,
         };
-        let msg = format_split_message(&group);
-        assert!(msg.text.contains("Netsplit"));
-        assert!(msg.text.contains("hub.net"));
-        assert!(msg.text.contains("leaf.net"));
-        assert!(msg.text.contains("quits:"));
-        assert!(msg.text.contains("alice"));
-        assert!(msg.text.contains("bob"));
-        assert!(msg.buffer_ids.contains(&"conn/#chan".to_string()));
+        let msgs = format_split_messages(&group);
+        // One message per channel.
+        assert_eq!(msgs.len(), 2);
+        let chan_a = msgs.iter().find(|m| m.buffer_ids == ["conn/#a"]).unwrap();
+        assert!(chan_a.text.contains("alice"));
+        assert!(chan_a.text.contains("bob"));
+        let chan_b = msgs.iter().find(|m| m.buffer_ids == ["conn/#b"]).unwrap();
+        assert!(chan_b.text.contains("alice"));
+        assert!(!chan_b.text.contains("bob"));
     }
 
     #[test]
-    fn format_netjoin_message_content() {
-        let mut channels = HashSet::new();
-        channels.insert("conn/#chan".to_string());
+    fn format_netjoin_messages_per_channel() {
+        let mut ch_a = HashSet::new();
+        ch_a.insert("conn/#a".to_string());
+        let mut ch_both = HashSet::new();
+        ch_both.insert("conn/#a".to_string());
+        ch_both.insert("conn/#b".to_string());
         let group = NetjoinGroup {
             server1: "hub.net".to_string(),
             server2: "leaf.net".to_string(),
-            nicks: vec!["alice".to_string(), "bob".to_string()],
-            channels,
+            records: vec![
+                NetjoinRecord {
+                    nick: "alice".to_string(),
+                    channels: ch_both,
+                },
+                NetjoinRecord {
+                    nick: "bob".to_string(),
+                    channels: ch_a,
+                },
+            ],
             last_join: Instant::now(),
             printed: false,
         };
-        let msg = format_netjoin_message(&group);
-        assert!(msg.text.contains("Netsplit over"));
-        assert!(msg.text.contains("hub.net"));
-        assert!(msg.text.contains("leaf.net"));
-        assert!(msg.text.contains("joins:"));
-        assert!(msg.text.contains("alice"));
-        assert!(msg.text.contains("bob"));
+        let msgs = format_netjoin_messages(&group);
+        assert_eq!(msgs.len(), 2);
+        let chan_a = msgs.iter().find(|m| m.buffer_ids == ["conn/#a"]).unwrap();
+        assert!(chan_a.text.contains("alice"));
+        assert!(chan_a.text.contains("bob"));
+        assert!(chan_a.text.contains("Netsplit over"));
+        let chan_b = msgs.iter().find(|m| m.buffer_ids == ["conn/#b"]).unwrap();
+        assert!(chan_b.text.contains("alice"));
+        assert!(!chan_b.text.contains("bob"));
     }
 
     #[test]

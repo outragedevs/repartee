@@ -2419,12 +2419,14 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
         Response::RPL_ENDOFNAMES => {}
 
         _ => {
-            // Show unknown numerics in server buffer — skip our own nick arg
-            let label = state
-                .connections
-                .get(conn_id)
-                .map_or("Status", |c| c.label.as_str());
-            let buffer_id = make_buffer_id(conn_id, label);
+            // Error numerics (4xx) go to the active window — they are responses
+            // to user commands (e.g. "No such nick/channel"). Informational
+            // numerics still go to the server buffer.
+            let buffer_id = if response.is_error() {
+                active_or_server_buffer(state, conn_id)
+            } else {
+                server_buffer(state, conn_id)
+            };
             // Skip args[0] which is our nick
             let text = if args.len() > 1 {
                 args[1..].join(" ")

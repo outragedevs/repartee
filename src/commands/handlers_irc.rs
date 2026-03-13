@@ -865,7 +865,8 @@ pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
             );
         }
     }
-    app.state.set_active_buffer(&buffer_id);
+    // /msg stays in the current window — buffer is created but not switched to.
+    // Use /query to open and switch to a conversation.
 }
 
 pub(crate) fn cmd_query(app: &mut App, args: &[String]) {
@@ -1033,13 +1034,18 @@ pub(crate) fn cmd_notice(app: &mut App, args: &[String]) {
 // === Info ===
 
 pub(crate) fn cmd_whois(app: &mut App, args: &[String]) {
-    if args.is_empty() {
+    let nick = if args.is_empty() {
+        whois_default_nick(app)
+    } else {
+        Some(args[0].clone())
+    };
+    let Some(nick) = nick else {
         add_local_event(app, "Usage: /whois <nick>");
         return;
-    }
+    };
 
     if let Some(sender) = app.active_irc_sender() {
-        if let Err(e) = sender.send(irc::proto::Command::WHOIS(None, args[0].clone())) {
+        if let Err(e) = sender.send(irc::proto::Command::WHOIS(None, nick)) {
             add_local_event(app, &format!("Failed to send WHOIS: {e}"));
         }
     } else {
@@ -1048,22 +1054,36 @@ pub(crate) fn cmd_whois(app: &mut App, args: &[String]) {
 }
 
 pub(crate) fn cmd_wii(app: &mut App, args: &[String]) {
-    if args.is_empty() {
+    let nick = if args.is_empty() {
+        whois_default_nick(app)
+    } else {
+        Some(args[0].clone())
+    };
+    let Some(nick) = nick else {
         add_local_event(app, "Usage: /wii <nick>");
         return;
-    }
+    };
 
     if let Some(sender) = app.active_irc_sender() {
         // WHOIS nick nick — queries the user's server for idle info
-        if let Err(e) = sender.send(irc::proto::Command::WHOIS(
-            Some(args[0].clone()),
-            args[0].clone(),
-        )) {
+        if let Err(e) = sender.send(irc::proto::Command::WHOIS(Some(nick.clone()), nick)) {
             add_local_event(app, &format!("Failed to send WHOIS: {e}"));
         }
     } else {
         add_local_event(app, "Not connected");
     }
+}
+
+/// Default nick for /whois when no argument given.
+/// In a query buffer: use the query target. Otherwise: use our own nick.
+fn whois_default_nick(app: &App) -> Option<String> {
+    use crate::state::buffer::BufferType;
+    let buf = app.state.active_buffer()?;
+    if buf.buffer_type == BufferType::Query {
+        return Some(buf.name.clone());
+    }
+    let conn = app.state.connections.get(&buf.connection_id)?;
+    Some(conn.nick.clone())
 }
 
 pub(crate) fn cmd_version(app: &mut App, args: &[String]) {
