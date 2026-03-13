@@ -2948,11 +2948,7 @@ impl App {
                             msg.prefix
                     {
                         let renames = self.dcc.update_nick(old_nick, new_nick);
-                        for (old_id, _) in renames {
-                            // Record ID is the lowercase original nick; the buffer
-                            // name is "=Nick".  Reconstruct both buffer IDs.
-                            let old_buf_suffix = format!("={old_id}");
-                            let new_buf_suffix = format!("={}", new_nick.to_lowercase());
+                        for (_old_id, _new_id, old_buf_suffix, new_buf_suffix) in renames {
                             let old_buf_id =
                                 crate::state::buffer::make_buffer_id(&conn_id, &old_buf_suffix);
                             let new_buf_id =

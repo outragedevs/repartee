@@ -116,6 +116,7 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 "own_ip" => config.dcc.own_ip.clone(),
                 "port_range" => config.dcc.port_range.clone(),
                 "autoaccept_lowports" => config.dcc.autoaccept_lowports.to_string(),
+                "autochat_masks" => config.dcc.autochat_masks.join(", "),
                 "max_connections" => config.dcc.max_connections.to_string(),
                 _ => return None,
             };
@@ -265,6 +266,10 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
             "autoaccept_lowports" => {
                 config.dcc.autoaccept_lowports = parse_bool(raw)?;
             }
+            "autochat_masks" => {
+                config.dcc.autochat_masks =
+                    raw.split(',').map(|s| s.trim().to_string()).collect();
+            }
             "max_connections" => {
                 config.dcc.max_connections =
                     raw.parse().map_err(|_| "Expected a number".to_string())?;
@@ -358,6 +363,7 @@ const BASE_PATHS: &[&str] = &[
     "dcc.own_ip",
     "dcc.port_range",
     "dcc.autoaccept_lowports",
+    "dcc.autochat_masks",
     "dcc.max_connections",
 ];
 
@@ -446,6 +452,36 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
             // Sync runtime state from config
             if path == "display.scrollback_lines" {
                 app.state.scrollback_limit = app.config.display.scrollback_lines;
+            }
+
+            // Sync DCC runtime state from config
+            if path.starts_with("dcc.") {
+                match path.as_str() {
+                    "dcc.timeout" => {
+                        app.dcc.timeout_secs = app.config.dcc.timeout;
+                    }
+                    "dcc.own_ip" => {
+                        app.dcc.own_ip = if app.config.dcc.own_ip.is_empty() {
+                            None
+                        } else {
+                            app.config.dcc.own_ip.parse().ok()
+                        };
+                    }
+                    "dcc.port_range" => {
+                        app.dcc.port_range =
+                            crate::dcc::chat::parse_port_range(&app.config.dcc.port_range);
+                    }
+                    "dcc.autoaccept_lowports" => {
+                        app.dcc.autoaccept_lowports = app.config.dcc.autoaccept_lowports;
+                    }
+                    "dcc.autochat_masks" => {
+                        app.dcc.autochat_masks.clone_from(&app.config.dcc.autochat_masks);
+                    }
+                    "dcc.max_connections" => {
+                        app.dcc.max_connections = app.config.dcc.max_connections;
+                    }
+                    _ => {}
+                }
             }
 
             // Special handling: reload theme if theme name changed
@@ -579,6 +615,7 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
         "own_ip",
         "port_range",
         "autoaccept_lowports",
+        "autochat_masks",
         "max_connections",
     ] {
         let path = format!("dcc.{field}");

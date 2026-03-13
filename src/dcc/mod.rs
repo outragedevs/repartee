@@ -155,25 +155,52 @@ impl DccManager {
 
         expired
             .into_iter()
-            .filter_map(|id| self.records.remove(&id).map(|r| (id, r.nick)))
+            .filter_map(|id| {
+                self.chat_senders.remove(&id);
+                self.records.remove(&id).map(|r| (id, r.nick))
+            })
             .collect()
     }
 
-    /// Rename the nick on every matching record (case-insensitive).
+    /// Rename the nick on every matching record (case-insensitive), re-keying
+    /// both `records` and `chat_senders` so lookups by the new nick work.
     ///
-    /// Returns `(old_buf_suffix, new_buf_suffix)` pairs — the caller uses these
-    /// to rename DCC chat buffers in the UI.  The suffix is the record's ID
-    /// (which encodes the old nick).
-    pub fn update_nick(&mut self, old_nick: &str, new_nick: &str) -> Vec<(String, String)> {
+    /// Returns `(old_id, new_id, old_buf_suffix, new_buf_suffix)` tuples so the
+    /// caller can rename DCC chat buffers in the UI.
+    pub fn update_nick(
+        &mut self,
+        old_nick: &str,
+        new_nick: &str,
+    ) -> Vec<(String, String, String, String)> {
         let old_lower = old_nick.to_lowercase();
+
+        // Collect IDs that need re-keying — cannot mutate maps while iterating.
+        let old_ids: Vec<String> = self
+            .records
+            .iter()
+            .filter(|(_, r)| r.nick.to_lowercase() == old_lower)
+            .map(|(id, _)| id.clone())
+            .collect();
+
         let mut renamed = Vec::new();
 
-        for record in self.records.values_mut() {
-            if record.nick.to_lowercase() == old_lower {
-                let old_id = record.id.clone();
-                new_nick.clone_into(&mut record.nick);
-                renamed.push((old_id, record.id.clone()));
+        for old_id in old_ids {
+            let Some(mut record) = self.records.remove(&old_id) else {
+                continue;
+            };
+            new_nick.clone_into(&mut record.nick);
+            let new_id = self.generate_id(new_nick);
+            let old_buf_suffix = format!("={old_id}");
+            let new_buf_suffix = format!("={new_id}");
+            record.id.clone_from(&new_id);
+            self.records.insert(new_id.clone(), record);
+
+            // Re-key the chat sender channel if one exists.
+            if let Some(sender) = self.chat_senders.remove(&old_id) {
+                self.chat_senders.insert(new_id.clone(), sender);
             }
+
+            renamed.push((old_id, new_id, old_buf_suffix, new_buf_suffix));
         }
 
         renamed
@@ -338,17 +365,25 @@ mod tests {
     // ── update_nick ──────────────────────────────────────────────────────────
 
     #[test]
-    fn update_nick_renames() {
+    fn update_nick_rekeys_records_and_senders() {
         let mut mgr = make_manager();
         mgr.records.insert("dave".to_owned(), make_record("dave", "Dave", DccState::Connected));
+        // Simulate an active chat sender for the old ID.
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        mgr.chat_senders.insert("dave".to_owned(), tx);
 
-        let pairs = mgr.update_nick("Dave", "Dave_");
-        // Exactly one rename happened.
-        assert_eq!(pairs.len(), 1);
-        let (old_id, _new_id) = &pairs[0];
+        let tuples = mgr.update_nick("Dave", "Dave_");
+        assert_eq!(tuples.len(), 1);
+        let (old_id, new_id, old_buf, new_buf) = &tuples[0];
         assert_eq!(old_id, "dave");
-        // The nick inside the record was updated.
-        assert_eq!(mgr.records["dave"].nick, "Dave_");
+        assert_eq!(new_id, "dave_");
+        assert_eq!(old_buf, "=dave");
+        assert_eq!(new_buf, "=dave_");
+        // Old key removed, new key present.
+        assert!(!mgr.records.contains_key("dave"));
+        assert_eq!(mgr.records["dave_"].nick, "Dave_");
+        assert!(!mgr.chat_senders.contains_key("dave"));
+        assert!(mgr.chat_senders.contains_key("dave_"));
     }
 
     // ── close_by_nick ────────────────────────────────────────────────────────

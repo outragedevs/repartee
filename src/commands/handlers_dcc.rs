@@ -187,7 +187,7 @@ fn initiate_dcc_chat(app: &mut App, nick: &str, passive: bool) {
     if passive {
         // Passive/reverse DCC: send CTCP with fake IP + port 0 + token.
         // The remote peer will set up a listener and reply with their address.
-        let token: u32 = rand::random::<u32>();
+        let token: u32 = rand::random::<u32>() % 64;
         let id = app.dcc.generate_id(nick);
         let record = crate::dcc::types::DccRecord {
             id: id.clone(),
@@ -309,12 +309,17 @@ fn initiate_dcc_chat(app: &mut App, nick: &str, passive: bool) {
 
 /// Resolve the IP address to advertise in DCC offers.
 ///
-/// Checks `app.dcc.own_ip` first, falling back to `127.0.0.1` with a warning.
+/// Priority: config override > 127.0.0.1 fallback.
+/// Logs an actionable warning when no explicit IP is set, since localhost
+/// only works for same-machine connections.
 fn resolve_own_ip(app: &App) -> Option<std::net::IpAddr> {
     if let Some(ip) = app.dcc.own_ip {
         return Some(ip);
     }
-    tracing::warn!("DCC own_ip not configured, using 127.0.0.1 — set dcc.own_ip in config");
+    tracing::warn!(
+        "DCC: no own_ip configured — using 127.0.0.1 which only works locally. \
+         Set dcc.own_ip to your public IP for remote DCC connections: /set dcc.own_ip <ip>"
+    );
     None
 }
 
