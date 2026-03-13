@@ -983,6 +983,7 @@ impl App {
             should_reconnect: auto_reconnect,
             joined_channels: server_config.channels.clone(),
             origin_config: server_config.clone(),
+            local_ip: None,
             enabled_caps: HashSet::new(),
             who_token_counter: 0,
             silent_who_channels: HashSet::new(),
@@ -1686,6 +1687,7 @@ impl App {
                 sasl_mechanism: None,
                 client_cert_path: None,
             },
+            local_ip: None,
             enabled_caps: HashSet::new(),
             who_token_counter: 0,
             silent_who_channels: HashSet::new(),
@@ -2196,7 +2198,7 @@ impl App {
                 match crate::irc::connect_server(&id, &cfg, &general).await {
                     Ok((handle, mut rx)) => {
                         let _ =
-                            tx.send(IrcEvent::HandleReady(handle.conn_id.clone(), handle.sender));
+                            tx.send(IrcEvent::HandleReady(handle.conn_id.clone(), handle.sender, handle.local_ip));
                         while let Some(event) = rx.recv().await {
                             if tx.send(event).is_err() {
                                 break;
@@ -2534,9 +2536,13 @@ impl App {
     #[allow(clippy::too_many_lines)]
     fn handle_irc_event(&mut self, event: IrcEvent) {
         match event {
-            IrcEvent::HandleReady(conn_id, sender) => {
+            IrcEvent::HandleReady(conn_id, sender, local_ip) => {
+                // Store local IP on Connection state (for DCC own-IP fallback)
+                if let Some(conn) = self.state.connections.get_mut(&conn_id) {
+                    conn.local_ip = local_ip;
+                }
                 self.irc_handles
-                    .insert(conn_id.clone(), IrcHandle { conn_id, sender });
+                    .insert(conn_id.clone(), IrcHandle { conn_id, sender, local_ip });
             }
             IrcEvent::NegotiationInfo(conn_id, diag) => {
                 // Display CAP/SASL diagnostics in status buffer — fires immediately

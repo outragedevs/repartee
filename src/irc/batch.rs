@@ -472,6 +472,7 @@ mod tests {
             origin_config: make_test_server_config(),
             enabled_caps: std::collections::HashSet::new(),
             who_token_counter: 0,
+            local_ip: None,
             silent_who_channels: std::collections::HashSet::new(),
         });
 
@@ -667,6 +668,7 @@ mod tests {
             origin_config: make_test_server_config(),
             enabled_caps: std::collections::HashSet::new(),
             who_token_counter: 0,
+            local_ip: None,
             silent_who_channels: std::collections::HashSet::new(),
         });
 

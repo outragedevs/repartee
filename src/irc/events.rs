@@ -2791,6 +2791,7 @@ mod tests {
                 sasl_mechanism: None,
                 client_cert_path: None,
             },
+            local_ip: None,
             enabled_caps: std::collections::HashSet::new(),
             who_token_counter: 0,
             silent_who_channels: std::collections::HashSet::new(),

@@ -309,16 +309,26 @@ fn initiate_dcc_chat(app: &mut App, nick: &str, passive: bool) {
 
 /// Resolve the IP address to advertise in DCC offers.
 ///
-/// Priority: config override > 127.0.0.1 fallback.
-/// Logs an actionable warning when no explicit IP is set, since localhost
-/// only works for same-machine connections.
+/// Priority: config override > IRC socket local address > 127.0.0.1 fallback.
+/// Matches erssi's approach: `getsockname()` on the IRC socket, then
+/// `dcc_own_ip` override. We reverse the check order since config takes
+/// precedence in our architecture.
 fn resolve_own_ip(app: &App) -> Option<std::net::IpAddr> {
+    // 1. Explicit config override
     if let Some(ip) = app.dcc.own_ip {
         return Some(ip);
     }
+    // 2. Local address of the active IRC TCP socket (erssi: getsockname on iface)
+    if let Some(conn_id) = app.active_conn_id()
+        && let Some(conn) = app.state.connections.get(conn_id)
+        && let Some(ip) = conn.local_ip
+    {
+        return Some(ip);
+    }
+    // 3. Fallback — warn user
     tracing::warn!(
-        "DCC: no own_ip configured — using 127.0.0.1 which only works locally. \
-         Set dcc.own_ip to your public IP for remote DCC connections: /set dcc.own_ip <ip>"
+        "DCC: could not determine local IP — using 127.0.0.1. \
+         Set dcc.own_ip for remote connections: /set dcc.own_ip <ip>"
     );
     None
 }

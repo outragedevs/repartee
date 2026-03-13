@@ -1,5 +1,7 @@
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
+
+use serde::{Deserialize, Serialize};
 
 use crate::config::ServerConfig;
 
@@ -39,6 +41,8 @@ pub struct Connection {
     /// Stored so ad-hoc connections (from `/connect address`) can reconnect
     /// without requiring a matching entry in the config file.
     pub origin_config: ServerConfig,
+    /// Local IP address of the IRC TCP socket (for DCC own-IP fallback).
+    pub local_ip: Option<IpAddr>,
     /// `IRCv3` capabilities that were successfully negotiated with the server.
     pub enabled_caps: HashSet<String>,
     /// Counter for WHOX tokens. Each `WHO %fields,TOKEN` request gets

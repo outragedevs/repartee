@@ -29,7 +29,8 @@ pub enum IrcEvent {
     /// The connection was lost, optionally with an error description.
     Disconnected(String, Option<String>),
     /// An IRC handle (sender) is ready after async connection completes.
-    HandleReady(String, irc::client::Sender),
+    /// Third field is the local IP of the TCP socket (for DCC own-IP fallback).
+    HandleReady(String, irc::client::Sender, Option<std::net::IpAddr>),
     /// Diagnostic messages from CAP/SASL negotiation (fires immediately).
     NegotiationInfo(String, Vec<String>),
 }
@@ -49,6 +50,8 @@ struct NegotiateResult {
 pub struct IrcHandle {
     pub conn_id: String,
     pub sender: irc::client::Sender,
+    /// Local IP of the TCP socket (for DCC own-IP fallback).
+    pub local_ip: Option<std::net::IpAddr>,
 }
 
 /// SASL authentication mechanism.
@@ -341,6 +344,7 @@ pub async fn connect_server(
     };
 
     let mut client = Client::from_config(irc_config).await?;
+    let local_ip = client.local_addr().map(|a| a.ip());
     let sender = client.sender();
     let mut stream = client.stream()?;
 
@@ -418,6 +422,7 @@ pub async fn connect_server(
         IrcHandle {
             conn_id: id2,
             sender,
+            local_ip,
         },
         rx,
     ))
