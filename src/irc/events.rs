@@ -156,6 +156,37 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
         Command::Raw(cmd, args) if cmd == "354" => {
             handle_whox_reply(state, conn_id, args);
         }
+        // Catch-all for unknown numerics that irc-proto doesn't define
+        // (e.g. IRCnet's 344/345 for reop list). Display them like the
+        // Response catch-all does — errors to active window, info to server.
+        Command::Raw(cmd, args) if cmd.len() == 3 && cmd.chars().all(|c| c.is_ascii_digit()) => {
+            // Unknown numerics are typically responses to user commands,
+            // so always route to the active window.
+            let buffer_id = active_or_server_buffer(state, conn_id);
+            let text = if args.len() > 1 {
+                args[1..].join(" ")
+            } else {
+                args.join(" ")
+            };
+            let id = state.next_message_id();
+            state.add_message(
+                &buffer_id,
+                Message {
+                    id,
+                    timestamp: Utc::now(),
+                    message_type: MessageType::Event,
+                    nick: None,
+                    nick_mode: None,
+                    text,
+                    highlight: false,
+                    event_key: None,
+                    event_params: None,
+                    log_msg_id: None,
+                    log_ref_id: None,
+                    tags: HashMap::new(),
+                },
+            );
+        }
         // PING handled automatically by the irc crate
         _ => {}
     }
