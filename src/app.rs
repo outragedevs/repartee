@@ -2609,6 +2609,8 @@ impl App {
                 }
             }
             IrcEvent::Disconnected(conn_id, error) => {
+                // DCC connections are peer-to-peer and independent of the IRC
+                // server.  Do NOT close DCC records on IRC disconnect.
                 crate::irc::events::handle_disconnected(
                     &mut self.state,
                     &conn_id,
@@ -2885,6 +2887,54 @@ impl App {
                     }
 
                     crate::irc::events::handle_irc_message(&mut self.state, &conn_id, &msg);
+
+                    // ── DCC: track nick renames ──────────────────────────────────
+                    // When a user renames on IRC their DCC record and buffer must
+                    // follow, since buffers are named after the peer's nick (=Nick).
+                    if let ::irc::proto::Command::NICK(ref new_nick) = msg.command
+                        && let Some(::irc::proto::Prefix::Nickname(ref old_nick, _, _)) =
+                            msg.prefix
+                    {
+                        let renames = self.dcc.update_nick(old_nick, new_nick);
+                        for (old_id, _) in renames {
+                            // Record ID is the lowercase original nick; the buffer
+                            // name is "=Nick".  Reconstruct both buffer IDs.
+                            let old_buf_suffix = format!("={old_id}");
+                            let new_buf_suffix = format!("={}", new_nick.to_lowercase());
+                            let old_buf_id =
+                                crate::state::buffer::make_buffer_id(&conn_id, &old_buf_suffix);
+                            let new_buf_id =
+                                crate::state::buffer::make_buffer_id(&conn_id, &new_buf_suffix);
+
+                            if let Some(mut buf) = self.state.buffers.shift_remove(&old_buf_id) {
+                                buf.id.clone_from(&new_buf_id);
+                                buf.name = format!("={new_nick}");
+                                self.state.buffers.insert(new_buf_id.clone(), buf);
+
+                                // Keep active selection consistent.
+                                if self.state.active_buffer_id.as_deref() == Some(&old_buf_id) {
+                                    self.state.active_buffer_id = Some(new_buf_id);
+                                }
+                            }
+                        }
+                    }
+
+                    // ── DCC: ERR_NOSUCHNICK cleanup ──────────────────────────────
+                    // If the IRC server reports that a nick does not exist,
+                    // cancel any pending DCC request to that nick so it doesn't
+                    // sit in the queue until timeout.
+                    if let ::irc::proto::Command::Response(
+                        ::irc::proto::Response::ERR_NOSUCHNICK,
+                        ref args,
+                    ) = msg.command
+                        && let Some(target_nick) = args.get(1)
+                        && let Some(record) = self.dcc.close_by_nick(target_nick)
+                    {
+                        crate::commands::helpers::add_local_event(
+                            self,
+                            &format!("DCC CHAT to {} cancelled: no such nick", record.nick),
+                        );
+                    }
 
                     // Queue channel for batched WHO + MODE after join.
                     if let Some(channel) = endofnames_channel {
