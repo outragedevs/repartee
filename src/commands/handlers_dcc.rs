@@ -323,7 +323,10 @@ fn resolve_own_ip(app: &App) -> Option<std::net::IpAddr> {
         && let Some(conn) = app.state.connections.get(conn_id)
         && let Some(ip) = conn.local_ip
     {
-        return Some(ip);
+        // Skip loopback — not useful for DCC to remote peers
+        if !ip.is_loopback() {
+            return Some(ip);
+        }
     }
     // 3. Fallback — warn user
     tracing::warn!(

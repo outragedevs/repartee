@@ -1048,6 +1048,10 @@ impl App {
         match irc::connect_server(&conn_id, &server_config, &general).await {
             Ok((handle, mut rx)) => {
                 let tx = self.irc_tx.clone();
+                // Store local IP on Connection state (for DCC own-IP fallback)
+                if let Some(conn) = self.state.connections.get_mut(&conn_id) {
+                    conn.local_ip = handle.local_ip;
+                }
                 self.irc_handles.insert(conn_id.clone(), handle);
 
                 // Spawn task to forward events from per-connection receiver to shared channel
