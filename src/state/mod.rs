@@ -63,6 +63,7 @@ impl AppState {
                     buffer::BufferType::Server => "server",
                     buffer::BufferType::Channel => "channel",
                     buffer::BufferType::Query => "query",
+                    buffer::BufferType::DccChat => "dcc_chat",
                     buffer::BufferType::Special => "special",
                 };
                 BufferInfo {

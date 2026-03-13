@@ -9,6 +9,8 @@ pub enum BufferType {
     Server,
     Channel,
     Query,
+    /// Direct Client Connection chat — a 1:1 peer-to-peer chat buffer.
+    DccChat,
     Special,
 }
 
@@ -18,7 +20,8 @@ impl BufferType {
             Self::Server => 1,
             Self::Channel => 2,
             Self::Query => 3,
-            Self::Special => 4,
+            Self::DccChat => 4,
+            Self::Special => 5,
         }
     }
 }
@@ -265,6 +268,7 @@ mod tests {
     fn buffer_type_sort_group() {
         assert!(BufferType::Server.sort_group() < BufferType::Channel.sort_group());
         assert!(BufferType::Channel.sort_group() < BufferType::Query.sort_group());
-        assert!(BufferType::Query.sort_group() < BufferType::Special.sort_group());
+        assert!(BufferType::Query.sort_group() < BufferType::DccChat.sort_group());
+        assert!(BufferType::DccChat.sort_group() < BufferType::Special.sort_group());
     }
 }

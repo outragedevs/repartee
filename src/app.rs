@@ -3027,7 +3027,10 @@ impl App {
                 return;
             };
             // Only send to channels and queries, not server/status buffers
-            if !matches!(buf.buffer_type, BufferType::Channel | BufferType::Query) {
+            if !matches!(
+                buf.buffer_type,
+                BufferType::Channel | BufferType::Query | BufferType::DccChat
+            ) {
                 crate::commands::helpers::add_local_event(
                     self,
                     "Cannot send messages to this buffer",
