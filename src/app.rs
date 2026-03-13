@@ -1179,6 +1179,7 @@ impl App {
     }
 
     /// Handle a new shim connection from the socket listener.
+    #[expect(clippy::too_many_lines, reason = "flat init sequence, splitting adds indirection")]
     async fn handle_shim_connect(&mut self, stream: tokio::net::UnixStream) -> Result<()> {
         use crate::session::protocol::{self, MainMessage, ShimMessage};
         use crate::session::writer::SocketWriter;
@@ -1257,6 +1258,10 @@ impl App {
         self.needs_full_redraw = true;
         self.cached_term_cols = cols;
         self.cached_term_rows = rows;
+        // Reset sidepanel scroll — stale offsets cause click position mismatch
+        // because the renderer clamps but click handlers used the raw value.
+        self.buffer_list_scroll = 0;
+        self.nick_list_scroll = 0;
 
         // Store shim's terminal env for protocol detection.
         self.shim_term_env = Some(term_env.env_vars);
@@ -2800,8 +2805,17 @@ impl App {
     fn handle_buffer_list_click(&mut self, y_offset: usize) {
         use crate::state::buffer::BufferType;
 
-        // Account for scroll offset: the visual row maps to a logical row
-        let logical_row = y_offset + self.buffer_list_scroll;
+        // Clamp scroll the same way the renderer does — prevents click offset
+        // when buffer_list_scroll exceeds max_scroll (e.g. after reattach or
+        // channels parted while scrolled).
+        let visible_h = self
+            .ui_regions
+            .and_then(|r| r.buffer_list_area)
+            .map_or(0, |r| r.height as usize);
+        let max_scroll = self.buffer_list_total.saturating_sub(visible_h);
+        let clamped_scroll = self.buffer_list_scroll.min(max_scroll);
+        self.buffer_list_scroll = clamped_scroll;
+        let logical_row = y_offset + clamped_scroll;
         let sorted_ids = self.state.sorted_buffer_ids();
         // Map logical_row to the correct buffer, accounting for headers.
         // Server buffers are rendered as headers (not numbered items).
@@ -2845,8 +2859,15 @@ impl App {
     fn handle_nick_list_click(&mut self, y_offset: usize) {
         use crate::state::sorting;
 
-        // Account for scroll offset
-        let logical_row = y_offset + self.nick_list_scroll;
+        // Clamp scroll the same way the renderer does.
+        let visible_h = self
+            .ui_regions
+            .and_then(|r| r.nick_list_area)
+            .map_or(0, |r| r.height as usize);
+        let max_scroll = self.nick_list_total.saturating_sub(visible_h);
+        let clamped_scroll = self.nick_list_scroll.min(max_scroll);
+        self.nick_list_scroll = clamped_scroll;
+        let logical_row = y_offset + clamped_scroll;
 
         // Row 0 is the "N users" header line — skip it
         if logical_row == 0 {
