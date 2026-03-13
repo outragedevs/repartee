@@ -70,6 +70,7 @@ pub struct AppConfig {
     pub ignores: Vec<IgnoreEntry>,
     pub scripts: ScriptsConfig,
     pub logging: LoggingConfig,
+    pub dcc: DccConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -324,6 +325,36 @@ impl Default for LoggingConfig {
 pub struct ScriptsConfig {
     pub autoload: Vec<String>,
     pub debug: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DccConfig {
+    /// Seconds before unaccepted DCC requests expire.
+    pub timeout: u64,
+    /// Override IP address sent in DCC offers (empty = auto-detect from IRC socket).
+    pub own_ip: String,
+    /// Port or range for DCC listen sockets. "0" = OS-assigned, "1025 65535" = range.
+    pub port_range: String,
+    /// Allow auto-accepting DCC from privileged ports (< 1024).
+    pub autoaccept_lowports: bool,
+    /// Hostmask patterns for auto-accepting DCC CHAT (e.g. "*!*@trusted.host").
+    pub autochat_masks: Vec<String>,
+    /// Maximum simultaneous DCC connections.
+    pub max_connections: usize,
+}
+
+impl Default for DccConfig {
+    fn default() -> Self {
+        Self {
+            timeout: 300,
+            own_ip: String::new(),
+            port_range: "0".to_string(),
+            autoaccept_lowports: false,
+            autochat_masks: Vec::new(),
+            max_connections: 10,
+        }
+    }
 }
 
 // === Load / Save ===

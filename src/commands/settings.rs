@@ -110,6 +110,20 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 is_credential: false,
             })
         }
+        "dcc" => {
+            let val = match parts[1] {
+                "timeout" => config.dcc.timeout.to_string(),
+                "own_ip" => config.dcc.own_ip.clone(),
+                "port_range" => config.dcc.port_range.clone(),
+                "autoaccept_lowports" => config.dcc.autoaccept_lowports.to_string(),
+                "max_connections" => config.dcc.max_connections.to_string(),
+                _ => return None,
+            };
+            Some(Resolved {
+                value: val,
+                is_credential: false,
+            })
+        }
         "servers" if parts.len() >= 3 => {
             let server = config.servers.get(parts[1])?;
             let is_cred = matches!(parts[2], "password" | "sasl_pass" | "sasl_user");
@@ -242,6 +256,21 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
             "kitty_format" => config.image_preview.kitty_format = raw.to_string(),
             _ => return Err(format!("Unknown field: {path}")),
         },
+        "dcc" => match parts[1] {
+            "timeout" => {
+                config.dcc.timeout = raw.parse().map_err(|_| "Expected a number".to_string())?;
+            }
+            "own_ip" => config.dcc.own_ip = raw.to_string(),
+            "port_range" => config.dcc.port_range = raw.to_string(),
+            "autoaccept_lowports" => {
+                config.dcc.autoaccept_lowports = parse_bool(raw)?;
+            }
+            "max_connections" => {
+                config.dcc.max_connections =
+                    raw.parse().map_err(|_| "Expected a number".to_string())?;
+            }
+            _ => return Err(format!("Unknown field: {path}")),
+        },
         "servers" if parts.len() >= 3 => {
             let server = config
                 .servers
@@ -325,6 +354,11 @@ const BASE_PATHS: &[&str] = &[
     "image_preview.max_file_size",
     "image_preview.protocol",
     "image_preview.kitty_format",
+    "dcc.timeout",
+    "dcc.own_ip",
+    "dcc.port_range",
+    "dcc.autoaccept_lowports",
+    "dcc.max_connections",
 ];
 
 const SERVER_FIELDS: &[&str] = &[
@@ -450,6 +484,10 @@ fn list_all_settings(app: &mut App) {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "flat section listing — one block per config section"
+)]
 fn build_settings_lines(config: &AppConfig) -> Vec<String> {
     let mut lines = Vec::new();
 
@@ -526,6 +564,24 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
         "cursor_color",
     ] {
         let path = format!("statusbar.{field}");
+        if let Some(resolved) = get_config_value(config, &path) {
+            lines.push(format!(
+                "    {C_HEADER}{path}{C_RST} = {C_CMD}{}{C_RST}",
+                resolved.value
+            ));
+        }
+    }
+
+    // DCC
+    lines.push(format!("  {C_DIM}[dcc]{C_RST}"));
+    for field in &[
+        "timeout",
+        "own_ip",
+        "port_range",
+        "autoaccept_lowports",
+        "max_connections",
+    ] {
+        let path = format!("dcc.{field}");
         if let Some(resolved) = get_config_value(config, &path) {
             lines.push(format!(
                 "    {C_HEADER}{path}{C_RST} = {C_CMD}{}{C_RST}",
