@@ -809,6 +809,49 @@ pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
     let target = &args[0];
     let text = &args[1];
 
+    // DCC CHAT routing: /msg =nick sends via DCC, not IRC.
+    if let Some(dcc_nick) = target.strip_prefix('=') {
+        if let Some(record) = app.dcc.find_connected(dcc_nick) {
+            let record_id = record.id.clone();
+            let conn_id = record.conn_id.clone();
+            if let Err(e) = app.dcc.send_chat_line(&record_id, text) {
+                add_local_event(app, &format!("DCC send error: {e}"));
+                return;
+            }
+            // Display locally in the DCC buffer
+            let buf_name = format!("={dcc_nick}");
+            let buffer_id = crate::state::buffer::make_buffer_id(&conn_id, &buf_name);
+            let our_nick = app
+                .state
+                .connections
+                .values()
+                .next()
+                .map(|c| c.nick.clone())
+                .unwrap_or_default();
+            let msg_id = app.state.next_message_id();
+            app.state.add_message(
+                &buffer_id,
+                crate::state::buffer::Message {
+                    id: msg_id,
+                    timestamp: chrono::Utc::now(),
+                    message_type: crate::state::buffer::MessageType::Message,
+                    nick: Some(our_nick),
+                    nick_mode: None,
+                    text: text.clone(),
+                    highlight: false,
+                    event_key: None,
+                    event_params: None,
+                    log_msg_id: None,
+                    log_ref_id: None,
+                    tags: std::collections::HashMap::new(),
+                },
+            );
+        } else {
+            add_local_event(app, &format!("No active DCC CHAT session with {dcc_nick}"));
+        }
+        return;
+    }
+
     let (conn_id, nick) = {
         let Some(conn_id) = app.active_conn_id().map(str::to_owned) else {
             add_local_event(app, "No active connection");
@@ -947,6 +990,51 @@ pub(crate) fn cmd_me(app: &mut App, args: &[String]) {
     };
     let target = buf.name.clone();
     let conn_id = buf.connection_id.clone();
+    let buf_type = buf.buffer_type.clone();
+
+    // DCC CHAT: send ACTION via DCC channel, not IRC.
+    if buf_type == crate::state::buffer::BufferType::DccChat {
+        let dcc_nick = target.strip_prefix('=').unwrap_or(&target);
+        if let Some(record) = app.dcc.find_connected(dcc_nick) {
+            let record_id = record.id.clone();
+            let ctcp = format!("\x01ACTION {action_text}\x01");
+            if let Err(e) = app.dcc.send_chat_line(&record_id, &ctcp) {
+                add_local_event(app, &format!("DCC send error: {e}"));
+                return;
+            }
+            // Display locally
+            let our_nick = app
+                .state
+                .connections
+                .values()
+                .next()
+                .map(|c| c.nick.clone())
+                .unwrap_or_default();
+            let buffer_id = app.state.active_buffer_id.clone().unwrap_or_default();
+            let msg_id = app.state.next_message_id();
+            app.state.add_message(
+                &buffer_id,
+                crate::state::buffer::Message {
+                    id: msg_id,
+                    timestamp: chrono::Utc::now(),
+                    message_type: crate::state::buffer::MessageType::Action,
+                    nick: Some(our_nick),
+                    nick_mode: None,
+                    text: action_text.clone(),
+                    highlight: false,
+                    event_key: None,
+                    event_params: None,
+                    log_msg_id: None,
+                    log_ref_id: None,
+                    tags: std::collections::HashMap::new(),
+                },
+            );
+        } else {
+            add_local_event(app, "No active DCC CHAT session for this buffer");
+        }
+        return;
+    }
+
     let nick = app
         .state
         .connections

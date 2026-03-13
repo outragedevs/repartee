@@ -462,6 +462,10 @@ pub struct App {
     /// stdout) — broken when stdout is `/dev/null` in daemon/fork mode.
     pub cached_term_cols: u16,
     pub cached_term_rows: u16,
+    /// DCC connection manager (owns all DCC records, senders, config).
+    pub dcc: crate::dcc::DccManager,
+    /// Receiver for events from DCC async tasks.
+    dcc_rx: mpsc::UnboundedReceiver<crate::dcc::DccEvent>,
 }
 
 impl App {
@@ -551,6 +555,17 @@ impl App {
 
         let http_client = reqwest::Client::new();
 
+        // --- DCC subsystem ---
+        let (mut dcc, dcc_rx) = crate::dcc::DccManager::new();
+        dcc.timeout_secs = config.dcc.timeout;
+        if !config.dcc.own_ip.is_empty() {
+            dcc.own_ip = config.dcc.own_ip.parse().ok();
+        }
+        dcc.port_range = crate::dcc::chat::parse_port_range(&config.dcc.port_range);
+        dcc.autoaccept_lowports = config.dcc.autoaccept_lowports;
+        dcc.autochat_masks = config.dcc.autochat_masks.clone();
+        dcc.max_connections = config.dcc.max_connections;
+
         // --- Scripting system ---
         let (script_action_tx, script_action_rx) = mpsc::unbounded_channel();
         let script_state = Arc::new(std::sync::RwLock::new(state.script_snapshot()));
@@ -632,6 +647,8 @@ impl App {
             shim_input_handle: None,
             cached_term_cols: 80,
             cached_term_rows: 24,
+            dcc,
+            dcc_rx,
         };
         app.recompute_wrap_indent();
         Ok(app)
@@ -1541,6 +1558,11 @@ impl App {
                         self.handle_preview_event(ev);
                     }
                 },
+                dcc_ev = self.dcc_rx.recv() => {
+                    if let Some(ev) = dcc_ev {
+                        self.handle_dcc_event(ev);
+                    }
+                },
                 _ = tick.tick() => {
                     self.handle_netsplit_tick();
                     self.purge_expired_batches();
@@ -1548,6 +1570,13 @@ impl App {
                     self.measure_lag();
                     self.update_script_snapshot();
                     self.check_stale_who_batches();
+                    let expired = self.dcc.purge_expired();
+                    for (_id, nick) in expired {
+                        crate::commands::helpers::add_local_event(
+                            self,
+                            &format!("DCC CHAT request from {nick} timed out"),
+                        );
+                    }
                 },
                 _ = paste_tick.tick() => {
                     self.drain_paste_queue();
@@ -1738,6 +1767,261 @@ impl App {
             },
             ImagePreviewEvent::Error { url, message } => PreviewStatus::Error { url, message },
         };
+    }
+
+    // ── DCC event handling ───────────────────────────────────────────────────
+
+    #[allow(clippy::too_many_lines)]
+    fn handle_dcc_event(&mut self, ev: crate::dcc::DccEvent) {
+        use crate::dcc::DccEvent;
+        match ev {
+            DccEvent::IncomingRequest {
+                nick,
+                conn_id,
+                addr,
+                port,
+                passive_token,
+                ident,
+                host,
+            } => {
+                // Cross-request auto-allow: if we already have a Listening DCC
+                // to this nick (we initiated), tear down our listener and
+                // auto-accept their request instead.
+                let mut auto = false;
+                let our_listening_id = self
+                    .dcc
+                    .records
+                    .iter()
+                    .find(|(_, r)| {
+                        r.nick.eq_ignore_ascii_case(&nick)
+                            && matches!(r.state, crate::dcc::types::DccState::Listening)
+                    })
+                    .map(|(id, _)| id.clone());
+                if let Some(lid) = our_listening_id {
+                    self.dcc.close_by_id(&lid);
+                    self.dcc.chat_senders.remove(&lid);
+                    auto = true;
+                }
+
+                // Check hostmask auto-accept
+                if !auto {
+                    auto = self.dcc.should_auto_accept(&nick, &ident, &host, port);
+                }
+
+                if self.dcc.records.len() >= self.dcc.max_connections {
+                    crate::commands::helpers::add_local_event(
+                        self,
+                        &format!("DCC CHAT from {nick} rejected: max connections reached"),
+                    );
+                    return;
+                }
+
+                let id = self.dcc.generate_id(&nick);
+                let nick_for_record = nick.clone();
+                let record = crate::dcc::types::DccRecord {
+                    id: id.clone(),
+                    dcc_type: crate::dcc::types::DccType::Chat,
+                    nick: nick_for_record,
+                    conn_id,
+                    addr,
+                    port,
+                    state: crate::dcc::types::DccState::WaitingUser,
+                    passive_token,
+                    created: std::time::Instant::now(),
+                    started: None,
+                    bytes_transferred: 0,
+                    mirc_ctcp: true,
+                    ident,
+                    host,
+                };
+                self.dcc.records.insert(id, record);
+
+                if auto {
+                    crate::commands::handlers_dcc::cmd_dcc(
+                        self,
+                        &["chat".to_string(), nick],
+                    );
+                } else {
+                    crate::commands::helpers::add_local_event(
+                        self,
+                        &format!(
+                            "DCC CHAT request from {nick} ({addr}:{port}) — \
+                             use /dcc chat {nick} to accept"
+                        ),
+                    );
+                }
+            }
+
+            DccEvent::ChatConnected { id } => {
+                let nick = {
+                    let Some(record) = self.dcc.records.get_mut(&id) else {
+                        return;
+                    };
+                    record.state = crate::dcc::types::DccState::Connected;
+                    record.started = Some(std::time::Instant::now());
+                    record.nick.clone()
+                };
+
+                let conn_id = self
+                    .dcc
+                    .records
+                    .get(&id)
+                    .map(|r| r.conn_id.clone())
+                    .unwrap_or_default();
+
+                let buf_name = format!("={nick}");
+                let buffer_id = make_buffer_id(&conn_id, &buf_name);
+
+                if !self.state.buffers.contains_key(&buffer_id) {
+                    self.state.add_buffer(Buffer {
+                        id: buffer_id.clone(),
+                        connection_id: conn_id,
+                        buffer_type: BufferType::DccChat,
+                        name: buf_name,
+                        messages: Vec::new(),
+                        activity: ActivityLevel::None,
+                        unread_count: 0,
+                        last_read: chrono::Utc::now(),
+                        topic: None,
+                        topic_set_by: None,
+                        users: std::collections::HashMap::new(),
+                        modes: None,
+                        mode_params: None,
+                        list_modes: std::collections::HashMap::new(),
+                        last_speakers: Vec::new(),
+                    });
+                }
+
+                self.state.set_active_buffer(&buffer_id);
+
+                let msg_id = self.state.next_message_id();
+                self.state.add_message(
+                    &buffer_id,
+                    Message {
+                        id: msg_id,
+                        timestamp: Utc::now(),
+                        message_type: MessageType::Event,
+                        nick: None,
+                        nick_mode: None,
+                        text: format!("DCC CHAT connection established with {nick}"),
+                        highlight: false,
+                        event_key: None,
+                        event_params: None,
+                        log_msg_id: None,
+                        log_ref_id: None,
+                        tags: std::collections::HashMap::new(),
+                    },
+                );
+            }
+
+            DccEvent::ChatMessage { id, text } => {
+                let (nick, conn_id) = {
+                    let Some(record) = self.dcc.records.get_mut(&id) else {
+                        return;
+                    };
+                    record.bytes_transferred += text.len() as u64;
+                    (record.nick.clone(), record.conn_id.clone())
+                };
+
+                let buf_name = format!("={nick}");
+                let buffer_id = make_buffer_id(&conn_id, &buf_name);
+
+                let msg_id = self.state.next_message_id();
+                self.state.add_message_with_activity(
+                    &buffer_id,
+                    Message {
+                        id: msg_id,
+                        timestamp: Utc::now(),
+                        message_type: MessageType::Message,
+                        nick: Some(nick),
+                        nick_mode: None,
+                        text,
+                        highlight: false,
+                        event_key: None,
+                        event_params: None,
+                        log_msg_id: None,
+                        log_ref_id: None,
+                        tags: std::collections::HashMap::new(),
+                    },
+                    ActivityLevel::Mention,
+                );
+            }
+
+            DccEvent::ChatAction { id, text } => {
+                let (nick, conn_id) = {
+                    let Some(record) = self.dcc.records.get_mut(&id) else {
+                        return;
+                    };
+                    record.bytes_transferred += text.len() as u64;
+                    (record.nick.clone(), record.conn_id.clone())
+                };
+
+                let buf_name = format!("={nick}");
+                let buffer_id = make_buffer_id(&conn_id, &buf_name);
+
+                let msg_id = self.state.next_message_id();
+                self.state.add_message_with_activity(
+                    &buffer_id,
+                    Message {
+                        id: msg_id,
+                        timestamp: Utc::now(),
+                        message_type: MessageType::Action,
+                        nick: Some(nick),
+                        nick_mode: None,
+                        text,
+                        highlight: false,
+                        event_key: None,
+                        event_params: None,
+                        log_msg_id: None,
+                        log_ref_id: None,
+                        tags: std::collections::HashMap::new(),
+                    },
+                    ActivityLevel::Mention,
+                );
+            }
+
+            DccEvent::ChatClosed { id, reason } => {
+                let record = self.dcc.close_by_id(&id);
+                self.dcc.chat_senders.remove(&id);
+                if let Some(record) = record {
+                    let buf_name = format!("={}", record.nick);
+                    let buffer_id = make_buffer_id(&record.conn_id, &buf_name);
+                    let reason_str = reason
+                        .as_deref()
+                        .map_or(String::new(), |r| format!(" ({r})"));
+                    let msg_id = self.state.next_message_id();
+                    self.state.add_message(
+                        &buffer_id,
+                        Message {
+                            id: msg_id,
+                            timestamp: Utc::now(),
+                            message_type: MessageType::Event,
+                            nick: None,
+                            nick_mode: None,
+                            text: format!(
+                                "DCC CHAT with {} closed{reason_str}",
+                                record.nick
+                            ),
+                            highlight: false,
+                            event_key: None,
+                            event_params: None,
+                            log_msg_id: None,
+                            log_ref_id: None,
+                            tags: std::collections::HashMap::new(),
+                        },
+                    );
+                }
+            }
+
+            DccEvent::ChatError { id, error } => {
+                self.dcc.close_by_id(&id);
+                self.dcc.chat_senders.remove(&id);
+                crate::commands::helpers::add_local_event(
+                    self,
+                    &format!("DCC error: {error}"),
+                );
+            }
+        }
     }
 
     /// Tick the netsplit state and emit batched netsplit/netjoin messages.
@@ -3022,7 +3306,7 @@ impl App {
             return;
         };
 
-        let (conn_id, nick, buffer_name) = {
+        let (conn_id, nick, buffer_name, buf_type) = {
             let Some(buf) = self.state.active_buffer() else {
                 return;
             };
@@ -3039,8 +3323,55 @@ impl App {
             }
             let conn = self.state.connections.get(&buf.connection_id);
             let nick = conn.map(|c| c.nick.clone()).unwrap_or_default();
-            (buf.connection_id.clone(), nick, buf.name.clone())
+            (buf.connection_id.clone(), nick, buf.name.clone(), buf.buffer_type.clone())
         };
+
+        // DCC CHAT routing: send via DCC channel, not IRC.
+        if buf_type == BufferType::DccChat {
+            let dcc_nick = buffer_name.strip_prefix('=').unwrap_or(&buffer_name);
+            if let Some(record) = self.dcc.find_connected(dcc_nick) {
+                let record_id = record.id.clone();
+                if let Err(e) = self.dcc.send_chat_line(&record_id, text) {
+                    crate::commands::helpers::add_local_event(
+                        self,
+                        &format!("DCC send error: {e}"),
+                    );
+                    return;
+                }
+                // Display locally
+                let our_nick = self
+                    .state
+                    .connections
+                    .values()
+                    .next()
+                    .map(|c| c.nick.clone())
+                    .unwrap_or_default();
+                let msg_id = self.state.next_message_id();
+                self.state.add_message(
+                    &active_id,
+                    Message {
+                        id: msg_id,
+                        timestamp: Utc::now(),
+                        message_type: MessageType::Message,
+                        nick: Some(our_nick),
+                        nick_mode: None,
+                        text: text.to_string(),
+                        highlight: false,
+                        event_key: None,
+                        event_params: None,
+                        log_msg_id: None,
+                        log_ref_id: None,
+                        tags: std::collections::HashMap::new(),
+                    },
+                );
+            } else {
+                crate::commands::helpers::add_local_event(
+                    self,
+                    "No active DCC CHAT session for this buffer",
+                );
+            }
+            return;
+        }
 
         // Split long messages at word boundaries to stay within IRC byte limits.
         let chunks = crate::irc::split_irc_message(text, crate::irc::MESSAGE_MAX_BYTES);

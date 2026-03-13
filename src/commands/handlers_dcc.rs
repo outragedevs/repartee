@@ -64,22 +64,275 @@ fn cmd_dcc_chat(app: &mut App, args: &[String]) {
     initiate_dcc_chat(app, &nick, passive);
 }
 
-/// Accept a pending DCC CHAT request (stub — wired in Task 8).
+/// Accept a pending DCC CHAT request.
 fn accept_dcc_chat(app: &mut App, nick: &str, id: &str) {
-    add_local_event(app, &format!("DCC CHAT: accepting from {nick} (id: {id})..."));
-    // TCP connection spawning happens in Task 8
+    let Some(record) = app.dcc.records.get(id).cloned() else {
+        add_local_event(app, &format!("{C_ERR}No pending DCC CHAT for {nick}{C_RST}"));
+        return;
+    };
+
+    // Passive DCC (port == 0, has token): we become the listener and the
+    // remote peer connects to us once we reply with our address + token.
+    if record.port == 0 && record.passive_token.is_some() {
+        let own_ip = resolve_own_ip(app);
+        let bind_port = pick_bind_port(app.dcc.port_range);
+        let bind_addr = std::net::SocketAddr::new(
+            own_ip.unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+            bind_port,
+        );
+
+        // Bind listener synchronously so we can extract the actual port.
+        let listener = match std::net::TcpListener::bind(bind_addr) {
+            Ok(l) => l,
+            Err(e) => {
+                add_local_event(
+                    app,
+                    &format!("{C_ERR}DCC CHAT bind error: {e}{C_RST}"),
+                );
+                return;
+            }
+        };
+        let local_port = match listener.local_addr() {
+            Ok(a) => a.port(),
+            Err(e) => {
+                add_local_event(
+                    app,
+                    &format!("{C_ERR}DCC CHAT local_addr error: {e}{C_RST}"),
+                );
+                return;
+            }
+        };
+        listener.set_nonblocking(true).ok();
+        let tokio_listener = match tokio::net::TcpListener::from_std(listener) {
+            Ok(l) => l,
+            Err(e) => {
+                add_local_event(
+                    app,
+                    &format!("{C_ERR}DCC CHAT async listener error: {e}{C_RST}"),
+                );
+                return;
+            }
+        };
+
+        // Update record state
+        if let Some(rec) = app.dcc.records.get_mut(id) {
+            rec.state = crate::dcc::types::DccState::Listening;
+        }
+
+        // Send CTCP response with our address + token
+        let advertise_ip = own_ip.unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        let token = record.passive_token;
+        let ctcp = crate::dcc::protocol::build_dcc_chat_ctcp(&advertise_ip, local_port, token);
+        if let Some(sender) = app.active_irc_sender()
+            && let Err(e) = sender.send_privmsg(nick, &ctcp)
+        {
+            add_local_event(app, &format!("{C_ERR}Failed to send DCC response: {e}{C_RST}"));
+            return;
+        }
+
+        // Create line sender channel and spawn listener task
+        let (line_tx, line_rx) = tokio::sync::mpsc::unbounded_channel();
+        app.dcc.chat_senders.insert(id.to_string(), line_tx);
+
+        let task_id = id.to_string();
+        let event_tx = app.dcc.dcc_tx.clone();
+        let timeout_dur = std::time::Duration::from_secs(app.dcc.timeout_secs);
+        tokio::spawn(async move {
+            crate::dcc::chat::listen_for_chat(task_id, tokio_listener, timeout_dur, event_tx, line_rx)
+                .await;
+        });
+
+        add_local_event(
+            app,
+            &format!("DCC CHAT: listening on port {local_port} for {nick} (passive)..."),
+        );
+    } else {
+        // Active DCC: connect to the remote peer's address + port.
+        if let Some(rec) = app.dcc.records.get_mut(id) {
+            rec.state = crate::dcc::types::DccState::Connecting;
+        }
+
+        let (line_tx, line_rx) = tokio::sync::mpsc::unbounded_channel();
+        app.dcc.chat_senders.insert(id.to_string(), line_tx);
+
+        let task_id = id.to_string();
+        let event_tx = app.dcc.dcc_tx.clone();
+        let timeout_dur = std::time::Duration::from_secs(app.dcc.timeout_secs);
+        let addr = std::net::SocketAddr::new(record.addr, record.port);
+        tokio::spawn(async move {
+            crate::dcc::chat::connect_for_chat(task_id, addr, timeout_dur, event_tx, line_rx)
+                .await;
+        });
+
+        add_local_event(
+            app,
+            &format!("DCC CHAT: connecting to {nick} ({}:{})...", record.addr, record.port),
+        );
+    }
 }
 
-/// Initiate a new outgoing DCC CHAT (stub — wired in Task 8).
+/// Initiate a new outgoing DCC CHAT.
+#[allow(clippy::too_many_lines)]
 fn initiate_dcc_chat(app: &mut App, nick: &str, passive: bool) {
     if app.dcc.records.len() >= app.dcc.max_connections {
         add_local_event(app, "Maximum DCC connections reached");
         return;
     }
-    let mode = if passive { "passive " } else { "" };
-    add_local_event(app, &format!("DCC CHAT: initiating {mode}to {nick}..."));
-    // TCP connection spawning happens in Task 8
+
+    let Some(conn_id) = app.active_conn_id().map(str::to_owned) else {
+        add_local_event(app, "No active connection");
+        return;
+    };
+
+    if passive {
+        // Passive/reverse DCC: send CTCP with fake IP + port 0 + token.
+        // The remote peer will set up a listener and reply with their address.
+        let token: u32 = rand::random::<u32>();
+        let id = app.dcc.generate_id(nick);
+        let record = crate::dcc::types::DccRecord {
+            id: id.clone(),
+            dcc_type: crate::dcc::types::DccType::Chat,
+            nick: nick.to_string(),
+            conn_id,
+            addr: crate::dcc::protocol::PASSIVE_FAKE_IP,
+            port: 0,
+            state: crate::dcc::types::DccState::WaitingUser,
+            passive_token: Some(token),
+            created: std::time::Instant::now(),
+            started: None,
+            bytes_transferred: 0,
+            mirc_ctcp: true,
+            ident: String::new(),
+            host: String::new(),
+        };
+        app.dcc.records.insert(id, record);
+
+        let ctcp =
+            crate::dcc::protocol::build_dcc_chat_ctcp(&crate::dcc::protocol::PASSIVE_FAKE_IP, 0, Some(token));
+        if let Some(sender) = app.active_irc_sender()
+            && let Err(e) = sender.send_privmsg(nick, &ctcp)
+        {
+            add_local_event(app, &format!("{C_ERR}Failed to send DCC offer: {e}{C_RST}"));
+            return;
+        }
+        add_local_event(
+            app,
+            &format!("DCC CHAT: sent passive offer to {nick} (token {token})"),
+        );
+    } else {
+        // Active DCC: bind a listener, send CTCP with our IP + port.
+        let own_ip = resolve_own_ip(app);
+        let bind_port = pick_bind_port(app.dcc.port_range);
+        let bind_addr = std::net::SocketAddr::new(
+            own_ip.unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+            bind_port,
+        );
+
+        let listener = match std::net::TcpListener::bind(bind_addr) {
+            Ok(l) => l,
+            Err(e) => {
+                add_local_event(
+                    app,
+                    &format!("{C_ERR}DCC CHAT bind error: {e}{C_RST}"),
+                );
+                return;
+            }
+        };
+        let local_port = match listener.local_addr() {
+            Ok(a) => a.port(),
+            Err(e) => {
+                add_local_event(
+                    app,
+                    &format!("{C_ERR}DCC CHAT local_addr error: {e}{C_RST}"),
+                );
+                return;
+            }
+        };
+        listener.set_nonblocking(true).ok();
+        let tokio_listener = match tokio::net::TcpListener::from_std(listener) {
+            Ok(l) => l,
+            Err(e) => {
+                add_local_event(
+                    app,
+                    &format!("{C_ERR}DCC CHAT async listener error: {e}{C_RST}"),
+                );
+                return;
+            }
+        };
+
+        let id = app.dcc.generate_id(nick);
+        let advertise_ip = own_ip.unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        let record = crate::dcc::types::DccRecord {
+            id: id.clone(),
+            dcc_type: crate::dcc::types::DccType::Chat,
+            nick: nick.to_string(),
+            conn_id,
+            addr: advertise_ip,
+            port: local_port,
+            state: crate::dcc::types::DccState::Listening,
+            passive_token: None,
+            created: std::time::Instant::now(),
+            started: None,
+            bytes_transferred: 0,
+            mirc_ctcp: true,
+            ident: String::new(),
+            host: String::new(),
+        };
+        app.dcc.records.insert(id.clone(), record);
+
+        // Send CTCP DCC CHAT offer
+        let ctcp = crate::dcc::protocol::build_dcc_chat_ctcp(&advertise_ip, local_port, None);
+        if let Some(sender) = app.active_irc_sender()
+            && let Err(e) = sender.send_privmsg(nick, &ctcp)
+        {
+            add_local_event(app, &format!("{C_ERR}Failed to send DCC offer: {e}{C_RST}"));
+            return;
+        }
+
+        // Create line sender channel and spawn listener task
+        let (line_tx, line_rx) = tokio::sync::mpsc::unbounded_channel();
+        app.dcc.chat_senders.insert(id.clone(), line_tx);
+
+        let event_tx = app.dcc.dcc_tx.clone();
+        let timeout_dur = std::time::Duration::from_secs(app.dcc.timeout_secs);
+        tokio::spawn(async move {
+            crate::dcc::chat::listen_for_chat(id, tokio_listener, timeout_dur, event_tx, line_rx)
+                .await;
+        });
+
+        add_local_event(
+            app,
+            &format!("DCC CHAT: listening on port {local_port} for {nick}..."),
+        );
+    }
 }
+
+/// Resolve the IP address to advertise in DCC offers.
+///
+/// Checks `app.dcc.own_ip` first, falling back to `127.0.0.1` with a warning.
+fn resolve_own_ip(app: &App) -> Option<std::net::IpAddr> {
+    if let Some(ip) = app.dcc.own_ip {
+        return Some(ip);
+    }
+    tracing::warn!("DCC own_ip not configured, using 127.0.0.1 — set dcc.own_ip in config");
+    None
+}
+
+/// Pick a port to bind for DCC listening.
+///
+/// Returns 0 for (0,0) (OS-assigned), the single port for (N,N),
+/// or a random port within the range.
+fn pick_bind_port(range: (u16, u16)) -> u16 {
+    match range {
+        (0, 0) => 0,
+        (lo, hi) if lo == hi => lo,
+        (lo, hi) => {
+            use rand::RngExt;
+            rand::rng().random_range(lo..=hi)
+        }
+    }
+}
+
 
 // ─── /dcc close ───────────────────────────────────────────────────────────────
 
@@ -107,7 +360,7 @@ fn cmd_dcc_close(app: &mut App, args: &[String]) {
         None => {
             add_local_event(
                 app,
-                &format!("{}No DCC CHAT session found for {nick}{C_RST}", C_ERR),
+                &format!("{C_ERR}No DCC CHAT session found for {nick}{C_RST}"),
             );
         }
     }
@@ -140,8 +393,7 @@ fn cmd_dcc_list(app: &mut App) {
         // Duration since connection was established, or since record creation.
         let elapsed_secs = r
             .started
-            .map(|t: std::time::Instant| t.elapsed().as_secs())
-            .unwrap_or_else(|| r.created.elapsed().as_secs());
+            .map_or_else(|| r.created.elapsed().as_secs(), |t: std::time::Instant| t.elapsed().as_secs());
         let duration = format_duration(elapsed_secs);
 
         lines.push(format!(
