@@ -35,6 +35,7 @@ nick_alignment = "right"       # "left", "right", or "center"
 nick_truncation = true
 show_timestamps = true
 scrollback_lines = 2000
+backlog_lines = 20             # history lines loaded when buffer opens (0 = off)
 
 [sidepanel.left]
 width = 20
@@ -111,7 +112,7 @@ Global identity and behavior. The `nick`, `username`, and `realname` are used as
 
 ### `[display]`
 
-Controls how messages are rendered. `nick_column_width` sets the fixed-width column for nicks in chat view. `scrollback_lines` is the number of messages kept in memory per buffer.
+Controls how messages are rendered. `nick_column_width` sets the fixed-width column for nicks in chat view. `scrollback_lines` is the number of messages kept in memory per buffer. `backlog_lines` sets how many historical messages to load from the log database when a channel, query, or DCC buffer is first opened (0 to disable).
 
 ### `[sidepanel]`
 

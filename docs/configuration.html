@@ -124,6 +124,7 @@ nick_alignment = &quot;right&quot;       # &quot;left&quot;, &quot;right&quot;, 
 nick_truncation = true
 show_timestamps = true
 scrollback_lines = 2000
+backlog_lines = 20             # history lines loaded when buffer opens (0 = off)
 
 [sidepanel.left]
 width = 20
@@ -195,7 +196,7 @@ levels = [&quot;ALL&quot;]
 <h3><code>[general]</code></h3>
 <p>Global identity and behavior. The <code>nick</code>, <code>username</code>, and <code>realname</code> are used as defaults for all servers unless overridden per-server. Set <code>theme</code> to the name of a theme file in <code>~/.repartee/themes/</code> (without the <code>.theme</code> extension).</p>
 <h3><code>[display]</code></h3>
-<p>Controls how messages are rendered. <code>nick_column_width</code> sets the fixed-width column for nicks in chat view. <code>scrollback_lines</code> is the number of messages kept in memory per buffer.</p>
+<p>Controls how messages are rendered. <code>nick_column_width</code> sets the fixed-width column for nicks in chat view. <code>scrollback_lines</code> is the number of messages kept in memory per buffer. <code>backlog_lines</code> sets how many historical messages to load from the log database when a channel, query, or DCC buffer is first opened (0 to disable).</p>
 <h3><code>[sidepanel]</code></h3>
 <p>Left panel shows buffer list, right panel shows nick list. Set <code>visible = false</code> to hide a panel. Widths are in terminal columns.</p>
 <h3><code>[statusbar]</code></h3>
