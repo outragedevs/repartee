@@ -363,4 +363,13 @@ Add a new server.
         let names = get_subcommand_names("join");
         assert!(names.is_empty(), "join should have no subcommands");
     }
+
+    #[test]
+    fn dcc_subcommands_loaded() {
+        let names = get_subcommand_names("dcc");
+        assert!(names.contains(&"chat"), "dcc should have 'chat' subcommand");
+        assert!(names.contains(&"close"), "dcc should have 'close' subcommand");
+        assert!(names.contains(&"list"), "dcc should have 'list' subcommand");
+        assert!(names.contains(&"reject"), "dcc should have 'reject' subcommand");
+    }
 }

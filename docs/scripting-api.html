@@ -537,6 +537,76 @@ end)
 </tr>
 </tbody></table>
 <hr>
+<h2>DCC Events</h2>
+<p>These events fire for DCC CHAT activity. DCC connections are direct peer-to-peer TCP connections that bypass the IRC server.</p>
+<table>
+<thead>
+<tr>
+<th>Event</th>
+<th>Params</th>
+<th>Suppressible</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>dcc.chat.request</code></td>
+<td>connection_id, nick, ip, port</td>
+<td>Yes</td>
+<td>Incoming DCC CHAT offer</td>
+</tr>
+<tr>
+<td><code>dcc.chat.connected</code></td>
+<td>connection_id, nick</td>
+<td>No</td>
+<td>DCC CHAT TCP connection established</td>
+</tr>
+<tr>
+<td><code>dcc.chat.message</code></td>
+<td>connection_id, nick, text</td>
+<td>Yes</td>
+<td>Message received over DCC CHAT</td>
+</tr>
+<tr>
+<td><code>dcc.chat.closed</code></td>
+<td>connection_id, nick, reason</td>
+<td>No</td>
+<td>DCC CHAT connection closed</td>
+</tr>
+</tbody></table>
+<h3><code>dcc.chat.request</code></h3>
+<p>Fires when a remote user sends a DCC CHAT offer. Return <code>true</code> to suppress (auto-reject).</p>
+<pre><code class="language-lua">api.on(&quot;dcc.chat.request&quot;, function(event)
+    -- event.connection_id  (string) IRC connection the offer arrived on
+    -- event.nick           (string) offering nick
+    -- event.ip             (string) IP address to connect to
+    -- event.port           (number) TCP port
+    api.ui.print(&quot;DCC CHAT offer from &quot; .. event.nick .. &quot; (&quot; .. event.ip .. &quot;:&quot; .. event.port .. &quot;)&quot;)
+end)
+</code></pre>
+<h3><code>dcc.chat.connected</code></h3>
+<p>Fires when a DCC CHAT TCP connection is fully established (either direction).</p>
+<pre><code class="language-lua">api.on(&quot;dcc.chat.connected&quot;, function(event)
+    -- event.connection_id  (string)
+    -- event.nick           (string)
+end)
+</code></pre>
+<h3><code>dcc.chat.message</code></h3>
+<p>Fires when a message arrives over an established DCC CHAT connection. Return <code>true</code> to suppress display.</p>
+<pre><code class="language-lua">api.on(&quot;dcc.chat.message&quot;, function(event)
+    -- event.connection_id  (string)
+    -- event.nick           (string)
+    -- event.text           (string) raw message text
+end)
+</code></pre>
+<h3><code>dcc.chat.closed</code></h3>
+<p>Fires when a DCC CHAT connection closes (either side).</p>
+<pre><code class="language-lua">api.on(&quot;dcc.chat.closed&quot;, function(event)
+    -- event.connection_id  (string)
+    -- event.nick           (string)
+    -- event.reason         (string) e.g. &quot;remote closed&quot;, &quot;timeout&quot;, &quot;error&quot;
+end)
+</code></pre>
+<hr>
 <h2>Lifecycle Events</h2>
 <h3><code>connected</code></h3>
 <table>

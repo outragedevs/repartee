@@ -179,6 +179,14 @@ j = &quot;/join&quot;
 autoload = [&quot;slap&quot;]
 # debug = true
 
+[dcc]
+timeout = 300                  # seconds before pending requests expire
+own_ip = &quot;&quot;                    # override IP in DCC offers (empty = auto-detect)
+port_range = &quot;0&quot;               # &quot;0&quot; = OS-assigned, &quot;1025 65535&quot; = range
+autoaccept_lowports = false    # allow auto-accept from ports &lt; 1024
+# autochat_masks = [&quot;*!*@trusted.host&quot;]  # hostmask patterns for auto-accept
+max_connections = 10
+
 [[ignores]]
 mask = &quot;*!*@spammer.host&quot;
 levels = [&quot;ALL&quot;]
@@ -202,6 +210,11 @@ levels = [&quot;ALL&quot;]
 <p>Custom command shortcuts. The key is the alias name, the value is the command it expands to.</p>
 <h3><code>[scripts]</code></h3>
 <p>The <code>autoload</code> array lists script names to load on startup. Scripts live in <code>~/.repartee/scripts/</code> as <code>.lua</code> files.</p>
+<h3><code>[dcc]</code></h3>
+<p>DCC (Direct Client-to-Client) chat settings. DCC CHAT establishes peer-to-peer TCP connections that bypass the IRC server.</p>
+<p><code>own_ip</code> overrides the IP address advertised in DCC offers. When empty, Repartee auto-detects from the IRC socket&#39;s local address (like irssi&#39;s <code>getsockname</code>). Set this to your public IP if behind NAT.</p>
+<p><code>port_range</code> controls the TCP port for DCC listeners. <code>&quot;0&quot;</code> lets the OS assign a free port. Use <code>&quot;1025 65535&quot;</code> or <code>&quot;5000-5100&quot;</code> to restrict to a range (useful for firewall rules).</p>
+<p><code>autochat_masks</code> is a list of <code>nick!ident@host</code> wildcard patterns. Incoming DCC CHAT offers matching any pattern are auto-accepted without prompting.</p>
 <h3><code>[[ignores]]</code></h3>
 <p>Ignore patterns for filtering unwanted messages. Uses wildcard matching (<code>*!*@host</code>). Levels: <code>MSGS</code>, <code>PUBLIC</code>, <code>NOTICES</code>, <code>ACTIONS</code>, <code>JOINS</code>, <code>PARTS</code>, <code>QUITS</code>, <code>NICKS</code>, <code>KICKS</code>, <code>CTCPS</code>, <code>ALL</code>.</p>
 <h2>Credentials</h2>

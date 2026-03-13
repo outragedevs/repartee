@@ -441,6 +441,73 @@ flags override its settings for this connection only.</p>
 <h2>See Also</h2>
 <p>/server, /disconnect, /quit</p>
 </div>
+<div class="command-entry" data-command="dcc" data-category="Connection">
+<h1>/dcc</h1>
+<h2>Syntax</h2>
+<pre><code>/dcc &lt;chat|close|list|reject&gt; [args...]
+</code></pre>
+<h2>Description</h2>
+<p>Manage DCC (Direct Client-to-Client) CHAT connections. DCC CHAT establishes a
+direct TCP connection between two IRC users, bypassing the IRC server entirely.
+Messages are exchanged over a raw TCP socket, not through the IRC network.</p>
+<p>DCC CHAT buffers use the <code>=nick</code> naming convention (e.g., <code>=Alice</code>). Typing in
+a <code>=nick</code> buffer sends text over the DCC connection, not via IRC. The
+<code>/msg =nick text</code> syntax also routes to DCC.</p>
+<h2>Subcommands</h2>
+<h3>chat</h3>
+<p>Initiate a DCC CHAT or accept a pending request.</p>
+<pre><code>/dcc chat                  Accept the most recent pending request
+/dcc chat &lt;nick&gt;           Initiate DCC CHAT or accept pending from nick
+/dcc chat -passive &lt;nick&gt;  Initiate passive DCC (for NAT/firewall)
+</code></pre>
+<p>When no nick is given, the most recent pending incoming request is accepted.
+If a pending request from the specified nick exists, it is accepted instead of
+initiating a new one.</p>
+<p>Passive mode (<code>-passive</code>) sends a reverse DCC offer — the remote peer opens the
+listener instead. Use this when your firewall blocks incoming connections.</p>
+<h3>close</h3>
+<p>Close an active DCC CHAT connection.</p>
+<pre><code>/dcc close chat &lt;nick&gt;
+</code></pre>
+<p>The <code>=nick</code> buffer remains after closing (with a disconnect message). Use
+<code>/close</code> on the buffer to remove it.</p>
+<h3>list</h3>
+<p>List all DCC connections with their current state.</p>
+<pre><code>/dcc list
+</code></pre>
+<p>Shows: nick, type (CHAT), state (waiting/listening/connecting/connected),
+duration, and bytes transferred.</p>
+<h3>reject</h3>
+<p>Reject a pending DCC CHAT request and notify the sender.</p>
+<pre><code>/dcc reject chat &lt;nick&gt;
+</code></pre>
+<p>Sends a <code>DCC REJECT</code> CTCP notice to the remote client so they know the offer
+was declined. Requests that time out (5 minutes by default) are silently
+discarded without sending REJECT.</p>
+<h2>Configuration</h2>
+<p>DCC settings can be changed at runtime with <code>/set</code>:</p>
+<pre><code>/set dcc.timeout 300           Seconds before pending requests expire
+/set dcc.own_ip 203.0.113.5    Override IP in DCC offers
+/set dcc.port_range 0          Port range for listeners (0 = OS-assigned)
+/set dcc.max_connections 10    Max simultaneous DCC connections
+/set dcc.autoaccept_lowports false  Allow auto-accept from ports &lt; 1024
+</code></pre>
+<h2>IP Detection</h2>
+<p>Repartee automatically detects your IP from the IRC socket (like irssi&#39;s
+<code>getsockname</code>). If you&#39;re behind NAT or connecting through a bouncer, set
+<code>dcc.own_ip</code> to your public/LAN IP.</p>
+<h2>Examples</h2>
+<pre><code>/dcc chat Alice
+/dcc chat -passive Bob
+/dcc list
+/dcc close chat Alice
+/dcc reject chat Eve
+/msg =Alice hello over DCC!
+/me waves (in a =nick buffer, sent over DCC)
+</code></pre>
+<h2>See Also</h2>
+<p>/msg, /query, /set</p>
+</div>
 <div class="command-entry" data-command="detach" data-category="Connection">
 <h1>/detach</h1>
 <h2>Syntax</h2>
