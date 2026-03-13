@@ -1784,6 +1784,20 @@ impl App {
                 ident,
                 host,
             } => {
+                // Notify scripts before any default handling; suppression skips
+                // the accept-prompt and auto-accept logic entirely.
+                {
+                    use crate::scripting::api::events;
+                    let mut params = HashMap::new();
+                    params.insert("connection_id".to_string(), conn_id.clone());
+                    params.insert("nick".to_string(), nick.clone());
+                    params.insert("ip".to_string(), addr.to_string());
+                    params.insert("port".to_string(), port.to_string());
+                    if self.emit_script_event(events::DCC_CHAT_REQUEST, params) {
+                        return;
+                    }
+                }
+
                 // Cross-request auto-allow: if we already have a Listening DCC
                 // to this nick (we initiated), tear down our listener and
                 // auto-accept their request instead.
@@ -1875,7 +1889,7 @@ impl App {
                 if !self.state.buffers.contains_key(&buffer_id) {
                     self.state.add_buffer(Buffer {
                         id: buffer_id.clone(),
-                        connection_id: conn_id,
+                        connection_id: conn_id.clone(),
                         buffer_type: BufferType::DccChat,
                         name: buf_name,
                         messages: Vec::new(),
@@ -1912,6 +1926,16 @@ impl App {
                         tags: std::collections::HashMap::new(),
                     },
                 );
+
+                // Inform scripts after the buffer is ready so they can print
+                // to it immediately if desired.
+                {
+                    use crate::scripting::api::events;
+                    let mut params = HashMap::new();
+                    params.insert("connection_id".to_string(), conn_id);
+                    params.insert("nick".to_string(), nick);
+                    self.emit_script_event(events::DCC_CHAT_CONNECTED, params);
+                }
             }
 
             DccEvent::ChatMessage { id, text } => {
@@ -1926,25 +1950,38 @@ impl App {
                 let buf_name = format!("={nick}");
                 let buffer_id = make_buffer_id(&conn_id, &buf_name);
 
-                let msg_id = self.state.next_message_id();
-                self.state.add_message_with_activity(
-                    &buffer_id,
-                    Message {
-                        id: msg_id,
-                        timestamp: Utc::now(),
-                        message_type: MessageType::Message,
-                        nick: Some(nick),
-                        nick_mode: None,
-                        text,
-                        highlight: false,
-                        event_key: None,
-                        event_params: None,
-                        log_msg_id: None,
-                        log_ref_id: None,
-                        tags: std::collections::HashMap::new(),
-                    },
-                    ActivityLevel::Mention,
-                );
+                // Scripts can suppress message display (e.g., for filtering or
+                // routing DCC chat lines to a custom buffer).
+                let suppressed = {
+                    use crate::scripting::api::events;
+                    let mut params = HashMap::new();
+                    params.insert("connection_id".to_string(), conn_id.clone());
+                    params.insert("nick".to_string(), nick.clone());
+                    params.insert("text".to_string(), text.clone());
+                    self.emit_script_event(events::DCC_CHAT_MESSAGE, params)
+                };
+
+                if !suppressed {
+                    let msg_id = self.state.next_message_id();
+                    self.state.add_message_with_activity(
+                        &buffer_id,
+                        Message {
+                            id: msg_id,
+                            timestamp: Utc::now(),
+                            message_type: MessageType::Message,
+                            nick: Some(nick),
+                            nick_mode: None,
+                            text,
+                            highlight: false,
+                            event_key: None,
+                            event_params: None,
+                            log_msg_id: None,
+                            log_ref_id: None,
+                            tags: std::collections::HashMap::new(),
+                        },
+                        ActivityLevel::Mention,
+                    );
+                }
             }
 
             DccEvent::ChatAction { id, text } => {
@@ -1989,6 +2026,21 @@ impl App {
                     let reason_str = reason
                         .as_deref()
                         .map_or(String::new(), |r| format!(" ({r})"));
+
+                    // Notify scripts before the "closed" message so they can
+                    // react while the nick/conn context is still meaningful.
+                    {
+                        use crate::scripting::api::events;
+                        let mut params = HashMap::new();
+                        params.insert("connection_id".to_string(), record.conn_id.clone());
+                        params.insert("nick".to_string(), record.nick.clone());
+                        params.insert(
+                            "reason".to_string(),
+                            reason.as_deref().unwrap_or("").to_string(),
+                        );
+                        self.emit_script_event(events::DCC_CHAT_CLOSED, params);
+                    }
+
                     let msg_id = self.state.next_message_id();
                     self.state.add_message(
                         &buffer_id,

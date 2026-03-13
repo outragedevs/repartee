@@ -94,6 +94,26 @@ pub mod events {
     /// User typed a command (before execution). Can be suppressed.
     /// Params: command, args, `connection_id`
     pub const COMMAND_INPUT: &str = "command_input";
+
+    // ── DCC events ───────────────────────────────────────────
+
+    /// DCC CHAT request received. Can be suppressed (suppression skips the
+    /// default accept-prompt / auto-accept logic).
+    /// Params: `connection_id`, nick, ip, port
+    pub const DCC_CHAT_REQUEST: &str = "dcc.chat.request";
+
+    /// DCC CHAT connection established.
+    /// Params: `connection_id`, nick
+    pub const DCC_CHAT_CONNECTED: &str = "dcc.chat.connected";
+
+    /// DCC CHAT message received. Can be suppressed (suppression skips
+    /// adding the message to the buffer).
+    /// Params: `connection_id`, nick, text
+    pub const DCC_CHAT_MESSAGE: &str = "dcc.chat.message";
+
+    /// DCC CHAT connection closed.
+    /// Params: `connection_id`, nick, reason
+    pub const DCC_CHAT_CLOSED: &str = "dcc.chat.closed";
 }
 
 /// Script file layout expected by the Lua engine:
