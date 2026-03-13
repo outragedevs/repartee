@@ -1775,6 +1775,121 @@ impl App {
         };
     }
 
+    // ── Backlog loading ────────────────────────────────────────────────────
+
+    /// Load recent chat history from the log database into a newly created buffer.
+    ///
+    /// Mimics `WeeChat`'s backlog feature: when a channel/query buffer is opened,
+    /// the last N messages from persistent storage are prepended so the user
+    /// sees recent context immediately. A separator line marks the end of
+    /// the backlog.
+    ///
+    /// Backlog messages are tagged `no_highlight` to avoid spurious notifications
+    /// and are not re-logged (they already exist in the database).
+    fn load_backlog(&mut self, buffer_id: &str) {
+        let limit = self.config.display.backlog_lines;
+        if limit == 0 {
+            return;
+        }
+
+        let Some(storage) = self.storage.as_ref() else {
+            return;
+        };
+
+        let Some(buf) = self.state.buffers.get(buffer_id) else {
+            return;
+        };
+
+        // Skip server/special buffers — backlog is only for chat buffers
+        if !matches!(
+            buf.buffer_type,
+            BufferType::Channel | BufferType::Query | BufferType::DccChat
+        ) {
+            return;
+        }
+
+        let conn_id = buf.connection_id.clone();
+        let buf_name = buf.name.clone();
+
+        // Scope the mutex lock tightly — WAL mode means reads don't block
+        // the writer task, but we still want to release ASAP.
+        let messages = {
+            let Ok(db) = storage.db.lock() else {
+                return;
+            };
+            crate::storage::query::get_messages(
+                &db,
+                &conn_id,
+                &buf_name,
+                None,
+                limit,
+                storage.encrypt,
+                None,
+            )
+        };
+
+        let Ok(messages) = messages else {
+            return;
+        };
+
+        if messages.is_empty() {
+            return;
+        }
+
+        let count = messages.len();
+
+        // Convert StoredMessage → Message and prepend to the buffer
+        for stored in &messages {
+            let msg_type = match stored.msg_type.as_str() {
+                "action" => MessageType::Action,
+                "notice" => MessageType::Notice,
+                "event" => MessageType::Event,
+                _ => MessageType::Message,
+            };
+
+            let id = self.state.next_message_id();
+            let ts = chrono::DateTime::from_timestamp(stored.timestamp, 0)
+                .unwrap_or_else(Utc::now);
+
+            // Insert directly into messages vec — no activity, no logging, no highlight
+            if let Some(buf) = self.state.buffers.get_mut(buffer_id) {
+                buf.messages.push(Message {
+                    id,
+                    timestamp: ts,
+                    message_type: msg_type,
+                    nick: stored.nick.clone(),
+                    nick_mode: None,
+                    text: stored.text.clone(),
+                    highlight: false,
+                    event_key: None,
+                    event_params: None,
+                    log_msg_id: None,
+                    log_ref_id: None,
+                    tags: std::collections::HashMap::new(),
+                });
+            }
+        }
+
+        // Add separator after backlog
+        let sep_id = self.state.next_message_id();
+        if let Some(buf) = self.state.buffers.get_mut(buffer_id) {
+            buf.messages.push(Message {
+                id: sep_id,
+                timestamp: Utc::now(),
+                message_type: MessageType::Event,
+                nick: None,
+                nick_mode: None,
+                text: format!("─── End of backlog ({count} lines) ───"),
+                highlight: false,
+                event_key: Some("backlog_end".to_string()),
+                event_params: None,
+                log_msg_id: None,
+                log_ref_id: None,
+                tags: std::collections::HashMap::new(),
+            });
+        }
+    }
+
     // ── DCC event handling ───────────────────────────────────────────────────
 
     #[allow(clippy::too_many_lines)]
@@ -1912,6 +2027,7 @@ impl App {
                     });
                 }
 
+                self.load_backlog(&buffer_id);
                 self.state.set_active_buffer(&buffer_id);
 
                 let msg_id = self.state.next_message_id();
@@ -2948,7 +3064,25 @@ impl App {
                         }
                     }
 
+                    // Snapshot buffer count so we can detect newly created buffers
+                    // and feed them with chat history from the log database.
+                    let buffers_before = self.state.buffers.len();
+
                     crate::irc::events::handle_irc_message(&mut self.state, &conn_id, &msg);
+
+                    // Load backlog for any buffers created by handle_irc_message
+                    if self.state.buffers.len() > buffers_before {
+                        let new_ids: Vec<String> = self
+                            .state
+                            .buffers
+                            .keys()
+                            .skip(buffers_before)
+                            .cloned()
+                            .collect();
+                        for buf_id in new_ids {
+                            self.load_backlog(&buf_id);
+                        }
+                    }
 
                     // ── DCC: track nick renames ──────────────────────────────────
                     // When a user renames on IRC their DCC record and buffer must

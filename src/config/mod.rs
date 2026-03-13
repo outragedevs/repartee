@@ -109,6 +109,9 @@ pub struct DisplayConfig {
     pub nick_truncation: bool,
     pub show_timestamps: bool,
     pub scrollback_lines: usize,
+    /// Number of historical log lines to load when a buffer is first opened.
+    /// 0 = disabled. Lines come from `SQLite` storage, not memory.
+    pub backlog_lines: usize,
 }
 
 impl Default for DisplayConfig {
@@ -120,6 +123,7 @@ impl Default for DisplayConfig {
             nick_truncation: true,
             show_timestamps: true,
             scrollback_lines: 2000,
+            backlog_lines: 20,
         }
     }
 }

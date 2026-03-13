@@ -49,6 +49,7 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 "nick_truncation" => config.display.nick_truncation.to_string(),
                 "show_timestamps" => config.display.show_timestamps.to_string(),
                 "scrollback_lines" => config.display.scrollback_lines.to_string(),
+                "backlog_lines" => config.display.backlog_lines.to_string(),
                 _ => return None,
             };
             Some(Resolved {
@@ -199,6 +200,10 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
                 config.display.scrollback_lines =
                     raw.parse().map_err(|_| "Expected a number".to_string())?;
             }
+            "backlog_lines" => {
+                config.display.backlog_lines =
+                    raw.parse().map_err(|_| "Expected a number".to_string())?;
+            }
             _ => return Err(format!("Unknown field: {path}")),
         },
         "sidepanel" if parts.len() >= 3 => {
@@ -335,6 +340,7 @@ const BASE_PATHS: &[&str] = &[
     "display.nick_truncation",
     "display.show_timestamps",
     "display.scrollback_lines",
+    "display.backlog_lines",
     "sidepanel.left.width",
     "sidepanel.left.visible",
     "sidepanel.right.width",
@@ -551,6 +557,7 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
                 "nick_truncation",
                 "show_timestamps",
                 "scrollback_lines",
+                "backlog_lines",
             ],
         ),
     ];
