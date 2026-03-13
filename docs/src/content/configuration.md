@@ -90,6 +90,14 @@ j = "/join"
 autoload = ["slap"]
 # debug = true
 
+[dcc]
+timeout = 300                  # seconds before pending requests expire
+own_ip = ""                    # override IP in DCC offers (empty = auto-detect)
+port_range = "0"               # "0" = OS-assigned, "1025 65535" = range
+autoaccept_lowports = false    # allow auto-accept from ports < 1024
+# autochat_masks = ["*!*@trusted.host"]  # hostmask patterns for auto-accept
+max_connections = 10
+
 [[ignores]]
 mask = "*!*@spammer.host"
 levels = ["ALL"]
@@ -132,6 +140,16 @@ Custom command shortcuts. The key is the alias name, the value is the command it
 ### `[scripts]`
 
 The `autoload` array lists script names to load on startup. Scripts live in `~/.repartee/scripts/` as `.lua` files.
+
+### `[dcc]`
+
+DCC (Direct Client-to-Client) chat settings. DCC CHAT establishes peer-to-peer TCP connections that bypass the IRC server.
+
+`own_ip` overrides the IP address advertised in DCC offers. When empty, Repartee auto-detects from the IRC socket's local address (like irssi's `getsockname`). Set this to your public IP if behind NAT.
+
+`port_range` controls the TCP port for DCC listeners. `"0"` lets the OS assign a free port. Use `"1025 65535"` or `"5000-5100"` to restrict to a range (useful for firewall rules).
+
+`autochat_masks` is a list of `nick!ident@host` wildcard patterns. Incoming DCC CHAT offers matching any pattern are auto-accepted without prompting.
 
 ### `[[ignores]]`
 

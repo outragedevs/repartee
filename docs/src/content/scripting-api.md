@@ -191,6 +191,68 @@ Same as `irc.join` plus `message` (part reason).
 
 ---
 
+## DCC Events
+
+These events fire for DCC CHAT activity. DCC connections are direct peer-to-peer TCP connections that bypass the IRC server.
+
+| Event | Params | Suppressible | Description |
+|---|---|---|---|
+| `dcc.chat.request` | connection_id, nick, ip, port | Yes | Incoming DCC CHAT offer |
+| `dcc.chat.connected` | connection_id, nick | No | DCC CHAT TCP connection established |
+| `dcc.chat.message` | connection_id, nick, text | Yes | Message received over DCC CHAT |
+| `dcc.chat.closed` | connection_id, nick, reason | No | DCC CHAT connection closed |
+
+### `dcc.chat.request`
+
+Fires when a remote user sends a DCC CHAT offer. Return `true` to suppress (auto-reject).
+
+```lua
+api.on("dcc.chat.request", function(event)
+    -- event.connection_id  (string) IRC connection the offer arrived on
+    -- event.nick           (string) offering nick
+    -- event.ip             (string) IP address to connect to
+    -- event.port           (number) TCP port
+    api.ui.print("DCC CHAT offer from " .. event.nick .. " (" .. event.ip .. ":" .. event.port .. ")")
+end)
+```
+
+### `dcc.chat.connected`
+
+Fires when a DCC CHAT TCP connection is fully established (either direction).
+
+```lua
+api.on("dcc.chat.connected", function(event)
+    -- event.connection_id  (string)
+    -- event.nick           (string)
+end)
+```
+
+### `dcc.chat.message`
+
+Fires when a message arrives over an established DCC CHAT connection. Return `true` to suppress display.
+
+```lua
+api.on("dcc.chat.message", function(event)
+    -- event.connection_id  (string)
+    -- event.nick           (string)
+    -- event.text           (string) raw message text
+end)
+```
+
+### `dcc.chat.closed`
+
+Fires when a DCC CHAT connection closes (either side).
+
+```lua
+api.on("dcc.chat.closed", function(event)
+    -- event.connection_id  (string)
+    -- event.nick           (string)
+    -- event.reason         (string) e.g. "remote closed", "timeout", "error"
+end)
+```
+
+---
+
 ## Lifecycle Events
 
 ### `connected`
