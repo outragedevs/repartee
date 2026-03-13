@@ -1,5 +1,6 @@
 use std::sync::LazyLock;
 
+use super::handlers_dcc::cmd_dcc;
 use super::handlers_admin::{
     cmd_autoconnect, cmd_ignore, cmd_image, cmd_kill, cmd_log, cmd_oper, cmd_preview, cmd_reload,
     cmd_script, cmd_server, cmd_stats, cmd_unignore, cmd_wallops,
@@ -60,6 +61,15 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
             CommandDef {
                 handler: cmd_server,
                 description: "Manage server configurations",
+                aliases: &[],
+                category: CommandCategory::Connection,
+            },
+        ),
+        (
+            "dcc",
+            CommandDef {
+                handler: cmd_dcc,
+                description: "DCC CHAT commands (chat, close, list, reject)",
                 aliases: &[],
                 category: CommandCategory::Connection,
             },
