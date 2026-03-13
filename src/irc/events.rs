@@ -1387,6 +1387,34 @@ fn handle_quit(
     }
 }
 
+/// Rename query buffers in `affected` to `new_nick`.
+/// Re-keys the buffer in the `IndexMap` and updates `active_buffer_id`.
+fn rename_query_buffers(
+    state: &mut AppState,
+    conn_id: &str,
+    new_nick: &str,
+    affected: &[String],
+) {
+    for buf_id in affected {
+        let is_query = state
+            .buffers
+            .get(buf_id)
+            .is_some_and(|b| b.buffer_type == BufferType::Query);
+        if !is_query {
+            continue;
+        }
+        let new_buf_id = make_buffer_id(conn_id, new_nick);
+        if let Some(mut buf) = state.buffers.shift_remove(buf_id) {
+            buf.name = new_nick.to_string();
+            buf.id.clone_from(&new_buf_id);
+            state.buffers.insert(new_buf_id.clone(), buf);
+            if state.active_buffer_id.as_deref() == Some(buf_id.as_str()) {
+                state.active_buffer_id = Some(new_buf_id);
+            }
+        }
+    }
+}
+
 #[expect(
     clippy::needless_pass_by_value,
     reason = "tags are cloned into each fan-out Message"
@@ -1419,29 +1447,39 @@ fn handle_nick_change(
             &IgnoreLevel::Nicks,
             None,
         ) {
-            // Still update nick list so state is correct, but suppress messages
+            // Still update nick list and rename query buffers so state is
+            // correct, but suppress the notification message.
             let old_nick_lower = old_nick.to_lowercase();
             let affected: Vec<String> = state
                 .buffers
                 .iter()
                 .filter(|(_, buf)| {
-                    buf.connection_id == conn_id && buf.users.contains_key(&old_nick_lower)
+                    buf.connection_id == conn_id
+                        && (buf.users.contains_key(&old_nick_lower)
+                            || (buf.buffer_type == BufferType::Query
+                                && buf.name.to_lowercase() == old_nick_lower))
                 })
                 .map(|(id, _)| id.clone())
                 .collect();
             for buf_id in &affected {
                 state.update_nick(buf_id, &old_nick, new_nick);
             }
+            rename_query_buffers(state, conn_id, new_nick, &affected);
             return;
         }
     }
 
-    // Update in all buffers on this connection
+    // Update in all buffers on this connection — channels (have user in nick list)
+    // AND query buffers (named after the nick, no users list).
+    let old_nick_lower = old_nick.to_lowercase();
     let affected: Vec<String> = state
         .buffers
         .iter()
         .filter(|(_, buf)| {
-            buf.connection_id == conn_id && buf.users.contains_key(&old_nick.to_lowercase())
+            buf.connection_id == conn_id
+                && (buf.users.contains_key(&old_nick_lower)
+                    || (buf.buffer_type == BufferType::Query
+                        && buf.name.to_lowercase() == old_nick_lower))
         })
         .map(|(id, _)| id.clone())
         .collect();
@@ -1497,6 +1535,8 @@ fn handle_nick_change(
             },
         );
     }
+
+    rename_query_buffers(state, conn_id, new_nick, &affected);
 }
 
 #[expect(clippy::too_many_arguments, reason = "IRC KICK has many parameters")]
