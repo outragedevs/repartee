@@ -2785,6 +2785,105 @@ impl App {
                         return;
                     }
 
+                    // Intercept DCC CTCP before normal IRC handling.
+                    // DCC messages arrive as CTCP inside PRIVMSG; events.rs ignores
+                    // non-ACTION CTCPs, so we must consume them here to avoid them
+                    // appearing as garbled text in the chat view.
+                    if let ::irc::proto::Command::PRIVMSG(_, ref text) = msg.command
+                        && text.starts_with('\x01')
+                        && text.ends_with('\x01')
+                        && text.len() > 2
+                    {
+                        let inner = &text[1..text.len() - 1];
+                        if let Some(dcc_msg) = crate::dcc::protocol::parse_dcc_ctcp(inner) {
+                            let (nick, ident, host) =
+                                crate::irc::formatting::extract_nick_userhost(
+                                    msg.prefix.as_ref(),
+                                );
+
+                            // A passive DCC response from the peer looks like:
+                            //   DCC CHAT CHAT <peer_ip> <peer_port> <our_token>
+                            // where port > 0 and passive_token matches what we sent.
+                            // We find our pending record by token and connect to the peer.
+                            if let Some(token) = dcc_msg.passive_token
+                                && dcc_msg.port > 0
+                            {
+                                let matching_id = self
+                                    .dcc
+                                    .records
+                                    .iter()
+                                    .find(|(_, r)| r.passive_token == Some(token))
+                                    .map(|(id, _)| id.clone());
+
+                                if let Some(id) = matching_id {
+                                    // Update the record to point at the peer's real address.
+                                    if let Some(rec) = self.dcc.records.get_mut(&id) {
+                                        rec.addr = dcc_msg.addr;
+                                        rec.port = dcc_msg.port;
+                                        rec.state = crate::dcc::types::DccState::Connecting;
+                                    }
+
+                                    let (line_tx, line_rx) =
+                                        tokio::sync::mpsc::unbounded_channel();
+                                    self.dcc.chat_senders.insert(id.clone(), line_tx);
+
+                                    let task_id = id.clone();
+                                    let event_tx = self.dcc.dcc_tx.clone();
+                                    let timeout_dur = std::time::Duration::from_secs(
+                                        self.dcc.timeout_secs,
+                                    );
+                                    let peer_addr =
+                                        std::net::SocketAddr::new(dcc_msg.addr, dcc_msg.port);
+
+                                    tracing::debug!(
+                                        "passive DCC response from {nick}: \
+                                         connecting to {peer_addr} (token={token})"
+                                    );
+
+                                    tokio::spawn(async move {
+                                        crate::dcc::chat::connect_for_chat(
+                                            task_id,
+                                            peer_addr,
+                                            timeout_dur,
+                                            event_tx,
+                                            line_rx,
+                                        )
+                                        .await;
+                                    });
+
+                                    // Don't fall through to normal IRC handling.
+                                    if let Some(channel) = endofnames_channel {
+                                        self.queue_channel_query(&conn_id, channel);
+                                    }
+                                    if let Some(ref target) = endofwho_target {
+                                        self.handle_who_batch_complete(&conn_id, target);
+                                    }
+                                    return;
+                                }
+                            }
+
+                            // Otherwise this is a fresh incoming DCC CHAT offer.
+                            self.handle_dcc_event(crate::dcc::DccEvent::IncomingRequest {
+                                nick,
+                                conn_id: conn_id.clone(),
+                                addr: dcc_msg.addr,
+                                port: dcc_msg.port,
+                                passive_token: dcc_msg.passive_token,
+                                ident,
+                                host,
+                            });
+
+                            // Don't pass to normal IRC handler — the CTCP is consumed.
+                            if let Some(channel) = endofnames_channel {
+                                self.queue_channel_query(&conn_id, channel);
+                            }
+                            if let Some(ref target) = endofwho_target {
+                                self.handle_who_batch_complete(&conn_id, target);
+                            }
+                            return;
+                        }
+                    }
+
                     crate::irc::events::handle_irc_message(&mut self.state, &conn_id, &msg);
 
                     // Queue channel for batched WHO + MODE after join.
