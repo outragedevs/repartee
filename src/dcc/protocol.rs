@@ -15,10 +15,10 @@ pub fn encode_ip(ip: &IpAddr) -> String {
     match ip {
         IpAddr::V4(v4) => {
             let octets = v4.octets();
-            let n: u32 = ((octets[0] as u32) << 24)
-                | ((octets[1] as u32) << 16)
-                | ((octets[2] as u32) << 8)
-                | (octets[3] as u32);
+            let n: u32 = (u32::from(octets[0]) << 24)
+                | (u32::from(octets[1]) << 16)
+                | (u32::from(octets[2]) << 8)
+                | u32::from(octets[3]);
             n.to_string()
         }
         IpAddr::V6(v6) => v6.to_string(),
@@ -51,6 +51,8 @@ pub fn decode_ip(s: &str) -> Result<IpAddr, String> {
 /// Parsed representation of a DCC CTCP message.
 pub struct DccCtcpMessage {
     /// Sub-type, normalised to uppercase (e.g. `"CHAT"`).
+    /// Reserved for future DCC SEND support — currently always `"CHAT"`.
+    #[allow(dead_code)]
     pub dcc_type: String,
     /// Remote address (IPv4 or IPv6).
     pub addr: IpAddr,
@@ -112,15 +114,15 @@ pub fn parse_dcc_ctcp(body: &str) -> Option<DccCtcpMessage> {
 /// Passive (port == 0, token present): `\x01DCC CHAT CHAT <addr> 0 <token>\x01`
 pub fn build_dcc_chat_ctcp(ip: &IpAddr, port: u16, token: Option<u32>) -> String {
     let addr_str = encode_ip(ip);
-    match token {
-        Some(t) => format!("\x01DCC CHAT CHAT {addr_str} {port} {t}\x01"),
-        None => format!("\x01DCC CHAT CHAT {addr_str} {port}\x01"),
-    }
+    token.map_or_else(
+        || format!("\x01DCC CHAT CHAT {addr_str} {port}\x01"),
+        |t| format!("\x01DCC CHAT CHAT {addr_str} {port} {t}\x01"),
+    )
 }
 
 /// Build a CTCP DCC REJECT message, including the surrounding `\x01` delimiters.
 ///
-/// The literal body `DCC REJECT CHAT chat` is what most clients (mIRC, HexChat,
+/// The literal body `DCC REJECT CHAT chat` is what most clients (mIRC, `HexChat`,
 /// irssi) emit to decline an incoming DCC CHAT offer.
 pub fn build_dcc_reject() -> String {
     "\x01DCC REJECT CHAT chat\x01".to_owned()

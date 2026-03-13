@@ -14,7 +14,7 @@ pub enum DccState {
     WaitingUser,
     /// Our TCP listener is open, waiting for peer to connect.
     Listening,
-    /// Outgoing TCP connect() in progress.
+    /// Outgoing TCP `connect()` in progress.
     Connecting,
     /// TCP connected, actively exchanging chat lines.
     Connected,
@@ -25,6 +25,8 @@ pub enum DccState {
 pub struct DccRecord {
     /// Unique ID: nick, or nick2/nick3 if multiple DCC to same nick.
     pub id: String,
+    /// DCC sub-protocol type — reserved for future DCC SEND support.
+    #[allow(dead_code)]
     pub dcc_type: DccType,
     /// Remote user's current nick.
     pub nick: String,
@@ -44,9 +46,12 @@ pub struct DccRecord {
     /// Total bytes transferred over this connection.
     pub bytes_transferred: u64,
     /// Whether remote uses mIRC CTCP style (default true, auto-detected).
+    #[allow(dead_code)]
     pub mirc_ctcp: bool,
     /// Remote ident (from original CTCP request).
+    #[allow(dead_code)]
     pub ident: String,
     /// Remote hostname (from original CTCP request).
+    #[allow(dead_code)]
     pub host: String,
 }

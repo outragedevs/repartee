@@ -563,7 +563,7 @@ impl App {
         }
         dcc.port_range = crate::dcc::chat::parse_port_range(&config.dcc.port_range);
         dcc.autoaccept_lowports = config.dcc.autoaccept_lowports;
-        dcc.autochat_masks = config.dcc.autochat_masks.clone();
+        dcc.autochat_masks.clone_from(&config.dcc.autochat_masks);
         dcc.max_connections = config.dcc.max_connections;
 
         // --- Scripting system ---
@@ -1955,7 +1955,7 @@ impl App {
                 let suppressed = {
                     use crate::scripting::api::events;
                     let mut params = HashMap::new();
-                    params.insert("connection_id".to_string(), conn_id.clone());
+                    params.insert("connection_id".to_string(), conn_id);
                     params.insert("nick".to_string(), nick.clone());
                     params.insert("text".to_string(), text.clone());
                     self.emit_script_event(events::DCC_CHAT_MESSAGE, params)
