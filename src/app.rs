@@ -1808,7 +1808,13 @@ impl App {
             return;
         }
 
-        let conn_id = buf.connection_id.clone();
+        // The DB stores connection.label as the network name (not conn_id),
+        // matching how maybe_log() writes rows.
+        let network = self
+            .state
+            .connections
+            .get(&buf.connection_id)
+            .map_or_else(|| buf.connection_id.clone(), |c| c.label.clone());
         let buf_name = buf.name.clone();
 
         // Scope the mutex lock tightly — WAL mode means reads don't block
@@ -1819,7 +1825,7 @@ impl App {
             };
             crate::storage::query::get_messages(
                 &db,
-                &conn_id,
+                &network,
                 &buf_name,
                 None,
                 limit,
