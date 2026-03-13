@@ -157,6 +157,7 @@ fn spawn_connection(app: &mut App, conn_id: &str, server_config: &crate::config:
                 let _ = tx.send(crate::irc::IrcEvent::HandleReady(
                     handle.conn_id.clone(),
                     handle.sender,
+                    handle.local_ip,
                 ));
                 while let Some(event) = rx.recv().await {
                     if tx.send(event).is_err() {

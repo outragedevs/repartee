@@ -140,7 +140,7 @@ mod tests {
     #[test]
     fn encode_ipv4_localhost() {
         assert_eq!(
-            encode_ip(&IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
+            encode_ip(&IpAddr::V4(Ipv4Addr::LOCALHOST)),
             "2130706433"
         );
     }
@@ -169,7 +169,7 @@ mod tests {
     fn decode_ipv4_localhost() {
         assert_eq!(
             decode_ip("2130706433").unwrap(),
-            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
         );
     }
 

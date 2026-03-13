@@ -341,7 +341,7 @@ mod tests {
         // Insert an older record first, then a newer one.
         let mut old_rec = make_record("alice", "Alice", DccState::WaitingUser);
         // Backdate the older record so it has a larger elapsed time.
-        old_rec.created = Instant::now() - Duration::from_secs(10);
+        old_rec.created = Instant::now().checked_sub(Duration::from_secs(10)).unwrap();
         mgr.records.insert("alice".to_owned(), old_rec);
 
         let new_rec = make_record("bob", "Bob", DccState::WaitingUser);
@@ -419,12 +419,12 @@ mod tests {
         mgr.timeout_secs = 5;
 
         let mut old_rec = make_record("grace", "Grace", DccState::WaitingUser);
-        old_rec.created = Instant::now() - Duration::from_secs(10);
+        old_rec.created = Instant::now().checked_sub(Duration::from_secs(10)).unwrap();
         mgr.records.insert("grace".to_owned(), old_rec);
 
         // Connected records must not be purged regardless of age.
         let mut conn_rec = make_record("hank", "Hank", DccState::Connected);
-        conn_rec.created = Instant::now() - Duration::from_secs(10);
+        conn_rec.created = Instant::now().checked_sub(Duration::from_secs(10)).unwrap();
         mgr.records.insert("hank".to_owned(), conn_rec);
 
         let purged = mgr.purge_expired();
