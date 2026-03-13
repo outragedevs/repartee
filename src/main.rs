@@ -2,6 +2,7 @@ mod app;
 mod commands;
 mod config;
 mod constants;
+mod dcc;
 mod image_preview;
 mod irc;
 mod scripting;
