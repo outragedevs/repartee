@@ -100,7 +100,7 @@ where
     W: AsyncWriteExt + Unpin + Send,
     M: Serialize + Sync,
 {
-    let payload = bincode::serde::encode_to_vec(msg, bincode::config::standard())?;
+    let payload = postcard::to_stdvec(msg)?;
     let len = u32::try_from(payload.len())
         .map_err(|_| eyre!("message too large: {} bytes", payload.len()))?;
     writer.write_all(&len.to_be_bytes()).await?;
@@ -123,6 +123,6 @@ where
     }
     let mut payload = vec![0u8; len as usize];
     reader.read_exact(&mut payload).await?;
-    let (msg, _len) = bincode::serde::decode_from_slice(&payload, bincode::config::standard())?;
+    let msg: M = postcard::from_bytes(&payload)?;
     Ok(msg)
 }
