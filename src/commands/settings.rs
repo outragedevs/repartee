@@ -515,10 +515,20 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
             app.cached_config_toml = None;
             ev(app, &format!("{C_OK}{path}{C_RST} = {C_CMD}{raw}{C_RST}"));
 
-            // Save config
+            // Save config (web.password is #[serde(skip)] — saved to .env instead).
             let cfg_path = crate::constants::config_path();
             if let Err(e) = crate::config::save_config(&cfg_path, &app.config) {
                 ev(app, &format!("{C_ERR}Failed to save config: {e}{C_RST}"));
+            }
+
+            // Persist credentials to .env (not config.toml).
+            if path == "web.password" {
+                let env_path = crate::constants::env_path();
+                if let Err(e) = crate::config::set_env_value(&env_path, "WEB_PASSWORD", raw) {
+                    ev(app, &format!("{C_ERR}Failed to save to .env: {e}{C_RST}"));
+                } else {
+                    ev(app, &format!("{C_DIM}Password saved to .env. Restart to start the web server.{C_RST}"));
+                }
             }
 
             // Sync runtime state from config
