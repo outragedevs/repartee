@@ -1,13 +1,13 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="nightfall">
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>repartee</title>
     
 <script type="module">
-import init, * as bindings from '/repartee-web-62cbcf22434f7b1d.js';
-const wasm = await init({ module_or_path: '/repartee-web-62cbcf22434f7b1d_bg.wasm' });
+import init, * as bindings from '/repartee-web-aead12dcfa2836e2.js';
+const wasm = await init({ module_or_path: '/repartee-web-aead12dcfa2836e2_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -16,10 +16,8 @@ window.wasmBindings = bindings;
 dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
 
 </script>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { background: #1a1b26; }
-    </style>
-<link rel="modulepreload" href="/repartee-web-62cbcf22434f7b1d.js" crossorigin="anonymous" integrity="sha384-vHuee9F5rYGYDvnMM4qt2PHTYCg0o0OK6CEd+tIFkwlz68Nq0/DVCFyXFJQdV2IG"><link rel="preload" href="/repartee-web-62cbcf22434f7b1d_bg.wasm" crossorigin="anonymous" integrity="sha384-PEc4ySRcBJdXiONBZo2B75GNDyR9OMXimJPgUrPNQVDApDv6RpVR41ciSXbPjYKm" as="fetch" type="application/wasm"></head>
+    <link rel="stylesheet" href="/themes-4cb699d98e43a9c5.css" integrity="sha384-lPQiah47bnLlGcAKF2g3zvz6CqHTOoivSh7tMXdvGx5+5UJd6K+Kt9YOZBEkYk0r"/>
+    <link rel="stylesheet" href="/base-3a134b117cddc773.css" integrity="sha384-EzDN9neVN9UY/B0qXewnJMJW0eOt7apAMmvWCM52SQ56HKsQ3vHbYJ91sgryGxgu"/>
+<link rel="modulepreload" href="/repartee-web-aead12dcfa2836e2.js" crossorigin="anonymous" integrity="sha384-8Co6My+3bpwASqg19W6fkAaWqGvn0dpw5pY9TZsKB97B8EMggMzBA5n6RDnM77Zi"><link rel="preload" href="/repartee-web-aead12dcfa2836e2_bg.wasm" crossorigin="anonymous" integrity="sha384-4BdSXWvtvmr1wllTQg+Fgc4Np25nVetqifOQB9MWyHtnEz1ax5AbjwL+i3dnjhA/" as="fetch" type="application/wasm"></head>
 <body></body>
 </html>

@@ -1,56 +1,39 @@
 use leptos::prelude::*;
 
-/// Root application component — placeholder for Phase 2.
+use crate::components::layout::Layout;
+use crate::components::login::Login;
+use crate::state::AppState;
+
+/// Root application component.
 ///
-/// Displays connection status and a login form.
-/// The full desktop/mobile layouts will be implemented in Phase 2.
+/// Shows login screen until authenticated, then renders the full IRC layout.
 #[component]
 pub fn App() -> impl IntoView {
-    let (connected, _set_connected) = signal(false);
-    let (status, _set_status) = signal("Not connected".to_string());
+    let state = AppState::new();
+    provide_context(state.clone());
+
+    // Apply theme from state to the document.
+    Effect::new(move || {
+        let theme = state.theme.get();
+        if let Some(doc) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.document_element())
+        {
+            let _ = doc.set_attribute("data-theme", &theme);
+        }
+        // Persist to localStorage.
+        if let Some(storage) = web_sys::window()
+            .and_then(|w| w.local_storage().ok().flatten())
+        {
+            let _ = storage.set_item("repartee-theme", &theme);
+        }
+    });
+
+    let has_token = move || state.token.get().is_some();
 
     view! {
-        <div style="
-            font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
-            background: #1a1b26;
-            color: #a9b1d6;
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            flex-direction: column;
-            gap: 16px;
-        ">
-            <h1 style="color: #7aa2f7; font-size: 24px; margin: 0;">
-                "repartee"
-            </h1>
-            <p style="color: #565f89; font-size: 14px; margin: 0;">
-                "web frontend — phase 2 coming soon"
-            </p>
-            <div style="
-                background: #16161e;
-                border: 1px solid #292e42;
-                border-radius: 8px;
-                padding: 24px;
-                min-width: 300px;
-                text-align: center;
-            ">
-                <div style="margin-bottom: 12px;">
-                    <span style="color: #565f89;">"Status: "</span>
-                    <span style=move || {
-                        if connected.get() {
-                            "color: #9ece6a;"
-                        } else {
-                            "color: #f7768e;"
-                        }
-                    }>
-                        {move || status.get()}
-                    </span>
-                </div>
-                <p style="color: #565f89; font-size: 12px; margin: 0;">
-                    "The full UI (desktop + mobile layouts, themes, chat) will be implemented in Phase 2."
-                </p>
-            </div>
-        </div>
+        <Show when=has_token fallback=Login>
+            <Layout />
+        </Show>
     }
 }

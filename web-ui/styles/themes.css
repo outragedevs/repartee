@@ -1,0 +1,103 @@
+/* === Repartee Web Themes === */
+/* Each theme defines CSS custom properties for colors. */
+/* Apply via data-theme attribute on <html>: <html data-theme="nightfall"> */
+
+/* --- Nightfall (default dark) — matches terminal default.theme --- */
+[data-theme="nightfall"], :root {
+    --bg: #1a1b26;
+    --bg-alt: #16161e;
+    --border: #292e42;
+    --fg: #a9b1d6;
+    --fg-muted: #565f89;
+    --fg-dim: #292e42;
+    --accent: #7aa2f7;
+    --cursor: #7aa2f7;
+    --green: #9ece6a;
+    --yellow: #e0af68;
+    --red: #f7768e;
+    --purple: #bb9af7;
+    --cyan: #7dcfff;
+    --bright: #c0caf5;
+    --mention-bg: rgba(187, 154, 247, 0.08);
+    --highlight-bg: rgba(247, 118, 142, 0.08);
+}
+
+/* --- Catppuccin Mocha (dark) --- */
+[data-theme="catppuccin-mocha"] {
+    --bg: #1e1e2e;
+    --bg-alt: #181825;
+    --border: #45475a;
+    --fg: #cdd6f4;
+    --fg-muted: #6c7086;
+    --fg-dim: #45475a;
+    --accent: #cba6f7;
+    --cursor: #cba6f7;
+    --green: #a6e3a1;
+    --yellow: #f9e2af;
+    --red: #f38ba8;
+    --purple: #cba6f7;
+    --cyan: #89dceb;
+    --bright: #bac2de;
+    --mention-bg: rgba(203, 166, 247, 0.08);
+    --highlight-bg: rgba(243, 139, 168, 0.08);
+}
+
+/* --- Tokyo Storm (dark) --- */
+[data-theme="tokyo-storm"] {
+    --bg: #24283b;
+    --bg-alt: #1f2335;
+    --border: #3b4261;
+    --fg: #a9b1d6;
+    --fg-muted: #565f89;
+    --fg-dim: #3b4261;
+    --accent: #7aa2f7;
+    --cursor: #7aa2f7;
+    --green: #73daca;
+    --yellow: #ff9e64;
+    --red: #f7768e;
+    --purple: #bb9af7;
+    --cyan: #7dcfff;
+    --bright: #c0caf5;
+    --mention-bg: rgba(187, 154, 247, 0.08);
+    --highlight-bg: rgba(247, 118, 142, 0.08);
+}
+
+/* --- Gruvbox Light --- */
+[data-theme="gruvbox-light"] {
+    --bg: #fbf1c7;
+    --bg-alt: #f2e5bc;
+    --border: #d5c4a1;
+    --fg: #3c3836;
+    --fg-muted: #928374;
+    --fg-dim: #d5c4a1;
+    --accent: #d65d0e;
+    --cursor: #d65d0e;
+    --green: #79740e;
+    --yellow: #b57614;
+    --red: #cc241d;
+    --purple: #8f3f71;
+    --cyan: #076678;
+    --bright: #282828;
+    --mention-bg: rgba(143, 63, 113, 0.08);
+    --highlight-bg: rgba(204, 36, 29, 0.08);
+}
+
+/* --- Catppuccin Latte (light) --- */
+[data-theme="catppuccin-latte"] {
+    --bg: #eff1f5;
+    --bg-alt: #e6e9ef;
+    --border: #dce0e8;
+    --fg: #4c4f69;
+    --fg-muted: #9ca0b0;
+    --fg-dim: #dce0e8;
+    --accent: #8839ef;
+    --cursor: #8839ef;
+    --green: #40a02b;
+    --yellow: #df8e1d;
+    --red: #d20f39;
+    --purple: #8839ef;
+    --cyan: #04a5e5;
+    --bright: #1e1e2e;
+    --mention-bg: rgba(136, 57, 239, 0.08);
+    --highlight-bg: rgba(210, 15, 57, 0.08);
+}
