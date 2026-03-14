@@ -68,7 +68,7 @@ async fn run_ws_loop(
         // Drain all pending commands first (non-blocking).
         loop {
             match cmd_rx.try_recv() {
-                Ok(Some(json)) => {
+                Ok(json) => {
                     if let Err(e) = ws_tx.send(Message::Text(json)).await {
                         web_sys::console::warn_1(&format!("ws send failed: {e}").into());
                         return;
