@@ -770,6 +770,22 @@ specific subcommand.</p>
 <h2>See Also</h2>
 <p>/stats, /info, /who</p>
 </div>
+<div class="command-entry" data-command="mentions" data-category="Info">
+<h1>/mentions</h1>
+<p>Show all unread highlight mentions across all buffers, then mark them as read.</p>
+<h2>Usage</h2>
+<pre><code>/mentions
+</code></pre>
+<h2>Output</h2>
+<p>Each mention shows: <code>[timestamp] #channel &lt;nick&gt; message text</code></p>
+<p>After displaying, all mentions are marked as read and the counter resets to 0.</p>
+<h2>Requirements</h2>
+<p>Logging must be enabled (<code>logging.enabled = true</code> in config) — mentions are stored in the SQLite database alongside message logs.</p>
+<h2>Web Integration</h2>
+<p>On the web frontend, the unread mention count appears as a badge in the top bar. Viewing mentions on either the terminal or web clears them on both — state is shared.</p>
+<h2>See also</h2>
+<p><code>/set logging.enabled</code>, <code>/log</code></p>
+</div>
 <div class="command-entry" data-command="mode" data-category="Info">
 <h1>/mode</h1>
 <h2>Syntax</h2>
