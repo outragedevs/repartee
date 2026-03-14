@@ -1961,52 +1961,36 @@ impl App {
     // ── Dictionary download event handling ─────────────────────────────────
 
     fn handle_dict_event(&mut self, ev: crate::spellcheck::DictEvent) {
+        use crate::commands::types::{C_CMD, C_DIM, C_ERR, C_OK, C_RST, divider};
         use crate::spellcheck::DictEvent;
         let ev_fn = crate::commands::helpers::add_local_event;
         match ev {
             DictEvent::ListResult { entries } => {
-                ev_fn(
-                    self,
-                    &crate::commands::types::divider("Available Dictionaries"),
-                );
-                for (code, name, installed) in &entries {
-                    let status = if *installed {
-                        format!(
-                            " {}[installed]{}",
-                            crate::commands::types::C_OK,
-                            crate::commands::types::C_RST
-                        )
+                ev_fn(self, &divider("Available Dictionaries"));
+                for entry in &entries {
+                    let status = if entry.installed {
+                        format!(" {C_OK}[installed]{C_RST}")
                     } else {
                         String::new()
                     };
                     ev_fn(
                         self,
                         &format!(
-                            "  {}{code:<8}{} {name}{status}",
-                            crate::commands::types::C_CMD,
-                            crate::commands::types::C_RST
+                            "  {C_CMD}{:<8}{C_RST} {}{status}",
+                            entry.code, entry.name
                         ),
                     );
                 }
                 ev_fn(
                     self,
-                    &format!(
-                        "  {}Use /spellcheck get <lang> to download{}",
-                        crate::commands::types::C_DIM,
-                        crate::commands::types::C_RST
-                    ),
+                    &format!("  {C_DIM}Use /spellcheck get <lang> to download{C_RST}"),
                 );
             }
             DictEvent::Downloaded { lang } => {
                 ev_fn(
                     self,
-                    &format!(
-                        "{}Dictionary {lang} downloaded successfully{}",
-                        crate::commands::types::C_OK,
-                        crate::commands::types::C_RST
-                    ),
+                    &format!("{C_OK}Dictionary {lang} downloaded successfully{C_RST}"),
                 );
-                // Auto-reload if the language is in the active config
                 self.reload_spellchecker();
                 let loaded = self
                     .spellchecker
@@ -2014,22 +1998,11 @@ impl App {
                     .map_or(0, crate::spellcheck::SpellChecker::dict_count);
                 ev_fn(
                     self,
-                    &format!(
-                        "{}Spell checker reloaded ({loaded} dictionaries){}",
-                        crate::commands::types::C_OK,
-                        crate::commands::types::C_RST
-                    ),
+                    &format!("{C_OK}Spell checker reloaded ({loaded} dictionaries){C_RST}"),
                 );
             }
             DictEvent::Error { message } => {
-                ev_fn(
-                    self,
-                    &format!(
-                        "{}{message}{}",
-                        crate::commands::types::C_ERR,
-                        crate::commands::types::C_RST
-                    ),
-                );
+                ev_fn(self, &format!("{C_ERR}{message}{C_RST}"));
             }
         }
     }

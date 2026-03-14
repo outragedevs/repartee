@@ -160,12 +160,23 @@ pub struct DictInfo {
     pub name: String,
 }
 
+/// A single entry in the dictionary list result.
+#[derive(Debug)]
+pub struct DictListEntry {
+    /// Language code (e.g. `en_US`).
+    pub code: String,
+    /// Human-readable name (e.g. "English (US)").
+    pub name: String,
+    /// Whether this dictionary is already installed locally.
+    pub installed: bool,
+}
+
 /// Events sent from async dictionary download tasks back to the main loop.
 #[derive(Debug)]
 pub enum DictEvent {
     /// Manifest fetched successfully — contains available dicts and which are installed.
     ListResult {
-        entries: Vec<(String, String, bool)>, // (code, name, installed)
+        entries: Vec<DictListEntry>,
     },
     /// A dictionary was downloaded and saved.
     Downloaded { lang: String },
@@ -182,15 +193,19 @@ pub fn spawn_fetch_manifest(
     tokio::spawn(async move {
         let event = match fetch_manifest(&client).await {
             Ok(manifest) => {
-                let mut entries: Vec<(String, String, bool)> = manifest
+                let mut entries: Vec<DictListEntry> = manifest
                     .dictionaries
                     .into_iter()
                     .map(|(code, info)| {
                         let installed = dict_dir.join(format!("{code}.dic")).exists();
-                        (code, info.name, installed)
+                        DictListEntry {
+                            code,
+                            name: info.name,
+                            installed,
+                        }
                     })
                     .collect();
-                entries.sort_by(|a, b| a.0.cmp(&b.0));
+                entries.sort_by(|a, b| a.code.cmp(&b.code));
                 DictEvent::ListResult { entries }
             }
             Err(e) => DictEvent::Error {

@@ -441,19 +441,16 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
     let path = &args[0];
 
     if args.len() < 2 {
-        // Show current value
-        match get_config_value(&app.config, path) {
-            Some(resolved) => {
-                let display = if resolved.is_credential && !resolved.value.is_empty() {
-                    format!("*** {C_DIM}[credential]{C_RST}")
-                } else {
-                    format!("{C_CMD}{}{C_RST}", resolved.value)
-                };
-                ev(app, &format!("{C_HEADER}{path}{C_RST} = {display}"));
-            }
-            None => {
-                ev(app, &format!("{C_ERR}Unknown setting: {path}{C_RST}"));
-            }
+        // Show current value — or search if no exact match (irssi-style)
+        if let Some(resolved) = get_config_value(&app.config, path) {
+            let display = if resolved.is_credential && !resolved.value.is_empty() {
+                format!("*** {C_DIM}[credential]{C_RST}")
+            } else {
+                format!("{C_CMD}{}{C_RST}", resolved.value)
+            };
+            ev(app, &format!("{C_HEADER}{path}{C_RST} = {display}"));
+        } else {
+            search_settings(app, path);
         }
         return;
     }
@@ -544,6 +541,35 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
         }
         Err(e) => {
             ev(app, &format!("{C_ERR}{e}{C_RST}"));
+        }
+    }
+}
+
+/// irssi-style substring search: `/set nick` lists all settings containing "nick".
+fn search_settings(app: &mut App, needle: &str) {
+    let ev = super::helpers::add_local_event;
+    let lower = needle.to_lowercase();
+    let all_paths = get_setting_paths(&app.config);
+    let matches: Vec<&String> = all_paths
+        .iter()
+        .filter(|p| p.to_lowercase().contains(&lower))
+        .collect();
+    if matches.is_empty() {
+        ev(app, &format!("{C_ERR}Unknown setting: {needle}{C_RST}"));
+    } else {
+        ev(app, &divider(&format!("Settings matching *{needle}*")));
+        for matched_path in &matches {
+            if let Some(resolved) = get_config_value(&app.config, matched_path) {
+                let val = if resolved.is_credential && !resolved.value.is_empty() {
+                    "***".to_string()
+                } else {
+                    resolved.value
+                };
+                ev(
+                    app,
+                    &format!("  {C_HEADER}{matched_path}{C_RST} = {C_CMD}{val}{C_RST}"),
+                );
+            }
         }
     }
 }
@@ -783,6 +809,28 @@ mod tests {
         assert!(paths.contains(&"general.nick".to_string()));
         assert!(paths.contains(&"display.scrollback_lines".to_string()));
         assert!(paths.contains(&"sidepanel.left.width".to_string()));
+    }
+
+    #[test]
+    fn search_by_substring() {
+        let config = default_config();
+        let all = get_setting_paths(&config);
+        let matches: Vec<&String> = all.iter().filter(|p| p.contains("nick")).collect();
+        // Should find general.nick, display.nick_column_width, display.nick_max_length, etc.
+        assert!(matches.len() >= 4);
+        assert!(matches.iter().any(|p| *p == "general.nick"));
+        assert!(matches.iter().any(|p| *p == "display.nick_column_width"));
+    }
+
+    #[test]
+    fn search_no_matches() {
+        let config = default_config();
+        let all = get_setting_paths(&config);
+        let matches: Vec<&String> = all
+            .iter()
+            .filter(|p| p.to_lowercase().contains("zzzznonexistent"))
+            .collect();
+        assert!(matches.is_empty());
     }
 
     #[test]
