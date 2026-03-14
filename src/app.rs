@@ -3383,9 +3383,20 @@ impl App {
                 if self.input.spell_state.is_some() {
                     // Spell correction is active — handle accept keys specially.
                     if c == ' ' {
-                        // Space: accept current suggestion, don't add another space
-                        // (the trigger space is already in the input).
+                        // Space: accept current suggestion.
+                        // If the trigger was a space, it's already in the input — done.
+                        // If the trigger was punctuation (e.g., "word."), add a space
+                        // after it so the user doesn't have to press Space twice.
+                        let needs_space = self.input.spell_state.as_ref().is_some_and(|s| {
+                            self.input.value[s.word_end..]
+                                .chars()
+                                .next()
+                                .is_none_or(|ch| ch != ' ')
+                        });
                         self.input.spell_state = None;
+                        if needs_space {
+                            self.input.insert_char(' ');
+                        }
                     } else if matches!(c, '.' | ',' | '!' | '?' | ';' | ':') {
                         // Punctuation: accept and replace trailing separator with it.
                         // "corrected_word " → "corrected_word."
