@@ -64,6 +64,7 @@ rcgen = "0.14"
 rustls-pemfile = "2"
 tokio-rustls = "0.26"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
+rust-embed = "8"
 
 [dev-dependencies]
 tempfile = "3.26"

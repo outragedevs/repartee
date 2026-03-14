@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Json};
+use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use color_eyre::eyre::Result;
+use rust_embed::Embed;
 use serde::Deserialize;
 use tokio::sync::{Mutex, mpsc};
 
@@ -68,12 +69,64 @@ async fn health_handler() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
+/// Embedded WASM frontend assets (built by `trunk build` in web-ui/).
+///
+/// When the `web-ui/dist/` directory doesn't exist (e.g. during development
+/// without running trunk), this serves nothing and the fallback returns 404.
+#[derive(Embed)]
+#[folder = "web-ui/dist/"]
+#[allow(clippy::empty_structs_with_brackets)]
+struct WebAssets;
+
+/// Serve embedded static assets from `web-ui/dist/`.
+async fn static_handler(Path(path): Path<String>) -> Response {
+    serve_embedded(&path)
+}
+
+/// Serve the index.html for the root path.
+async fn index_handler() -> Response {
+    serve_embedded("index.html")
+}
+
+/// Look up a file in the embedded assets and return it with the correct MIME type.
+fn serve_embedded(path: &str) -> Response {
+    match WebAssets::get(path) {
+        Some(content) => {
+            let mime = mime_from_path(path);
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, mime)],
+                content.data.to_vec(),
+            )
+                .into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Guess MIME type from file extension.
+fn mime_from_path(path: &str) -> &'static str {
+    match path.rsplit('.').next() {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "application/javascript",
+        Some("wasm") => "application/wasm",
+        Some("css") => "text/css",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("ico") => "image/x-icon",
+        Some("json") => "application/json",
+        _ => "application/octet-stream",
+    }
+}
+
 /// Build the axum router with all routes.
 pub fn build_router(handle: Arc<AppHandle>) -> Router {
     Router::new()
         .route("/api/login", post(login_handler))
         .route("/api/health", get(health_handler))
         // WebSocket endpoint will be added in ws.rs
+        .route("/", get(index_handler))
+        .route("/{*path}", get(static_handler))
         .with_state(handle)
 }
 
@@ -177,6 +230,35 @@ mod tests {
 
         let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn index_serves_html() {
+        let handle = make_test_handle();
+        let app = build_router(handle);
+
+        let request = axum::http::Request::builder()
+            .uri("/")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
+        // Should return 200 if dist/index.html exists (placeholder or real build).
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn missing_asset_returns_404() {
+        let handle = make_test_handle();
+        let app = build_router(handle);
+
+        let request = axum::http::Request::builder()
+            .uri("/nonexistent.js")
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
