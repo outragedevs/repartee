@@ -6,8 +6,8 @@ use leptos::prelude::*;
 /// The full desktop/mobile layouts will be implemented in Phase 2.
 #[component]
 pub fn App() -> impl IntoView {
-    let (connected, set_connected) = signal(false);
-    let (status, set_status) = signal("Not connected".to_string());
+    let (connected, _set_connected) = signal(false);
+    let (status, _set_status) = signal("Not connected".to_string());
 
     view! {
         <div style="
