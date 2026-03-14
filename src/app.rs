@@ -476,6 +476,16 @@ pub struct App {
     dict_rx: mpsc::UnboundedReceiver<crate::spellcheck::DictEvent>,
     /// Sender cloned into dictionary download tasks.
     pub dict_tx: mpsc::UnboundedSender<crate::spellcheck::DictEvent>,
+    // --- Web frontend ---
+    /// Event broadcaster for connected web clients.
+    pub web_broadcaster: std::sync::Arc<crate::web::broadcast::WebBroadcaster>,
+    /// Receiver for commands from web clients (processed in the main event loop).
+    web_cmd_rx: mpsc::UnboundedReceiver<(crate::web::protocol::WebCommand, String)>,
+    /// Sender side — cloned into the web server's `AppHandle`.
+    web_cmd_tx: mpsc::UnboundedSender<(crate::web::protocol::WebCommand, String)>,
+    /// Handle for the web server task (if running).
+    #[expect(dead_code, reason = "held to keep the spawned server task alive")]
+    web_server_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl App {
@@ -568,6 +578,9 @@ impl App {
 
         // --- Dictionary download channel ---
         let (dict_tx, dict_rx) = mpsc::unbounded_channel();
+
+        // --- Web frontend channel ---
+        let (web_cmd_tx_inner, web_cmd_rx_inner) = mpsc::unbounded_channel();
 
         // --- DCC subsystem ---
         let (mut dcc, dcc_rx) = crate::dcc::DccManager::new();
@@ -667,6 +680,10 @@ impl App {
             spellchecker: None,
             dict_rx,
             dict_tx,
+            web_broadcaster: std::sync::Arc::new(crate::web::broadcast::WebBroadcaster::new(256)),
+            web_cmd_rx: web_cmd_rx_inner,
+            web_cmd_tx: web_cmd_tx_inner,
+            web_server_handle: None,
         };
         app.recompute_wrap_indent();
 
@@ -1483,6 +1500,36 @@ impl App {
             tracing::warn!("failed to start session socket: {e}");
         }
 
+        // Start web server if enabled and password is set.
+        if self.config.web.enabled && !self.config.web.password.is_empty() {
+            let handle = std::sync::Arc::new(crate::web::server::AppHandle {
+                broadcaster: std::sync::Arc::clone(&self.web_broadcaster),
+                web_cmd_tx: self.web_cmd_tx.clone(),
+                password: self.config.web.password.clone(),
+                session_store: std::sync::Arc::new(tokio::sync::Mutex::new(
+                    crate::web::auth::SessionStore::new(),
+                )),
+                rate_limiter: std::sync::Arc::new(tokio::sync::Mutex::new(
+                    crate::web::auth::RateLimiter::new(),
+                )),
+            });
+            match crate::web::server::start(&self.config.web, handle).await {
+                Ok(h) => {
+                    self.web_server_handle = Some(h);
+                    tracing::info!(
+                        "web frontend at https://{}:{}",
+                        self.config.web.bind_address,
+                        self.config.web.port
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("failed to start web server: {e}");
+                }
+            }
+        } else if self.config.web.enabled && self.config.web.password.is_empty() {
+            tracing::warn!("web.enabled=true but web.password is empty — set WEB_PASSWORD in .env");
+        }
+
         // Signal handlers for detached mode.
         let mut sigterm =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -1630,6 +1677,12 @@ impl App {
                 dict_ev = self.dict_rx.recv() => {
                     if let Some(ev) = dict_ev {
                         self.handle_dict_event(ev);
+                    }
+                },
+                web_cmd = self.web_cmd_rx.recv() => {
+                    if let Some((_cmd, _session_id)) = web_cmd {
+                        // TODO: dispatch WebCommand to appropriate handler
+                        tracing::debug!("web command received (dispatch not yet implemented)");
                     }
                 },
                 _ = tick.tick() => {
