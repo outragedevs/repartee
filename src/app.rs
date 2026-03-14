@@ -580,7 +580,7 @@ impl App {
         let (dict_tx, dict_rx) = mpsc::unbounded_channel();
 
         // --- Web frontend channel ---
-        let (web_cmd_tx_inner, web_cmd_rx_inner) = mpsc::unbounded_channel();
+        let (web_tx, web_rx) = mpsc::unbounded_channel();
 
         // --- DCC subsystem ---
         let (mut dcc, dcc_rx) = crate::dcc::DccManager::new();
@@ -681,8 +681,8 @@ impl App {
             dict_rx,
             dict_tx,
             web_broadcaster: std::sync::Arc::new(crate::web::broadcast::WebBroadcaster::new(256)),
-            web_cmd_rx: web_cmd_rx_inner,
-            web_cmd_tx: web_cmd_tx_inner,
+            web_cmd_rx: web_rx,
+            web_cmd_tx: web_tx,
             web_server_handle: None,
         };
         app.recompute_wrap_indent();

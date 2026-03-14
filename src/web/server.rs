@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
 use axum::routing::{get, post};
 use color_eyre::eyre::Result;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::sync::{Mutex, mpsc};
 
 use super::auth::{RateLimiter, SessionStore, verify_password};
