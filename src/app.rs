@@ -484,7 +484,7 @@ pub struct App {
     /// Sender side — cloned into the web server's `AppHandle`.
     web_cmd_tx: mpsc::UnboundedSender<(crate::web::protocol::WebCommand, String)>,
     /// Handle for the web server task (if running).
-    #[expect(dead_code, reason = "held to keep the spawned server task alive")]
+    /// Held to keep the spawned server task alive — dropped with App.
     web_server_handle: Option<tokio::task::JoinHandle<()>>,
 }
 

@@ -48,6 +48,7 @@ pub struct ReadMarker {
 
 /// A mention row from the mentions table.
 #[derive(Debug, Clone)]
+#[expect(dead_code, reason = "fields used by web frontend FetchMentions in Phase 2")]
 pub struct MentionRow {
     pub id: i64,
     pub timestamp: i64,
