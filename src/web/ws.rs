@@ -89,15 +89,12 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppHandl
                             }
                         }
                     }
-                    Some(Ok(axum::extract::ws::Message::Pong(_))) => {
-                        // Client responded to our ping — connection alive.
-                    }
                     Some(Ok(axum::extract::ws::Message::Close(_))) | None => break,
                     Some(Err(e)) => {
                         tracing::debug!(session_id = %session_id, error = %e, "ws recv error");
                         break;
                     }
-                    _ => {} // Binary, Ping from client — ignore
+                    _ => {} // Pong, Binary, Ping — no action needed
                 }
             }
 
@@ -115,14 +112,14 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppHandl
 
 /// Build a `SyncInit` from the shared state snapshot.
 fn build_sync_init_from_snapshot(state: &AppHandle) -> WebEvent {
-    if let Some(ref snapshot) = state.web_state_snapshot {
-        if let Ok(snap) = snapshot.read() {
-            return WebEvent::SyncInit {
+    if let Some(ref snapshot) = state.web_state_snapshot
+        && let Ok(snap) = snapshot.read()
+    {
+        return WebEvent::SyncInit {
                 buffers: snap.buffers.clone(),
                 connections: snap.connections.clone(),
                 mention_count: snap.mention_count,
             };
-        }
     }
     // Fallback: empty init.
     WebEvent::SyncInit {
@@ -133,7 +130,7 @@ fn build_sync_init_from_snapshot(state: &AppHandle) -> WebEvent {
 }
 
 /// Check if a `WebEvent` is targeted to a specific session (not this one).
-fn is_targeted_to_other(_event: &WebEvent, _session_id: &str) -> bool {
+const fn is_targeted_to_other(_event: &WebEvent, _session_id: &str) -> bool {
     // TODO: when FetchMessages/NickList/MentionsList responses are tagged
     // with a session_id, filter here. For now, all events are broadcast.
     false

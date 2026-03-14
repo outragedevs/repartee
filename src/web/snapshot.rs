@@ -70,7 +70,7 @@ pub fn message_to_wire(msg: &Message) -> WireMessage {
     }
 }
 
-/// Convert a `StoredMessage` (from SQLite) to a `WireMessage`.
+/// Convert a `StoredMessage` (from `SQLite`) to a `WireMessage`.
 pub fn stored_to_wire(msg: &crate::storage::types::StoredMessage) -> WireMessage {
     WireMessage {
         id: u64::try_from(msg.id).unwrap_or(0),

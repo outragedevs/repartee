@@ -2166,7 +2166,7 @@ impl App {
         });
     }
 
-    /// Fetch messages from SQLite for a web client.
+    /// Fetch messages from `SQLite` for a web client.
     fn web_fetch_messages(&self, buffer_id: &str, limit: u32, before: Option<i64>) {
         let Some(ref storage) = self.storage else {
             return;

@@ -34,7 +34,7 @@ pub struct AppHandle {
     pub rate_limiter: Arc<Mutex<RateLimiter>>,
     /// Periodic snapshot of `AppState` for `SyncInit` / `FetchNickList`.
     pub web_state_snapshot: Option<Arc<std::sync::RwLock<WebStateSnapshot>>>,
-    /// SQLite database handle for `FetchMessages` / `FetchMentions`.
+    /// `SQLite` database handle for `FetchMessages` / `FetchMentions`.
     pub db: Option<Arc<std::sync::Mutex<rusqlite::Connection>>>,
     /// Whether the database uses encryption.
     pub db_encrypt: bool,
