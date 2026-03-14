@@ -352,7 +352,6 @@ mod tests {
                 client_cert_path: None,
             },
             local_ip: None,
-            sasl_skip: false,
             enabled_caps: std::collections::HashSet::new(),
             who_token_counter: 0,
             silent_who_channels: std::collections::HashSet::new(),

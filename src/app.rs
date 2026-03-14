@@ -993,7 +993,6 @@ impl App {
             joined_channels: server_config.channels.clone(),
             origin_config: server_config.clone(),
             local_ip: None,
-            sasl_skip: false,
             enabled_caps: HashSet::new(),
             who_token_counter: 0,
             silent_who_channels: HashSet::new(),
@@ -1705,7 +1704,6 @@ impl App {
                 client_cert_path: None,
             },
             local_ip: None,
-            sasl_skip: false,
             enabled_caps: HashSet::new(),
             who_token_counter: 0,
             silent_who_channels: HashSet::new(),
@@ -2296,24 +2294,13 @@ impl App {
 
             let conn = self.state.connections.get(&conn_id);
             let label = conn.map_or_else(|| conn_id.clone(), |c| c.label.clone());
-            let sasl_skip = conn.is_some_and(|c| c.sasl_skip);
-            let mut server_config = conn.map(|c| c.origin_config.clone());
-
-            // If SASL failed on the last attempt, strip credentials so this
-            // reconnection proceeds without SASL (non-authenticated fallback).
-            if sasl_skip && let Some(ref mut cfg) = server_config {
-                cfg.sasl_user = None;
-                cfg.sasl_pass = None;
-                cfg.sasl_mechanism = None;
-            }
+            let server_config = conn.map(|c| c.origin_config.clone());
 
             let buffer_id = make_buffer_id(&conn_id, &label);
-            let reconnect_msg = if sasl_skip {
-                format!("Reconnecting to {label} without SASL (attempt {attempts})...")
-            } else {
-                format!("Reconnecting to {label} (attempt {attempts})...")
-            };
-            self.add_event_to_buffer(&buffer_id, reconnect_msg);
+            self.add_event_to_buffer(
+                &buffer_id,
+                format!("Reconnecting to {label} (attempt {attempts})..."),
+            );
 
             if let Some(conn) = self.state.connections.get_mut(&conn_id) {
                 conn.status = ConnectionStatus::Connecting;
@@ -2704,19 +2691,8 @@ impl App {
                 for msg in &diag {
                     crate::irc::events::emit(&mut self.state, &buf_id, &format!("%Z56b6c2{msg}%N"));
                 }
-
-                // If SASL failed, mark the connection so reconnection skips SASL.
-                let sasl_failed = diag.iter().any(|d| d.contains("authentication FAILED"));
-                if sasl_failed && let Some(conn) = self.state.connections.get_mut(&conn_id) {
-                    conn.sasl_skip = true;
-                }
             }
             IrcEvent::Connected(conn_id, enabled_caps) => {
-                // Successful connection — reset SASL skip flag so future
-                // reconnects will try SASL again.
-                if let Some(conn) = self.state.connections.get_mut(&conn_id) {
-                    conn.sasl_skip = false;
-                }
                 // Store negotiated caps on connection
                 if let Some(conn) = self.state.connections.get_mut(&conn_id) {
                     conn.enabled_caps = enabled_caps;

@@ -634,7 +634,9 @@ async fn negotiate_caps(
                     }
                     Err(e) => {
                         diag.push(format!("SASL: {mechanism} authentication FAILED: {e}"));
-                        diag.push("SASL: falling back to non-authenticated connection".to_string());
+                        diag.push(
+                            "SASL: falling back to non-authenticated connection".to_string(),
+                        );
                         enabled_caps.remove("sasl");
 
                         // Abort the SASL exchange so the server exits authentication
