@@ -634,7 +634,14 @@ async fn negotiate_caps(
                     }
                     Err(e) => {
                         diag.push(format!("SASL: {mechanism} authentication FAILED: {e}"));
+                        diag.push(
+                            "SASL: falling back to non-authenticated connection".to_string(),
+                        );
                         enabled_caps.remove("sasl");
+
+                        // Abort the SASL exchange so the server exits authentication
+                        // mode. If the connection is already dead this harmlessly fails.
+                        let _ = sender.send(Command::AUTHENTICATE("*".to_string()));
                     }
                 }
             }
@@ -646,7 +653,15 @@ async fn negotiate_caps(
 
         // Send CAP END to finish capability negotiation.
         // The server will now process the held NICK/USER commands.
-        sender.send(Command::CAP(None, CapSubCommand::END, None, None))?;
+        // Use `let _ =` so a dead connection (e.g. SASL service down)
+        // doesn't prevent the reader task from spawning — it will detect
+        // the disconnect and trigger reconnection.
+        if sender
+            .send(Command::CAP(None, CapSubCommand::END, None, None))
+            .is_err()
+        {
+            diag.push("CAP END: send failed (connection may be dead)".to_string());
+        }
     }
 
     // NICK/USER were already sent in step 1 — no need to send them again.
