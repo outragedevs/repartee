@@ -28,7 +28,7 @@ const URL_PREFIXES: &[&str] = &[
 /// A loaded language dictionary.
 struct LangDict {
     /// Language code (e.g. `en_US`).
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "stored for diagnostics and /spellcheck status")]
     lang: String,
     dict: Arc<spellbook::Dictionary>,
 }

@@ -22,7 +22,10 @@ pub struct SpellCorrection {
     pub index: usize,
 }
 
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "fields accessed via pub struct in app.rs tab completion"
+)]
 pub struct TabCompletionState {
     pub prefix: String,
     pub matches: Vec<String>,
@@ -228,7 +231,7 @@ impl InputState {
             self.value
                 .replace_range(spell.word_start..spell.word_end, &spell.original);
             if self.cursor_pos > spell.word_start {
-                self.cursor_pos = self.cursor_pos + original_len - current_word_len;
+                self.cursor_pos = (self.cursor_pos + original_len).saturating_sub(current_word_len);
             }
         }
     }
@@ -251,7 +254,7 @@ impl InputState {
         spell.word_end = spell.word_start + new_len;
 
         if self.cursor_pos > spell.word_start {
-            self.cursor_pos = self.cursor_pos + new_len - old_len;
+            self.cursor_pos = (self.cursor_pos + new_len).saturating_sub(old_len);
         }
 
         spell.index = index;
@@ -1382,5 +1385,59 @@ mod tests {
         // "world" pre-applied (5 chars vs 4 original)
         assert_eq!(input.value, "hi world ");
         assert_eq!(input.cursor_pos, 9);
+    }
+
+    #[test]
+    fn spell_multibyte_utf8_replacement() {
+        // Simulate replacing ASCII with a multibyte UTF-8 suggestion.
+        // "manana" (6 bytes) → "mañana" (7 bytes, ñ = 2 bytes UTF-8)
+        let mut input = InputState::new();
+        input.value = "manana ".to_string();
+        input.cursor_pos = 7;
+        make_spell_state(&mut input, 0, 6, "manana", &["mañana"]);
+
+        // "mañana" pre-applied (7 bytes vs 6)
+        assert_eq!(input.value, "mañana ");
+        assert_eq!(input.cursor_pos, 8); // 7 bytes for "mañana" + 1 for space
+        assert!(input.value.is_char_boundary(input.cursor_pos));
+    }
+
+    #[test]
+    fn spell_multibyte_dismiss_reverts_correctly() {
+        let mut input = InputState::new();
+        input.value = "manana ".to_string();
+        input.cursor_pos = 7;
+        make_spell_state(&mut input, 0, 6, "manana", &["mañana"]);
+
+        // "mañana" is pre-applied
+        assert_eq!(input.value, "mañana ");
+
+        // Dismiss should revert to original
+        input.dismiss_spell();
+        assert_eq!(input.value, "manana ");
+        assert_eq!(input.cursor_pos, 7);
+        assert!(input.value.is_char_boundary(input.cursor_pos));
+    }
+
+    #[test]
+    fn spell_multibyte_cycle_preserves_boundaries() {
+        let mut input = InputState::new();
+        input.value = "nino ".to_string();
+        input.cursor_pos = 5;
+        make_spell_state(&mut input, 0, 4, "nino", &["niño", "nido"]);
+
+        // "niño" pre-applied (5 bytes)
+        assert_eq!(input.value, "niño ");
+        assert!(input.value.is_char_boundary(input.cursor_pos));
+
+        // Cycle to "nido" (4 bytes)
+        input.cycle_spell_suggestion();
+        assert_eq!(input.value, "nido ");
+        assert!(input.value.is_char_boundary(input.cursor_pos));
+
+        // Cycle back to "niño"
+        input.cycle_spell_suggestion();
+        assert_eq!(input.value, "niño ");
+        assert!(input.value.is_char_boundary(input.cursor_pos));
     }
 }

@@ -680,4 +680,37 @@ mod tests {
         assert_eq!(buf.messages.len(), 2);
         assert_eq!(buf.messages[0].text, "msg3");
     }
+
+    #[test]
+    fn add_local_message_does_not_log_to_storage() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = make_test_state();
+        state.log_tx = Some(tx);
+
+        let msg = make_test_message(&mut state, "local UI output");
+        state.add_local_message("libera/#rust", msg);
+
+        // Nothing should have been sent to the log channel.
+        assert!(
+            rx.try_recv().is_err(),
+            "add_local_message must not send to log_tx"
+        );
+
+        // But the message should still appear in the buffer.
+        let buf = state.buffers.get("libera/#rust").unwrap();
+        assert_eq!(buf.messages.last().unwrap().text, "local UI output");
+    }
+
+    #[test]
+    fn add_message_does_log_to_storage() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = make_test_state();
+        state.log_tx = Some(tx);
+
+        let msg = make_test_message(&mut state, "IRC message");
+        state.add_message("libera/#rust", msg);
+
+        // add_message SHOULD send to log channel.
+        assert!(rx.try_recv().is_ok(), "add_message must send to log_tx");
+    }
 }
