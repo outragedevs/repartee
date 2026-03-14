@@ -52,7 +52,6 @@ impl RateLimiter {
     }
 
     /// Remove expired entries (entries whose lockout has fully elapsed).
-    #[expect(dead_code, reason = "called periodically by web::server tick")]
     pub fn purge_expired(&mut self) {
         self.attempts.retain(|_, state| {
             let lockout = lockout_duration(state.failures);
@@ -112,7 +111,6 @@ impl SessionStore {
     }
 
     /// Remove expired sessions.
-    #[expect(dead_code, reason = "called periodically by web::server tick")]
     pub fn purge_expired(&mut self) {
         let max_age = Duration::from_secs(86400);
         self.sessions

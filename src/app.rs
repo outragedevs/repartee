@@ -486,6 +486,10 @@ pub struct App {
     /// Handle for the web server task (if running).
     /// Held to keep the spawned server task alive — dropped with App.
     web_server_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Shared session store for periodic cleanup.
+    web_sessions: Option<std::sync::Arc<tokio::sync::Mutex<crate::web::auth::SessionStore>>>,
+    /// Shared rate limiter for periodic cleanup.
+    web_rate_limiter: Option<std::sync::Arc<tokio::sync::Mutex<crate::web::auth::RateLimiter>>>,
 }
 
 impl App {
@@ -684,6 +688,8 @@ impl App {
             web_cmd_rx: web_rx,
             web_cmd_tx: web_tx,
             web_server_handle: None,
+            web_sessions: None,
+            web_rate_limiter: None,
         };
         app.recompute_wrap_indent();
 
@@ -1502,16 +1508,21 @@ impl App {
 
         // Start web server if enabled and password is set.
         if self.config.web.enabled && !self.config.web.password.is_empty() {
+            let sessions = std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::web::auth::SessionStore::new(),
+            ));
+            let limiter = std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::web::auth::RateLimiter::new(),
+            ));
+            self.web_sessions = Some(std::sync::Arc::clone(&sessions));
+            self.web_rate_limiter = Some(std::sync::Arc::clone(&limiter));
+
             let handle = std::sync::Arc::new(crate::web::server::AppHandle {
                 broadcaster: std::sync::Arc::clone(&self.web_broadcaster),
                 web_cmd_tx: self.web_cmd_tx.clone(),
                 password: self.config.web.password.clone(),
-                session_store: std::sync::Arc::new(tokio::sync::Mutex::new(
-                    crate::web::auth::SessionStore::new(),
-                )),
-                rate_limiter: std::sync::Arc::new(tokio::sync::Mutex::new(
-                    crate::web::auth::RateLimiter::new(),
-                )),
+                session_store: sessions,
+                rate_limiter: limiter,
             });
             match crate::web::server::start(&self.config.web, handle).await {
                 Ok(h) => {
@@ -1692,6 +1703,11 @@ impl App {
                     self.measure_lag();
                     self.update_script_snapshot();
                     self.check_stale_who_batches();
+                    // Purge expired web sessions and rate limiter entries.
+                    if let Some(ref sessions) = self.web_sessions
+                        && let Ok(mut s) = sessions.try_lock() { s.purge_expired(); }
+                    if let Some(ref limiter) = self.web_rate_limiter
+                        && let Ok(mut l) = limiter.try_lock() { l.purge_expired(); }
                     let expired = self.dcc.purge_expired();
                     for (_id, nick) in expired {
                         crate::commands::helpers::add_local_event(

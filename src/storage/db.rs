@@ -60,6 +60,8 @@ fn apply_pragmas(db: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// `buffer` is the lowercased buffer name (matches messages table).
+/// `channel` is the display name (e.g. `#Rust` with original casing).
 const CREATE_MENTIONS: &str = "
 CREATE TABLE IF NOT EXISTS mentions (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
@@ -28,13 +29,17 @@ struct LoginRequest {
     password: String,
 }
 
+/// Peer address injected via Extension by the TLS accept loop.
+#[derive(Debug, Clone)]
+struct PeerAddr(SocketAddr);
+
 /// POST /api/login — authenticate and return a session token.
 async fn login_handler(
+    peer: Option<axum::Extension<PeerAddr>>,
     State(state): State<Arc<AppHandle>>,
     Json(body): Json<LoginRequest>,
 ) -> impl IntoResponse {
-    // Rate limit check (use a placeholder IP for now — will be extracted from request later).
-    let ip = "unknown".to_string();
+    let ip = peer.map_or_else(|| "unknown".to_string(), |p| p.0 .0.ip().to_string());
 
     {
         let limiter = state.rate_limiter.lock().await;
@@ -148,7 +153,7 @@ pub async fn start(
 
     let join = tokio::spawn(async move {
         loop {
-            let (stream, _peer) = match listener.accept().await {
+            let (stream, peer) = match listener.accept().await {
                 Ok(conn) => conn,
                 Err(e) => {
                     tracing::warn!("web accept error: {e}");
@@ -157,7 +162,8 @@ pub async fn start(
             };
 
             let acceptor = acceptor.clone();
-            let router = router.clone();
+            // Clone router and add peer address as an Extension for this connection.
+            let conn_router = router.clone().layer(axum::Extension(PeerAddr(peer)));
 
             tokio::spawn(async move {
                 let tls_stream = match acceptor.accept(stream).await {
@@ -169,7 +175,7 @@ pub async fn start(
                 };
 
                 let io = hyper_util::rt::TokioIo::new(tls_stream);
-                let service = hyper_util::service::TowerToHyperService::new(router);
+                let service = hyper_util::service::TowerToHyperService::new(conn_router);
 
                 if let Err(e) = hyper_util::server::conn::auto::Builder::new(
                     hyper_util::rt::TokioExecutor::new(),
@@ -201,10 +207,15 @@ mod tests {
         })
     }
 
+    /// Build a test router with a fake peer address extension.
+    fn test_app(handle: Arc<AppHandle>) -> Router {
+        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        build_router(handle).layer(axum::Extension(PeerAddr(addr)))
+    }
+
     #[tokio::test]
     async fn health_endpoint_returns_ok() {
-        let handle = make_test_handle();
-        let app = build_router(handle);
+        let app = test_app(make_test_handle());
 
         let response = axum::http::Request::builder()
             .uri("/api/health")
@@ -217,8 +228,7 @@ mod tests {
 
     #[tokio::test]
     async fn login_rejects_wrong_password() {
-        let handle = make_test_handle();
-        let app = build_router(handle);
+        let app = test_app(make_test_handle());
 
         let body = serde_json::json!({"password": "wrong"});
         let request = axum::http::Request::builder()
@@ -234,8 +244,7 @@ mod tests {
 
     #[tokio::test]
     async fn index_serves_html() {
-        let handle = make_test_handle();
-        let app = build_router(handle);
+        let app = test_app(make_test_handle());
 
         let request = axum::http::Request::builder()
             .uri("/")
@@ -243,14 +252,12 @@ mod tests {
             .unwrap();
 
         let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
-        // Should return 200 if dist/index.html exists (placeholder or real build).
         assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
     async fn missing_asset_returns_404() {
-        let handle = make_test_handle();
-        let app = build_router(handle);
+        let app = test_app(make_test_handle());
 
         let request = axum::http::Request::builder()
             .uri("/nonexistent.js")
@@ -263,8 +270,7 @@ mod tests {
 
     #[tokio::test]
     async fn login_accepts_correct_password() {
-        let handle = make_test_handle();
-        let app = build_router(handle);
+        let app = test_app(make_test_handle());
 
         let body = serde_json::json!({"password": "testpass"});
         let request = axum::http::Request::builder()
@@ -276,5 +282,33 @@ mod tests {
 
         let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn rate_limiter_blocks_after_failure() {
+        let handle = make_test_handle();
+        let wrong = serde_json::json!({"password": "wrong"});
+
+        // 1st attempt: no prior failures → 401 (wrong password).
+        let app = test_app(Arc::clone(&handle));
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/login")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(wrong.to_string()))
+            .unwrap();
+        let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 2nd attempt: within lockout window → 429 (rate limited).
+        let app = test_app(Arc::clone(&handle));
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/login")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(wrong.to_string()))
+            .unwrap();
+        let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 }
