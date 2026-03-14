@@ -1,5 +1,5 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders};
+use ratatui::widgets::{Block, Borders, Clear};
 
 use crate::app::App;
 use crate::state::buffer::BufferType;
@@ -121,4 +121,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     // Image preview overlay (drawn last, on top of everything).
     super::image_overlay::render(frame, frame.area(), app);
+
+    // Targeted repaint after image dismiss (Kitty/iTerm2 only).
+    // The graphics layer was already cleaned up by escape sequences.
+    // Rendering Clear over the popup area forces ratatui's diff to
+    // repaint those cells, avoiding a full terminal.clear() flicker.
+    if let Some(rect) = app.image_clear_rect.take() {
+        frame.render_widget(Clear, rect);
+    }
 }

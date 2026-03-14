@@ -6,7 +6,7 @@ use std::time::Instant;
 use chrono::Utc;
 use color_eyre::eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
-use ratatui::layout::Position;
+use ratatui::layout::{Position, Rect};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, interval};
 
@@ -377,6 +377,10 @@ pub struct App {
     pub quit_message: Option<String>,
     /// Current image preview overlay state.
     pub image_preview: crate::image_preview::PreviewStatus,
+    /// Rect to invalidate on next frame after image dismiss (targeted repaint).
+    /// Set by `dismiss_image_preview()` for Kitty/iTerm2 protocols to avoid
+    /// full terminal clear. Consumed by the renderer on the next draw.
+    pub image_clear_rect: Option<Rect>,
     /// Channel receiver for image preview results from background tasks.
     preview_rx: mpsc::UnboundedReceiver<crate::image_preview::ImagePreviewEvent>,
     /// Channel sender cloned into each preview task.
@@ -613,6 +617,7 @@ impl App {
             storage,
             quit_message: None,
             image_preview: crate::image_preview::PreviewStatus::default(),
+            image_clear_rect: None,
             preview_rx,
             preview_tx,
             http_client,
@@ -770,6 +775,9 @@ impl App {
     ///   buffer flush, so ratatui has no knowledge of those pixels. A diff-based
     ///   update may not rewrite every cell the image covered.
     pub fn dismiss_image_preview(&mut self) {
+        // Capture popup rect before clearing, for targeted repaint.
+        let popup_rect = self.image_preview_popup_rect();
+
         if matches!(
             self.image_preview,
             crate::image_preview::PreviewStatus::Ready { .. }
@@ -777,10 +785,39 @@ impl App {
             self.cleanup_image_graphics();
         }
         self.image_preview = crate::image_preview::PreviewStatus::Hidden;
-        // Force full terminal redraw on next frame — ensures all cells are
-        // rewritten, covering any graphics artifacts from Kitty's separate
-        // layer or iTerm2's direct stdout writes.
-        self.needs_full_redraw = true;
+
+        // Decide cleanup strategy based on graphics protocol.
+        // Kitty/iTerm2: escape sequences already deleted the graphics layer,
+        // so we only need ratatui to repaint the cells underneath (no full clear).
+        // Halfblocks/Sixel: graphics are cell-based, need a full terminal clear.
+        match self.picker.protocol_type() {
+            ProtocolType::Kitty | ProtocolType::Iterm2 => {
+                // Store the popup rect so the renderer can invalidate just
+                // that region on the next frame (differential repaint).
+                self.image_clear_rect = popup_rect;
+            }
+            _ => {
+                // Sixel / Halfblocks: full redraw required.
+                self.needs_full_redraw = true;
+            }
+        }
+    }
+
+    /// Compute the popup Rect for the current image preview.
+    fn image_preview_popup_rect(&self) -> Option<Rect> {
+        let (w, h) = match &self.image_preview {
+            crate::image_preview::PreviewStatus::Ready { width, height, .. } => (*width, *height),
+            crate::image_preview::PreviewStatus::Loading { .. } => (40, 5),
+            crate::image_preview::PreviewStatus::Error { .. } => (50, 5),
+            crate::image_preview::PreviewStatus::Hidden => return None,
+        };
+        let term_w = self.cached_term_cols;
+        let term_h = self.cached_term_rows;
+        let pw = w.min(term_w);
+        let ph = h.min(term_h);
+        let px = (term_w.saturating_sub(pw)) / 2;
+        let py = (term_h.saturating_sub(ph)) / 2;
+        Some(Rect::new(px, py, pw, ph))
     }
 
     /// Send protocol-specific escape sequences to clear image graphics.
