@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn nicks_skipped() {
         let checker = SpellChecker { dicts: vec![] };
-        let nicks: HashSet<String> = ["kofany", "ferris"].iter().map(|s| s.to_string()).collect();
+        let nicks: HashSet<String> = ["kofany", "ferris"].iter().map(ToString::to_string).collect();
         assert!(checker.check("kofany", &nicks));
         assert!(checker.check("Kofany", &nicks)); // case-insensitive
     }

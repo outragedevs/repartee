@@ -317,7 +317,8 @@ pub fn get_unread_mention_count(db: &Connection) -> rusqlite::Result<u32> {
         |row| {
             #[expect(
                 clippy::cast_possible_truncation,
-                reason = "mention count will never exceed u32::MAX"
+                clippy::cast_sign_loss,
+                reason = "COUNT(*) always returns non-negative and will never exceed u32::MAX"
             )]
             row.get::<_, i64>(0).map(|c| c as u32)
         },

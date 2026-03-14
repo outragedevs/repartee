@@ -872,11 +872,10 @@ mod tests {
     fn search_no_matches() {
         let config = default_config();
         let all = get_setting_paths(&config);
-        let matches: Vec<&String> = all
+        let has_match = all
             .iter()
-            .filter(|p| p.to_lowercase().contains("zzzznonexistent"))
-            .collect();
-        assert!(matches.is_empty());
+            .any(|p| p.to_lowercase().contains("zzzznonexistent"));
+        assert!(!has_match);
     }
 
     #[test]

@@ -24,6 +24,7 @@ impl WebBroadcaster {
     ///
     /// Returns the number of receivers that will receive the event.
     /// Returns 0 if no clients are connected (event is silently dropped).
+    #[must_use]
     pub fn send(&self, event: WebEvent) -> usize {
         self.tx.send(event).unwrap_or(0)
     }

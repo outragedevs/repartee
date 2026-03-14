@@ -27,7 +27,7 @@ impl RateLimiter {
         let lockout = lockout_duration(state.failures);
         let elapsed = state.last_attempt.elapsed();
         if elapsed < lockout {
-            Some(lockout - elapsed)
+            Some(lockout.saturating_sub(elapsed))
         } else {
             None
         }
@@ -35,10 +35,13 @@ impl RateLimiter {
 
     /// Record a failed login attempt for an IP.
     pub fn record_failure(&mut self, ip: &str) {
-        let state = self.attempts.entry(ip.to_string()).or_insert(AttemptState {
-            failures: 0,
-            last_attempt: Instant::now(),
-        });
+        let state = self
+            .attempts
+            .entry(ip.to_string())
+            .or_insert_with(|| AttemptState {
+                failures: 0,
+                last_attempt: Instant::now(),
+            });
         state.failures = state.failures.saturating_add(1);
         state.last_attempt = Instant::now();
     }
@@ -126,13 +129,18 @@ fn generate_token() -> String {
 }
 
 /// Constant-time password comparison to prevent timing attacks.
+///
+/// Uses HMAC-SHA256 to ensure comparison time is independent of where
+/// the strings first differ.
+#[must_use]
 pub fn verify_password(provided: &str, expected: &str) -> bool {
+    use hmac::Mac;
+    type HmacSha256 = hmac::Hmac<sha2::Sha256>;
+
     if expected.is_empty() {
         return false;
     }
-    // Use constant-time comparison via hmac.
-    use hmac::Mac;
-    type HmacSha256 = hmac::Hmac<sha2::Sha256>;
+
     let mut mac =
         HmacSha256::new_from_slice(b"repartee-password-verify").expect("HMAC accepts any key");
     mac.update(expected.as_bytes());
