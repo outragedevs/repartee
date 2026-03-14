@@ -3,6 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+use tachyonfx::EffectRenderer as _;
+
 use chrono::Utc;
 use color_eyre::eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
@@ -343,8 +345,6 @@ pub struct App {
     pub theme: ThemeFile,
     pub input: ui::input::InputState,
     pub should_quit: bool,
-    /// Splash screen: number of logo lines currently visible (progressive reveal).
-    pub splash_visible: usize,
     /// Splash screen dismissed — set to true after animation or keypress.
     pub splash_done: bool,
     pub scroll_offset: usize,
@@ -603,7 +603,6 @@ impl App {
             theme,
             input: ui::input::InputState::new(),
             should_quit: false,
-            splash_visible: 0,
             splash_done: false,
             scroll_offset: 0,
             ui_regions: None,
@@ -1130,8 +1129,12 @@ impl App {
     /// Animated splash screen: progressively reveals the logo, then holds
     /// for 2.5s. Any keypress dismisses immediately.
     async fn run_splash(&mut self) -> Result<()> {
-        const LINE_DELAY_MS: u64 = 50;
+        /// Duration of the coalesce materialization effect (ms).
+        const COALESCE_MS: u32 = 1200;
+        /// How long to hold the fully revealed logo (ms).
         const HOLD_MS: u64 = 2500;
+        /// Frame interval for smooth animation (~60fps).
+        const FRAME_MS: u64 = 16;
 
         let Some(terminal) = self.terminal.as_mut() else {
             self.splash_done = true;
@@ -1139,16 +1142,28 @@ impl App {
         };
         let total_lines = include_str!("../logo.txt").lines().count();
 
-        let mut line_tick = interval(Duration::from_millis(LINE_DELAY_MS));
+        // Phase 1: coalesce materialization — logo emerges from random chars.
+        let mut effect = tachyonfx::fx::coalesce((COALESCE_MS, tachyonfx::Interpolation::CubicOut));
+        let mut last_frame = Instant::now();
+        let mut frame_tick = interval(Duration::from_millis(FRAME_MS));
 
-        // Phase 1: progressive reveal.
-        while self.splash_visible < total_lines {
-            terminal.draw(|frame| ui::splash::render(frame, self.splash_visible))?;
+        loop {
+            let now = Instant::now();
+            let elapsed = now.duration_since(last_frame);
+            last_frame = now;
+
+            terminal.draw(|frame| {
+                ui::splash::render(frame, total_lines);
+                let area = frame.area();
+                frame.render_effect(&mut effect, area, elapsed);
+            })?;
+
+            if effect.done() {
+                break;
+            }
 
             tokio::select! {
-                _ = line_tick.tick() => {
-                    self.splash_visible += 1;
-                }
+                _ = frame_tick.tick() => {}
                 ev = tokio::task::spawn_blocking(|| {
                     if event::poll(std::time::Duration::from_millis(1)).unwrap_or(false) {
                         event::read().ok()
@@ -1165,7 +1180,6 @@ impl App {
         }
 
         // Phase 2: hold fully revealed logo.
-        // Re-borrow terminal since `self` was borrowed mutably in the loop.
         let terminal = self.terminal.as_mut().unwrap();
         terminal.draw(|frame| ui::splash::render(frame, total_lines))?;
         let hold_start = Instant::now();
