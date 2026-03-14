@@ -46,6 +46,18 @@ pub struct ReadMarker {
     pub last_read: i64,
 }
 
+/// A mention row from the mentions table.
+#[derive(Debug, Clone)]
+pub struct MentionRow {
+    pub id: i64,
+    pub timestamp: i64,
+    pub network: String,
+    pub buffer: String,
+    pub channel: String,
+    pub nick: String,
+    pub text: String,
+}
+
 /// Stats about the log database.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]

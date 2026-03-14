@@ -268,6 +268,71 @@ pub fn get_unread_count(
     )
 }
 
+// === Mentions ===
+
+/// Insert a mention into the mentions table. Returns the row ID.
+pub fn insert_mention(
+    db: &Connection,
+    timestamp: i64,
+    network: &str,
+    buffer: &str,
+    channel: &str,
+    nick: &str,
+    text: &str,
+) -> rusqlite::Result<i64> {
+    db.execute(
+        "INSERT INTO mentions (timestamp, network, buffer, channel, nick, text)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![timestamp, network, buffer, channel, nick, text],
+    )?;
+    Ok(db.last_insert_rowid())
+}
+
+/// Fetch all unread mentions (where `read_at` is NULL), newest first.
+pub fn get_unread_mentions(db: &Connection) -> rusqlite::Result<Vec<super::types::MentionRow>> {
+    let mut stmt = db.prepare(
+        "SELECT id, timestamp, network, buffer, channel, nick, text
+         FROM mentions WHERE read_at IS NULL
+         ORDER BY timestamp DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(super::types::MentionRow {
+            id: row.get(0)?,
+            timestamp: row.get(1)?,
+            network: row.get(2)?,
+            buffer: row.get(3)?,
+            channel: row.get(4)?,
+            nick: row.get(5)?,
+            text: row.get(6)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Count unread mentions.
+pub fn get_unread_mention_count(db: &Connection) -> rusqlite::Result<u32> {
+    db.query_row(
+        "SELECT COUNT(*) FROM mentions WHERE read_at IS NULL",
+        [],
+        |row| {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "mention count will never exceed u32::MAX"
+            )]
+            row.get::<_, i64>(0).map(|c| c as u32)
+        },
+    )
+}
+
+/// Mark all unread mentions as read. Returns the number of rows updated.
+pub fn mark_mentions_read(db: &Connection) -> rusqlite::Result<usize> {
+    let now = chrono::Utc::now().timestamp();
+    db.execute(
+        "UPDATE mentions SET read_at = ?1 WHERE read_at IS NULL",
+        params![now],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,5 +481,48 @@ mod tests {
         insert_msg(&db, "net", "#a", 300, "three");
 
         assert_eq!(get_message_count(&db).unwrap(), 3);
+    }
+
+    // === Mention tests ===
+
+    #[test]
+    fn insert_and_query_mentions() {
+        let db = open_database(false).unwrap();
+        insert_mention(&db, 1000, "libera", "#rust", "#rust", "bob", "hey kofany!").unwrap();
+        insert_mention(&db, 2000, "libera", "#tokio", "#tokio", "alice", "kofany: look").unwrap();
+
+        let mentions = get_unread_mentions(&db).unwrap();
+        assert_eq!(mentions.len(), 2);
+        // Newest first.
+        assert_eq!(mentions[0].timestamp, 2000);
+        assert_eq!(mentions[0].nick, "alice");
+        assert_eq!(mentions[1].timestamp, 1000);
+        assert_eq!(mentions[1].nick, "bob");
+    }
+
+    #[test]
+    fn unread_mention_count() {
+        let db = open_database(false).unwrap();
+        assert_eq!(get_unread_mention_count(&db).unwrap(), 0);
+
+        insert_mention(&db, 1000, "net", "#a", "#a", "x", "hi").unwrap();
+        insert_mention(&db, 2000, "net", "#b", "#b", "y", "hey").unwrap();
+        assert_eq!(get_unread_mention_count(&db).unwrap(), 2);
+    }
+
+    #[test]
+    fn mark_mentions_read_clears_unread() {
+        let db = open_database(false).unwrap();
+        insert_mention(&db, 1000, "net", "#a", "#a", "x", "hi").unwrap();
+        insert_mention(&db, 2000, "net", "#b", "#b", "y", "hey").unwrap();
+
+        let updated = mark_mentions_read(&db).unwrap();
+        assert_eq!(updated, 2);
+        assert_eq!(get_unread_mention_count(&db).unwrap(), 0);
+        assert!(get_unread_mentions(&db).unwrap().is_empty());
+
+        // New mention after marking still shows as unread.
+        insert_mention(&db, 3000, "net", "#c", "#c", "z", "yo").unwrap();
+        assert_eq!(get_unread_mention_count(&db).unwrap(), 1);
     }
 }

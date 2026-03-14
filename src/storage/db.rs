@@ -60,11 +60,29 @@ fn apply_pragmas(db: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+const CREATE_MENTIONS: &str = "
+CREATE TABLE IF NOT EXISTS mentions (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp INTEGER NOT NULL,
+    network   TEXT NOT NULL,
+    buffer    TEXT NOT NULL,
+    channel   TEXT NOT NULL,
+    nick      TEXT NOT NULL,
+    text      TEXT NOT NULL,
+    read_at   INTEGER
+)";
+
+const CREATE_MENTIONS_IDX: &str = "
+CREATE INDEX IF NOT EXISTS idx_mentions_unread
+ON mentions (read_at) WHERE read_at IS NULL";
+
 fn create_schema(db: &Connection, encrypt: bool) -> rusqlite::Result<()> {
     db.execute_batch(CREATE_MESSAGES)?;
     db.execute_batch(CREATE_MESSAGES_IDX)?;
     db.execute_batch(CREATE_MESSAGES_MSG_ID_IDX)?;
     db.execute_batch(CREATE_READ_MARKERS)?;
+    db.execute_batch(CREATE_MENTIONS)?;
+    db.execute_batch(CREATE_MENTIONS_IDX)?;
     if !encrypt {
         db.execute_batch(CREATE_FTS)?;
         db.execute_batch(CREATE_FTS_TRIGGERS)?;
@@ -148,6 +166,7 @@ mod tests {
     fn open_creates_tables() {
         let db = open_database(false).unwrap();
         assert!(table_exists(&db, "messages"));
+        assert!(table_exists(&db, "mentions"));
     }
 
     #[test]
