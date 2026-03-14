@@ -56,9 +56,8 @@ impl EffectState {
         self.manager.process_effects(elapsed, buf, area);
     }
 
-    /// Whether any effects are currently running.
-    #[cfg(test)]
-    pub fn is_running(&self) -> bool {
+    /// Whether any effects are currently running (used for animation tick gating).
+    pub fn has_active_effects(&self) -> bool {
         self.enabled && self.manager.is_running()
     }
 
@@ -122,7 +121,7 @@ mod tests {
         let config = EffectsConfig::default();
         let state = EffectState::new(&config);
         assert!(!state.enabled);
-        assert!(!state.is_running());
+        assert!(!state.has_active_effects());
     }
 
     #[test]
@@ -140,7 +139,7 @@ mod tests {
         let config = EffectsConfig::default(); // enabled = false
         let mut state = EffectState::new(&config);
         state.trigger_buffer_switch(&config, Rect::new(0, 0, 80, 24), Color::Black);
-        assert!(!state.is_running());
+        assert!(!state.has_active_effects());
     }
 
     #[test]
@@ -152,7 +151,7 @@ mod tests {
         };
         let mut state = EffectState::new(&config);
         state.trigger_buffer_switch(&config, Rect::new(0, 0, 80, 24), Color::Black);
-        assert!(!state.is_running());
+        assert!(!state.has_active_effects());
     }
 
     #[test]
@@ -165,7 +164,7 @@ mod tests {
         };
         let mut state = EffectState::new(&config);
         state.trigger_buffer_switch(&config, Rect::new(0, 0, 80, 24), Color::Black);
-        assert!(state.is_running());
+        assert!(state.has_active_effects());
     }
 
     #[test]
@@ -178,7 +177,7 @@ mod tests {
         };
         let mut state = EffectState::new(&config);
         state.trigger_buffer_switch(&config, Rect::new(0, 0, 80, 24), Color::Black);
-        assert!(state.is_running());
+        assert!(state.has_active_effects());
     }
 
     #[test]
@@ -191,7 +190,7 @@ mod tests {
         };
         let mut state = EffectState::new(&config);
         state.trigger_buffer_switch(&config, Rect::new(0, 0, 80, 24), Color::Black);
-        assert!(state.is_running());
+        assert!(state.has_active_effects());
     }
 
     #[test]
@@ -285,7 +284,7 @@ mod tests {
         };
         let mut state = EffectState::new(&config);
         state.trigger_buffer_switch(&config, Rect::new(0, 0, 40, 10), Color::Black);
-        assert!(state.is_running());
+        assert!(state.has_active_effects());
 
         // Process for longer than the effect duration.
         let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 40, 10));
@@ -296,7 +295,7 @@ mod tests {
         state.process(&mut buf, Rect::new(0, 0, 40, 10));
 
         assert!(
-            !state.is_running(),
+            !state.has_active_effects(),
             "effect should have completed after its duration"
         );
     }

@@ -155,8 +155,8 @@ pub async fn run_splash(sock_path: Option<&std::path::Path>) -> Result<()> {
     use crossterm::event::{EnableBracketedPaste, EnableMouseCapture};
     use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
     use ratatui::prelude::*;
+    use tachyonfx::EffectRenderer as _;
 
-    const LINE_DELAY_MS: u64 = 50;
     const HOLD_MS: u64 = 2500;
 
     enable_raw_mode()?;
@@ -171,18 +171,26 @@ pub async fn run_splash(sock_path: Option<&std::path::Path>) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let total_lines = include_str!("../../logo.txt").lines().count();
-    let mut visible = 0;
-    let mut line_tick = interval(Duration::from_millis(LINE_DELAY_MS));
     let mut dismissed = false;
 
-    // Phase 1: progressive reveal.
-    while visible < total_lines && !dismissed {
-        terminal.draw(|frame| crate::ui::splash::render(frame, visible))?;
+    // Phase 1: coalesce materialization — logo emerges from random chars.
+    let mut effect = tachyonfx::fx::coalesce((1200_u32, tachyonfx::Interpolation::CubicOut));
+    let mut last_frame = Instant::now();
+    let mut frame_tick = interval(Duration::from_millis(16));
+
+    while !effect.done() && !dismissed {
+        let now = Instant::now();
+        let elapsed = now.duration_since(last_frame);
+        last_frame = now;
+
+        terminal.draw(|frame| {
+            crate::ui::splash::render(frame, total_lines);
+            let area = frame.area();
+            frame.render_effect(&mut effect, area, elapsed);
+        })?;
 
         tokio::select! {
-            _ = line_tick.tick() => {
-                visible += 1;
-            }
+            _ = frame_tick.tick() => {}
             ev = tokio::task::spawn_blocking(|| {
                 if event::poll(std::time::Duration::from_millis(1)).unwrap_or(false) {
                     event::read().ok()

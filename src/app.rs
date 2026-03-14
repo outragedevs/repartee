@@ -1500,6 +1500,9 @@ impl App {
 
         let mut tick = interval(Duration::from_secs(1));
         let mut paste_tick = interval(Duration::from_millis(500));
+        // Fast tick for tachyonfx effect animation (~60fps).
+        // Only triggers redraws when effects are actively running.
+        let mut effect_tick = interval(Duration::from_millis(16));
 
         while !self.should_quit {
             // Handle pending detach request.
@@ -1653,6 +1656,9 @@ impl App {
                 },
                 _ = paste_tick.tick() => {
                     self.drain_paste_queue();
+                },
+                _ = effect_tick.tick(), if self.effects.has_active_effects() => {
+                    // Effect animation frame — just loop to trigger redraw.
                 },
                 action = self.script_action_rx.recv() => {
                     if let Some(action) = action {
