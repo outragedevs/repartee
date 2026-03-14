@@ -296,7 +296,10 @@ fn format_split_messages(group: &SplitGroup) -> Vec<NetsplitMessage> {
     let mut channel_nicks: HashMap<&str, Vec<&str>> = HashMap::new();
     for rec in &group.nicks {
         for ch in &rec.channels {
-            channel_nicks.entry(ch.as_str()).or_default().push(&rec.nick);
+            channel_nicks
+                .entry(ch.as_str())
+                .or_default()
+                .push(&rec.nick);
         }
     }
 
@@ -321,7 +324,10 @@ fn format_netjoin_messages(group: &NetjoinGroup) -> Vec<NetsplitMessage> {
     let mut channel_nicks: HashMap<&str, Vec<&str>> = HashMap::new();
     for rec in &group.records {
         for ch in &rec.channels {
-            channel_nicks.entry(ch.as_str()).or_default().push(&rec.nick);
+            channel_nicks
+                .entry(ch.as_str())
+                .or_default()
+                .push(&rec.nick);
         }
     }
 

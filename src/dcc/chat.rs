@@ -277,8 +277,9 @@ mod tests {
     #[tokio::test]
     async fn chat_session_connect_and_exchange() {
         // 1. Bind a listener on an OS-assigned port.
-        let server_listener =
-            TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.expect("bind listener");
+        let server_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind listener");
         let server_addr = server_listener.local_addr().expect("local_addr");
 
         // Channels for the client side (connect_for_chat).
@@ -317,7 +318,9 @@ mod tests {
         );
 
         // 5b. Server side: send a plain text line to the client.
-        server_line_tx.send("hello from server".to_owned()).expect("send plain");
+        server_line_tx
+            .send("hello from server".to_owned())
+            .expect("send plain");
 
         // Client should receive ChatMessage.
         let event = client_event_rx.recv().await.expect("ChatMessage");

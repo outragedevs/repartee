@@ -466,6 +466,8 @@ pub struct App {
     pub dcc: crate::dcc::DccManager,
     /// Receiver for events from DCC async tasks.
     dcc_rx: mpsc::UnboundedReceiver<crate::dcc::DccEvent>,
+    /// Spell checker (loaded from Hunspell dictionaries).
+    pub spellchecker: Option<crate::spellcheck::SpellChecker>,
 }
 
 impl App {
@@ -649,8 +651,15 @@ impl App {
             cached_term_rows: 24,
             dcc,
             dcc_rx,
+            spellchecker: None,
         };
         app.recompute_wrap_indent();
+
+        // Initialize spell checker if enabled.
+        if app.config.spellcheck.enabled {
+            app.init_spellchecker();
+        }
+
         Ok(app)
     }
 
@@ -1201,7 +1210,10 @@ impl App {
     }
 
     /// Handle a new shim connection from the socket listener.
-    #[expect(clippy::too_many_lines, reason = "flat init sequence, splitting adds indirection")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "flat init sequence, splitting adds indirection"
+    )]
     async fn handle_shim_connect(&mut self, stream: tokio::net::UnixStream) -> Result<()> {
         use crate::session::protocol::{self, MainMessage, ShimMessage};
         use crate::session::writer::SocketWriter;
@@ -1854,8 +1866,7 @@ impl App {
             };
 
             let id = self.state.next_message_id();
-            let ts = chrono::DateTime::from_timestamp(stored.timestamp, 0)
-                .unwrap_or_else(Utc::now);
+            let ts = chrono::DateTime::from_timestamp(stored.timestamp, 0).unwrap_or_else(Utc::now);
 
             // Insert directly into messages vec — no activity, no logging, no highlight
             if let Some(buf) = self.state.buffers.get_mut(buffer_id) {
@@ -1978,10 +1989,7 @@ impl App {
                 self.dcc.records.insert(id, record);
 
                 if auto {
-                    crate::commands::handlers_dcc::cmd_dcc(
-                        self,
-                        &["chat".to_string(), nick],
-                    );
+                    crate::commands::handlers_dcc::cmd_dcc(self, &["chat".to_string(), nick]);
                 } else {
                     crate::commands::helpers::add_local_event(
                         self,
@@ -2178,10 +2186,7 @@ impl App {
                             message_type: MessageType::Event,
                             nick: None,
                             nick_mode: None,
-                            text: format!(
-                                "DCC CHAT with {} closed{reason_str}",
-                                record.nick
-                            ),
+                            text: format!("DCC CHAT with {} closed{reason_str}", record.nick),
                             highlight: false,
                             event_key: None,
                             event_params: None,
@@ -2196,10 +2201,7 @@ impl App {
             DccEvent::ChatError { id, error } => {
                 self.dcc.close_by_id(&id);
                 self.dcc.chat_senders.remove(&id);
-                crate::commands::helpers::add_local_event(
-                    self,
-                    &format!("DCC error: {error}"),
-                );
+                crate::commands::helpers::add_local_event(self, &format!("DCC error: {error}"));
             }
         }
     }
@@ -2323,8 +2325,11 @@ impl App {
             tokio::spawn(async move {
                 match crate::irc::connect_server(&id, &cfg, &general).await {
                     Ok((handle, mut rx)) => {
-                        let _ =
-                            tx.send(IrcEvent::HandleReady(handle.conn_id.clone(), handle.sender, handle.local_ip));
+                        let _ = tx.send(IrcEvent::HandleReady(
+                            handle.conn_id.clone(),
+                            handle.sender,
+                            handle.local_ip,
+                        ));
                         while let Some(event) = rx.recv().await {
                             if tx.send(event).is_err() {
                                 break;
@@ -2667,8 +2672,14 @@ impl App {
                 if let Some(conn) = self.state.connections.get_mut(&conn_id) {
                     conn.local_ip = local_ip;
                 }
-                self.irc_handles
-                    .insert(conn_id.clone(), IrcHandle { conn_id, sender, local_ip });
+                self.irc_handles.insert(
+                    conn_id.clone(),
+                    IrcHandle {
+                        conn_id,
+                        sender,
+                        local_ip,
+                    },
+                );
             }
             IrcEvent::NegotiationInfo(conn_id, diag) => {
                 // Display CAP/SASL diagnostics in status buffer — fires immediately
@@ -2990,9 +3001,7 @@ impl App {
                         let inner = &text[1..text.len() - 1];
                         if let Some(dcc_msg) = crate::dcc::protocol::parse_dcc_ctcp(inner) {
                             let (nick, ident, host) =
-                                crate::irc::formatting::extract_nick_userhost(
-                                    msg.prefix.as_ref(),
-                                );
+                                crate::irc::formatting::extract_nick_userhost(msg.prefix.as_ref());
 
                             // A passive DCC response from the peer looks like:
                             //   DCC CHAT CHAT <peer_ip> <peer_port> <our_token>
@@ -3016,15 +3025,13 @@ impl App {
                                         rec.state = crate::dcc::types::DccState::Connecting;
                                     }
 
-                                    let (line_tx, line_rx) =
-                                        tokio::sync::mpsc::unbounded_channel();
+                                    let (line_tx, line_rx) = tokio::sync::mpsc::unbounded_channel();
                                     self.dcc.chat_senders.insert(id.clone(), line_tx);
 
                                     let task_id = id.clone();
                                     let event_tx = self.dcc.dcc_tx.clone();
-                                    let timeout_dur = std::time::Duration::from_secs(
-                                        self.dcc.timeout_secs,
-                                    );
+                                    let timeout_dur =
+                                        std::time::Duration::from_secs(self.dcc.timeout_secs);
                                     let peer_addr =
                                         std::net::SocketAddr::new(dcc_msg.addr, dcc_msg.port);
 
@@ -3102,8 +3109,7 @@ impl App {
                     // When a user renames on IRC their DCC record and buffer must
                     // follow, since buffers are named after the peer's nick (=Nick).
                     if let ::irc::proto::Command::NICK(ref new_nick) = msg.command
-                        && let Some(::irc::proto::Prefix::Nickname(ref old_nick, _, _)) =
-                            msg.prefix
+                        && let Some(::irc::proto::Prefix::Nickname(ref old_nick, _, _)) = msg.prefix
                     {
                         let renames = self.dcc.update_nick(old_nick, new_nick);
                         for (_old_id, _new_id, old_buf_suffix, new_buf_suffix) in renames {
@@ -3257,9 +3263,11 @@ impl App {
         }
 
         match (key.modifiers, key.code) {
-            // ESC — dismiss image preview if active, otherwise record for ESC+key combo
+            // ESC — dismiss spell suggestions, image preview, or record for ESC+key combo
             (_, KeyCode::Esc) => {
-                if matches!(
+                if self.input.spell_state.is_some() {
+                    self.input.dismiss_spell();
+                } else if matches!(
                     self.image_preview,
                     crate::image_preview::PreviewStatus::Hidden
                 ) {
@@ -3309,7 +3317,10 @@ impl App {
                     self.handle_submit(&text);
                 }
             }
-            (_, KeyCode::Backspace) => self.input.backspace(),
+            (_, KeyCode::Backspace) => {
+                self.input.dismiss_spell();
+                self.input.backspace();
+            }
             (_, KeyCode::Delete) => self.input.delete(),
             (mods, KeyCode::Left) if !mods.contains(KeyModifiers::ALT) => self.input.move_left(),
             (mods, KeyCode::Right) if !mods.contains(KeyModifiers::ALT) => self.input.move_right(),
@@ -3321,9 +3332,20 @@ impl App {
             (_, KeyCode::PageDown) => {
                 self.scroll_offset = self.scroll_offset.saturating_sub(10);
             }
-            (_, KeyCode::Tab) => self.handle_tab(),
+            (_, KeyCode::Tab) => {
+                // Spell suggestion cycling takes priority over tab completion.
+                if self.input.spell_state.is_some() {
+                    self.input.cycle_spell_suggestion();
+                } else {
+                    self.handle_tab();
+                }
+            }
             (mods, KeyCode::Char(c)) if mods.is_empty() || mods == KeyModifiers::SHIFT => {
                 self.input.insert_char(c);
+                // After typing a word separator, check spelling of the completed word.
+                if c == ' ' || (c.is_ascii_punctuation() && c != '/') {
+                    self.check_spelling_after_separator();
+                }
             }
             _ => {}
         }
@@ -3587,6 +3609,63 @@ impl App {
         }
     }
 
+    /// Initialize the spell checker from config.
+    fn init_spellchecker(&mut self) {
+        let dict_dir = crate::spellcheck::SpellChecker::resolve_dict_dir(
+            &self.config.spellcheck.dictionary_dir,
+        );
+        let checker =
+            crate::spellcheck::SpellChecker::load(&self.config.spellcheck.languages, &dict_dir);
+        if checker.is_active() {
+            tracing::info!(dicts = checker.dict_count(), "spell checker initialized");
+            self.spellchecker = Some(checker);
+        } else {
+            tracing::info!("spell checker: no dictionaries loaded");
+            self.spellchecker = None;
+        }
+    }
+
+    /// Reload the spell checker (called from `/set spellcheck.*`).
+    pub fn reload_spellchecker(&mut self) {
+        if self.config.spellcheck.enabled {
+            self.init_spellchecker();
+        } else {
+            self.spellchecker = None;
+        }
+    }
+
+    /// Check the last completed word for spelling and set up correction state.
+    fn check_spelling_after_separator(&mut self) {
+        // Skip if spell checking is disabled or no checker loaded.
+        let Some(ref checker) = self.spellchecker else {
+            return;
+        };
+        // Skip commands.
+        if self.input.is_command() {
+            return;
+        }
+        // Extract the last completed word.
+        let Some((word_start, word_end, word)) = self.input.last_completed_word() else {
+            return;
+        };
+        // Check the word.
+        if checker.check(&word) {
+            return;
+        }
+        // Misspelled — get suggestions.
+        let suggestions = checker.suggest(&word);
+        if suggestions.is_empty() {
+            return;
+        }
+        self.input.spell_state = Some(crate::ui::input::SpellCorrection {
+            word_start,
+            word_end,
+            original: word,
+            suggestions,
+            index: 0,
+        });
+    }
+
     fn handle_tab(&mut self) {
         let (nicks, last_speakers): (Vec<String>, Vec<String>) =
             self.state.active_buffer().map_or_else(
@@ -3656,6 +3735,10 @@ impl App {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "flat dispatch for DCC/channel/query message routing"
+    )]
     fn handle_plain_message(&mut self, text: &str) {
         let Some(active_id) = self.state.active_buffer_id.clone() else {
             return;
@@ -3678,7 +3761,12 @@ impl App {
             }
             let conn = self.state.connections.get(&buf.connection_id);
             let nick = conn.map(|c| c.nick.clone()).unwrap_or_default();
-            (buf.connection_id.clone(), nick, buf.name.clone(), buf.buffer_type.clone())
+            (
+                buf.connection_id.clone(),
+                nick,
+                buf.name.clone(),
+                buf.buffer_type.clone(),
+            )
         };
 
         // DCC CHAT routing: send via DCC channel, not IRC.

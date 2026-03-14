@@ -1420,12 +1420,7 @@ fn handle_quit(
 
 /// Rename query buffers in `affected` to `new_nick`.
 /// Re-keys the buffer in the `IndexMap` and updates `active_buffer_id`.
-fn rename_query_buffers(
-    state: &mut AppState,
-    conn_id: &str,
-    new_nick: &str,
-    affected: &[String],
-) {
+fn rename_query_buffers(state: &mut AppState, conn_id: &str, new_nick: &str, affected: &[String]) {
     for buf_id in affected {
         let is_query = state
             .buffers

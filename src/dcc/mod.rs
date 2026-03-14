@@ -129,9 +129,9 @@ impl DccManager {
     /// Find the first record in `Connected` state for `nick` (case-insensitive).
     pub fn find_connected(&self, nick: &str) -> Option<&DccRecord> {
         let nick_lower = nick.to_lowercase();
-        self.records.values().find(|r| {
-            r.nick.to_lowercase() == nick_lower && matches!(r.state, DccState::Connected)
-        })
+        self.records
+            .values()
+            .find(|r| r.nick.to_lowercase() == nick_lower && matches!(r.state, DccState::Connected))
     }
 
     /// Remove all `WaitingUser`/`Listening` records older than `timeout_secs`.
@@ -300,12 +300,14 @@ mod tests {
         // First ID for alice → "alice"
         let id1 = mgr.generate_id("Alice");
         assert_eq!(id1, "alice");
-        mgr.records.insert(id1.clone(), make_record(&id1, "Alice", DccState::Connected));
+        mgr.records
+            .insert(id1.clone(), make_record(&id1, "Alice", DccState::Connected));
 
         // Second ID for alice → "alice2"
         let id2 = mgr.generate_id("Alice");
         assert_eq!(id2, "alice2");
-        mgr.records.insert(id2.clone(), make_record(&id2, "Alice", DccState::Connected));
+        mgr.records
+            .insert(id2.clone(), make_record(&id2, "Alice", DccState::Connected));
 
         // Third ID for alice → "alice3"
         let id3 = mgr.generate_id("Alice");
@@ -317,7 +319,10 @@ mod tests {
     #[test]
     fn find_pending_by_nick() {
         let mut mgr = make_manager();
-        mgr.records.insert("bob".to_owned(), make_record("bob", "Bob", DccState::WaitingUser));
+        mgr.records.insert(
+            "bob".to_owned(),
+            make_record("bob", "Bob", DccState::WaitingUser),
+        );
 
         let found = mgr.find_pending("BOB");
         assert!(found.is_some());
@@ -326,7 +331,10 @@ mod tests {
     #[test]
     fn find_pending_not_connected() {
         let mut mgr = make_manager();
-        mgr.records.insert("bob".to_owned(), make_record("bob", "Bob", DccState::Connected));
+        mgr.records.insert(
+            "bob".to_owned(),
+            make_record("bob", "Bob", DccState::Connected),
+        );
 
         let found = mgr.find_pending("bob");
         assert!(found.is_none());
@@ -347,7 +355,9 @@ mod tests {
         let new_rec = make_record("bob", "Bob", DccState::WaitingUser);
         mgr.records.insert("bob".to_owned(), new_rec);
 
-        let latest = mgr.find_latest_pending().expect("should find a pending record");
+        let latest = mgr
+            .find_latest_pending()
+            .expect("should find a pending record");
         assert_eq!(latest.nick, "Bob");
     }
 
@@ -356,7 +366,10 @@ mod tests {
     #[test]
     fn find_connected_by_nick() {
         let mut mgr = make_manager();
-        mgr.records.insert("carol".to_owned(), make_record("carol", "Carol", DccState::Connected));
+        mgr.records.insert(
+            "carol".to_owned(),
+            make_record("carol", "Carol", DccState::Connected),
+        );
 
         let found = mgr.find_connected("carol");
         assert!(found.is_some());
@@ -367,7 +380,10 @@ mod tests {
     #[test]
     fn update_nick_rekeys_records_and_senders() {
         let mut mgr = make_manager();
-        mgr.records.insert("dave".to_owned(), make_record("dave", "Dave", DccState::Connected));
+        mgr.records.insert(
+            "dave".to_owned(),
+            make_record("dave", "Dave", DccState::Connected),
+        );
         // Simulate an active chat sender for the old ID.
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         mgr.chat_senders.insert("dave".to_owned(), tx);
@@ -391,7 +407,10 @@ mod tests {
     #[test]
     fn close_by_nick_removes() {
         let mut mgr = make_manager();
-        mgr.records.insert("eve".to_owned(), make_record("eve", "Eve", DccState::Connected));
+        mgr.records.insert(
+            "eve".to_owned(),
+            make_record("eve", "Eve", DccState::Connected),
+        );
 
         let removed = mgr.close_by_nick("Eve");
         assert!(removed.is_some());
@@ -403,7 +422,10 @@ mod tests {
     #[test]
     fn close_by_id_removes() {
         let mut mgr = make_manager();
-        mgr.records.insert("frank".to_owned(), make_record("frank", "Frank", DccState::Listening));
+        mgr.records.insert(
+            "frank".to_owned(),
+            make_record("frank", "Frank", DccState::Listening),
+        );
 
         let removed = mgr.close_by_id("frank");
         assert!(removed.is_some());
@@ -439,7 +461,10 @@ mod tests {
         mgr.timeout_secs = 300;
 
         // Fresh WaitingUser record should not be purged.
-        mgr.records.insert("iris".to_owned(), make_record("iris", "Iris", DccState::WaitingUser));
+        mgr.records.insert(
+            "iris".to_owned(),
+            make_record("iris", "Iris", DccState::WaitingUser),
+        );
 
         let purged = mgr.purge_expired();
         assert!(purged.is_empty());

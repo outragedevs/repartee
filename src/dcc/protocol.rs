@@ -139,10 +139,7 @@ mod tests {
 
     #[test]
     fn encode_ipv4_localhost() {
-        assert_eq!(
-            encode_ip(&IpAddr::V4(Ipv4Addr::LOCALHOST)),
-            "2130706433"
-        );
+        assert_eq!(encode_ip(&IpAddr::V4(Ipv4Addr::LOCALHOST)), "2130706433");
     }
 
     #[test]

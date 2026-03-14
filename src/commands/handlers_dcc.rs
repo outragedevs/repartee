@@ -38,7 +38,10 @@ fn cmd_dcc_chat(app: &mut App, args: &[String]) {
             return;
         }
         // No nick given — accept the most recent pending request.
-        let pending = app.dcc.find_latest_pending().map(|r| (r.nick.clone(), r.id.clone()));
+        let pending = app
+            .dcc
+            .find_latest_pending()
+            .map(|r| (r.nick.clone(), r.id.clone()));
         if let Some((nick, id)) = pending {
             accept_dcc_chat(app, &nick, &id);
         } else {
@@ -52,7 +55,10 @@ fn cmd_dcc_chat(app: &mut App, args: &[String]) {
     if !passive {
         // Check whether there is already a pending request from this nick;
         // if so, accept it rather than initiating a duplicate outgoing offer.
-        let pending = app.dcc.find_pending(nick).map(|r| (r.nick.clone(), r.id.clone()));
+        let pending = app
+            .dcc
+            .find_pending(nick)
+            .map(|r| (r.nick.clone(), r.id.clone()));
         if let Some((pending_nick, id)) = pending {
             accept_dcc_chat(app, &pending_nick, &id);
             return;
@@ -67,7 +73,10 @@ fn cmd_dcc_chat(app: &mut App, args: &[String]) {
 /// Accept a pending DCC CHAT request.
 fn accept_dcc_chat(app: &mut App, nick: &str, id: &str) {
     let Some(record) = app.dcc.records.get(id).cloned() else {
-        add_local_event(app, &format!("{C_ERR}No pending DCC CHAT for {nick}{C_RST}"));
+        add_local_event(
+            app,
+            &format!("{C_ERR}No pending DCC CHAT for {nick}{C_RST}"),
+        );
         return;
     };
 
@@ -85,10 +94,7 @@ fn accept_dcc_chat(app: &mut App, nick: &str, id: &str) {
         let listener = match std::net::TcpListener::bind(bind_addr) {
             Ok(l) => l,
             Err(e) => {
-                add_local_event(
-                    app,
-                    &format!("{C_ERR}DCC CHAT bind error: {e}{C_RST}"),
-                );
+                add_local_event(app, &format!("{C_ERR}DCC CHAT bind error: {e}{C_RST}"));
                 return;
             }
         };
@@ -126,7 +132,10 @@ fn accept_dcc_chat(app: &mut App, nick: &str, id: &str) {
         if let Some(sender) = app.active_irc_sender()
             && let Err(e) = sender.send_privmsg(nick, &ctcp)
         {
-            add_local_event(app, &format!("{C_ERR}Failed to send DCC response: {e}{C_RST}"));
+            add_local_event(
+                app,
+                &format!("{C_ERR}Failed to send DCC response: {e}{C_RST}"),
+            );
             return;
         }
 
@@ -138,8 +147,14 @@ fn accept_dcc_chat(app: &mut App, nick: &str, id: &str) {
         let event_tx = app.dcc.dcc_tx.clone();
         let timeout_dur = std::time::Duration::from_secs(app.dcc.timeout_secs);
         tokio::spawn(async move {
-            crate::dcc::chat::listen_for_chat(task_id, tokio_listener, timeout_dur, event_tx, line_rx)
-                .await;
+            crate::dcc::chat::listen_for_chat(
+                task_id,
+                tokio_listener,
+                timeout_dur,
+                event_tx,
+                line_rx,
+            )
+            .await;
         });
 
         add_local_event(
@@ -160,13 +175,15 @@ fn accept_dcc_chat(app: &mut App, nick: &str, id: &str) {
         let timeout_dur = std::time::Duration::from_secs(app.dcc.timeout_secs);
         let addr = std::net::SocketAddr::new(record.addr, record.port);
         tokio::spawn(async move {
-            crate::dcc::chat::connect_for_chat(task_id, addr, timeout_dur, event_tx, line_rx)
-                .await;
+            crate::dcc::chat::connect_for_chat(task_id, addr, timeout_dur, event_tx, line_rx).await;
         });
 
         add_local_event(
             app,
-            &format!("DCC CHAT: connecting to {nick} ({}:{})...", record.addr, record.port),
+            &format!(
+                "DCC CHAT: connecting to {nick} ({}:{})...",
+                record.addr, record.port
+            ),
         );
     }
 }
@@ -207,8 +224,11 @@ fn initiate_dcc_chat(app: &mut App, nick: &str, passive: bool) {
         };
         app.dcc.records.insert(id, record);
 
-        let ctcp =
-            crate::dcc::protocol::build_dcc_chat_ctcp(&crate::dcc::protocol::PASSIVE_FAKE_IP, 0, Some(token));
+        let ctcp = crate::dcc::protocol::build_dcc_chat_ctcp(
+            &crate::dcc::protocol::PASSIVE_FAKE_IP,
+            0,
+            Some(token),
+        );
         if let Some(sender) = app.active_irc_sender()
             && let Err(e) = sender.send_privmsg(nick, &ctcp)
         {
@@ -231,10 +251,7 @@ fn initiate_dcc_chat(app: &mut App, nick: &str, passive: bool) {
         let listener = match std::net::TcpListener::bind(bind_addr) {
             Ok(l) => l,
             Err(e) => {
-                add_local_event(
-                    app,
-                    &format!("{C_ERR}DCC CHAT bind error: {e}{C_RST}"),
-                );
+                add_local_event(app, &format!("{C_ERR}DCC CHAT bind error: {e}{C_RST}"));
                 return;
             }
         };
@@ -351,7 +368,6 @@ fn pick_bind_port(range: (u16, u16)) -> u16 {
     }
 }
 
-
 // ─── /dcc close ───────────────────────────────────────────────────────────────
 
 fn cmd_dcc_close(app: &mut App, args: &[String]) {
@@ -409,9 +425,10 @@ fn cmd_dcc_list(app: &mut App) {
         };
 
         // Duration since connection was established, or since record creation.
-        let elapsed_secs = r
-            .started
-            .map_or_else(|| r.created.elapsed().as_secs(), |t: std::time::Instant| t.elapsed().as_secs());
+        let elapsed_secs = r.started.map_or_else(
+            || r.created.elapsed().as_secs(),
+            |t: std::time::Instant| t.elapsed().as_secs(),
+        );
         let duration = format_duration(elapsed_secs);
 
         lines.push(format!(
@@ -472,7 +489,10 @@ fn cmd_dcc_reject(app: &mut App, args: &[String]) {
     // Send the DCC REJECT notice over IRC so the remote client knows we declined.
     if let Some(sender) = app.active_irc_sender() {
         if let Err(e) = sender.send_notice(nick_str, &reject_ctcp) {
-            add_local_event(app, &format!("{C_ERR}Failed to send DCC REJECT: {e}{C_RST}"));
+            add_local_event(
+                app,
+                &format!("{C_ERR}Failed to send DCC REJECT: {e}{C_RST}"),
+            );
         }
     } else {
         add_local_event(app, "Not connected — DCC REJECT not sent");

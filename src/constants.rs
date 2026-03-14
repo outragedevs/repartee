@@ -49,6 +49,10 @@ pub fn sessions_dir() -> PathBuf {
     home_dir().join("sessions")
 }
 
+pub fn dicts_dir() -> PathBuf {
+    home_dir().join("dicts")
+}
+
 /// Create config directory and write default files on first run.
 pub fn ensure_config_dir() {
     let home = home_dir();
@@ -63,6 +67,9 @@ pub fn ensure_config_dir() {
     }
     if let Err(e) = std::fs::create_dir_all(sessions_dir()) {
         tracing::warn!("failed to create sessions dir: {e}");
+    }
+    if let Err(e) = std::fs::create_dir_all(dicts_dir()) {
+        tracing::warn!("failed to create dicts dir: {e}");
     }
 
     // Write default config if missing
