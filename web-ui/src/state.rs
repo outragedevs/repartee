@@ -145,7 +145,7 @@ impl AppState {
                     *entry = combined;
                 });
             }
-            WebEvent::NickList { buffer_id, nicks } => {
+            WebEvent::NickList { buffer_id, nicks, .. } => {
                 self.nick_lists.update(|lists| {
                     lists.insert(buffer_id, nicks);
                 });

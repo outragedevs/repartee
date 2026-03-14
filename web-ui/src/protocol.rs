@@ -54,13 +54,19 @@ pub enum WebEvent {
         buffer_id: String,
         messages: Vec<WireMessage>,
         has_more: bool,
+        #[serde(default)]
+        session_id: Option<String>,
     },
     NickList {
         buffer_id: String,
         nicks: Vec<WireNick>,
+        #[serde(default)]
+        session_id: Option<String>,
     },
     MentionsList {
         mentions: Vec<WireMention>,
+        #[serde(default)]
+        session_id: Option<String>,
     },
     Error {
         message: String,

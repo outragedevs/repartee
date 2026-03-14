@@ -30,8 +30,10 @@ pub async fn ws_handler(
     let session_id = uuid::Uuid::new_v4().to_string();
     tracing::info!(session_id = %session_id, "web client connecting");
 
-    ws.on_upgrade(move |socket| handle_socket(socket, state, session_id))
-        .into_response()
+    ws.on_upgrade(move |socket| async move {
+        handle_socket(socket, state, session_id).await;
+    })
+    .into_response()
 }
 
 /// Per-session WebSocket loop.
@@ -46,9 +48,12 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppHandl
 
     // Send SyncInit.
     let sync_init = build_sync_init_from_snapshot(&state);
+    tracing::info!(session_id = %session_id, "sending SyncInit");
     if send_json(&mut ws_tx, &sync_init).await.is_err() {
+        tracing::warn!(session_id = %session_id, "failed to send SyncInit");
         return;
     }
+    tracing::info!(session_id = %session_id, "SyncInit sent, entering event loop");
 
     let mut ping_interval = interval(Duration::from_secs(30));
     ping_interval.tick().await; // skip immediate first tick
