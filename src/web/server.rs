@@ -15,6 +15,16 @@ use super::auth::{RateLimiter, SessionStore, verify_password};
 use super::broadcast::WebBroadcaster;
 use super::protocol::WebCommand;
 
+/// Read-only snapshot of `AppState` for web handlers.
+///
+/// Updated periodically (1s tick) by the main event loop.
+/// Web handlers read from this rather than locking `AppState` directly.
+pub struct WebStateSnapshot {
+    pub buffers: Vec<super::protocol::BufferMeta>,
+    pub connections: Vec<super::protocol::ConnectionMeta>,
+    pub mention_count: u32,
+}
+
 /// Shared state passed to all axum handlers.
 pub struct AppHandle {
     pub broadcaster: Arc<WebBroadcaster>,
@@ -22,6 +32,12 @@ pub struct AppHandle {
     pub password: String,
     pub session_store: Arc<Mutex<SessionStore>>,
     pub rate_limiter: Arc<Mutex<RateLimiter>>,
+    /// Periodic snapshot of `AppState` for `SyncInit` / `FetchNickList`.
+    pub web_state_snapshot: Option<Arc<std::sync::RwLock<WebStateSnapshot>>>,
+    /// SQLite database handle for `FetchMessages` / `FetchMentions`.
+    pub db: Option<Arc<std::sync::Mutex<rusqlite::Connection>>>,
+    /// Whether the database uses encryption.
+    pub db_encrypt: bool,
 }
 
 #[derive(Deserialize)]
@@ -129,7 +145,7 @@ pub fn build_router(handle: Arc<AppHandle>) -> Router {
     Router::new()
         .route("/api/login", post(login_handler))
         .route("/api/health", get(health_handler))
-        // WebSocket endpoint will be added in ws.rs
+        .route("/ws", get(super::ws::ws_handler))
         .route("/", get(index_handler))
         .route("/{*path}", get(static_handler))
         .with_state(handle)
@@ -204,6 +220,9 @@ mod tests {
             password: "testpass".to_string(),
             session_store: Arc::new(Mutex::new(SessionStore::new())),
             rate_limiter: Arc::new(Mutex::new(RateLimiter::new())),
+            web_state_snapshot: None,
+            db: None,
+            db_encrypt: false,
         })
     }
 

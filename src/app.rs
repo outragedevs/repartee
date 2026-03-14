@@ -490,6 +490,8 @@ pub struct App {
     web_sessions: Option<std::sync::Arc<tokio::sync::Mutex<crate::web::auth::SessionStore>>>,
     /// Shared rate limiter for periodic cleanup.
     web_rate_limiter: Option<std::sync::Arc<tokio::sync::Mutex<crate::web::auth::RateLimiter>>>,
+    /// Shared state snapshot for web handlers (updated every 1s tick).
+    web_state_snapshot: Option<std::sync::Arc<std::sync::RwLock<crate::web::server::WebStateSnapshot>>>,
 }
 
 impl App {
@@ -690,6 +692,7 @@ impl App {
             web_server_handle: None,
             web_sessions: None,
             web_rate_limiter: None,
+            web_state_snapshot: None,
         };
         app.recompute_wrap_indent();
 
@@ -1517,12 +1520,25 @@ impl App {
             self.web_sessions = Some(std::sync::Arc::clone(&sessions));
             self.web_rate_limiter = Some(std::sync::Arc::clone(&limiter));
 
+            // Build initial state snapshot for web handlers.
+            let snapshot = std::sync::Arc::new(std::sync::RwLock::new(
+                crate::web::server::WebStateSnapshot {
+                    buffers: Vec::new(),
+                    connections: Vec::new(),
+                    mention_count: 0,
+                },
+            ));
+            self.web_state_snapshot = Some(std::sync::Arc::clone(&snapshot));
+
             let handle = std::sync::Arc::new(crate::web::server::AppHandle {
                 broadcaster: std::sync::Arc::clone(&self.web_broadcaster),
                 web_cmd_tx: self.web_cmd_tx.clone(),
                 password: self.config.web.password.clone(),
                 session_store: sessions,
                 rate_limiter: limiter,
+                web_state_snapshot: Some(snapshot),
+                db: self.storage.as_ref().map(|s| std::sync::Arc::clone(&s.db)),
+                db_encrypt: self.storage.as_ref().is_some_and(|s| s.encrypt),
             });
             match crate::web::server::start(&self.config.web, handle).await {
                 Ok(h) => {
@@ -1708,6 +1724,17 @@ impl App {
                         && let Ok(mut s) = sessions.try_lock() { s.purge_expired(); }
                     if let Some(ref limiter) = self.web_rate_limiter
                         && let Ok(mut l) = limiter.try_lock() { l.purge_expired(); }
+                    // Update web state snapshot.
+                    if let Some(ref snapshot) = self.web_state_snapshot
+                        && let Ok(mut snap) = snapshot.write()
+                    {
+                        let init = crate::web::snapshot::build_sync_init(&self.state, 0);
+                        if let crate::web::protocol::WebEvent::SyncInit { buffers, connections, mention_count } = init {
+                            snap.buffers = buffers;
+                            snap.connections = connections;
+                            snap.mention_count = mention_count;
+                        }
+                    }
                     let expired = self.dcc.purge_expired();
                     for (_id, nick) in expired {
                         crate::commands::helpers::add_local_event(
