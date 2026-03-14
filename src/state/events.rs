@@ -98,6 +98,16 @@ impl AppState {
         }
     }
 
+    /// Add a message to a buffer WITHOUT logging it to the database.
+    /// Used for local UI events (command output, status messages) that
+    /// should appear on screen but not be persisted.
+    pub fn add_local_message(&mut self, buffer_id: &str, message: Message) {
+        if let Some(buf) = self.buffers.get_mut(buffer_id) {
+            buf.messages.push(message);
+            enforce_scrollback(buf, self.scrollback_limit);
+        }
+    }
+
     pub fn add_message_with_activity(
         &mut self,
         buffer_id: &str,

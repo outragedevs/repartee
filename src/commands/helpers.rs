@@ -8,7 +8,7 @@ pub fn add_local_event(app: &mut App, text: &str) {
     };
     let active_id = active_id.to_string();
     let id = app.state.next_message_id();
-    app.state.add_message(
+    app.state.add_local_message(
         &active_id,
         Message {
             id,

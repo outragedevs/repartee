@@ -2280,7 +2280,7 @@ impl App {
     /// Add an event message to the specified buffer.
     fn add_event_to_buffer(&mut self, buffer_id: &str, text: String) {
         let id = self.state.next_message_id();
-        self.state.add_message(
+        self.state.add_local_message(
             buffer_id,
             Message {
                 id,
