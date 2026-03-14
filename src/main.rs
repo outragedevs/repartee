@@ -12,6 +12,7 @@ mod state;
 mod storage;
 mod theme;
 mod ui;
+mod web;
 
 use color_eyre::eyre::Result;
 use tracing_subscriber::EnvFilter;
