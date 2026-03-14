@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 pub use defaults::default_config;
 #[allow(unused_imports)]
-pub use env::{apply_credentials, load_env};
+pub use env::{apply_credentials, apply_web_credentials, load_env};
 
 // === Helper for serde defaults ===
 
@@ -72,6 +72,7 @@ pub struct AppConfig {
     pub logging: LoggingConfig,
     pub dcc: DccConfig,
     pub spellcheck: SpellcheckConfig,
+    pub web: WebConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -379,6 +380,49 @@ impl Default for SpellcheckConfig {
             enabled: false,
             languages: vec!["en_US".to_string()],
             dictionary_dir: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebConfig {
+    /// Enable the embedded web frontend.
+    pub enabled: bool,
+    /// Bind address for the HTTPS server.
+    pub bind_address: String,
+    /// Port for the HTTPS server.
+    pub port: u16,
+    /// Path to TLS certificate (PEM). Empty = auto-generated self-signed.
+    pub tls_cert: String,
+    /// Path to TLS private key (PEM). Empty = auto-generated self-signed.
+    pub tls_key: String,
+    /// Timestamp format for the web UI (chrono strftime syntax).
+    pub timestamp_format: String,
+    /// CSS line-height for chat messages.
+    pub line_height: f32,
+    /// Web theme name.
+    pub theme: String,
+    /// Cloudflare tunnel name (future use).
+    pub cloudflare_tunnel_name: String,
+    /// Login password — loaded from `.env` (`WEB_PASSWORD`), not serialized to TOML.
+    #[serde(skip)]
+    pub password: String,
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind_address: "127.0.0.1".to_string(),
+            port: 8443,
+            tls_cert: String::new(),
+            tls_key: String::new(),
+            timestamp_format: "%H:%M".to_string(),
+            line_height: 1.35,
+            theme: "nightfall".to_string(),
+            cloudflare_tunnel_name: String::new(),
+            password: String::new(),
         }
     }
 }

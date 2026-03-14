@@ -138,6 +138,26 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 is_credential: false,
             })
         }
+        "web" => {
+            let is_cred = parts[1] == "password";
+            let val = match parts[1] {
+                "enabled" => config.web.enabled.to_string(),
+                "bind_address" => config.web.bind_address.clone(),
+                "port" => config.web.port.to_string(),
+                "tls_cert" => config.web.tls_cert.clone(),
+                "tls_key" => config.web.tls_key.clone(),
+                "timestamp_format" => config.web.timestamp_format.clone(),
+                "line_height" => config.web.line_height.to_string(),
+                "theme" => config.web.theme.clone(),
+                "cloudflare_tunnel_name" => config.web.cloudflare_tunnel_name.clone(),
+                "password" => config.web.password.clone(),
+                _ => return None,
+            };
+            Some(Resolved {
+                value: val,
+                is_credential: is_cred,
+            })
+        }
         "servers" if parts.len() >= 3 => {
             let server = config.servers.get(parts[1])?;
             let is_cred = matches!(parts[2], "password" | "sasl_pass" | "sasl_user");
@@ -301,6 +321,22 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
             "dictionary_dir" => config.spellcheck.dictionary_dir = raw.to_string(),
             _ => return Err(format!("Unknown field: {path}")),
         },
+        "web" => match parts[1] {
+            "enabled" => config.web.enabled = parse_bool(raw)?,
+            "bind_address" => config.web.bind_address = raw.to_string(),
+            "port" => config.web.port = parse_u16(raw)?,
+            "tls_cert" => config.web.tls_cert = raw.to_string(),
+            "tls_key" => config.web.tls_key = raw.to_string(),
+            "timestamp_format" => config.web.timestamp_format = raw.to_string(),
+            "line_height" => {
+                config.web.line_height =
+                    raw.parse().map_err(|_| "Expected a decimal number".to_string())?;
+            }
+            "theme" => config.web.theme = raw.to_string(),
+            "cloudflare_tunnel_name" => config.web.cloudflare_tunnel_name = raw.to_string(),
+            "password" => config.web.password = raw.to_string(),
+            _ => return Err(format!("Unknown field: {path}")),
+        },
         "servers" if parts.len() >= 3 => {
             let server = config
                 .servers
@@ -394,6 +430,16 @@ const BASE_PATHS: &[&str] = &[
     "spellcheck.enabled",
     "spellcheck.languages",
     "spellcheck.dictionary_dir",
+    "web.enabled",
+    "web.bind_address",
+    "web.port",
+    "web.tls_cert",
+    "web.tls_key",
+    "web.timestamp_format",
+    "web.line_height",
+    "web.theme",
+    "web.cloudflare_tunnel_name",
+    "web.password",
 ];
 
 const SERVER_FIELDS: &[&str] = &[

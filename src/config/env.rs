@@ -29,6 +29,14 @@ pub fn load_env(path: &Path) -> Result<HashMap<String, String>> {
     Ok(vars)
 }
 
+/// Apply .env credentials to the web config.
+/// Reads `WEB_PASSWORD` from the env map.
+pub fn apply_web_credentials(web: &mut super::WebConfig, env: &HashMap<String, String>) {
+    if let Some(val) = env.get("WEB_PASSWORD") {
+        web.password.clone_from(val);
+    }
+}
+
 /// Apply .env credentials to server configs.
 /// For each server with id "foo", looks for `FOO_SASL_USER`, `FOO_SASL_PASS`, `FOO_PASSWORD`.
 pub fn apply_credentials(

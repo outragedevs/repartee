@@ -487,6 +487,7 @@ impl App {
         // Load .env credentials and apply to server configs
         let env_vars = config::load_env(&constants::env_path())?;
         config::apply_credentials(&mut config.servers, &env_vars);
+        config::apply_web_credentials(&mut config.web, &env_vars);
         let theme_path = constants::theme_dir().join(format!("{}.theme", config.general.theme));
         let theme = theme::load_theme(&theme_path)?;
 
