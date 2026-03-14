@@ -61,6 +61,10 @@ pub fn dicts_dir() -> PathBuf {
     home_dir().join("dicts")
 }
 
+pub fn certs_dir() -> PathBuf {
+    home_dir().join("certs")
+}
+
 /// Create config directory and write default files on first run.
 pub fn ensure_config_dir() {
     let home = home_dir();

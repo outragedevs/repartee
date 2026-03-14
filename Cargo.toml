@@ -54,6 +54,12 @@ ratatui-image = "10.0"
 spellbook = "0.4"
 image = "0.25"
 reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
+axum = "0.8"
+axum-extra = { version = "0.10", features = ["cookie-signed"] }
+tower = { version = "0.5", features = ["limit"] }
+rcgen = "0.14"
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
 
 [dev-dependencies]
 tempfile = "3.26"
