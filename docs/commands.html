@@ -392,6 +392,61 @@ Array values use comma-separated format: <code>#chan1,#chan2</code>.</p>
 <h2>See Also</h2>
 <p>/reload, /server, /items</p>
 </div>
+<div class="command-entry" data-command="spellcheck" data-category="Configuration">
+<h1>/spellcheck</h1>
+<p>Spell checker status and control.</p>
+<h2>Usage</h2>
+<pre><code>/spellcheck [status|reload|list|get &lt;lang&gt;]
+</code></pre>
+<h2>Subcommands</h2>
+<h3>status</h3>
+<p>Show spell checker status: enabled/disabled, active languages, dictionary directory, and number of loaded dictionaries.</p>
+<h3>reload</h3>
+<p>Reload dictionaries from disk. Useful after adding new <code>.dic</code>/<code>.aff</code> files or changing <code>spellcheck.languages</code>.</p>
+<h3>list</h3>
+<p>Fetch the list of available dictionaries from the Repartee dictionary repository. Shows each language with its install status.</p>
+<h3>get &lt;lang&gt;</h3>
+<p>Download a dictionary by language code (e.g. <code>en_US</code>, <code>pl_PL</code>, <code>de_DE</code>). Files are saved to <code>~/.repartee/dicts/</code> and the spell checker is automatically reloaded.</p>
+<h2>Configuration</h2>
+<pre><code class="language-toml">[spellcheck]
+enabled = true
+languages = [&quot;en_US&quot;, &quot;pl_PL&quot;, &quot;de_DE&quot;]
+dictionary_dir = &quot;&quot;   # default: ~/.repartee/dicts
+</code></pre>
+<p>Runtime settings:</p>
+<pre><code>/set spellcheck.enabled true
+/set spellcheck.languages en_US,pl_PL,de_DE
+/set spellcheck.dictionary_dir /path/to/dicts
+</code></pre>
+<h2>Dictionary setup</h2>
+<p>The easiest way is to use the built-in download command:</p>
+<pre><code>/spellcheck list          # see available dictionaries
+/spellcheck get en_US     # download English (US)
+/spellcheck get pl_PL     # download Polish
+</code></pre>
+<p>Dictionaries are downloaded from the <a href="https://github.com/outragedevs/repartee-dicts">outragedevs/repartee-dicts</a> repository, which provides UTF-8 Hunspell dictionaries sourced from <a href="https://github.com/wooorm/dictionaries">wooorm/dictionaries</a>.</p>
+<p>You can also place <code>.dic</code>/<code>.aff</code> files manually in <code>~/.repartee/dicts/</code>:</p>
+<pre><code>~/.repartee/dicts/en_US.dic
+~/.repartee/dicts/en_US.aff
+</code></pre>
+<p>For languages not included in our repository, you can find additional UTF-8 Hunspell dictionaries at <a href="https://github.com/wooorm/dictionaries">wooorm/dictionaries</a> (90+ languages).</p>
+<h2>Inline correction</h2>
+<p>When spell checking is active:</p>
+<ol>
+<li>Type a word and press <strong>Space</strong> — the word is checked</li>
+<li>Misspelled words appear <strong>underlined in red</strong></li>
+<li>A popup shows up to 4 suggestions</li>
+<li>Press <strong>Tab</strong> to cycle through suggestions (replaces the word inline)</li>
+<li>Press <strong>Space</strong> or continue typing to accept the current correction</li>
+<li>Press <strong>Escape</strong> to revert to the original word</li>
+<li>Press <strong>Backspace</strong> to dismiss and edit manually</li>
+</ol>
+<p>A word is correct if <strong>any</strong> active dictionary accepts it — so with <code>en_US</code> + <code>pl_PL</code> active, both English and Polish words pass.</p>
+<h2>Aliases</h2>
+<p><code>/spell</code></p>
+<h2>See also</h2>
+<p><code>/set spellcheck.*</code></p>
+</div>
 <div class="command-entry" data-command="unalias" data-category="Configuration">
 <h1>/unalias</h1>
 <h2>Syntax</h2>

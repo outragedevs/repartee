@@ -105,6 +105,7 @@
   themes/              # custom themes
   scripts/             # user scripts (Lua)
   logs/messages.db     # chat logs (SQLite)
+  dicts/               # Hunspell dictionaries (.dic/.aff)
   sessions/            # Unix sockets for detached sessions
 </code></pre>
 <h2>Full annotated example</h2>
@@ -188,6 +189,11 @@ autoaccept_lowports = false    # allow auto-accept from ports &lt; 1024
 # autochat_masks = [&quot;*!*@trusted.host&quot;]  # hostmask patterns for auto-accept
 max_connections = 10
 
+[spellcheck]
+enabled = true
+languages = [&quot;en_US&quot;]              # Hunspell language codes
+dictionary_dir = &quot;&quot;                # default: ~/.repartee/dicts
+
 [[ignores]]
 mask = &quot;*!*@spammer.host&quot;
 levels = [&quot;ALL&quot;]
@@ -216,6 +222,8 @@ levels = [&quot;ALL&quot;]
 <p><code>own_ip</code> overrides the IP address advertised in DCC offers. When empty, Repartee auto-detects from the IRC socket&#39;s local address (like irssi&#39;s <code>getsockname</code>). Set this to your public IP if behind NAT.</p>
 <p><code>port_range</code> controls the TCP port for DCC listeners. <code>&quot;0&quot;</code> lets the OS assign a free port. Use <code>&quot;1025 65535&quot;</code> or <code>&quot;5000-5100&quot;</code> to restrict to a range (useful for firewall rules).</p>
 <p><code>autochat_masks</code> is a list of <code>nick!ident@host</code> wildcard patterns. Incoming DCC CHAT offers matching any pattern are auto-accepted without prompting.</p>
+<h3><code>[spellcheck]</code></h3>
+<p>Inline spell checking. When <code>enabled = true</code>, misspelled words are underlined in red while typing. Press Tab to cycle suggestions, Space to accept, Escape to revert. <code>languages</code> is a list of Hunspell language codes (e.g., <code>en_US</code>, <code>pl_PL</code>, <code>de_DE</code>) — a word is correct if <strong>any</strong> active dictionary accepts it. Place <code>.dic</code>/<code>.aff</code> files in <code>~/.repartee/dicts/</code> (or set <code>dictionary_dir</code> to a custom path).</p>
 <h3><code>[[ignores]]</code></h3>
 <p>Ignore patterns for filtering unwanted messages. Uses wildcard matching (<code>*!*@host</code>). Levels: <code>MSGS</code>, <code>PUBLIC</code>, <code>NOTICES</code>, <code>ACTIONS</code>, <code>JOINS</code>, <code>PARTS</code>, <code>QUITS</code>, <code>NICKS</code>, <code>KICKS</code>, <code>CTCPS</code>, <code>ALL</code>.</p>
 <h2>Credentials</h2>

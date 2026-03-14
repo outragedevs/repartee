@@ -1020,10 +1020,43 @@ pub(crate) fn cmd_spellcheck(app: &mut App, args: &[String]) {
                 );
             }
         }
+        "list" => {
+            ev(app, &format!("{C_DIM}Fetching dictionary list...{C_RST}"));
+            let dict_dir = crate::spellcheck::SpellChecker::resolve_dict_dir(
+                &app.config.spellcheck.dictionary_dir,
+            );
+            crate::spellcheck::spawn_fetch_manifest(
+                app.http_client.clone(),
+                dict_dir,
+                app.dict_tx.clone(),
+            );
+        }
+        "get" => {
+            let Some(lang) = args.get(1) else {
+                ev(
+                    app,
+                    &format!("{C_ERR}Usage: /spellcheck get <lang> (e.g. en_US, pl_PL){C_RST}"),
+                );
+                return;
+            };
+            ev(
+                app,
+                &format!("{C_DIM}Downloading {lang}...{C_RST}"),
+            );
+            let dict_dir = crate::spellcheck::SpellChecker::resolve_dict_dir(
+                &app.config.spellcheck.dictionary_dir,
+            );
+            crate::spellcheck::spawn_download_dict(
+                lang.clone(),
+                app.http_client.clone(),
+                dict_dir,
+                app.dict_tx.clone(),
+            );
+        }
         _ => {
             ev(
                 app,
-                &format!("{C_ERR}Usage: /spellcheck [status|reload]{C_RST}"),
+                &format!("{C_ERR}Usage: /spellcheck [status|reload|list|get <lang>]{C_RST}"),
             );
         }
     }

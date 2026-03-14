@@ -13,6 +13,7 @@ The full directory layout:
   themes/              # custom themes
   scripts/             # user scripts (Lua)
   logs/messages.db     # chat logs (SQLite)
+  dicts/               # Hunspell dictionaries (.dic/.aff)
   sessions/            # Unix sockets for detached sessions
 ```
 
@@ -99,6 +100,11 @@ autoaccept_lowports = false    # allow auto-accept from ports < 1024
 # autochat_masks = ["*!*@trusted.host"]  # hostmask patterns for auto-accept
 max_connections = 10
 
+[spellcheck]
+enabled = true
+languages = ["en_US"]              # Hunspell language codes
+dictionary_dir = ""                # default: ~/.repartee/dicts
+
 [[ignores]]
 mask = "*!*@spammer.host"
 levels = ["ALL"]
@@ -151,6 +157,10 @@ DCC (Direct Client-to-Client) chat settings. DCC CHAT establishes peer-to-peer T
 `port_range` controls the TCP port for DCC listeners. `"0"` lets the OS assign a free port. Use `"1025 65535"` or `"5000-5100"` to restrict to a range (useful for firewall rules).
 
 `autochat_masks` is a list of `nick!ident@host` wildcard patterns. Incoming DCC CHAT offers matching any pattern are auto-accepted without prompting.
+
+### `[spellcheck]`
+
+Inline spell checking. When `enabled = true`, misspelled words are underlined in red while typing. Press Tab to cycle suggestions, Space to accept, Escape to revert. `languages` is a list of Hunspell language codes (e.g., `en_US`, `pl_PL`, `de_DE`) — a word is correct if **any** active dictionary accepts it. Place `.dic`/`.aff` files in `~/.repartee/dicts/` (or set `dictionary_dir` to a custom path).
 
 ### `[[ignores]]`
 

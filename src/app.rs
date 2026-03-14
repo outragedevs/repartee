@@ -472,6 +472,10 @@ pub struct App {
     dcc_rx: mpsc::UnboundedReceiver<crate::dcc::DccEvent>,
     /// Spell checker (loaded from Hunspell dictionaries).
     pub spellchecker: Option<crate::spellcheck::SpellChecker>,
+    /// Receiver for dictionary download events (list/get results).
+    dict_rx: mpsc::UnboundedReceiver<crate::spellcheck::DictEvent>,
+    /// Sender cloned into dictionary download tasks.
+    pub dict_tx: mpsc::UnboundedSender<crate::spellcheck::DictEvent>,
 }
 
 impl App {
@@ -560,6 +564,9 @@ impl App {
         );
 
         let http_client = reqwest::Client::new();
+
+        // --- Dictionary download channel ---
+        let (dict_tx, dict_rx) = mpsc::unbounded_channel();
 
         // --- DCC subsystem ---
         let (mut dcc, dcc_rx) = crate::dcc::DccManager::new();
@@ -657,6 +664,8 @@ impl App {
             dcc,
             dcc_rx,
             spellchecker: None,
+            dict_rx,
+            dict_tx,
         };
         app.recompute_wrap_indent();
 
@@ -1617,6 +1626,11 @@ impl App {
                         self.handle_dcc_event(ev);
                     }
                 },
+                dict_ev = self.dict_rx.recv() => {
+                    if let Some(ev) = dict_ev {
+                        self.handle_dict_event(ev);
+                    }
+                },
                 _ = tick.tick() => {
                     self.handle_netsplit_tick();
                     self.purge_expired_batches();
@@ -1941,6 +1955,82 @@ impl App {
                 log_ref_id: None,
                 tags: std::collections::HashMap::new(),
             });
+        }
+    }
+
+    // ── Dictionary download event handling ─────────────────────────────────
+
+    fn handle_dict_event(&mut self, ev: crate::spellcheck::DictEvent) {
+        use crate::spellcheck::DictEvent;
+        let ev_fn = crate::commands::helpers::add_local_event;
+        match ev {
+            DictEvent::ListResult { entries } => {
+                ev_fn(
+                    self,
+                    &crate::commands::types::divider("Available Dictionaries"),
+                );
+                for (code, name, installed) in &entries {
+                    let status = if *installed {
+                        format!(
+                            " {}[installed]{}",
+                            crate::commands::types::C_OK,
+                            crate::commands::types::C_RST
+                        )
+                    } else {
+                        String::new()
+                    };
+                    ev_fn(
+                        self,
+                        &format!(
+                            "  {}{code:<8}{} {name}{status}",
+                            crate::commands::types::C_CMD,
+                            crate::commands::types::C_RST
+                        ),
+                    );
+                }
+                ev_fn(
+                    self,
+                    &format!(
+                        "  {}Use /spellcheck get <lang> to download{}",
+                        crate::commands::types::C_DIM,
+                        crate::commands::types::C_RST
+                    ),
+                );
+            }
+            DictEvent::Downloaded { lang } => {
+                ev_fn(
+                    self,
+                    &format!(
+                        "{}Dictionary {lang} downloaded successfully{}",
+                        crate::commands::types::C_OK,
+                        crate::commands::types::C_RST
+                    ),
+                );
+                // Auto-reload if the language is in the active config
+                self.reload_spellchecker();
+                let loaded = self
+                    .spellchecker
+                    .as_ref()
+                    .map_or(0, crate::spellcheck::SpellChecker::dict_count);
+                ev_fn(
+                    self,
+                    &format!(
+                        "{}Spell checker reloaded ({loaded} dictionaries){}",
+                        crate::commands::types::C_OK,
+                        crate::commands::types::C_RST
+                    ),
+                );
+            }
+            DictEvent::Error { message } => {
+                ev_fn(
+                    self,
+                    &format!(
+                        "{}{message}{}",
+                        crate::commands::types::C_ERR,
+                        crate::commands::types::C_RST
+                    ),
+                );
+            }
         }
     }
 

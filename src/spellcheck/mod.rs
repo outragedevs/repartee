@@ -7,9 +7,12 @@
 //! Follows `WeeChat`'s spell plugin UX: strip trailing punctuation, skip URLs,
 //! skip nicks, skip number-like strings, minimum word length 2.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use serde::Deserialize;
+use tokio::sync::mpsc;
 
 /// Maximum number of suggestions returned per misspelled word.
 const MAX_SUGGESTIONS: usize = 4;
@@ -139,6 +142,108 @@ impl SpellChecker {
             PathBuf::from(configured)
         }
     }
+}
+
+// ── Dictionary download types ──────────────────────────────────────────
+
+/// Remote dictionary manifest (mirrors `manifest.json` in repartee-dicts repo).
+#[derive(Debug, Clone, Deserialize)]
+pub struct DictManifest {
+    #[expect(dead_code, reason = "reserved for future manifest format changes")]
+    pub version: u32,
+    pub dictionaries: HashMap<String, DictInfo>,
+}
+
+/// Metadata for a single dictionary in the manifest.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DictInfo {
+    pub name: String,
+}
+
+/// Events sent from async dictionary download tasks back to the main loop.
+#[derive(Debug)]
+pub enum DictEvent {
+    /// Manifest fetched successfully — contains available dicts and which are installed.
+    ListResult {
+        entries: Vec<(String, String, bool)>, // (code, name, installed)
+    },
+    /// A dictionary was downloaded and saved.
+    Downloaded { lang: String },
+    /// An error occurred during list or download.
+    Error { message: String },
+}
+
+/// Spawn an async task to fetch the manifest and report available dictionaries.
+pub fn spawn_fetch_manifest(
+    client: reqwest::Client,
+    dict_dir: PathBuf,
+    tx: mpsc::UnboundedSender<DictEvent>,
+) {
+    tokio::spawn(async move {
+        let event = match fetch_manifest(&client).await {
+            Ok(manifest) => {
+                let mut entries: Vec<(String, String, bool)> = manifest
+                    .dictionaries
+                    .into_iter()
+                    .map(|(code, info)| {
+                        let installed = dict_dir.join(format!("{code}.dic")).exists();
+                        (code, info.name, installed)
+                    })
+                    .collect();
+                entries.sort_by(|a, b| a.0.cmp(&b.0));
+                DictEvent::ListResult { entries }
+            }
+            Err(e) => DictEvent::Error {
+                message: format!("Failed to fetch dictionary list: {e}"),
+            },
+        };
+        let _ = tx.send(event);
+    });
+}
+
+/// Spawn an async task to download a single dictionary (`.aff` + `.dic`).
+pub fn spawn_download_dict(
+    lang: String,
+    client: reqwest::Client,
+    dict_dir: PathBuf,
+    tx: mpsc::UnboundedSender<DictEvent>,
+) {
+    tokio::spawn(async move {
+        let base = crate::constants::DICTS_REPO_URL;
+        let event = match download_dict_files(&client, base, &lang, &dict_dir).await {
+            Ok(()) => DictEvent::Downloaded { lang },
+            Err(e) => DictEvent::Error {
+                message: format!("Failed to download {lang}: {e}"),
+            },
+        };
+        let _ = tx.send(event);
+    });
+}
+
+/// Fetch and parse the remote manifest.
+async fn fetch_manifest(client: &reqwest::Client) -> color_eyre::eyre::Result<DictManifest> {
+    let url = crate::constants::DICTS_MANIFEST_URL;
+    let resp = client.get(url).send().await?.error_for_status()?;
+    let manifest: DictManifest = resp.json().await?;
+    Ok(manifest)
+}
+
+/// Download `.aff` and `.dic` files for a language and write them to `dict_dir`.
+async fn download_dict_files(
+    client: &reqwest::Client,
+    base_url: &str,
+    lang: &str,
+    dict_dir: &Path,
+) -> color_eyre::eyre::Result<()> {
+    for ext in &["aff", "dic"] {
+        let url = format!("{base_url}/{lang}.{ext}");
+        let resp = client.get(&url).send().await?.error_for_status()?;
+        let bytes = resp.bytes().await?;
+        let path = dict_dir.join(format!("{lang}.{ext}"));
+        tokio::fs::write(&path, &bytes).await?;
+        tracing::info!(lang = %lang, ext = %ext, bytes = bytes.len(), "dictionary file saved");
+    }
+    Ok(())
 }
 
 /// Strip leading and trailing non-alphanumeric characters from a word.
@@ -358,5 +463,27 @@ mod tests {
         assert!(is_url("ftp://files"));
         assert!(!is_url("hello"));
         assert!(!is_url("httpwhat"));
+    }
+
+    #[test]
+    fn manifest_deserialize() {
+        let json = r#"{
+            "version": 1,
+            "dictionaries": {
+                "en_US": { "name": "English (US)" },
+                "pl_PL": { "name": "Polish" }
+            }
+        }"#;
+        let manifest: DictManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(manifest.dictionaries.len(), 2);
+        assert_eq!(manifest.dictionaries["en_US"].name, "English (US)");
+        assert_eq!(manifest.dictionaries["pl_PL"].name, "Polish");
+    }
+
+    #[test]
+    fn manifest_empty_dictionaries() {
+        let json = r#"{ "version": 1, "dictionaries": {} }"#;
+        let manifest: DictManifest = serde_json::from_str(json).unwrap();
+        assert!(manifest.dictionaries.is_empty());
     }
 }

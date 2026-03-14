@@ -1,3 +1,8 @@
+---
+category: Configuration
+description: Spell checker status and control
+---
+
 # /spellcheck
 
 Spell checker status and control.
@@ -5,7 +10,7 @@ Spell checker status and control.
 ## Usage
 
 ```
-/spellcheck [status|reload]
+/spellcheck [status|reload|list|get <lang>]
 ```
 
 ## Subcommands
@@ -17,6 +22,14 @@ Show spell checker status: enabled/disabled, active languages, dictionary direct
 ### reload
 
 Reload dictionaries from disk. Useful after adding new `.dic`/`.aff` files or changing `spellcheck.languages`.
+
+### list
+
+Fetch the list of available dictionaries from the Repartee dictionary repository. Shows each language with its install status.
+
+### get &lt;lang&gt;
+
+Download a dictionary by language code (e.g. `en_US`, `pl_PL`, `de_DE`). Files are saved to `~/.repartee/dicts/` and the spell checker is automatically reloaded.
 
 ## Configuration
 
@@ -37,17 +50,24 @@ Runtime settings:
 
 ## Dictionary setup
 
-Place Hunspell `.dic` and `.aff` files in `~/.repartee/dicts/`:
+The easiest way is to use the built-in download command:
+
+```
+/spellcheck list          # see available dictionaries
+/spellcheck get en_US     # download English (US)
+/spellcheck get pl_PL     # download Polish
+```
+
+Dictionaries are downloaded from the [outragedevs/repartee-dicts](https://github.com/outragedevs/repartee-dicts) repository, which provides UTF-8 Hunspell dictionaries sourced from [wooorm/dictionaries](https://github.com/wooorm/dictionaries).
+
+You can also place `.dic`/`.aff` files manually in `~/.repartee/dicts/`:
 
 ```
 ~/.repartee/dicts/en_US.dic
 ~/.repartee/dicts/en_US.aff
-~/.repartee/dicts/pl_PL.dic
-~/.repartee/dicts/pl_PL.aff
 ```
 
-Dictionaries are available from the LibreOffice project:
-https://github.com/LibreOffice/dictionaries
+For languages not included in our repository, you can find additional UTF-8 Hunspell dictionaries at [wooorm/dictionaries](https://github.com/wooorm/dictionaries) (90+ languages).
 
 ## Inline correction
 

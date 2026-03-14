@@ -38,6 +38,10 @@ A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by ir
     <div class="card-body">Lua 5.4 scripts with an event bus, custom commands, and full IRC/state access.</div>
   </div>
   <div class="card">
+    <div class="card-title">Spell Checking</div>
+    <div class="card-body">Multilingual inline spell checking with Hunspell dictionaries. Tab cycles suggestions, Space accepts.</div>
+  </div>
+  <div class="card">
     <div class="card-title">IRCv3 Capabilities</div>
     <div class="card-body">Full IRCv3 suite: server-time, echo-message, away-notify, account tags, BATCH netsplit grouping, SASL SCRAM-SHA-256, and more.</div>
   </div>
