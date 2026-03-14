@@ -1,8 +1,12 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use leptos::prelude::*;
 
 use crate::components::layout::Layout;
 use crate::components::login::Login;
 use crate::state::AppState;
+use crate::ws::WsSender;
 
 /// Root application component.
 ///
@@ -11,6 +15,10 @@ use crate::state::AppState;
 pub fn App() -> impl IntoView {
     let state = AppState::new();
     provide_context(state.clone());
+
+    // Provide the shared WebSocket sender for all components.
+    let ws_sender = WsSender(Rc::new(RefCell::new(None)));
+    provide_context(ws_sender);
 
     // Apply theme from state to the document.
     Effect::new(move || {
@@ -21,7 +29,6 @@ pub fn App() -> impl IntoView {
         {
             let _ = doc.set_attribute("data-theme", &theme);
         }
-        // Persist to localStorage.
         if let Some(storage) = web_sys::window()
             .and_then(|w| w.local_storage().ok().flatten())
         {
