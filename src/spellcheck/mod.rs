@@ -2,15 +2,28 @@
 //!
 //! Loads one `spellbook::Dictionary` per configured language from `.dic`/`.aff`
 //! files. A word is considered correct if ANY dictionary accepts it (union check).
+//! Suggestions are ranked by dictionary priority (config order).
+//!
+//! Follows `WeeChat`'s spell plugin UX: strip trailing punctuation, skip URLs,
+//! skip nicks, skip number-like strings, minimum word length 2.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Maximum number of suggestions returned per misspelled word.
 const MAX_SUGGESTIONS: usize = 4;
 
-/// Minimum word length to bother spell-checking.
+/// Maximum suggestions to collect from a single dictionary before moving on.
+const MAX_PER_DICT: usize = 6;
+
+/// Minimum word length to spell-check (after punctuation stripping).
 const MIN_WORD_LEN: usize = 2;
+
+/// URL prefixes that should be skipped entirely.
+const URL_PREFIXES: &[&str] = &[
+    "http:", "https:", "ftp:", "ftps:", "ssh:", "irc:", "ircs:", "git:", "svn:", "file:", "telnet:",
+];
 
 /// A loaded language dictionary.
 struct LangDict {
@@ -30,6 +43,7 @@ impl SpellChecker {
     ///
     /// Each language needs `{lang}.aff` and `{lang}.dic` in the directory.
     /// Languages that fail to load are logged and skipped.
+    /// Dictionary order determines suggestion priority (first = highest).
     pub fn load(languages: &[String], dict_dir: &Path) -> Self {
         let mut dicts = Vec::new();
         for lang in languages {
@@ -49,45 +63,62 @@ impl SpellChecker {
         Self { dicts }
     }
 
-    /// Returns true if the word is accepted by at least one dictionary.
+    /// Check whether a word should be flagged as misspelled.
     ///
-    /// Empty strings, very short words, and words containing digits are
-    /// always considered correct to avoid noise.
-    pub fn check(&self, word: &str) -> bool {
+    /// Returns `true` if the word is correct (or should be skipped).
+    /// The word should already be stripped of surrounding punctuation.
+    pub fn check(&self, word: &str, nicks: &HashSet<String>) -> bool {
         if self.dicts.is_empty() || word.len() < MIN_WORD_LEN {
             return true;
         }
-        // Skip words with digits or special characters (URLs, nicks, etc.)
-        if word
-            .chars()
-            .any(|c| c.is_ascii_digit() || c == '_' || c == '-')
-        {
+        // Skip URLs
+        if is_url(word) {
             return true;
         }
+        // Skip number-like strings (digits + punctuation only)
+        if is_number_like(word) {
+            return true;
+        }
+        // Skip words containing underscores (variable names, etc.)
+        if word.contains('_') {
+            return true;
+        }
+        // Skip channel nicks (case-insensitive)
+        let word_lower = word.to_lowercase();
+        if nicks.iter().any(|n| n.to_lowercase() == word_lower) {
+            return true;
+        }
+        // Union check: correct if ANY dictionary accepts
         self.dicts.iter().any(|ld| ld.dict.check(word))
     }
 
-    /// Get spelling suggestions for a misspelled word, merged from all dictionaries.
+    /// Get spelling suggestions for a misspelled word, ranked by dictionary
+    /// priority (config order). First dictionary's suggestions come first.
     ///
     /// Returns up to [`MAX_SUGGESTIONS`] unique suggestions.
     pub fn suggest(&self, word: &str) -> Vec<String> {
-        let mut suggestions = Vec::new();
+        let mut all: Vec<String> = Vec::new();
+        let mut seen = HashSet::new();
+
+        // Collect from each dictionary in priority order.
+        // First dictionary = highest priority, its suggestions appear first.
         for ld in &self.dicts {
-            ld.dict.suggest(word, &mut suggestions);
-        }
-        // Deduplicate while preserving order (first occurrence wins).
-        let mut seen = Vec::new();
-        suggestions.retain(|s| {
-            let lower = s.to_lowercase();
-            if seen.contains(&lower) {
-                false
-            } else {
-                seen.push(lower);
-                true
+            let mut dict_suggestions = Vec::new();
+            ld.dict.suggest(word, &mut dict_suggestions);
+
+            for s in dict_suggestions.into_iter().take(MAX_PER_DICT) {
+                let lower = s.to_lowercase();
+                if seen.contains(&lower) {
+                    continue;
+                }
+                seen.insert(lower);
+                all.push(s);
+                if all.len() >= MAX_SUGGESTIONS {
+                    return all;
+                }
             }
-        });
-        suggestions.truncate(MAX_SUGGESTIONS);
-        suggestions
+        }
+        all
     }
 
     /// Whether any dictionaries are loaded.
@@ -108,6 +139,59 @@ impl SpellChecker {
             PathBuf::from(configured)
         }
     }
+}
+
+/// Strip leading and trailing non-alphanumeric characters from a word.
+///
+/// Keeps apostrophes (`'`) and hyphens (`-`) that are INSIDE the word
+/// (between alphanumeric chars), matching `WeeChat`'s word boundary rules.
+/// Returns the stripped word and byte offsets relative to the input.
+///
+/// Examples:
+/// - `"hello!"` → `("hello", 0, 5)`
+/// - `"do?"` → `("do", 0, 2)`
+/// - `"'test'"` → `("test", 1, 5)`
+/// - `"don't"` → `("don't", 0, 5)`
+/// - `"--well-known--"` → `("well-known", 2, 12)`
+pub fn strip_word_punctuation(word: &str) -> (&str, usize, usize) {
+    let bytes = word.as_bytes();
+    let len = word.len();
+
+    // Find first alphanumeric char
+    let start = word
+        .char_indices()
+        .find(|(_, c)| c.is_alphanumeric())
+        .map_or(len, |(i, _)| i);
+
+    if start >= len {
+        return ("", 0, 0);
+    }
+
+    // Find last alphanumeric char
+    let end = word
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_alphanumeric())
+        .map_or(start, |(i, c)| i + c.len_utf8());
+
+    // Safety: start..end are valid char boundaries found by char_indices
+    let _ = bytes; // suppress unused warning
+    (&word[start..end], start, end)
+}
+
+/// Check if a word looks like a URL.
+fn is_url(word: &str) -> bool {
+    let lower = word.to_lowercase();
+    URL_PREFIXES.iter().any(|prefix| lower.starts_with(prefix))
+}
+
+/// Check if a string contains only digits and punctuation (no letters).
+/// Matches `WeeChat`'s "simili number" detection: `"123"`, `"10:30"`, `"$5.99"`.
+fn is_number_like(word: &str) -> bool {
+    !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_digit() || c.is_ascii_punctuation())
 }
 
 /// Load a single Hunspell dictionary from `.aff` + `.dic` files.
@@ -133,29 +217,103 @@ mod tests {
     #[test]
     fn empty_checker_accepts_everything() {
         let checker = SpellChecker { dicts: vec![] };
-        assert!(checker.check("anything"));
-        assert!(checker.check("xyzzy"));
+        assert!(checker.check("anything", &HashSet::new()));
+        assert!(checker.check("xyzzy", &HashSet::new()));
     }
 
     #[test]
     fn short_words_always_accepted() {
         let checker = SpellChecker { dicts: vec![] };
-        assert!(checker.check("a"));
-        assert!(checker.check(""));
+        assert!(checker.check("a", &HashSet::new()));
+        assert!(checker.check("", &HashSet::new()));
     }
 
     #[test]
     fn words_with_digits_skipped() {
         let checker = SpellChecker { dicts: vec![] };
-        assert!(checker.check("test123"));
-        assert!(checker.check("h4ck"));
+        assert!(checker.check("123", &HashSet::new()));
+        assert!(checker.check("10:30", &HashSet::new()));
     }
 
     #[test]
-    fn words_with_underscore_or_dash_skipped() {
+    fn words_with_underscore_skipped() {
         let checker = SpellChecker { dicts: vec![] };
-        assert!(checker.check("foo_bar"));
-        assert!(checker.check("foo-bar"));
+        assert!(checker.check("foo_bar", &HashSet::new()));
+    }
+
+    #[test]
+    fn urls_skipped() {
+        let checker = SpellChecker { dicts: vec![] };
+        assert!(checker.check("https://example.com", &HashSet::new()));
+        assert!(checker.check("irc://server", &HashSet::new()));
+    }
+
+    #[test]
+    fn nicks_skipped() {
+        let checker = SpellChecker { dicts: vec![] };
+        let nicks: HashSet<String> = ["kofany", "ferris"].iter().map(|s| s.to_string()).collect();
+        assert!(checker.check("kofany", &nicks));
+        assert!(checker.check("Kofany", &nicks)); // case-insensitive
+    }
+
+    #[test]
+    fn number_like_detection() {
+        assert!(is_number_like("123"));
+        assert!(is_number_like("10:30"));
+        assert!(is_number_like("$5.99"));
+        assert!(!is_number_like("hello"));
+        assert!(!is_number_like("test123")); // has letters
+        assert!(!is_number_like(""));
+    }
+
+    #[test]
+    fn strip_punctuation_trailing() {
+        let (word, start, end) = strip_word_punctuation("hello!");
+        assert_eq!(word, "hello");
+        assert_eq!(start, 0);
+        assert_eq!(end, 5);
+    }
+
+    #[test]
+    fn strip_punctuation_question() {
+        let (word, _, _) = strip_word_punctuation("do?");
+        assert_eq!(word, "do");
+    }
+
+    #[test]
+    fn strip_punctuation_quotes() {
+        let (word, start, end) = strip_word_punctuation("'test'");
+        assert_eq!(word, "test");
+        assert_eq!(start, 1);
+        assert_eq!(end, 5);
+    }
+
+    #[test]
+    fn strip_punctuation_apostrophe_inside() {
+        let (word, _, _) = strip_word_punctuation("don't");
+        assert_eq!(word, "don't");
+    }
+
+    #[test]
+    fn strip_punctuation_hyphen_inside() {
+        let (word, start, end) = strip_word_punctuation("--well-known--");
+        assert_eq!(word, "well-known");
+        assert_eq!(start, 2);
+        assert_eq!(end, 12);
+    }
+
+    #[test]
+    fn strip_punctuation_empty() {
+        let (word, _, _) = strip_word_punctuation("...");
+        assert_eq!(word, "");
+    }
+
+    #[test]
+    fn strip_punctuation_clean_word() {
+        let (word, start, end) = strip_word_punctuation("hello");
+        assert_eq!(word, "hello");
+        assert_eq!(start, 0);
+        assert_eq!(end, 5);
     }
 
     #[test]
@@ -191,5 +349,14 @@ mod tests {
         let checker = SpellChecker { dicts: vec![] };
         let suggestions = checker.suggest("hello");
         assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn url_detection() {
+        assert!(is_url("https://example.com"));
+        assert!(is_url("HTTP://FOO.BAR"));
+        assert!(is_url("ftp://files"));
+        assert!(!is_url("hello"));
+        assert!(!is_url("httpwhat"));
     }
 }

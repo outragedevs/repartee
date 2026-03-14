@@ -664,6 +664,18 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
         }
     }
 
+    // Spellcheck
+    lines.push(format!("  {C_DIM}[spellcheck]{C_RST}"));
+    for field in &["enabled", "languages", "dictionary_dir"] {
+        let path = format!("spellcheck.{field}");
+        if let Some(resolved) = get_config_value(config, &path) {
+            lines.push(format!(
+                "    {C_HEADER}{path}{C_RST} = {C_CMD}{}{C_RST}",
+                resolved.value
+            ));
+        }
+    }
+
     // Servers
     for server_id in config.servers.keys() {
         lines.push(format!("  {C_DIM}[servers.{server_id}]{C_RST}"));

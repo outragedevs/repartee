@@ -3644,23 +3644,44 @@ impl App {
         if self.input.is_command() {
             return;
         }
-        // Extract the last completed word.
-        let Some((word_start, word_end, word)) = self.input.last_completed_word() else {
+        // Extract the last completed word (may include trailing punctuation).
+        let Some((raw_start, _raw_end, raw_word)) = self.input.last_completed_word() else {
             return;
         };
-        // Check the word.
-        if checker.check(&word) {
+
+        // Strip leading/trailing punctuation (WeeChat-style).
+        // "do?" → "do", "hello!" → "hello", "'test'" → "test"
+        let (stripped, strip_offset, strip_end) =
+            crate::spellcheck::strip_word_punctuation(&raw_word);
+        if stripped.is_empty() {
             return;
         }
-        // Misspelled — get suggestions.
-        let suggestions = checker.suggest(&word);
+
+        // Actual byte positions in the input buffer for the stripped word.
+        let word_start = raw_start + strip_offset;
+        let word_end = raw_start + strip_end;
+
+        // Collect nicks from the active buffer to skip.
+        let nicks: std::collections::HashSet<String> = self
+            .state
+            .active_buffer()
+            .map_or_else(std::collections::HashSet::new, |buf| {
+                buf.users.values().map(|e| e.nick.clone()).collect()
+            });
+
+        // Check the stripped word.
+        if checker.check(stripped, &nicks) {
+            return;
+        }
+        // Misspelled — get suggestions ranked by dictionary priority.
+        let suggestions = checker.suggest(stripped);
         if suggestions.is_empty() {
             return;
         }
         self.input.spell_state = Some(crate::ui::input::SpellCorrection {
             word_start,
             word_end,
-            original: word,
+            original: stripped.to_string(),
             suggestions,
             index: 0,
         });
