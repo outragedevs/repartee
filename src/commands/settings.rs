@@ -138,6 +138,20 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 is_credential: false,
             })
         }
+        "effects" => {
+            let val = match parts[1] {
+                "enabled" => config.effects.enabled.to_string(),
+                "buffer_switch" => config.effects.buffer_switch.clone(),
+                "buffer_switch_ms" => config.effects.buffer_switch_ms.to_string(),
+                "highlight_flash" => config.effects.highlight_flash.to_string(),
+                "highlight_ms" => config.effects.highlight_ms.to_string(),
+                _ => return None,
+            };
+            Some(Resolved {
+                value: val,
+                is_credential: false,
+            })
+        }
         "servers" if parts.len() >= 3 => {
             let server = config.servers.get(parts[1])?;
             let is_cred = matches!(parts[2], "password" | "sasl_pass" | "sasl_user");
@@ -292,6 +306,25 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
             }
             _ => return Err(format!("Unknown field: {path}")),
         },
+        "effects" => match parts[1] {
+            "enabled" => config.effects.enabled = parse_bool(raw)?,
+            "buffer_switch" => {
+                if !matches!(raw, "fade" | "sweep" | "coalesce" | "none") {
+                    return Err("Expected fade, sweep, coalesce, or none".to_string());
+                }
+                config.effects.buffer_switch = raw.to_string();
+            }
+            "buffer_switch_ms" => {
+                config.effects.buffer_switch_ms =
+                    raw.parse().map_err(|_| "Expected a number".to_string())?;
+            }
+            "highlight_flash" => config.effects.highlight_flash = parse_bool(raw)?,
+            "highlight_ms" => {
+                config.effects.highlight_ms =
+                    raw.parse().map_err(|_| "Expected a number".to_string())?;
+            }
+            _ => return Err(format!("Unknown field: {path}")),
+        },
         "spellcheck" => match parts[1] {
             "enabled" => config.spellcheck.enabled = parse_bool(raw)?,
             "languages" => {
@@ -394,6 +427,11 @@ const BASE_PATHS: &[&str] = &[
     "spellcheck.enabled",
     "spellcheck.languages",
     "spellcheck.dictionary_dir",
+    "effects.enabled",
+    "effects.buffer_switch",
+    "effects.buffer_switch_ms",
+    "effects.highlight_flash",
+    "effects.highlight_ms",
 ];
 
 const SERVER_FIELDS: &[&str] = &[
@@ -513,6 +551,11 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                     }
                     _ => {}
                 }
+            }
+
+            // Sync effects runtime state
+            if path.starts_with("effects.") {
+                app.effects.set_enabled(app.config.effects.enabled);
             }
 
             // Sync spellcheck runtime state
@@ -656,6 +699,24 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
         "max_connections",
     ] {
         let path = format!("dcc.{field}");
+        if let Some(resolved) = get_config_value(config, &path) {
+            lines.push(format!(
+                "    {C_HEADER}{path}{C_RST} = {C_CMD}{}{C_RST}",
+                resolved.value
+            ));
+        }
+    }
+
+    // Effects
+    lines.push(format!("  {C_DIM}[effects]{C_RST}"));
+    for field in &[
+        "enabled",
+        "buffer_switch",
+        "buffer_switch_ms",
+        "highlight_flash",
+        "highlight_ms",
+    ] {
+        let path = format!("effects.{field}");
         if let Some(resolved) = get_config_value(config, &path) {
             lines.push(format!(
                 "    {C_HEADER}{path}{C_RST} = {C_CMD}{}{C_RST}",

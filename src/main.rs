@@ -3,6 +3,7 @@ mod commands;
 mod config;
 mod constants;
 mod dcc;
+mod effects;
 mod image_preview;
 mod irc;
 mod scripting;

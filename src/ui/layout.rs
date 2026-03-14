@@ -119,8 +119,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // Spell suggestion popup (above input, below image overlay).
     super::input::render_spell_popup(frame, input_area, app);
 
+    // Process visual transition effects (tachyonfx post-processing).
+    // Must run AFTER widgets render, BEFORE overlays.
+    let full_area = frame.area();
+    app.effects.process(frame.buffer_mut(), full_area);
+
     // Image preview overlay (drawn last, on top of everything).
-    super::image_overlay::render(frame, frame.area(), app);
+    super::image_overlay::render(frame, full_area, app);
 
     // Targeted repaint after image dismiss (Kitty/iTerm2 only).
     // The graphics layer was already cleaned up by escape sequences.

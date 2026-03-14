@@ -472,6 +472,8 @@ pub struct App {
     dcc_rx: mpsc::UnboundedReceiver<crate::dcc::DccEvent>,
     /// Spell checker (loaded from Hunspell dictionaries).
     pub spellchecker: Option<crate::spellcheck::SpellChecker>,
+    /// Visual transition effects (tachyonfx).
+    pub effects: crate::effects::EffectState,
 }
 
 impl App {
@@ -593,6 +595,8 @@ impl App {
             }
         }
 
+        let effects = crate::effects::EffectState::new(&config.effects);
+
         let mut app = Self {
             state,
             config,
@@ -657,6 +661,7 @@ impl App {
             dcc,
             dcc_rx,
             spellchecker: None,
+            effects,
         };
         app.recompute_wrap_indent();
 
@@ -3224,6 +3229,7 @@ impl App {
 
     /// Switch to buffer N (0-9) — shared logic for Alt+N and ESC+N.
     fn switch_to_buffer_num(&mut self, n: usize) {
+        let prev = self.state.active_buffer_id.clone();
         if n == 0 {
             // 0 goes to default Status buffer
             let default_buf_id = make_buffer_id(Self::DEFAULT_CONN_ID, "Status");
@@ -3252,6 +3258,26 @@ impl App {
                 self.reset_sidepanel_scrolls();
             }
         }
+        // Trigger transition effect if buffer actually changed.
+        if self.state.active_buffer_id != prev {
+            self.trigger_buffer_switch_effect();
+        }
+    }
+
+    /// Trigger a buffer switch transition effect on the chat area.
+    /// Uses the last known chat area from `UiRegions`.
+    fn trigger_buffer_switch_effect(&mut self) {
+        let chat_area = self
+            .ui_regions
+            .and_then(|r| r.chat_area)
+            .unwrap_or(Rect::ZERO);
+        if chat_area.area() == 0 {
+            return;
+        }
+        let bg = crate::theme::hex_to_color(&self.theme.colors.bg)
+            .unwrap_or(ratatui::style::Color::Black);
+        self.effects
+            .trigger_buffer_switch(&self.config.effects, chat_area, bg);
     }
 
     /// Reset sidepanel scroll offsets (e.g. on buffer switch).
@@ -3285,12 +3311,14 @@ impl App {
                     self.state.prev_buffer();
                     self.scroll_offset = 0;
                     self.reset_sidepanel_scrolls();
+                    self.trigger_buffer_switch_effect();
                     return;
                 }
                 KeyCode::Right if key.modifiers.is_empty() => {
                     self.state.next_buffer();
                     self.scroll_offset = 0;
                     self.reset_sidepanel_scrolls();
+                    self.trigger_buffer_switch_effect();
                     return;
                 }
                 _ => {
@@ -3340,11 +3368,13 @@ impl App {
                 self.state.prev_buffer();
                 self.scroll_offset = 0;
                 self.reset_sidepanel_scrolls();
+                self.trigger_buffer_switch_effect();
             }
             (mods, KeyCode::Right) if mods.contains(KeyModifiers::ALT) => {
                 self.state.next_buffer();
                 self.scroll_offset = 0;
                 self.reset_sidepanel_scrolls();
+                self.trigger_buffer_switch_effect();
             }
             // Enter key, or newline chars arriving individually when bracketed
             // paste isn't supported — submit the current input line.

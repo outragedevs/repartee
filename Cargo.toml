@@ -51,6 +51,7 @@ uuid = { version = "1.21", features = ["v4"] }
 hex = "0.4"
 mlua = { version = "0.11.6", features = ["lua54", "vendored", "send"] }
 ratatui-image = "10.0"
+tachyonfx = { version = "0.25", default-features = false, features = ["std", "std-duration"] }
 spellbook = "0.4"
 image = "0.25"
 reqwest = { version = "0.13", features = ["rustls"], default-features = false }
@@ -63,6 +64,9 @@ pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 perf = { level = "deny", priority = 1 }
 redundant_clone = { level = "deny", priority = 2 }
+# tachyonfx uses Rc<RefCell> internally, making App !Send. This is fine
+# because we use tokio current_thread runtime (single-threaded).
+future_not_send = { level = "allow", priority = 3 }
 
 [profile.release]
 lto = true

@@ -72,6 +72,7 @@ pub struct AppConfig {
     pub logging: LoggingConfig,
     pub dcc: DccConfig,
     pub spellcheck: SpellcheckConfig,
+    pub effects: EffectsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -358,6 +359,33 @@ impl Default for DccConfig {
             autoaccept_lowports: false,
             autochat_masks: Vec::new(),
             max_connections: 10,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EffectsConfig {
+    /// Enable visual transition effects (requires terminal with color support).
+    pub enabled: bool,
+    /// Buffer switch transition style: `fade`, `sweep`, `coalesce`, or `none`.
+    pub buffer_switch: String,
+    /// Buffer switch transition duration in milliseconds.
+    pub buffer_switch_ms: u32,
+    /// Flash highlighted messages (nick mentions) with accent color.
+    pub highlight_flash: bool,
+    /// Highlight flash duration in milliseconds.
+    pub highlight_ms: u32,
+}
+
+impl Default for EffectsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            buffer_switch: "fade".to_string(),
+            buffer_switch_ms: 120,
+            highlight_flash: true,
+            highlight_ms: 800,
         }
     }
 }
