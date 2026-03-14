@@ -192,7 +192,7 @@ pub async fn start(
                 if let Err(e) = hyper_util::server::conn::auto::Builder::new(
                     hyper_util::rt::TokioExecutor::new(),
                 )
-                .serve_connection(io, service)
+                .serve_connection_with_upgrades(io, service)
                 .await
                 {
                     tracing::debug!("web connection error: {e}");
