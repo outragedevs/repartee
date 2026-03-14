@@ -3312,6 +3312,8 @@ impl App {
             // Enter key, or newline chars arriving individually when bracketed
             // paste isn't supported — submit the current input line.
             (_, KeyCode::Enter | KeyCode::Char('\n' | '\r')) => {
+                // Accept any active spell correction before submitting.
+                self.input.spell_state = None;
                 let text = self.input.submit();
                 if !text.is_empty() {
                     self.handle_submit(&text);
@@ -3341,10 +3343,27 @@ impl App {
                 }
             }
             (mods, KeyCode::Char(c)) if mods.is_empty() || mods == KeyModifiers::SHIFT => {
-                self.input.insert_char(c);
-                // After typing a word separator, check spelling of the completed word.
-                if c == ' ' || (c.is_ascii_punctuation() && c != '/') {
-                    self.check_spelling_after_separator();
+                if self.input.spell_state.is_some() {
+                    // Spell correction is active — handle accept keys specially.
+                    if c == ' ' {
+                        // Space: accept current suggestion, don't add another space
+                        // (the trigger space is already in the input).
+                        self.input.spell_state = None;
+                    } else if matches!(c, '.' | ',' | '!' | '?' | ';' | ':') {
+                        // Punctuation: accept and replace trailing separator with it.
+                        // "corrected_word " → "corrected_word."
+                        self.input.accept_spell_with_punctuation(c);
+                    } else {
+                        // Any other char: accept current suggestion and continue typing.
+                        self.input.spell_state = None;
+                        self.input.insert_char(c);
+                    }
+                } else {
+                    self.input.insert_char(c);
+                    // After typing a word separator, check spelling of the completed word.
+                    if c == ' ' || (c.is_ascii_punctuation() && c != '/') {
+                        self.check_spelling_after_separator();
+                    }
                 }
             }
             _ => {}
@@ -3685,6 +3704,10 @@ impl App {
             suggestions,
             index: 0,
         });
+
+        // Immediately apply the first suggestion so it's visible in the input
+        // and ready to accept with Space. Tab cycles to the next one.
+        self.input.apply_spell_suggestion(0);
     }
 
     fn handle_tab(&mut self) {

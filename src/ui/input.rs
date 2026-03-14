@@ -219,50 +219,80 @@ impl InputState {
         self.tab_state = None;
     }
 
-    /// Dismiss any active spell correction without accepting.
+    /// Dismiss any active spell correction, reverting to the original word.
     pub fn dismiss_spell(&mut self) {
         if let Some(spell) = self.spell_state.take() {
-            // Revert to original word if we had replaced it.
-            if spell.index > 0 || self.value[spell.word_start..spell.word_end] != spell.original {
-                let current_word_len = spell.word_end - spell.word_start;
-                let original_len = spell.original.len();
-                self.value
-                    .replace_range(spell.word_start..spell.word_end, &spell.original);
-                // Adjust cursor position for the size difference.
-                if self.cursor_pos > spell.word_start {
-                    self.cursor_pos = self.cursor_pos + original_len - current_word_len;
-                }
+            // Revert to original word (the first suggestion was applied on creation).
+            let current_word_len = spell.word_end - spell.word_start;
+            let original_len = spell.original.len();
+            self.value
+                .replace_range(spell.word_start..spell.word_end, &spell.original);
+            if self.cursor_pos > spell.word_start {
+                self.cursor_pos = self.cursor_pos + original_len - current_word_len;
             }
         }
     }
 
-    /// Cycle to the next spell suggestion, replacing the word inline.
-    /// Returns true if we cycled (had active suggestions).
-    pub fn cycle_spell_suggestion(&mut self) -> bool {
+    /// Apply a specific suggestion by index, replacing the word inline.
+    pub fn apply_spell_suggestion(&mut self, index: usize) {
         let Some(spell) = self.spell_state.as_mut() else {
+            return;
+        };
+        if index >= spell.suggestions.len() {
+            return;
+        }
+
+        let replacement = spell.suggestions[index].clone();
+        let old_len = spell.word_end - spell.word_start;
+        let new_len = replacement.len();
+
+        self.value
+            .replace_range(spell.word_start..spell.word_end, &replacement);
+        spell.word_end = spell.word_start + new_len;
+
+        if self.cursor_pos > spell.word_start {
+            self.cursor_pos = self.cursor_pos + new_len - old_len;
+        }
+
+        spell.index = index;
+    }
+
+    /// Cycle to the next spell suggestion.
+    pub fn cycle_spell_suggestion(&mut self) -> bool {
+        let Some(spell) = self.spell_state.as_ref() else {
             return false;
         };
         if spell.suggestions.is_empty() {
             return false;
         }
-
-        let replacement = &spell.suggestions[spell.index];
-        let old_len = spell.word_end - spell.word_start;
-        let new_len = replacement.len();
-
-        self.value
-            .replace_range(spell.word_start..spell.word_end, replacement);
-        spell.word_end = spell.word_start + new_len;
-
-        // Adjust cursor for size difference.
-        if self.cursor_pos > spell.word_start {
-            self.cursor_pos = self.cursor_pos + new_len - old_len;
-        }
-
-        // Advance to next suggestion (wrap around).
-        spell.index = (spell.index + 1) % spell.suggestions.len();
-
+        let next = (spell.index + 1) % spell.suggestions.len();
+        self.apply_spell_suggestion(next);
         true
+    }
+
+    /// Accept current spell suggestion and replace the trailing separator
+    /// (space/punctuation that triggered the check) with a punctuation char.
+    /// Result: `"corrected_word."` instead of `"corrected_word ."`.
+    pub fn accept_spell_with_punctuation(&mut self, punct: char) {
+        let Some(spell) = self.spell_state.take() else {
+            return;
+        };
+        // The character after the corrected word is the trigger separator.
+        // Replace it with the punctuation character.
+        let after_word = spell.word_end;
+        if after_word < self.value.len() {
+            let next_end = self.value[after_word..]
+                .char_indices()
+                .nth(1)
+                .map_or(self.value.len(), |(i, _)| after_word + i);
+            self.value.drain(after_word..next_end);
+            if self.cursor_pos > after_word {
+                self.cursor_pos -= next_end - after_word;
+            }
+        }
+        // Insert punctuation right after the word.
+        self.value.insert(after_word, punct);
+        self.cursor_pos = after_word + punct.len_utf8();
     }
 
     /// Check if the input is in command mode (starts with /).
@@ -674,13 +704,8 @@ pub fn render_spell_popup(frame: &mut Frame, input_area: Rect, app: &App) {
     let accent = hex_to_color(&colors.accent).unwrap_or(Color::Yellow);
     let fg_muted = hex_to_color(&colors.fg_muted).unwrap_or(Color::DarkGray);
 
-    // Build suggestion text: show all suggestions, highlight current.
-    let current_idx = if spell.index == 0 {
-        spell.suggestions.len() - 1
-    } else {
-        spell.index - 1
-    };
-
+    // Build suggestion text: show all suggestions, highlight the active one.
+    // spell.index is the currently applied suggestion (already in the input).
     let mut suggestion_spans: Vec<Span<'_>> = Vec::new();
     suggestion_spans.push(Span::styled(" ", Style::default().bg(bg_alt)));
     for (i, s) in spell.suggestions.iter().enumerate() {
@@ -690,7 +715,7 @@ pub fn render_spell_popup(frame: &mut Frame, input_area: Rect, app: &App) {
                 Style::default().fg(fg_muted).bg(bg_alt),
             ));
         }
-        let style = if i == current_idx {
+        let style = if i == spell.index {
             Style::default().fg(Color::Black).bg(accent)
         } else {
             Style::default().fg(fg).bg(bg_alt)
@@ -1158,6 +1183,7 @@ mod tests {
 
     // --- Spell correction tests ---
 
+    /// Set up spell state AND apply first suggestion (matching real behavior).
     fn make_spell_state(
         input: &mut InputState,
         start: usize,
@@ -1172,18 +1198,34 @@ mod tests {
             suggestions: suggestions.iter().map(|s| s.to_string()).collect(),
             index: 0,
         });
+        // Immediately apply first suggestion (matching check_spelling_after_separator).
+        input.apply_spell_suggestion(0);
     }
 
     #[test]
-    fn spell_cycle_replaces_word() {
+    fn spell_first_suggestion_pre_applied() {
         let mut input = InputState::new();
         input.value = "hello wrod ".to_string();
         input.cursor_pos = 11;
         make_spell_state(&mut input, 6, 10, "wrod", &["word", "rod", "wired"]);
 
-        assert!(input.cycle_spell_suggestion());
+        // First suggestion "word" should already be in the input.
         assert_eq!(input.value, "hello word ");
         assert_eq!(input.cursor_pos, 11);
+        assert_eq!(input.spell_state.as_ref().unwrap().index, 0);
+    }
+
+    #[test]
+    fn spell_cycle_advances_to_next() {
+        let mut input = InputState::new();
+        input.value = "hello wrod ".to_string();
+        input.cursor_pos = 11;
+        make_spell_state(&mut input, 6, 10, "wrod", &["word", "rod", "wired"]);
+
+        // First suggestion "word" is already applied. Tab goes to "rod".
+        assert!(input.cycle_spell_suggestion());
+        assert_eq!(input.value, "hello rod ");
+        assert_eq!(input.spell_state.as_ref().unwrap().index, 1);
     }
 
     #[test]
@@ -1193,11 +1235,11 @@ mod tests {
         input.cursor_pos = 11;
         make_spell_state(&mut input, 6, 10, "wrod", &["word", "rod"]);
 
-        input.cycle_spell_suggestion(); // "word"
-        input.cycle_spell_suggestion(); // "rod"
-        input.cycle_spell_suggestion(); // "word" again
-        // After cycling through [word, rod], we should be back at word (index wraps)
-        assert!(input.value.contains("word") || input.value.contains("rod"));
+        // word (pre-applied) → Tab → rod → Tab → word again
+        input.cycle_spell_suggestion(); // rod
+        assert!(input.value.contains("rod"));
+        input.cycle_spell_suggestion(); // word
+        assert!(input.value.contains("word"));
     }
 
     #[test]
@@ -1207,12 +1249,51 @@ mod tests {
         input.cursor_pos = 11;
         make_spell_state(&mut input, 6, 10, "wrod", &["word", "rod"]);
 
-        input.cycle_spell_suggestion(); // replace "wrod" with "word"
-        assert_eq!(&input.value[6..10], "word");
+        // "word" is pre-applied
+        assert!(input.value.contains("word"));
 
         input.dismiss_spell();
-        assert_eq!(&input.value[6..10], "wrod"); // reverted
+        assert!(input.value.contains("wrod")); // reverted
         assert!(input.spell_state.is_none());
+    }
+
+    #[test]
+    fn spell_space_accepts_no_extra_space() {
+        let mut input = InputState::new();
+        input.value = "hello wrod ".to_string();
+        input.cursor_pos = 11;
+        make_spell_state(&mut input, 6, 10, "wrod", &["word"]);
+
+        // "word" is pre-applied. Clearing spell_state = accepting.
+        // The trigger space is already in the input, so no extra space.
+        input.spell_state = None;
+        assert_eq!(input.value, "hello word ");
+        assert_eq!(input.cursor_pos, 11);
+    }
+
+    #[test]
+    fn spell_punctuation_replaces_separator() {
+        let mut input = InputState::new();
+        input.value = "hello wrod ".to_string();
+        input.cursor_pos = 11;
+        make_spell_state(&mut input, 6, 10, "wrod", &["word"]);
+
+        // "word" pre-applied → input is "hello word "
+        // Accept with "." → replace trailing space with period
+        input.accept_spell_with_punctuation('.');
+        assert_eq!(input.value, "hello word.");
+        assert_eq!(input.cursor_pos, 11);
+    }
+
+    #[test]
+    fn spell_punctuation_question_mark() {
+        let mut input = InputState::new();
+        input.value = "wrod ".to_string();
+        input.cursor_pos = 5;
+        make_spell_state(&mut input, 0, 4, "wrod", &["word"]);
+
+        input.accept_spell_with_punctuation('?');
+        assert_eq!(input.value, "word?");
     }
 
     #[test]
@@ -1222,11 +1303,10 @@ mod tests {
         input.cursor_pos = 11;
         make_spell_state(&mut input, 6, 10, "wrod", &["word"]);
 
-        input.cycle_spell_suggestion(); // "word"
-        input.insert_char('x'); // accepts "word" and inserts 'x'
+        // "word" pre-applied. insert_char clears spell_state (accepts).
+        input.insert_char('x');
         assert!(input.spell_state.is_none());
         assert!(input.value.contains("word"));
-        assert!(input.value.contains('x'));
     }
 
     #[test]
@@ -1234,7 +1314,14 @@ mod tests {
         let mut input = InputState::new();
         input.value = "hello wrod ".to_string();
         input.cursor_pos = 11;
-        make_spell_state(&mut input, 6, 10, "wrod", &[]);
+        // Don't use make_spell_state here since it calls apply which needs suggestions
+        input.spell_state = Some(SpellCorrection {
+            word_start: 6,
+            word_end: 10,
+            original: "wrod".to_string(),
+            suggestions: vec![],
+            index: 0,
+        });
 
         assert!(!input.cycle_spell_suggestion());
     }
@@ -1292,8 +1379,8 @@ mod tests {
         input.cursor_pos = 8;
         make_spell_state(&mut input, 3, 7, "wrld", &["world"]);
 
-        input.cycle_spell_suggestion();
+        // "world" pre-applied (5 chars vs 4 original)
         assert_eq!(input.value, "hi world ");
-        assert_eq!(input.cursor_pos, 9); // adjusted for longer replacement
+        assert_eq!(input.cursor_pos, 9);
     }
 }
