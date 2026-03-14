@@ -71,6 +71,7 @@ pub struct AppConfig {
     pub scripts: ScriptsConfig,
     pub logging: LoggingConfig,
     pub dcc: DccConfig,
+    pub spellcheck: SpellcheckConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -357,6 +358,27 @@ impl Default for DccConfig {
             autoaccept_lowports: false,
             autochat_masks: Vec::new(),
             max_connections: 10,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SpellcheckConfig {
+    /// Enable/disable spell checking.
+    pub enabled: bool,
+    /// Active language codes (Hunspell dict file stems, e.g. `en_US`, `pl_PL`, `de_DE`).
+    pub languages: Vec<String>,
+    /// Directory containing `.dic`/`.aff` files. Empty = `~/.repartee/dicts`.
+    pub dictionary_dir: String,
+}
+
+impl Default for SpellcheckConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            languages: vec!["en_US".to_string()],
+            dictionary_dir: String::new(),
         }
     }
 }

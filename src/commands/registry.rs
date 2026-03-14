@@ -1,10 +1,10 @@
 use std::sync::LazyLock;
 
-use super::handlers_dcc::cmd_dcc;
 use super::handlers_admin::{
     cmd_autoconnect, cmd_ignore, cmd_image, cmd_kill, cmd_log, cmd_oper, cmd_preview, cmd_reload,
-    cmd_script, cmd_server, cmd_stats, cmd_unignore, cmd_wallops,
+    cmd_script, cmd_server, cmd_spellcheck, cmd_stats, cmd_unignore, cmd_wallops,
 };
+use super::handlers_dcc::cmd_dcc;
 use super::handlers_irc::{
     cmd_admin, cmd_away, cmd_ban, cmd_connect, cmd_cycle, cmd_deop, cmd_devoice, cmd_disconnect,
     cmd_except, cmd_info, cmd_invex, cmd_invite, cmd_join, cmd_kick, cmd_kickban, cmd_links,
@@ -444,6 +444,15 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
                 handler: cmd_reload,
                 description: "Reload theme and config",
                 aliases: &[],
+                category: CommandCategory::Configuration,
+            },
+        ),
+        (
+            "spellcheck",
+            CommandDef {
+                handler: cmd_spellcheck,
+                description: "Spell checker status and control",
+                aliases: &["spell"],
                 category: CommandCategory::Configuration,
             },
         ),

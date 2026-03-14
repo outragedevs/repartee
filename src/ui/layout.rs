@@ -116,6 +116,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     app.ui_regions = Some(regions);
 
+    // Spell suggestion popup (above input, below image overlay).
+    super::input::render_spell_popup(frame, input_area, app);
+
     // Image preview overlay (drawn last, on top of everything).
     super::image_overlay::render(frame, frame.area(), app);
 }

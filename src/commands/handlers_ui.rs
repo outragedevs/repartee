@@ -192,8 +192,7 @@ pub(crate) fn cmd_close(app: &mut App, args: &[String]) {
                 app.state.remove_buffer(&buf_id);
             }
         }
-        crate::state::buffer::BufferType::Query
-        | crate::state::buffer::BufferType::DccChat => {
+        crate::state::buffer::BufferType::Query | crate::state::buffer::BufferType::DccChat => {
             // DCC chat buffers close like query buffers — just remove locally.
             app.state.remove_buffer(&buf_id);
         }

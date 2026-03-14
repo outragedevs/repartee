@@ -956,3 +956,75 @@ fn log_search(app: &mut App, query: &str) {
         add_local_event(app, line);
     }
 }
+
+// === Spell Check ===
+
+pub(crate) fn cmd_spellcheck(app: &mut App, args: &[String]) {
+    let ev = add_local_event;
+    let sub = args.first().map_or("status", String::as_str);
+
+    match sub {
+        "status" => {
+            ev(app, &divider("Spell Check"));
+            let enabled = app.config.spellcheck.enabled;
+            let status = if enabled {
+                format!("{C_OK}enabled{C_RST}")
+            } else {
+                format!("{C_ERR}disabled{C_RST}")
+            };
+            ev(app, &format!("  Status: {status}"));
+            ev(
+                app,
+                &format!(
+                    "  Languages: {C_CMD}{}{C_RST}",
+                    app.config.spellcheck.languages.join(", ")
+                ),
+            );
+            let dict_dir = crate::spellcheck::SpellChecker::resolve_dict_dir(
+                &app.config.spellcheck.dictionary_dir,
+            );
+            ev(
+                app,
+                &format!("  Dictionary dir: {C_CMD}{}{C_RST}", dict_dir.display()),
+            );
+            let loaded = app
+                .spellchecker
+                .as_ref()
+                .map_or(0, crate::spellcheck::SpellChecker::dict_count);
+            ev(
+                app,
+                &format!("  Loaded dictionaries: {C_CMD}{loaded}{C_RST}"),
+            );
+        }
+        "reload" => {
+            app.reload_spellchecker();
+            let loaded = app
+                .spellchecker
+                .as_ref()
+                .map_or(0, crate::spellcheck::SpellChecker::dict_count);
+            if loaded > 0 {
+                ev(
+                    app,
+                    &format!("{C_OK}Spell checker reloaded ({loaded} dictionaries){C_RST}"),
+                );
+            } else {
+                ev(
+                    app,
+                    &format!(
+                        "{C_ERR}No dictionaries loaded — place .dic/.aff files in {}{C_RST}",
+                        crate::spellcheck::SpellChecker::resolve_dict_dir(
+                            &app.config.spellcheck.dictionary_dir
+                        )
+                        .display()
+                    ),
+                );
+            }
+        }
+        _ => {
+            ev(
+                app,
+                &format!("{C_ERR}Usage: /spellcheck [status|reload]{C_RST}"),
+            );
+        }
+    }
+}

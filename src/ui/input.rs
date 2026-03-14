@@ -8,6 +8,20 @@ use crate::theme::hex_to_color;
 
 const MAX_HISTORY: usize = 100;
 
+/// Active inline spell correction state.
+pub struct SpellCorrection {
+    /// Byte offset of the misspelled word start in `InputState::value`.
+    pub word_start: usize,
+    /// Byte offset of the misspelled word end (exclusive).
+    pub word_end: usize,
+    /// The original misspelled word.
+    pub original: String,
+    /// Ranked suggestions from the spell checker.
+    pub suggestions: Vec<String>,
+    /// Current suggestion index (wraps around).
+    pub index: usize,
+}
+
 #[allow(dead_code)]
 pub struct TabCompletionState {
     pub prefix: String,
@@ -22,6 +36,7 @@ pub struct InputState {
     pub value: String,
     pub cursor_pos: usize,
     pub tab_state: Option<TabCompletionState>,
+    pub spell_state: Option<SpellCorrection>,
     pub history: VecDeque<String>,
     pub history_index: Option<usize>,
     pub saved_input: Option<String>,
@@ -33,6 +48,7 @@ impl InputState {
             value: String::new(),
             cursor_pos: 0,
             tab_state: None,
+            spell_state: None,
             history: VecDeque::new(),
             history_index: None,
             saved_input: None,
@@ -46,6 +62,8 @@ impl InputState {
         if c.is_control() {
             return;
         }
+        // Accept any active spell correction before inserting.
+        self.spell_state = None;
         self.value.insert(self.cursor_pos, c);
         self.cursor_pos += c.len_utf8();
         self.tab_state = None;
@@ -199,6 +217,85 @@ impl InputState {
             None => {}
         }
         self.tab_state = None;
+    }
+
+    /// Dismiss any active spell correction without accepting.
+    pub fn dismiss_spell(&mut self) {
+        if let Some(spell) = self.spell_state.take() {
+            // Revert to original word if we had replaced it.
+            if spell.index > 0 || self.value[spell.word_start..spell.word_end] != spell.original {
+                let current_word_len = spell.word_end - spell.word_start;
+                let original_len = spell.original.len();
+                self.value
+                    .replace_range(spell.word_start..spell.word_end, &spell.original);
+                // Adjust cursor position for the size difference.
+                if self.cursor_pos > spell.word_start {
+                    self.cursor_pos = self.cursor_pos + original_len - current_word_len;
+                }
+            }
+        }
+    }
+
+    /// Cycle to the next spell suggestion, replacing the word inline.
+    /// Returns true if we cycled (had active suggestions).
+    pub fn cycle_spell_suggestion(&mut self) -> bool {
+        let Some(spell) = self.spell_state.as_mut() else {
+            return false;
+        };
+        if spell.suggestions.is_empty() {
+            return false;
+        }
+
+        let replacement = &spell.suggestions[spell.index];
+        let old_len = spell.word_end - spell.word_start;
+        let new_len = replacement.len();
+
+        self.value
+            .replace_range(spell.word_start..spell.word_end, replacement);
+        spell.word_end = spell.word_start + new_len;
+
+        // Adjust cursor for size difference.
+        if self.cursor_pos > spell.word_start {
+            self.cursor_pos = self.cursor_pos + new_len - old_len;
+        }
+
+        // Advance to next suggestion (wrap around).
+        spell.index = (spell.index + 1) % spell.suggestions.len();
+
+        true
+    }
+
+    /// Check if the input is in command mode (starts with /).
+    pub fn is_command(&self) -> bool {
+        self.value.starts_with('/')
+    }
+
+    /// Extract the last completed word before `cursor_pos` (i.e., the word
+    /// that just ended because the user typed a separator).
+    ///
+    /// Returns `Some((word_start_byte, word_end_byte, word))` or `None`.
+    pub fn last_completed_word(&self) -> Option<(usize, usize, String)> {
+        let before_cursor = &self.value[..self.cursor_pos];
+        // The cursor should be right after a separator (space, etc.)
+        // Find the word before it.
+        let trimmed = before_cursor.trim_end();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let word_end = trimmed.len();
+        let word_start = trimmed.rfind(char::is_whitespace).map_or(0, |i| {
+            // i is the byte position of the last whitespace in trimmed
+            // The word starts after it — find the char boundary after it.
+            trimmed[i..]
+                .char_indices()
+                .nth(1)
+                .map_or(trimmed.len(), |(offset, _)| i + offset)
+        });
+        let word = trimmed[word_start..word_end].to_string();
+        if word.is_empty() {
+            return None;
+        }
+        Some((word_start, word_end, word))
     }
 
     pub fn tab_complete(
@@ -428,31 +525,226 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         }
     };
 
-    let before_cursor = &app.input.value[byte_at(scroll_offset)..byte_at(cursor_char_pos)];
-    let cursor_char = app.input.value[byte_at(cursor_char_pos)..]
-        .chars()
-        .next()
-        .unwrap_or(' ');
-    let after_cursor = if cursor_char_pos + 1 < visible_end {
-        &app.input.value[byte_at(cursor_char_pos + 1)..byte_at(visible_end)]
-    } else {
-        ""
-    };
+    let visible_start_byte = byte_at(scroll_offset);
+    let cursor_byte = byte_at(cursor_char_pos);
+    let visible_end_byte = byte_at(visible_end);
+
+    let cursor_char = app.input.value[cursor_byte..].chars().next().unwrap_or(' ');
+    let cursor_end_byte = cursor_byte + cursor_char.len_utf8().min(string_len - cursor_byte);
 
     let cursor_color = hex_to_color(&colors.cursor).unwrap_or(Color::Reset);
+    let normal_style = Style::default().fg(fg);
+    let cursor_style = Style::default().fg(Color::Black).bg(cursor_color);
+    let spell_style = Style::default()
+        .fg(Color::Red)
+        .add_modifier(Modifier::UNDERLINED);
 
-    let line = Line::from(vec![
-        Span::styled(prompt, Style::default().fg(fg_muted)),
-        Span::styled(before_cursor, Style::default().fg(fg)),
-        Span::styled(
-            cursor_char.to_string(),
-            Style::default().fg(Color::Black).bg(cursor_color),
-        ),
-        Span::styled(after_cursor, Style::default().fg(fg)),
-    ]);
+    // Build spans — spell-highlighted if needed.
+    let mut spans = vec![Span::styled(prompt, Style::default().fg(fg_muted))];
 
+    if let Some(ref spell) = app.input.spell_state {
+        // Build spans with the misspelled/corrected word highlighted.
+        build_spell_spans(
+            &mut spans,
+            &app.input.value,
+            visible_start_byte,
+            cursor_byte,
+            cursor_end_byte,
+            visible_end_byte,
+            spell.word_start,
+            spell.word_end,
+            normal_style,
+            cursor_style,
+            spell_style,
+        );
+    } else {
+        // Normal rendering — no spell highlight.
+        let before_cursor = &app.input.value[visible_start_byte..cursor_byte];
+        let after_cursor = if cursor_end_byte < visible_end_byte {
+            &app.input.value[cursor_end_byte..visible_end_byte]
+        } else {
+            ""
+        };
+        spans.push(Span::styled(before_cursor, normal_style));
+        spans.push(Span::styled(cursor_char.to_string(), cursor_style));
+        spans.push(Span::styled(after_cursor, normal_style));
+    }
+
+    let line = Line::from(spans);
     let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, area);
+}
+
+/// Build spans for the visible input line with a spell-highlighted word region.
+///
+/// Splits the visible text into segments: normal, spell-highlighted, cursor,
+/// ensuring the cursor and spell ranges overlay correctly.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "span builder needs all byte boundaries"
+)]
+fn build_spell_spans<'a>(
+    spans: &mut Vec<Span<'a>>,
+    text: &'a str,
+    vis_start: usize,
+    cursor_byte: usize,
+    cursor_end: usize,
+    vis_end: usize,
+    spell_start: usize,
+    spell_end: usize,
+    normal: Style,
+    cursor: Style,
+    spell: Style,
+) {
+    // Clamp spell range to visible region.
+    let sp_start = spell_start.max(vis_start);
+    let sp_end = spell_end.min(vis_end);
+
+    if sp_start >= sp_end {
+        // Spell word not visible — render normally.
+        spans.push(Span::styled(&text[vis_start..cursor_byte], normal));
+        spans.push(Span::styled(
+            text[cursor_byte..cursor_end].to_string(),
+            cursor,
+        ));
+        if cursor_end < vis_end {
+            spans.push(Span::styled(&text[cursor_end..vis_end], normal));
+        }
+        return;
+    }
+
+    // Walk through the visible range, emitting spans in order.
+    // Regions: [vis_start..sp_start] [sp_start..sp_end] [sp_end..vis_end]
+    // The cursor can be anywhere in the visible range.
+    let mut pos = vis_start;
+    let regions = [
+        (vis_start, sp_start, normal),
+        (sp_start, sp_end, spell),
+        (sp_end, vis_end, normal),
+    ];
+
+    for (region_start, region_end, style) in regions {
+        if region_start >= region_end || pos >= vis_end {
+            continue;
+        }
+        let start = pos.max(region_start);
+        let end = region_end;
+
+        // Does the cursor fall within this region?
+        if cursor_byte >= start && cursor_byte < end {
+            // Before cursor in this region.
+            if start < cursor_byte {
+                spans.push(Span::styled(&text[start..cursor_byte], style));
+            }
+            // Cursor character — combine cursor style with spell underline if applicable.
+            let combined_cursor = if style == spell {
+                cursor.add_modifier(Modifier::UNDERLINED)
+            } else {
+                cursor
+            };
+            spans.push(Span::styled(
+                text[cursor_byte..cursor_end].to_string(),
+                combined_cursor,
+            ));
+            // After cursor in this region.
+            if cursor_end < end {
+                spans.push(Span::styled(&text[cursor_end..end], style));
+            }
+        } else if start < end {
+            spans.push(Span::styled(&text[start..end], style));
+        }
+        pos = end;
+    }
+}
+
+/// Render the spell suggestion popup above the input area.
+pub fn render_spell_popup(frame: &mut Frame, input_area: Rect, app: &App) {
+    use ratatui::widgets::{Block, Borders, Clear};
+
+    let Some(ref spell) = app.input.spell_state else {
+        return;
+    };
+    if spell.suggestions.is_empty() {
+        return;
+    }
+
+    let colors = &app.theme.colors;
+    let bg_alt = hex_to_color(&colors.bg_alt).unwrap_or(Color::DarkGray);
+    let fg = hex_to_color(&colors.fg).unwrap_or(Color::White);
+    let accent = hex_to_color(&colors.accent).unwrap_or(Color::Yellow);
+    let fg_muted = hex_to_color(&colors.fg_muted).unwrap_or(Color::DarkGray);
+
+    // Build suggestion text: show all suggestions, highlight current.
+    let current_idx = if spell.index == 0 {
+        spell.suggestions.len() - 1
+    } else {
+        spell.index - 1
+    };
+
+    let mut suggestion_spans: Vec<Span<'_>> = Vec::new();
+    suggestion_spans.push(Span::styled(" ", Style::default().bg(bg_alt)));
+    for (i, s) in spell.suggestions.iter().enumerate() {
+        if i > 0 {
+            suggestion_spans.push(Span::styled(
+                " │ ",
+                Style::default().fg(fg_muted).bg(bg_alt),
+            ));
+        }
+        let style = if i == current_idx {
+            Style::default().fg(Color::Black).bg(accent)
+        } else {
+            Style::default().fg(fg).bg(bg_alt)
+        };
+        suggestion_spans.push(Span::styled(s.as_str(), style));
+    }
+    suggestion_spans.push(Span::styled(" ", Style::default().bg(bg_alt)));
+
+    // Calculate popup width from content.
+    let content_width: usize = suggestion_spans.iter().map(Span::width).sum();
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "clamped to input_area.width which is u16"
+    )]
+    let popup_width = (content_width + 2).min(input_area.width as usize) as u16; // +2 for borders
+    let popup_height = 3_u16; // top border + content + bottom border
+
+    // Position popup above the input line.
+    let popup_y = input_area.y.saturating_sub(popup_height);
+    let popup_x = input_area.x;
+    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(Line::from(vec![
+            Span::styled(" spell ", Style::default().fg(accent).bg(bg_alt)),
+            Span::styled(
+                "Tab",
+                Style::default()
+                    .fg(fg)
+                    .bg(bg_alt)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("=cycle ", Style::default().fg(fg_muted).bg(bg_alt)),
+            Span::styled(
+                "Esc",
+                Style::default()
+                    .fg(fg)
+                    .bg(bg_alt)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("=cancel ", Style::default().fg(fg_muted).bg(bg_alt)),
+        ]))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(fg_muted).bg(bg_alt))
+        .style(Style::default().bg(bg_alt));
+
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let suggestion_line = Line::from(suggestion_spans);
+    let paragraph = Paragraph::new(suggestion_line);
+    frame.render_widget(paragraph, inner);
 }
 
 #[cfg(test)]
@@ -862,5 +1154,146 @@ mod tests {
         let last_speakers: Vec<String> = vec![];
         input.tab_complete(&nicks, &last_speakers, &[], &[]);
         assert_eq!(input.value, "hank: "); // alphabetical
+    }
+
+    // --- Spell correction tests ---
+
+    fn make_spell_state(
+        input: &mut InputState,
+        start: usize,
+        end: usize,
+        original: &str,
+        suggestions: &[&str],
+    ) {
+        input.spell_state = Some(SpellCorrection {
+            word_start: start,
+            word_end: end,
+            original: original.to_string(),
+            suggestions: suggestions.iter().map(|s| s.to_string()).collect(),
+            index: 0,
+        });
+    }
+
+    #[test]
+    fn spell_cycle_replaces_word() {
+        let mut input = InputState::new();
+        input.value = "hello wrod ".to_string();
+        input.cursor_pos = 11;
+        make_spell_state(&mut input, 6, 10, "wrod", &["word", "rod", "wired"]);
+
+        assert!(input.cycle_spell_suggestion());
+        assert_eq!(input.value, "hello word ");
+        assert_eq!(input.cursor_pos, 11);
+    }
+
+    #[test]
+    fn spell_cycle_wraps_around() {
+        let mut input = InputState::new();
+        input.value = "hello wrod ".to_string();
+        input.cursor_pos = 11;
+        make_spell_state(&mut input, 6, 10, "wrod", &["word", "rod"]);
+
+        input.cycle_spell_suggestion(); // "word"
+        input.cycle_spell_suggestion(); // "rod"
+        input.cycle_spell_suggestion(); // "word" again
+        // After cycling through [word, rod], we should be back at word (index wraps)
+        assert!(input.value.contains("word") || input.value.contains("rod"));
+    }
+
+    #[test]
+    fn spell_dismiss_reverts_to_original() {
+        let mut input = InputState::new();
+        input.value = "hello wrod ".to_string();
+        input.cursor_pos = 11;
+        make_spell_state(&mut input, 6, 10, "wrod", &["word", "rod"]);
+
+        input.cycle_spell_suggestion(); // replace "wrod" with "word"
+        assert_eq!(&input.value[6..10], "word");
+
+        input.dismiss_spell();
+        assert_eq!(&input.value[6..10], "wrod"); // reverted
+        assert!(input.spell_state.is_none());
+    }
+
+    #[test]
+    fn spell_insert_char_accepts_current() {
+        let mut input = InputState::new();
+        input.value = "hello wrod ".to_string();
+        input.cursor_pos = 11;
+        make_spell_state(&mut input, 6, 10, "wrod", &["word"]);
+
+        input.cycle_spell_suggestion(); // "word"
+        input.insert_char('x'); // accepts "word" and inserts 'x'
+        assert!(input.spell_state.is_none());
+        assert!(input.value.contains("word"));
+        assert!(input.value.contains('x'));
+    }
+
+    #[test]
+    fn spell_no_suggestions_returns_false() {
+        let mut input = InputState::new();
+        input.value = "hello wrod ".to_string();
+        input.cursor_pos = 11;
+        make_spell_state(&mut input, 6, 10, "wrod", &[]);
+
+        assert!(!input.cycle_spell_suggestion());
+    }
+
+    #[test]
+    fn last_completed_word_basic() {
+        let mut input = InputState::new();
+        input.value = "hello world ".to_string();
+        input.cursor_pos = 12;
+
+        let result = input.last_completed_word();
+        assert!(result.is_some());
+        let (start, end, word) = result.unwrap();
+        assert_eq!(word, "world");
+        assert_eq!(start, 6);
+        assert_eq!(end, 11);
+    }
+
+    #[test]
+    fn last_completed_word_single() {
+        let mut input = InputState::new();
+        input.value = "hello ".to_string();
+        input.cursor_pos = 6;
+
+        let result = input.last_completed_word();
+        assert!(result.is_some());
+        let (_, _, word) = result.unwrap();
+        assert_eq!(word, "hello");
+    }
+
+    #[test]
+    fn last_completed_word_empty() {
+        let mut input = InputState::new();
+        input.value = " ".to_string();
+        input.cursor_pos = 1;
+
+        let result = input.last_completed_word();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn is_command_detects_slash() {
+        let mut input = InputState::new();
+        input.value = "/join #test".to_string();
+        assert!(input.is_command());
+
+        input.value = "hello world".to_string();
+        assert!(!input.is_command());
+    }
+
+    #[test]
+    fn spell_different_length_replacement() {
+        let mut input = InputState::new();
+        input.value = "hi wrld ".to_string();
+        input.cursor_pos = 8;
+        make_spell_state(&mut input, 3, 7, "wrld", &["world"]);
+
+        input.cycle_spell_suggestion();
+        assert_eq!(input.value, "hi world ");
+        assert_eq!(input.cursor_pos, 9); // adjusted for longer replacement
     }
 }

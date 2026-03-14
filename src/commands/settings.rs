@@ -126,6 +126,18 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 is_credential: false,
             })
         }
+        "spellcheck" => {
+            let val = match parts[1] {
+                "enabled" => config.spellcheck.enabled.to_string(),
+                "languages" => config.spellcheck.languages.join(", "),
+                "dictionary_dir" => config.spellcheck.dictionary_dir.clone(),
+                _ => return None,
+            };
+            Some(Resolved {
+                value: val,
+                is_credential: false,
+            })
+        }
         "servers" if parts.len() >= 3 => {
             let server = config.servers.get(parts[1])?;
             let is_cred = matches!(parts[2], "password" | "sasl_pass" | "sasl_user");
@@ -272,13 +284,21 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
                 config.dcc.autoaccept_lowports = parse_bool(raw)?;
             }
             "autochat_masks" => {
-                config.dcc.autochat_masks =
-                    raw.split(',').map(|s| s.trim().to_string()).collect();
+                config.dcc.autochat_masks = raw.split(',').map(|s| s.trim().to_string()).collect();
             }
             "max_connections" => {
                 config.dcc.max_connections =
                     raw.parse().map_err(|_| "Expected a number".to_string())?;
             }
+            _ => return Err(format!("Unknown field: {path}")),
+        },
+        "spellcheck" => match parts[1] {
+            "enabled" => config.spellcheck.enabled = parse_bool(raw)?,
+            "languages" => {
+                config.spellcheck.languages =
+                    raw.split(',').map(|s| s.trim().to_string()).collect();
+            }
+            "dictionary_dir" => config.spellcheck.dictionary_dir = raw.to_string(),
             _ => return Err(format!("Unknown field: {path}")),
         },
         "servers" if parts.len() >= 3 => {
@@ -371,6 +391,9 @@ const BASE_PATHS: &[&str] = &[
     "dcc.autoaccept_lowports",
     "dcc.autochat_masks",
     "dcc.max_connections",
+    "spellcheck.enabled",
+    "spellcheck.languages",
+    "spellcheck.dictionary_dir",
 ];
 
 const SERVER_FIELDS: &[&str] = &[
@@ -481,13 +504,20 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                         app.dcc.autoaccept_lowports = app.config.dcc.autoaccept_lowports;
                     }
                     "dcc.autochat_masks" => {
-                        app.dcc.autochat_masks.clone_from(&app.config.dcc.autochat_masks);
+                        app.dcc
+                            .autochat_masks
+                            .clone_from(&app.config.dcc.autochat_masks);
                     }
                     "dcc.max_connections" => {
                         app.dcc.max_connections = app.config.dcc.max_connections;
                     }
                     _ => {}
                 }
+            }
+
+            // Sync spellcheck runtime state
+            if path.starts_with("spellcheck.") {
+                app.reload_spellchecker();
             }
 
             // Special handling: reload theme if theme name changed
