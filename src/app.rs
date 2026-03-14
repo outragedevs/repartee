@@ -1800,7 +1800,7 @@ impl App {
             return;
         };
 
-        // Skip server/special buffers — backlog is only for chat buffers
+        // Only chat buffers get backlog — skip server/special
         if !matches!(
             buf.buffer_type,
             BufferType::Channel | BufferType::Query | BufferType::DccChat
@@ -2765,6 +2765,13 @@ impl App {
                     }
                 }
 
+                // Load backlog for eagerly created channel buffers
+                for entry in &all_channels {
+                    let chan_name = entry.split(' ').next().unwrap_or(entry);
+                    let buf_id = make_buffer_id(&conn_id, chan_name);
+                    self.load_backlog(&buf_id);
+                }
+
                 // Channel joining is handled by the irc crate on ENDOFMOTD:
                 // it batches channels into comma-separated JOINs with keys-first
                 // ordering and 512-byte splitting. Channels are passed via Config.
@@ -3077,6 +3084,7 @@ impl App {
                     crate::irc::events::handle_irc_message(&mut self.state, &conn_id, &msg);
 
                     // Load backlog for any buffers created by handle_irc_message
+                    // (e.g. query buffer on first PRIVMSG from a new nick)
                     if self.state.buffers.len() > buffers_before {
                         let new_ids: Vec<String> = self
                             .state
@@ -3085,8 +3093,8 @@ impl App {
                             .skip(buffers_before)
                             .cloned()
                             .collect();
-                        for buf_id in new_ids {
-                            self.load_backlog(&buf_id);
+                        for buf_id in &new_ids {
+                            self.load_backlog(buf_id);
                         }
                     }
 
