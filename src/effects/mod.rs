@@ -57,7 +57,7 @@ impl EffectState {
     }
 
     /// Whether any effects are currently running.
-    #[expect(dead_code, reason = "used for frame-skip optimization in future")]
+    #[cfg(test)]
     pub fn is_running(&self) -> bool {
         self.enabled && self.manager.is_running()
     }
@@ -67,6 +67,13 @@ impl EffectState {
         if !self.enabled || config.buffer_switch == "none" || config.buffer_switch_ms == 0 {
             return;
         }
+
+        tracing::debug!(
+            style = %config.buffer_switch,
+            ms = config.buffer_switch_ms,
+            area = ?chat_area,
+            "triggering buffer switch effect"
+        );
 
         let effect = build_buffer_switch_effect(config, bg);
         let effect = effect.with_area(chat_area);
@@ -206,5 +213,91 @@ mod tests {
         assert!(state.enabled);
         state.set_enabled(false);
         assert!(!state.enabled);
+    }
+
+    #[test]
+    fn coalesce_effect_actually_modifies_buffer_cells() {
+        use ratatui::buffer::Buffer;
+
+        let area = Rect::new(0, 0, 20, 3);
+        let mut buf = Buffer::empty(area);
+
+        // Fill buffer with known content.
+        for y in 0..3 {
+            for x in 0..20 {
+                buf[(x, y)].set_char('X');
+            }
+        }
+
+        // Create coalesce effect and process with 0 elapsed (alpha=0).
+        // At alpha=0, coalesce should show random chars (not the original content).
+        let mut effect = fx::coalesce((1000_u32, Interpolation::Linear));
+        effect.process(std::time::Duration::ZERO, &mut buf, area);
+
+        // Count how many cells were modified from 'X'.
+        let modified = (0..3)
+            .flat_map(|y| (0..20).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf[(x, y)].symbol() != "X")
+            .count();
+
+        // At alpha=0 (start of coalesce), most cells should be randomized.
+        assert!(
+            modified > 30,
+            "coalesce at alpha=0 should modify most cells, but only {modified}/60 were changed"
+        );
+    }
+
+    #[test]
+    fn fade_effect_modifies_buffer_colors() {
+        use ratatui::buffer::Buffer;
+
+        let area = Rect::new(0, 0, 10, 2);
+        let mut buf = Buffer::empty(area);
+
+        // Fill with white-on-black text.
+        for y in 0..2 {
+            for x in 0..10 {
+                buf[(x, y)].set_char('A');
+                buf[(x, y)].set_fg(Color::White);
+            }
+        }
+
+        // Apply fade_from_fg(Black) at alpha=0 — fg should be near Black.
+        let mut effect = fx::fade_from_fg(Color::Black, (500_u32, Interpolation::Linear));
+        effect.process(std::time::Duration::ZERO, &mut buf, area);
+
+        // After processing at t=0, fg should have been shifted toward Black.
+        let cell_fg = buf[(0, 0)].fg;
+        assert_ne!(
+            cell_fg,
+            Color::White,
+            "fade_from_fg at alpha=0 should shift fg away from White"
+        );
+    }
+
+    #[test]
+    fn process_completes_effect_after_duration() {
+        let config = EffectsConfig {
+            enabled: true,
+            buffer_switch: "fade".to_string(),
+            buffer_switch_ms: 100,
+            ..Default::default()
+        };
+        let mut state = EffectState::new(&config);
+        state.trigger_buffer_switch(&config, Rect::new(0, 0, 40, 10), Color::Black);
+        assert!(state.is_running());
+
+        // Process for longer than the effect duration.
+        let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 40, 10));
+        state.process(&mut buf, Rect::new(0, 0, 40, 10));
+
+        // Simulate enough time passing.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        state.process(&mut buf, Rect::new(0, 0, 40, 10));
+
+        assert!(
+            !state.is_running(),
+            "effect should have completed after its duration"
+        );
     }
 }
