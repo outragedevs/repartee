@@ -473,6 +473,7 @@ mod tests {
             enabled_caps: std::collections::HashSet::new(),
             who_token_counter: 0,
             local_ip: None,
+            sasl_skip: false,
             silent_who_channels: std::collections::HashSet::new(),
         });
 
@@ -669,6 +670,7 @@ mod tests {
             enabled_caps: std::collections::HashSet::new(),
             who_token_counter: 0,
             local_ip: None,
+            sasl_skip: false,
             silent_who_channels: std::collections::HashSet::new(),
         });
 

@@ -43,6 +43,9 @@ pub struct Connection {
     pub origin_config: ServerConfig,
     /// Local IP address of the IRC TCP socket (for DCC own-IP fallback).
     pub local_ip: Option<IpAddr>,
+    /// SASL authentication failed on last attempt — skip SASL on reconnect.
+    /// Reset to false on successful SASL or manual `/connect`.
+    pub sasl_skip: bool,
     /// `IRCv3` capabilities that were successfully negotiated with the server.
     pub enabled_caps: HashSet<String>,
     /// Counter for WHOX tokens. Each `WHO %fields,TOKEN` request gets
