@@ -166,6 +166,18 @@
 <li>Scripts are Lua instead of Perl</li>
 <li>Most <code>/commands</code> work the same</li>
 </ul>
+<h2>Does repartee support DCC?</h2>
+<p>Yes — repartee supports DCC CHAT with full irssi/erssi parity:</p>
+<ul>
+<li><strong>Active and passive</strong> (reverse) DCC CHAT connections</li>
+<li><strong><code>=nick</code> buffer convention</strong> — DCC chats appear as <code>=Alice</code> in the buffer list</li>
+<li><strong>Auto IP detection</strong> from the IRC socket, with manual override via <code>/set dcc.own_ip</code></li>
+<li><strong>Auto-accept masks</strong>, timeout, nick tracking, DCC REJECT</li>
+<li><strong>Tab-completable commands</strong>: <code>/dcc chat</code>, <code>/dcc close</code>, <code>/dcc list</code>, <code>/dcc reject</code></li>
+<li><strong>Scripting events</strong>: <code>dcc.chat.request</code>, <code>dcc.chat.connected</code>, <code>dcc.chat.message</code>, <code>dcc.chat.closed</code></li>
+</ul>
+<h2>Does repartee load chat history?</h2>
+<p>Yes. When you open a channel, query, or DCC buffer, the last 20 messages (configurable) are loaded from the SQLite log database. Set <code>display.backlog_lines</code> to adjust or disable.</p>
 <h2>Where are logs stored?</h2>
 <p><code>~/.repartee/logs/messages.db</code> — a SQLite database with optional AES-256-GCM encryption.</p>
 <h2>Can I use multiple IRC networks?</h2>

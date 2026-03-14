@@ -67,6 +67,24 @@ Show logging status, database size, and message count.
 
 Search across all logged messages.
 
+## Chat history backlog
+
+When you open a channel, query, or DCC chat buffer, repartee automatically loads the most recent messages from the log database — so you immediately see recent context without scrolling.
+
+```
+/set display.backlog_lines 20    # default — load last 20 messages
+/set display.backlog_lines 50    # load more history
+/set display.backlog_lines 0     # disable backlog
+```
+
+Backlog messages appear at the top of the buffer, followed by a separator:
+
+```
+─── End of backlog (20 lines) ───
+```
+
+Backlog messages do not trigger highlights or notifications, and are not re-logged to the database (they already exist). This works for autoconnect channels, manual `/join`, queries opened via incoming messages, and DCC chat reconnections.
+
 ## Batched writes
 
 Messages are written to the database in batches (50 rows or every 1 second) using an async writer task connected via a tokio mpsc channel. This minimizes SQLite lock contention and ensures the UI never blocks on disk I/O.

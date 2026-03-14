@@ -41,6 +41,21 @@ repartee uses irssi-compatible format strings, so your theme knowledge transfers
 - Scripts are Lua instead of Perl
 - Most `/commands` work the same
 
+## Does repartee support DCC?
+
+Yes — repartee supports DCC CHAT with full irssi/erssi parity:
+
+- **Active and passive** (reverse) DCC CHAT connections
+- **`=nick` buffer convention** — DCC chats appear as `=Alice` in the buffer list
+- **Auto IP detection** from the IRC socket, with manual override via `/set dcc.own_ip`
+- **Auto-accept masks**, timeout, nick tracking, DCC REJECT
+- **Tab-completable commands**: `/dcc chat`, `/dcc close`, `/dcc list`, `/dcc reject`
+- **Scripting events**: `dcc.chat.request`, `dcc.chat.connected`, `dcc.chat.message`, `dcc.chat.closed`
+
+## Does repartee load chat history?
+
+Yes. When you open a channel, query, or DCC buffer, the last 20 messages (configurable) are loaded from the SQLite log database. Set `display.backlog_lines` to adjust or disable.
+
 ## Where are logs stored?
 
 `~/.repartee/logs/messages.db` — a SQLite database with optional AES-256-GCM encryption.
