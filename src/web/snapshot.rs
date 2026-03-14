@@ -54,6 +54,7 @@ pub fn build_nick_list(state: &AppState, buffer_id: &str) -> Option<WebEvent> {
     Some(WebEvent::NickList {
         buffer_id: buffer_id.to_string(),
         nicks,
+        session_id: None,
     })
 }
 

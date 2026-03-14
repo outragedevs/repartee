@@ -54,19 +54,28 @@ pub enum WebEvent {
         buffer_id: String,
         message: WireMessage,
     },
-    /// Response to `FetchMessages`.
+    /// Response to `FetchMessages` (targeted to requesting session).
     Messages {
         buffer_id: String,
         messages: Vec<WireMessage>,
         has_more: bool,
+        /// Session that requested this data. Other sessions skip it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
     },
-    /// Response to `FetchNickList`.
+    /// Response to `FetchNickList` (targeted to requesting session).
     NickList {
         buffer_id: String,
         nicks: Vec<WireNick>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
     },
-    /// Response to `FetchMentions`.
-    MentionsList { mentions: Vec<WireMention> },
+    /// Response to `FetchMentions` (targeted to requesting session).
+    MentionsList {
+        mentions: Vec<WireMention>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
     /// Server-side error.
     Error { message: String },
 }

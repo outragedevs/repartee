@@ -129,11 +129,19 @@ fn build_sync_init_from_snapshot(state: &AppHandle) -> WebEvent {
     }
 }
 
-/// Check if a `WebEvent` is targeted to a specific session (not this one).
-const fn is_targeted_to_other(_event: &WebEvent, _session_id: &str) -> bool {
-    // TODO: when FetchMessages/NickList/MentionsList responses are tagged
-    // with a session_id, filter here. For now, all events are broadcast.
-    false
+/// Check if a `WebEvent` is targeted to a different session.
+///
+/// Returns `true` if the event has a `session_id` field that doesn't match
+/// the current session — meaning this client should NOT receive it.
+fn is_targeted_to_other(event: &WebEvent, session_id: &str) -> bool {
+    let target = match event {
+        WebEvent::Messages { session_id, .. }
+        | WebEvent::NickList { session_id, .. }
+        | WebEvent::MentionsList { session_id, .. } => session_id.as_deref(),
+        _ => None,
+    };
+    // If target is Some and doesn't match, skip this event.
+    target.is_some_and(|t| t != session_id)
 }
 
 /// Send a `WebEvent` as JSON text through the WebSocket.

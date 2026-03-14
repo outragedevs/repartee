@@ -34,10 +34,6 @@ pub struct AppHandle {
     pub rate_limiter: Arc<Mutex<RateLimiter>>,
     /// Periodic snapshot of `AppState` for `SyncInit` / `FetchNickList`.
     pub web_state_snapshot: Option<Arc<std::sync::RwLock<WebStateSnapshot>>>,
-    /// `SQLite` database handle for `FetchMessages` / `FetchMentions`.
-    pub db: Option<Arc<std::sync::Mutex<rusqlite::Connection>>>,
-    /// Whether the database uses encryption.
-    pub db_encrypt: bool,
 }
 
 #[derive(Deserialize)]
@@ -221,8 +217,6 @@ mod tests {
             session_store: Arc::new(Mutex::new(SessionStore::new())),
             rate_limiter: Arc::new(Mutex::new(RateLimiter::new())),
             web_state_snapshot: None,
-            db: None,
-            db_encrypt: false,
         })
     }
 

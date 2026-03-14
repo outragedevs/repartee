@@ -1537,8 +1537,6 @@ impl App {
                 session_store: sessions,
                 rate_limiter: limiter,
                 web_state_snapshot: Some(snapshot),
-                db: self.storage.as_ref().map(|s| std::sync::Arc::clone(&s.db)),
-                db_encrypt: self.storage.as_ref().is_some_and(|s| s.encrypt),
             });
             match crate::web::server::start(&self.config.web, handle).await {
                 Ok(h) => {
@@ -1707,8 +1705,8 @@ impl App {
                     }
                 },
                 web_cmd = self.web_cmd_rx.recv() => {
-                    if let Some((cmd, _session_id)) = web_cmd {
-                        self.handle_web_command(cmd);
+                    if let Some((cmd, session_id)) = web_cmd {
+                        self.handle_web_command(cmd, &session_id);
                     }
                 },
                 _ = tick.tick() => {
@@ -2110,8 +2108,12 @@ impl App {
         let _ = self.web_broadcaster.send(event);
     }
 
+    // ── Web command handling (continued) ────────────────────────────────────
+
+
     /// Dispatch a command received from a web client.
-    fn handle_web_command(&mut self, cmd: crate::web::protocol::WebCommand) {
+    #[expect(clippy::too_many_lines, reason = "flat dispatch for web command variants")]
+    fn handle_web_command(&mut self, cmd: crate::web::protocol::WebCommand, session_id: &str) {
         use crate::web::protocol::WebCommand;
         use crate::web::snapshot;
 
@@ -2122,28 +2124,52 @@ impl App {
             WebCommand::SwitchBuffer { .. } => {
                 // Session-local on client side — no server state change.
             }
-            WebCommand::MarkRead { buffer_id, up_to } => {
-                self.web_mark_read(&buffer_id, up_to);
+            WebCommand::MarkRead { buffer_id, .. } => {
+                // TODO: use `up_to` for partial mark-read. Currently resets fully.
+                self.web_mark_read(&buffer_id);
             }
             WebCommand::FetchMessages {
                 buffer_id,
                 limit,
                 before,
             } => {
-                self.web_fetch_messages(&buffer_id, limit, before);
+                self.web_fetch_messages(&buffer_id, limit, before, session_id);
             }
             WebCommand::FetchNickList { buffer_id } => {
-                if let Some(event) = snapshot::build_nick_list(&self.state, &buffer_id) {
-                    self.broadcast_web(event);
+                if let Some(crate::web::protocol::WebEvent::NickList {
+                    buffer_id: bid,
+                    nicks,
+                    ..
+                }) = snapshot::build_nick_list(&self.state, &buffer_id)
+                {
+                    self.broadcast_web(crate::web::protocol::WebEvent::NickList {
+                        buffer_id: bid,
+                        nicks,
+                        session_id: Some(session_id.to_string()),
+                    });
                 }
             }
             WebCommand::FetchMentions => {
-                self.web_fetch_mentions();
+                self.web_fetch_mentions(session_id);
             }
             WebCommand::RunCommand { buffer_id, text } => {
                 self.web_run_command(&buffer_id, &text);
             }
         }
+    }
+
+    /// Execute a command from a web client in the context of a buffer.
+    fn web_run_command(&mut self, buffer_id: &str, text: &str) {
+        // Temporarily set active buffer to the web client's buffer context.
+        let saved_buffer = self.state.active_buffer_id.clone();
+        let saved_scroll = self.scroll_offset;
+        self.state.active_buffer_id = Some(buffer_id.to_string());
+
+        self.handle_submit(text);
+
+        // Restore terminal state — web commands must not affect terminal view.
+        self.state.active_buffer_id = saved_buffer;
+        self.scroll_offset = saved_scroll;
     }
 
     /// Send a message from a web client to IRC.
@@ -2154,7 +2180,7 @@ impl App {
     }
 
     /// Mark a buffer as read from a web client.
-    fn web_mark_read(&mut self, buffer_id: &str, _up_to: i64) {
+    fn web_mark_read(&mut self, buffer_id: &str) {
         if let Some(buf) = self.state.buffers.get_mut(buffer_id) {
             buf.unread_count = 0;
             buf.activity = crate::state::buffer::ActivityLevel::None;
@@ -2167,25 +2193,26 @@ impl App {
     }
 
     /// Fetch messages from `SQLite` for a web client.
-    fn web_fetch_messages(&self, buffer_id: &str, limit: u32, before: Option<i64>) {
+    fn web_fetch_messages(&self, buffer_id: &str, limit: u32, before: Option<i64>, session_id: &str) {
         let Some(ref storage) = self.storage else {
             return;
         };
         let Ok(db) = storage.db.lock() else {
             return;
         };
+        let capped_limit = limit.min(500) as usize;
         let (network, buffer) = crate::web::snapshot::split_buffer_id(buffer_id);
         let messages = crate::storage::query::get_messages(
             &db,
             network,
             buffer,
             before,
-            limit as usize,
+            capped_limit,
             storage.encrypt,
             None, // TODO: pass crypto key for encrypted DBs
         );
         if let Ok(msgs) = messages {
-            let has_more = msgs.len() == limit as usize;
+            let has_more = msgs.len() == capped_limit;
             let wire: Vec<_> = msgs
                 .iter()
                 .map(crate::web::snapshot::stored_to_wire)
@@ -2194,12 +2221,13 @@ impl App {
                 buffer_id: buffer_id.to_string(),
                 messages: wire,
                 has_more,
+                session_id: Some(session_id.to_string()),
             });
         }
     }
 
     /// Fetch unread mentions for a web client.
-    fn web_fetch_mentions(&self) {
+    fn web_fetch_mentions(&self, session_id: &str) {
         let Some(ref storage) = self.storage else {
             return;
         };
@@ -2218,21 +2246,11 @@ impl App {
                     text: m.text.clone(),
                 })
                 .collect();
-            self.broadcast_web(crate::web::protocol::WebEvent::MentionsList { mentions: wire });
+            self.broadcast_web(crate::web::protocol::WebEvent::MentionsList {
+                mentions: wire,
+                session_id: Some(session_id.to_string()),
+            });
         }
-    }
-
-    /// Execute a command from a web client in the context of a buffer.
-    fn web_run_command(&mut self, buffer_id: &str, text: &str) {
-        // Temporarily set active buffer to the web client's buffer context.
-        let saved = self.state.active_buffer_id.clone();
-        self.state.active_buffer_id = Some(buffer_id.to_string());
-
-        // Reuse the same input path as the terminal.
-        self.handle_submit(text);
-
-        // Restore active buffer.
-        self.state.active_buffer_id = saved;
     }
 
     // ── DCC event handling ───────────────────────────────────────────────────
