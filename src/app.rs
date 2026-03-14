@@ -1707,9 +1707,8 @@ impl App {
                     }
                 },
                 web_cmd = self.web_cmd_rx.recv() => {
-                    if let Some((_cmd, _session_id)) = web_cmd {
-                        // TODO: dispatch WebCommand to appropriate handler
-                        tracing::debug!("web command received (dispatch not yet implemented)");
+                    if let Some((cmd, _session_id)) = web_cmd {
+                        self.handle_web_command(cmd);
                     }
                 },
                 _ = tick.tick() => {
@@ -2102,6 +2101,138 @@ impl App {
                 ev_fn(self, &format!("{C_ERR}{message}{C_RST}"));
             }
         }
+    }
+
+    // ── Web command handling ──────────────────────────────────────────────────
+
+    /// Broadcast a `WebEvent` to all connected web clients.
+    fn broadcast_web(&self, event: crate::web::protocol::WebEvent) {
+        let _ = self.web_broadcaster.send(event);
+    }
+
+    /// Dispatch a command received from a web client.
+    fn handle_web_command(&mut self, cmd: crate::web::protocol::WebCommand) {
+        use crate::web::protocol::WebCommand;
+        use crate::web::snapshot;
+
+        match cmd {
+            WebCommand::SendMessage { buffer_id, text } => {
+                self.web_send_message(&buffer_id, &text);
+            }
+            WebCommand::SwitchBuffer { .. } => {
+                // Session-local on client side — no server state change.
+            }
+            WebCommand::MarkRead { buffer_id, up_to } => {
+                self.web_mark_read(&buffer_id, up_to);
+            }
+            WebCommand::FetchMessages {
+                buffer_id,
+                limit,
+                before,
+            } => {
+                self.web_fetch_messages(&buffer_id, limit, before);
+            }
+            WebCommand::FetchNickList { buffer_id } => {
+                if let Some(event) = snapshot::build_nick_list(&self.state, &buffer_id) {
+                    self.broadcast_web(event);
+                }
+            }
+            WebCommand::FetchMentions => {
+                self.web_fetch_mentions();
+            }
+            WebCommand::RunCommand { buffer_id, text } => {
+                self.web_run_command(&buffer_id, &text);
+            }
+        }
+    }
+
+    /// Send a message from a web client to IRC.
+    fn web_send_message(&mut self, buffer_id: &str, text: &str) {
+        // Reuse the same path as terminal input — handles commands,
+        // PRIVMSG, echo, logging, and script events.
+        self.web_run_command(buffer_id, text);
+    }
+
+    /// Mark a buffer as read from a web client.
+    fn web_mark_read(&mut self, buffer_id: &str, _up_to: i64) {
+        if let Some(buf) = self.state.buffers.get_mut(buffer_id) {
+            buf.unread_count = 0;
+            buf.activity = crate::state::buffer::ActivityLevel::None;
+        }
+        self.broadcast_web(crate::web::protocol::WebEvent::ActivityChanged {
+            buffer_id: buffer_id.to_string(),
+            activity: 0,
+            unread_count: 0,
+        });
+    }
+
+    /// Fetch messages from SQLite for a web client.
+    fn web_fetch_messages(&self, buffer_id: &str, limit: u32, before: Option<i64>) {
+        let Some(ref storage) = self.storage else {
+            return;
+        };
+        let Ok(db) = storage.db.lock() else {
+            return;
+        };
+        let (network, buffer) = crate::web::snapshot::split_buffer_id(buffer_id);
+        let messages = crate::storage::query::get_messages(
+            &db,
+            network,
+            buffer,
+            before,
+            limit as usize,
+            storage.encrypt,
+            None, // TODO: pass crypto key for encrypted DBs
+        );
+        if let Ok(msgs) = messages {
+            let has_more = msgs.len() == limit as usize;
+            let wire: Vec<_> = msgs
+                .iter()
+                .map(crate::web::snapshot::stored_to_wire)
+                .collect();
+            self.broadcast_web(crate::web::protocol::WebEvent::Messages {
+                buffer_id: buffer_id.to_string(),
+                messages: wire,
+                has_more,
+            });
+        }
+    }
+
+    /// Fetch unread mentions for a web client.
+    fn web_fetch_mentions(&self) {
+        let Some(ref storage) = self.storage else {
+            return;
+        };
+        let Ok(db) = storage.db.lock() else {
+            return;
+        };
+        if let Ok(mentions) = crate::storage::query::get_unread_mentions(&db) {
+            let wire: Vec<_> = mentions
+                .iter()
+                .map(|m| crate::web::protocol::WireMention {
+                    id: m.id,
+                    timestamp: m.timestamp,
+                    buffer_id: format!("{}/{}", m.network, m.buffer),
+                    channel: m.channel.clone(),
+                    nick: m.nick.clone(),
+                    text: m.text.clone(),
+                })
+                .collect();
+            self.broadcast_web(crate::web::protocol::WebEvent::MentionsList { mentions: wire });
+        }
+    }
+
+    /// Execute a command from a web client in the context of a buffer.
+    fn web_run_command(&mut self, buffer_id: &str, text: &str) {
+        // Temporarily set active buffer to the web client's buffer context.
+        let saved = self.state.active_buffer_id.clone();
+        self.state.active_buffer_id = Some(buffer_id.to_string());
+
+        // Reuse the same input path as the terminal.
+        self.handle_submit(text);
+
+        // Restore active buffer.
+        self.state.active_buffer_id = saved;
     }
 
     // ── DCC event handling ───────────────────────────────────────────────────
