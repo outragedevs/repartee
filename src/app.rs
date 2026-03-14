@@ -2108,6 +2108,52 @@ impl App {
         let _ = self.web_broadcaster.send(event);
     }
 
+    /// Drain pending web events queued during IRC event processing.
+    ///
+    /// Called after `handle_irc_message` to broadcast `NewMessage`,
+    /// `ActivityChanged`, and `MentionAlert` events to web clients.
+    /// Also auto-records highlight mentions to the `SQLite` mentions table.
+    fn drain_pending_web_events(&mut self) {
+        let events: Vec<_> = self.state.pending_web_events.drain(..).collect();
+        for event in events {
+            // Auto-record mentions to DB.
+            if let crate::web::protocol::WebEvent::MentionAlert {
+                ref buffer_id,
+                ref message,
+            } = event
+            {
+                self.record_mention(buffer_id, message);
+            }
+            self.broadcast_web(event);
+        }
+    }
+
+    /// Insert a mention into the `SQLite` mentions table.
+    fn record_mention(&self, buffer_id: &str, msg: &crate::web::protocol::WireMessage) {
+        let Some(ref storage) = self.storage else {
+            return;
+        };
+        let Ok(db) = storage.db.lock() else {
+            return;
+        };
+        let (network, buffer) = crate::web::snapshot::split_buffer_id(buffer_id);
+        let channel = self
+            .state
+            .buffers
+            .get(buffer_id)
+            .map_or(buffer, |b| b.name.as_str());
+        let nick = msg.nick.as_deref().unwrap_or("");
+        let _ = crate::storage::query::insert_mention(
+            &db,
+            msg.timestamp,
+            network,
+            buffer,
+            channel,
+            nick,
+            &msg.text,
+        );
+    }
+
     // ── Web command handling (continued) ────────────────────────────────────
 
 
@@ -3047,6 +3093,16 @@ impl App {
                 let rejoin_channels = crate::irc::events::channels_to_rejoin(&self.state, &conn_id);
                 crate::irc::events::handle_connected(&mut self.state, &conn_id);
 
+                // Broadcast connection status to web clients.
+                if let Some(conn) = self.state.connections.get(&conn_id) {
+                    self.broadcast_web(crate::web::protocol::WebEvent::ConnectionStatus {
+                        conn_id: conn_id.clone(),
+                        label: conn.label.clone(),
+                        connected: true,
+                        nick: conn.nick.clone(),
+                    });
+                }
+
                 // Notify scripts
                 {
                     use crate::scripting::api::events;
@@ -3164,6 +3220,15 @@ impl App {
                     &conn_id,
                     error.as_deref(),
                 );
+                // Broadcast disconnection to web clients.
+                if let Some(conn) = self.state.connections.get(&conn_id) {
+                    self.broadcast_web(crate::web::protocol::WebEvent::ConnectionStatus {
+                        conn_id: conn_id.clone(),
+                        label: conn.label.clone(),
+                        connected: false,
+                        nick: conn.nick.clone(),
+                    });
+                }
                 // Notify scripts
                 {
                     use crate::scripting::api::events;
@@ -3435,6 +3500,9 @@ impl App {
                     let buffers_before = self.state.buffers.len();
 
                     crate::irc::events::handle_irc_message(&mut self.state, &conn_id, &msg);
+
+                    // Drain pending web events and broadcast + auto-record mentions.
+                    self.drain_pending_web_events();
 
                     // Load backlog for any buffers created by handle_irc_message
                     // (e.g. query buffer on first PRIVMSG from a new nick)

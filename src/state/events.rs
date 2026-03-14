@@ -19,6 +19,7 @@ impl AppState {
             log_tx: None,
             log_exclude_types: Vec::new(),
             scrollback_limit: 0,
+            pending_web_events: Vec::new(),
         }
     }
 
@@ -91,6 +92,19 @@ impl AppState {
 
     pub fn add_message(&mut self, buffer_id: &str, message: Message) {
         self.maybe_log(buffer_id, &message);
+        // Queue web event for broadcast.
+        self.pending_web_events
+            .push(crate::web::protocol::WebEvent::NewMessage {
+                buffer_id: buffer_id.to_string(),
+                message: crate::web::snapshot::message_to_wire(&message),
+            });
+        if message.highlight {
+            self.pending_web_events
+                .push(crate::web::protocol::WebEvent::MentionAlert {
+                    buffer_id: buffer_id.to_string(),
+                    message: crate::web::snapshot::message_to_wire(&message),
+                });
+        }
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
             track_speaker(buf, &message);
             buf.messages.push(message);
@@ -115,6 +129,19 @@ impl AppState {
         level: ActivityLevel,
     ) {
         self.maybe_log(buffer_id, &message);
+        // Queue web events for broadcast.
+        self.pending_web_events
+            .push(crate::web::protocol::WebEvent::NewMessage {
+                buffer_id: buffer_id.to_string(),
+                message: crate::web::snapshot::message_to_wire(&message),
+            });
+        if message.highlight {
+            self.pending_web_events
+                .push(crate::web::protocol::WebEvent::MentionAlert {
+                    buffer_id: buffer_id.to_string(),
+                    message: crate::web::snapshot::message_to_wire(&message),
+                });
+        }
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
             track_speaker(buf, &message);
             buf.messages.push(message);
@@ -124,6 +151,12 @@ impl AppState {
             if !is_active && level > buf.activity {
                 buf.activity = level;
                 buf.unread_count += 1;
+                self.pending_web_events
+                    .push(crate::web::protocol::WebEvent::ActivityChanged {
+                        buffer_id: buffer_id.to_string(),
+                        activity: level as u8,
+                        unread_count: buf.unread_count,
+                    });
             }
         }
     }
