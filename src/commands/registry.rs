@@ -2,7 +2,7 @@ use std::sync::LazyLock;
 
 use super::handlers_admin::{
     cmd_autoconnect, cmd_ignore, cmd_image, cmd_kill, cmd_log, cmd_oper, cmd_preview, cmd_reload,
-    cmd_script, cmd_server, cmd_spellcheck, cmd_stats, cmd_unignore, cmd_wallops,
+    cmd_mentions, cmd_script, cmd_server, cmd_spellcheck, cmd_stats, cmd_unignore, cmd_wallops,
 };
 use super::handlers_dcc::cmd_dcc;
 use super::handlers_irc::{
@@ -454,6 +454,15 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
                 description: "Spell checker status and control",
                 aliases: &["spell"],
                 category: CommandCategory::Configuration,
+            },
+        ),
+        (
+            "mentions",
+            CommandDef {
+                handler: cmd_mentions,
+                description: "Show and clear unread mentions",
+                aliases: &[],
+                category: CommandCategory::Info,
             },
         ),
         (
