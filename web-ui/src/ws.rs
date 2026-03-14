@@ -1,20 +1,17 @@
-use std::cell::RefCell;
-use std::rc::Rc;
-
+use futures::{SinkExt, StreamExt, channel::mpsc};
 use gloo_net::websocket::{Message, futures::WebSocket};
-use futures::{SinkExt, StreamExt};
 use leptos::prelude::*;
 
 use crate::protocol::{WebCommand, WebEvent};
 use crate::state::AppState;
 
-/// Shared WebSocket sender, accessible from any component via Leptos context.
-/// Uses `Rc<RefCell>` because WASM is single-threaded.
+/// Channel sender for components to send commands to the WebSocket loop.
+/// Stored in Leptos context — `Send + Sync` because `futures::mpsc` sender is.
 #[derive(Clone)]
-pub struct WsSender(pub Rc<RefCell<Option<futures::stream::SplitSink<WebSocket, Message>>>>);
+pub struct CommandSender(pub mpsc::UnboundedSender<String>);
 
 /// Connect to the WebSocket server and spawn the message loop.
-pub fn connect(state: &AppState) {
+pub fn connect(state: &AppState, cmd_rx: mpsc::UnboundedReceiver<String>) {
     let token = state.token.get_untracked();
     let Some(token) = token else { return };
 
@@ -28,40 +25,8 @@ pub fn connect(state: &AppState) {
         match WebSocket::open(&url) {
             Ok(ws) => {
                 state.error.set(None);
-                let (tx, mut rx) = ws.split();
-
-                // Store the sender so components can use it.
-                if let Some(ws_sender) = use_context::<WsSender>() {
-                    *ws_sender.0.borrow_mut() = Some(tx);
-                }
-
                 state.connected.set(true);
-
-                // Read loop — dispatch incoming events to state.
-                while let Some(msg) = rx.next().await {
-                    match msg {
-                        Ok(Message::Text(text)) => {
-                            match serde_json::from_str::<WebEvent>(&text) {
-                                Ok(event) => state.handle_event(event),
-                                Err(e) => {
-                                    web_sys::console::warn_1(
-                                        &format!("invalid WebEvent: {e}").into(),
-                                    );
-                                }
-                            }
-                        }
-                        Ok(Message::Bytes(_)) => {}
-                        Err(e) => {
-                            state.error.set(Some(format!("WebSocket error: {e}")));
-                            break;
-                        }
-                    }
-                }
-
-                // Connection closed — clear sender.
-                if let Some(ws_sender) = use_context::<WsSender>() {
-                    *ws_sender.0.borrow_mut() = None;
-                }
+                run_ws_loop(ws, &state, cmd_rx).await;
                 state.connected.set(false);
             }
             Err(e) => {
@@ -72,37 +37,63 @@ pub fn connect(state: &AppState) {
     });
 }
 
-/// Send a WebCommand to the server via the shared WebSocket sender.
+/// Send a WebCommand to the server via the command channel.
 pub fn send_command(cmd: &WebCommand) {
-    let Some(ws_sender) = use_context::<WsSender>() else {
-        web_sys::console::warn_1(&"no WsSender context".into());
+    let Some(sender) = use_context::<CommandSender>() else {
+        web_sys::console::warn_1(&"no CommandSender context".into());
         return;
     };
 
-    let json = match serde_json::to_string(cmd) {
-        Ok(j) => j,
-        Err(e) => {
-            web_sys::console::warn_1(&format!("failed to serialize command: {e}").into());
-            return;
-        }
-    };
-
-    // Take the sender, send, put it back.
-    let mut borrow = ws_sender.0.borrow_mut();
-    if let Some(ref mut tx) = *borrow {
-        // We need to spawn because SinkExt::send is async.
-        // Clone the Rc so the spawn can access it.
-        let sender_rc = ws_sender.0.clone();
-        // Take the sender out temporarily.
-        let mut taken_tx = borrow.take().unwrap();
-        drop(borrow); // release the RefCell borrow before spawning
-
-        leptos::task::spawn_local(async move {
-            if let Err(e) = taken_tx.send(Message::Text(json)).await {
-                web_sys::console::warn_1(&format!("ws send failed: {e}").into());
+    match serde_json::to_string(cmd) {
+        Ok(json) => {
+            if let Err(e) = sender.0.unbounded_send(json) {
+                web_sys::console::warn_1(&format!("cmd send failed: {e}").into());
             }
-            // Put the sender back.
-            *sender_rc.borrow_mut() = Some(taken_tx);
-        });
+        }
+        Err(e) => {
+            web_sys::console::warn_1(&format!("cmd serialize failed: {e}").into());
+        }
+    }
+}
+
+async fn run_ws_loop(
+    ws: WebSocket,
+    state: &AppState,
+    mut cmd_rx: mpsc::UnboundedReceiver<String>,
+) {
+    let (mut ws_tx, mut ws_rx) = ws.split();
+
+    // WASM is single-threaded — poll both streams in a manual loop.
+    loop {
+        // Drain all pending commands first (non-blocking).
+        loop {
+            match cmd_rx.try_next() {
+                Ok(Some(json)) => {
+                    if let Err(e) = ws_tx.send(Message::Text(json)).await {
+                        web_sys::console::warn_1(&format!("ws send failed: {e}").into());
+                        return;
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        // Wait for next server message.
+        match ws_rx.next().await {
+            Some(Ok(Message::Text(text))) => {
+                match serde_json::from_str::<WebEvent>(&text) {
+                    Ok(event) => state.handle_event(event),
+                    Err(e) => {
+                        web_sys::console::warn_1(&format!("invalid WebEvent: {e}").into());
+                    }
+                }
+            }
+            Some(Ok(Message::Bytes(_))) => {}
+            Some(Err(e)) => {
+                state.error.set(Some(format!("WebSocket error: {e}")));
+                break;
+            }
+            None => break,
+        }
     }
 }

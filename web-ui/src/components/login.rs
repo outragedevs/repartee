@@ -22,7 +22,11 @@ pub fn Login() -> impl IntoView {
             match do_login(&pw).await {
                 Ok(token) => {
                     state.token.set(Some(token));
-                    crate::ws::connect(&state);
+                    // Take the command receiver and start the WS loop.
+                    let cmd_rx_cell = use_context::<StoredValue<Option<futures::channel::mpsc::UnboundedReceiver<String>>>>().unwrap();
+                    if let Some(rx) = cmd_rx_cell.try_update_value(|v| v.take()).flatten() {
+                        crate::ws::connect(&state, rx);
+                    }
                 }
                 Err(e) => {
                     set_error.set(Some(e));

@@ -1,26 +1,23 @@
-use std::cell::RefCell;
-use std::rc::Rc;
-
 use leptos::prelude::*;
 
 use crate::components::layout::Layout;
 use crate::components::login::Login;
 use crate::state::AppState;
-use crate::ws::WsSender;
+use crate::ws::CommandSender;
 
-/// Root application component.
-///
-/// Shows login screen until authenticated, then renders the full IRC layout.
 #[component]
 pub fn App() -> impl IntoView {
     let state = AppState::new();
     provide_context(state.clone());
 
-    // Provide the shared WebSocket sender for all components.
-    let ws_sender = WsSender(Rc::new(RefCell::new(None)));
-    provide_context(ws_sender);
+    // Create the command channel — sender goes into context, receiver into WS loop on login.
+    let (cmd_tx, cmd_rx) = futures::channel::mpsc::unbounded::<String>();
+    provide_context(CommandSender(cmd_tx));
+    // Store receiver in a signal so login can take it.
+    let cmd_rx_cell = StoredValue::new(Some(cmd_rx));
+    provide_context(cmd_rx_cell);
 
-    // Apply theme from state to the document.
+    // Apply theme.
     Effect::new(move || {
         let theme = state.theme.get();
         if let Some(doc) = web_sys::window()
