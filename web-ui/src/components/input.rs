@@ -87,23 +87,24 @@ pub fn InputLine() -> impl IntoView {
     let (value, set_value) = signal(String::new());
 
     // Tab completion state.
-    let (tab_prefix, set_tab_prefix) = signal(Option::<String>::None);
     let (tab_matches, set_tab_matches) = signal(Vec::<String>::new());
     let (tab_index, set_tab_index) = signal(0usize);
-    let (tab_word_start, set_tab_word_start) = signal(0usize);
+    // The cursor position where the last completion ended — used to detect continuation.
     let (tab_cursor_end, set_tab_cursor_end) = signal(0usize);
+    // The start position of the replaced text — used to rebuild on cycle.
+    let (tab_replace_start, set_tab_replace_start) = signal(0usize);
+    // Whether we're in an active tab cycle.
+    let (tab_active, set_tab_active) = signal(false);
 
     let input_ref = NodeRef::<leptos::html::Input>::new();
 
-    // Global keydown listener: refocus input when user types anywhere.
+    // Global keydown listener — focus input when user types anywhere.
     Effect::new(move || {
         let cb = wasm_bindgen::prelude::Closure::<dyn Fn(web_sys::KeyboardEvent)>::new(
             move |ev: web_sys::KeyboardEvent| {
-                // Don't capture if a modifier is held (Ctrl+C, etc.)
                 if ev.ctrl_key() || ev.alt_key() || ev.meta_key() {
                     return;
                 }
-                // Don't capture keys with special handling.
                 let key = ev.key();
                 if key == "Tab"
                     || key == "Enter"
@@ -113,7 +114,6 @@ pub fn InputLine() -> impl IntoView {
                 {
                     return;
                 }
-                // Focus the input if it's not already focused.
                 if let Some(el) = input_ref.get_untracked() {
                     let html_el: &web_sys::HtmlInputElement = el.as_ref();
                     let _ = html_el.focus();
@@ -123,7 +123,7 @@ pub fn InputLine() -> impl IntoView {
         if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
             let _ =
                 doc.add_event_listener_with_callback("keydown", cb.as_ref().unchecked_ref());
-            cb.forget(); // keep alive for the lifetime of the page
+            cb.forget();
         }
     });
 
@@ -154,8 +154,7 @@ pub fn InputLine() -> impl IntoView {
     let state_paste = state.clone();
     let on_keydown = move |ev: web_sys::KeyboardEvent| {
         if ev.key() == "Enter" {
-            // Reset tab state on Enter.
-            set_tab_prefix.set(None);
+            set_tab_active.set(false);
             submit.run(());
             return;
         }
@@ -164,36 +163,10 @@ pub fn InputLine() -> impl IntoView {
             ev.prevent_default();
 
             let text = value.get_untracked();
+            let cursor = get_cursor(&input_ref, text.len());
 
-            // Get cursor position from the input element.
-            let cursor = input_ref
-                .get_untracked()
-                .and_then(|el| {
-                    let html_input: &web_sys::HtmlInputElement = el.as_ref();
-                    html_input.selection_start().ok().flatten()
-                })
-                .map_or(text.len(), |p| p as usize);
-
-            // Clamp cursor to text length (safety).
-            let cursor = cursor.min(text.len());
-            let before_cursor = &text[..cursor];
-
-            // Find the word being typed (from previous space to cursor).
-            let word_start = before_cursor.rfind(' ').map_or(0, |i| i + 1);
-            let typed = &before_cursor[word_start..];
-
-            if typed.is_empty() {
-                return;
-            }
-
-            // Check if we're continuing a previous tab cycle.
-            let prev_prefix = tab_prefix.get_untracked();
-            let continuing = prev_prefix.as_deref() == Some(typed)
-                || (prev_prefix.is_some()
-                    && tab_word_start.get_untracked() == word_start);
-
-            if continuing {
-                // Cycle to next match.
+            if tab_active.get_untracked() && cursor == tab_cursor_end.get_untracked() {
+                // Continue cycling through existing matches.
                 let matches = tab_matches.get_untracked();
                 if matches.is_empty() {
                     return;
@@ -202,92 +175,75 @@ pub fn InputLine() -> impl IntoView {
                 set_tab_index.set(idx);
 
                 let replacement = &matches[idx];
-                let is_full_line = replacement.starts_with('/');
-                let suffix = if is_full_line {
-                    " "
-                } else if word_start == 0 {
-                    ": "
-                } else {
-                    " "
-                };
-                let start = if is_full_line { 0 } else { word_start };
-                let after = &text[tab_cursor_end.get_untracked()..];
-                let new_text = format!(
-                    "{}{replacement}{suffix}{after}",
-                    &text[..start]
-                );
-                let new_cursor = start + replacement.len() + suffix.len();
+                let start = tab_replace_start.get_untracked();
+                let old_end = tab_cursor_end.get_untracked();
+                let after = &text[old_end..];
+                let new_text = format!("{}{replacement}{after}", &text[..start]);
+                let new_cursor = start + replacement.len();
+
                 set_tab_cursor_end.set(new_cursor);
                 set_value.set(new_text);
-
-                // Set cursor position.
-                if let Some(el) = input_ref.get_untracked() {
-                    let html_input: &web_sys::HtmlInputElement = el.as_ref();
-                    let _ = html_input.set_selection_start(Some(new_cursor as u32));
-                    let _ = html_input.set_selection_end(Some(new_cursor as u32));
-                }
+                set_cursor(&input_ref, new_cursor);
             } else {
-                // New tab completion — build matches based on context.
-                let mut matches: Vec<String> =
-                    build_tab_matches(&text, word_start, typed, &state);
+                // New tab completion.
+                let before_cursor = &text[..cursor];
+                let word_start = before_cursor.rfind(' ').map_or(0, |i| i + 1);
+                let typed = &before_cursor[word_start..];
 
-                if matches.is_empty() {
+                if typed.is_empty() && !text.starts_with('/') {
                     return;
                 }
 
-                // Sort alphabetically (case-insensitive).
+                let mut matches = build_tab_matches(&text, word_start, typed, &state);
+                if matches.is_empty() {
+                    return;
+                }
                 matches.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
 
-                let replacement = &matches[0];
-                // For /command and "/set path" completions, no trailing suffix
-                // because the replacement already includes the full text.
-                let is_full_line = replacement.starts_with('/');
-                let suffix = if is_full_line {
-                    " "
-                } else if word_start == 0 {
-                    ": "
-                } else {
-                    " "
-                };
-                let start = if is_full_line { 0 } else { word_start };
+                // Build the replacement with appropriate suffix.
+                let completions: Vec<String> = matches
+                    .iter()
+                    .map(|m| {
+                        if m.starts_with('/') {
+                            format!("{m} ")
+                        } else if word_start == 0 {
+                            format!("{m}: ")
+                        } else {
+                            format!("{m} ")
+                        }
+                    })
+                    .collect();
+
+                let replace_start = if matches[0].starts_with('/') { 0 } else { word_start };
+                let first = &completions[0];
                 let after = &text[cursor..];
-                let new_text = format!(
-                    "{}{replacement}{suffix}{after}",
-                    &text[..start]
-                );
-                let new_cursor = start + replacement.len() + suffix.len();
+                let new_text = format!("{}{first}{after}", &text[..replace_start]);
+                let new_cursor = replace_start + first.len();
 
-                set_tab_prefix.set(Some(typed.to_string()));
-                set_tab_matches.set(matches);
+                set_tab_matches.set(completions);
                 set_tab_index.set(0);
-                set_tab_word_start.set(word_start);
+                set_tab_replace_start.set(replace_start);
                 set_tab_cursor_end.set(new_cursor);
+                set_tab_active.set(true);
                 set_value.set(new_text);
-
-                // Set cursor position.
-                if let Some(el) = input_ref.get_untracked() {
-                    let html_input: &web_sys::HtmlInputElement = el.as_ref();
-                    let _ = html_input.set_selection_start(Some(new_cursor as u32));
-                    let _ = html_input.set_selection_end(Some(new_cursor as u32));
-                }
+                set_cursor(&input_ref, new_cursor);
             }
             return;
         }
 
-        // Any non-Tab key resets tab completion state.
-        if tab_prefix.get_untracked().is_some() {
-            set_tab_prefix.set(None);
+        // Any non-Tab key resets tab state.
+        if tab_active.get_untracked() {
+            set_tab_active.set(false);
         }
     };
 
     // Handle paste — split multiline content and send each line separately.
     let on_paste = move |ev: web_sys::Event| {
-        use wasm_bindgen::JsCast;
         let Some(clip_ev) = ev.dyn_ref::<web_sys::ClipboardEvent>() else { return };
         let Some(data) = clip_ev.clipboard_data() else { return };
         let Ok(text) = data.get_data("text/plain") else { return };
         if !text.contains('\n') {
-            return; // single-line paste — let default browser behavior handle it
+            return;
         }
         ev.prevent_default();
         let Some(buffer_id) = state_paste.active_buffer.get_untracked() else { return };
@@ -318,6 +274,7 @@ pub fn InputLine() -> impl IntoView {
                 type="text"
                 placeholder="Type a message..."
                 autofocus=true
+                autocomplete="off"
                 prop:value=value
                 node_ref=input_ref
                 on:input=move |ev| set_value.set(event_target_value(&ev))
@@ -329,11 +286,27 @@ pub fn InputLine() -> impl IntoView {
     }
 }
 
+/// Get cursor position from the input element.
+fn get_cursor(input_ref: &NodeRef<leptos::html::Input>, text_len: usize) -> usize {
+    input_ref
+        .get_untracked()
+        .and_then(|el| {
+            let html_input: &web_sys::HtmlInputElement = el.as_ref();
+            html_input.selection_start().ok().flatten()
+        })
+        .map_or(text_len, |p| (p as usize).min(text_len))
+}
+
+/// Set cursor position on the input element.
+fn set_cursor(input_ref: &NodeRef<leptos::html::Input>, pos: usize) {
+    if let Some(el) = input_ref.get_untracked() {
+        let html_input: &web_sys::HtmlInputElement = el.as_ref();
+        let _ = html_input.set_selection_start(Some(pos as u32));
+        let _ = html_input.set_selection_end(Some(pos as u32));
+    }
+}
+
 /// Build tab completion matches based on input context.
-///
-/// 1. `/` at start with no spaces: complete /command names.
-/// 2. `/set ` prefix: complete setting paths.
-/// 3. Otherwise: complete nicks from the active channel.
 fn build_tab_matches(
     text: &str,
     word_start: usize,
@@ -352,10 +325,9 @@ fn build_tab_matches(
 
     // Case 2: /set path completion.
     if text.starts_with("/set ") && word_start >= 5 {
-        let after_set = typed;
         return SETTING_PATHS
             .iter()
-            .filter(|p| p.starts_with(after_set))
+            .filter(|p| p.starts_with(typed))
             .map(|p| format!("/set {p}"))
             .collect();
     }
