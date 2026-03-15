@@ -51,16 +51,14 @@ pub fn Layout() -> impl IntoView {
             <div class="desktop-only">
                 <TopicBar />
                 <div class="main-area">
-                    <div class="sidebar-left">
-                        <BufferList />
-                        <ThemePicker />
-                    </div>
+                    <BufferList />
                     <ChatView />
                     <NickList />
                 </div>
                 <div class="bottom-bar">
                     <StatusLine />
                     <InputLine />
+                    <ThemePicker />
                 </div>
             </div>
 

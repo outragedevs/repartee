@@ -103,7 +103,7 @@ pub fn ChatView() -> impl IntoView {
                             }.into_any()
                         } else {
                             // Regular message: timestamp | right-aligned nick❯ | text
-                            let nick = msg.nick.unwrap_or_default();
+                            let nick = truncate_nick(&msg.nick.unwrap_or_default(), 9);
                             let mode = msg.nick_mode.unwrap_or_default();
                             let styled = render_styled_text(&msg.text);
                             view! {
@@ -161,4 +161,15 @@ fn format_timestamp(ts: i64, fmt: &str) -> String {
             local.format(fmt).to_string()
         })
         .unwrap_or_default()
+}
+
+/// Truncate nick to max_len chars. If longer, cut to max_len-1 and append `+`.
+fn truncate_nick(nick: &str, max_len: usize) -> String {
+    let char_count = nick.chars().count();
+    if char_count <= max_len {
+        nick.to_string()
+    } else {
+        let truncated: String = nick.chars().take(max_len - 1).collect();
+        format!("{truncated}+")
+    }
 }

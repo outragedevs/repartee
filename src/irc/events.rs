@@ -1513,6 +1513,13 @@ fn handle_nick_change(
         && let Some(conn) = state.connections.get_mut(conn_id)
     {
         conn.nick = new_nick.to_string();
+        // Broadcast to web so status bar updates.
+        state.pending_web_events.push(crate::web::protocol::WebEvent::ConnectionStatus {
+            conn_id: conn_id.to_string(),
+            label: conn.label.clone(),
+            connected: conn.status == crate::state::connection::ConnectionStatus::Connected,
+            nick: new_nick.to_string(),
+        });
     }
 
     // --- Ignore check (never ignore our own nick changes) ---
