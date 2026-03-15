@@ -327,31 +327,53 @@ automatically re-op users matching the mask when they rejoin.</p>
 <div class="command-entry" data-command="alias" data-category="Configuration">
 <h1>/alias</h1>
 <h2>Syntax</h2>
-<pre><code>/alias [name] [body]
-/alias -&lt;name&gt;
+<pre><code>/alias                    List all aliases
+/alias &lt;name&gt;             Show a specific alias
+/alias &lt;name&gt; &lt;body&gt;      Define or replace an alias
+/alias -&lt;name&gt;            Remove an alias
 </code></pre>
 <h2>Description</h2>
 <p>Define custom command aliases. Aliases expand before execution and support
-template variables and command chaining with semicolons.</p>
-<p>With no arguments, lists all defined aliases.
-With name and body, defines or replaces the alias.
-With <code>-name</code>, removes the alias (e.g. <code>/alias -ns</code>).</p>
-<p>Template variables:</p>
+template variables, context variables, and command chaining with semicolons.</p>
+<h3>Template Variables</h3>
 <ul>
 <li><code>$0</code>-<code>$9</code> — positional arguments</li>
-<li><code>$*</code> — all arguments</li>
-<li><code>$C</code> — current channel name</li>
-<li><code>$N</code> — current nick</li>
-<li><code>$S</code> — current server label</li>
-<li><code>$T</code> — current buffer name</li>
+<li><code>$0-</code> through <code>$9-</code> — all arguments from position N onward</li>
+<li><code>$*</code> — all arguments joined by space</li>
 </ul>
+<p>If the alias body contains no <code>$</code> references, <code>$*</code> is appended automatically.
+This means <code>/alias ns /msg NickServ</code> works the same as <code>/alias ns /msg NickServ $*</code>.</p>
+<h3>Context Variables</h3>
+<ul>
+<li><code>$C</code> or <code>${C}</code> — current channel/buffer name</li>
+<li><code>$N</code> or <code>${N}</code> — current nick</li>
+<li><code>$S</code> or <code>${S}</code> — current server label</li>
+<li><code>$T</code> or <code>${T}</code> — current buffer name (same as <code>$C</code>)</li>
+</ul>
+<h3>Command Chaining</h3>
+<p>Use <code>;</code> to chain multiple commands in one alias:</p>
+<pre><code>/alias j /join $0; /msg $0 hello everyone
+</code></pre>
+<h3>Recursion Guard</h3>
+<p>Aliases can reference other aliases. Recursion is capped at 10 levels to
+prevent infinite loops.</p>
 <p>Cannot override built-in commands.</p>
 <h2>Examples</h2>
 <pre><code>/alias
+/alias ns
 /alias ns /msg NickServ $*
 /alias cs /msg ChanServ $*
 /alias j /join $0; /msg $0 hello everyone
+/alias w /who $C
 /alias -ns
+</code></pre>
+<h2>Config</h2>
+<p>Aliases are stored in the <code>[aliases]</code> section of <code>config.toml</code>:</p>
+<pre><code class="language-toml">[aliases]
+ns = &quot;/msg NickServ $*&quot;
+cs = &quot;/msg ChanServ $*&quot;
+wc = &quot;/close&quot;
+j = &quot;/join $0; /msg $0 hello everyone&quot;
 </code></pre>
 <h2>See Also</h2>
 <p>/unalias</p>

@@ -86,8 +86,10 @@ retention_days = 0             # 0 = keep forever
 exclude_types = []             # e.g. ["join", "part", "quit"]
 
 [aliases]
+ns = "/msg NickServ $*"
+cs = "/msg ChanServ $*"
 wc = "/close"
-j = "/join"
+j = "/join $0; /msg $0 hello everyone"
 
 [scripts]
 autoload = ["slap"]
@@ -154,7 +156,20 @@ Chat logging to SQLite. When `encrypt = true`, messages are encrypted with AES-2
 
 ### `[aliases]`
 
-Custom command shortcuts. The key is the alias name, the value is the command it expands to.
+Custom command shortcuts. The key is the alias name, the value is the command template.
+
+Templates support positional args (`$0`-`$9`), range args (`$1-`), all args (`$*`), context variables (`$C` channel, `$N` nick, `$S` server, `$T` buffer), and command chaining with `;`. If no `$` appears in the template, `$*` is appended automatically.
+
+```toml
+[aliases]
+ns = "/msg NickServ $*"
+cs = "/msg ChanServ $*"
+wc = "/close"
+j = "/join $0; /msg $0 hello everyone"
+w = "/who $C"
+```
+
+Manage at runtime with `/alias` and `/unalias`.
 
 ### `[scripts]`
 

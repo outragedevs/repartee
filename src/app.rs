@@ -4188,15 +4188,21 @@ impl App {
                     (nicks, speakers)
                 },
             );
-        let commands = crate::commands::registry::get_command_names();
+        let builtin_commands = crate::commands::registry::get_command_names();
+        // Include user-defined alias names in tab completion
+        let alias_names: Vec<String> = self.config.aliases.keys().cloned().collect();
+        let mut all_commands: Vec<&str> = builtin_commands.to_vec();
+        all_commands.extend(alias_names.iter().map(String::as_str));
+        all_commands.sort_unstable();
+        all_commands.dedup();
         let setting_paths = crate::commands::settings::get_setting_paths(&self.config);
         self.input
-            .tab_complete(&nicks, &last_speakers, commands, &setting_paths);
+            .tab_complete(&nicks, &last_speakers, &all_commands, &setting_paths);
     }
 
     fn handle_submit(&mut self, text: &str) {
         if let Some(parsed) = crate::commands::parser::parse_command(text) {
-            self.execute_command(&parsed);
+            self.execute_command_with_depth(&parsed, 0);
         } else {
             self.handle_plain_message(text);
         }
@@ -4204,6 +4210,24 @@ impl App {
     }
 
     fn execute_command(&mut self, parsed: &crate::commands::parser::ParsedCommand) {
+        self.execute_command_with_depth(parsed, 0);
+    }
+
+    fn execute_command_with_depth(
+        &mut self,
+        parsed: &crate::commands::parser::ParsedCommand,
+        depth: u8,
+    ) {
+        if depth > MAX_ALIAS_DEPTH {
+            crate::commands::helpers::add_local_event(
+                self,
+                &format!(
+                    "Alias recursion limit reached (max {MAX_ALIAS_DEPTH})"
+                ),
+            );
+            return;
+        }
+
         // Emit to scripts — they can suppress commands
         {
             use crate::scripting::api::events;
@@ -4225,13 +4249,17 @@ impl App {
         if let Some((_, def)) = found {
             (def.handler)(self, &parsed.args);
         } else if let Some(template) = self.config.aliases.get(&parsed.name).cloned() {
-            // Expand user-defined alias
-            let expanded = expand_alias_template(&template, &parsed.args);
-            // Re-parse the expanded text (it may itself be a command)
-            if let Some(reparsed) = crate::commands::parser::parse_command(&expanded) {
-                self.execute_command(&reparsed);
-            } else {
-                self.handle_plain_message(&expanded);
+            // Gather context for variable expansion
+            let (channel, nick, server) = self.alias_context();
+            let expanded = expand_alias_template(&template, &parsed.args, &channel, &nick, &server);
+
+            // Split by ; for command chaining
+            for part in expanded.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+                if let Some(reparsed) = crate::commands::parser::parse_command(part) {
+                    self.execute_command_with_depth(&reparsed, depth + 1);
+                } else {
+                    self.handle_plain_message(part);
+                }
             }
         } else if self.script_manager.as_ref().is_some_and(|m| {
             let conn_id = self.state.active_buffer().map(|b| b.connection_id.as_str());
@@ -4245,6 +4273,17 @@ impl App {
                 &format!("Unknown command: /{}. Type /help for a list.", parsed.name),
             );
         }
+    }
+
+    /// Gather context variables for alias expansion (`$C`, `$N`, `$S`, `$T`).
+    fn alias_context(&self) -> (String, String, String) {
+        let buf = self.state.active_buffer();
+        let channel = buf.map_or_else(String::new, |b| b.name.clone());
+        let conn_id = buf.map_or("", |b| b.connection_id.as_str());
+        let conn = self.state.connections.get(conn_id);
+        let nick = conn.map_or_else(String::new, |c| c.nick.clone());
+        let server = conn.map_or_else(String::new, |c| c.label.clone());
+        (channel, nick, server)
     }
 
     #[expect(
@@ -5136,28 +5175,73 @@ impl App {
     }
 }
 
-/// Expand an alias template with positional args.
+/// Maximum alias recursion depth (prevents infinite loops from circular aliases).
+const MAX_ALIAS_DEPTH: u8 = 10;
+
+/// Expand an alias template with positional args and context variables.
 ///
 /// Supported variables:
 /// - `$0` through `$9` — positional arguments
+/// - `$0-` through `$9-` — all arguments from position N onward
 /// - `$*` — all arguments joined by space
 /// - `$-` — all arguments from position 0 onward (same as `$*`)
-fn expand_alias_template(template: &str, args: &[String]) -> String {
+/// - `$C` or `${C}` — current channel/buffer name
+/// - `$N` or `${N}` — current nick
+/// - `$S` or `${S}` — current server label
+/// - `$T` or `${T}` — current buffer name (same as `$C`)
+///
+/// If the template contains no `$` references, ` $*` is appended automatically
+/// so that simple aliases like `/alias ns /msg NickServ` work without explicit `$*`.
+fn expand_alias_template(
+    template: &str,
+    args: &[String],
+    channel: &str,
+    nick: &str,
+    server: &str,
+) -> String {
+    let mut body = template.to_string();
+
+    // Auto-append $* if body contains no $ references
+    if !body.contains('$') {
+        body.push_str(" $*");
+    }
+
+    // Context variables ($X and ${X} forms)
+    body = body.replace("${C}", channel);
+    body = body.replace("$C", channel);
+    body = body.replace("${N}", nick);
+    body = body.replace("$N", nick);
+    body = body.replace("${S}", server);
+    body = body.replace("$S", server);
+    body = body.replace("${T}", channel);
+    body = body.replace("$T", channel);
+
+    // Range args: $0-, $1-, $2-, etc. — all args from index N onward
+    for i in (0..=9).rev() {
+        let range_var = format!("${i}-");
+        if body.contains(&range_var) {
+            let val = if i < args.len() {
+                args[i..].join(" ")
+            } else {
+                String::new()
+            };
+            body = body.replace(&range_var, &val);
+        }
+    }
+
+    // $* and $- — all args
     let all_args = args.join(" ");
-    let mut result = template.to_string();
+    body = body.replace("$*", &all_args);
+    body = body.replace("$-", &all_args);
 
-    // Replace $* and $- with all args
-    result = result.replace("$*", &all_args);
-    result = result.replace("$-", &all_args);
-
-    // Replace $0-$9 with positional args
+    // Single positional: $0 .. $9 (reverse order so $10 doesn't eat $1 first)
     for i in (0..=9).rev() {
         let var = format!("${i}");
         let val = args.get(i).map_or("", String::as_str);
-        result = result.replace(&var, val);
+        body = body.replace(&var, val);
     }
 
-    result
+    body.trim().to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -5441,5 +5525,115 @@ mod tests {
         );
         assert_eq!(proto, Some(ProtocolType::Kitty));
         assert_eq!(source, "env:LC_TERMINAL=subterm");
+    }
+
+    // ── expand_alias_template tests ──
+
+    fn args(s: &[&str]) -> Vec<String> {
+        s.iter().map(|a| (*a).to_string()).collect()
+    }
+
+    #[test]
+    fn alias_positional_args() {
+        let result = expand_alias_template("/join $0", &args(&["#test"]), "", "", "");
+        assert_eq!(result, "/join #test");
+    }
+
+    #[test]
+    fn alias_all_args() {
+        let result =
+            expand_alias_template("/msg NickServ $*", &args(&["identify", "pass"]), "", "", "");
+        assert_eq!(result, "/msg NickServ identify pass");
+    }
+
+    #[test]
+    fn alias_auto_append_star() {
+        // No $ in template — should auto-append $*
+        let result =
+            expand_alias_template("/msg NickServ", &args(&["identify", "pass"]), "", "", "");
+        assert_eq!(result, "/msg NickServ identify pass");
+    }
+
+    #[test]
+    fn alias_context_variables() {
+        let result =
+            expand_alias_template("/topic $C", &[], "#rust", "ferris", "libera");
+        assert_eq!(result, "/topic #rust");
+    }
+
+    #[test]
+    fn alias_context_braced_syntax() {
+        let result =
+            expand_alias_template("/msg ${N} hello from ${S}", &[], "#ch", "me", "srv");
+        assert_eq!(result, "/msg me hello from srv");
+    }
+
+    #[test]
+    fn alias_range_args() {
+        let result = expand_alias_template(
+            "/msg $0 $1-",
+            &args(&["nick", "hello", "world"]),
+            "",
+            "",
+            "",
+        );
+        assert_eq!(result, "/msg nick hello world");
+    }
+
+    #[test]
+    fn alias_missing_positional_replaced_empty() {
+        let result = expand_alias_template("/msg $0 $1", &args(&["nick"]), "", "", "");
+        assert_eq!(result, "/msg nick");
+    }
+
+    #[test]
+    fn alias_chaining_template() {
+        // Semicolons are preserved in the expanded string (split happens in execute_command)
+        let result = expand_alias_template(
+            "/join $0; /msg $0 hello",
+            &args(&["#test"]),
+            "",
+            "",
+            "",
+        );
+        assert_eq!(result, "/join #test; /msg #test hello");
+    }
+
+    #[test]
+    fn alias_empty_args_star() {
+        let result = expand_alias_template("/who $C", &[], "#general", "me", "srv");
+        assert_eq!(result, "/who #general");
+    }
+
+    #[test]
+    fn alias_dollar_t_same_as_c() {
+        let result = expand_alias_template("/topic $T", &[], "#rust", "", "");
+        assert_eq!(result, "/topic #rust");
+    }
+
+    #[test]
+    fn alias_range_args_out_of_bounds_returns_empty() {
+        // $3- with only 2 args should produce empty, not panic
+        let result = expand_alias_template(
+            "/msg $0 $3-",
+            &args(&["nick", "hello"]),
+            "",
+            "",
+            "",
+        );
+        assert_eq!(result, "/msg nick");
+    }
+
+    #[test]
+    fn alias_range_args_at_boundary() {
+        // $2- with exactly 2 args (index 2 = past end) should produce empty
+        let result = expand_alias_template(
+            "/msg $0 $2-",
+            &args(&["nick", "hello"]),
+            "",
+            "",
+            "",
+        );
+        assert_eq!(result, "/msg nick");
     }
 }

@@ -276,11 +276,20 @@ pub(crate) fn cmd_alias(app: &mut App, args: &[String]) {
         return;
     }
 
+    // `/alias name` (one arg, no body) — show that specific alias
     if args.len() < 2 {
-        add_local_event(
-            app,
-            "Usage: /alias <name> <template> | /alias -<name> (to remove)",
-        );
+        let name = args[0].strip_prefix('/').unwrap_or(&args[0]).to_lowercase();
+        if let Some(body) = app.config.aliases.get(&name) {
+            add_local_event(
+                app,
+                &format!("  {C_CMD}/{name}{C_RST} = {C_TEXT}{body}{C_RST}"),
+            );
+        } else {
+            add_local_event(
+                app,
+                &format!("{C_ERR}No alias named: /{name}{C_RST}"),
+            );
+        }
         return;
     }
 

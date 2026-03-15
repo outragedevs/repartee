@@ -176,8 +176,10 @@ retention_days = 0             # 0 = keep forever
 exclude_types = []             # e.g. [&quot;join&quot;, &quot;part&quot;, &quot;quit&quot;]
 
 [aliases]
+ns = &quot;/msg NickServ $*&quot;
+cs = &quot;/msg ChanServ $*&quot;
 wc = &quot;/close&quot;
-j = &quot;/join&quot;
+j = &quot;/join $0; /msg $0 hello everyone&quot;
 
 [scripts]
 autoload = [&quot;slap&quot;]
@@ -227,7 +229,16 @@ levels = [&quot;ALL&quot;]
 <h3><code>[logging]</code></h3>
 <p>Chat logging to SQLite. When <code>encrypt = true</code>, messages are encrypted with AES-256-GCM. <code>retention_days = 0</code> keeps logs forever.</p>
 <h3><code>[aliases]</code></h3>
-<p>Custom command shortcuts. The key is the alias name, the value is the command it expands to.</p>
+<p>Custom command shortcuts. The key is the alias name, the value is the command template.</p>
+<p>Templates support positional args (<code>$0</code>-<code>$9</code>), range args (<code>$1-</code>), all args (<code>$*</code>), context variables (<code>$C</code> channel, <code>$N</code> nick, <code>$S</code> server, <code>$T</code> buffer), and command chaining with <code>;</code>. If no <code>$</code> appears in the template, <code>$*</code> is appended automatically.</p>
+<pre><code class="language-toml">[aliases]
+ns = &quot;/msg NickServ $*&quot;
+cs = &quot;/msg ChanServ $*&quot;
+wc = &quot;/close&quot;
+j = &quot;/join $0; /msg $0 hello everyone&quot;
+w = &quot;/who $C&quot;
+</code></pre>
+<p>Manage at runtime with <code>/alias</code> and <code>/unalias</code>.</p>
 <h3><code>[scripts]</code></h3>
 <p>The <code>autoload</code> array lists script names to load on startup. Scripts live in <code>~/.repartee/scripts/</code> as <code>.lua</code> files.</p>
 <h3><code>[dcc]</code></h3>

@@ -56,7 +56,7 @@ cargo build --release
 ### Requirements
 
 - **Rust 1.85+** (2024 edition) — install via [rustup](https://rustup.rs)
-- A terminal with 256-color or truecolor support (iTerm2, Alacritty, kitty, WezTerm, etc.)
+- A terminal with 256-color or truecolor support (iTerm2, Alacritty, kitty, WezTerm, Ghostty, Subterm, etc.)
 - A modern web browser for the web frontend (optional)
 
 ---
@@ -101,8 +101,8 @@ channels = ["#repartee"]
 | `Up` / `Down` | Input history |
 | `Mouse click` | Select buffer or nick |
 | `Mouse wheel` | Scroll chat |
-| `Ctrl+\` | Detach from terminal |
 | `Ctrl+Z` | Detach from terminal |
+| `/detach` or `/dt` | Detach from terminal |
 
 ---
 
@@ -125,7 +125,7 @@ channels = ["#repartee"]
 repartee can run in the background while you close your terminal:
 
 ```bash
-# Detach: press Ctrl+\ or type /detach — terminal is restored
+# Detach: press Ctrl+Z or type /detach — terminal is restored
 # Reattach from any terminal:
 repartee a
 
