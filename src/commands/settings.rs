@@ -481,6 +481,7 @@ pub fn get_setting_paths(config: &AppConfig) -> Vec<String> {
 
 // === Command handler ===
 
+#[expect(clippy::too_many_lines, reason = "flat dispatcher with per-section side-effects")]
 pub fn cmd_set(app: &mut App, args: &[String]) {
     let ev = super::helpers::add_local_event;
 
@@ -577,6 +578,20 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
             // Sync spellcheck runtime state
             if path.starts_with("spellcheck.") {
                 app.reload_spellchecker();
+            }
+
+            // Broadcast web settings changes to connected web clients.
+            if path.starts_with("web.timestamp_format")
+                || path.starts_with("web.line_height")
+                || path.starts_with("web.theme")
+            {
+                app.state.pending_web_events.push(
+                    crate::web::protocol::WebEvent::SettingsChanged {
+                        timestamp_format: app.config.web.timestamp_format.clone(),
+                        line_height: app.config.web.line_height,
+                        theme: app.config.web.theme.clone(),
+                    },
+                );
             }
 
             // Special handling: reload theme if theme name changed

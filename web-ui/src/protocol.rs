@@ -73,6 +73,11 @@ pub enum WebEvent {
     ActiveBufferChanged {
         buffer_id: String,
     },
+    SettingsChanged {
+        timestamp_format: String,
+        line_height: f32,
+        theme: String,
+    },
     Error {
         message: String,
     },
@@ -100,6 +105,8 @@ pub struct BufferMeta {
     pub unread_count: u32,
     pub activity: u8,
     pub nick_count: u32,
+    #[serde(default)]
+    pub modes: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +115,10 @@ pub struct ConnectionMeta {
     pub label: String,
     pub nick: String,
     pub connected: bool,
+    #[serde(default)]
+    pub user_modes: String,
+    #[serde(default)]
+    pub lag: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -79,6 +79,12 @@ pub enum WebEvent {
     },
     /// Active buffer changed (syncs TUI ↔ Web).
     ActiveBufferChanged { buffer_id: String },
+    /// Web settings changed (`timestamp_format`, `line_height`, theme).
+    SettingsChanged {
+        timestamp_format: String,
+        line_height: f32,
+        theme: String,
+    },
     /// Server-side error.
     Error { message: String },
 }
@@ -118,6 +124,8 @@ pub struct BufferMeta {
     pub unread_count: u32,
     pub activity: u8,
     pub nick_count: u32,
+    #[serde(default)]
+    pub modes: Option<String>,
 }
 
 /// Connection metadata sent in `SyncInit`.
@@ -127,6 +135,10 @@ pub struct ConnectionMeta {
     pub label: String,
     pub nick: String,
     pub connected: bool,
+    #[serde(default)]
+    pub user_modes: String,
+    #[serde(default)]
+    pub lag: Option<u64>,
 }
 
 /// Wire-format message for transport over WebSocket.

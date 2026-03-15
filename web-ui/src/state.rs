@@ -17,6 +17,8 @@ pub struct AppState {
     pub token: RwSignal<Option<String>>,
     pub theme: RwSignal<String>,
     pub error: RwSignal<Option<String>>,
+    pub timestamp_format: RwSignal<String>,
+    pub line_height: RwSignal<f32>,
 }
 
 impl AppState {
@@ -38,6 +40,8 @@ impl AppState {
             token: RwSignal::new(None),
             theme: RwSignal::new(saved_theme),
             error: RwSignal::new(None),
+            timestamp_format: RwSignal::new("%H:%M".to_string()),
+            line_height: RwSignal::new(1.35),
         }
     }
 
@@ -147,6 +151,8 @@ impl AppState {
                             label,
                             nick,
                             connected,
+                            user_modes: String::new(),
+                            lag: None,
                         });
                     }
                 });
@@ -262,6 +268,15 @@ impl AppState {
             }
             WebEvent::ActiveBufferChanged { buffer_id } => {
                 self.active_buffer.set(Some(buffer_id));
+            }
+            WebEvent::SettingsChanged {
+                timestamp_format,
+                line_height,
+                theme,
+            } => {
+                self.timestamp_format.set(timestamp_format);
+                self.line_height.set(line_height);
+                self.theme.set(theme);
             }
             WebEvent::Error { message } => {
                 self.error.set(Some(message));

@@ -1,4 +1,5 @@
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 
 use crate::format;
 use crate::state::AppState;
@@ -27,9 +28,15 @@ pub fn ChatView() -> impl IntoView {
 
     Effect::new(move || {
         let _ = messages(); // track message changes
-        // Scroll to bottom after DOM update.
+        // Use requestAnimationFrame to scroll after DOM paint.
         if let Some(el) = chat_ref.get() {
-            el.set_scroll_top(el.scroll_height());
+            let scroll_fn = wasm_bindgen::prelude::Closure::once(move || {
+                el.set_scroll_top(el.scroll_height());
+            });
+            if let Some(window) = web_sys::window() {
+                let _ = window.request_animation_frame(scroll_fn.as_ref().unchecked_ref());
+                scroll_fn.forget(); // one-shot closure — leak is fine
+            }
         }
     });
 
@@ -38,6 +45,7 @@ pub fn ChatView() -> impl IntoView {
             <div class="chat-messages" node_ref=chat_ref>
                 {move || {
                     let nick_self = our_nick();
+                    let ts_fmt = state.timestamp_format.get();
                     messages().unwrap_or_default().into_iter().map(|msg| {
                         let is_event = msg.msg_type == "event";
                         let is_action = msg.msg_type == "action";
@@ -60,7 +68,7 @@ pub fn ChatView() -> impl IntoView {
                             "chat-line"
                         };
 
-                        let ts = format_timestamp(msg.timestamp);
+                        let ts = format_timestamp(msg.timestamp, &ts_fmt);
 
                         if is_event || is_action || is_notice {
                             // Detect event arrow from text content.
@@ -128,8 +136,12 @@ fn render_styled_text(text: &str) -> Vec<leptos::prelude::AnyView> {
         .collect::<Vec<_>>()
 }
 
-fn format_timestamp(ts: i64) -> String {
-    let hours = (ts / 3600) % 24;
-    let minutes = (ts % 3600) / 60;
-    format!("{hours:02}:{minutes:02}")
+fn format_timestamp(ts: i64, fmt: &str) -> String {
+    chrono::DateTime::from_timestamp(ts, 0)
+        .map(|dt| {
+            use chrono::TimeZone;
+            let local = chrono::Local.from_utc_datetime(&dt.naive_utc());
+            local.format(fmt).to_string()
+        })
+        .unwrap_or_default()
 }

@@ -57,6 +57,7 @@ impl AppState {
             unread_count: buffer.unread_count,
             activity: buffer.activity as u8,
             nick_count: u32::try_from(buffer.users.len()).unwrap_or(u32::MAX),
+            modes: buffer.modes.clone(),
         };
         self.buffers.insert(buffer.id.clone(), buffer);
         self.pending_web_events

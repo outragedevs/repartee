@@ -19,11 +19,19 @@ pub fn Layout() -> impl IntoView {
     // Auto-fetch messages and nick list whenever active buffer changes.
     Effect::new(move || {
         if let Some(buf_id) = state.active_buffer.get() {
-            crate::ws::send_command(&WebCommand::FetchMessages {
-                buffer_id: buf_id.clone(),
-                limit: 50,
-                before: None,
-            });
+            // Only fetch from DB if we don't already have messages for this buffer.
+            let has_messages = state
+                .messages
+                .get_untracked()
+                .get(&buf_id)
+                .is_some_and(|msgs| !msgs.is_empty());
+            if !has_messages {
+                crate::ws::send_command(&WebCommand::FetchMessages {
+                    buffer_id: buf_id.clone(),
+                    limit: 100,
+                    before: None,
+                });
+            }
             crate::ws::send_command(&WebCommand::FetchNickList {
                 buffer_id: buf_id,
             });

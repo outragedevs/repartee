@@ -58,15 +58,42 @@ pub fn StatusLine() -> impl IntoView {
             // Time
             <span class="muted">{time_str}</span>
             <span class="sep">"|"</span>
-            // Nick
-            {move || active_conn().map(|c| view! {
-                <span class="nick">{c.nick}</span>
+            // Nick + user modes
+            {move || active_conn().map(|c| {
+                let modes = if c.user_modes.is_empty() {
+                    String::new()
+                } else {
+                    format!("(+{})", c.user_modes)
+                };
+                view! {
+                    <span class="nick">{c.nick}</span>
+                    <span class="muted">{modes}</span>
+                }
             })}
             <span class="sep">"|"</span>
-            // Channel
-            {move || active_buf().map(|b| view! {
-                <span class="nick">{b.name}</span>
+            // Channel + channel modes
+            {move || active_buf().map(|b| {
+                let modes = b.modes.as_deref()
+                    .filter(|m| !m.is_empty())
+                    .map(|m| format!("(+{m})"))
+                    .unwrap_or_default();
+                view! {
+                    <span class="nick">{b.name}</span>
+                    <span class="muted">{modes}</span>
+                }
             })}
+            // Lag
+            {move || {
+                let conn = active_conn()?;
+                let lag = conn.lag?;
+                #[allow(clippy::cast_precision_loss)]
+                let secs = lag as f64 / 1000.0;
+                Some(view! {
+                    <span class="sep">"|"</span>
+                    <span class="muted">"Lag: "</span>
+                    <span class="muted">{format!("{secs:.1}s")}</span>
+                })
+            }}
             // Activity
             {move || {
                 let items = activity_items();

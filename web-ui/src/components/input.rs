@@ -1,4 +1,5 @@
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 
 use crate::protocol::WebCommand;
 use crate::state::AppState;
@@ -16,6 +17,38 @@ pub fn InputLine() -> impl IntoView {
     let (tab_cursor_end, set_tab_cursor_end) = signal(0usize);
 
     let input_ref = NodeRef::<leptos::html::Input>::new();
+
+    // Global keydown listener: refocus input when user types anywhere.
+    Effect::new(move || {
+        let cb = wasm_bindgen::prelude::Closure::<dyn Fn(web_sys::KeyboardEvent)>::new(
+            move |ev: web_sys::KeyboardEvent| {
+                // Don't capture if a modifier is held (Ctrl+C, etc.)
+                if ev.ctrl_key() || ev.alt_key() || ev.meta_key() {
+                    return;
+                }
+                // Don't capture keys with special handling.
+                let key = ev.key();
+                if key == "Tab"
+                    || key == "Enter"
+                    || key == "Escape"
+                    || key == "F1"
+                    || key.starts_with("Arrow")
+                {
+                    return;
+                }
+                // Focus the input if it's not already focused.
+                if let Some(el) = input_ref.get_untracked() {
+                    let html_el: &web_sys::HtmlInputElement = el.as_ref();
+                    let _ = html_el.focus();
+                }
+            },
+        );
+        if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+            let _ =
+                doc.add_event_listener_with_callback("keydown", cb.as_ref().unchecked_ref());
+            cb.forget(); // keep alive for the lifetime of the page
+        }
+    });
 
     let submit = Callback::new(move |_: ()| {
         let text = value.get();
@@ -167,6 +200,7 @@ pub fn InputLine() -> impl IntoView {
             <input
                 type="text"
                 placeholder="Type a message..."
+                autofocus=true
                 prop:value=value
                 node_ref=input_ref
                 on:input=move |ev| set_value.set(event_target_value(&ev))

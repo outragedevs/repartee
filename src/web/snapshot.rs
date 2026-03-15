@@ -28,6 +28,7 @@ pub fn build_sync_init(state: &AppState, mention_count: u32) -> WebEvent {
             unread_count: b.unread_count,
             activity: b.activity as u8,
             nick_count: u32::try_from(b.users.len()).unwrap_or(u32::MAX),
+            modes: b.modes.clone(),
         })
         .collect();
 
@@ -39,6 +40,8 @@ pub fn build_sync_init(state: &AppState, mention_count: u32) -> WebEvent {
             label: c.label.clone(),
             nick: c.nick.clone(),
             connected: c.status == ConnectionStatus::Connected,
+            user_modes: c.user_modes.clone(),
+            lag: c.lag,
         })
         .collect();
 
