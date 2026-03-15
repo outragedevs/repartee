@@ -45,14 +45,20 @@ html, body {
     overflow: hidden;
 }
 
-/* === Buffer List (left panel) === */
+/* === Left Sidebar (buffer list + theme picker) === */
+
+.sidebar-left {
+    display: flex;
+    flex-direction: column;
+    width: 170px;
+    flex-shrink: 0;
+    border-right: 1px solid var(--border);
+    background: var(--bg);
+}
 
 .buffer-list {
-    width: 170px;
-    background: var(--bg);
-    border-right: 1px solid var(--border);
+    flex: 1;
     overflow-y: auto;
-    flex-shrink: 0;
     padding: 1px 0;
 }
 
