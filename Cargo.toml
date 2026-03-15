@@ -3,7 +3,7 @@ members = [".", "web-ui"]
 
 [package]
 name = "repartee"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 description = "A modern terminal IRC client built with Ratatui and Tokio"
 license = "MIT"
@@ -43,7 +43,7 @@ unicode-width = "0.2"
 thiserror = "2.0"
 indexmap = { version = "2", features = ["serde"] }
 regex = "1"
-rusqlite = { version = "0.38", features = ["bundled-full"] }
+rusqlite = { version = "0.39", features = ["bundled-full"] }
 aes-gcm = "0.10"
 rand = "0.10"
 base64 = "0.22"
@@ -58,7 +58,7 @@ spellbook = "0.4"
 image = "0.25"
 reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
 axum = { version = "0.8", features = ["ws"] }
-axum-extra = { version = "0.10", features = ["cookie-signed"] }
+axum-extra = { version = "0.12", features = ["cookie-signed"] }
 tower = { version = "0.5", features = ["limit"] }
 rcgen = "0.14"
 rustls-pemfile = "2"
