@@ -39,13 +39,17 @@ pub fn connect(state: &AppState) {
         match WebSocket::open(&url) {
             Ok(ws) => {
                 state.error.set(None);
-                state.connected.set(true);
+                // Don't set connected=true yet — wait for SyncInit.
                 run_ws_loop(ws, &state, cmd_rx).await;
+                let was_connected = state.connected.get_untracked();
                 state.connected.set(false);
+                if !was_connected {
+                    // Never received SyncInit → server rejected (401/expired token).
+                    state.token.set(None);
+                }
             }
             Err(e) => {
                 let msg = format!("{e}");
-                // Connection failed (likely expired/invalid token) — clear to show login.
                 state.token.set(None);
                 state.error.set(Some(format!("WebSocket error: {msg}")));
                 state.connected.set(false);
