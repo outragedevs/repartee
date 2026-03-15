@@ -2124,7 +2124,22 @@ impl App {
     /// Also auto-records highlight mentions to the `SQLite` mentions table.
     fn drain_pending_web_events(&mut self) {
         let events: Vec<_> = self.state.pending_web_events.drain(..).collect();
+        if !events.is_empty() {
+            tracing::debug!(count = events.len(), "draining {} web events", events.len());
+        }
         for event in events {
+            match &event {
+                crate::web::protocol::WebEvent::BufferCreated { buffer } => {
+                    tracing::debug!(buffer_id = %buffer.id, "broadcasting BufferCreated");
+                }
+                crate::web::protocol::WebEvent::BufferClosed { buffer_id } => {
+                    tracing::debug!(%buffer_id, "broadcasting BufferClosed");
+                }
+                crate::web::protocol::WebEvent::ActiveBufferChanged { buffer_id } => {
+                    tracing::debug!(%buffer_id, "broadcasting ActiveBufferChanged");
+                }
+                _ => {}
+            }
             // Auto-record mentions to DB.
             if let crate::web::protocol::WebEvent::MentionAlert {
                 ref buffer_id,

@@ -116,8 +116,17 @@ impl AppState {
                 self.active_buffer.set(Some(new_id));
             }
             WebEvent::BufferClosed { buffer_id } => {
+                // If the closed buffer was active, switch to first available.
+                if self.active_buffer.get_untracked().as_deref() == Some(&buffer_id) {
+                    let bufs = self.buffers.get_untracked();
+                    let fallback = bufs.iter()
+                        .find(|b| b.id != buffer_id)
+                        .map(|b| b.id.clone());
+                    self.active_buffer.set(fallback);
+                }
                 self.buffers.update(|bufs| bufs.retain(|b| b.id != buffer_id));
                 self.messages.update(|msgs| { msgs.remove(&buffer_id); });
+                self.nick_lists.update(|lists| { lists.remove(&buffer_id); });
             }
             WebEvent::ConnectionStatus {
                 conn_id,
