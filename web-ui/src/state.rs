@@ -244,6 +244,7 @@ impl AppState {
                                     && let Some(entry) = list.iter_mut().find(|n| n.nick == nick)
                                 {
                                     entry.nick = new.clone();
+                                    sort_nicks(list);
                                 }
                             });
                         }

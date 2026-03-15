@@ -11,7 +11,7 @@ pub fn BufferList() -> impl IntoView {
         <div class="buffer-list">
             {move || {
                 let buffers = state.buffers.get();
-                let connections = state.connections.get_untracked();
+                let connections = state.connections.get();
                 let active_id = state.active_buffer.get();
                 let mut views: Vec<leptos::prelude::AnyView> = Vec::new();
                 let mut current_conn = String::new();

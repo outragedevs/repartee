@@ -16,10 +16,15 @@ pub fn StatusLine() -> impl IntoView {
 
     let (time_str, set_time_str) = signal(current_time());
 
-    // Update the clock every second.
+    // Update the clock every second. Cancelled via on_cleanup on unmount.
+    let clock_alive = StoredValue::new(true);
+    on_cleanup(move || clock_alive.set_value(false));
     leptos::task::spawn_local(async move {
         loop {
             gloo_timers::future::sleep(std::time::Duration::from_secs(1)).await;
+            if !clock_alive.get_value() {
+                break;
+            }
             set_time_str.set(current_time());
         }
     });
@@ -94,7 +99,7 @@ pub fn StatusLine() -> impl IntoView {
             {move || {
                 let conn = active_conn()?;
                 let lag = conn.lag?;
-                #[allow(clippy::cast_precision_loss)]
+                #[expect(clippy::cast_precision_loss, reason = "u64 lag ms to f64 seconds, precision loss acceptable")]
                 let secs = lag as f64 / 1000.0;
                 Some(view! {
                     <span class="sep">"|"</span>

@@ -10,6 +10,7 @@ html, body {
     font-size: 13px;
     line-height: var(--line-height, 1.35);
     overflow: hidden;
+    overscroll-behavior: none;
 }
 
 /* === Layout === */
@@ -17,8 +18,11 @@ html, body {
 .app {
     display: flex;
     flex-direction: column;
-    height: 100vh;
+    height: 100vh; /* fallback */
+    height: 100dvh; /* dynamic viewport height — accounts for mobile browser chrome */
     overflow: hidden;
+    position: fixed;
+    inset: 0;
 }
 
 .desktop-only {
@@ -104,7 +108,9 @@ html, body {
 .chat-messages {
     flex: 1;
     overflow-y: auto;
+    overflow-x: hidden;
     padding: 2px 0;
+    overscroll-behavior: contain;
 }
 
 /* Chat line — flex row, all items on same baseline */
@@ -113,6 +119,8 @@ html, body {
     display: flex;
     align-items: baseline;
     line-height: var(--line-height, 1.35);
+    max-width: 100%;
+    overflow: hidden;
 }
 
 .chat-line .ts {
@@ -132,6 +140,7 @@ html, body {
     padding-left: 4px;
     flex: 1;
     min-width: 0;
+    white-space: pre-wrap;
     overflow-wrap: break-word;
 }
 
@@ -197,6 +206,7 @@ html, body {
 .bottom-bar {
     background: var(--bg-alt);
     border-top: 1px solid var(--border);
+    padding-bottom: env(safe-area-inset-bottom);
 }
 
 .status-line {
@@ -248,11 +258,16 @@ html, body {
     background: var(--accent);
     color: var(--bg);
     border: none;
-    padding: 4px 12px;
+    padding: 4px;
     border-radius: 3px;
     cursor: pointer;
-    font-family: inherit;
-    font-size: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 28px;
+    min-height: 28px;
+    flex-shrink: 0;
+    -webkit-tap-highlight-color: transparent;
 }
 
 /* === Login === */
@@ -263,6 +278,7 @@ html, body {
     justify-content: center;
     flex-direction: column;
     min-height: 100vh;
+    min-height: 100dvh;
     gap: 16px;
 }
 
@@ -315,42 +331,116 @@ html, body {
 
 /* === Mobile === */
 
+/* Desktop: hide mobile elements */
+@media (min-width: 768px) {
+    .mobile-only { display: none !important; }
+}
+
+/* Mobile: hide desktop, show mobile */
 @media (max-width: 767px) {
+    .desktop-only { display: none !important; }
+    .mobile-only {
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        height: 100dvh;
+        overflow: hidden;
+        touch-action: pan-y; /* vertical scroll only — horizontal swipe handled by JS */
+        overscroll-behavior: none;
+    }
+
     .buffer-list, .nick-list {
-        display: none; /* hidden by default on mobile, shown via slide-out */
+        display: none; /* hidden by default, shown inside slide-out panels */
     }
 
+    /* Chat area — vertical scroll only, no horizontal */
+    .chat-area {
+        overflow: hidden;
+        min-width: 0;
+    }
+    .chat-messages {
+        touch-action: pan-y;
+    }
+
+    /* Inline chat layout — no nick column */
     .chat-line {
-        display: block; /* inline layout on mobile, no grid */
+        display: block;
         padding: 0 6px;
+        overflow: hidden;
+        overflow-wrap: anywhere;
     }
-
-    .chat-line .ts { font-size: 11px; margin-right: 4px; }
+    .chat-line .ts {
+        display: inline;
+        width: auto;
+        margin-right: 4px;
+    }
+    .chat-line .nick {
+        display: inline;
+        width: auto;
+        text-align: left;
+    }
+    .chat-line .text {
+        display: inline;
+        padding-left: 0;
+        overflow-wrap: anywhere;
+    }
 
     /* Mobile top bar */
     .mobile-topbar {
         display: flex;
         background: var(--bg-alt);
-        padding: 2px 8px;
+        padding: 4px 8px;
         align-items: center;
-        justify-content: space-between;
         border-bottom: 1px solid var(--border);
-        height: 22px;
+        min-height: 28px;
+        flex-shrink: 0;
+        touch-action: pan-y;
     }
-
     .mobile-topbar .hamburger,
     .mobile-topbar .nicklist-btn {
         color: var(--fg-muted);
         cursor: pointer;
-        font-size: 14px;
+        font-size: 16px;
+        padding: 2px 4px;
+        -webkit-tap-highlight-color: transparent;
+    }
+    .mobile-topbar-center {
+        flex: 1;
+        text-align: center;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+        padding: 0 8px;
+    }
+    .mobile-topbar .mobile-chan {
+        color: var(--accent);
+        font-weight: bold;
+        font-size: 13px;
+    }
+    .mobile-topbar .mobile-topic {
+        color: var(--fg-muted);
+        font-size: 11px;
+    }
+    .mobile-topbar-right {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        flex-shrink: 0;
     }
 
-    /* Slide-out overlay */
+    /* Slide-out overlay — always in DOM, toggled via .visible */
     .slide-overlay {
         position: fixed;
         inset: 0;
         background: rgba(0, 0, 0, 0.5);
         z-index: 10;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.2s ease;
+    }
+    .slide-overlay.visible {
+        opacity: 1;
+        pointer-events: auto;
     }
 
     .slide-panel-left {
@@ -363,8 +453,11 @@ html, body {
         overflow-y: auto;
         transform: translateX(-100%);
         transition: transform 0.2s ease;
+        display: flex;
+        flex-direction: column;
+        touch-action: pan-y;
+        will-change: transform;
     }
-
     .slide-panel-left.open { transform: translateX(0); }
 
     .slide-panel-right {
@@ -377,31 +470,37 @@ html, body {
         overflow-y: auto;
         transform: translateX(100%);
         transition: transform 0.2s ease;
-    }
-
-    .slide-panel-right.open { transform: translateX(0); }
-
-    /* Compact status bar on mobile */
-    .status-line { font-size: 10px; height: 14px; }
-
-    /* Touch-friendly input */
-    .input-line textarea { padding: 6px 8px; }
-}
-
-@media (min-width: 768px) {
-    .mobile-only { display: none !important; }
-    .mobile-topbar { display: none; }
-    .slide-overlay { display: none; }
-    .slide-panel-left, .slide-panel-right { display: none; }
-}
-
-@media (max-width: 767px) {
-    .desktop-only { display: none !important; }
-    .mobile-only {
         display: flex;
         flex-direction: column;
-        height: 100vh;
-        overflow: hidden;
+        touch-action: pan-y;
+        will-change: transform;
+    }
+    .slide-panel-right.open { transform: translateX(0); }
+
+    .slide-panel-header {
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-shrink: 0;
+    }
+
+    /* Override desktop buffer-list/nick-list styles inside panels */
+    .slide-panel-left .buffer-list,
+    .slide-panel-right .nick-list {
+        display: block;
+        width: auto;
+        border: none;
+    }
+
+    /* Compact status bar on mobile */
+    .status-line { font-size: 11px; }
+
+    /* Touch-friendly input — 16px prevents iOS Safari auto-zoom on focus */
+    .input-line textarea {
+        font-size: 16px;
+        padding: 6px 8px;
     }
 }
 

@@ -55,8 +55,21 @@ pub fn InputLine() -> impl IntoView {
 
     let input_ref = NodeRef::<leptos::html::Textarea>::new();
 
-    // Global keydown listener — focus textarea when user types anywhere.
+    // Set enterkeyhint for mobile keyboard "Send" button.
     Effect::new(move || {
+        if let Some(el) = input_ref.get() {
+            let html_el: &web_sys::HtmlTextAreaElement = el.as_ref();
+            let _ = html_el.set_attribute("enterkeyhint", "send");
+        }
+    });
+
+    // Global keydown listener — focus textarea when user types anywhere.
+    let keydown_registered = StoredValue::new(false);
+    Effect::new(move || {
+        if keydown_registered.get_value() {
+            return;
+        }
+        keydown_registered.set_value(true);
         let cb = wasm_bindgen::prelude::Closure::<dyn Fn(web_sys::KeyboardEvent)>::new(
             move |ev: web_sys::KeyboardEvent| {
                 if ev.ctrl_key() || ev.alt_key() || ev.meta_key() {
@@ -227,6 +240,7 @@ pub fn InputLine() -> impl IntoView {
                 rows="1"
                 placeholder="Type a message..."
                 autofocus=true
+                autocomplete="off"
                 prop:value=value
                 node_ref=input_ref
                 on:input=on_input
@@ -236,7 +250,15 @@ pub fn InputLine() -> impl IntoView {
                 let text = value.get();
                 send_text(text);
                 set_value.set(String::new());
-            }>"Send"</button>
+                // Reset textarea height.
+                if let Some(el) = input_ref.get_untracked() {
+                    let html_el: &web_sys::HtmlTextAreaElement = el.as_ref();
+                    let el_html: &web_sys::HtmlElement = html_el.unchecked_ref();
+                    el_html.style().set_property("height", "").ok();
+                }
+            }
+                inner_html="<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='16' height='16' fill='currentColor'><path d='M2.01 21L23 12 2.01 3 2 10l15 2-15 2z'/></svg>"
+            ></button>
         </div>
     }
 }

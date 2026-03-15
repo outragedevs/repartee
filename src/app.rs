@@ -1691,6 +1691,7 @@ impl App {
                     if let Some(event) = irc_ev {
                         self.handle_irc_event(event);
                         self.update_script_snapshot();
+                        self.drain_pending_web_events();
                     }
                 },
                 preview_ev = self.preview_rx.recv() => {
@@ -2232,11 +2233,17 @@ impl App {
 
     /// Execute a command from a web client in the context of a buffer.
     ///
-    /// Active buffer is synced 1:1 between TUI and web, so we just ensure
-    /// the active buffer matches the web client's context before executing.
+    /// Temporarily switches the active buffer to `buffer_id` so
+    /// `handle_submit` targets the right channel, then restores
+    /// the TUI's original active buffer afterward.
     fn web_run_command(&mut self, buffer_id: &str, text: &str) {
+        let prior = self.state.active_buffer_id.clone();
         self.state.set_active_buffer(buffer_id);
         self.handle_submit(text);
+        // Restore TUI's active buffer.
+        if let Some(id) = prior {
+            self.state.set_active_buffer(&id);
+        }
     }
 
     /// Send a message from a web client to IRC.
@@ -2279,13 +2286,14 @@ impl App {
             &network,
             buffer,
             before,
-            capped_limit,
+            capped_limit + 1,
             storage.encrypt,
             None, // TODO: pass crypto key for encrypted DBs
         );
         match messages {
-            Ok(msgs) => {
-                let has_more = msgs.len() == capped_limit;
+            Ok(mut msgs) => {
+                let has_more = msgs.len() > capped_limit;
+                msgs.truncate(capped_limit);
                 tracing::debug!(
                     %buffer_id, count = msgs.len(), %has_more,
                     "web FetchMessages: sending {} messages", msgs.len()

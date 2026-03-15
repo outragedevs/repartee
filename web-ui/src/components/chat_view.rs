@@ -33,8 +33,13 @@ pub fn ChatView() -> impl IntoView {
     });
 
     // Scroll to bottom on resize (browser window resize).
+    let resize_registered = StoredValue::new(false);
     Effect::new(move || {
         let Some(el) = chat_ref.get() else { return };
+        if resize_registered.get_value() {
+            return;
+        }
+        resize_registered.set_value(true);
         let el_clone: web_sys::Element = el.clone().into();
         let cb = wasm_bindgen::prelude::Closure::<dyn Fn()>::new(move || {
             el_clone.set_scroll_top(el_clone.scroll_height());
@@ -108,9 +113,7 @@ pub fn ChatView() -> impl IntoView {
                             let nick = truncate_nick(&msg.nick.unwrap_or_default(), max_len);
                             let mode = msg.nick_mode.unwrap_or_default();
                             let styled = render_styled_text(&msg.text);
-                            // Compute nick column CSS width: ~7.8px per monospace char at 13px.
-                            let nick_col_px = f64::from(col_width) * 7.8;
-                            let nick_style = format!("width: {nick_col_px:.1}px;");
+                            let nick_style = format!("width: {col_width}ch;");
                             view! {
                                 <div class=class>
                                     <span class="ts">{ts}</span>
@@ -174,7 +177,7 @@ fn truncate_nick(nick: &str, max_len: usize) -> String {
     if char_count <= max_len {
         nick.to_string()
     } else {
-        let mut result = String::with_capacity(nick.len());
+        let mut result = String::with_capacity(max_len);
         for (i, ch) in nick.chars().enumerate() {
             if i >= max_len - 1 {
                 break;

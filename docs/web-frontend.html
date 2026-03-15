@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="repartee — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
+  <meta name="keywords" content="irc, terminal, tui, client, chat, repartee, ratatui, tokio, rust">
+  <meta name="author" content="outragedevs">
+  <meta property="og:title" content="Web Frontend — repartee">
+  <meta property="og:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by irssi, designed for the future.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://outragedevs.github.io/repartee/">
+  <meta property="og:image" content="https://outragedevs.github.io/repartee/images/chat.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{title}} — repartee">
+  <meta name="twitter:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust.">
+  <meta name="twitter:image" content="https://outragedevs.github.io/repartee/images/chat.png">
+  <title>{{title}} — repartee</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- Mobile hamburger toggle -->
+  <button class="hamburger" aria-label="Toggle navigation">
+    <span></span>
+    <span></span>
+    <span></span>
+  </button>
+
+  <div class="page-wrapper">
+    <!-- Sidebar navigation -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <a href="index.html" class="brand">repartee</a>
+        <span class="brand-tagline">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+          <ul>
+    <li><a href="index.html">Home</a></li>
+  </ul>
+  <div class="nav-section">
+    <span class="nav-section-title">Getting Started</span>
+    <ul>
+      <li><a href="installation.html">Installation</a></li>
+      <li><a href="first-connection.html">First Connection</a></li>
+      <li><a href="configuration.html">Configuration</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Reference</span>
+    <ul>
+      <li><a href="commands.html">Commands</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Scripting</span>
+    <ul>
+      <li><a href="scripting-getting-started.html">Getting Started</a></li>
+      <li><a href="scripting-api.html">API Reference</a></li>
+      <li><a href="scripting-examples.html">Examples</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Customization</span>
+    <ul>
+      <li><a href="theming.html">Theming</a></li>
+      <li><a href="theming-format-strings.html">Format Strings</a></li>
+      <li><a href="logging.html">Logging & Search</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Usage</span>
+    <ul>
+      <li><a href="web-frontend.html" class="active">Web Frontend</a></li>
+      <li><a href="sessions.html">Sessions & Detach</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Project</span>
+    <ul>
+      <li><a href="architecture.html">Architecture</a></li>
+      <li><a href="faq.html">FAQ</a></li>
+    </ul>
+  </div>
+
+      </nav>
+      <div class="sidebar-footer">
+        Built with <a href="https://www.rust-lang.org">Rust</a>
+        &middot;
+        <a href="https://github.com/outragedevs/repartee">GitHub</a>
+      </div>
+    </aside>
+
+    <!-- Overlay for mobile sidebar -->
+    <div class="sidebar-overlay"></div>
+
+    <!-- Main content -->
+    <div class="content-wrapper">
+      <main class="content">
+        <h1>Web Frontend</h1>
+<p>repartee includes a built-in web frontend that runs alongside the terminal UI. Access your IRC sessions from any browser — desktop or mobile — with real-time bidirectional sync.</p>
+<h2>Enabling</h2>
+<p>The web frontend is disabled by default. To enable it, set a password in <code>~/.repartee/.env</code> and enable it in <code>config.toml</code>:</p>
+<p><strong>1. Set the login password:</strong></p>
+<pre><code class="language-bash">echo &#39;WEB_PASSWORD=your-secret-password&#39; &gt;&gt; ~/.repartee/.env
+</code></pre>
+<p><strong>2. Enable in config:</strong></p>
+<pre><code class="language-toml">[web]
+enabled = true
+port = 8443
+</code></pre>
+<p>repartee auto-generates a self-signed TLS certificate on first launch. Open <code>https://localhost:8443</code> in your browser and accept the certificate warning.</p>
+<h2>Configuration</h2>
+<p>All web settings live under the <code>[web]</code> section in <code>config.toml</code> and can be changed at runtime with <code>/set</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>web.enabled</code></td>
+<td><code>false</code></td>
+<td>Enable the web server</td>
+</tr>
+<tr>
+<td><code>web.bind_address</code></td>
+<td><code>127.0.0.1</code></td>
+<td>Bind address (use <code>0.0.0.0</code> for LAN access)</td>
+</tr>
+<tr>
+<td><code>web.port</code></td>
+<td><code>8443</code></td>
+<td>HTTPS port</td>
+</tr>
+<tr>
+<td><code>web.tls_cert</code></td>
+<td><em>(auto)</em></td>
+<td>Path to TLS certificate (PEM). Empty = self-signed</td>
+</tr>
+<tr>
+<td><code>web.tls_key</code></td>
+<td><em>(auto)</em></td>
+<td>Path to TLS private key (PEM). Empty = self-signed</td>
+</tr>
+<tr>
+<td><code>web.password</code></td>
+<td><em>(from .env)</em></td>
+<td>Login password (set via <code>WEB_PASSWORD</code> in <code>.env</code>)</td>
+</tr>
+<tr>
+<td><code>web.session_hours</code></td>
+<td><code>24</code></td>
+<td>Session duration before re-login required</td>
+</tr>
+<tr>
+<td><code>web.theme</code></td>
+<td><code>nightfall</code></td>
+<td>Default theme (<code>nightfall</code>, <code>catppuccin-mocha</code>, <code>tokyo-storm</code>, <code>gruvbox-light</code>, <code>catppuccin-latte</code>)</td>
+</tr>
+<tr>
+<td><code>web.timestamp_format</code></td>
+<td><code>%H:%M</code></td>
+<td>Timestamp format (chrono strftime syntax)</td>
+</tr>
+<tr>
+<td><code>web.line_height</code></td>
+<td><code>1.35</code></td>
+<td>CSS line-height for chat messages</td>
+</tr>
+<tr>
+<td><code>web.nick_column_width</code></td>
+<td><code>12</code></td>
+<td>Nick column width in characters</td>
+</tr>
+<tr>
+<td><code>web.nick_max_length</code></td>
+<td><code>9</code></td>
+<td>Max nick display length before truncation</td>
+</tr>
+</tbody></table>
+<p>Settings changed via <code>/set web.*</code> apply immediately to all connected web clients.</p>
+<h2>Features</h2>
+<p>The web frontend provides full 1:1 parity with the terminal UI:</p>
+<ul>
+<li><strong>All buffer types</strong> — server, channel, query, DCC chat</li>
+<li><strong>Real-time sync</strong> — messages, nick changes, joins, parts, quits, topic changes, mode changes</li>
+<li><strong>Bidirectional buffer switching</strong> — switch a buffer on web and the TUI follows, and vice versa</li>
+<li><strong>Command execution</strong> — run any <code>/command</code> from the web input (output visible on web)</li>
+<li><strong>Tab completion</strong> — nicks, <code>/commands</code>, and <code>/set</code> setting paths</li>
+<li><strong>Nick list</strong> — grouped by mode (ops, voiced, regular), away status</li>
+<li><strong>Activity indicators</strong> — unread counts and color-coded activity levels</li>
+<li><strong>Mentions</strong> — highlight tracking with mention count badge</li>
+<li><strong>Theme picker</strong> — switch themes live (5 built-in themes)</li>
+<li><strong>Multiline input</strong> — paste multiline text, each line sent separately</li>
+<li><strong>Persistent sessions</strong> — page refresh reconnects automatically (session stored in browser)</li>
+</ul>
+<h2>Desktop Layout</h2>
+<p>The desktop layout mirrors the terminal UI:</p>
+<pre><code>┌─────────────────────────────────────────────────────┐
+│ Topic bar                                           │
+├──────────┬─────────────────────────────┬────────────┤
+│ Buffers  │ Chat area                   │ Nick list  │
+│          │ 14:23 @ferris❯ Hello!       │ @ferris    │
+│ (status) │ 14:24  alice❯ Hey there     │  alice     │
+│ 1.#rust  │                             │  bob       │
+│ 2.#help  │                             │            │
+├──────────┴─────────────────────────────┴────────────┤
+│ [kofany(+i)] [#rust(+nt)] [Lag: 42ms] [Act: 3,4]   │
+│ ❯ [Message input...                           ] [➤] │
+│ [● ● ● ● ●] theme picker                           │
+└─────────────────────────────────────────────────────┘
+</code></pre>
+<h2>Mobile Layout</h2>
+<p>On screens narrower than 768px, the layout switches to a mobile-optimized view:</p>
+<pre><code>┌──────────────────────────┐
+│ ☰  #rust (+nt) — Welc… 👥│  top bar
+├──────────────────────────┤
+│ 14:23 @ferris❯ Has any…  │  inline nicks
+│ 14:24 alice❯ Yeah, it&#39;s… │
+├──────────────────────────┤
+│ [kofany|Act: 3,4,7]      │  compact status
+│ [Message...          ] ➤  │  input
+└──────────────────────────┘
+</code></pre>
+<p><strong>Mobile features:</strong></p>
+<ul>
+<li><strong>Inline chat</strong> — nicks appear inline with the message (no right-aligned column) to maximize horizontal space</li>
+<li><strong>Slide-out buffer list</strong> — tap the ☰ hamburger or swipe right from anywhere to open the channel/buffer list</li>
+<li><strong>Slide-out nick list</strong> — tap the 👥 button or swipe left from anywhere to open the nick list</li>
+<li><strong>Auto-close panels</strong> — tapping a buffer in the slide-out switches to it and closes the panel automatically</li>
+<li><strong>Touch-friendly</strong> — large tap targets, swipe gestures, no accidental horizontal scroll</li>
+<li><strong>Viewport fitting</strong> — uses <code>100dvh</code> to properly fill the screen on iOS Safari and Android Chrome (accounts for browser chrome)</li>
+<li><strong>No auto-zoom</strong> — focusing the input field does not trigger iOS Safari&#39;s auto-zoom behavior</li>
+<li><strong>Notch-safe</strong> — respects <code>safe-area-inset-bottom</code> on iPhones with home indicators</li>
+</ul>
+<h2>Custom TLS</h2>
+<p>For production use (or to avoid browser certificate warnings), provide your own TLS certificate:</p>
+<pre><code class="language-toml">[web]
+tls_cert = &quot;/path/to/fullchain.pem&quot;
+tls_key  = &quot;/path/to/privkey.pem&quot;
+</code></pre>
+<p>Let&#39;s Encrypt certificates work out of the box.</p>
+<h2>Remote Access</h2>
+<p>To access the web frontend from other devices on your network:</p>
+<pre><code class="language-toml">[web]
+bind_address = &quot;0.0.0.0&quot;   # listen on all interfaces
+port = 8443
+</code></pre>
+<p>Then open <code>https://your-machine-ip:8443</code> from your phone or another computer.</p>
+<h2>Security</h2>
+<ul>
+<li><strong>HTTPS only</strong> — all traffic is encrypted via TLS</li>
+<li><strong>Password authentication</strong> — HMAC-SHA256 verified login</li>
+<li><strong>Rate limiting</strong> — brute-force protection with progressive lockout</li>
+<li><strong>Session tokens</strong> — time-limited, stored in browser localStorage</li>
+<li><strong>No external dependencies</strong> — the web UI is compiled to WASM and embedded in the binary; no CDN requests, no external scripts</li>
+</ul>
+
+
+        <!-- Prev / Next navigation -->
+        <nav class="page-nav">
+          <a href="logging.html" class="page-nav-link prev">
+  <span class="page-nav-label">&larr; Previous</span>
+  <span class="page-nav-title">Logging & Search</span>
+</a>
+          <a href="sessions.html" class="page-nav-link next">
+  <span class="page-nav-label">Next &rarr;</span>
+  <span class="page-nav-title">Sessions & Detach</span>
+</a>
+        </nav>
+
+        <footer class="site-footer">
+          Built with <a href="https://www.rust-lang.org">Rust</a> &middot;
+          <a href="https://github.com/outragedevs/repartee">GitHub</a> &middot;
+          MIT License
+        </footer>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    // Mobile sidebar toggle
+    (function() {
+      const hamburger = document.querySelector('.hamburger');
+      const sidebar = document.querySelector('.sidebar');
+      const overlay = document.querySelector('.sidebar-overlay');
+
+      function toggleSidebar() {
+        hamburger.classList.toggle('active');
+        sidebar.classList.toggle('open');
+        overlay.classList.toggle('visible');
+        document.body.style.overflow = sidebar.classList.contains('open') ? 'hidden' : '';
+      }
+
+      function closeSidebar() {
+        hamburger.classList.remove('active');
+        sidebar.classList.remove('open');
+        overlay.classList.remove('visible');
+        document.body.style.overflow = '';
+      }
+
+      hamburger.addEventListener('click', toggleSidebar);
+      overlay.addEventListener('click', closeSidebar);
+
+      // Close sidebar on Escape key
+      document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && sidebar.classList.contains('open')) {
+          closeSidebar();
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

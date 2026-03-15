@@ -38,12 +38,56 @@ pub fn Layout() -> impl IntoView {
         }
     });
 
+    // Auto-close left panel when active buffer changes.
+    Effect::new(move || {
+        let _ = state.active_buffer.get();
+        set_left_open.set(false);
+    });
+
     let active_buf = move || {
         let active_id = state.active_buffer.get()?;
         state.buffers.get().into_iter().find(|b| b.id == active_id)
     };
 
     let mention_count = move || state.mention_count.get();
+
+    // Swipe gesture state.
+    let (touch_start_x, set_touch_start_x) = signal(0i32);
+    let (touch_start_y, set_touch_start_y) = signal(0i32);
+
+    let on_touch_start = move |ev: web_sys::TouchEvent| {
+        if let Some(touch) = ev.touches().get(0) {
+            set_touch_start_x.set(touch.client_x());
+            set_touch_start_y.set(touch.client_y());
+        }
+    };
+
+    let on_touch_end = move |ev: web_sys::TouchEvent| {
+        let Some(touch) = ev.changed_touches().get(0) else {
+            return;
+        };
+        let dx = touch.client_x() - touch_start_x.get_untracked();
+        let dy = touch.client_y() - touch_start_y.get_untracked();
+
+        // Only horizontal swipes (|dx| > |dy|) with minimum 50px distance.
+        if dx.abs() < 50 || dy.abs() > dx.abs() {
+            return;
+        }
+
+        if dx > 0 {
+            if right_open.get_untracked() {
+                set_right_open.set(false);
+            } else if !left_open.get_untracked() {
+                set_left_open.set(true);
+            }
+        } else if dx < 0 {
+            if left_open.get_untracked() {
+                set_left_open.set(false);
+            } else if !right_open.get_untracked() {
+                set_right_open.set(true);
+            }
+        }
+    };
 
     view! {
         <div class="app">
@@ -63,15 +107,32 @@ pub fn Layout() -> impl IntoView {
             </div>
 
             // Mobile layout
-            <div class="mobile-only">
+            <div class="mobile-only"
+                on:touchstart=on_touch_start
+                on:touchend=on_touch_end
+            >
                 <div class="mobile-topbar">
                     <span class="hamburger" on:click=move |_| set_left_open.set(true)>"\u{2630}"</span>
-                    <div style="text-align: center; flex: 1; overflow: hidden; white-space: nowrap;">
-                        {move || active_buf().map(|b| view! {
-                            <span style="color: var(--accent); font-weight: bold;">{b.name}</span>
+                    <div class="mobile-topbar-center">
+                        {move || active_buf().map(|b| {
+                            let modes = b.modes.as_deref()
+                                .filter(|m| !m.is_empty())
+                                .map(|m| format!(" (+{m})"))
+                                .unwrap_or_default();
+                            let topic = b.topic.as_deref().unwrap_or("");
+                            let topic_end = topic.char_indices()
+                                .nth(30)
+                                .map_or(topic.len(), |(i, _)| i);
+                            let topic_short = &topic[..topic_end];
+                            view! {
+                                <span class="mobile-chan">{b.name}{modes}</span>
+                                {(!topic.is_empty()).then(|| view! {
+                                    <span class="mobile-topic">{format!(" — {topic_short}")}</span>
+                                })}
+                            }
                         })}
                     </div>
-                    <div style="display: flex; gap: 6px; align-items: center;">
+                    <div class="mobile-topbar-right">
                         {move || {
                             let count = mention_count();
                             (count > 0).then(|| view! {
@@ -89,42 +150,38 @@ pub fn Layout() -> impl IntoView {
                     <InputLine />
                 </div>
 
-                // Slide-out buffer list (left)
-                {move || left_open.get().then(|| view! {
-                    <div class="slide-overlay" on:click=move |_| set_left_open.set(false)></div>
-                    <div class="slide-panel-left open">
-                        <div style="padding: 4px 10px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between;">
-                            <span style="color: var(--accent); font-weight: bold;">"Buffers"</span>
-                            {move || {
-                                let count = mention_count();
-                                (count > 0).then(|| view! {
-                                    <span class="mention-badge">{format!("{count} mentions")}</span>
-                                })
-                            }}
-                        </div>
-                        <BufferList />
-                        <ThemePicker />
+                // Slide-out panels — always in DOM, toggled via CSS class.
+                <div class="slide-overlay" class:visible=left_open
+                    on:click=move |_| set_left_open.set(false)></div>
+                <div class="slide-panel-left" class:open=left_open>
+                    <div class="slide-panel-header">
+                        <span style="color: var(--accent); font-weight: bold;">"Buffers"</span>
+                        {move || {
+                            let count = mention_count();
+                            (count > 0).then(|| view! {
+                                <span class="mention-badge">{format!("{count} mentions")}</span>
+                            })
+                        }}
                     </div>
-                })}
+                    <BufferList />
+                    <ThemePicker />
+                </div>
 
-                // Slide-out nick list (right)
-                {move || right_open.get().then(|| view! {
-                    <div class="slide-overlay" on:click=move |_| set_right_open.set(false)></div>
-                    <div class="slide-panel-right open">
-                        <div style="padding: 4px 10px; border-bottom: 1px solid var(--border);">
-                            {move || active_buf().map(|b| {
-                                let user_count = format!("{} users", b.nick_count);
-                                view! {
-                                    <span style="color: var(--accent); font-weight: bold;">{b.name}</span>
-                                    <span style="color: var(--fg-muted); font-size: 10px; margin-left: 6px;">
-                                        {user_count}
-                                    </span>
-                                }
-                            })}
-                        </div>
-                        <NickList />
+                <div class="slide-overlay" class:visible=right_open
+                    on:click=move |_| set_right_open.set(false)></div>
+                <div class="slide-panel-right" class:open=right_open>
+                    <div class="slide-panel-header">
+                        {move || active_buf().map(|b| {
+                            view! {
+                                <span style="color: var(--accent); font-weight: bold;">{b.name}</span>
+                                <span style="color: var(--fg-muted); font-size: 10px; margin-left: 6px;">
+                                    {format!("{} users", b.nick_count)}
+                                </span>
+                            }
+                        })}
                     </div>
-                })}
+                    <NickList />
+                </div>
             </div>
         </div>
     }

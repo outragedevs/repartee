@@ -37,6 +37,7 @@ const siteMap: SiteEntry[] = [
   { slug: "theming", title: "Theming", section: "Customization" },
   { slug: "theming-format-strings", title: "Format Strings", section: "Customization" },
   { slug: "logging", title: "Logging & Search", section: "Customization" },
+  { slug: "web-frontend", title: "Web Frontend", section: "Usage" },
   { slug: "sessions", title: "Sessions & Detach", section: "Usage" },
   { slug: "architecture", title: "Architecture", section: "Project" },
   { slug: "faq", title: "FAQ", section: "Project" },

@@ -35,7 +35,9 @@ pub fn connect(state: &AppState) {
     };
     let location = window.location();
     let host = location.host().unwrap_or_default();
-    let url = format!("wss://{host}/ws?token={token}");
+    let proto = location.protocol().unwrap_or_default();
+    let ws_scheme = if proto == "https:" { "wss" } else { "ws" };
+    let url = format!("{ws_scheme}://{host}/ws?token={token}");
 
     let state = *state;
 
