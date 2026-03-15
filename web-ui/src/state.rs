@@ -5,7 +5,7 @@ use leptos::prelude::*;
 use crate::protocol::*;
 
 /// Client-side application state, stored as Leptos signals.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct AppState {
     pub connected: RwSignal<bool>,
     pub buffers: RwSignal<Vec<BufferMeta>>,
@@ -63,10 +63,10 @@ impl AppState {
                 self.connections.set(connections);
                 self.mention_count.set(mention_count);
                 self.connected.set(true);
-                if let Some(fmt) = timestamp_format {
-                    if !fmt.is_empty() {
-                        self.timestamp_format.set(fmt);
-                    }
+                if let Some(fmt) = timestamp_format
+                    && !fmt.is_empty()
+                {
+                    self.timestamp_format.set(fmt);
                 }
 
                 self.sort_buffers();
@@ -176,7 +176,7 @@ impl AppState {
                     let entry = msgs.entry(buffer_id).or_default();
                     // Prepend older messages (they come from scroll-back).
                     let mut combined = messages;
-                    combined.extend(entry.drain(..));
+                    combined.append(entry);
                     *entry = combined;
                 });
             }
@@ -240,10 +240,10 @@ impl AppState {
                     NickEventKind::NickChange => {
                         if let Some(ref new) = new_nick {
                             self.nick_lists.update(|lists| {
-                                if let Some(list) = lists.get_mut(&buffer_id) {
-                                    if let Some(entry) = list.iter_mut().find(|n| n.nick == nick) {
-                                        entry.nick = new.clone();
-                                    }
+                                if let Some(list) = lists.get_mut(&buffer_id)
+                                    && let Some(entry) = list.iter_mut().find(|n| n.nick == nick)
+                                {
+                                    entry.nick = new.clone();
                                 }
                             });
                         }
@@ -265,12 +265,11 @@ impl AppState {
                     }
                     NickEventKind::AwayChange => {
                         self.nick_lists.update(|lists| {
-                            if let Some(list) = lists.get_mut(&buffer_id) {
-                                if let Some(entry) = list.iter_mut().find(|n| n.nick == nick) {
-                                    if let Some(a) = away {
-                                        entry.away = a;
-                                    }
-                                }
+                            if let Some(list) = lists.get_mut(&buffer_id)
+                                && let Some(entry) = list.iter_mut().find(|n| n.nick == nick)
+                                && let Some(a) = away
+                            {
+                                entry.away = a;
                             }
                         });
                     }

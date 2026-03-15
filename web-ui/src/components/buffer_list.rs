@@ -38,14 +38,17 @@ pub fn BufferList() -> impl IntoView {
                         "dcc_chat" => " type-dcc",
                         _ => "",
                     };
+                    let activity_class = match buf.activity {
+                        0 => "",
+                        1 => " activity-1",
+                        2 => " activity-2",
+                        3 => " activity-3",
+                        4 => " activity-4",
+                        _ => " activity-4",
+                    };
                     let class = format!(
-                        "buffer-item{}{}{type_class}",
+                        "buffer-item{}{activity_class}{type_class}",
                         if is_active { " active" } else { "" },
-                        if buf.activity > 0 {
-                            format!(" activity-{}", buf.activity)
-                        } else {
-                            String::new()
-                        }
                     );
 
                     let id = buf.id.clone();

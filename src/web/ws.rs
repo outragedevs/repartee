@@ -134,7 +134,7 @@ fn build_sync_init_from_snapshot(state: &AppHandle) -> WebEvent {
         connections: Vec::new(),
         mention_count: 0,
         active_buffer_id: None,
-        timestamp_format: "%H:%M".to_string(),
+        timestamp_format: crate::config::WebConfig::default().timestamp_format,
     }
 }
 

@@ -593,11 +593,11 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
             }
 
             // Broadcast web settings changes to connected web clients.
-            if path.starts_with("web.timestamp_format")
-                || path.starts_with("web.line_height")
-                || path.starts_with("web.theme")
-                || path.starts_with("web.nick_column_width")
-                || path.starts_with("web.nick_max_length")
+            if path == "web.timestamp_format"
+                || path == "web.line_height"
+                || path == "web.theme"
+                || path == "web.nick_column_width"
+                || path == "web.nick_max_length"
             {
                 app.state.pending_web_events.push(
                     crate::web::protocol::WebEvent::SettingsChanged {

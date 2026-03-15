@@ -146,15 +146,14 @@ fn ThemePicker() -> impl IntoView {
     view! {
         <div class="theme-picker">
             {themes.iter().map(|(name, color)| {
-                let name = (*name).to_string();
-                let name_for_active = name.clone();
-                let name_for_click = name.clone();
-                let is_active = move || state.theme.get() == name_for_active;
+                let name_owned = (*name).to_string();
+                let name_for_click = name_owned.clone();
+                let is_active = move || state.theme.get() == name_owned;
                 view! {
                     <div
-                        class=move || format!("theme-swatch{}", if is_active() { " active" } else { "" })
+                        class=move || if is_active() { "theme-swatch active" } else { "theme-swatch" }
                         style=format!("background: {color};")
-                        title=name
+                        title=*name
                         on:click=move |_| state.theme.set(name_for_click.clone())
                     ></div>
                 }

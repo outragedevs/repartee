@@ -7,7 +7,8 @@ use crate::web::protocol::{BufferMeta, ConnectionMeta, WebEvent, WireMessage, Wi
 /// Build a `SyncInit` event from the current `AppState`.
 ///
 /// Buffers are sorted to match terminal order: connection label → `sort_group` → name.
-pub fn build_sync_init(state: &AppState, mention_count: u32) -> WebEvent {
+/// `timestamp_format` comes from `WebConfig` (not available in `AppState`).
+pub fn build_sync_init(state: &AppState, mention_count: u32, timestamp_format: &str) -> WebEvent {
     // Sort buffers in the same order as the terminal sidebar.
     let buf_refs: Vec<_> = state.buffers.values().collect();
     let sorted = sort_buffers(&buf_refs, |conn_id| {
@@ -50,7 +51,7 @@ pub fn build_sync_init(state: &AppState, mention_count: u32) -> WebEvent {
         connections,
         mention_count,
         active_buffer_id: state.active_buffer_id.clone(),
-        timestamp_format: String::new(), // overridden by snapshot/tick with config value
+        timestamp_format: timestamp_format.to_string(),
     }
 }
 
@@ -152,7 +153,7 @@ mod tests {
     #[test]
     fn sync_init_includes_buffers() {
         let state = make_test_state();
-        let event = build_sync_init(&state, 5);
+        let event = build_sync_init(&state, 5, "%H:%M");
         match event {
             WebEvent::SyncInit {
                 buffers,

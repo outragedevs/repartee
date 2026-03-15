@@ -1732,13 +1732,13 @@ impl App {
                     if let Some(ref snapshot) = self.web_state_snapshot
                         && let Ok(mut snap) = snapshot.write()
                     {
-                        let init = crate::web::snapshot::build_sync_init(&self.state, 0);
-                        if let crate::web::protocol::WebEvent::SyncInit { buffers, connections, mention_count, active_buffer_id, .. } = init {
+                        let init = crate::web::snapshot::build_sync_init(&self.state, 0, &self.config.web.timestamp_format);
+                        if let crate::web::protocol::WebEvent::SyncInit { buffers, connections, mention_count, active_buffer_id, timestamp_format, .. } = init {
                             snap.buffers = buffers;
                             snap.connections = connections;
                             snap.mention_count = mention_count;
                             snap.active_buffer_id = active_buffer_id;
-                            snap.timestamp_format.clone_from(&self.config.web.timestamp_format);
+                            snap.timestamp_format = timestamp_format;
                         }
                     }
                     let expired = self.dcc.purge_expired();

@@ -7,11 +7,10 @@ use crate::state::AppState;
 #[component]
 pub fn App() -> impl IntoView {
     let state = AppState::new();
-    provide_context(state.clone());
+    provide_context(state);
 
     // Save token to localStorage whenever it changes.
     Effect::new({
-        let state = state.clone();
         move || {
             let token = state.token.get();
             if let Some(storage) = web_sys::window()

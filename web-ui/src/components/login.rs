@@ -17,7 +17,6 @@ pub fn Login() -> impl IntoView {
         set_loading.set(true);
         set_error.set(None);
 
-        let state = state.clone();
         leptos::task::spawn_local(async move {
             match do_login(&pw).await {
                 Ok(token) => {

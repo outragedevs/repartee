@@ -174,7 +174,14 @@ fn truncate_nick(nick: &str, max_len: usize) -> String {
     if char_count <= max_len {
         nick.to_string()
     } else {
-        let truncated: String = nick.chars().take(max_len - 1).collect();
-        format!("{truncated}+")
+        let mut result = String::with_capacity(nick.len());
+        for (i, ch) in nick.chars().enumerate() {
+            if i >= max_len - 1 {
+                break;
+            }
+            result.push(ch);
+        }
+        result.push('+');
+        result
     }
 }

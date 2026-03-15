@@ -151,7 +151,6 @@ pub fn InputLine() -> impl IntoView {
         set_value.set(String::new());
     });
 
-    let state_paste = state.clone();
     let on_keydown = move |ev: web_sys::KeyboardEvent| {
         if ev.key() == "Enter" {
             set_tab_active.set(false);
@@ -198,7 +197,7 @@ pub fn InputLine() -> impl IntoView {
                 if matches.is_empty() {
                     return;
                 }
-                matches.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+                matches.sort_by_key(|a| a.to_lowercase());
 
                 // Build the replacement with appropriate suffix.
                 let completions: Vec<String> = matches
@@ -246,7 +245,7 @@ pub fn InputLine() -> impl IntoView {
             return;
         }
         ev.prevent_default();
-        let Some(buffer_id) = state_paste.active_buffer.get_untracked() else { return };
+        let Some(buffer_id) = state.active_buffer.get_untracked() else { return };
         for line in text.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() {
@@ -339,7 +338,7 @@ fn build_tab_matches(
 
     active_id
         .and_then(|id| nicks.get(&id))
-        .map_or(Vec::new(), |list| {
+        .map_or_else(Vec::new, |list| {
             list.iter()
                 .filter(|n| n.nick.to_lowercase().starts_with(&typed_lower))
                 .map(|n| n.nick.clone())

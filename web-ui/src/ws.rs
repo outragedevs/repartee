@@ -37,7 +37,7 @@ pub fn connect(state: &AppState) {
     let host = location.host().unwrap_or_default();
     let url = format!("wss://{host}/ws?token={token}");
 
-    let state = state.clone();
+    let state = *state;
 
     leptos::task::spawn_local(async move {
         match WebSocket::open(&url) {
