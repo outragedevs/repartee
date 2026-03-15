@@ -13,6 +13,16 @@ pub fn ChatView() -> impl IntoView {
         msgs.get(&active_id).cloned()
     };
 
+    // Derive our own nick for the active buffer's connection.
+    let our_nick = move || -> Option<String> {
+        let active_id = state.active_buffer.get()?;
+        let bufs = state.buffers.get();
+        let buf = bufs.iter().find(|b| b.id == active_id)?;
+        let conns = state.connections.get();
+        let conn = conns.iter().find(|c| c.id == buf.connection_id)?;
+        Some(conn.nick.clone())
+    };
+
     let chat_ref = NodeRef::<leptos::html::Div>::new();
 
     Effect::new(move || {
@@ -27,17 +37,25 @@ pub fn ChatView() -> impl IntoView {
         <div class="chat-area">
             <div class="chat-messages" node_ref=chat_ref>
                 {move || {
+                    let nick_self = our_nick();
                     messages().unwrap_or_default().into_iter().map(|msg| {
                         let is_event = msg.msg_type == "event";
                         let is_action = msg.msg_type == "action";
                         let is_notice = msg.msg_type == "notice";
 
+                        // Detect own message.
+                        let is_own = nick_self.as_ref().is_some_and(|our| {
+                            msg.nick.as_deref() == Some(our.as_str())
+                        });
+
                         let class = if msg.highlight && msg.nick.is_some() {
-                            "chat-line mention"
+                            if is_own { "chat-line mention own" } else { "chat-line mention" }
                         } else if is_event {
                             "chat-line event"
                         } else if is_action {
                             "chat-line event action"
+                        } else if is_own {
+                            "chat-line own"
                         } else {
                             "chat-line"
                         };
@@ -45,12 +63,29 @@ pub fn ChatView() -> impl IntoView {
                         let ts = format_timestamp(msg.timestamp);
 
                         if is_event || is_action || is_notice {
-                            // Events/actions: no nick column, span full width.
+                            // Detect event arrow from text content.
+                            let arrow = if msg.text.contains("has joined") {
+                                Some(("\u{2192} ", "join-arrow"))
+                            } else if msg.text.contains("has left") {
+                                Some(("\u{2190} ", "part-arrow"))
+                            } else if msg.text.contains("has quit") {
+                                Some(("\u{2190} ", "quit-arrow"))
+                            } else if msg.text.contains("is now known as") {
+                                Some(("\u{2194} ", "nick-arrow"))
+                            } else {
+                                None
+                            };
+
                             let styled = render_styled_text(&msg.text);
                             view! {
                                 <div class=class>
                                     <span class="ts">{ts}</span>
-                                    <span>{styled}</span>
+                                    <span>
+                                        {arrow.map(|(symbol, css_class)| view! {
+                                            <span class=css_class>{symbol}</span>
+                                        })}
+                                        {styled}
+                                    </span>
                                 </div>
                             }.into_any()
                         } else {

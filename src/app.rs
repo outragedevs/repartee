@@ -1512,7 +1512,7 @@ impl App {
         // Start web server if enabled and password is set.
         if self.config.web.enabled && !self.config.web.password.is_empty() {
             let sessions = std::sync::Arc::new(tokio::sync::Mutex::new(
-                crate::web::auth::SessionStore::new(),
+                crate::web::auth::SessionStore::with_hours(self.config.web.session_hours),
             ));
             let limiter = std::sync::Arc::new(tokio::sync::Mutex::new(
                 crate::web::auth::RateLimiter::new(),

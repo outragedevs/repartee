@@ -8,6 +8,15 @@ pub fn InputLine() -> impl IntoView {
     let state = use_context::<AppState>().unwrap();
     let (value, set_value) = signal(String::new());
 
+    // Tab completion state.
+    let (tab_prefix, set_tab_prefix) = signal(Option::<String>::None);
+    let (tab_matches, set_tab_matches) = signal(Vec::<String>::new());
+    let (tab_index, set_tab_index) = signal(0usize);
+    let (tab_word_start, set_tab_word_start) = signal(0usize);
+    let (tab_cursor_end, set_tab_cursor_end) = signal(0usize);
+
+    let input_ref = NodeRef::<leptos::html::Input>::new();
+
     let submit = Callback::new(move |_: ()| {
         let text = value.get();
         if text.is_empty() {
@@ -32,6 +41,126 @@ pub fn InputLine() -> impl IntoView {
         set_value.set(String::new());
     });
 
+    let on_keydown = move |ev: web_sys::KeyboardEvent| {
+        if ev.key() == "Enter" {
+            // Reset tab state on Enter.
+            set_tab_prefix.set(None);
+            submit.run(());
+            return;
+        }
+
+        if ev.key() == "Tab" {
+            ev.prevent_default();
+
+            let text = value.get_untracked();
+
+            // Get cursor position from the input element.
+            let cursor = input_ref
+                .get_untracked()
+                .and_then(|el| {
+                    let html_input: &web_sys::HtmlInputElement = el.as_ref();
+                    html_input.selection_start().ok().flatten()
+                })
+                .map_or(text.len(), |p| p as usize);
+
+            // Clamp cursor to text length (safety).
+            let cursor = cursor.min(text.len());
+            let before_cursor = &text[..cursor];
+
+            // Find the word being typed (from previous space to cursor).
+            let word_start = before_cursor.rfind(' ').map_or(0, |i| i + 1);
+            let typed = &before_cursor[word_start..];
+
+            if typed.is_empty() {
+                return;
+            }
+
+            // Check if we're continuing a previous tab cycle.
+            let prev_prefix = tab_prefix.get_untracked();
+            let continuing = prev_prefix.as_deref() == Some(typed)
+                || (prev_prefix.is_some()
+                    && tab_word_start.get_untracked() == word_start);
+
+            if continuing {
+                // Cycle to next match.
+                let matches = tab_matches.get_untracked();
+                if matches.is_empty() {
+                    return;
+                }
+                let idx = (tab_index.get_untracked() + 1) % matches.len();
+                set_tab_index.set(idx);
+
+                let replacement = &matches[idx];
+                let suffix = if word_start == 0 { ": " } else { " " };
+                let after = &text[tab_cursor_end.get_untracked()..];
+                let new_text = format!(
+                    "{}{replacement}{suffix}{after}",
+                    &text[..word_start]
+                );
+                let new_cursor = word_start + replacement.len() + suffix.len();
+                set_tab_cursor_end.set(new_cursor);
+                set_value.set(new_text);
+
+                // Set cursor position.
+                if let Some(el) = input_ref.get_untracked() {
+                    let html_input: &web_sys::HtmlInputElement = el.as_ref();
+                    let _ = html_input.set_selection_start(Some(new_cursor as u32));
+                    let _ = html_input.set_selection_end(Some(new_cursor as u32));
+                }
+            } else {
+                // New tab completion — build matches.
+                let nicks = state.nick_lists.get_untracked();
+                let active_id = state.active_buffer.get_untracked();
+                let typed_lower = typed.to_lowercase();
+
+                let mut matches: Vec<String> = active_id
+                    .and_then(|id| nicks.get(&id))
+                    .map_or(Vec::new(), |list| {
+                        list.iter()
+                            .filter(|n| n.nick.to_lowercase().starts_with(&typed_lower))
+                            .map(|n| n.nick.clone())
+                            .collect()
+                    });
+
+                if matches.is_empty() {
+                    return;
+                }
+
+                // Sort alphabetically (case-insensitive).
+                matches.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+
+                let replacement = &matches[0];
+                let suffix = if word_start == 0 { ": " } else { " " };
+                let after = &text[cursor..];
+                let new_text = format!(
+                    "{}{replacement}{suffix}{after}",
+                    &text[..word_start]
+                );
+                let new_cursor = word_start + replacement.len() + suffix.len();
+
+                set_tab_prefix.set(Some(typed.to_string()));
+                set_tab_matches.set(matches);
+                set_tab_index.set(0);
+                set_tab_word_start.set(word_start);
+                set_tab_cursor_end.set(new_cursor);
+                set_value.set(new_text);
+
+                // Set cursor position.
+                if let Some(el) = input_ref.get_untracked() {
+                    let html_input: &web_sys::HtmlInputElement = el.as_ref();
+                    let _ = html_input.set_selection_start(Some(new_cursor as u32));
+                    let _ = html_input.set_selection_end(Some(new_cursor as u32));
+                }
+            }
+            return;
+        }
+
+        // Any non-Tab key resets tab completion state.
+        if tab_prefix.get_untracked().is_some() {
+            set_tab_prefix.set(None);
+        }
+    };
+
     view! {
         <div class="input-line">
             <span class="prompt">"❯"</span>
@@ -39,8 +168,9 @@ pub fn InputLine() -> impl IntoView {
                 type="text"
                 placeholder="Type a message..."
                 prop:value=value
+                node_ref=input_ref
                 on:input=move |ev| set_value.set(event_target_value(&ev))
-                on:keydown=move |ev| { if ev.key() == "Enter" { submit.run(()) } }
+                on:keydown=on_keydown
             />
             <button class="send-btn" on:click=move |_| submit.run(())>"Send"</button>
         </div>

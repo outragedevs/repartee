@@ -403,6 +403,8 @@ pub struct WebConfig {
     pub line_height: f32,
     /// Web theme name.
     pub theme: String,
+    /// Session duration in hours (default 24).
+    pub session_hours: u32,
     /// Cloudflare tunnel name (future use).
     pub cloudflare_tunnel_name: String,
     /// Login password — loaded from `.env` (`WEB_PASSWORD`), not serialized to TOML.
@@ -421,6 +423,7 @@ impl Default for WebConfig {
             timestamp_format: "%H:%M".to_string(),
             line_height: 1.35,
             theme: "nightfall".to_string(),
+            session_hours: 24,
             cloudflare_tunnel_name: String::new(),
             password: String::new(),
         }

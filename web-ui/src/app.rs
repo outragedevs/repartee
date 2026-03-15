@@ -9,13 +9,6 @@ pub fn App() -> impl IntoView {
     let state = AppState::new();
     provide_context(state.clone());
 
-    // Create the command channel — sender stored globally, receiver taken by login/auto-connect.
-    let (cmd_tx, cmd_rx) = futures::channel::mpsc::unbounded::<String>();
-    crate::ws::init_command_sender(cmd_tx);
-    // Store receiver in a signal so login or auto-connect can take it.
-    let cmd_rx_cell = StoredValue::new(Some(cmd_rx));
-    provide_context(cmd_rx_cell);
-
     // Save token to localStorage whenever it changes.
     Effect::new({
         let state = state.clone();
@@ -41,9 +34,7 @@ pub fn App() -> impl IntoView {
             .and_then(|s| s.get_item("repartee-token").ok().flatten());
         if let Some(token) = saved_token {
             state.token.set(Some(token));
-            if let Some(rx) = cmd_rx_cell.try_update_value(|v| v.take()).flatten() {
-                crate::ws::connect(&state, rx);
-            }
+            crate::ws::connect(&state);
         }
     }
 

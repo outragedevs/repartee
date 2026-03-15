@@ -2,9 +2,26 @@ use leptos::prelude::*;
 
 use crate::state::AppState;
 
+fn current_time() -> String {
+    let date = js_sys::Date::new_0();
+    let h = date.get_hours();
+    let m = date.get_minutes();
+    format!("{h:02}:{m:02}")
+}
+
 #[component]
 pub fn StatusLine() -> impl IntoView {
     let state = use_context::<AppState>().unwrap();
+
+    let (time_str, set_time_str) = signal(current_time());
+
+    // Update the clock every 30 seconds.
+    leptos::task::spawn_local(async move {
+        loop {
+            gloo_timers::future::sleep(std::time::Duration::from_secs(30)).await;
+            set_time_str.set(current_time());
+        }
+    });
 
     let active_buf = move || {
         let active_id = state.active_buffer.get()?;
@@ -40,6 +57,9 @@ pub fn StatusLine() -> impl IntoView {
     view! {
         <div class="status-line">
             <span class="bracket">"["</span>
+            // Time
+            <span class="muted">{time_str}</span>
+            <span class="sep">"|"</span>
             // Nick
             {move || active_conn().map(|c| view! {
                 <span class="nick">{c.nick}</span>

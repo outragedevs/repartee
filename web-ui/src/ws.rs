@@ -17,15 +17,17 @@ thread_local! {
     static CMD_TX: RefCell<Option<mpsc::UnboundedSender<String>>> = const { RefCell::new(None) };
 }
 
-/// Initialize the global command sender. Called once from `App`.
-pub fn init_command_sender(tx: mpsc::UnboundedSender<String>) {
-    CMD_TX.with(|cell| *cell.borrow_mut() = Some(tx));
-}
-
 /// Connect to the WebSocket server and spawn the message loop.
-pub fn connect(state: &AppState, cmd_rx: mpsc::UnboundedReceiver<String>) {
+///
+/// Creates a fresh command channel on each call — safe to call
+/// multiple times (e.g., after token expiry and re-login).
+pub fn connect(state: &AppState) {
     let token = state.token.get_untracked();
     let Some(token) = token else { return };
+
+    // Fresh command channel for this connection.
+    let (cmd_tx, cmd_rx) = mpsc::unbounded::<String>();
+    CMD_TX.with(|cell| *cell.borrow_mut() = Some(cmd_tx));
 
     let location = web_sys::window().unwrap().location();
     let host = location.host().unwrap();
@@ -43,7 +45,7 @@ pub fn connect(state: &AppState, cmd_rx: mpsc::UnboundedReceiver<String>) {
             }
             Err(e) => {
                 let msg = format!("{e}");
-                // If connection failed (likely expired/invalid token), clear token to show login.
+                // Connection failed (likely expired/invalid token) — clear to show login.
                 state.token.set(None);
                 state.error.set(Some(format!("WebSocket error: {msg}")));
                 state.connected.set(false);

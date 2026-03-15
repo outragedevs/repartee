@@ -232,7 +232,7 @@ mod tests {
             broadcaster: Arc::new(WebBroadcaster::new(16)),
             web_cmd_tx: tx,
             password: "testpass".to_string(),
-            session_store: Arc::new(Mutex::new(SessionStore::new())),
+            session_store: Arc::new(Mutex::new(SessionStore::with_hours(24))),
             rate_limiter: Arc::new(Mutex::new(RateLimiter::new())),
             web_state_snapshot: None,
         })

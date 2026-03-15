@@ -72,6 +72,7 @@ fn lockout_duration(failures: u32) -> Duration {
 /// Session token store.
 pub struct SessionStore {
     sessions: HashMap<String, Session>,
+    max_age: Duration,
 }
 
 pub struct Session {
@@ -81,9 +82,11 @@ pub struct Session {
 }
 
 impl SessionStore {
-    pub fn new() -> Self {
+    /// Create with a custom session duration.
+    pub fn with_hours(hours: u32) -> Self {
         Self {
             sessions: HashMap::new(),
+            max_age: Duration::from_secs(u64::from(hours) * 3600),
         }
     }
 
@@ -103,8 +106,7 @@ impl SessionStore {
     /// Validate a session token. Returns the session if valid and not expired.
     pub fn validate(&self, token: &str) -> Option<&Session> {
         let session = self.sessions.get(token)?;
-        // Sessions expire after 24 hours.
-        if session.created_at.elapsed() > Duration::from_secs(86400) {
+        if session.created_at.elapsed() > self.max_age {
             return None;
         }
         Some(session)
@@ -112,7 +114,7 @@ impl SessionStore {
 
     /// Remove expired sessions.
     pub fn purge_expired(&mut self) {
-        let max_age = Duration::from_secs(86400);
+        let max_age = self.max_age;
         self.sessions
             .retain(|_, s| s.created_at.elapsed() < max_age);
     }
@@ -190,7 +192,7 @@ mod tests {
 
     #[test]
     fn session_store_create_and_validate() {
-        let mut store = SessionStore::new();
+        let mut store = SessionStore::with_hours(24);
         let token = store.create("1.2.3.4");
         assert_eq!(token.len(), 64); // 32 bytes = 64 hex chars
         assert!(store.validate(&token).is_some());

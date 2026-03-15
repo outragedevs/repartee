@@ -10,10 +10,12 @@ serde_json = "1.0"
 web-sys = { version = "0.3", features = [
     "WebSocket", "MessageEvent", "ErrorEvent", "CloseEvent",
     "Location", "Window", "Storage", "Document", "Element", "HtmlElement",
-    "HtmlDocument",
+    "HtmlDocument", "HtmlInputElement",
 ] }
 wasm-bindgen = "0.2"
+js-sys = "0.3"
 gloo-net = { version = "0.6", features = ["websocket", "http"] }
+gloo-timers = { version = "0.3", features = ["futures"] }
 chrono = { version = "0.4", features = ["wasmbind"] }
 futures = "0.3"
 console_error_panic_hook = "0.1"

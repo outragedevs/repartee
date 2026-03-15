@@ -9,10 +9,6 @@ pub fn Login() -> impl IntoView {
     let (error, set_error) = signal(Option::<String>::None);
     let (loading, set_loading) = signal(false);
 
-    // Grab the command receiver cell BEFORE any async spawn (context not available inside spawn_local).
-    let cmd_rx_cell = use_context::<StoredValue<Option<futures::channel::mpsc::UnboundedReceiver<String>>>>()
-        .expect("cmd_rx_cell context missing");
-
     let do_submit = Callback::new(move |_: ()| {
         let pw = password.get();
         if pw.is_empty() {
@@ -26,9 +22,7 @@ pub fn Login() -> impl IntoView {
             match do_login(&pw).await {
                 Ok(token) => {
                     state.token.set(Some(token));
-                    if let Some(rx) = cmd_rx_cell.try_update_value(|v| v.take()).flatten() {
-                        crate::ws::connect(&state, rx);
-                    }
+                    crate::ws::connect(&state);
                 }
                 Err(e) => {
                     set_error.set(Some(e));

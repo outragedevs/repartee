@@ -149,6 +149,7 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 "timestamp_format" => config.web.timestamp_format.clone(),
                 "line_height" => config.web.line_height.to_string(),
                 "theme" => config.web.theme.clone(),
+                "session_hours" => config.web.session_hours.to_string(),
                 "cloudflare_tunnel_name" => config.web.cloudflare_tunnel_name.clone(),
                 "password" => config.web.password.clone(),
                 _ => return None,
@@ -333,6 +334,10 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
                     raw.parse().map_err(|_| "Expected a decimal number".to_string())?;
             }
             "theme" => config.web.theme = raw.to_string(),
+            "session_hours" => {
+                config.web.session_hours =
+                    raw.parse().map_err(|_| "Expected a positive integer (hours)".to_string())?;
+            }
             "cloudflare_tunnel_name" => config.web.cloudflare_tunnel_name = raw.to_string(),
             "password" => config.web.password = raw.to_string(),
             _ => return Err(format!("Unknown field: {path}")),
@@ -438,6 +443,7 @@ const BASE_PATHS: &[&str] = &[
     "web.timestamp_format",
     "web.line_height",
     "web.theme",
+    "web.session_hours",
     "web.cloudflare_tunnel_name",
     "web.password",
 ];

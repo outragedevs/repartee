@@ -55,6 +55,8 @@ impl AppState {
                 self.mention_count.set(mention_count);
                 self.connected.set(true);
 
+                self.sort_buffers();
+
                 // Sync to the TUI's active buffer.
                 if let Some(ref id) = active_buffer_id {
                     self.active_buffer.set(Some(id.clone()));
@@ -112,6 +114,7 @@ impl AppState {
             WebEvent::BufferCreated { buffer } => {
                 let new_id = buffer.id.clone();
                 self.buffers.update(|bufs| bufs.push(buffer));
+                self.sort_buffers();
                 // Auto-switch to newly created buffer (matches terminal behavior).
                 self.active_buffer.set(Some(new_id));
             }
@@ -163,7 +166,9 @@ impl AppState {
             }
             WebEvent::NickList { buffer_id, nicks, .. } => {
                 self.nick_lists.update(|lists| {
-                    lists.insert(buffer_id, nicks);
+                    let mut sorted = nicks;
+                    sort_nicks(&mut sorted);
+                    lists.insert(buffer_id, sorted);
                 });
             }
             WebEvent::MentionAlert { .. } => {
@@ -186,7 +191,6 @@ impl AppState {
                     NickEventKind::Join => {
                         self.nick_lists.update(|lists| {
                             let list = lists.entry(buffer_id.clone()).or_default();
-                            // Only add if not already present.
                             if !list.iter().any(|n| n.nick == nick) {
                                 list.push(WireNick {
                                     nick: nick.clone(),
@@ -194,6 +198,7 @@ impl AppState {
                                     modes: modes.unwrap_or_default(),
                                     away: away.unwrap_or(false),
                                 });
+                                sort_nicks(list);
                             }
                         });
                         // Update nick_count.
@@ -238,6 +243,7 @@ impl AppState {
                                         entry.modes = m.clone();
                                     }
                                 }
+                                sort_nicks(list);
                             }
                         });
                     }
@@ -262,4 +268,48 @@ impl AppState {
             }
         }
     }
+
+    /// Sort buffers to match TUI order: connection label → buffer type → name.
+    ///
+    /// Buffer type sort order: server(0) < channel(1) < query(2) < dcc_chat(3) < special(4).
+    fn sort_buffers(&self) {
+        let connections = self.connections.get_untracked();
+        self.buffers.update(|bufs| {
+            bufs.sort_by(|a, b| {
+                let label_a = connections.iter().find(|c| c.id == a.connection_id)
+                    .map_or_else(|| a.connection_id.to_lowercase(), |c| c.label.to_lowercase());
+                let label_b = connections.iter().find(|c| c.id == b.connection_id)
+                    .map_or_else(|| b.connection_id.to_lowercase(), |c| c.label.to_lowercase());
+                label_a.cmp(&label_b)
+                    .then_with(|| buf_type_order(&a.buffer_type).cmp(&buf_type_order(&b.buffer_type)))
+                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            });
+        });
+    }
+}
+
+fn buf_type_order(t: &str) -> u8 {
+    match t {
+        "server" => 0,
+        "channel" => 1,
+        "query" => 2,
+        "dcc_chat" => 3,
+        "special" => 4,
+        _ => 5,
+    }
+}
+
+/// Sort nicks by prefix rank (~&@%+ order), then alphabetically.
+fn sort_nicks(nicks: &mut [WireNick]) {
+    nicks.sort_by(|a, b| {
+        prefix_rank(&a.prefix).cmp(&prefix_rank(&b.prefix))
+            .then_with(|| a.nick.to_lowercase().cmp(&b.nick.to_lowercase()))
+    });
+}
+
+fn prefix_rank(prefix: &str) -> u8 {
+    const ORDER: &str = "~&@%+";
+    prefix.chars().next()
+        .and_then(|c| ORDER.find(c))
+        .map_or(ORDER.len() as u8, |i| i as u8)
 }
