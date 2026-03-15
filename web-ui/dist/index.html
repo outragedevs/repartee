@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="nightfall">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>repartee</title>
+    
+<script type="module">
+import init, * as bindings from '/repartee-web-eaf73a8f9e8faa11.js';
+const wasm = await init({ module_or_path: '/repartee-web-eaf73a8f9e8faa11_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script>
+    <link rel="stylesheet" href="/themes-87144cd61da5f1f8.css" integrity="sha384-L+geR6Qmd/cKso+WVDIL86aMFxDmNAiIK5PuNs7pZKtQ09FtedWi3lxNiHGOQq6W"/>
+    <link rel="stylesheet" href="/base-8fffe41b6f44589d.css" integrity="sha384-n5U8n2ibZp0KgEmIMV3NVVR2XI6lWQZ1lo5640jZLSrDnK89tDPbgWCAOzeYFNmt"/>
+<link rel="modulepreload" href="/repartee-web-eaf73a8f9e8faa11.js" crossorigin="anonymous" integrity="sha384-b1UYUil4chLwns4KZCDRlmQVnX4QZqIS6K2mrPqhg/UiGCDV7sRag6mG341qZ8HR"><link rel="preload" href="/repartee-web-eaf73a8f9e8faa11_bg.wasm" crossorigin="anonymous" integrity="sha384-IfXH18arx9w11T9KAwR4Uh00pIeFdY5uRPYrPv2rY3OEalSCr63f5TcqG/Lr4VZg" as="fetch" type="application/wasm"></head>
+<body></body>
+</html>

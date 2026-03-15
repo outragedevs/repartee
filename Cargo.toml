@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "web-ui"]
+
 [package]
 name = "repartee"
 version = "0.3.0"
@@ -54,6 +57,14 @@ ratatui-image = "10.0"
 spellbook = "0.4"
 image = "0.25"
 reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
+axum = { version = "0.8", features = ["ws"] }
+axum-extra = { version = "0.10", features = ["cookie-signed"] }
+tower = { version = "0.5", features = ["limit"] }
+rcgen = "0.14"
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
+rust-embed = "8"
 
 [dev-dependencies]
 tempfile = "3.26"

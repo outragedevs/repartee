@@ -70,6 +70,7 @@
   <div class="nav-section">
     <span class="nav-section-title">Usage</span>
     <ul>
+      <li><a href="web-frontend.html">Web Frontend</a></li>
       <li><a href="sessions.html">Sessions & Detach</a></li>
     </ul>
   </div>
@@ -107,6 +108,7 @@
   logs/messages.db     # chat logs (SQLite)
   dicts/               # Hunspell dictionaries (.dic/.aff)
   sessions/            # Unix sockets for detached sessions
+  certs/               # TLS certificates for web frontend
 </code></pre>
 <h2>Full annotated example</h2>
 <pre><code class="language-toml">[general]
@@ -194,6 +196,17 @@ enabled = true
 languages = [&quot;en_US&quot;]              # Hunspell language codes
 dictionary_dir = &quot;&quot;                # default: ~/.repartee/dicts
 
+[web]
+enabled = false                    # enable embedded web frontend
+bind_address = &quot;127.0.0.1&quot;        # listen address (0.0.0.0 for LAN)
+port = 8443                        # HTTPS port
+tls_cert = &quot;&quot;                      # custom cert (empty = auto self-signed)
+tls_key = &quot;&quot;                       # custom key
+timestamp_format = &quot;%H:%M&quot;        # web UI timestamp format
+line_height = 1.35                 # CSS line-height for chat messages
+theme = &quot;nightfall&quot;                # web theme (nightfall, catppuccin-mocha, etc.)
+# cloudflare_tunnel_name = &quot;&quot;     # future: Cloudflare tunnel name
+
 [[ignores]]
 mask = &quot;*!*@spammer.host&quot;
 levels = [&quot;ALL&quot;]
@@ -224,6 +237,10 @@ levels = [&quot;ALL&quot;]
 <p><code>autochat_masks</code> is a list of <code>nick!ident@host</code> wildcard patterns. Incoming DCC CHAT offers matching any pattern are auto-accepted without prompting.</p>
 <h3><code>[spellcheck]</code></h3>
 <p>Inline spell checking. When <code>enabled = true</code>, misspelled words are underlined in red while typing. Press Tab to cycle suggestions, Space to accept, Escape to revert. <code>languages</code> is a list of Hunspell language codes (e.g., <code>en_US</code>, <code>pl_PL</code>, <code>de_DE</code>) — a word is correct if <strong>any</strong> active dictionary accepts it. Place <code>.dic</code>/<code>.aff</code> files in <code>~/.repartee/dicts/</code> (or set <code>dictionary_dir</code> to a custom path).</p>
+<h3><code>[web]</code></h3>
+<p>Embedded web frontend. When <code>enabled = true</code> and <code>WEB_PASSWORD</code> is set in <code>.env</code>, the app starts an HTTPS server alongside the terminal interface. Both share the same state — read a message on web, it&#39;s marked read on terminal, and vice versa.</p>
+<p>Set <code>bind_address = &quot;0.0.0.0&quot;</code> to allow LAN access. TLS is always on — if no custom cert/key is provided, a self-signed certificate is auto-generated in <code>~/.repartee/certs/</code>.</p>
+<p>The <code>theme</code> setting controls the web UI appearance. Available: <code>nightfall</code> (default dark), <code>catppuccin-mocha</code>, <code>tokyo-storm</code>, <code>gruvbox-light</code>, <code>catppuccin-latte</code>.</p>
 <h3><code>[[ignores]]</code></h3>
 <p>Ignore patterns for filtering unwanted messages. Uses wildcard matching (<code>*!*@host</code>). Levels: <code>MSGS</code>, <code>PUBLIC</code>, <code>NOTICES</code>, <code>ACTIONS</code>, <code>JOINS</code>, <code>PARTS</code>, <code>QUITS</code>, <code>NICKS</code>, <code>KICKS</code>, <code>CTCPS</code>, <code>ALL</code>.</p>
 <h2>Credentials</h2>
@@ -232,8 +249,9 @@ levels = [&quot;ALL&quot;]
 LIBERA_SASL_USER=mynick
 LIBERA_SASL_PASS=hunter2
 LIBERA_PASSWORD=serverpassword
+WEB_PASSWORD=mysecretpassword
 </code></pre>
-<p>The naming convention uses the server identifier uppercased.</p>
+<p>Server credentials use the server identifier uppercased. <code>WEB_PASSWORD</code> is required for the web frontend — the server won&#39;t start without it.</p>
 <h2>Runtime changes</h2>
 <ul>
 <li><strong><code>/set section.field value</code></strong> — change a config value at runtime. Changes are saved immediately.</li>

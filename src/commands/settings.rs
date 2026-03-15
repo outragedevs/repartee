@@ -138,6 +138,29 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 is_credential: false,
             })
         }
+        "web" => {
+            let is_cred = parts[1] == "password";
+            let val = match parts[1] {
+                "enabled" => config.web.enabled.to_string(),
+                "bind_address" => config.web.bind_address.clone(),
+                "port" => config.web.port.to_string(),
+                "tls_cert" => config.web.tls_cert.clone(),
+                "tls_key" => config.web.tls_key.clone(),
+                "timestamp_format" => config.web.timestamp_format.clone(),
+                "line_height" => config.web.line_height.to_string(),
+                "nick_column_width" => config.web.nick_column_width.to_string(),
+                "nick_max_length" => config.web.nick_max_length.to_string(),
+                "theme" => config.web.theme.clone(),
+                "session_hours" => config.web.session_hours.to_string(),
+                "cloudflare_tunnel_name" => config.web.cloudflare_tunnel_name.clone(),
+                "password" => config.web.password.clone(),
+                _ => return None,
+            };
+            Some(Resolved {
+                value: val,
+                is_credential: is_cred,
+            })
+        }
         "servers" if parts.len() >= 3 => {
             let server = config.servers.get(parts[1])?;
             let is_cred = matches!(parts[2], "password" | "sasl_pass" | "sasl_user");
@@ -301,6 +324,34 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
             "dictionary_dir" => config.spellcheck.dictionary_dir = raw.to_string(),
             _ => return Err(format!("Unknown field: {path}")),
         },
+        "web" => match parts[1] {
+            "enabled" => config.web.enabled = parse_bool(raw)?,
+            "bind_address" => config.web.bind_address = raw.to_string(),
+            "port" => config.web.port = parse_u16(raw)?,
+            "tls_cert" => config.web.tls_cert = raw.to_string(),
+            "tls_key" => config.web.tls_key = raw.to_string(),
+            "timestamp_format" => config.web.timestamp_format = raw.to_string(),
+            "line_height" => {
+                config.web.line_height =
+                    raw.parse().map_err(|_| "Expected a decimal number".to_string())?;
+            }
+            "nick_column_width" => {
+                config.web.nick_column_width =
+                    raw.parse().map_err(|_| "Expected a number".to_string())?;
+            }
+            "nick_max_length" => {
+                config.web.nick_max_length =
+                    raw.parse().map_err(|_| "Expected a number".to_string())?;
+            }
+            "theme" => config.web.theme = raw.to_string(),
+            "session_hours" => {
+                config.web.session_hours =
+                    raw.parse().map_err(|_| "Expected a positive integer (hours)".to_string())?;
+            }
+            "cloudflare_tunnel_name" => config.web.cloudflare_tunnel_name = raw.to_string(),
+            "password" => config.web.password = raw.to_string(),
+            _ => return Err(format!("Unknown field: {path}")),
+        },
         "servers" if parts.len() >= 3 => {
             let server = config
                 .servers
@@ -394,6 +445,19 @@ const BASE_PATHS: &[&str] = &[
     "spellcheck.enabled",
     "spellcheck.languages",
     "spellcheck.dictionary_dir",
+    "web.enabled",
+    "web.bind_address",
+    "web.port",
+    "web.tls_cert",
+    "web.tls_key",
+    "web.timestamp_format",
+    "web.line_height",
+    "web.nick_column_width",
+    "web.nick_max_length",
+    "web.theme",
+    "web.session_hours",
+    "web.cloudflare_tunnel_name",
+    "web.password",
 ];
 
 const SERVER_FIELDS: &[&str] = &[
@@ -429,6 +493,7 @@ pub fn get_setting_paths(config: &AppConfig) -> Vec<String> {
 
 // === Command handler ===
 
+#[expect(clippy::too_many_lines, reason = "flat dispatcher with per-section side-effects")]
 pub fn cmd_set(app: &mut App, args: &[String]) {
     let ev = super::helpers::add_local_event;
 
@@ -446,7 +511,7 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
             let display = if resolved.is_credential && !resolved.value.is_empty() {
                 format!("*** {C_DIM}[credential]{C_RST}")
             } else {
-                format!("{C_CMD}{}{C_RST}", resolved.value)
+                format!("{C_CMD}{}{C_RST}", resolved.value.replace('%', "%%"))
             };
             ev(app, &format!("{C_HEADER}{path}{C_RST} = {display}"));
         } else {
@@ -467,12 +532,22 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
     match set_config_value(&mut app.config, path, raw) {
         Ok(()) => {
             app.cached_config_toml = None;
-            ev(app, &format!("{C_OK}{path}{C_RST} = {C_CMD}{raw}{C_RST}"));
+            ev(app, &format!("{C_OK}{path}{C_RST} = {C_CMD}{}{C_RST}", raw.replace('%', "%%")));
 
-            // Save config
+            // Save config (web.password is #[serde(skip)] — saved to .env instead).
             let cfg_path = crate::constants::config_path();
             if let Err(e) = crate::config::save_config(&cfg_path, &app.config) {
                 ev(app, &format!("{C_ERR}Failed to save config: {e}{C_RST}"));
+            }
+
+            // Persist credentials to .env (not config.toml).
+            if path == "web.password" {
+                let env_path = crate::constants::env_path();
+                if let Err(e) = crate::config::set_env_value(&env_path, "WEB_PASSWORD", raw) {
+                    ev(app, &format!("{C_ERR}Failed to save to .env: {e}{C_RST}"));
+                } else {
+                    ev(app, &format!("{C_DIM}Password saved to .env. Restart to start the web server.{C_RST}"));
+                }
             }
 
             // Sync runtime state from config
@@ -515,6 +590,24 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
             // Sync spellcheck runtime state
             if path.starts_with("spellcheck.") {
                 app.reload_spellchecker();
+            }
+
+            // Broadcast web settings changes to connected web clients.
+            if path == "web.timestamp_format"
+                || path == "web.line_height"
+                || path == "web.theme"
+                || path == "web.nick_column_width"
+                || path == "web.nick_max_length"
+            {
+                app.state.pending_web_events.push(
+                    crate::web::protocol::WebEvent::SettingsChanged {
+                        timestamp_format: app.config.web.timestamp_format.clone(),
+                        line_height: app.config.web.line_height,
+                        theme: app.config.web.theme.clone(),
+                        nick_column_width: app.config.web.nick_column_width,
+                        nick_max_length: app.config.web.nick_max_length,
+                    },
+                );
             }
 
             // Special handling: reload theme if theme name changed
@@ -567,7 +660,7 @@ fn search_settings(app: &mut App, needle: &str) {
                 };
                 ev(
                     app,
-                    &format!("  {C_HEADER}{matched_path}{C_RST} = {C_CMD}{val}{C_RST}"),
+                    &format!("  {C_HEADER}{matched_path}{C_RST} = {C_CMD}{}{C_RST}", val.replace('%', "%%")),
                 );
             }
         }
@@ -628,7 +721,7 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
                 } else {
                     resolved.value
                 };
-                lines.push(format!("    {C_HEADER}{path}{C_RST} = {C_CMD}{val}{C_RST}"));
+                lines.push(format!("    {C_HEADER}{path}{C_RST} = {C_CMD}{}{C_RST}", val.replace('%', "%%")));
             }
         }
     }
@@ -713,7 +806,7 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
                 } else {
                     resolved.value
                 };
-                lines.push(format!("    {C_HEADER}{path}{C_RST} = {C_CMD}{val}{C_RST}"));
+                lines.push(format!("    {C_HEADER}{path}{C_RST} = {C_CMD}{}{C_RST}", val.replace('%', "%%")));
             }
         }
     }
@@ -826,11 +919,10 @@ mod tests {
     fn search_no_matches() {
         let config = default_config();
         let all = get_setting_paths(&config);
-        let matches: Vec<&String> = all
+        let has_match = all
             .iter()
-            .filter(|p| p.to_lowercase().contains("zzzznonexistent"))
-            .collect();
-        assert!(matches.is_empty());
+            .any(|p| p.to_lowercase().contains("zzzznonexistent"));
+        assert!(!has_match);
     }
 
     #[test]

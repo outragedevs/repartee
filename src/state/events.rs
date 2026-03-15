@@ -19,6 +19,7 @@ impl AppState {
             log_tx: None,
             log_exclude_types: Vec::new(),
             scrollback_limit: 0,
+            pending_web_events: Vec::new(),
         }
     }
 
@@ -33,7 +34,7 @@ impl AppState {
         self.connections.insert(conn.id.clone(), conn);
     }
 
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "reserved for future reconnect/disconnect commands")]
     pub fn remove_connection(&mut self, id: &str) {
         self.connections.remove(id);
     }
@@ -47,11 +48,28 @@ impl AppState {
     // === Buffer management ===
 
     pub fn add_buffer(&mut self, buffer: Buffer) {
+        let meta = crate::web::protocol::BufferMeta {
+            id: buffer.id.clone(),
+            connection_id: buffer.connection_id.clone(),
+            name: buffer.name.clone(),
+            buffer_type: crate::web::snapshot::buffer_type_str(&buffer.buffer_type).to_string(),
+            topic: buffer.topic.clone(),
+            unread_count: buffer.unread_count,
+            activity: buffer.activity as u8,
+            nick_count: u32::try_from(buffer.users.len()).unwrap_or(u32::MAX),
+            modes: buffer.modes.clone(),
+        };
         self.buffers.insert(buffer.id.clone(), buffer);
+        self.pending_web_events
+            .push(crate::web::protocol::WebEvent::BufferCreated { buffer: meta });
     }
 
     pub fn remove_buffer(&mut self, id: &str) {
         let was_active = self.active_buffer_id.as_deref() == Some(id);
+        self.pending_web_events
+            .push(crate::web::protocol::WebEvent::BufferClosed {
+                buffer_id: id.to_string(),
+            });
         self.buffers.shift_remove(id);
 
         if was_active {
@@ -74,8 +92,9 @@ impl AppState {
         if !self.buffers.contains_key(id) {
             return;
         }
+        let changed = self.active_buffer_id.as_deref() != Some(id);
         // Save current as previous
-        if self.active_buffer_id.as_deref() != Some(id) {
+        if changed {
             self.previous_buffer_id = self.active_buffer_id.clone();
         }
         self.active_buffer_id = Some(id.to_string());
@@ -85,12 +104,34 @@ impl AppState {
             buf.activity = ActivityLevel::None;
             buf.unread_count = 0;
         }
+
+        // Broadcast to web clients so TUI ↔ Web stay in sync.
+        if changed {
+            self.pending_web_events
+                .push(crate::web::protocol::WebEvent::ActiveBufferChanged {
+                    buffer_id: id.to_string(),
+                });
+        }
     }
 
     // === Messages ===
 
     pub fn add_message(&mut self, buffer_id: &str, message: Message) {
         self.maybe_log(buffer_id, &message);
+        // Queue web event for broadcast.
+        let wire = crate::web::snapshot::message_to_wire(&message);
+        if message.highlight {
+            self.pending_web_events
+                .push(crate::web::protocol::WebEvent::MentionAlert {
+                    buffer_id: buffer_id.to_string(),
+                    message: wire.clone(),
+                });
+        }
+        self.pending_web_events
+            .push(crate::web::protocol::WebEvent::NewMessage {
+                buffer_id: buffer_id.to_string(),
+                message: wire,
+            });
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
             track_speaker(buf, &message);
             buf.messages.push(message);
@@ -100,8 +141,14 @@ impl AppState {
 
     /// Add a message to a buffer WITHOUT logging it to the database.
     /// Used for local UI events (command output, status messages) that
-    /// should appear on screen but not be persisted.
+    /// should appear on screen but not be persisted — but still broadcast
+    /// to web clients so command output is visible on the web UI.
     pub fn add_local_message(&mut self, buffer_id: &str, message: Message) {
+        self.pending_web_events
+            .push(crate::web::protocol::WebEvent::NewMessage {
+                buffer_id: buffer_id.to_string(),
+                message: crate::web::snapshot::message_to_wire(&message),
+            });
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
             buf.messages.push(message);
             enforce_scrollback(buf, self.scrollback_limit);
@@ -115,6 +162,20 @@ impl AppState {
         level: ActivityLevel,
     ) {
         self.maybe_log(buffer_id, &message);
+        // Queue web events for broadcast.
+        let wire = crate::web::snapshot::message_to_wire(&message);
+        if message.highlight {
+            self.pending_web_events
+                .push(crate::web::protocol::WebEvent::MentionAlert {
+                    buffer_id: buffer_id.to_string(),
+                    message: wire.clone(),
+                });
+        }
+        self.pending_web_events
+            .push(crate::web::protocol::WebEvent::NewMessage {
+                buffer_id: buffer_id.to_string(),
+                message: wire,
+            });
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
             track_speaker(buf, &message);
             buf.messages.push(message);
@@ -124,6 +185,12 @@ impl AppState {
             if !is_active && level > buf.activity {
                 buf.activity = level;
                 buf.unread_count += 1;
+                self.pending_web_events
+                    .push(crate::web::protocol::WebEvent::ActivityChanged {
+                        buffer_id: buffer_id.to_string(),
+                        activity: level as u8,
+                        unread_count: buf.unread_count,
+                    });
             }
         }
     }
@@ -182,7 +249,7 @@ impl AppState {
         let _ = tx.send(row);
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "reserved for scripting API; used in tests")]
     pub fn set_activity(&mut self, buffer_id: &str, level: ActivityLevel) {
         if let Some(buf) = self.buffers.get_mut(buffer_id)
             && level > buf.activity

@@ -1,0 +1,348 @@
+use std::collections::HashMap;
+
+use leptos::prelude::*;
+
+use crate::protocol::*;
+
+/// Client-side application state, stored as Leptos signals.
+#[derive(Clone, Copy)]
+pub struct AppState {
+    pub connected: RwSignal<bool>,
+    pub buffers: RwSignal<Vec<BufferMeta>>,
+    pub connections: RwSignal<Vec<ConnectionMeta>>,
+    pub active_buffer: RwSignal<Option<String>>,
+    pub messages: RwSignal<HashMap<String, Vec<WireMessage>>>,
+    pub nick_lists: RwSignal<HashMap<String, Vec<WireNick>>>,
+    pub mention_count: RwSignal<u32>,
+    pub token: RwSignal<Option<String>>,
+    pub theme: RwSignal<String>,
+    pub error: RwSignal<Option<String>>,
+    pub timestamp_format: RwSignal<String>,
+    pub line_height: RwSignal<f32>,
+    pub nick_column_width: RwSignal<u32>,
+    pub nick_max_length: RwSignal<u32>,
+}
+
+impl AppState {
+    pub fn new() -> Self {
+        // Load theme from localStorage if available.
+        let saved_theme: String = web_sys::window()
+            .and_then(|w| w.local_storage().ok().flatten())
+            .and_then(|s: web_sys::Storage| s.get_item("repartee-theme").ok().flatten())
+            .unwrap_or_else(|| "nightfall".to_string());
+
+        Self {
+            connected: RwSignal::new(false),
+            buffers: RwSignal::new(Vec::new()),
+            connections: RwSignal::new(Vec::new()),
+            active_buffer: RwSignal::new(None),
+            messages: RwSignal::new(HashMap::new()),
+            nick_lists: RwSignal::new(HashMap::new()),
+            mention_count: RwSignal::new(0),
+            token: RwSignal::new(None),
+            theme: RwSignal::new(saved_theme),
+            error: RwSignal::new(None),
+            timestamp_format: RwSignal::new("%H:%M".to_string()),
+            line_height: RwSignal::new(1.35),
+            nick_column_width: RwSignal::new(12),
+            nick_max_length: RwSignal::new(9),
+        }
+    }
+
+    /// Handle a WebEvent from the server, updating signals accordingly.
+    pub fn handle_event(&self, event: WebEvent) {
+        match event {
+            WebEvent::SyncInit {
+                buffers,
+                connections,
+                mention_count,
+                active_buffer_id,
+                timestamp_format,
+            } => {
+                self.buffers.set(buffers);
+                self.connections.set(connections);
+                self.mention_count.set(mention_count);
+                self.connected.set(true);
+                if let Some(fmt) = timestamp_format
+                    && !fmt.is_empty()
+                {
+                    self.timestamp_format.set(fmt);
+                }
+
+                self.sort_buffers();
+
+                // Sync to the TUI's active buffer.
+                if let Some(ref id) = active_buffer_id {
+                    self.active_buffer.set(Some(id.clone()));
+                } else if self.active_buffer.get_untracked().is_none() {
+                    // Fallback: select first channel buffer.
+                    let bufs = self.buffers.get_untracked();
+                    if let Some(first) = bufs.iter().find(|b| b.buffer_type == "channel") {
+                        self.active_buffer.set(Some(first.id.clone()));
+                    }
+                }
+            }
+            WebEvent::NewMessage {
+                buffer_id,
+                message,
+            } => {
+                self.messages.update(|msgs| {
+                    msgs.entry(buffer_id.clone())
+                        .or_default()
+                        .push(message);
+                });
+                // Update unread count if not the active buffer.
+                let is_active = self
+                    .active_buffer
+                    .get_untracked()
+                    .as_deref() == Some(&buffer_id);
+                if !is_active {
+                    self.buffers.update(|bufs| {
+                        if let Some(b) = bufs.iter_mut().find(|b| b.id == buffer_id) {
+                            b.unread_count += 1;
+                        }
+                    });
+                }
+            }
+            WebEvent::TopicChanged {
+                buffer_id, topic, ..
+            } => {
+                self.buffers.update(|bufs| {
+                    if let Some(b) = bufs.iter_mut().find(|b| b.id == buffer_id) {
+                        b.topic = topic;
+                    }
+                });
+            }
+            WebEvent::ActivityChanged {
+                buffer_id,
+                activity,
+                unread_count,
+            } => {
+                self.buffers.update(|bufs| {
+                    if let Some(b) = bufs.iter_mut().find(|b| b.id == buffer_id) {
+                        b.activity = activity;
+                        b.unread_count = unread_count;
+                    }
+                });
+            }
+            WebEvent::BufferCreated { buffer } => {
+                let new_id = buffer.id.clone();
+                self.buffers.update(|bufs| bufs.push(buffer));
+                self.sort_buffers();
+                // Auto-switch to newly created buffer (matches terminal behavior).
+                self.active_buffer.set(Some(new_id));
+            }
+            WebEvent::BufferClosed { buffer_id } => {
+                // If the closed buffer was active, switch to first available.
+                if self.active_buffer.get_untracked().as_deref() == Some(&buffer_id) {
+                    let bufs = self.buffers.get_untracked();
+                    let fallback = bufs.iter()
+                        .find(|b| b.id != buffer_id)
+                        .map(|b| b.id.clone());
+                    self.active_buffer.set(fallback);
+                }
+                self.buffers.update(|bufs| bufs.retain(|b| b.id != buffer_id));
+                self.messages.update(|msgs| { msgs.remove(&buffer_id); });
+                self.nick_lists.update(|lists| { lists.remove(&buffer_id); });
+            }
+            WebEvent::ConnectionStatus {
+                conn_id,
+                connected,
+                nick,
+                label,
+            } => {
+                self.connections.update(|conns| {
+                    if let Some(c) = conns.iter_mut().find(|c| c.id == conn_id) {
+                        c.connected = connected;
+                        c.nick = nick;
+                    } else {
+                        conns.push(ConnectionMeta {
+                            id: conn_id,
+                            label,
+                            nick,
+                            connected,
+                            user_modes: String::new(),
+                            lag: None,
+                        });
+                    }
+                });
+            }
+            WebEvent::Messages {
+                buffer_id,
+                messages,
+                ..
+            } => {
+                self.messages.update(|msgs| {
+                    let entry = msgs.entry(buffer_id).or_default();
+                    // Prepend older messages (they come from scroll-back).
+                    let mut combined = messages;
+                    combined.append(entry);
+                    *entry = combined;
+                });
+            }
+            WebEvent::NickList { buffer_id, nicks, .. } => {
+                self.nick_lists.update(|lists| {
+                    let mut sorted = nicks;
+                    sort_nicks(&mut sorted);
+                    lists.insert(buffer_id, sorted);
+                });
+            }
+            WebEvent::MentionAlert { .. } => {
+                self.mention_count.update(|c| *c += 1);
+            }
+            WebEvent::MentionsList { .. } => {
+                self.mention_count.set(0);
+            }
+            WebEvent::NickEvent {
+                buffer_id,
+                kind,
+                nick,
+                new_nick,
+                prefix,
+                modes,
+                away,
+                ..
+            } => {
+                match kind {
+                    NickEventKind::Join => {
+                        self.nick_lists.update(|lists| {
+                            let list = lists.entry(buffer_id.clone()).or_default();
+                            if !list.iter().any(|n| n.nick == nick) {
+                                list.push(WireNick {
+                                    nick: nick.clone(),
+                                    prefix: prefix.unwrap_or_default(),
+                                    modes: modes.unwrap_or_default(),
+                                    away: away.unwrap_or(false),
+                                });
+                                sort_nicks(list);
+                            }
+                        });
+                        // Update nick_count.
+                        self.buffers.update(|bufs| {
+                            if let Some(b) = bufs.iter_mut().find(|b| b.id == buffer_id) {
+                                b.nick_count += 1;
+                            }
+                        });
+                    }
+                    NickEventKind::Part | NickEventKind::Quit => {
+                        self.nick_lists.update(|lists| {
+                            if let Some(list) = lists.get_mut(&buffer_id) {
+                                list.retain(|n| n.nick != nick);
+                            }
+                        });
+                        // Update nick_count.
+                        self.buffers.update(|bufs| {
+                            if let Some(b) = bufs.iter_mut().find(|b| b.id == buffer_id) {
+                                b.nick_count = b.nick_count.saturating_sub(1);
+                            }
+                        });
+                    }
+                    NickEventKind::NickChange => {
+                        if let Some(ref new) = new_nick {
+                            self.nick_lists.update(|lists| {
+                                if let Some(list) = lists.get_mut(&buffer_id)
+                                    && let Some(entry) = list.iter_mut().find(|n| n.nick == nick)
+                                {
+                                    entry.nick = new.clone();
+                                    sort_nicks(list);
+                                }
+                            });
+                        }
+                    }
+                    NickEventKind::ModeChange => {
+                        self.nick_lists.update(|lists| {
+                            if let Some(list) = lists.get_mut(&buffer_id) {
+                                if let Some(entry) = list.iter_mut().find(|n| n.nick == nick) {
+                                    if let Some(ref p) = prefix {
+                                        entry.prefix = p.clone();
+                                    }
+                                    if let Some(ref m) = modes {
+                                        entry.modes = m.clone();
+                                    }
+                                }
+                                sort_nicks(list);
+                            }
+                        });
+                    }
+                    NickEventKind::AwayChange => {
+                        self.nick_lists.update(|lists| {
+                            if let Some(list) = lists.get_mut(&buffer_id)
+                                && let Some(entry) = list.iter_mut().find(|n| n.nick == nick)
+                                && let Some(a) = away
+                            {
+                                entry.away = a;
+                            }
+                        });
+                    }
+                }
+            }
+            WebEvent::ActiveBufferChanged { buffer_id } => {
+                self.active_buffer.set(Some(buffer_id));
+            }
+            WebEvent::SettingsChanged {
+                timestamp_format,
+                line_height,
+                theme,
+                nick_column_width,
+                nick_max_length,
+            } => {
+                self.timestamp_format.set(timestamp_format);
+                self.line_height.set(line_height);
+                self.theme.set(theme);
+                if nick_column_width > 0 {
+                    self.nick_column_width.set(nick_column_width);
+                }
+                if nick_max_length > 0 {
+                    self.nick_max_length.set(nick_max_length);
+                }
+            }
+            WebEvent::Error { message } => {
+                self.error.set(Some(message));
+            }
+        }
+    }
+
+    /// Sort buffers to match TUI order: connection label → buffer type → name.
+    ///
+    /// Buffer type sort order: server(0) < channel(1) < query(2) < dcc_chat(3) < special(4).
+    fn sort_buffers(&self) {
+        let connections = self.connections.get_untracked();
+        self.buffers.update(|bufs| {
+            bufs.sort_by(|a, b| {
+                let label_a = connections.iter().find(|c| c.id == a.connection_id)
+                    .map_or_else(|| a.connection_id.to_lowercase(), |c| c.label.to_lowercase());
+                let label_b = connections.iter().find(|c| c.id == b.connection_id)
+                    .map_or_else(|| b.connection_id.to_lowercase(), |c| c.label.to_lowercase());
+                label_a.cmp(&label_b)
+                    .then_with(|| buf_type_order(&a.buffer_type).cmp(&buf_type_order(&b.buffer_type)))
+                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            });
+        });
+    }
+}
+
+fn buf_type_order(t: &str) -> u8 {
+    match t {
+        "server" => 0,
+        "channel" => 1,
+        "query" => 2,
+        "dcc_chat" => 3,
+        "special" => 4,
+        _ => 5,
+    }
+}
+
+/// Sort nicks by prefix rank (~&@%+ order), then alphabetically.
+fn sort_nicks(nicks: &mut [WireNick]) {
+    nicks.sort_by(|a, b| {
+        prefix_rank(&a.prefix).cmp(&prefix_rank(&b.prefix))
+            .then_with(|| a.nick.to_lowercase().cmp(&b.nick.to_lowercase()))
+    });
+}
+
+fn prefix_rank(prefix: &str) -> u8 {
+    const ORDER: &str = "~&@%+";
+    prefix.chars().next()
+        .and_then(|c| ORDER.find(c))
+        .map_or(ORDER.len() as u8, |i| i as u8)
+}

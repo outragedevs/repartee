@@ -15,6 +15,7 @@ The full directory layout:
   logs/messages.db     # chat logs (SQLite)
   dicts/               # Hunspell dictionaries (.dic/.aff)
   sessions/            # Unix sockets for detached sessions
+  certs/               # TLS certificates for web frontend
 ```
 
 ## Full annotated example
@@ -105,6 +106,17 @@ enabled = true
 languages = ["en_US"]              # Hunspell language codes
 dictionary_dir = ""                # default: ~/.repartee/dicts
 
+[web]
+enabled = false                    # enable embedded web frontend
+bind_address = "127.0.0.1"        # listen address (0.0.0.0 for LAN)
+port = 8443                        # HTTPS port
+tls_cert = ""                      # custom cert (empty = auto self-signed)
+tls_key = ""                       # custom key
+timestamp_format = "%H:%M"        # web UI timestamp format
+line_height = 1.35                 # CSS line-height for chat messages
+theme = "nightfall"                # web theme (nightfall, catppuccin-mocha, etc.)
+# cloudflare_tunnel_name = ""     # future: Cloudflare tunnel name
+
 [[ignores]]
 mask = "*!*@spammer.host"
 levels = ["ALL"]
@@ -162,6 +174,14 @@ DCC (Direct Client-to-Client) chat settings. DCC CHAT establishes peer-to-peer T
 
 Inline spell checking. When `enabled = true`, misspelled words are underlined in red while typing. Press Tab to cycle suggestions, Space to accept, Escape to revert. `languages` is a list of Hunspell language codes (e.g., `en_US`, `pl_PL`, `de_DE`) — a word is correct if **any** active dictionary accepts it. Place `.dic`/`.aff` files in `~/.repartee/dicts/` (or set `dictionary_dir` to a custom path).
 
+### `[web]`
+
+Embedded web frontend. When `enabled = true` and `WEB_PASSWORD` is set in `.env`, the app starts an HTTPS server alongside the terminal interface. Both share the same state — read a message on web, it's marked read on terminal, and vice versa.
+
+Set `bind_address = "0.0.0.0"` to allow LAN access. TLS is always on — if no custom cert/key is provided, a self-signed certificate is auto-generated in `~/.repartee/certs/`.
+
+The `theme` setting controls the web UI appearance. Available: `nightfall` (default dark), `catppuccin-mocha`, `tokyo-storm`, `gruvbox-light`, `catppuccin-latte`.
+
 ### `[[ignores]]`
 
 Ignore patterns for filtering unwanted messages. Uses wildcard matching (`*!*@host`). Levels: `MSGS`, `PUBLIC`, `NOTICES`, `ACTIONS`, `JOINS`, `PARTS`, `QUITS`, `NICKS`, `KICKS`, `CTCPS`, `ALL`.
@@ -175,9 +195,10 @@ Passwords and SASL credentials should **not** go in `config.toml` — store them
 LIBERA_SASL_USER=mynick
 LIBERA_SASL_PASS=hunter2
 LIBERA_PASSWORD=serverpassword
+WEB_PASSWORD=mysecretpassword
 ```
 
-The naming convention uses the server identifier uppercased.
+Server credentials use the server identifier uppercased. `WEB_PASSWORD` is required for the web frontend — the server won't start without it.
 
 ## Runtime changes
 

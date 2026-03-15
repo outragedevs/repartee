@@ -22,9 +22,12 @@ Inspired by irssi. Designed for the future.
 - **Netsplit detection** — batches join/part floods into single events
 - **Flood protection** — blocks CTCP spam and nick-change floods automatically
 - **Theming** — irssi-compatible format strings with 24-bit color support and custom abstracts
+- **Web frontend** — built-in HTTPS web UI with mobile support, real-time sync with the terminal, swipe gestures, 5 themes
+- **DCC CHAT** — direct client-to-client messaging with active and passive (reverse) connections
+- **Spell check** — inline correction with Hunspell dictionaries, multilingual, Tab to cycle suggestions
 - **Detach & reattach** — detach from your terminal and reattach later; IRC connections stay alive
 - **Extban** — `$a:account` ban type with `/ban -a` shorthand
-- **Single binary** — ~5MB, zero runtime dependencies (SQLite and Lua bundled)
+- **Single binary** — ~5.5MB, zero runtime dependencies (SQLite, Lua, and WASM frontend bundled)
 
 ---
 
@@ -43,6 +46,7 @@ cargo build --release
 
 - **Rust 1.85+** (2024 edition) — install via [rustup](https://rustup.rs)
 - A terminal with 256-color or truecolor support (iTerm2, Alacritty, kitty, WezTerm, etc.)
+- A modern web browser for the web frontend (optional)
 
 ---
 
@@ -191,6 +195,7 @@ Full documentation is available at **[outragedevs.github.io/repartee](https://ou
 - [First Connection](https://outragedevs.github.io/repartee/first-connection.html)
 - [Configuration Reference](https://outragedevs.github.io/repartee/configuration.html)
 - [Command List](https://outragedevs.github.io/repartee/commands.html)
+- [Web Frontend](https://outragedevs.github.io/repartee/web-frontend.html)
 - [Sessions & Detach](https://outragedevs.github.io/repartee/sessions.html)
 - [Scripting API](https://outragedevs.github.io/repartee/scripting-api.html)
 - [Theming](https://outragedevs.github.io/repartee/theming.html)

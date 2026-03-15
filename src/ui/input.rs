@@ -1198,7 +1198,7 @@ mod tests {
             word_start: start,
             word_end: end,
             original: original.to_string(),
-            suggestions: suggestions.iter().map(|s| s.to_string()).collect(),
+            suggestions: suggestions.iter().map(ToString::to_string).collect(),
             index: 0,
         });
         // Immediately apply first suggestion (matching check_spelling_after_separator).

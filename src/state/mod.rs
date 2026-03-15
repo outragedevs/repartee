@@ -38,6 +38,9 @@ pub struct AppState {
     pub log_exclude_types: Vec<String>,
     /// Maximum messages per buffer (FIFO eviction). 0 = unlimited.
     pub scrollback_limit: usize,
+    /// Pending web events to broadcast after IRC event processing.
+    /// Drained by `App` after each `handle_irc_message` call.
+    pub pending_web_events: Vec<crate::web::protocol::WebEvent>,
 }
 
 impl AppState {

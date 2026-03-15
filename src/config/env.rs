@@ -29,6 +29,51 @@ pub fn load_env(path: &Path) -> Result<HashMap<String, String>> {
     Ok(vars)
 }
 
+/// Set a key in the `.env` file. Creates the file if it doesn't exist.
+/// Updates existing keys in place, appends new ones at the end.
+pub fn set_env_value(path: &Path, key: &str, value: &str) -> Result<()> {
+    let mut lines: Vec<String> = if path.exists() {
+        std::fs::read_to_string(path)?
+            .lines()
+            .map(String::from)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let prefix = format!("{key}=");
+    let new_line = format!("{key}={value}");
+    let mut found = false;
+
+    for line in &mut lines {
+        let trimmed = line.trim();
+        if trimmed.starts_with(&prefix) {
+            line.clone_from(&new_line);
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        // Add a blank line separator if the file is non-empty and doesn't end with one.
+        if !lines.is_empty() && !lines.last().is_some_and(|l| l.trim().is_empty()) {
+            lines.push(String::new());
+        }
+        lines.push(new_line);
+    }
+
+    std::fs::write(path, lines.join("\n") + "\n")?;
+    Ok(())
+}
+
+/// Apply .env credentials to the web config.
+/// Reads `WEB_PASSWORD` from the env map.
+pub fn apply_web_credentials(web: &mut super::WebConfig, env: &HashMap<String, String>) {
+    if let Some(val) = env.get("WEB_PASSWORD") {
+        web.password.clone_from(val);
+    }
+}
+
 /// Apply .env credentials to server configs.
 /// For each server with id "foo", looks for `FOO_SASL_USER`, `FOO_SASL_PASS`, `FOO_PASSWORD`.
 pub fn apply_credentials(
@@ -126,5 +171,44 @@ mod tests {
         assert_eq!(server.sasl_user.as_deref(), Some("myuser"));
         assert_eq!(server.sasl_pass.as_deref(), Some("mypass"));
         assert!(server.password.is_none());
+    }
+
+    #[test]
+    fn set_env_value_creates_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+
+        set_env_value(&path, "WEB_PASSWORD", "secret").unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("WEB_PASSWORD=secret"));
+    }
+
+    #[test]
+    fn set_env_value_updates_existing_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::write(&path, "FOO=old\nWEB_PASSWORD=old\nBAR=keep\n").unwrap();
+
+        set_env_value(&path, "WEB_PASSWORD", "new").unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("WEB_PASSWORD=new"));
+        assert!(content.contains("FOO=old"));
+        assert!(content.contains("BAR=keep"));
+        assert!(!content.contains("WEB_PASSWORD=old"));
+    }
+
+    #[test]
+    fn set_env_value_appends_new_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::write(&path, "EXISTING=value\n").unwrap();
+
+        set_env_value(&path, "NEW_KEY", "new_value").unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("EXISTING=value"));
+        assert!(content.contains("NEW_KEY=new_value"));
     }
 }
