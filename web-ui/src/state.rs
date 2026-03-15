@@ -19,6 +19,8 @@ pub struct AppState {
     pub error: RwSignal<Option<String>>,
     pub timestamp_format: RwSignal<String>,
     pub line_height: RwSignal<f32>,
+    pub nick_column_width: RwSignal<u32>,
+    pub nick_max_length: RwSignal<u32>,
 }
 
 impl AppState {
@@ -42,6 +44,8 @@ impl AppState {
             error: RwSignal::new(None),
             timestamp_format: RwSignal::new("%H:%M".to_string()),
             line_height: RwSignal::new(1.35),
+            nick_column_width: RwSignal::new(12),
+            nick_max_length: RwSignal::new(9),
         }
     }
 
@@ -279,10 +283,18 @@ impl AppState {
                 timestamp_format,
                 line_height,
                 theme,
+                nick_column_width,
+                nick_max_length,
             } => {
                 self.timestamp_format.set(timestamp_format);
                 self.line_height.set(line_height);
                 self.theme.set(theme);
+                if nick_column_width > 0 {
+                    self.nick_column_width.set(nick_column_width);
+                }
+                if nick_max_length > 0 {
+                    self.nick_max_length.set(nick_max_length);
+                }
             }
             WebEvent::Error { message } => {
                 self.error.set(Some(message));

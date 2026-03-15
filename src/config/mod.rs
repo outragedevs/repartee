@@ -399,6 +399,10 @@ pub struct WebConfig {
     pub timestamp_format: String,
     /// CSS line-height for chat messages.
     pub line_height: f32,
+    /// Width of the nick column in characters.
+    pub nick_column_width: u32,
+    /// Maximum nick display length before truncation.
+    pub nick_max_length: u32,
     /// Web theme name.
     pub theme: String,
     /// Session duration in hours (default 24).
@@ -420,6 +424,8 @@ impl Default for WebConfig {
             tls_key: String::new(),
             timestamp_format: "%H:%M".to_string(),
             line_height: 1.35,
+            nick_column_width: 12,
+            nick_max_length: 9,
             theme: "nightfall".to_string(),
             session_hours: 24,
             cloudflare_tunnel_name: String::new(),

@@ -103,13 +103,18 @@ pub fn ChatView() -> impl IntoView {
                             }.into_any()
                         } else {
                             // Regular message: timestamp | right-aligned nick❯ | text
-                            let nick = truncate_nick(&msg.nick.unwrap_or_default(), 9);
+                            let max_len = state.nick_max_length.get() as usize;
+                            let col_width = state.nick_column_width.get();
+                            let nick = truncate_nick(&msg.nick.unwrap_or_default(), max_len);
                             let mode = msg.nick_mode.unwrap_or_default();
                             let styled = render_styled_text(&msg.text);
+                            // Compute nick column CSS width: ~7.8px per monospace char at 13px.
+                            let nick_col_px = f64::from(col_width) * 7.8;
+                            let nick_style = format!("width: {nick_col_px:.1}px;");
                             view! {
                                 <div class=class>
                                     <span class="ts">{ts}</span>
-                                    <span class="nick">
+                                    <span class="nick" style=nick_style>
                                         <span class="mode">{mode}</span>
                                         <span class="name">{nick}</span>
                                         <span class="sep">"❯"</span>

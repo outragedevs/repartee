@@ -80,11 +80,13 @@ pub enum WebEvent {
     },
     /// Active buffer changed (syncs TUI ↔ Web).
     ActiveBufferChanged { buffer_id: String },
-    /// Web settings changed (`timestamp_format`, `line_height`, theme).
+    /// Web settings changed (`timestamp_format`, `line_height`, theme, nick sizing).
     SettingsChanged {
         timestamp_format: String,
         line_height: f32,
         theme: String,
+        nick_column_width: u32,
+        nick_max_length: u32,
     },
     /// Server-side error.
     Error { message: String },

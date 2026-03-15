@@ -148,6 +148,8 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 "tls_key" => config.web.tls_key.clone(),
                 "timestamp_format" => config.web.timestamp_format.clone(),
                 "line_height" => config.web.line_height.to_string(),
+                "nick_column_width" => config.web.nick_column_width.to_string(),
+                "nick_max_length" => config.web.nick_max_length.to_string(),
                 "theme" => config.web.theme.clone(),
                 "session_hours" => config.web.session_hours.to_string(),
                 "cloudflare_tunnel_name" => config.web.cloudflare_tunnel_name.clone(),
@@ -333,6 +335,14 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
                 config.web.line_height =
                     raw.parse().map_err(|_| "Expected a decimal number".to_string())?;
             }
+            "nick_column_width" => {
+                config.web.nick_column_width =
+                    raw.parse().map_err(|_| "Expected a number".to_string())?;
+            }
+            "nick_max_length" => {
+                config.web.nick_max_length =
+                    raw.parse().map_err(|_| "Expected a number".to_string())?;
+            }
             "theme" => config.web.theme = raw.to_string(),
             "session_hours" => {
                 config.web.session_hours =
@@ -442,6 +452,8 @@ const BASE_PATHS: &[&str] = &[
     "web.tls_key",
     "web.timestamp_format",
     "web.line_height",
+    "web.nick_column_width",
+    "web.nick_max_length",
     "web.theme",
     "web.session_hours",
     "web.cloudflare_tunnel_name",
@@ -584,12 +596,16 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
             if path.starts_with("web.timestamp_format")
                 || path.starts_with("web.line_height")
                 || path.starts_with("web.theme")
+                || path.starts_with("web.nick_column_width")
+                || path.starts_with("web.nick_max_length")
             {
                 app.state.pending_web_events.push(
                     crate::web::protocol::WebEvent::SettingsChanged {
                         timestamp_format: app.config.web.timestamp_format.clone(),
                         line_height: app.config.web.line_height,
                         theme: app.config.web.theme.clone(),
+                        nick_column_width: app.config.web.nick_column_width,
+                        nick_max_length: app.config.web.nick_max_length,
                     },
                 );
             }

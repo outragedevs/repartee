@@ -4,6 +4,83 @@ use wasm_bindgen::JsCast;
 use crate::protocol::WebCommand;
 use crate::state::AppState;
 
+/// Known IRC commands for tab completion.
+const COMMANDS: &[&str] = &[
+    "action", "admin", "ban", "clear", "close", "connect", "ctcp", "cycle",
+    "dcc", "dehalfop", "deop", "detach", "devoice", "disconnect",
+    "halfop", "help", "ignore",
+    "info", "invite", "join", "kick", "links", "list", "log", "lusers",
+    "me", "mentions", "mode", "msg", "names", "nick", "notice",
+    "op", "part", "ping", "query", "quit", "raw", "reconnect", "rejoin",
+    "script", "server", "set", "spell", "spellcheck", "stats",
+    "time", "topic", "unban", "unexcept", "unignore", "uninvex", "unreop",
+    "voice", "who", "whois", "window",
+];
+
+/// Known /set setting paths for tab completion.
+const SETTING_PATHS: &[&str] = &[
+    "dcc.autoaccept_lowports",
+    "dcc.autochat_masks",
+    "dcc.max_connections",
+    "dcc.own_ip",
+    "dcc.port_range",
+    "dcc.timeout",
+    "display.backlog_lines",
+    "display.nick_alignment",
+    "display.nick_column_width",
+    "display.nick_max_length",
+    "display.nick_truncation",
+    "display.scrollback_lines",
+    "display.show_timestamps",
+    "general.ctcp_version",
+    "general.flood_protection",
+    "general.nick",
+    "general.realname",
+    "general.theme",
+    "general.timestamp_format",
+    "general.username",
+    "image_preview.cache_max_days",
+    "image_preview.cache_max_mb",
+    "image_preview.enabled",
+    "image_preview.fetch_timeout",
+    "image_preview.kitty_format",
+    "image_preview.max_file_size",
+    "image_preview.max_height",
+    "image_preview.max_width",
+    "image_preview.protocol",
+    "sidepanel.left.visible",
+    "sidepanel.left.width",
+    "sidepanel.right.visible",
+    "sidepanel.right.width",
+    "spellcheck.dictionary_dir",
+    "spellcheck.enabled",
+    "spellcheck.languages",
+    "statusbar.accent_color",
+    "statusbar.background",
+    "statusbar.cursor_color",
+    "statusbar.dim_color",
+    "statusbar.enabled",
+    "statusbar.input_color",
+    "statusbar.muted_color",
+    "statusbar.prompt",
+    "statusbar.prompt_color",
+    "statusbar.separator",
+    "statusbar.text_color",
+    "web.bind_address",
+    "web.cloudflare_tunnel_name",
+    "web.enabled",
+    "web.line_height",
+    "web.nick_column_width",
+    "web.nick_max_length",
+    "web.password",
+    "web.port",
+    "web.session_hours",
+    "web.theme",
+    "web.timestamp_format",
+    "web.tls_cert",
+    "web.tls_key",
+];
+
 #[component]
 pub fn InputLine() -> impl IntoView {
     let state = use_context::<AppState>().unwrap();
@@ -74,6 +151,7 @@ pub fn InputLine() -> impl IntoView {
         set_value.set(String::new());
     });
 
+    let state_paste = state.clone();
     let on_keydown = move |ev: web_sys::KeyboardEvent| {
         if ev.key() == "Enter" {
             // Reset tab state on Enter.
@@ -124,13 +202,21 @@ pub fn InputLine() -> impl IntoView {
                 set_tab_index.set(idx);
 
                 let replacement = &matches[idx];
-                let suffix = if word_start == 0 { ": " } else { " " };
+                let is_full_line = replacement.starts_with('/');
+                let suffix = if is_full_line {
+                    " "
+                } else if word_start == 0 {
+                    ": "
+                } else {
+                    " "
+                };
+                let start = if is_full_line { 0 } else { word_start };
                 let after = &text[tab_cursor_end.get_untracked()..];
                 let new_text = format!(
                     "{}{replacement}{suffix}{after}",
-                    &text[..word_start]
+                    &text[..start]
                 );
-                let new_cursor = word_start + replacement.len() + suffix.len();
+                let new_cursor = start + replacement.len() + suffix.len();
                 set_tab_cursor_end.set(new_cursor);
                 set_value.set(new_text);
 
@@ -141,19 +227,9 @@ pub fn InputLine() -> impl IntoView {
                     let _ = html_input.set_selection_end(Some(new_cursor as u32));
                 }
             } else {
-                // New tab completion — build matches.
-                let nicks = state.nick_lists.get_untracked();
-                let active_id = state.active_buffer.get_untracked();
-                let typed_lower = typed.to_lowercase();
-
-                let mut matches: Vec<String> = active_id
-                    .and_then(|id| nicks.get(&id))
-                    .map_or(Vec::new(), |list| {
-                        list.iter()
-                            .filter(|n| n.nick.to_lowercase().starts_with(&typed_lower))
-                            .map(|n| n.nick.clone())
-                            .collect()
-                    });
+                // New tab completion — build matches based on context.
+                let mut matches: Vec<String> =
+                    build_tab_matches(&text, word_start, typed, &state);
 
                 if matches.is_empty() {
                     return;
@@ -163,13 +239,23 @@ pub fn InputLine() -> impl IntoView {
                 matches.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
 
                 let replacement = &matches[0];
-                let suffix = if word_start == 0 { ": " } else { " " };
+                // For /command and "/set path" completions, no trailing suffix
+                // because the replacement already includes the full text.
+                let is_full_line = replacement.starts_with('/');
+                let suffix = if is_full_line {
+                    " "
+                } else if word_start == 0 {
+                    ": "
+                } else {
+                    " "
+                };
+                let start = if is_full_line { 0 } else { word_start };
                 let after = &text[cursor..];
                 let new_text = format!(
                     "{}{replacement}{suffix}{after}",
-                    &text[..word_start]
+                    &text[..start]
                 );
-                let new_cursor = word_start + replacement.len() + suffix.len();
+                let new_cursor = start + replacement.len() + suffix.len();
 
                 set_tab_prefix.set(Some(typed.to_string()));
                 set_tab_matches.set(matches);
@@ -204,7 +290,7 @@ pub fn InputLine() -> impl IntoView {
             return; // single-line paste — let default browser behavior handle it
         }
         ev.prevent_default();
-        let Some(buffer_id) = state.active_buffer.get_untracked() else { return };
+        let Some(buffer_id) = state_paste.active_buffer.get_untracked() else { return };
         for line in text.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() {
@@ -241,4 +327,50 @@ pub fn InputLine() -> impl IntoView {
             <button class="send-btn" on:click=move |_| submit.run(())>"Send"</button>
         </div>
     }
+}
+
+/// Build tab completion matches based on input context.
+///
+/// 1. `/` at start with no spaces: complete /command names.
+/// 2. `/set ` prefix: complete setting paths.
+/// 3. Otherwise: complete nicks from the active channel.
+fn build_tab_matches(
+    text: &str,
+    word_start: usize,
+    typed: &str,
+    state: &AppState,
+) -> Vec<String> {
+    // Case 1: /command completion — input starts with / and cursor is in the first word.
+    if text.starts_with('/') && !text[..word_start.max(1)].contains(' ') {
+        let prefix = typed.strip_prefix('/').unwrap_or(typed).to_lowercase();
+        return COMMANDS
+            .iter()
+            .filter(|c| c.starts_with(&prefix))
+            .map(|c| format!("/{c}"))
+            .collect();
+    }
+
+    // Case 2: /set path completion.
+    if text.starts_with("/set ") && word_start >= 5 {
+        let after_set = typed;
+        return SETTING_PATHS
+            .iter()
+            .filter(|p| p.starts_with(after_set))
+            .map(|p| format!("/set {p}"))
+            .collect();
+    }
+
+    // Case 3: Nick completion (default).
+    let nicks = state.nick_lists.get_untracked();
+    let active_id = state.active_buffer.get_untracked();
+    let typed_lower = typed.to_lowercase();
+
+    active_id
+        .and_then(|id| nicks.get(&id))
+        .map_or(Vec::new(), |list| {
+            list.iter()
+                .filter(|n| n.nick.to_lowercase().starts_with(&typed_lower))
+                .map(|n| n.nick.clone())
+                .collect()
+        })
 }

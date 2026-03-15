@@ -79,6 +79,10 @@ pub enum WebEvent {
         timestamp_format: String,
         line_height: f32,
         theme: String,
+        #[serde(default)]
+        nick_column_width: u32,
+        #[serde(default)]
+        nick_max_length: u32,
     },
     Error {
         message: String,
