@@ -107,36 +107,31 @@ html, body {
     padding: 2px 0;
 }
 
-/* Desktop: right-aligned nick column via flexbox (copies as single line) */
+/* Chat line — inline-block layout (copies as single line, no grid/flex line breaks) */
 .chat-line {
     padding: 0 8px;
-    display: flex;
     line-height: var(--line-height, 1.35);
-    white-space: nowrap;
 }
 
 .chat-line .ts {
+    display: inline-block;
+    width: 56px;
     color: var(--fg-dim);
     font-size: 11px;
-    width: 42px;
-    flex-shrink: 0;
+    vertical-align: top;
 }
 .chat-line .nick {
-    text-align: right;
+    display: inline-block;
     width: 100px;
-    flex-shrink: 0;
+    text-align: right;
     overflow: hidden;
+    white-space: nowrap;
+    vertical-align: top;
 }
 .chat-line .nick .mode { color: var(--fg-muted); }
 .chat-line .nick .name { color: var(--accent); font-weight: bold; }
-.chat-line .nick .sep { color: var(--accent); }
-.chat-line .text {
-    padding-left: 4px;
-    flex: 1;
-    min-width: 0;
-    white-space: pre-wrap;
-    word-break: break-word;
-}
+.chat-line .nick .sep { color: var(--accent); margin-left: 2px; }
+.chat-line .text { padding-left: 4px; }
 
 /* Own message nick = green */
 .chat-line.own .nick .name { color: var(--green); }
@@ -148,11 +143,7 @@ html, body {
 .chat-line.highlight { background: var(--highlight-bg); }
 .chat-line.highlight .text { color: var(--red); }
 
-/* Events: text wraps normally */
-.chat-line.event > span:last-child {
-    white-space: pre-wrap;
-    word-break: break-word;
-}
+/* Events: no nick column — text follows timestamp inline */
 
 .chat-line .join-arrow { color: var(--green); }
 .chat-line .part-arrow { color: var(--yellow); }
