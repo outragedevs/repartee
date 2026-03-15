@@ -59,7 +59,7 @@ pub fn Layout() -> impl IntoView {
                     <span class="hamburger" on:click=move |_| set_left_open.set(true)>"\u{2630}"</span>
                     <div style="text-align: center; flex: 1; overflow: hidden; white-space: nowrap;">
                         {move || active_buf().map(|b| view! {
-                            <span style="color: var(--accent); font-weight: bold;">{b.name.clone()}</span>
+                            <span style="color: var(--accent); font-weight: bold;">{b.name}</span>
                         })}
                     </div>
                     <div style="display: flex; gap: 6px; align-items: center;">
@@ -103,11 +103,14 @@ pub fn Layout() -> impl IntoView {
                     <div class="slide-overlay" on:click=move |_| set_right_open.set(false)></div>
                     <div class="slide-panel-right open">
                         <div style="padding: 4px 10px; border-bottom: 1px solid var(--border);">
-                            {move || active_buf().map(|b| view! {
-                                <span style="color: var(--accent); font-weight: bold;">{b.name.clone()}</span>
-                                <span style="color: var(--fg-muted); font-size: 10px; margin-left: 6px;">
-                                    {format!("{} users", b.nick_count)}
-                                </span>
+                            {move || active_buf().map(|b| {
+                                let user_count = format!("{} users", b.nick_count);
+                                view! {
+                                    <span style="color: var(--accent); font-weight: bold;">{b.name}</span>
+                                    <span style="color: var(--fg-muted); font-size: 10px; margin-left: 6px;">
+                                        {user_count}
+                                    </span>
+                                }
                             })}
                         </div>
                         <NickList />
@@ -134,19 +137,16 @@ fn ThemePicker() -> impl IntoView {
     view! {
         <div class="theme-picker">
             {themes.iter().map(|(name, color)| {
-                let name = name.to_string();
-                let color = color.to_string();
-                let name_clone = name.clone();
-                let is_active = move || state.theme.get() == name_clone;
+                let name = (*name).to_string();
+                let name_for_active = name.clone();
+                let name_for_click = name.clone();
+                let is_active = move || state.theme.get() == name_for_active;
                 view! {
                     <div
                         class=move || format!("theme-swatch{}", if is_active() { " active" } else { "" })
                         style=format!("background: {color};")
-                        title=name.clone()
-                        on:click={
-                            let name = name.clone();
-                            move |_| state.theme.set(name.clone())
-                        }
+                        title=name
+                        on:click=move |_| state.theme.set(name_for_click.clone())
                     ></div>
                 }
             }).collect::<Vec<_>>()}

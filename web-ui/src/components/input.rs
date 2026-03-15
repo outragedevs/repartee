@@ -29,12 +29,12 @@ pub fn InputLine() -> impl IntoView {
         if text.starts_with('/') {
             crate::ws::send_command(&WebCommand::RunCommand {
                 buffer_id,
-                text: text.clone(),
+                text,
             });
         } else {
             crate::ws::send_command(&WebCommand::SendMessage {
                 buffer_id,
-                text: text.clone(),
+                text,
             });
         }
 

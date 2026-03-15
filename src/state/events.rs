@@ -34,7 +34,7 @@ impl AppState {
         self.connections.insert(conn.id.clone(), conn);
     }
 
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "reserved for future reconnect/disconnect commands")]
     pub fn remove_connection(&mut self, id: &str) {
         self.connections.remove(id);
     }
@@ -118,18 +118,19 @@ impl AppState {
     pub fn add_message(&mut self, buffer_id: &str, message: Message) {
         self.maybe_log(buffer_id, &message);
         // Queue web event for broadcast.
-        self.pending_web_events
-            .push(crate::web::protocol::WebEvent::NewMessage {
-                buffer_id: buffer_id.to_string(),
-                message: crate::web::snapshot::message_to_wire(&message),
-            });
+        let wire = crate::web::snapshot::message_to_wire(&message);
         if message.highlight {
             self.pending_web_events
                 .push(crate::web::protocol::WebEvent::MentionAlert {
                     buffer_id: buffer_id.to_string(),
-                    message: crate::web::snapshot::message_to_wire(&message),
+                    message: wire.clone(),
                 });
         }
+        self.pending_web_events
+            .push(crate::web::protocol::WebEvent::NewMessage {
+                buffer_id: buffer_id.to_string(),
+                message: wire,
+            });
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
             track_speaker(buf, &message);
             buf.messages.push(message);
@@ -161,18 +162,19 @@ impl AppState {
     ) {
         self.maybe_log(buffer_id, &message);
         // Queue web events for broadcast.
-        self.pending_web_events
-            .push(crate::web::protocol::WebEvent::NewMessage {
-                buffer_id: buffer_id.to_string(),
-                message: crate::web::snapshot::message_to_wire(&message),
-            });
+        let wire = crate::web::snapshot::message_to_wire(&message);
         if message.highlight {
             self.pending_web_events
                 .push(crate::web::protocol::WebEvent::MentionAlert {
                     buffer_id: buffer_id.to_string(),
-                    message: crate::web::snapshot::message_to_wire(&message),
+                    message: wire.clone(),
                 });
         }
+        self.pending_web_events
+            .push(crate::web::protocol::WebEvent::NewMessage {
+                buffer_id: buffer_id.to_string(),
+                message: wire,
+            });
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
             track_speaker(buf, &message);
             buf.messages.push(message);
@@ -246,7 +248,7 @@ impl AppState {
         let _ = tx.send(row);
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "reserved for scripting API; used in tests")]
     pub fn set_activity(&mut self, buffer_id: &str, level: ActivityLevel) {
         if let Some(buf) = self.buffers.get_mut(buffer_id)
             && level > buf.activity

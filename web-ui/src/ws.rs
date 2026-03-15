@@ -29,8 +29,12 @@ pub fn connect(state: &AppState) {
     let (cmd_tx, cmd_rx) = mpsc::unbounded::<String>();
     CMD_TX.with(|cell| *cell.borrow_mut() = Some(cmd_tx));
 
-    let location = web_sys::window().unwrap().location();
-    let host = location.host().unwrap();
+    let Some(window) = web_sys::window() else {
+        web_sys::console::warn_1(&"no window object".into());
+        return;
+    };
+    let location = window.location();
+    let host = location.host().unwrap_or_default();
     let url = format!("wss://{host}/ws?token={token}");
 
     let state = state.clone();

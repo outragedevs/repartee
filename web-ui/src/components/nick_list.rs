@@ -19,13 +19,13 @@ pub fn NickList() -> impl IntoView {
         let mut voiced = Vec::new();
         let mut regular = Vec::new();
 
-        for n in &nicks {
+        for n in nicks {
             if n.prefix.contains('~') || n.prefix.contains('&') || n.prefix.contains('@') {
-                ops.push(n.clone());
+                ops.push(n);
             } else if n.prefix.contains('%') || n.prefix.contains('+') {
-                voiced.push(n.clone());
+                voiced.push(n);
             } else {
-                regular.push(n.clone());
+                regular.push(n);
             }
         }
 
@@ -38,13 +38,10 @@ pub fn NickList() -> impl IntoView {
                 let (ops, voiced, regular) = grouped();
                 let active_buffer_id = state.active_buffer.get_untracked();
 
-                let render_nicks = |nicks: &[crate::protocol::WireNick], prefix_class: &str| {
-                    nicks.iter().map(|n| {
+                let render_nicks = |nicks: Vec<crate::protocol::WireNick>, prefix_class: &'static str| {
+                    nicks.into_iter().map(|n| {
                         let away_class = if n.away { " away" } else { "" };
                         let class = format!("nick-entry{away_class}");
-                        let pclass = prefix_class.to_string();
-                        let prefix = n.prefix.clone();
-                        let nick = n.nick.clone();
                         let nick_for_click = n.nick.clone();
                         let buf_id = active_buffer_id.clone();
                         let on_click = move |_| {
@@ -57,8 +54,8 @@ pub fn NickList() -> impl IntoView {
                         };
                         view! {
                             <div class=class on:click=on_click>
-                                <span class=pclass>{prefix}</span>
-                                <span>{nick}</span>
+                                <span class=prefix_class>{n.prefix}</span>
+                                <span>{n.nick}</span>
                             </div>
                         }
                     }).collect::<Vec<_>>()
@@ -72,19 +69,19 @@ pub fn NickList() -> impl IntoView {
                     {if !ops.is_empty() {
                         Some(view! {
                             <div class="mode-group">{format!("Ops ({ops_len})")}</div>
-                            {render_nicks(&ops, "prefix-op")}
+                            {render_nicks(ops, "prefix-op")}
                         })
                     } else { None }}
                     {if !voiced.is_empty() {
                         Some(view! {
                             <div class="mode-group">{format!("Voiced ({voiced_len})")}</div>
-                            {render_nicks(&voiced, "prefix-voice")}
+                            {render_nicks(voiced, "prefix-voice")}
                         })
                     } else { None }}
                     {if !regular.is_empty() {
                         Some(view! {
                             <div class="mode-group">{format!("Users ({regular_len})")}</div>
-                            {render_nicks(&regular, "prefix-normal")}
+                            {render_nicks(regular, "prefix-normal")}
                         })
                     } else { None }}
                 }

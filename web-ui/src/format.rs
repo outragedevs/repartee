@@ -13,26 +13,39 @@ pub struct StyledSpan {
 impl StyledSpan {
     /// Generate a CSS `style` string for this span.
     pub fn css(&self) -> String {
-        let mut parts = Vec::new();
+        let mut s = String::new();
+        let mut sep = "";
         if let Some(ref fg) = self.fg {
-            parts.push(format!("color:{fg}"));
+            s.push_str("color:");
+            s.push_str(fg);
+            sep = ";";
         }
         if let Some(ref bg) = self.bg {
-            parts.push(format!("background:{bg}"));
+            s.push_str(sep);
+            s.push_str("background:");
+            s.push_str(bg);
+            sep = ";";
         }
         if self.bold {
-            parts.push("font-weight:bold".to_string());
+            s.push_str(sep);
+            s.push_str("font-weight:bold");
+            sep = ";";
         }
         if self.italic {
-            parts.push("font-style:italic".to_string());
+            s.push_str(sep);
+            s.push_str("font-style:italic");
+            sep = ";";
         }
         if self.underline {
-            parts.push("text-decoration:underline".to_string());
+            s.push_str(sep);
+            s.push_str("text-decoration:underline");
+            sep = ";";
         }
         if self.dim {
-            parts.push("opacity:0.5".to_string());
+            s.push_str(sep);
+            s.push_str("opacity:0.5");
         }
-        parts.join(";")
+        s
     }
 
     /// Returns true if this span has any styling.
@@ -167,7 +180,7 @@ pub fn parse_format(text: &str) -> Vec<StyledSpan> {
                     fg = None;
                     bg = None;
                 } else {
-                    fg = fg_str.parse::<u8>().ok().and_then(mirc_color);
+                    fg = fg_str.parse::<u8>().ok().and_then(mirc_color).map(String::from);
                     if i < len && chars[i] == ',' {
                         i += 1;
                         let mut bg_str = String::new();
@@ -175,7 +188,7 @@ pub fn parse_format(text: &str) -> Vec<StyledSpan> {
                             bg_str.push(chars[i]);
                             i += 1;
                         }
-                        bg = bg_str.parse::<u8>().ok().and_then(mirc_color);
+                        bg = bg_str.parse::<u8>().ok().and_then(mirc_color).map(String::from);
                     }
                 }
             }
@@ -236,25 +249,24 @@ pub fn parse_format(text: &str) -> Vec<StyledSpan> {
 }
 
 /// Convert a mIRC color code (0-15) to a CSS hex color.
-fn mirc_color(code: u8) -> Option<String> {
-    let hex = match code {
-        0 => "ffffff",
-        1 => "000000",
-        2 => "00007f",
-        3 => "009300",
-        4 => "ff0000",
-        5 => "7f0000",
-        6 => "9c009c",
-        7 => "fc7f00",
-        8 => "ffff00",
-        9 => "00fc00",
-        10 => "009393",
-        11 => "00ffff",
-        12 => "0000fc",
-        13 => "ff00ff",
-        14 => "7f7f7f",
-        15 => "d2d2d2",
-        _ => return None,
-    };
-    Some(format!("#{hex}"))
+fn mirc_color(code: u8) -> Option<&'static str> {
+    match code {
+        0 => Some("#ffffff"),
+        1 => Some("#000000"),
+        2 => Some("#00007f"),
+        3 => Some("#009300"),
+        4 => Some("#ff0000"),
+        5 => Some("#7f0000"),
+        6 => Some("#9c009c"),
+        7 => Some("#fc7f00"),
+        8 => Some("#ffff00"),
+        9 => Some("#00fc00"),
+        10 => Some("#009393"),
+        11 => Some("#00ffff"),
+        12 => Some("#0000fc"),
+        13 => Some("#ff00ff"),
+        14 => Some("#7f7f7f"),
+        15 => Some("#d2d2d2"),
+        _ => None,
+    }
 }

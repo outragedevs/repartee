@@ -28,7 +28,6 @@ pub fn App() -> impl IntoView {
 
     // Auto-connect if we have a saved token from a previous session.
     {
-        let state = state.clone();
         let saved_token = web_sys::window()
             .and_then(|w| w.local_storage().ok().flatten())
             .and_then(|s| s.get_item("repartee-token").ok().flatten());

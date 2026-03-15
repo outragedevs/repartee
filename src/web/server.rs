@@ -93,7 +93,6 @@ async fn health_handler() -> impl IntoResponse {
 /// without running trunk), this serves nothing and the fallback returns 404.
 #[derive(Embed)]
 #[folder = "web-ui/dist/"]
-#[allow(clippy::empty_structs_with_brackets)]
 struct WebAssets;
 
 /// Serve embedded static assets from `web-ui/dist/`.

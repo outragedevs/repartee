@@ -129,9 +129,7 @@ fn render_styled_text(text: &str) -> Vec<leptos::prelude::AnyView> {
 }
 
 fn format_timestamp(ts: i64) -> String {
-    // Simple HH:MM format.
-    let secs = ts;
-    let hours = (secs / 3600) % 24;
-    let minutes = (secs % 3600) / 60;
+    let hours = (ts / 3600) % 24;
+    let minutes = (ts % 3600) / 60;
     format!("{hours:02}:{minutes:02}")
 }

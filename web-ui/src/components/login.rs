@@ -59,9 +59,9 @@ pub fn Login() -> impl IntoView {
 }
 
 async fn do_login(password: &str) -> Result<String, String> {
-    let window = web_sys::window().unwrap();
+    let window = web_sys::window().ok_or("no window object")?;
     let location = window.location();
-    let origin = location.origin().unwrap();
+    let origin = location.origin().map_err(|_| "failed to get origin")?;
     let url = format!("{origin}/api/login");
 
     let body = serde_json::json!({ "password": password });

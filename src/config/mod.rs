@@ -1,5 +1,4 @@
 pub mod defaults;
-#[allow(dead_code)]
 pub mod env;
 
 use std::collections::HashMap;
@@ -9,7 +8,6 @@ use color_eyre::eyre::Result;
 use serde::{Deserialize, Serialize};
 
 pub use defaults::default_config;
-#[allow(unused_imports)]
 pub use env::{apply_credentials, apply_web_credentials, load_env, set_env_value};
 
 // === Helper for serde defaults ===

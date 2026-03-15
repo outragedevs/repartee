@@ -79,15 +79,15 @@ pub fn BufferList() -> impl IntoView {
                         view! { <div class="network-header">{label}</div> }.into_any()
                     }
                     ListEntry::Buffer(buf) => {
-                        let id = buf.id.clone();
-                        let id2 = buf.id.clone();
-                        let name = buf.name.clone();
+                        let id = buf.id;
+                        let name = buf.name;
                         let num = buf.num;
-                        let buf_type = buf.buffer_type.clone();
+                        let buf_type = buf.buffer_type;
                         let is_server = buf_type == "server";
+                        let id_for_click = id.clone();
 
                         let class = move || {
-                            let is_active = state.active_buffer.get().as_deref() == Some(&id);
+                            let is_active = state.active_buffer.get().as_deref() == Some(id.as_str());
                             let activity = state.buffers.get().iter()
                                 .find(|b| b.id == id)
                                 .map_or(0u8, |b| b.activity);
@@ -105,12 +105,12 @@ pub fn BufferList() -> impl IntoView {
                         };
 
                         let on_click = move |_| {
-                            state.active_buffer.set(Some(id2.clone()));
+                            state.active_buffer.set(Some(id_for_click.clone()));
                             crate::ws::send_command(&WebCommand::SwitchBuffer {
-                                buffer_id: id2.clone(),
+                                buffer_id: id_for_click.clone(),
                             });
                             crate::ws::send_command(&WebCommand::MarkRead {
-                                buffer_id: id2.clone(),
+                                buffer_id: id_for_click.clone(),
                                 up_to: chrono::Utc::now().timestamp(),
                             });
                         };

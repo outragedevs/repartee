@@ -38,6 +38,7 @@ pub fn StatusLine() -> impl IntoView {
     };
 
     let activity_items = move || {
+        let active_id = state.active_buffer.get();
         state
             .buffers
             .get()
@@ -45,10 +46,7 @@ pub fn StatusLine() -> impl IntoView {
             .enumerate()
             .filter(|(_, b)| {
                 b.activity > 0
-                    && state
-                        .active_buffer
-                        .get()
-                        .as_deref() != Some(&b.id)
+                    && active_id.as_deref() != Some(&b.id)
             })
             .map(|(i, b)| (i + 1, b.activity))
             .collect::<Vec<_>>()
