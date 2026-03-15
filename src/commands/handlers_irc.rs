@@ -425,7 +425,20 @@ pub(crate) fn cmd_mode(app: &mut App, args: &[String]) {
         return;
     }
 
-    // Send MODE with all args
+    // If the first arg looks like a mode string (+o, -b, etc.) rather than
+    // a channel/nick target, prepend the current channel name.
+    let first = &args[0];
+    if (first.starts_with('+') || first.starts_with('-'))
+        && let Some(buf) = app.state.active_buffer()
+        && (buf.name.starts_with('#') || buf.name.starts_with('&') || buf.name.starts_with('!'))
+    {
+        let mut full_args = vec![buf.name.clone()];
+        full_args.extend_from_slice(args);
+        let _ = sender.send(irc::proto::Command::Raw("MODE".to_string(), full_args));
+        return;
+    }
+
+    // Otherwise send as-is (explicit channel target, or nick mode query).
     let _ = sender.send(irc::proto::Command::Raw("MODE".to_string(), args.to_vec()));
 }
 

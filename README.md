@@ -6,7 +6,18 @@ Inspired by irssi. Designed for the future.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://www.rust-lang.org)
+[![Crates.io](https://img.shields.io/crates/v/repartee.svg)](https://crates.io/crates/repartee)
 [![GitHub Pages](https://img.shields.io/badge/docs-online-brightgreen.svg)](https://outragedevs.github.io/repartee/)
+
+---
+
+## Demo
+
+Terminal, mobile web, and desktop web — all in real-time sync:
+
+[![Repartee Demo](https://img.youtube.com/vi/okU4WKF5GDI/maxresdefault.jpg)](https://www.youtube.com/watch?v=okU4WKF5GDI)
+
+> TUI (left) | Mobile web (center) | Desktop web (right) — 1:1 state sync across all interfaces.
 
 ---
 
@@ -27,7 +38,7 @@ Inspired by irssi. Designed for the future.
 - **Spell check** — inline correction with Hunspell dictionaries, multilingual, Tab to cycle suggestions
 - **Detach & reattach** — detach from your terminal and reattach later; IRC connections stay alive
 - **Extban** — `$a:account` ban type with `/ban -a` shorthand
-- **Single binary** — ~5.5MB, zero runtime dependencies (SQLite, Lua, and WASM frontend bundled)
+- **Single binary** — ~15MB, zero runtime dependencies (SQLite, Lua, and WASM frontend bundled)
 
 ---
 

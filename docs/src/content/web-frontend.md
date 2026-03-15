@@ -2,6 +2,13 @@
 
 repartee includes a built-in web frontend that runs alongside the terminal UI. Access your IRC sessions from any browser — desktop or mobile — with real-time bidirectional sync.
 
+<div style="text-align: center; margin: 16px 0;">
+  <a href="https://www.youtube.com/watch?v=okU4WKF5GDI" target="_blank">
+    <img src="https://img.youtube.com/vi/okU4WKF5GDI/maxresdefault.jpg" alt="Repartee Web Frontend Demo" style="max-width: 100%; border-radius: 8px; border: 1px solid var(--border);">
+  </a>
+  <p style="color: var(--text-muted); font-size: 13px; margin-top: 6px;">TUI (left) | Mobile web (center) | Desktop web (right) — 1:1 state sync.</p>
+</div>
+
 ## Enabling
 
 The web frontend is disabled by default. To enable it, set a password in `~/.repartee/.env` and enable it in `config.toml`:

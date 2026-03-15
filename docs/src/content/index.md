@@ -2,6 +2,15 @@
 
 A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by irssi, designed for the future.
 
+## Demo
+
+<div style="text-align: center; margin: 16px 0;">
+  <a href="https://www.youtube.com/watch?v=okU4WKF5GDI" target="_blank">
+    <img src="https://img.youtube.com/vi/okU4WKF5GDI/maxresdefault.jpg" alt="Repartee Demo" style="max-width: 100%; border-radius: 8px; border: 1px solid var(--border);">
+  </a>
+  <p style="color: var(--text-muted); font-size: 13px; margin-top: 6px;">TUI (left) | Mobile web (center) | Desktop web (right) — 1:1 state sync across all interfaces.</p>
+</div>
+
 ## Features
 
 <div class="card-grid">
@@ -50,12 +59,20 @@ A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by ir
     <div class="card-body">WHOX account tracking and extban support — ban by account name with <code>/ban -a accountname</code>.</div>
   </div>
   <div class="card">
+    <div class="card-title">Web Frontend</div>
+    <div class="card-body">Built-in HTTPS web UI with mobile support. Real-time bidirectional sync with the terminal — switch buffers, send messages, see nick changes live.</div>
+  </div>
+  <div class="card">
+    <div class="card-title">DCC CHAT</div>
+    <div class="card-body">Direct client-to-client messaging with active and passive (reverse) connections, auto-accept masks, and nick tracking.</div>
+  </div>
+  <div class="card">
     <div class="card-title">Detach & Reattach</div>
     <div class="card-body">Detach from your terminal and reattach later — IRC connections stay alive. Like tmux, built in.</div>
   </div>
   <div class="card">
     <div class="card-title">Single Binary</div>
-    <div class="card-body">Compiles to a ~5MB standalone executable. Zero runtime dependencies.</div>
+    <div class="card-body">Compiles to a ~15MB standalone executable with WASM web frontend bundled. Zero runtime dependencies.</div>
   </div>
   <div class="card">
     <div class="card-title">Written in Rust</div>
