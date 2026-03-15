@@ -50,6 +50,7 @@ pub fn build_sync_init(state: &AppState, mention_count: u32) -> WebEvent {
         connections,
         mention_count,
         active_buffer_id: state.active_buffer_id.clone(),
+        timestamp_format: String::new(), // overridden by snapshot/tick with config value
     }
 }
 

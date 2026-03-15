@@ -10,6 +10,7 @@ pub enum WebEvent {
         connections: Vec<ConnectionMeta>,
         mention_count: u32,
         active_buffer_id: Option<String>,
+        timestamp_format: String,
     },
     /// A new message was received in a buffer.
     NewMessage {

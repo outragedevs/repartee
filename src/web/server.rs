@@ -24,6 +24,7 @@ pub struct WebStateSnapshot {
     pub connections: Vec<super::protocol::ConnectionMeta>,
     pub mention_count: u32,
     pub active_buffer_id: Option<String>,
+    pub timestamp_format: String,
 }
 
 /// Shared state passed to all axum handlers.

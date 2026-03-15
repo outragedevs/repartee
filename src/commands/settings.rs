@@ -499,7 +499,7 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
             let display = if resolved.is_credential && !resolved.value.is_empty() {
                 format!("*** {C_DIM}[credential]{C_RST}")
             } else {
-                format!("{C_CMD}{}{C_RST}", resolved.value)
+                format!("{C_CMD}{}{C_RST}", resolved.value.replace('%', "%%"))
             };
             ev(app, &format!("{C_HEADER}{path}{C_RST} = {display}"));
         } else {
@@ -520,7 +520,7 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
     match set_config_value(&mut app.config, path, raw) {
         Ok(()) => {
             app.cached_config_toml = None;
-            ev(app, &format!("{C_OK}{path}{C_RST} = {C_CMD}{raw}{C_RST}"));
+            ev(app, &format!("{C_OK}{path}{C_RST} = {C_CMD}{}{C_RST}", raw.replace('%', "%%")));
 
             // Save config (web.password is #[serde(skip)] — saved to .env instead).
             let cfg_path = crate::constants::config_path();
@@ -644,7 +644,7 @@ fn search_settings(app: &mut App, needle: &str) {
                 };
                 ev(
                     app,
-                    &format!("  {C_HEADER}{matched_path}{C_RST} = {C_CMD}{val}{C_RST}"),
+                    &format!("  {C_HEADER}{matched_path}{C_RST} = {C_CMD}{}{C_RST}", val.replace('%', "%%")),
                 );
             }
         }
@@ -705,7 +705,7 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
                 } else {
                     resolved.value
                 };
-                lines.push(format!("    {C_HEADER}{path}{C_RST} = {C_CMD}{val}{C_RST}"));
+                lines.push(format!("    {C_HEADER}{path}{C_RST} = {C_CMD}{}{C_RST}", val.replace('%', "%%")));
             }
         }
     }
@@ -790,7 +790,7 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
                 } else {
                     resolved.value
                 };
-                lines.push(format!("    {C_HEADER}{path}{C_RST} = {C_CMD}{val}{C_RST}"));
+                lines.push(format!("    {C_HEADER}{path}{C_RST} = {C_CMD}{}{C_RST}", val.replace('%', "%%")));
             }
         }
     }

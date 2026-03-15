@@ -11,6 +11,8 @@ pub enum WebEvent {
         mention_count: u32,
         #[serde(default)]
         active_buffer_id: Option<String>,
+        #[serde(default)]
+        timestamp_format: Option<String>,
     },
     NewMessage {
         buffer_id: String,

@@ -1527,6 +1527,7 @@ impl App {
                     connections: Vec::new(),
                     mention_count: 0,
                     active_buffer_id: None,
+                    timestamp_format: self.config.web.timestamp_format.clone(),
                 },
             ));
             self.web_state_snapshot = Some(std::sync::Arc::clone(&snapshot));
@@ -1732,11 +1733,12 @@ impl App {
                         && let Ok(mut snap) = snapshot.write()
                     {
                         let init = crate::web::snapshot::build_sync_init(&self.state, 0);
-                        if let crate::web::protocol::WebEvent::SyncInit { buffers, connections, mention_count, active_buffer_id } = init {
+                        if let crate::web::protocol::WebEvent::SyncInit { buffers, connections, mention_count, active_buffer_id, .. } = init {
                             snap.buffers = buffers;
                             snap.connections = connections;
                             snap.mention_count = mention_count;
                             snap.active_buffer_id = active_buffer_id;
+                            snap.timestamp_format.clone_from(&self.config.web.timestamp_format);
                         }
                     }
                     let expired = self.dcc.purge_expired();

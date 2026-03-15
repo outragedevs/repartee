@@ -125,6 +125,7 @@ fn build_sync_init_from_snapshot(state: &AppHandle) -> WebEvent {
                 connections: snap.connections.clone(),
                 mention_count: snap.mention_count,
                 active_buffer_id: snap.active_buffer_id.clone(),
+                timestamp_format: snap.timestamp_format.clone(),
             };
     }
     // Fallback: empty init.
@@ -133,6 +134,7 @@ fn build_sync_init_from_snapshot(state: &AppHandle) -> WebEvent {
         connections: Vec::new(),
         mention_count: 0,
         active_buffer_id: None,
+        timestamp_format: "%H:%M".to_string(),
     }
 }
 

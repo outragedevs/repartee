@@ -107,20 +107,36 @@ html, body {
     padding: 2px 0;
 }
 
-/* Desktop: right-aligned nick column via CSS grid */
+/* Desktop: right-aligned nick column via flexbox (copies as single line) */
 .chat-line {
     padding: 0 8px;
-    display: grid;
-    grid-template-columns: 42px 100px 1fr;
+    display: flex;
     line-height: var(--line-height, 1.35);
+    white-space: nowrap;
 }
 
-.chat-line .ts { color: var(--fg-dim); font-size: 11px; }
-.chat-line .nick { text-align: right; }
+.chat-line .ts {
+    color: var(--fg-dim);
+    font-size: 11px;
+    width: 42px;
+    flex-shrink: 0;
+}
+.chat-line .nick {
+    text-align: right;
+    width: 100px;
+    flex-shrink: 0;
+    overflow: hidden;
+}
 .chat-line .nick .mode { color: var(--fg-muted); }
 .chat-line .nick .name { color: var(--accent); font-weight: bold; }
 .chat-line .nick .sep { color: var(--accent); }
-.chat-line .text { padding-left: 4px; }
+.chat-line .text {
+    padding-left: 4px;
+    flex: 1;
+    min-width: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
 
 /* Own message nick = green */
 .chat-line.own .nick .name { color: var(--green); }
@@ -132,9 +148,10 @@ html, body {
 .chat-line.highlight { background: var(--highlight-bg); }
 .chat-line.highlight .text { color: var(--red); }
 
-/* Events: no nick column, span full width */
-.chat-line.event {
-    grid-template-columns: 42px 1fr;
+/* Events: text wraps normally */
+.chat-line.event > span:last-child {
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 .chat-line .join-arrow { color: var(--green); }

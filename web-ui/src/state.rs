@@ -53,11 +53,17 @@ impl AppState {
                 connections,
                 mention_count,
                 active_buffer_id,
+                timestamp_format,
             } => {
                 self.buffers.set(buffers);
                 self.connections.set(connections);
                 self.mention_count.set(mention_count);
                 self.connected.set(true);
+                if let Some(fmt) = timestamp_format {
+                    if !fmt.is_empty() {
+                        self.timestamp_format.set(fmt);
+                    }
+                }
 
                 self.sort_buffers();
 
