@@ -10,7 +10,7 @@ serde_json = "1.0"
 web-sys = { version = "0.3", features = [
     "WebSocket", "MessageEvent", "ErrorEvent", "CloseEvent",
     "Location", "Window", "Storage", "Document", "Element", "HtmlElement",
-    "HtmlDocument", "HtmlInputElement", "KeyboardEvent",
+    "HtmlDocument", "HtmlInputElement", "HtmlTextAreaElement", "KeyboardEvent",
     "ClipboardEvent", "DataTransfer",
 ] }
 wasm-bindgen = "0.2"

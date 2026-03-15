@@ -226,7 +226,7 @@ html, body {
 
 .input-line .prompt { color: var(--accent); }
 
-.input-line input {
+.input-line textarea {
     flex: 1;
     background: var(--bg);
     border: 1px solid var(--border);
@@ -236,9 +236,13 @@ html, body {
     outline: none;
     font-family: inherit;
     font-size: 13px;
+    line-height: var(--line-height, 1.35);
+    resize: none;
+    overflow: hidden;
+    min-height: 0;
 }
 
-.input-line input:focus { border-color: var(--accent); }
+.input-line textarea:focus { border-color: var(--accent); }
 
 .input-line .send-btn {
     background: var(--accent);
@@ -381,7 +385,7 @@ html, body {
     .status-line { font-size: 10px; height: 14px; }
 
     /* Touch-friendly input */
-    .input-line input { padding: 6px 8px; }
+    .input-line textarea { padding: 6px 8px; }
 }
 
 @media (min-width: 768px) {

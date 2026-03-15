@@ -39,6 +39,7 @@ pub fn Login() -> impl IntoView {
                 <input
                     type="password"
                     placeholder="Password"
+                    autocomplete="current-password"
                     prop:value=password
                     on:input=move |ev| set_password.set(event_target_value(&ev))
                     on:keydown=move |ev| {
