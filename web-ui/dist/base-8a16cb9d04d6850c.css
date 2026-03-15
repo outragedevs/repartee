@@ -115,10 +115,9 @@ html, body {
 
 .chat-line .ts {
     display: inline-block;
-    width: 56px;
+    width: 70px;
     color: var(--fg-dim);
-    font-size: 11px;
-    vertical-align: top;
+    vertical-align: baseline;
 }
 .chat-line .nick {
     display: inline-block;
@@ -126,7 +125,7 @@ html, body {
     text-align: right;
     overflow: hidden;
     white-space: nowrap;
-    vertical-align: top;
+    vertical-align: baseline;
 }
 .chat-line .nick .mode { color: var(--fg-muted); }
 .chat-line .nick .name { color: var(--accent); font-weight: bold; }
