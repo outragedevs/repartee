@@ -26,17 +26,22 @@ pub fn ChatView() -> impl IntoView {
 
     let chat_ref = NodeRef::<leptos::html::Div>::new();
 
+    // Scroll to bottom on new messages or buffer switch.
     Effect::new(move || {
         let _ = messages(); // track message changes
-        // Use requestAnimationFrame to scroll after DOM paint.
-        if let Some(el) = chat_ref.get() {
-            let scroll_fn = wasm_bindgen::prelude::Closure::once(move || {
-                el.set_scroll_top(el.scroll_height());
-            });
-            if let Some(window) = web_sys::window() {
-                let _ = window.request_animation_frame(scroll_fn.as_ref().unchecked_ref());
-                scroll_fn.forget(); // one-shot closure — leak is fine
-            }
+        scroll_to_bottom(&chat_ref);
+    });
+
+    // Scroll to bottom on resize (browser window resize).
+    Effect::new(move || {
+        let Some(el) = chat_ref.get() else { return };
+        let el_clone: web_sys::Element = el.clone().into();
+        let cb = wasm_bindgen::prelude::Closure::<dyn Fn()>::new(move || {
+            el_clone.set_scroll_top(el_clone.scroll_height());
+        });
+        if let Some(window) = web_sys::window() {
+            let _ = window.add_event_listener_with_callback("resize", cb.as_ref().unchecked_ref());
+            cb.forget();
         }
     });
 
@@ -134,6 +139,18 @@ fn render_styled_text(text: &str) -> Vec<leptos::prelude::AnyView> {
             }
         })
         .collect::<Vec<_>>()
+}
+
+/// Scroll chat container to bottom via requestAnimationFrame.
+fn scroll_to_bottom(chat_ref: &NodeRef<leptos::html::Div>) {
+    let Some(el) = chat_ref.get() else { return };
+    let scroll_fn = wasm_bindgen::prelude::Closure::once(move || {
+        el.set_scroll_top(el.scroll_height());
+    });
+    if let Some(window) = web_sys::window() {
+        let _ = window.request_animation_frame(scroll_fn.as_ref().unchecked_ref());
+        scroll_fn.forget();
+    }
 }
 
 fn format_timestamp(ts: i64, fmt: &str) -> String {

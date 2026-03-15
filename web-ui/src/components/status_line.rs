@@ -6,7 +6,8 @@ fn current_time() -> String {
     let date = js_sys::Date::new_0();
     let h = date.get_hours();
     let m = date.get_minutes();
-    format!("{h:02}:{m:02}")
+    let s = date.get_seconds();
+    format!("{h:02}:{m:02}:{s:02}")
 }
 
 #[component]
@@ -15,10 +16,10 @@ pub fn StatusLine() -> impl IntoView {
 
     let (time_str, set_time_str) = signal(current_time());
 
-    // Update the clock every 30 seconds.
+    // Update the clock every second.
     leptos::task::spawn_local(async move {
         loop {
-            gloo_timers::future::sleep(std::time::Duration::from_secs(30)).await;
+            gloo_timers::future::sleep(std::time::Duration::from_secs(1)).await;
             set_time_str.set(current_time());
         }
     });
@@ -37,28 +38,35 @@ pub fn StatusLine() -> impl IntoView {
             .find(|c| c.id == buf.connection_id)
     };
 
+    // Activity numbers — skip server buffers, use global sequential numbering.
     let activity_items = move || {
         let active_id = state.active_buffer.get();
-        state
-            .buffers
-            .get()
-            .iter()
-            .enumerate()
-            .filter(|(_, b)| {
-                b.activity > 0
-                    && active_id.as_deref() != Some(&b.id)
-            })
-            .map(|(i, b)| (i + 1, b.activity))
-            .collect::<Vec<_>>()
+        let buffers = state.buffers.get();
+        let mut num = 1u32;
+        let mut items = Vec::new();
+        for b in &buffers {
+            if b.buffer_type == "server" {
+                continue;
+            }
+            let current_num = num;
+            num += 1;
+            if active_id.as_deref() == Some(b.id.as_str()) {
+                continue;
+            }
+            if b.activity == 0 {
+                continue;
+            }
+            items.push((current_num, b.activity));
+        }
+        items
     };
 
     view! {
         <div class="status-line">
             <span class="bracket">"["</span>
-            // Time
             <span class="muted">{time_str}</span>
             <span class="sep">"|"</span>
-            // Nick + user modes
+            // Nick (+modes)
             {move || active_conn().map(|c| {
                 let modes = if c.user_modes.is_empty() {
                     String::new()
@@ -71,7 +79,7 @@ pub fn StatusLine() -> impl IntoView {
                 }
             })}
             <span class="sep">"|"</span>
-            // Channel + channel modes
+            // Channel (+modes)
             {move || active_buf().map(|b| {
                 let modes = b.modes.as_deref()
                     .filter(|m| !m.is_empty())
@@ -91,7 +99,7 @@ pub fn StatusLine() -> impl IntoView {
                 Some(view! {
                     <span class="sep">"|"</span>
                     <span class="muted">"Lag: "</span>
-                    <span class="muted">{format!("{secs:.1}s")}</span>
+                    <span class="nick">{format!("{secs:.1}s")}</span>
                 })
             }}
             // Activity
