@@ -6,13 +6,15 @@ all: clean wasm release
 # Clean all build artifacts
 clean:
 	cargo clean
-	rm -rf web-ui/dist
+	rm -rf web-ui/dist static/web
 
 # Build WASM frontend
 wasm:
 	cd web-ui && trunk build --release
+	rm -rf static/web && mkdir -p static/web
+	cp web-ui/dist/* static/web/
 
-# Native release build (embeds WASM from web-ui/dist/)
+# Native release build (embeds WASM from static/web/)
 release:
 	cargo build --release
 

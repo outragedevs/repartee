@@ -90,10 +90,10 @@ async fn health_handler() -> impl IntoResponse {
 
 /// Embedded WASM frontend assets (built by `trunk build` in web-ui/).
 ///
-/// When the `web-ui/dist/` directory doesn't exist (e.g. during development
-/// without running trunk), this serves nothing and the fallback returns 404.
+/// When `static/web/` is empty (e.g. during development without running
+/// `make wasm`), this serves nothing and the fallback returns 404.
 #[derive(Embed)]
-#[folder = "web-ui/dist/"]
+#[folder = "static/web/"]
 struct WebAssets;
 
 /// Serve embedded static assets from `web-ui/dist/`.
