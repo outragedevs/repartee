@@ -194,6 +194,37 @@ pub fn InputLine() -> impl IntoView {
         }
     };
 
+    // Handle paste — split multiline content and send each line separately.
+    let on_paste = move |ev: web_sys::Event| {
+        use wasm_bindgen::JsCast;
+        let Some(clip_ev) = ev.dyn_ref::<web_sys::ClipboardEvent>() else { return };
+        let Some(data) = clip_ev.clipboard_data() else { return };
+        let Ok(text) = data.get_data("text/plain") else { return };
+        if !text.contains('\n') {
+            return; // single-line paste — let default browser behavior handle it
+        }
+        ev.prevent_default();
+        let Some(buffer_id) = state.active_buffer.get_untracked() else { return };
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.starts_with('/') {
+                crate::ws::send_command(&WebCommand::RunCommand {
+                    buffer_id: buffer_id.clone(),
+                    text: trimmed.to_string(),
+                });
+            } else {
+                crate::ws::send_command(&WebCommand::SendMessage {
+                    buffer_id: buffer_id.clone(),
+                    text: trimmed.to_string(),
+                });
+            }
+        }
+        set_value.set(String::new());
+    };
+
     view! {
         <div class="input-line">
             <span class="prompt">"❯"</span>
@@ -205,6 +236,7 @@ pub fn InputLine() -> impl IntoView {
                 node_ref=input_ref
                 on:input=move |ev| set_value.set(event_target_value(&ev))
                 on:keydown=on_keydown
+                on:paste=on_paste
             />
             <button class="send-btn" on:click=move |_| submit.run(())>"Send"</button>
         </div>

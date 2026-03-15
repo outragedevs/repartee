@@ -154,9 +154,18 @@ pub fn parse_format(text: &str) -> Vec<StyledSpan> {
                     current.push('%');
                     i += 2;
                 }
-                _ => {
-                    current.push('%');
-                    i += 1;
+                c => {
+                    // irssi single-letter color codes (%k %r %g %y %b %m %c %w + uppercase)
+                    if let Some(hex) = irssi_color(c) {
+                        flush!();
+                        fg = Some(hex.to_string());
+                        i += 2;
+                    } else {
+                        // Unknown %X — keep literal
+                        current.push('%');
+                        current.push(c);
+                        i += 2;
+                    }
                 }
             },
 
@@ -246,6 +255,29 @@ pub fn parse_format(text: &str) -> Vec<StyledSpan> {
 
     flush!();
     spans
+}
+
+/// irssi single-letter color codes (%k %r %g %m etc).
+fn irssi_color(code: char) -> Option<&'static str> {
+    match code {
+        'k' => Some("#000000"),
+        'K' => Some("#555555"),
+        'r' => Some("#aa0000"),
+        'R' => Some("#ff5555"),
+        'g' => Some("#00aa00"),
+        'G' => Some("#55ff55"),
+        'y' => Some("#aa5500"),
+        'Y' => Some("#ffff55"),
+        'b' => Some("#0000aa"),
+        'B' => Some("#5555ff"),
+        'm' => Some("#aa00aa"),
+        'M' => Some("#ff55ff"),
+        'c' => Some("#00aaaa"),
+        'C' => Some("#55ffff"),
+        'w' => Some("#aaaaaa"),
+        'W' => Some("#ffffff"),
+        _ => None,
+    }
 }
 
 /// Convert a mIRC color code (0-15) to a CSS hex color.
