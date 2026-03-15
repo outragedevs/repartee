@@ -113,30 +113,35 @@ html, body {
     padding: 2px 0;
 }
 
-/* Chat line — inline-block layout (copies as single line, no grid/flex line breaks) */
+/* Chat line — flex row, all items on same baseline */
 .chat-line {
     padding: 0 8px;
+    display: flex;
+    align-items: baseline;
     line-height: var(--line-height, 1.35);
 }
 
 .chat-line .ts {
-    display: inline-block;
     width: 70px;
+    flex-shrink: 0;
     color: var(--fg-dim);
-    vertical-align: baseline;
 }
 .chat-line .nick {
-    display: inline-block;
     width: 100px;
+    flex-shrink: 0;
     text-align: right;
     overflow: hidden;
     white-space: nowrap;
-    vertical-align: baseline;
 }
 .chat-line .nick .mode { color: var(--fg-muted); }
 .chat-line .nick .name { color: var(--accent); font-weight: bold; }
 .chat-line .nick .sep { color: var(--accent); margin-left: 2px; }
-.chat-line .text { padding-left: 4px; }
+.chat-line .text {
+    padding-left: 4px;
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: break-word;
+}
 
 /* Own message nick = green */
 .chat-line.own .nick .name { color: var(--green); }
