@@ -48,11 +48,27 @@ impl AppState {
     // === Buffer management ===
 
     pub fn add_buffer(&mut self, buffer: Buffer) {
+        let meta = crate::web::protocol::BufferMeta {
+            id: buffer.id.clone(),
+            connection_id: buffer.connection_id.clone(),
+            name: buffer.name.clone(),
+            buffer_type: crate::web::snapshot::buffer_type_str(&buffer.buffer_type).to_string(),
+            topic: buffer.topic.clone(),
+            unread_count: buffer.unread_count,
+            activity: buffer.activity as u8,
+            nick_count: u32::try_from(buffer.users.len()).unwrap_or(u32::MAX),
+        };
         self.buffers.insert(buffer.id.clone(), buffer);
+        self.pending_web_events
+            .push(crate::web::protocol::WebEvent::BufferCreated { buffer: meta });
     }
 
     pub fn remove_buffer(&mut self, id: &str) {
         let was_active = self.active_buffer_id.as_deref() == Some(id);
+        self.pending_web_events
+            .push(crate::web::protocol::WebEvent::BufferClosed {
+                buffer_id: id.to_string(),
+            });
         self.buffers.shift_remove(id);
 
         if was_active {
@@ -75,8 +91,9 @@ impl AppState {
         if !self.buffers.contains_key(id) {
             return;
         }
+        let changed = self.active_buffer_id.as_deref() != Some(id);
         // Save current as previous
-        if self.active_buffer_id.as_deref() != Some(id) {
+        if changed {
             self.previous_buffer_id = self.active_buffer_id.clone();
         }
         self.active_buffer_id = Some(id.to_string());
@@ -85,6 +102,14 @@ impl AppState {
         if let Some(buf) = self.buffers.get_mut(id) {
             buf.activity = ActivityLevel::None;
             buf.unread_count = 0;
+        }
+
+        // Broadcast to web clients so TUI ↔ Web stay in sync.
+        if changed {
+            self.pending_web_events
+                .push(crate::web::protocol::WebEvent::ActiveBufferChanged {
+                    buffer_id: id.to_string(),
+                });
         }
     }
 
@@ -114,8 +139,14 @@ impl AppState {
 
     /// Add a message to a buffer WITHOUT logging it to the database.
     /// Used for local UI events (command output, status messages) that
-    /// should appear on screen but not be persisted.
+    /// should appear on screen but not be persisted — but still broadcast
+    /// to web clients so command output is visible on the web UI.
     pub fn add_local_message(&mut self, buffer_id: &str, message: Message) {
+        self.pending_web_events
+            .push(crate::web::protocol::WebEvent::NewMessage {
+                buffer_id: buffer_id.to_string(),
+                message: crate::web::snapshot::message_to_wire(&message),
+            });
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
             buf.messages.push(message);
             enforce_scrollback(buf, self.scrollback_limit);

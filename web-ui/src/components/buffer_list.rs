@@ -9,7 +9,6 @@ pub fn BufferList() -> impl IntoView {
 
     let grouped = move || {
         let buffers = state.buffers.get();
-        let active_id = state.active_buffer.get();
 
         // Group by connection_id, maintaining order.
         let mut groups: Vec<(String, Vec<BufferView>)> = Vec::new();
@@ -29,22 +28,18 @@ pub fn BufferList() -> impl IntoView {
                 groups.push((label, Vec::new()));
             }
 
-            // Skip server buffers from numbered list.
-            if buf.buffer_type == "server" {
-                continue;
-            }
-
-            let is_active = active_id.as_deref() == Some(&buf.id);
             if let Some((_, items)) = groups.last_mut() {
                 items.push(BufferView {
                     id: buf.id.clone(),
                     name: buf.name.clone(),
+                    buffer_type: buf.buffer_type.clone(),
                     num,
-                    activity: buf.activity,
-                    is_active,
                 });
             }
-            num += 1;
+            // Server buffers don't consume a number.
+            if buf.buffer_type != "server" {
+                num += 1;
+            }
         }
         groups
     };
@@ -65,7 +60,58 @@ pub fn BufferList() -> impl IntoView {
                             key=|item| item.id.clone()
                             let:item
                         >
-                            <BufferItem item=item />
+                            {
+                                let id = item.id.clone();
+                                let id2 = item.id.clone();
+                                let name = item.name.clone();
+                                let num = item.num;
+                                let buf_type = item.buffer_type.clone();
+
+                                let class = move || {
+                                    let is_active = state.active_buffer.get().as_deref() == Some(&id);
+                                    let activity = state.buffers.get().iter()
+                                        .find(|b| b.id == id)
+                                        .map_or(0u8, |b| b.activity);
+                                    let type_class = match buf_type.as_str() {
+                                        "server" => " type-server",
+                                        "query" => " type-query",
+                                        "dcc_chat" => " type-dcc",
+                                        _ => "",
+                                    };
+                                    format!(
+                                        "buffer-item{}{}{type_class}",
+                                        if is_active { " active" } else { "" },
+                                        if activity > 0 { format!(" activity-{activity}") } else { String::new() }
+                                    )
+                                };
+
+                                let on_click = move |_| {
+                                    state.active_buffer.set(Some(id2.clone()));
+                                    // Sync to TUI — server changes active buffer for both.
+                                    crate::ws::send_command(&WebCommand::SwitchBuffer {
+                                        buffer_id: id2.clone(),
+                                    });
+                                    crate::ws::send_command(&WebCommand::MarkRead {
+                                        buffer_id: id2.clone(),
+                                        up_to: chrono::Utc::now().timestamp(),
+                                    });
+                                };
+
+                                let is_server = item.buffer_type == "server";
+                                view! {
+                                    <div class=class on:click=on_click>
+                                        {if is_server {
+                                            view! { <span class="name status-name">"(status)"</span> }.into_any()
+                                        } else {
+                                            view! {
+                                                <span class="num">{num}"."</span>
+                                                " "
+                                                <span class="name">{name.clone()}</span>
+                                            }.into_any()
+                                        }}
+                                    </div>
+                                }
+                            }
                         </For>
                     }
                 }
@@ -78,45 +124,6 @@ pub fn BufferList() -> impl IntoView {
 struct BufferView {
     id: String,
     name: String,
+    buffer_type: String,
     num: u32,
-    activity: u8,
-    is_active: bool,
-}
-
-#[component]
-fn BufferItem(item: BufferView) -> impl IntoView {
-    let state = use_context::<AppState>().unwrap();
-    let id = item.id.clone();
-    let class = format!(
-        "buffer-item{}{}",
-        if item.is_active { " active" } else { "" },
-        if item.activity > 0 {
-            format!(" activity-{}", item.activity)
-        } else {
-            String::new()
-        }
-    );
-
-    let on_click = move |_| {
-        state.active_buffer.set(Some(id.clone()));
-        // Request messages for the buffer.
-        crate::ws::send_command(&WebCommand::FetchMessages {
-            buffer_id: id.clone(),
-            limit: 50,
-            before: None,
-        });
-        // Mark as read.
-        crate::ws::send_command(&WebCommand::MarkRead {
-            buffer_id: id.clone(),
-            up_to: chrono::Utc::now().timestamp(),
-        });
-    };
-
-    view! {
-        <div class=class on:click=on_click>
-            <span class="num">{item.num}"."</span>
-            " "
-            <span class="name">{item.name}</span>
-        </div>
-    }
 }

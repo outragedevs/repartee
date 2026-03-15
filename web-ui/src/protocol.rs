@@ -9,6 +9,8 @@ pub enum WebEvent {
         buffers: Vec<BufferMeta>,
         connections: Vec<ConnectionMeta>,
         mention_count: u32,
+        #[serde(default)]
+        active_buffer_id: Option<String>,
     },
     NewMessage {
         buffer_id: String,
@@ -67,6 +69,9 @@ pub enum WebEvent {
         mentions: Vec<WireMention>,
         #[serde(default)]
         session_id: Option<String>,
+    },
+    ActiveBufferChanged {
+        buffer_id: String,
     },
     Error {
         message: String,

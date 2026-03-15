@@ -1,13 +1,24 @@
 use crate::state::AppState;
 use crate::state::buffer::{BufferType, Message};
 use crate::state::connection::ConnectionStatus;
+use crate::state::sorting::sort_buffers;
 use crate::web::protocol::{BufferMeta, ConnectionMeta, WebEvent, WireMessage, WireNick};
 
 /// Build a `SyncInit` event from the current `AppState`.
+///
+/// Buffers are sorted to match terminal order: connection label → `sort_group` → name.
 pub fn build_sync_init(state: &AppState, mention_count: u32) -> WebEvent {
-    let buffers: Vec<BufferMeta> = state
-        .buffers
-        .values()
+    // Sort buffers in the same order as the terminal sidebar.
+    let buf_refs: Vec<_> = state.buffers.values().collect();
+    let sorted = sort_buffers(&buf_refs, |conn_id| {
+        state
+            .connections
+            .get(conn_id)
+            .map_or_else(|| conn_id.to_string(), |c| c.label.clone())
+    });
+
+    let buffers: Vec<BufferMeta> = sorted
+        .iter()
         .map(|b| BufferMeta {
             id: b.id.clone(),
             connection_id: b.connection_id.clone(),
@@ -35,6 +46,7 @@ pub fn build_sync_init(state: &AppState, mention_count: u32) -> WebEvent {
         buffers,
         connections,
         mention_count,
+        active_buffer_id: state.active_buffer_id.clone(),
     }
 }
 
@@ -84,7 +96,7 @@ pub fn stored_to_wire(msg: &crate::storage::types::StoredMessage) -> WireMessage
     }
 }
 
-const fn buffer_type_str(bt: &BufferType) -> &'static str {
+pub const fn buffer_type_str(bt: &BufferType) -> &'static str {
     match bt {
         BufferType::Server => "server",
         BufferType::Channel => "channel",

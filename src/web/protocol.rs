@@ -9,6 +9,7 @@ pub enum WebEvent {
         buffers: Vec<BufferMeta>,
         connections: Vec<ConnectionMeta>,
         mention_count: u32,
+        active_buffer_id: Option<String>,
     },
     /// A new message was received in a buffer.
     NewMessage {
@@ -76,6 +77,8 @@ pub enum WebEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
     },
+    /// Active buffer changed (syncs TUI ↔ Web).
+    ActiveBufferChanged { buffer_id: String },
     /// Server-side error.
     Error { message: String },
 }

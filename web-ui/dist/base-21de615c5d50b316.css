@@ -21,6 +21,13 @@ html, body {
     overflow: hidden;
 }
 
+.desktop-only {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    overflow: hidden;
+}
+
 .topic-bar {
     background: var(--bg-alt);
     padding: 2px 8px;
@@ -74,6 +81,10 @@ html, body {
 
 .buffer-item .num { color: var(--fg-muted); }
 .buffer-item .name { color: var(--fg-dim); }
+.buffer-item.type-server .name { color: var(--fg-muted); }
+.buffer-item.type-server .status-name { font-style: italic; font-size: 11px; }
+.buffer-item.type-query .name { color: var(--cyan); }
+.buffer-item.type-dcc .name { color: var(--yellow); }
 .buffer-item.active .num { color: var(--yellow); }
 .buffer-item.active .name { color: var(--bright); font-weight: bold; }
 .buffer-item.activity-1 .name { color: var(--green); }
@@ -163,6 +174,7 @@ html, body {
 .nick-list .nick-entry {
     padding: 0 6px;
     line-height: 1.4;
+    cursor: pointer;
 }
 
 .nick-entry .prefix-op { color: var(--green); }

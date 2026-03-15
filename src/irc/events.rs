@@ -1028,6 +1028,16 @@ fn handle_join(
                 host: None,
             },
         );
+        state.pending_web_events.push(crate::web::protocol::WebEvent::NickEvent {
+            buffer_id: buffer_id.clone(),
+            kind: crate::web::protocol::NickEventKind::Join,
+            nick: nick.clone(),
+            new_nick: None,
+            prefix: Some(String::new()),
+            modes: Some(String::new()),
+            away: Some(false),
+            message: None,
+        });
 
         // --- Netsplit: check if this is a netjoin ---
         if state.netsplit_state.handle_join(&nick, &buffer_id) {
@@ -1185,6 +1195,15 @@ fn handle_away(state: &mut AppState, conn_id: &str, prefix: Option<&Prefix>, rea
     let is_away = reason.is_some();
     let nick_lower = nick.to_lowercase();
 
+    let affected_bufs: Vec<String> = state
+        .buffers
+        .iter()
+        .filter(|(_, buf)| {
+            buf.connection_id == conn_id && buf.users.contains_key(&nick_lower)
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+
     for buf in state.buffers.values_mut() {
         if buf.connection_id != conn_id {
             continue;
@@ -1192,6 +1211,19 @@ fn handle_away(state: &mut AppState, conn_id: &str, prefix: Option<&Prefix>, rea
         if let Some(entry) = buf.users.get_mut(&nick_lower) {
             entry.away = is_away;
         }
+    }
+
+    for buf_id in affected_bufs {
+        state.pending_web_events.push(crate::web::protocol::WebEvent::NickEvent {
+            buffer_id: buf_id,
+            kind: crate::web::protocol::NickEventKind::AwayChange,
+            nick: nick.clone(),
+            new_nick: None,
+            prefix: None,
+            modes: None,
+            away: Some(is_away),
+            message: reason.map(ToString::to_string),
+        });
     }
 }
 
@@ -1286,6 +1318,16 @@ fn handle_part(
     } else {
         // Always update nick list regardless of ignore
         state.remove_nick(&buffer_id, &nick);
+        state.pending_web_events.push(crate::web::protocol::WebEvent::NickEvent {
+            buffer_id: buffer_id.clone(),
+            kind: crate::web::protocol::NickEventKind::Part,
+            nick: nick.clone(),
+            new_nick: None,
+            prefix: None,
+            modes: None,
+            away: None,
+            message: reason.map(ToString::to_string),
+        });
 
         // --- Ignore check ---
         if should_ignore(
@@ -1355,6 +1397,16 @@ fn handle_quit(
     // Always remove from nick lists regardless of ignore/netsplit
     for buf_id in &affected {
         state.remove_nick(buf_id, &nick);
+        state.pending_web_events.push(crate::web::protocol::WebEvent::NickEvent {
+            buffer_id: buf_id.clone(),
+            kind: crate::web::protocol::NickEventKind::Quit,
+            nick: nick.clone(),
+            new_nick: None,
+            prefix: None,
+            modes: None,
+            away: None,
+            message: reason.map(ToString::to_string),
+        });
     }
 
     // --- Ignore check ---
@@ -1445,6 +1497,7 @@ fn rename_query_buffers(state: &mut AppState, conn_id: &str, new_nick: &str, aff
     clippy::needless_pass_by_value,
     reason = "tags are cloned into each fan-out Message"
 )]
+#[expect(clippy::too_many_lines, reason = "nick change fan-out + web NickEvent broadcasting")]
 fn handle_nick_change(
     state: &mut AppState,
     conn_id: &str,
@@ -1519,6 +1572,16 @@ fn handle_nick_change(
 
     for buf_id in &affected {
         state.update_nick(buf_id, &old_nick, new_nick);
+        state.pending_web_events.push(crate::web::protocol::WebEvent::NickEvent {
+            buffer_id: buf_id.clone(),
+            kind: crate::web::protocol::NickEventKind::NickChange,
+            nick: old_nick.clone(),
+            new_nick: Some(new_nick.to_string()),
+            prefix: None,
+            modes: None,
+            away: None,
+            message: None,
+        });
 
         // --- Nick flood check ---
         if state.flood_protection
@@ -1658,6 +1721,11 @@ fn handle_topic(
 
     if let Some(topic_text) = topic {
         state.set_topic(&buffer_id, topic_text.to_string(), nick.clone());
+        state.pending_web_events.push(crate::web::protocol::WebEvent::TopicChanged {
+            buffer_id: buffer_id.clone(),
+            topic: Some(topic_text.to_string()),
+            set_by: nick.clone(),
+        });
         let setter = nick.unwrap_or_default();
         let id = state.next_message_id();
         state.add_message(
@@ -1806,6 +1874,18 @@ fn apply_channel_mode(
             entry.modes = entry.modes.replace(mc, "");
         }
         entry.prefix = modes_to_prefix(&entry.modes, "~&@%+");
+        let new_prefix = entry.prefix.clone();
+        let new_modes = entry.modes.clone();
+        state.pending_web_events.push(crate::web::protocol::WebEvent::NickEvent {
+            buffer_id: buffer_id.to_string(),
+            kind: crate::web::protocol::NickEventKind::ModeChange,
+            nick: target_nick.to_string(),
+            new_nick: None,
+            prefix: Some(new_prefix),
+            modes: Some(new_modes),
+            away: None,
+            message: None,
+        });
         return;
     }
 

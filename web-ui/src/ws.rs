@@ -1,14 +1,26 @@
-use futures::{SinkExt, StreamExt, channel::mpsc};
+use std::cell::RefCell;
+
+use futures::{SinkExt, StreamExt, channel::mpsc, future};
 use gloo_net::websocket::{Message, futures::WebSocket};
 use leptos::prelude::*;
 
 use crate::protocol::{WebCommand, WebEvent};
 use crate::state::AppState;
 
-/// Channel sender for components to send commands to the WebSocket loop.
-/// Stored in Leptos context — `Send + Sync` because `futures::mpsc` sender is.
-#[derive(Clone)]
-pub struct CommandSender(pub mpsc::UnboundedSender<String>);
+// Module-level sender for commands to the WebSocket loop.
+//
+// Stored in a `thread_local` instead of Leptos context because
+// `use_context` is unreliable inside Leptos 0.7 `Callback::run()`
+// and `Effect` scopes — the owner chain doesn't always propagate.
+// WASM is single-threaded, so `thread_local` is safe and always accessible.
+thread_local! {
+    static CMD_TX: RefCell<Option<mpsc::UnboundedSender<String>>> = const { RefCell::new(None) };
+}
+
+/// Initialize the global command sender. Called once from `App`.
+pub fn init_command_sender(tx: mpsc::UnboundedSender<String>) {
+    CMD_TX.with(|cell| *cell.borrow_mut() = Some(tx));
+}
 
 /// Connect to the WebSocket server and spawn the message loop.
 pub fn connect(state: &AppState, cmd_rx: mpsc::UnboundedReceiver<String>) {
@@ -30,32 +42,38 @@ pub fn connect(state: &AppState, cmd_rx: mpsc::UnboundedReceiver<String>) {
                 state.connected.set(false);
             }
             Err(e) => {
-                state.error.set(Some(format!("WebSocket error: {e}")));
+                let msg = format!("{e}");
+                // If connection failed (likely expired/invalid token), clear token to show login.
+                state.token.set(None);
+                state.error.set(Some(format!("WebSocket error: {msg}")));
                 state.connected.set(false);
             }
         }
     });
 }
 
-/// Send a WebCommand to the server via the command channel.
+/// Send a WebCommand to the server via the global command channel.
 pub fn send_command(cmd: &WebCommand) {
-    let Some(sender) = use_context::<CommandSender>() else {
-        web_sys::console::warn_1(&"no CommandSender context".into());
-        return;
-    };
-
-    match serde_json::to_string(cmd) {
-        Ok(json) => {
-            if let Err(e) = sender.0.unbounded_send(json) {
-                web_sys::console::warn_1(&format!("cmd send failed: {e}").into());
+    CMD_TX.with(|cell| {
+        let tx = cell.borrow();
+        let Some(tx) = tx.as_ref() else {
+            web_sys::console::warn_1(&"command sender not initialized".into());
+            return;
+        };
+        match serde_json::to_string(cmd) {
+            Ok(json) => {
+                if let Err(e) = tx.unbounded_send(json) {
+                    web_sys::console::warn_1(&format!("cmd send failed: {e}").into());
+                }
+            }
+            Err(e) => {
+                web_sys::console::warn_1(&format!("cmd serialize failed: {e}").into());
             }
         }
-        Err(e) => {
-            web_sys::console::warn_1(&format!("cmd serialize failed: {e}").into());
-        }
-    }
+    });
 }
 
+/// Main WebSocket event loop — polls commands and server messages concurrently.
 async fn run_ws_loop(
     ws: WebSocket,
     state: &AppState,
@@ -63,24 +81,24 @@ async fn run_ws_loop(
 ) {
     let (mut ws_tx, mut ws_rx) = ws.split();
 
-    // WASM is single-threaded — poll both streams in a manual loop.
     loop {
-        // Drain all pending commands first (non-blocking).
-        loop {
-            match cmd_rx.try_recv() {
-                Ok(json) => {
-                    if let Err(e) = ws_tx.send(Message::Text(json)).await {
-                        web_sys::console::warn_1(&format!("ws send failed: {e}").into());
-                        return;
-                    }
-                }
-                _ => break,
-            }
-        }
+        let cmd_next = cmd_rx.next();
+        let ws_next = ws_rx.next();
+        futures::pin_mut!(cmd_next, ws_next);
 
-        // Wait for next server message.
-        match ws_rx.next().await {
-            Some(Ok(Message::Text(text))) => {
+        match future::select(cmd_next, ws_next).await {
+            // Outgoing command from UI.
+            future::Either::Left((Some(json), _)) => {
+                if let Err(e) = ws_tx.send(Message::Text(json)).await {
+                    web_sys::console::warn_1(&format!("ws send failed: {e}").into());
+                    break;
+                }
+            }
+            // Command channel closed.
+            future::Either::Left((None, _)) => break,
+
+            // Incoming server message.
+            future::Either::Right((Some(Ok(Message::Text(text))), _)) => {
                 match serde_json::from_str::<WebEvent>(&text) {
                     Ok(event) => state.handle_event(event),
                     Err(e) => {
@@ -88,12 +106,13 @@ async fn run_ws_loop(
                     }
                 }
             }
-            Some(Ok(Message::Bytes(_))) => {}
-            Some(Err(e)) => {
+            future::Either::Right((Some(Ok(Message::Bytes(_))), _)) => {}
+            future::Either::Right((Some(Err(e)), _)) => {
                 state.error.set(Some(format!("WebSocket error: {e}")));
                 break;
             }
-            None => break,
+            // WebSocket closed.
+            future::Either::Right((None, _)) => break,
         }
     }
 }

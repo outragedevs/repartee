@@ -124,6 +124,7 @@ fn build_sync_init_from_snapshot(state: &AppHandle) -> WebEvent {
                 buffers: snap.buffers.clone(),
                 connections: snap.connections.clone(),
                 mention_count: snap.mention_count,
+                active_buffer_id: snap.active_buffer_id.clone(),
             };
     }
     // Fallback: empty init.
@@ -131,6 +132,7 @@ fn build_sync_init_from_snapshot(state: &AppHandle) -> WebEvent {
         buffers: Vec::new(),
         connections: Vec::new(),
         mention_count: 0,
+        active_buffer_id: None,
     }
 }
 

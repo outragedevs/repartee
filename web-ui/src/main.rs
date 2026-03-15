@@ -1,5 +1,6 @@
 mod app;
 mod components;
+mod format;
 mod protocol;
 mod state;
 mod ws;

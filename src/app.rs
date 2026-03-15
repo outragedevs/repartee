@@ -1526,6 +1526,7 @@ impl App {
                     buffers: Vec::new(),
                     connections: Vec::new(),
                     mention_count: 0,
+                    active_buffer_id: None,
                 },
             ));
             self.web_state_snapshot = Some(std::sync::Arc::clone(&snapshot));
@@ -1613,6 +1614,7 @@ impl App {
                             self.term_rx = Some(rx);
                         }
                         self.update_script_snapshot();
+                        self.drain_pending_web_events();
                     }
                     None => {
                         // Terminal reader died — if we have a terminal, it's dead.
@@ -1637,6 +1639,7 @@ impl App {
                             self.shim_event_rx = Some(rx);
                         }
                         self.update_script_snapshot();
+                        self.drain_pending_web_events();
                     }
                     Some(crate::session::protocol::ShimMessage::Resize { cols, rows }) => {
                         self.cached_term_cols = cols;
@@ -1697,6 +1700,7 @@ impl App {
                 dcc_ev = self.dcc_rx.recv() => {
                     if let Some(ev) = dcc_ev {
                         self.handle_dcc_event(ev);
+                        self.drain_pending_web_events();
                     }
                 },
                 dict_ev = self.dict_rx.recv() => {
@@ -1706,7 +1710,9 @@ impl App {
                 },
                 web_cmd = self.web_cmd_rx.recv() => {
                     if let Some((cmd, session_id)) = web_cmd {
+                        tracing::debug!(?cmd, %session_id, "web command received");
                         self.handle_web_command(cmd, &session_id);
+                        self.drain_pending_web_events();
                     }
                 },
                 _ = tick.tick() => {
@@ -1726,10 +1732,11 @@ impl App {
                         && let Ok(mut snap) = snapshot.write()
                     {
                         let init = crate::web::snapshot::build_sync_init(&self.state, 0);
-                        if let crate::web::protocol::WebEvent::SyncInit { buffers, connections, mention_count } = init {
+                        if let crate::web::protocol::WebEvent::SyncInit { buffers, connections, mention_count, active_buffer_id } = init {
                             snap.buffers = buffers;
                             snap.connections = connections;
                             snap.mention_count = mention_count;
+                            snap.active_buffer_id = active_buffer_id;
                         }
                     }
                     let expired = self.dcc.purge_expired();
@@ -1742,6 +1749,7 @@ impl App {
                 },
                 _ = paste_tick.tick() => {
                     self.drain_paste_queue();
+                    self.drain_pending_web_events();
                 },
                 action = self.script_action_rx.recv() => {
                     if let Some(action) = action {
@@ -1750,6 +1758,7 @@ impl App {
                             self.handle_script_action(action);
                         }
                         self.update_script_snapshot();
+                        self.drain_pending_web_events();
                     }
                 },
                 _ = sigterm.recv() => {
@@ -2158,7 +2167,6 @@ impl App {
 
 
     /// Dispatch a command received from a web client.
-    #[expect(clippy::too_many_lines, reason = "flat dispatch for web command variants")]
     fn handle_web_command(&mut self, cmd: crate::web::protocol::WebCommand, session_id: &str) {
         use crate::web::protocol::WebCommand;
         use crate::web::snapshot;
@@ -2167,8 +2175,9 @@ impl App {
             WebCommand::SendMessage { buffer_id, text } => {
                 self.web_send_message(&buffer_id, &text);
             }
-            WebCommand::SwitchBuffer { .. } => {
-                // Session-local on client side — no server state change.
+            WebCommand::SwitchBuffer { buffer_id } => {
+                // Sync active buffer: web ↔ TUI share the same active buffer.
+                self.state.set_active_buffer(&buffer_id);
             }
             WebCommand::MarkRead { buffer_id, .. } => {
                 // TODO: use `up_to` for partial mark-read. Currently resets fully.
@@ -2205,17 +2214,12 @@ impl App {
     }
 
     /// Execute a command from a web client in the context of a buffer.
+    ///
+    /// Active buffer is synced 1:1 between TUI and web, so we just ensure
+    /// the active buffer matches the web client's context before executing.
     fn web_run_command(&mut self, buffer_id: &str, text: &str) {
-        // Temporarily set active buffer to the web client's buffer context.
-        let saved_buffer = self.state.active_buffer_id.clone();
-        let saved_scroll = self.scroll_offset;
-        self.state.active_buffer_id = Some(buffer_id.to_string());
-
+        self.state.set_active_buffer(buffer_id);
         self.handle_submit(text);
-
-        // Restore terminal state — web commands must not affect terminal view.
-        self.state.active_buffer_id = saved_buffer;
-        self.scroll_offset = saved_scroll;
     }
 
     /// Send a message from a web client to IRC.
@@ -2241,34 +2245,48 @@ impl App {
     /// Fetch messages from `SQLite` for a web client.
     fn web_fetch_messages(&self, buffer_id: &str, limit: u32, before: Option<i64>, session_id: &str) {
         let Some(ref storage) = self.storage else {
+            tracing::warn!("web FetchMessages: storage not available");
             return;
         };
         let Ok(db) = storage.db.lock() else {
+            tracing::warn!("web FetchMessages: failed to lock db");
             return;
         };
         let capped_limit = limit.min(500) as usize;
-        let (network, buffer) = crate::web::snapshot::split_buffer_id(buffer_id);
+        let (conn_id, buffer) = crate::web::snapshot::split_buffer_id(buffer_id);
+        // Resolve connection_id → connection label (how the DB stores network).
+        let network = self.state.connections.get(conn_id)
+            .map_or_else(|| conn_id.to_string(), |c| c.label.clone());
         let messages = crate::storage::query::get_messages(
             &db,
-            network,
+            &network,
             buffer,
             before,
             capped_limit,
             storage.encrypt,
             None, // TODO: pass crypto key for encrypted DBs
         );
-        if let Ok(msgs) = messages {
-            let has_more = msgs.len() == capped_limit;
-            let wire: Vec<_> = msgs
-                .iter()
-                .map(crate::web::snapshot::stored_to_wire)
-                .collect();
-            self.broadcast_web(crate::web::protocol::WebEvent::Messages {
-                buffer_id: buffer_id.to_string(),
-                messages: wire,
-                has_more,
-                session_id: Some(session_id.to_string()),
-            });
+        match messages {
+            Ok(msgs) => {
+                let has_more = msgs.len() == capped_limit;
+                tracing::debug!(
+                    %buffer_id, count = msgs.len(), %has_more,
+                    "web FetchMessages: sending {} messages", msgs.len()
+                );
+                let wire: Vec<_> = msgs
+                    .iter()
+                    .map(crate::web::snapshot::stored_to_wire)
+                    .collect();
+                self.broadcast_web(crate::web::protocol::WebEvent::Messages {
+                    buffer_id: buffer_id.to_string(),
+                    messages: wire,
+                    has_more,
+                    session_id: Some(session_id.to_string()),
+                });
+            }
+            Err(e) => {
+                tracing::warn!(%buffer_id, error = %e, "web FetchMessages: query failed");
+            }
         }
     }
 

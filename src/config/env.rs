@@ -48,7 +48,7 @@ pub fn set_env_value(path: &Path, key: &str, value: &str) -> Result<()> {
     for line in &mut lines {
         let trimmed = line.trim();
         if trimmed.starts_with(&prefix) {
-            *line = new_line.clone();
+            line.clone_from(&new_line);
             found = true;
             break;
         }

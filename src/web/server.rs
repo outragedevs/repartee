@@ -23,6 +23,7 @@ pub struct WebStateSnapshot {
     pub buffers: Vec<super::protocol::BufferMeta>,
     pub connections: Vec<super::protocol::ConnectionMeta>,
     pub mention_count: u32,
+    pub active_buffer_id: Option<String>,
 }
 
 /// Shared state passed to all axum handlers.
@@ -100,9 +101,20 @@ async fn static_handler(Path(path): Path<String>) -> Response {
     serve_embedded(&path)
 }
 
-/// Serve the index.html for the root path.
+/// Serve the index.html for the root path (no-cache to pick up new hashed assets).
 async fn index_handler() -> Response {
-    serve_embedded("index.html")
+    match WebAssets::get("index.html") {
+        Some(content) => (
+            StatusCode::OK,
+            [
+                (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (axum::http::header::CACHE_CONTROL, "no-cache"),
+            ],
+            content.data.to_vec(),
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 /// Look up a file in the embedded assets and return it with the correct MIME type.
@@ -136,12 +148,18 @@ fn mime_from_path(path: &str) -> &'static str {
     }
 }
 
+/// GET /favicon.ico — return 204 No Content (no favicon file).
+async fn favicon_handler() -> impl IntoResponse {
+    StatusCode::NO_CONTENT
+}
+
 /// Build the axum router with all routes.
 pub fn build_router(handle: Arc<AppHandle>) -> Router {
     Router::new()
         .route("/api/login", post(login_handler))
         .route("/api/health", get(health_handler))
         .route("/ws", get(super::ws::ws_handler))
+        .route("/favicon.ico", get(favicon_handler))
         .route("/", get(index_handler))
         .route("/{*path}", get(static_handler))
         .with_state(handle)

@@ -6,6 +6,7 @@ use super::input::InputLine;
 use super::nick_list::NickList;
 use super::status_line::StatusLine;
 use super::topic_bar::TopicBar;
+use crate::protocol::WebCommand;
 use crate::state::AppState;
 
 /// Root layout component — renders desktop (>=768px) or mobile (<768px).
@@ -14,6 +15,20 @@ pub fn Layout() -> impl IntoView {
     let state = use_context::<AppState>().unwrap();
     let (left_open, set_left_open) = signal(false);
     let (right_open, set_right_open) = signal(false);
+
+    // Auto-fetch messages and nick list whenever active buffer changes.
+    Effect::new(move || {
+        if let Some(buf_id) = state.active_buffer.get() {
+            crate::ws::send_command(&WebCommand::FetchMessages {
+                buffer_id: buf_id.clone(),
+                limit: 50,
+                before: None,
+            });
+            crate::ws::send_command(&WebCommand::FetchNickList {
+                buffer_id: buf_id,
+            });
+        }
+    });
 
     let active_buf = move || {
         let active_id = state.active_buffer.get()?;

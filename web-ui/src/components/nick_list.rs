@@ -1,5 +1,6 @@
 use leptos::prelude::*;
 
+use crate::protocol::WebCommand;
 use crate::state::AppState;
 
 #[component]
@@ -35,6 +36,7 @@ pub fn NickList() -> impl IntoView {
         <div class="nick-list">
             {move || {
                 let (ops, voiced, regular) = grouped();
+                let active_buffer_id = state.active_buffer.get_untracked();
 
                 let render_nicks = |nicks: &[crate::protocol::WireNick], prefix_class: &str| {
                     nicks.iter().map(|n| {
@@ -43,8 +45,18 @@ pub fn NickList() -> impl IntoView {
                         let pclass = prefix_class.to_string();
                         let prefix = n.prefix.clone();
                         let nick = n.nick.clone();
+                        let nick_for_click = n.nick.clone();
+                        let buf_id = active_buffer_id.clone();
+                        let on_click = move |_| {
+                            if let Some(ref buffer_id) = buf_id {
+                                crate::ws::send_command(&WebCommand::RunCommand {
+                                    buffer_id: buffer_id.clone(),
+                                    text: format!("/query {}", nick_for_click),
+                                });
+                            }
+                        };
                         view! {
-                            <div class=class>
+                            <div class=class on:click=on_click>
                                 <span class=pclass>{prefix}</span>
                                 <span>{nick}</span>
                             </div>
