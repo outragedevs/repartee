@@ -211,6 +211,111 @@ impl ShellManager {
         self.sessions.get(id).map(|s| s.parser.screen())
     }
 
+    /// Serialize a shell screen to styled rows for web transport.
+    ///
+    /// Merges consecutive cells with identical style into spans (RLE compression).
+    /// A typical btop frame compresses from ~17K cells to ~500 spans.
+    #[expect(clippy::similar_names, reason = "fg/bg are standard terminal color abbreviations")]
+    pub fn screen_to_web(
+        &self,
+        id: &str,
+    ) -> Option<(
+        Vec<crate::web::protocol::ShellScreenRow>,
+        u16,
+        u16,
+        bool,
+    )> {
+        let screen = self.sessions.get(id)?.parser.screen();
+        let (screen_rows, screen_cols) = screen.size();
+        let (cursor_row, cursor_col) = screen.cursor_position();
+        let cursor_visible = !screen.hide_cursor();
+
+        let mut rows = Vec::with_capacity(screen_rows as usize);
+
+        for row in 0..screen_rows {
+            let mut spans: Vec<crate::web::protocol::ShellSpan> = Vec::new();
+            let mut cur_text = String::new();
+            let mut cur_fg = String::new();
+            let mut cur_bg = String::new();
+            let mut cur_bold = false;
+            let mut cur_italic = false;
+            let mut cur_underline = false;
+            let mut cur_inverse = false;
+
+            for col in 0..screen_cols {
+                let Some(cell) = screen.cell(row, col) else {
+                    continue;
+                };
+                let ch = cell.contents();
+                let c = if ch.is_empty() {
+                    ' '
+                } else {
+                    ch.chars().next().unwrap_or(' ')
+                };
+
+                let fg = vt100_color_to_css(cell.fgcolor());
+                let bg = vt100_color_to_css(cell.bgcolor());
+                let bold = cell.bold();
+                let italic = cell.italic();
+                let underline = cell.underline();
+                let inverse = cell.inverse();
+
+                // If style changed, flush current span and start new one.
+                if !cur_text.is_empty()
+                    && (fg != cur_fg
+                        || bg != cur_bg
+                        || bold != cur_bold
+                        || italic != cur_italic
+                        || underline != cur_underline
+                        || inverse != cur_inverse)
+                {
+                    spans.push(crate::web::protocol::ShellSpan {
+                        text: std::mem::take(&mut cur_text),
+                        fg: std::mem::take(&mut cur_fg),
+                        bg: std::mem::take(&mut cur_bg),
+                        bold: cur_bold,
+                        italic: cur_italic,
+                        underline: cur_underline,
+                        inverse: cur_inverse,
+                    });
+                    cur_bold = bold;
+                    cur_italic = italic;
+                    cur_underline = underline;
+                    cur_inverse = inverse;
+                    cur_fg = fg;
+                    cur_bg = bg;
+                } else if cur_text.is_empty() {
+                    cur_fg = fg;
+                    cur_bg = bg;
+                    cur_bold = bold;
+                    cur_italic = italic;
+                    cur_underline = underline;
+                    cur_inverse = inverse;
+                }
+
+                cur_text.push(c);
+            }
+
+            // Flush final span (trim trailing spaces for compression).
+            let trimmed = cur_text.trim_end();
+            if !trimmed.is_empty() {
+                spans.push(crate::web::protocol::ShellSpan {
+                    text: trimmed.to_string(),
+                    fg: cur_fg,
+                    bg: cur_bg,
+                    bold: cur_bold,
+                    italic: cur_italic,
+                    underline: cur_underline,
+                    inverse: cur_inverse,
+                });
+            }
+
+            rows.push(crate::web::protocol::ShellScreenRow { spans });
+        }
+
+        Some((rows, cursor_row, cursor_col, cursor_visible))
+    }
+
     /// Get the buffer ID associated with a shell session.
     pub fn buffer_id(&self, id: &str) -> Option<&str> {
         self.sessions.get(id).map(|s| s.buffer_id.as_str())
@@ -248,6 +353,39 @@ impl ShellManager {
             let _ = session.child.kill();
         }
         self.sessions.clear();
+    }
+}
+
+/// Convert a vt100 color to a CSS color string.
+/// Returns empty string for default (lets the web frontend use its own default).
+fn vt100_color_to_css(color: vt100::Color) -> String {
+    match color {
+        vt100::Color::Default => String::new(),
+        vt100::Color::Idx(n) => {
+            // Map standard 16 ANSI colors to hex. Extended 256 uses the index directly.
+            let hex = match n {
+                0 => "#000000",
+                1 => "#aa0000",
+                2 => "#00aa00",
+                3 => "#aa5500",
+                4 => "#0000aa",
+                5 => "#aa00aa",
+                6 => "#00aaaa",
+                7 => "#aaaaaa",
+                8 => "#555555",
+                9 => "#ff5555",
+                10 => "#55ff55",
+                11 => "#ffff55",
+                12 => "#5555ff",
+                13 => "#ff55ff",
+                14 => "#55ffff",
+                15 => "#ffffff",
+                // 256-color: encode as ansi(N) for the frontend to resolve.
+                _ => return format!("ansi({n})"),
+            };
+            hex.to_string()
+        }
+        vt100::Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
     }
 }
 

@@ -87,6 +87,13 @@ pub enum WebEvent {
     Error {
         message: String,
     },
+    ShellScreen {
+        buffer_id: String,
+        rows: Vec<ShellScreenRow>,
+        cursor_row: u16,
+        cursor_col: u16,
+        cursor_visible: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +106,7 @@ pub enum WebCommand {
     FetchNickList { buffer_id: String },
     FetchMentions,
     RunCommand { buffer_id: String, text: String },
+    ShellInput { buffer_id: String, data: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +162,40 @@ pub struct WireMention {
     pub channel: String,
     pub nick: String,
     pub text: String,
+}
+
+/// Complete shell screen state for rendering in the web frontend.
+#[derive(Debug, Clone)]
+pub struct ShellScreenData {
+    pub buffer_id: String,
+    pub rows: Vec<ShellScreenRow>,
+    pub cursor_row: u16,
+    pub cursor_col: u16,
+    pub cursor_visible: bool,
+}
+
+/// A row of styled text spans for shell screen rendering.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellScreenRow {
+    pub spans: Vec<ShellSpan>,
+}
+
+/// A run of characters sharing the same style in a shell screen row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellSpan {
+    pub text: String,
+    #[serde(default)]
+    pub fg: String,
+    #[serde(default)]
+    pub bg: String,
+    #[serde(default)]
+    pub bold: bool,
+    #[serde(default)]
+    pub italic: bool,
+    #[serde(default)]
+    pub underline: bool,
+    #[serde(default)]
+    pub inverse: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

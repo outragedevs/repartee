@@ -21,6 +21,8 @@ pub struct AppState {
     pub line_height: RwSignal<f32>,
     pub nick_column_width: RwSignal<u32>,
     pub nick_max_length: RwSignal<u32>,
+    /// Shell screen content for the active shell buffer.
+    pub shell_screen: RwSignal<Option<crate::protocol::ShellScreenData>>,
 }
 
 impl AppState {
@@ -46,6 +48,7 @@ impl AppState {
             line_height: RwSignal::new(1.35),
             nick_column_width: RwSignal::new(12),
             nick_max_length: RwSignal::new(9),
+            shell_screen: RwSignal::new(None),
         }
     }
 
@@ -299,6 +302,24 @@ impl AppState {
             WebEvent::Error { message } => {
                 self.error.set(Some(message));
             }
+            WebEvent::ShellScreen {
+                buffer_id,
+                rows,
+                cursor_row,
+                cursor_col,
+                cursor_visible,
+            } => {
+                // Only update if this shell buffer is currently active.
+                if self.active_buffer.get_untracked().as_deref() == Some(buffer_id.as_str()) {
+                    self.shell_screen.set(Some(crate::protocol::ShellScreenData {
+                        buffer_id,
+                        rows,
+                        cursor_row,
+                        cursor_col,
+                        cursor_visible,
+                    }));
+                }
+            }
         }
     }
 
@@ -328,7 +349,8 @@ fn buf_type_order(t: &str) -> u8 {
         "query" => 2,
         "dcc_chat" => 3,
         "special" => 4,
-        _ => 5,
+        "shell" => 5,
+        _ => 6,
     }
 }
 

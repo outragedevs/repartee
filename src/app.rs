@@ -478,6 +478,8 @@ pub struct App {
     shell_rx: mpsc::UnboundedReceiver<crate::shell::ShellEvent>,
     /// Whether keyboard input is routed to the active shell PTY.
     pub shell_input_active: bool,
+    /// Last time a shell screen was broadcast to web clients (for throttling).
+    last_shell_web_broadcast: Instant,
     /// Spell checker (loaded from Hunspell dictionaries).
     pub spellchecker: Option<crate::spellcheck::SpellChecker>,
     /// Receiver for dictionary download events (list/get results).
@@ -698,6 +700,7 @@ impl App {
             shell_mgr,
             shell_rx,
             shell_input_active: false,
+            last_shell_web_broadcast: Instant::now(),
             spellchecker: None,
             dict_rx,
             dict_tx,
@@ -2254,6 +2257,20 @@ impl App {
             WebCommand::RunCommand { buffer_id, text } => {
                 self.web_run_command(&buffer_id, &text);
             }
+            WebCommand::ShellInput { buffer_id, data } => {
+                // Decode base64-encoded input bytes and write to the shell PTY.
+                if let Ok(bytes) = base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &data,
+                )
+                    && let Some(shell_id) = self
+                        .shell_mgr
+                        .session_id_for_buffer(&buffer_id)
+                        .map(ToString::to_string)
+                {
+                    self.shell_mgr.write(&shell_id, &bytes);
+                }
+            }
         }
     }
 
@@ -2378,6 +2395,8 @@ impl App {
         match ev {
             crate::shell::ShellEvent::Output { id, bytes } => {
                 self.shell_mgr.process_output(&id, &bytes);
+                // Broadcast shell screen to web clients (throttled to ~10fps).
+                self.maybe_broadcast_shell_screen(&id);
             }
             crate::shell::ShellEvent::Exited { id, status } => {
                 tracing::info!(shell_id = %id, ?status, "shell process exited");
@@ -2520,6 +2539,38 @@ impl App {
         for id in &ids {
             self.shell_mgr.resize(id, cols, rows);
         }
+    }
+
+    /// Broadcast the shell screen to web clients if enough time has passed (100ms throttle).
+    fn maybe_broadcast_shell_screen(&mut self, shell_id: &str) {
+        // Throttle to ~10fps to avoid flooding the WebSocket.
+        let now = Instant::now();
+        if now.duration_since(self.last_shell_web_broadcast).as_millis() < 100 {
+            return;
+        }
+        self.last_shell_web_broadcast = now;
+
+        let Some(buffer_id) = self
+            .shell_mgr
+            .buffer_id(shell_id)
+            .map(ToString::to_string)
+        else {
+            return;
+        };
+
+        let Some((rows, cursor_row, cursor_col, cursor_visible)) =
+            self.shell_mgr.screen_to_web(shell_id)
+        else {
+            return;
+        };
+
+        self.broadcast_web(crate::web::protocol::WebEvent::ShellScreen {
+            buffer_id,
+            rows,
+            cursor_row,
+            cursor_col,
+            cursor_visible,
+        });
     }
 
     /// Update `shell_input_active` based on the current active buffer type.
