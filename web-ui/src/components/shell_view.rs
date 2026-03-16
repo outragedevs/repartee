@@ -1,4 +1,5 @@
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 use web_sys::KeyboardEvent;
 
 use crate::protocol::{ShellSpan, WebCommand};
@@ -12,6 +13,16 @@ use crate::state::AppState;
 #[component]
 pub fn ShellView() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState not provided");
+    let shell_ref = NodeRef::<leptos::html::Div>::new();
+
+    // Auto-focus the shell terminal div when it mounts or screen updates.
+    Effect::new(move || {
+        let _ = state.shell_screen.get();
+        if let Some(el) = shell_ref.get() {
+            let html_el: &web_sys::HtmlElement = el.as_ref();
+            let _ = html_el.focus();
+        }
+    });
 
     // Handle keyboard input — forward to shell PTY via WebSocket.
     let on_keydown = move |ev: KeyboardEvent| {
@@ -39,6 +50,7 @@ pub fn ShellView() -> impl IntoView {
         <div
             class="shell-terminal"
             tabindex="0"
+            node_ref=shell_ref
             on:keydown=on_keydown
         >
             {move || {

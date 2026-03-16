@@ -247,11 +247,6 @@ impl ShellManager {
                     continue;
                 };
                 let ch = cell.contents();
-                let c = if ch.is_empty() {
-                    ' '
-                } else {
-                    ch.chars().next().unwrap_or(' ')
-                };
 
                 let fg = vt100_color_to_css(cell.fgcolor());
                 let bg = vt100_color_to_css(cell.bgcolor());
@@ -293,7 +288,11 @@ impl ShellManager {
                     cur_inverse = inverse;
                 }
 
-                cur_text.push(c);
+                if ch.is_empty() {
+                    cur_text.push(' ');
+                } else {
+                    cur_text.push_str(ch);
+                }
             }
 
             // Flush final span (trim trailing spaces for compression).

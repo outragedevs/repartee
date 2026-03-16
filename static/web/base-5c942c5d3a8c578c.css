@@ -532,13 +532,16 @@ html, body {
     overflow: auto;
     background: #000;
     color: #aaa;
-    font-family: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', 'Menlo', monospace;
+    font-family: 'Menlo', 'DejaVu Sans Mono', 'Liberation Mono', 'Consolas', 'Courier New', monospace;
     font-size: 13px;
     line-height: 1.2;
     padding: 2px;
     outline: none;
     white-space: pre;
     cursor: text;
+    /* Ensure consistent character cell width for terminal grid alignment. */
+    font-variant-ligatures: none;
+    -webkit-font-smoothing: antialiased;
 }
 
 .shell-terminal:focus {
