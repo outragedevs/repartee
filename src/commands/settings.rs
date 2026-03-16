@@ -634,6 +634,11 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                 );
             }
 
+            // Resize shells when sidebar layout changes (affects chat area dimensions).
+            if path.starts_with("sidepanel.") {
+                app.resize_all_shells();
+            }
+
             // Special handling: reload theme if theme name changed
             if path == "general.theme" {
                 let theme_path = crate::constants::theme_dir().join(format!("{raw}.theme"));

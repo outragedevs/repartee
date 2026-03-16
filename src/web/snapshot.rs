@@ -108,6 +108,7 @@ pub const fn buffer_type_str(bt: &BufferType) -> &'static str {
         BufferType::Query => "query",
         BufferType::DccChat => "dcc_chat",
         BufferType::Special => "special",
+        BufferType::Shell => "shell",
     }
 }
 

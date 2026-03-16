@@ -10,6 +10,16 @@ use crate::theme::hex_to_color;
 // config or theme changes (see `App::recompute_wrap_indent`).
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
+    // Delegate to shell renderer for shell buffers.
+    if app
+        .state
+        .active_buffer()
+        .is_some_and(|b| b.buffer_type == crate::state::buffer::BufferType::Shell)
+    {
+        super::shell_view::render(frame, area, app);
+        return;
+    }
+
     let colors = &app.theme.colors;
     let bg = hex_to_color(&colors.bg).unwrap_or(Color::Reset);
     let fg_muted = hex_to_color(&colors.fg_muted).unwrap_or(Color::DarkGray);

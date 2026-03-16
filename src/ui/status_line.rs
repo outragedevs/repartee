@@ -57,6 +57,19 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             }
             StatusbarItem::ChannelInfo => {
                 if let Some(buf) = active_buf {
+                    // Shell buffers show "shell: label" instead of channel name.
+                    if buf.buffer_type == BufferType::Shell {
+                        let label = app
+                            .shell_mgr
+                            .session_id_for_buffer(&buf.id)
+                            .and_then(|sid| app.shell_mgr.label(sid))
+                            .unwrap_or("shell");
+                        spans.push(Span::styled(
+                            format!("shell: {label}"),
+                            Style::default().fg(accent),
+                        ));
+                        continue;
+                    }
                     let name_color = match buf.buffer_type {
                         BufferType::Channel => accent,
                         BufferType::Query => fg,

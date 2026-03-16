@@ -202,6 +202,8 @@
 <p>This also works across SSH disconnections — start with <code>repartee -d</code> on a remote server, disconnect SSH, reconnect later, and <code>repartee a</code> picks up your session.</p>
 <h2>What does /cycle do?</h2>
 <p><code>/cycle</code> parts and immediately rejoins a channel. Useful for refreshing your nick list, re-triggering auto-op, or clearing stale channel state. Channel keys are preserved. Alias: <code>/rejoin</code>.</p>
+<h2>Can I run shell commands without detaching?</h2>
+<p>Yes! Use <code>/shell</code> to open an embedded terminal inside Repartee. You get a full PTY-backed shell (zsh, bash, vim, htop) in a separate buffer. Press <strong>Ctrl+]</strong> to switch back to IRC input, or click another buffer in the sidebar. Type <code>exit</code> in the shell to close it automatically. You can open multiple shells — they appear under a &quot;Shell&quot; group in the sidebar.</p>
 <h2>How do I report bugs?</h2>
 <p>Open an issue on the <a href="https://github.com/outragedevs/repartee/issues">GitHub repository</a>.</p>
 

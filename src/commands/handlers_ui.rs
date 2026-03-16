@@ -1,8 +1,11 @@
 #![allow(clippy::redundant_pub_crate)]
 
+use std::collections::{HashMap, VecDeque};
+
 use super::helpers::add_local_event;
 use super::types::{C_CMD, C_DIM, C_ERR, C_HEADER, C_OK, C_RST, C_TEXT, CATEGORY_ORDER, divider};
 use crate::app::App;
+use crate::state::buffer::{ActivityLevel, Buffer, BufferType, make_buffer_id};
 
 pub(crate) fn cmd_quit(app: &mut App, args: &[String]) {
     if !args.is_empty() {
@@ -195,6 +198,10 @@ pub(crate) fn cmd_close(app: &mut App, args: &[String]) {
         crate::state::buffer::BufferType::Query | crate::state::buffer::BufferType::DccChat => {
             // DCC chat buffers close like query buffers — just remove locally.
             app.state.remove_buffer(&buf_id);
+        }
+        crate::state::buffer::BufferType::Shell => {
+            // Shell close is handled by App::close_shell_buffer() — wired in Task 5.
+            app.close_shell_buffer(&buf_id);
         }
         crate::state::buffer::BufferType::Server | crate::state::buffer::BufferType::Special => {
             let is_disconnected = app.state.connections.get(&conn_id).is_none_or(|c| {
@@ -569,4 +576,149 @@ const fn statusbar_item_name(item: &crate::config::StatusbarItem) -> &'static st
         StatusbarItem::Lag => "lag",
         StatusbarItem::ActiveWindows => "active_windows",
     }
+}
+
+// === Shell commands ===
+
+pub(crate) fn cmd_shell(app: &mut App, args: &[String]) {
+    let sub = args.first().map_or("open", String::as_str);
+    match sub {
+        "open" | "" => shell_open(app, None),
+        "cmd" => {
+            let command = args.get(1).map(String::as_str);
+            if command.is_none() {
+                add_local_event(app, &format!("{C_ERR}Usage: /shell cmd <command>{C_RST}"));
+                return;
+            }
+            shell_open(app, command);
+        }
+        "close" => {
+            let shell_buf = app.state.active_buffer().and_then(|buf| {
+                if buf.buffer_type == BufferType::Shell {
+                    Some(buf.id.clone())
+                } else {
+                    None
+                }
+            });
+            let Some(buf_id) = shell_buf else {
+                add_local_event(
+                    app,
+                    &format!("{C_ERR}Active buffer is not a shell{C_RST}"),
+                );
+                return;
+            };
+            app.close_shell_buffer(&buf_id);
+            app.ensure_default_status();
+        }
+        "list" => {
+            let sessions: Vec<(String, String)> = app
+                .shell_mgr
+                .list_sessions()
+                .iter()
+                .map(|(id, _, label)| ((*id).to_string(), (*label).to_string()))
+                .collect();
+            if sessions.is_empty() {
+                add_local_event(app, &format!("{C_DIM}No active shell sessions{C_RST}"));
+                return;
+            }
+            add_local_event(app, &format!("{C_HEADER}Shell sessions:{C_RST}"));
+            for (id, label) in &sessions {
+                add_local_event(app, &format!("  {C_CMD}{id}{C_RST} — {C_TEXT}{label}{C_RST}"));
+            }
+        }
+        _ => {
+            // Treat unknown subcommand as a command to run.
+            shell_open(app, Some(sub));
+        }
+    }
+}
+
+/// Open a new shell session and create the associated buffer.
+fn shell_open(app: &mut App, command: Option<&str>) {
+    // Ensure the "Shell" sidebar header exists.
+    app.ensure_shell_connection();
+
+    // Compute actual chat area dimensions (matching the ratatui layout).
+    // Shell buffers never show the nick list panel.
+    let (cols, rows) = crate::ui::layout::compute_chat_area_size(
+        app.cached_term_cols,
+        app.cached_term_rows,
+        app.config.sidepanel.left.visible,
+        app.config.sidepanel.left.width,
+        false, // shell buffers never show nick list
+        0,
+    );
+    tracing::debug!(
+        term_cols = app.cached_term_cols,
+        term_rows = app.cached_term_rows,
+        left_visible = app.config.sidepanel.left.visible,
+        left_width = app.config.sidepanel.left.width,
+        pty_cols = cols,
+        pty_rows = rows,
+        "shell: opening PTY with computed dimensions"
+    );
+
+    // Determine the display label from the command basename.
+    let base_label = command
+        .and_then(|c| {
+            std::path::Path::new(c)
+                .file_name()
+                .and_then(|n| n.to_str())
+        })
+        .map(String::from)
+        .or_else(|| {
+            std::env::var("SHELL").ok().and_then(|s| {
+                std::path::Path::new(&s)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(String::from)
+            })
+        })
+        .unwrap_or_else(|| "shell".to_string());
+
+    let buf_name = find_unique_shell_name(app, &base_label);
+    let buf_id = make_buffer_id(App::SHELL_CONN_ID, &buf_name);
+
+    match app.shell_mgr.open(cols, rows, command, &buf_id) {
+        Ok((_shell_id, _label)) => {
+            app.state.add_buffer(Buffer {
+                id: buf_id.clone(),
+                connection_id: App::SHELL_CONN_ID.to_string(),
+                buffer_type: BufferType::Shell,
+                name: buf_name,
+                messages: VecDeque::new(),
+                activity: ActivityLevel::None,
+                unread_count: 0,
+                last_read: chrono::Utc::now(),
+                topic: None,
+                topic_set_by: None,
+                users: HashMap::new(),
+                modes: None,
+                mode_params: None,
+                list_modes: HashMap::new(),
+                last_speakers: Vec::new(),
+            });
+            app.state.set_active_buffer(&buf_id);
+            app.shell_input_active = true;
+        }
+        Err(e) => {
+            add_local_event(app, &format!("{C_ERR}Failed to open shell: {e}{C_RST}"));
+        }
+    }
+}
+
+/// Find a unique shell buffer name, appending " (2)", " (3)", etc. on collision.
+fn find_unique_shell_name(app: &App, base: &str) -> String {
+    let candidate = make_buffer_id(App::SHELL_CONN_ID, base);
+    if !app.state.buffers.contains_key(&candidate) {
+        return base.to_string();
+    }
+    for n in 2..=100 {
+        let name = format!("{base} ({n})");
+        let candidate = make_buffer_id(App::SHELL_CONN_ID, &name);
+        if !app.state.buffers.contains_key(&candidate) {
+            return name;
+        }
+    }
+    format!("{base} ({})", app.shell_mgr.session_count() + 1)
 }

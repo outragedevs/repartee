@@ -13,6 +13,8 @@ pub enum BufferType {
     /// Direct Client Connection chat — a 1:1 peer-to-peer chat buffer.
     DccChat,
     Special,
+    /// Embedded PTY-backed shell terminal.
+    Shell,
 }
 
 impl BufferType {
@@ -23,6 +25,7 @@ impl BufferType {
             Self::Query => 3,
             Self::DccChat => 4,
             Self::Special => 5,
+            Self::Shell => 6,
         }
     }
 }
@@ -272,5 +275,6 @@ mod tests {
         assert!(BufferType::Channel.sort_group() < BufferType::Query.sort_group());
         assert!(BufferType::Query.sort_group() < BufferType::DccChat.sort_group());
         assert!(BufferType::DccChat.sort_group() < BufferType::Special.sort_group());
+        assert!(BufferType::Special.sort_group() < BufferType::Shell.sort_group());
     }
 }
