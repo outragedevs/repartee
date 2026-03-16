@@ -20,6 +20,8 @@ const GREEDY_COMMANDS: &[&str] = &[
     "set",
     "alias",
     "quote",
+    "shell",
+    "sh",
 ];
 
 pub fn parse_command(input: &str) -> Option<ParsedCommand> {

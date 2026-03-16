@@ -90,6 +90,14 @@ pub enum WebEvent {
     },
     /// Server-side error.
     Error { message: String },
+    /// Shell buffer screen update (full screen as styled rows).
+    ShellScreen {
+        buffer_id: String,
+        rows: Vec<ShellScreenRow>,
+        cursor_row: u16,
+        cursor_col: u16,
+        cursor_visible: bool,
+    },
 }
 
 /// Client → Server commands (JSON over WSS).
@@ -114,6 +122,8 @@ pub enum WebCommand {
     FetchMentions,
     /// Execute a command in the context of a specific buffer.
     RunCommand { buffer_id: String, text: String },
+    /// Raw keyboard input for a shell buffer (base64-encoded bytes).
+    ShellInput { buffer_id: String, data: String },
 }
 
 /// Buffer metadata sent in `SyncInit` and `BufferCreated`.
@@ -185,6 +195,38 @@ pub enum NickEventKind {
     NickChange,
     ModeChange,
     AwayChange,
+}
+
+/// A row of styled text spans for shell screen rendering.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellScreenRow {
+    pub spans: Vec<ShellSpan>,
+}
+
+/// A run of characters sharing the same style in a shell screen row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[expect(clippy::struct_excessive_bools, reason = "terminal cell attributes are inherently boolean flags")]
+pub struct ShellSpan {
+    pub text: String,
+    /// CSS color string (e.g. "#ff0000" or "").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub fg: String,
+    /// CSS background color string.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub bg: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bold: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub italic: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub underline: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub inverse: bool,
+}
+
+#[expect(clippy::trivially_copy_pass_by_ref, reason = "serde skip_serializing_if requires &T")]
+const fn is_false(b: &bool) -> bool {
+    !(*b)
 }
 
 #[cfg(test)]

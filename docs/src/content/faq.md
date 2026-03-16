@@ -93,6 +93,10 @@ This also works across SSH disconnections — start with `repartee -d` on a remo
 
 `/cycle` parts and immediately rejoins a channel. Useful for refreshing your nick list, re-triggering auto-op, or clearing stale channel state. Channel keys are preserved. Alias: `/rejoin`.
 
+## Can I run shell commands without detaching?
+
+Yes! Use `/shell` to open an embedded terminal inside Repartee. You get a full PTY-backed shell (zsh, bash, vim, htop) in a separate buffer. Press **Ctrl+]** to switch back to IRC input, or click another buffer in the sidebar. Type `exit` in the shell to close it automatically. You can open multiple shells — they appear under a "Shell" group in the sidebar.
+
 ## How do I report bugs?
 
 Open an issue on the [GitHub repository](https://github.com/outragedevs/repartee/issues).

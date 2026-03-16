@@ -65,6 +65,7 @@ pub fn InputLine() -> impl IntoView {
     });
 
     // Global keydown listener — focus textarea when user types anywhere.
+    // Skipped when active buffer is a shell (shell_view captures input instead).
     let keydown_registered = StoredValue::new(false);
     Effect::new(move || {
         if keydown_registered.get_value() {
@@ -74,6 +75,17 @@ pub fn InputLine() -> impl IntoView {
         let cb = wasm_bindgen::prelude::Closure::<dyn Fn(web_sys::KeyboardEvent)>::new(
             move |ev: web_sys::KeyboardEvent| {
                 if ev.ctrl_key() || ev.alt_key() || ev.meta_key() {
+                    return;
+                }
+                // Don't steal focus from shell terminal.
+                let is_shell = state.active_buffer.get_untracked()
+                    .and_then(|id| {
+                        state.buffers.get_untracked().iter()
+                            .find(|b| b.id == id)
+                            .map(|b| b.buffer_type == "shell")
+                    })
+                    .unwrap_or(false);
+                if is_shell {
                     return;
                 }
                 let key = ev.key();

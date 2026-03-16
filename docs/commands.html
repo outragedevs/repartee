@@ -1397,6 +1397,53 @@ channel operator to use this command.</p>
 <h2>See Also</h2>
 <p>/devoice, /op, /mode</p>
 </div>
+<h2 id="cat-other">Other</h2>
+<div class="command-entry" data-command="shell" data-category="Other">
+<h1>/shell</h1>
+<h2>Syntax</h2>
+<pre><code>/shell [open|cmd|close|list] [command]
+</code></pre>
+<h2>Aliases</h2>
+<pre><code>/sh
+</code></pre>
+<h2>Description</h2>
+<p>Open an embedded PTY-backed shell terminal inside Repartee. You get a
+real terminal experience (zsh, bash, vim, htop) without leaving the IRC
+client.</p>
+<p>Shell buffers appear under a &quot;Shell&quot; group in the sidebar. You can open
+multiple shells and switch between them with Alt+N.</p>
+<h3>Input Mode</h3>
+<p>When a shell buffer is active, all keyboard input is forwarded to the
+shell process. To return to IRC command input, press <strong>Ctrl+]</strong> (the
+telnet escape convention).</p>
+<p><strong>Alt+digit</strong> and <strong>Alt+Left/Right</strong> still work for buffer switching
+even while in shell input mode. Clicking a buffer in the sidebar also
+switches away from the shell.</p>
+<h2>Subcommands</h2>
+<ul>
+<li><code>/shell</code> or <code>/shell open</code> — Open a new shell using <code>$SHELL</code></li>
+<li><code>/shell cmd &lt;command&gt;</code> — Open a shell running a specific command (e.g. <code>/shell cmd htop</code>)</li>
+<li><code>/shell close</code> — Close the currently active shell buffer (kills the process)</li>
+<li><code>/shell list</code> — List all active shell sessions</li>
+</ul>
+<p>If the subcommand is not recognized, it is treated as a command to run
+(e.g. <code>/shell htop</code> is equivalent to <code>/shell cmd htop</code>).</p>
+<h2>Examples</h2>
+<pre><code>/shell
+/sh cmd htop
+/shell cmd vim /etc/hosts
+/shell close
+/shell list
+</code></pre>
+<h2>Notes</h2>
+<ul>
+<li>When you type <code>exit</code> in a shell, the buffer is automatically closed.</li>
+<li>Shell buffers are not logged to the message database.</li>
+<li>The shell PTY is resized automatically when the terminal window changes size.</li>
+</ul>
+<h2>See Also</h2>
+<p>/close</p>
+</div>
 <h2 id="cat-scripts">Scripts</h2>
 <div class="command-entry" data-command="script" data-category="Scripts">
 <h1>/script</h1>

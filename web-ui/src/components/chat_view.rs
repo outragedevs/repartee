@@ -8,6 +8,15 @@ use crate::state::AppState;
 pub fn ChatView() -> impl IntoView {
     let state = use_context::<AppState>().unwrap();
 
+    // Check if the active buffer is a shell — delegate to ShellView.
+    let is_shell = move || {
+        let active_id = state.active_buffer.get()?;
+        let bufs = state.buffers.get();
+        bufs.iter()
+            .find(|b| b.id == active_id)
+            .map(|b| b.buffer_type == "shell")
+    };
+
     let messages = move || {
         let active_id = state.active_buffer.get()?;
         let msgs = state.messages.get();
@@ -52,6 +61,11 @@ pub fn ChatView() -> impl IntoView {
 
     view! {
         <div class="chat-area">
+            {move || {
+                if is_shell() == Some(true) {
+                    return view! { <super::shell_view::ShellView /> }.into_any();
+                }
+                view! {
             <div class="chat-messages" node_ref=chat_ref>
                 {move || {
                     let nick_self = our_nick();
@@ -144,6 +158,8 @@ pub fn ChatView() -> impl IntoView {
                     }).collect::<Vec<_>>()
                 }}
             </div>
+                }.into_any()
+            }}
         </div>
     }
 }

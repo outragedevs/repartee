@@ -7,6 +7,7 @@ mod image_preview;
 mod irc;
 mod scripting;
 mod session;
+mod shell;
 mod spellcheck;
 mod state;
 mod storage;

@@ -13,7 +13,8 @@ use super::handlers_irc::{
     cmd_uninvex, cmd_unreop, cmd_version, cmd_voice, cmd_who, cmd_whois, cmd_whowas, cmd_wii,
 };
 use super::handlers_ui::{
-    cmd_alias, cmd_clear, cmd_close, cmd_detach, cmd_help, cmd_items, cmd_quit, cmd_unalias,
+    cmd_alias, cmd_clear, cmd_close, cmd_detach, cmd_help, cmd_items, cmd_quit, cmd_shell,
+    cmd_unalias,
 };
 use super::types::{CommandCategory, CommandDef};
 
@@ -617,6 +618,16 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
                 handler: cmd_image,
                 description: "Image cache management",
                 aliases: &["img"],
+                category: CommandCategory::Other,
+            },
+        ),
+        // === Shell ===
+        (
+            "shell",
+            CommandDef {
+                handler: cmd_shell,
+                description: "Open an embedded terminal",
+                aliases: &["sh"],
                 category: CommandCategory::Other,
             },
         ),

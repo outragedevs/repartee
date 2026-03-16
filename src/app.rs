@@ -472,6 +472,14 @@ pub struct App {
     pub dcc: crate::dcc::DccManager,
     /// Receiver for events from DCC async tasks.
     dcc_rx: mpsc::UnboundedReceiver<crate::dcc::DccEvent>,
+    /// Embedded shell terminal manager (PTY sessions).
+    pub shell_mgr: crate::shell::ShellManager,
+    /// Receiver for events from shell PTY reader threads.
+    shell_rx: mpsc::UnboundedReceiver<crate::shell::ShellEvent>,
+    /// Whether keyboard input is routed to the active shell PTY.
+    pub shell_input_active: bool,
+    /// Last time a shell screen was broadcast to web clients (for throttling).
+    last_shell_web_broadcast: Instant,
     /// Spell checker (loaded from Hunspell dictionaries).
     pub spellchecker: Option<crate::spellcheck::SpellChecker>,
     /// Receiver for dictionary download events (list/get results).
@@ -601,6 +609,9 @@ impl App {
         dcc.autochat_masks.clone_from(&config.dcc.autochat_masks);
         dcc.max_connections = config.dcc.max_connections;
 
+        // --- Shell subsystem ---
+        let (shell_mgr, shell_rx) = crate::shell::ShellManager::new();
+
         // --- Scripting system ---
         let (script_action_tx, script_action_rx) = mpsc::unbounded_channel();
         let script_state = Arc::new(std::sync::RwLock::new(state.script_snapshot()));
@@ -686,6 +697,10 @@ impl App {
             cached_term_rows: 24,
             dcc,
             dcc_rx,
+            shell_mgr,
+            shell_rx,
+            shell_input_active: false,
+            last_shell_web_broadcast: Instant::now(),
             spellchecker: None,
             dict_rx,
             dict_tx,
@@ -1652,6 +1667,7 @@ impl App {
                             let _ = terminal.resize(ratatui::layout::Rect::new(0, 0, cols, rows));
                             self.needs_full_redraw = true;
                         }
+                        self.resize_all_shells();
                     }
                     Some(crate::session::protocol::ShimMessage::Detach) => {
                         self.should_detach = true;
@@ -1706,6 +1722,11 @@ impl App {
                     if let Some(ev) = dcc_ev {
                         self.handle_dcc_event(ev);
                         self.drain_pending_web_events();
+                    }
+                },
+                shell_ev = self.shell_rx.recv() => {
+                    if let Some(ev) = shell_ev {
+                        self.handle_shell_event(ev);
                     }
                 },
                 dict_ev = self.dict_rx.recv() => {
@@ -1802,6 +1823,9 @@ impl App {
         // Notify shim of quit and stop terminal reader.
         self.notify_shim_quit();
         self.stop_term_reader();
+
+        // Kill all shell processes.
+        self.shell_mgr.kill_all();
 
         // Send QUIT to all connected servers (once — cmd_quit defers to here)
         let default_quit = crate::constants::default_quit_message();
@@ -2145,6 +2169,14 @@ impl App {
                 }
                 crate::web::protocol::WebEvent::ActiveBufferChanged { buffer_id } => {
                     tracing::debug!(%buffer_id, "broadcasting ActiveBufferChanged");
+                    // Send shell screen immediately when switching to a shell buffer.
+                    if let Some(shell_id) = self
+                        .shell_mgr
+                        .session_id_for_buffer(&buffer_id)
+                        .map(ToString::to_string)
+                    {
+                        self.force_broadcast_shell_screen(&shell_id);
+                    }
                 }
                 _ => {}
             }
@@ -2201,6 +2233,15 @@ impl App {
             WebCommand::SwitchBuffer { buffer_id } => {
                 // Sync active buffer: web ↔ TUI share the same active buffer.
                 self.state.set_active_buffer(&buffer_id);
+                self.update_shell_input_state();
+                // Send current shell screen to web client immediately.
+                if let Some(shell_id) = self
+                    .shell_mgr
+                    .session_id_for_buffer(&buffer_id)
+                    .map(ToString::to_string)
+                {
+                    self.force_broadcast_shell_screen(&shell_id);
+                }
             }
             WebCommand::MarkRead { buffer_id, .. } => {
                 // TODO: use `up_to` for partial mark-read. Currently resets fully.
@@ -2232,6 +2273,20 @@ impl App {
             }
             WebCommand::RunCommand { buffer_id, text } => {
                 self.web_run_command(&buffer_id, &text);
+            }
+            WebCommand::ShellInput { buffer_id, data } => {
+                // Decode base64-encoded input bytes and write to the shell PTY.
+                if let Ok(bytes) = base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &data,
+                )
+                    && let Some(shell_id) = self
+                        .shell_mgr
+                        .session_id_for_buffer(&buffer_id)
+                        .map(ToString::to_string)
+                {
+                    self.shell_mgr.write(&shell_id, &bytes);
+                }
             }
         }
     }
@@ -2345,6 +2400,311 @@ impl App {
                 session_id: Some(session_id.to_string()),
             });
         }
+    }
+
+    // ── Shell event handling ─────────────────────────────────────────────────
+
+    /// Connection ID used for the synthetic "Shell" sidebar group.
+    pub const SHELL_CONN_ID: &'static str = "_shell";
+
+    /// Handle an event from a shell PTY reader thread.
+    fn handle_shell_event(&mut self, ev: crate::shell::ShellEvent) {
+        match ev {
+            crate::shell::ShellEvent::Output { id, bytes } => {
+                self.shell_mgr.process_output(&id, &bytes);
+                // Broadcast shell screen to web clients (throttled to ~10fps).
+                self.maybe_broadcast_shell_screen(&id);
+            }
+            crate::shell::ShellEvent::Exited { id, status } => {
+                tracing::info!(shell_id = %id, ?status, "shell process exited");
+                // Find and remove the buffer associated with this shell.
+                if let Some(buffer_id) = self.shell_mgr.buffer_id(&id).map(ToString::to_string) {
+                    self.shell_mgr.close(&id);
+                    self.state.remove_buffer(&buffer_id);
+                    self.maybe_remove_shell_connection();
+                    // If we were viewing this shell, shell_input_active should be off.
+                    if self
+                        .state
+                        .active_buffer()
+                        .is_none_or(|b| b.buffer_type != BufferType::Shell)
+                    {
+                        self.shell_input_active = false;
+                    }
+                } else {
+                    self.shell_mgr.close(&id);
+                }
+            }
+        }
+    }
+
+    /// Close a shell buffer (called from /close command handler).
+    pub fn close_shell_buffer(&mut self, buf_id: &str) {
+        if let Some(sid) = self
+            .shell_mgr
+            .session_id_for_buffer(buf_id)
+            .map(ToString::to_string)
+        {
+            self.shell_mgr.close(&sid);
+        }
+        self.state.remove_buffer(buf_id);
+        self.maybe_remove_shell_connection();
+    }
+
+    /// Add the synthetic "Shell" connection header if not already present.
+    pub fn ensure_shell_connection(&mut self) {
+        if self.state.connections.contains_key(Self::SHELL_CONN_ID) {
+            return;
+        }
+        self.state.add_connection(Connection {
+            id: Self::SHELL_CONN_ID.to_string(),
+            label: "Shell".to_string(),
+            status: ConnectionStatus::Connected,
+            nick: String::new(),
+            user_modes: String::new(),
+            isupport: HashMap::new(),
+            isupport_parsed: crate::irc::isupport::Isupport::new(),
+            error: None,
+            lag: None,
+            lag_pending: false,
+            reconnect_attempts: 0,
+            reconnect_delay_secs: 0,
+            next_reconnect: None,
+            should_reconnect: false,
+            joined_channels: Vec::new(),
+            origin_config: config::ServerConfig {
+                label: String::new(),
+                address: String::new(),
+                port: 0,
+                tls: false,
+                tls_verify: true,
+                autoconnect: false,
+                channels: vec![],
+                nick: None,
+                username: None,
+                realname: None,
+                password: None,
+                sasl_user: None,
+                sasl_pass: None,
+                bind_ip: None,
+                encoding: None,
+                auto_reconnect: Some(false),
+                reconnect_delay: None,
+                reconnect_max_retries: None,
+                autosendcmd: None,
+                sasl_mechanism: None,
+                client_cert_path: None,
+            },
+            local_ip: None,
+            enabled_caps: HashSet::new(),
+            who_token_counter: 0,
+            silent_who_channels: HashSet::new(),
+        });
+        // Add a Server-type buffer so the sidebar header renders.
+        let header_id = make_buffer_id(Self::SHELL_CONN_ID, "Shell");
+        self.state.add_buffer(Buffer {
+            id: header_id,
+            connection_id: Self::SHELL_CONN_ID.to_string(),
+            buffer_type: BufferType::Server,
+            name: "Shell".to_string(),
+            messages: VecDeque::new(),
+            activity: ActivityLevel::None,
+            unread_count: 0,
+            last_read: chrono::Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
+        });
+    }
+
+    /// Remove the synthetic "Shell" connection if no shell sessions remain.
+    pub fn maybe_remove_shell_connection(&mut self) {
+        if self.shell_mgr.session_count() > 0 {
+            return;
+        }
+        // Remove the shell header buffer.
+        let header_id = make_buffer_id(Self::SHELL_CONN_ID, "Shell");
+        self.state.remove_buffer(&header_id);
+        self.state.connections.remove(Self::SHELL_CONN_ID);
+        self.shell_input_active = false;
+    }
+
+    /// Resize all active shell PTYs to match the current chat area dimensions.
+    /// Uses the layout computation to account for sidebar visibility and widths.
+    pub fn resize_all_shells(&mut self) {
+        if self.shell_mgr.session_count() == 0 {
+            return;
+        }
+        // Shell buffers never show the nick list panel.
+        let (cols, rows) = crate::ui::layout::compute_chat_area_size(
+            self.cached_term_cols,
+            self.cached_term_rows,
+            self.config.sidepanel.left.visible,
+            self.config.sidepanel.left.width,
+            false,
+            0,
+        );
+        let ids: Vec<String> = self
+            .shell_mgr
+            .list_sessions()
+            .iter()
+            .map(|(id, _, _)| (*id).to_string())
+            .collect();
+        for id in &ids {
+            self.shell_mgr.resize(id, cols, rows);
+        }
+    }
+
+    /// Broadcast the shell screen to web clients if enough time has passed (100ms throttle).
+    fn maybe_broadcast_shell_screen(&mut self, shell_id: &str) {
+        // Throttle to ~10fps to avoid flooding the WebSocket.
+        let now = Instant::now();
+        if now.duration_since(self.last_shell_web_broadcast).as_millis() < 100 {
+            return;
+        }
+        self.last_shell_web_broadcast = now;
+
+        let Some(buffer_id) = self
+            .shell_mgr
+            .buffer_id(shell_id)
+            .map(ToString::to_string)
+        else {
+            return;
+        };
+
+        let Some((rows, cursor_row, cursor_col, cursor_visible)) =
+            self.shell_mgr.screen_to_web(shell_id)
+        else {
+            return;
+        };
+
+        self.broadcast_web(crate::web::protocol::WebEvent::ShellScreen {
+            buffer_id,
+            rows,
+            cursor_row,
+            cursor_col,
+            cursor_visible,
+        });
+    }
+
+    /// Broadcast the shell screen immediately (no throttle). Used when web client
+    /// switches to a shell buffer and needs the initial screen state.
+    fn force_broadcast_shell_screen(&mut self, shell_id: &str) {
+        let Some(buffer_id) = self
+            .shell_mgr
+            .buffer_id(shell_id)
+            .map(ToString::to_string)
+        else {
+            return;
+        };
+        let Some((rows, cursor_row, cursor_col, cursor_visible)) =
+            self.shell_mgr.screen_to_web(shell_id)
+        else {
+            return;
+        };
+        self.broadcast_web(crate::web::protocol::WebEvent::ShellScreen {
+            buffer_id,
+            rows,
+            cursor_row,
+            cursor_col,
+            cursor_visible,
+        });
+    }
+
+    /// Update `shell_input_active` based on the current active buffer type.
+    /// Called after buffer switches to auto-enable/disable shell input mode.
+    pub fn update_shell_input_state(&mut self) {
+        self.shell_input_active = self
+            .state
+            .active_buffer()
+            .is_some_and(|b| b.buffer_type == BufferType::Shell);
+    }
+
+    /// Serialize a crossterm `KeyEvent` to terminal bytes and write to the active shell PTY.
+    fn forward_key_to_shell(&mut self, key: event::KeyEvent) {
+        let Some(buf) = self.state.active_buffer() else {
+            return;
+        };
+        let buf_id = buf.id.clone();
+        let Some(shell_id) = self
+            .shell_mgr
+            .session_id_for_buffer(&buf_id)
+            .map(ToString::to_string)
+        else {
+            return;
+        };
+
+        // Check if the shell has enabled application cursor mode (DECSET ?1).
+        let app_cursor = self
+            .shell_mgr
+            .screen(&shell_id)
+            .is_some_and(vt100::Screen::application_cursor);
+
+        let bytes = key_event_to_bytes(&key, app_cursor);
+        if !bytes.is_empty() {
+            self.shell_mgr.write(&shell_id, &bytes);
+        }
+    }
+
+    /// Forward a mouse event to the active shell PTY using SGR (mode 1006) encoding.
+    /// Coordinates are translated to be relative to the shell render area.
+    fn forward_mouse_to_shell(
+        &mut self,
+        mouse: event::MouseEvent,
+        regions: &UiRegions,
+    ) {
+        let Some(chat_area) = regions.chat_area else {
+            return;
+        };
+        let Some(buf) = self.state.active_buffer() else {
+            return;
+        };
+        let buf_id = buf.id.clone();
+        let Some(shell_id) = self
+            .shell_mgr
+            .session_id_for_buffer(&buf_id)
+            .map(ToString::to_string)
+        else {
+            return;
+        };
+
+        // Check if the shell has enabled mouse tracking.
+        let Some(screen) = self.shell_mgr.screen(&shell_id) else {
+            return;
+        };
+        if matches!(
+            screen.mouse_protocol_mode(),
+            vt100::MouseProtocolMode::None
+        ) {
+            return;
+        }
+
+        // Translate to shell-relative coordinates (1-based for SGR).
+        let sx = mouse.column.saturating_sub(chat_area.x) + 1;
+        let sy = mouse.row.saturating_sub(chat_area.y) + 1;
+
+        // SGR encoding: CSI < button ; x ; y M/m
+        let (button, suffix) = match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => (0u8, b'M'),
+            MouseEventKind::Down(MouseButton::Right) => (2, b'M'),
+            MouseEventKind::Down(MouseButton::Middle) => (1, b'M'),
+            MouseEventKind::Up(MouseButton::Left) => (0, b'm'),
+            MouseEventKind::Up(MouseButton::Right) => (2, b'm'),
+            MouseEventKind::Up(MouseButton::Middle) => (1, b'm'),
+            MouseEventKind::ScrollUp => (64, b'M'),
+            MouseEventKind::ScrollDown => (65, b'M'),
+            MouseEventKind::Drag(MouseButton::Left) => (32, b'M'),
+            MouseEventKind::Drag(MouseButton::Right) => (34, b'M'),
+            MouseEventKind::Drag(MouseButton::Middle) => (33, b'M'),
+            MouseEventKind::Moved => (35, b'M'),
+            _ => return,
+        };
+
+        let seq = format!("\x1b[<{button};{sx};{sy}{}", suffix as char);
+        self.shell_mgr.write(&shell_id, seq.as_bytes());
     }
 
     // ── DCC event handling ───────────────────────────────────────────────────
@@ -3659,6 +4019,7 @@ impl App {
             Event::Resize(cols, rows) => {
                 self.cached_term_cols = cols;
                 self.cached_term_rows = rows;
+                self.resize_all_shells();
             }
             _ => {}
         }
@@ -3704,6 +4065,7 @@ impl App {
                 self.reset_sidepanel_scrolls();
             }
         }
+        self.update_shell_input_state();
     }
 
     /// Reset sidepanel scroll offsets (e.g. on buffer switch).
@@ -3715,6 +4077,45 @@ impl App {
 
     #[allow(clippy::too_many_lines)]
     fn handle_key(&mut self, key: event::KeyEvent) {
+        // Shell input mode: forward most keys to the active shell PTY.
+        if self.shell_input_active {
+            // Ctrl+] exits shell input mode (telnet convention).
+            if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char(']') {
+                self.shell_input_active = false;
+                return;
+            }
+            // Alt+digit / Alt+arrow switches buffers even in shell mode.
+            if key.modifiers.contains(KeyModifiers::ALT) {
+                if let KeyCode::Char(c) = key.code
+                    && c.is_ascii_digit()
+                {
+                    let n = c.to_digit(10).unwrap_or(0) as usize;
+                    self.switch_to_buffer_num(n);
+                    return;
+                }
+                match key.code {
+                    KeyCode::Left => {
+                        self.state.prev_buffer();
+                        self.scroll_offset = 0;
+                        self.reset_sidepanel_scrolls();
+                        self.update_shell_input_state();
+                        return;
+                    }
+                    KeyCode::Right => {
+                        self.state.next_buffer();
+                        self.scroll_offset = 0;
+                        self.reset_sidepanel_scrolls();
+                        self.update_shell_input_state();
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            // Forward everything else to the shell PTY.
+            self.forward_key_to_shell(key);
+            return;
+        }
+
         // Check for ESC+key combos (ESC pressed recently, now a follow-up key)
         let esc_active = if key.code == KeyCode::Esc {
             // Don't consume ESC prefix on another ESC press
@@ -3871,6 +4272,30 @@ impl App {
     }
 
     fn handle_paste(&mut self, text: &str) {
+        // In shell input mode, forward paste directly to the PTY.
+        if self.shell_input_active
+            && let Some(buf) = self.state.active_buffer()
+        {
+            let buf_id = buf.id.clone();
+            if let Some(shell_id) =
+                self.shell_mgr.session_id_for_buffer(&buf_id).map(ToString::to_string)
+            {
+                // Check if shell enabled bracketed paste mode.
+                let bracketed = self
+                    .shell_mgr
+                    .screen(&shell_id)
+                    .is_some_and(vt100::Screen::bracketed_paste);
+                if bracketed {
+                    self.shell_mgr.write(&shell_id, b"\x1b[200~");
+                }
+                self.shell_mgr.write(&shell_id, text.as_bytes());
+                if bracketed {
+                    self.shell_mgr.write(&shell_id, b"\x1b[201~");
+                }
+                return;
+            }
+        }
+
         let lines: Vec<&str> = text.split('\n').collect();
         let non_empty: Vec<&str> = lines
             .iter()
@@ -3920,6 +4345,15 @@ impl App {
             return;
         };
         let pos = Position::new(mouse.column, mouse.row);
+
+        // Forward mouse events to the shell PTY when in shell input mode
+        // and the mouse is within the chat (shell render) area.
+        if self.shell_input_active
+            && regions.chat_area.is_some_and(|r| r.contains(pos))
+        {
+            self.forward_mouse_to_shell(mouse, &regions);
+            return;
+        }
 
         match mouse.kind {
             MouseEventKind::ScrollUp => {
@@ -4017,6 +4451,7 @@ impl App {
                         self.state.set_active_buffer(id);
                         self.scroll_offset = 0;
                         self.nick_list_scroll = 0;
+                        self.update_shell_input_state();
                     }
                     return;
                 }
@@ -4030,6 +4465,7 @@ impl App {
                 self.state.set_active_buffer(id);
                 self.scroll_offset = 0;
                 self.nick_list_scroll = 0;
+                self.update_shell_input_state();
                 return;
             }
             row += 1;
@@ -5398,6 +5834,79 @@ fn write_iterm2_tmux_direct(
     let _ = out.flush();
 }
 
+/// Serialize a crossterm `KeyEvent` to terminal escape bytes for PTY input.
+///
+/// `app_cursor` indicates whether the shell has enabled application cursor mode
+/// (DECSET ?1). When true, arrow keys use SS3 prefix (`\x1b O`) instead of
+/// CSI prefix (`\x1b [`), which programs like vim/less expect.
+fn key_event_to_bytes(key: &event::KeyEvent, app_cursor: bool) -> Vec<u8> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    // SS3 prefix for application cursor mode, CSI for normal mode.
+    let arrow_prefix: &[u8] = if app_cursor { b"\x1bO" } else { b"\x1b[" };
+
+    match key.code {
+        KeyCode::Char(c) if ctrl => {
+            // Ctrl+letter → control character (0x01..0x1A).
+            let byte = (c.to_ascii_lowercase() as u8).wrapping_sub(b'a').wrapping_add(1);
+            if alt {
+                vec![0x1b, byte]
+            } else {
+                vec![byte]
+            }
+        }
+        KeyCode::Char(c) => {
+            // Alt+char → ESC prefix (standard terminal encoding for meta key).
+            let mut result = Vec::with_capacity(if alt { 5 } else { 4 });
+            if alt {
+                result.push(0x1b);
+            }
+            let mut buf = [0u8; 4];
+            let s = c.encode_utf8(&mut buf);
+            result.extend_from_slice(s.as_bytes());
+            result
+        }
+        KeyCode::Enter => vec![b'\r'],
+        KeyCode::Backspace => vec![0x7f],
+        KeyCode::Tab => vec![b'\t'],
+        KeyCode::BackTab => vec![0x1b, b'[', b'Z'],
+        KeyCode::Esc => vec![0x1b],
+        KeyCode::Up => [arrow_prefix, b"A"].concat(),
+        KeyCode::Down => [arrow_prefix, b"B"].concat(),
+        KeyCode::Right => [arrow_prefix, b"C"].concat(),
+        KeyCode::Left => [arrow_prefix, b"D"].concat(),
+        KeyCode::Home => [arrow_prefix, b"H"].concat(),
+        KeyCode::End => [arrow_prefix, b"F"].concat(),
+        KeyCode::PageUp => vec![0x1b, b'[', b'5', b'~'],
+        KeyCode::PageDown => vec![0x1b, b'[', b'6', b'~'],
+        KeyCode::Insert => vec![0x1b, b'[', b'2', b'~'],
+        KeyCode::Delete => vec![0x1b, b'[', b'3', b'~'],
+        KeyCode::F(1) => vec![0x1b, b'O', b'P'],
+        KeyCode::F(2) => vec![0x1b, b'O', b'Q'],
+        KeyCode::F(3) => vec![0x1b, b'O', b'R'],
+        KeyCode::F(4) => vec![0x1b, b'O', b'S'],
+        KeyCode::F(n @ 5..=12) => {
+            // F5-F12 use CSI nn ~ encoding.
+            let code = match n {
+                5 => b"15",
+                6 => b"17",
+                7 => b"18",
+                8 => b"19",
+                9 => b"20",
+                10 => b"21",
+                11 => b"23",
+                12 => b"24",
+                _ => return vec![],
+            };
+            let mut seq = vec![0x1b, b'['];
+            seq.extend_from_slice(code.as_slice());
+            seq.push(b'~');
+            seq
+        }
+        _ => vec![],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5676,5 +6185,156 @@ mod tests {
             "",
         );
         assert_eq!(result, "/msg nick");
+    }
+
+    // ── key_event_to_bytes tests ──────────────────────────────────────────
+
+    fn make_key(code: KeyCode, mods: KeyModifiers) -> event::KeyEvent {
+        event::KeyEvent::new(code, mods)
+    }
+
+    #[test]
+    fn key_to_bytes_char() {
+        assert_eq!(
+            key_event_to_bytes(&make_key(KeyCode::Char('a'), KeyModifiers::NONE), false),
+            b"a"
+        );
+    }
+
+    #[test]
+    fn key_to_bytes_enter() {
+        assert_eq!(
+            key_event_to_bytes(&make_key(KeyCode::Enter, KeyModifiers::NONE), false),
+            b"\r"
+        );
+    }
+
+    #[test]
+    fn key_to_bytes_backspace() {
+        assert_eq!(
+            key_event_to_bytes(&make_key(KeyCode::Backspace, KeyModifiers::NONE), false),
+            vec![0x7f]
+        );
+    }
+
+    #[test]
+    fn key_to_bytes_ctrl_c() {
+        assert_eq!(
+            key_event_to_bytes(&make_key(KeyCode::Char('c'), KeyModifiers::CONTROL), false),
+            vec![0x03]
+        );
+    }
+
+    #[test]
+    fn key_to_bytes_ctrl_d() {
+        assert_eq!(
+            key_event_to_bytes(&make_key(KeyCode::Char('d'), KeyModifiers::CONTROL), false),
+            vec![0x04]
+        );
+    }
+
+    #[test]
+    fn key_to_bytes_arrow_up() {
+        assert_eq!(
+            key_event_to_bytes(&make_key(KeyCode::Up, KeyModifiers::NONE), false),
+            vec![0x1b, b'[', b'A']
+        );
+    }
+
+    #[test]
+    fn key_to_bytes_arrow_down() {
+        assert_eq!(
+            key_event_to_bytes(&make_key(KeyCode::Down, KeyModifiers::NONE), false),
+            vec![0x1b, b'[', b'B']
+        );
+    }
+
+    #[test]
+    fn key_to_bytes_tab() {
+        assert_eq!(
+            key_event_to_bytes(&make_key(KeyCode::Tab, KeyModifiers::NONE), false),
+            b"\t"
+        );
+    }
+
+    #[test]
+    fn key_to_bytes_esc() {
+        assert_eq!(
+            key_event_to_bytes(&make_key(KeyCode::Esc, KeyModifiers::NONE), false),
+            vec![0x1b]
+        );
+    }
+
+    #[test]
+    fn key_to_bytes_f1() {
+        assert_eq!(
+            key_event_to_bytes(&make_key(KeyCode::F(1), KeyModifiers::NONE), false),
+            vec![0x1b, b'O', b'P']
+        );
+    }
+
+    #[test]
+    fn key_to_bytes_f5() {
+        assert_eq!(
+            key_event_to_bytes(&make_key(KeyCode::F(5), KeyModifiers::NONE), false),
+            vec![0x1b, b'[', b'1', b'5', b'~']
+        );
+    }
+
+    #[test]
+    fn key_to_bytes_page_up() {
+        assert_eq!(
+            key_event_to_bytes(&make_key(KeyCode::PageUp, KeyModifiers::NONE), false),
+            vec![0x1b, b'[', b'5', b'~']
+        );
+    }
+
+    #[test]
+    fn key_to_bytes_home() {
+        assert_eq!(
+            key_event_to_bytes(&make_key(KeyCode::Home, KeyModifiers::NONE), false),
+            vec![0x1b, b'[', b'H']
+        );
+    }
+
+    #[test]
+    fn key_to_bytes_arrow_up_app_cursor_mode() {
+        // Application cursor mode sends SS3 prefix instead of CSI.
+        assert_eq!(
+            key_event_to_bytes(&make_key(KeyCode::Up, KeyModifiers::NONE), true),
+            vec![0x1b, b'O', b'A']
+        );
+    }
+
+    #[test]
+    fn key_to_bytes_home_app_cursor_mode() {
+        assert_eq!(
+            key_event_to_bytes(&make_key(KeyCode::Home, KeyModifiers::NONE), true),
+            vec![0x1b, b'O', b'H']
+        );
+    }
+
+    #[test]
+    fn key_to_bytes_alt_char() {
+        // Alt+x → ESC followed by 'x' (standard meta encoding).
+        assert_eq!(
+            key_event_to_bytes(&make_key(KeyCode::Char('x'), KeyModifiers::ALT), false),
+            vec![0x1b, b'x']
+        );
+    }
+
+    #[test]
+    fn key_to_bytes_alt_ctrl_c() {
+        // Alt+Ctrl+C → ESC followed by 0x03.
+        assert_eq!(
+            key_event_to_bytes(
+                &make_key(
+                    KeyCode::Char('c'),
+                    KeyModifiers::ALT | KeyModifiers::CONTROL
+                ),
+                false
+            ),
+            vec![0x1b, 0x03]
+        );
     }
 }
