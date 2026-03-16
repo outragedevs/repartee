@@ -36,6 +36,7 @@ Terminal, mobile web, and desktop web — all in real-time sync:
 - **Web frontend** — built-in HTTPS web UI with mobile support, real-time sync with the terminal, swipe gestures, 5 themes
 - **DCC CHAT** — direct client-to-client messaging with active and passive (reverse) connections
 - **Spell check** — inline correction with Hunspell dictionaries, multilingual, Tab to cycle suggestions
+- **Embedded shell** — full PTY terminal inside Repartee (`/shell`) — run vim, btop, irssi without leaving the client
 - **Detach & reattach** — detach from your terminal and reattach later; IRC connections stay alive
 - **Extban** — `$a:account` ban type with `/ban -a` shorthand
 - **Single binary** — ~15MB, zero runtime dependencies (SQLite, Lua, and WASM frontend bundled)
@@ -101,6 +102,7 @@ channels = ["#repartee"]
 | `Up` / `Down` | Input history |
 | `Mouse click` | Select buffer or nick |
 | `Mouse wheel` | Scroll chat |
+| `Ctrl+]` | Exit shell input mode |
 | `Ctrl+Z` | Detach from terminal |
 | `/detach` or `/dt` | Detach from terminal |
 

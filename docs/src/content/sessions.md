@@ -96,6 +96,24 @@ This means you can detach from iTerm2 on your laptop and reattach from kitty on 
 
 If your terminal is closed unexpectedly (window closed, SSH disconnection, etc.), repartee catches `SIGHUP` and auto-detaches instead of crashing. The session remains running and can be reattached.
 
+## Embedded shell
+
+Instead of detaching to run a quick command, you can open a shell directly inside repartee:
+
+```
+/shell              # open $SHELL
+/shell cmd htop     # run a specific command
+/shell cmd vim file # open a file in vim
+/shell list         # list open shells
+/shell close        # close active shell
+```
+
+Shell buffers appear under a "Shell" group in the sidebar. Press **Ctrl+]** to switch back to IRC input mode. All keyboard input (including Alt combos for bash/vim) is forwarded to the shell while in shell input mode.
+
+Full-screen TUI programs (btop, vim, irssi, weechat) work correctly, including mouse support, 256 colors, and alternate screen buffer.
+
+See [/shell command reference](commands.html) for details.
+
 ## Tips
 
 - **Check running sessions**: `repartee a` with no arguments lists all live sessions
