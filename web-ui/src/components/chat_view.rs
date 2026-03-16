@@ -80,7 +80,22 @@ pub fn ChatView() -> impl IntoView {
 
                         let ts = format_timestamp(msg.timestamp, &ts_fmt);
 
-                        if is_event || is_action || is_notice {
+                        if is_action {
+                            // Action (/me): render as "* nick text"
+                            let nick = msg.nick.unwrap_or_default();
+                            let styled = render_styled_text(&msg.text);
+                            view! {
+                                <div class=class>
+                                    <span class="ts">{ts}</span>
+                                    <span class="action-body">
+                                        "* "
+                                        <span class="action-nick">{nick}</span>
+                                        " "
+                                        {styled}
+                                    </span>
+                                </div>
+                            }.into_any()
+                        } else if is_event || is_notice {
                             // Detect event arrow from text content.
                             let arrow = if msg.text.contains("has joined") {
                                 Some(("\u{2192} ", "join-arrow"))
