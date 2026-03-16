@@ -26,6 +26,7 @@ const SETTING_PATHS: &[&str] = &[
     "display.show_timestamps",
     "general.ctcp_version", "general.flood_protection", "general.nick",
     "general.realname", "general.theme", "general.timestamp_format", "general.username",
+    "logging.event_retention_hours", "logging.retention_days",
     "image_preview.cache_max_days", "image_preview.cache_max_mb", "image_preview.enabled",
     "image_preview.fetch_timeout", "image_preview.kitty_format", "image_preview.max_file_size",
     "image_preview.max_height", "image_preview.max_width", "image_preview.protocol",

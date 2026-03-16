@@ -11,11 +11,20 @@ use crate::config::{IgnoreEntry, IgnoreLevel};
 static REGEX_CACHE: std::sync::LazyLock<Mutex<HashMap<String, Regex>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Maximum entries in the regex cache. Prevents unbounded growth from
+/// dynamic script-generated patterns over months of uptime.
+const REGEX_CACHE_MAX: usize = 200;
+
 /// Get a compiled regex for a wildcard pattern, using a cache to avoid recompilation.
 fn cached_wildcard_regex(pattern: &str) -> Regex {
     let mut cache = REGEX_CACHE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Evict entire cache when it grows too large (simple but effective — patterns are
+    // cheap to recompile and real usage has <20 patterns, so this only fires under abuse).
+    if cache.len() >= REGEX_CACHE_MAX && !cache.contains_key(pattern) {
+        cache.clear();
+    }
     cache
         .entry(pattern.to_string())
         .or_insert_with(|| wildcard_to_regex(pattern))

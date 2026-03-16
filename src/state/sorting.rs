@@ -58,7 +58,7 @@ mod tests {
     use super::*;
     use crate::state::buffer::*;
     use chrono::Utc;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
 
     fn make_buffer(conn_id: &str, btype: BufferType, name: &str) -> Buffer {
         Buffer {
@@ -66,7 +66,7 @@ mod tests {
             connection_id: conn_id.to_string(),
             buffer_type: btype,
             name: name.to_string(),
-            messages: Vec::new(),
+            messages: VecDeque::new(),
             activity: ActivityLevel::None,
             unread_count: 0,
             last_read: Utc::now(),

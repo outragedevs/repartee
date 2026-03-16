@@ -18,7 +18,7 @@ impl AppState {
             ignores: Vec::new(),
             log_tx: None,
             log_exclude_types: Vec::new(),
-            scrollback_limit: 0,
+            scrollback_limit: 2000,
             pending_web_events: Vec::new(),
         }
     }
@@ -71,6 +71,8 @@ impl AppState {
                 buffer_id: id.to_string(),
             });
         self.buffers.shift_remove(id);
+        // Clean up per-buffer flood tracking to prevent unbounded map growth.
+        self.flood_state.remove_buffer(id);
 
         if was_active {
             // Try to fall back to previous buffer
@@ -134,7 +136,7 @@ impl AppState {
             });
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
             track_speaker(buf, &message);
-            buf.messages.push(message);
+            buf.messages.push_back(message);
             enforce_scrollback(buf, self.scrollback_limit);
         }
     }
@@ -150,7 +152,7 @@ impl AppState {
                 message: crate::web::snapshot::message_to_wire(&message),
             });
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
-            buf.messages.push(message);
+            buf.messages.push_back(message);
             enforce_scrollback(buf, self.scrollback_limit);
         }
     }
@@ -178,7 +180,7 @@ impl AppState {
             });
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
             track_speaker(buf, &message);
-            buf.messages.push(message);
+            buf.messages.push_back(message);
             enforce_scrollback(buf, self.scrollback_limit);
             // Only escalate activity if this is not the active buffer
             let is_active = self.active_buffer_id.as_deref() == Some(buffer_id);
@@ -221,11 +223,10 @@ impl AppState {
             .map_or_else(|| conn_id.to_string(), |c| c.label.clone());
 
         let is_ref = message.log_ref_id.is_some();
-        let tags_json = if message.tags.is_empty() {
-            None
-        } else {
-            serde_json::to_string(&message.tags).ok()
-        };
+        let tags_json = message
+            .tags
+            .as_ref()
+            .and_then(|t| serde_json::to_string(t).ok());
         let row = LogRow {
             msg_id: message
                 .log_msg_id
@@ -372,6 +373,7 @@ fn track_speaker(buf: &mut Buffer, message: &Message) {
 }
 
 /// Trim oldest messages from the buffer if it exceeds the scrollback limit.
+/// Uses `VecDeque::drain` which is O(n) on the drained range only (no shift of remaining).
 fn enforce_scrollback(buf: &mut Buffer, limit: usize) {
     if limit > 0 && buf.messages.len() > limit {
         let excess = buf.messages.len() - limit;
@@ -385,7 +387,7 @@ mod tests {
     use crate::state::buffer::*;
     use crate::state::connection::*;
     use chrono::Utc;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
 
     fn make_test_connection() -> Connection {
         Connection {
@@ -441,7 +443,7 @@ mod tests {
             connection_id: conn_id.to_string(),
             buffer_type: btype,
             name: name.to_string(),
-            messages: Vec::new(),
+            messages: VecDeque::new(),
             activity: ActivityLevel::None,
             unread_count: 0,
             last_read: Utc::now(),
@@ -468,7 +470,7 @@ mod tests {
             event_params: None,
             log_msg_id: None,
             log_ref_id: None,
-            tags: std::collections::HashMap::new(),
+            tags: None,
         }
     }
 
@@ -669,7 +671,7 @@ mod tests {
             event_params: None,
             log_msg_id: Some(primary_id.clone()),
             log_ref_id: None,
-            tags: std::collections::HashMap::new(),
+            tags: None,
         };
         state.add_message("libera/#rust", msg1);
 
@@ -686,7 +688,7 @@ mod tests {
             event_params: None,
             log_msg_id: None,
             log_ref_id: Some(primary_id.clone()),
-            tags: std::collections::HashMap::new(),
+            tags: None,
         };
         state.add_message("libera/#linux", msg2);
 
@@ -765,7 +767,7 @@ mod tests {
 
         // But the message should still appear in the buffer.
         let buf = state.buffers.get("libera/#rust").unwrap();
-        assert_eq!(buf.messages.last().unwrap().text, "local UI output");
+        assert_eq!(buf.messages.back().unwrap().text, "local UI output");
     }
 
     #[test]

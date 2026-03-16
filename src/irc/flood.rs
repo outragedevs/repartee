@@ -1,6 +1,7 @@
 // Flood protection — antiflood detection for CTCP, tilde-ident, duplicate text, and nick changes.
 
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::{Duration, Instant};
 
 /// Result of a flood check.
@@ -52,9 +53,9 @@ pub struct FloodState {
     tilde_times: Vec<Instant>,
     tilde_blocked_until: Option<Instant>,
 
-    // Duplicate text flood
-    msg_window: Vec<(String, Instant)>,      // (text, timestamp)
-    blocked_texts: HashMap<String, Instant>, // text -> blocked_until
+    // Duplicate text flood — stores hashes instead of full text to avoid heap allocations per message
+    msg_window: Vec<(u64, Instant)>,        // (text_hash, timestamp)
+    blocked_texts: HashMap<u64, Instant>,   // text_hash -> blocked_until
 
     // Nick change flood (per buffer)
     nick_times: HashMap<String, Vec<Instant>>, // buffer_id -> timestamps
@@ -124,6 +125,7 @@ impl FloodState {
 
     /// Check for duplicate text flood. Returns whether the message is allowed, just triggered, or already blocked.
     /// Only checks duplicates for channel messages (`is_channel = true`).
+    /// Uses a hash fingerprint instead of cloning full message text to avoid heap allocations.
     pub fn check_duplicate_flood(
         &mut self,
         text: &str,
@@ -134,16 +136,18 @@ impl FloodState {
             return FloodResult::Allow;
         }
 
+        let hash = hash_text(text);
+
         // Check if this exact text is already blocked — suppress silently
-        if let Some(&until) = self.blocked_texts.get(text)
+        if let Some(&until) = self.blocked_texts.get(&hash)
             && now < until
         {
-            self.blocked_texts.insert(text.to_string(), now + DUP_BLOCK);
+            self.blocked_texts.insert(hash, now + DUP_BLOCK);
             return FloodResult::Blocked;
         }
 
         // Add to sliding message window
-        self.msg_window.push((text.to_string(), now));
+        self.msg_window.push((hash, now));
 
         // Prune old entries
         let cutoff = now.checked_sub(DUP_WINDOW).unwrap_or(now);
@@ -151,9 +155,9 @@ impl FloodState {
 
         // Only analyze when enough messages in window
         if self.msg_window.len() >= DUP_MIN_IN_WINDOW {
-            let dupes = self.msg_window.iter().filter(|(t, _)| t == text).count();
+            let dupes = self.msg_window.iter().filter(|(h, _)| *h == hash).count();
             if dupes >= DUP_THRESHOLD {
-                self.blocked_texts.insert(text.to_string(), now + DUP_BLOCK);
+                self.blocked_texts.insert(hash, now + DUP_BLOCK);
                 return FloodResult::Triggered;
             }
         }
@@ -193,12 +197,27 @@ impl FloodState {
 
         false
     }
+
+    /// Remove all tracking data for a buffer that has been closed.
+    /// Prevents unbounded growth of per-buffer maps over months of join/part cycles.
+    pub fn remove_buffer(&mut self, buffer_id: &str) {
+        self.nick_times.remove(buffer_id);
+        self.nick_blocked_until.remove(buffer_id);
+    }
 }
 
 impl Default for FloodState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Hash a message text into a u64 fingerprint for duplicate detection.
+/// Uses `DefaultHasher` — collision probability is negligible for flood detection.
+fn hash_text(text: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Remove timestamps older than `window` from the front of `times`.
@@ -585,5 +604,21 @@ mod tests {
         assert!(b.ctcp_times.is_empty());
         assert!(a.ctcp_blocked_until.is_none());
         assert!(b.ctcp_blocked_until.is_none());
+    }
+
+    #[test]
+    fn remove_buffer_cleans_nick_tracking() {
+        let mut state = FloodState::new();
+        let now = Instant::now();
+        // Accumulate nick changes for a buffer
+        for i in 0..3 {
+            state.should_suppress_nick_flood("conn/#old", now + Duration::from_millis(i * 100));
+        }
+        assert!(state.nick_times.contains_key("conn/#old"));
+
+        // Remove the buffer — should clean up
+        state.remove_buffer("conn/#old");
+        assert!(!state.nick_times.contains_key("conn/#old"));
+        assert!(!state.nick_blocked_until.contains_key("conn/#old"));
     }
 }

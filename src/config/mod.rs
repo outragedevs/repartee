@@ -310,6 +310,9 @@ pub struct LoggingConfig {
     pub enabled: bool,
     pub encrypt: bool,
     pub retention_days: u32,
+    /// Hours to keep event messages (join/part/quit/nick/kick/mode) before pruning.
+    /// 0 = keep forever (no automatic pruning). Default: 72.
+    pub event_retention_hours: u32,
     pub exclude_types: Vec<String>,
 }
 
@@ -319,6 +322,7 @@ impl Default for LoggingConfig {
             enabled: true,
             encrypt: false,
             retention_days: 0,
+            event_retention_hours: 72,
             exclude_types: Vec::new(),
         }
     }

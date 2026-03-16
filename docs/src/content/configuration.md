@@ -83,6 +83,7 @@ kitty_format = "rgba"
 enabled = true
 encrypt = false
 retention_days = 0             # 0 = keep forever
+event_retention_hours = 72     # auto-prune join/part/quit/nick/kick/mode (0 = keep forever)
 exclude_types = []             # e.g. ["join", "part", "quit"]
 
 [aliases]
@@ -152,7 +153,7 @@ Set `bind_ip` to bind to a specific local IP address when connecting. Useful for
 
 ### `[logging]`
 
-Chat logging to SQLite. When `encrypt = true`, messages are encrypted with AES-256-GCM. `retention_days = 0` keeps logs forever.
+Chat logging to SQLite. When `encrypt = true`, messages are encrypted with AES-256-GCM. `retention_days = 0` keeps logs forever. `event_retention_hours` controls how long event messages (join/part/quit/nick/kick/mode) are kept before automatic pruning — defaults to 72 hours. Set to `0` to keep event messages forever. Event pruning runs hourly in the background and is independent of `retention_days`.
 
 ### `[aliases]`
 

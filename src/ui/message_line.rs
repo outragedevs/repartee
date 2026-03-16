@@ -152,7 +152,7 @@ mod tests {
             event_params: None,
             log_msg_id: None,
             log_ref_id: None,
-            tags: std::collections::HashMap::new(),
+            tags: None,
         }
     }
 
@@ -265,7 +265,7 @@ mod tests {
             event_params: None,
             log_msg_id: None,
             log_ref_id: None,
-            tags: std::collections::HashMap::new(),
+            tags: None,
         };
         let theme = default_theme();
         let config = default_config();

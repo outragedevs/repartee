@@ -1,6 +1,7 @@
+use std::collections::{HashMap, VecDeque};
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 // === Buffer Type ===
 
@@ -83,7 +84,8 @@ pub struct Message {
     /// For fan-out events (quit/nick): reference rows point to the primary row's `msg_id`.
     pub log_ref_id: Option<String>,
     /// `IRCv3` message tags extracted from the incoming IRC message.
-    pub tags: HashMap<String, String>,
+    /// `None` when no tags are present (the common case), avoiding a `HashMap` allocation per message.
+    pub tags: Option<HashMap<String, String>>,
 }
 
 // === NickEntry ===
@@ -128,7 +130,7 @@ pub struct Buffer {
     )]
     pub buffer_type: BufferType,
     pub name: String,
-    pub messages: Vec<Message>,
+    pub messages: VecDeque<Message>,
     pub activity: ActivityLevel,
     pub unread_count: u32,
     pub last_read: DateTime<Utc>,
@@ -175,7 +177,7 @@ mod tests {
             connection_id: "test".to_string(),
             buffer_type: BufferType::Channel,
             name: "#chan".to_string(),
-            messages: Vec::new(),
+            messages: VecDeque::new(),
             activity: ActivityLevel::None,
             unread_count: 0,
             last_read: chrono::Utc::now(),
@@ -205,7 +207,7 @@ mod tests {
             connection_id: "test".to_string(),
             buffer_type: BufferType::Channel,
             name: "#chan".to_string(),
-            messages: Vec::new(),
+            messages: VecDeque::new(),
             activity: ActivityLevel::None,
             unread_count: 0,
             last_read: chrono::Utc::now(),
@@ -231,7 +233,7 @@ mod tests {
             connection_id: "test".to_string(),
             buffer_type: BufferType::Channel,
             name: "#chan".to_string(),
-            messages: Vec::new(),
+            messages: VecDeque::new(),
             activity: ActivityLevel::None,
             unread_count: 0,
             last_read: chrono::Utc::now(),

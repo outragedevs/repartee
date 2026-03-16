@@ -8,8 +8,9 @@ repartee includes a built-in logging system backed by SQLite with optional encry
 [logging]
 enabled = true
 encrypt = false
-retention_days = 0       # 0 = keep forever
-exclude_types = []       # e.g. ["join", "part", "quit"]
+retention_days = 0              # 0 = keep forever
+event_retention_hours = 72      # auto-prune events after 72h (0 = keep forever)
+exclude_types = []              # e.g. ["join", "part", "quit"]
 ```
 
 ## Storage
@@ -84,6 +85,20 @@ Backlog messages appear at the top of the buffer, followed by a separator:
 ```
 
 Backlog messages do not trigger highlights or notifications, and are not re-logged to the database (they already exist). This works for autoconnect channels, manual `/join`, queries opened via incoming messages, and DCC chat reconnections.
+
+## Event retention
+
+Event messages (join, part, quit, nick, kick, mode changes) are high-volume noise that accumulates over time. The `event_retention_hours` setting automatically prunes old event messages while keeping actual chat history intact.
+
+```
+/set logging.event_retention_hours 72    # default — keep 3 days of events
+/set logging.event_retention_hours 24    # aggressive — only 1 day
+/set logging.event_retention_hours 0     # disable — keep events forever
+```
+
+Pruning runs on startup and every hour in the background. It only deletes rows with `type = 'event'` — chat messages, actions, notices, and CTCPs are never touched regardless of their age.
+
+This complements `retention_days` which controls the maximum age for **all** message types. When both are set, event messages are pruned at whichever threshold is reached first.
 
 ## Batched writes
 

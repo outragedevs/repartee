@@ -211,7 +211,7 @@ fn process_netsplit_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo
                 event_params: Some(vec![server1.to_string(), server2.to_string()]),
                 log_msg_id: None,
                 log_ref_id: None,
-                tags: HashMap::new(),
+                tags: None,
             },
         );
     }
@@ -287,7 +287,7 @@ fn process_netjoin_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo)
                 event_params: Some(vec![server1.to_string(), server2.to_string()]),
                 log_msg_id: None,
                 log_ref_id: None,
-                tags: HashMap::new(),
+                tags: None,
             },
         );
     }
@@ -482,7 +482,7 @@ mod tests {
             connection_id: conn_id.to_string(),
             buffer_type: crate::state::buffer::BufferType::Channel,
             name: "#test".to_string(),
-            messages: Vec::new(),
+            messages: std::collections::VecDeque::new(),
             activity: crate::state::buffer::ActivityLevel::None,
             unread_count: 0,
             last_read: chrono::Utc::now(),
@@ -541,7 +541,7 @@ mod tests {
 
         // A summary message should be added
         assert!(!buf.messages.is_empty());
-        let last_msg = buf.messages.last().unwrap();
+        let last_msg = buf.messages.back().unwrap();
         assert!(last_msg.text.contains("Netsplit"));
         assert!(last_msg.text.contains("hub.net"));
         assert!(last_msg.text.contains("leaf.net"));
@@ -678,7 +678,7 @@ mod tests {
             connection_id: conn_id.to_string(),
             buffer_type: crate::state::buffer::BufferType::Channel,
             name: "#test".to_string(),
-            messages: Vec::new(),
+            messages: std::collections::VecDeque::new(),
             activity: crate::state::buffer::ActivityLevel::None,
             unread_count: 0,
             last_read: chrono::Utc::now(),
@@ -738,7 +738,7 @@ mod tests {
 
         // Summary message should still be present
         assert!(!buf.messages.is_empty());
-        let last_msg = buf.messages.last().unwrap();
+        let last_msg = buf.messages.back().unwrap();
         assert!(last_msg.text.contains("Netsplit"));
         assert!(last_msg.text.contains("Alice"));
         assert!(last_msg.text.contains("BOB"));

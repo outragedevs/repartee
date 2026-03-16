@@ -796,7 +796,7 @@ fn ensure_query_buffer(app: &mut App, conn_id: &str, target: &str, skip_channels
             connection_id: conn_id.to_string(),
             buffer_type: crate::state::buffer::BufferType::Query,
             name: target.to_string(),
-            messages: Vec::new(),
+            messages: std::collections::VecDeque::new(),
             activity: crate::state::buffer::ActivityLevel::None,
             unread_count: 0,
             last_read: chrono::Utc::now(),
@@ -857,7 +857,7 @@ pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
                     event_params: None,
                     log_msg_id: None,
                     log_ref_id: None,
-                    tags: std::collections::HashMap::new(),
+                    tags: None,
                 },
             );
         } else {
@@ -917,7 +917,7 @@ pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
                     event_params: None,
                     log_msg_id: None,
                     log_ref_id: None,
-                    tags: std::collections::HashMap::new(),
+                    tags: None,
                 },
             );
         }
@@ -985,7 +985,7 @@ pub(crate) fn cmd_query(app: &mut App, args: &[String]) {
                     event_params: None,
                     log_msg_id: None,
                     log_ref_id: None,
-                    tags: std::collections::HashMap::new(),
+                    tags: None,
                 },
             );
         }
@@ -1040,7 +1040,7 @@ pub(crate) fn cmd_me(app: &mut App, args: &[String]) {
                     event_params: None,
                     log_msg_id: None,
                     log_ref_id: None,
-                    tags: std::collections::HashMap::new(),
+                    tags: None,
                 },
             );
         } else {
@@ -1091,7 +1091,7 @@ pub(crate) fn cmd_me(app: &mut App, args: &[String]) {
                 event_params: None,
                 log_msg_id: None,
                 log_ref_id: None,
-                tags: std::collections::HashMap::new(),
+                tags: None,
             },
         );
     }

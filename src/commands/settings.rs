@@ -138,6 +138,17 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 is_credential: false,
             })
         }
+        "logging" => {
+            let val = match parts[1] {
+                "event_retention_hours" => config.logging.event_retention_hours.to_string(),
+                "retention_days" => config.logging.retention_days.to_string(),
+                _ => return None,
+            };
+            Some(Resolved {
+                value: val,
+                is_credential: false,
+            })
+        }
         "web" => {
             let is_cred = parts[1] == "password";
             let val = match parts[1] {
@@ -324,6 +335,17 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
             "dictionary_dir" => config.spellcheck.dictionary_dir = raw.to_string(),
             _ => return Err(format!("Unknown field: {path}")),
         },
+        "logging" => match parts[1] {
+            "event_retention_hours" => {
+                config.logging.event_retention_hours =
+                    raw.parse().map_err(|_| "Expected a number".to_string())?;
+            }
+            "retention_days" => {
+                config.logging.retention_days =
+                    raw.parse().map_err(|_| "Expected a number".to_string())?;
+            }
+            _ => return Err(format!("Unknown field: {path}")),
+        },
         "web" => match parts[1] {
             "enabled" => config.web.enabled = parse_bool(raw)?,
             "bind_address" => config.web.bind_address = raw.to_string(),
@@ -442,6 +464,8 @@ const BASE_PATHS: &[&str] = &[
     "dcc.autoaccept_lowports",
     "dcc.autochat_masks",
     "dcc.max_connections",
+    "logging.event_retention_hours",
+    "logging.retention_days",
     "spellcheck.enabled",
     "spellcheck.languages",
     "spellcheck.dictionary_dir",
@@ -775,6 +799,18 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
         "max_connections",
     ] {
         let path = format!("dcc.{field}");
+        if let Some(resolved) = get_config_value(config, &path) {
+            lines.push(format!(
+                "    {C_HEADER}{path}{C_RST} = {C_CMD}{}{C_RST}",
+                resolved.value
+            ));
+        }
+    }
+
+    // Logging
+    lines.push(format!("  {C_DIM}[logging]{C_RST}"));
+    for field in &["event_retention_hours", "retention_days"] {
+        let path = format!("logging.{field}");
         if let Some(resolved) = get_config_value(config, &path) {
             lines.push(format!(
                 "    {C_HEADER}{path}{C_RST} = {C_CMD}{}{C_RST}",

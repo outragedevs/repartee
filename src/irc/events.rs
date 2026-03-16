@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::time::Instant;
 
@@ -183,7 +183,7 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
                     event_params: None,
                     log_msg_id: None,
                     log_ref_id: None,
-                    tags: HashMap::new(),
+                    tags: None,
                 },
             );
         }
@@ -224,7 +224,7 @@ pub fn handle_connected(state: &mut AppState, conn_id: &str) {
             event_params: None,
             log_msg_id: None,
             log_ref_id: None,
-            tags: HashMap::new(),
+            tags: None,
         },
     );
 }
@@ -322,7 +322,7 @@ pub fn handle_disconnected(state: &mut AppState, conn_id: &str, error: Option<&s
             event_params: None,
             log_msg_id: None,
             log_ref_id: None,
-            tags: HashMap::new(),
+            tags: None,
         },
     );
 }
@@ -430,7 +430,7 @@ pub fn handle_cap_new(
             event_params: None,
             log_msg_id: None,
             log_ref_id: None,
-            tags: HashMap::new(),
+            tags: None,
         },
     );
 
@@ -496,7 +496,7 @@ pub fn handle_cap_del(
             event_params: None,
             log_msg_id: None,
             log_ref_id: None,
-            tags: HashMap::new(),
+            tags: None,
         },
     );
 }
@@ -549,7 +549,7 @@ pub fn handle_cap_ack(
             event_params: None,
             log_msg_id: None,
             log_ref_id: None,
-            tags: HashMap::new(),
+            tags: None,
         },
     );
 }
@@ -594,7 +594,7 @@ pub fn handle_cap_nak(
             event_params: None,
             log_msg_id: None,
             log_ref_id: None,
-            tags: HashMap::new(),
+            tags: None,
         },
     );
 }
@@ -610,12 +610,13 @@ fn nick_prefix(state: &AppState, buffer_id: &str, nick: &str) -> Option<char> {
 /// Extract `IRCv3` message tags from an `irc::proto::Message`.
 ///
 /// Tags with no value are omitted — only `key=value` pairs are returned.
-fn extract_tags(msg: &IrcMessage) -> HashMap<String, String> {
-    msg.tags.as_ref().map_or_else(HashMap::new, |tags| {
-        tags.iter()
-            .filter_map(|tag| Some((tag.0.clone(), tag.1.as_ref()?.clone())))
-            .collect()
-    })
+fn extract_tags(msg: &IrcMessage) -> Option<HashMap<String, String>> {
+    let tags = msg.tags.as_ref()?;
+    let map: HashMap<String, String> = tags
+        .iter()
+        .filter_map(|tag| Some((tag.0.clone(), tag.1.as_ref()?.clone())))
+        .collect();
+    if map.is_empty() { None } else { Some(map) }
 }
 
 /// Extract the timestamp from `IRCv3` `server-time` tag (`@time=...`).
@@ -623,8 +624,8 @@ fn extract_tags(msg: &IrcMessage) -> HashMap<String, String> {
 /// If a valid RFC 3339 timestamp is present, use it; otherwise fall back to
 /// `Utc::now()`.  This is critical for bouncer/relay playback where messages
 /// arrive with historical timestamps.
-fn message_timestamp(tags: &HashMap<String, String>) -> DateTime<Utc> {
-    tags.get("time")
+fn message_timestamp(tags: Option<&HashMap<String, String>>) -> DateTime<Utc> {
+    tags.and_then(|t| t.get("time"))
         .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
         .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc))
 }
@@ -639,7 +640,7 @@ fn handle_privmsg(
     prefix: Option<&Prefix>,
     target: &str,
     text: &str,
-    tags: HashMap<String, String>,
+    tags: Option<HashMap<String, String>>,
 ) {
     let (nick, ident, host) = extract_nick_userhost(prefix);
     let target_is_channel = is_channel(target);
@@ -695,7 +696,7 @@ fn handle_privmsg(
             connection_id: conn_id.to_string(),
             buffer_type: BufferType::Query,
             name: nick.clone(),
-            messages: Vec::new(),
+            messages: VecDeque::new(),
             activity: ActivityLevel::None,
             unread_count: 0,
             last_read: Utc::now(),
@@ -710,7 +711,7 @@ fn handle_privmsg(
     }
 
     // account-tag: update NickEntry.account from message tags (supplementary)
-    if let Some(tag_account) = tags.get("account") {
+    if let Some(tag_account) = tags.as_ref().and_then(|t| t.get("account")) {
         let account = if tag_account == "*" {
             None
         } else {
@@ -745,7 +746,7 @@ fn handle_privmsg(
                 &buffer_id,
                 Message {
                     id,
-                    timestamp: message_timestamp(&tags),
+                    timestamp: message_timestamp(tags.as_ref()),
                     message_type: MessageType::Action,
                     nick: Some(nick),
                     nick_mode: mode_prefix.map(String::from),
@@ -831,7 +832,7 @@ fn handle_privmsg(
         &buffer_id,
         Message {
             id,
-            timestamp: message_timestamp(&tags),
+            timestamp: message_timestamp(tags.as_ref()),
             message_type: MessageType::Message,
             nick: Some(nick),
             nick_mode: mode_prefix.map(String::from),
@@ -853,7 +854,7 @@ fn handle_notice(
     prefix: Option<&Prefix>,
     target: &str,
     text: &str,
-    tags: HashMap<String, String>,
+    tags: Option<HashMap<String, String>>,
 ) {
     let nick = extract_nick(prefix);
     // Server notices or pre-registration notices go to status buffer
@@ -921,7 +922,7 @@ fn handle_notice(
         &buffer_id,
         Message {
             id,
-            timestamp: message_timestamp(&tags),
+            timestamp: message_timestamp(tags.as_ref()),
             message_type: MessageType::Notice,
             nick,
             nick_mode: mode_prefix.map(String::from),
@@ -945,7 +946,7 @@ fn handle_join(
     channel: &str,
     extended_account: Option<&str>,
     extended_realname: Option<&str>,
-    tags: HashMap<String, String>,
+    tags: Option<HashMap<String, String>>,
 ) {
     let (nick, ident, host) = extract_nick_userhost(prefix);
     let buffer_id = make_buffer_id(conn_id, channel);
@@ -958,7 +959,8 @@ fn handle_join(
 
     // account-tag: supplementary source (only if extended-join didn't provide one)
     let account = account.or_else(|| {
-        tags.get("account")
+        tags.as_ref()
+            .and_then(|t| t.get("account"))
             .and_then(|a| if a == "*" { None } else { Some(a.clone()) })
     });
 
@@ -1000,7 +1002,7 @@ fn handle_join(
                 connection_id: conn_id.to_string(),
                 buffer_type: BufferType::Channel,
                 name: channel.to_string(),
-                messages: Vec::new(),
+                messages: VecDeque::new(),
                 activity: ActivityLevel::None,
                 unread_count: 0,
                 last_read: Utc::now(),
@@ -1061,7 +1063,7 @@ fn handle_join(
         &buffer_id,
         Message {
             id,
-            timestamp: message_timestamp(&tags),
+            timestamp: message_timestamp(tags.as_ref()),
             message_type: MessageType::Event,
             nick: None,
             nick_mode: None,
@@ -1120,7 +1122,7 @@ fn handle_account(
     conn_id: &str,
     prefix: Option<&Prefix>,
     account: &str,
-    tags: HashMap<String, String>,
+    tags: Option<HashMap<String, String>>,
 ) {
     let Some(nick) = extract_nick(prefix) else {
         return;
@@ -1163,7 +1165,7 @@ fn handle_account(
             &buf_id,
             Message {
                 id,
-                timestamp: message_timestamp(&tags),
+                timestamp: message_timestamp(tags.as_ref()),
                 message_type: MessageType::Event,
                 nick: None,
                 nick_mode: None,
@@ -1242,7 +1244,7 @@ fn handle_chghost(
     prefix: Option<&Prefix>,
     new_user: &str,
     new_host: &str,
-    tags: HashMap<String, String>,
+    tags: Option<HashMap<String, String>>,
 ) {
     let Some(nick) = extract_nick(prefix) else {
         return;
@@ -1281,7 +1283,7 @@ fn handle_chghost(
             &buf_id,
             Message {
                 id,
-                timestamp: message_timestamp(&tags),
+                timestamp: message_timestamp(tags.as_ref()),
                 message_type: MessageType::Event,
                 nick: None,
                 nick_mode: None,
@@ -1308,7 +1310,7 @@ fn handle_part(
     prefix: Option<&Prefix>,
     channel: &str,
     reason: Option<&str>,
-    tags: HashMap<String, String>,
+    tags: Option<HashMap<String, String>>,
 ) {
     let (nick, ident, host) = extract_nick_userhost(prefix);
     let buffer_id = make_buffer_id(conn_id, channel);
@@ -1347,7 +1349,7 @@ fn handle_part(
             &buffer_id,
             Message {
                 id,
-                timestamp: message_timestamp(&tags),
+                timestamp: message_timestamp(tags.as_ref()),
                 message_type: MessageType::Event,
                 nick: None,
                 nick_mode: None,
@@ -1379,7 +1381,7 @@ fn handle_quit(
     _our_nick: &str,
     prefix: Option<&Prefix>,
     reason: Option<&str>,
-    tags: HashMap<String, String>,
+    tags: Option<HashMap<String, String>>,
 ) {
     let (nick, ident, host) = extract_nick_userhost(prefix);
     let reason_str = reason.unwrap_or("");
@@ -1434,7 +1436,7 @@ fn handle_quit(
     let primary_msg_id = uuid::Uuid::new_v4().to_string();
     let text = format!("{nick} ({ident}@{host}) has quit ({reason_str})");
 
-    let ts = message_timestamp(&tags);
+    let ts = message_timestamp(tags.as_ref());
     for (i, buf_id) in affected.iter().enumerate() {
         let id = state.next_message_id();
         state.add_message(
@@ -1504,7 +1506,7 @@ fn handle_nick_change(
     our_nick: &str,
     prefix: Option<&Prefix>,
     new_nick: &str,
-    tags: HashMap<String, String>,
+    tags: Option<HashMap<String, String>>,
 ) {
     let old_nick = extract_nick(prefix).unwrap_or_default();
 
@@ -1574,7 +1576,7 @@ fn handle_nick_change(
     let primary_msg_id = uuid::Uuid::new_v4().to_string();
     let text = format!("{old_nick} is now known as {new_nick}");
     let mut primary_assigned = false;
-    let ts = message_timestamp(&tags);
+    let ts = message_timestamp(tags.as_ref());
     let now = Instant::now();
 
     for buf_id in &affected {
@@ -1644,7 +1646,7 @@ fn handle_kick(
     channel: &str,
     kicked_user: &str,
     reason: Option<&str>,
-    tags: HashMap<String, String>,
+    tags: Option<HashMap<String, String>>,
 ) {
     let (kicker, kicker_ident, kicker_host) = extract_nick_userhost(prefix);
     let buffer_id = make_buffer_id(conn_id, channel);
@@ -1666,7 +1668,7 @@ fn handle_kick(
         return;
     }
 
-    let ts = message_timestamp(&tags);
+    let ts = message_timestamp(tags.as_ref());
     if kicked_user == our_nick {
         let id = state.next_message_id();
         state.add_message(
@@ -1721,7 +1723,7 @@ fn handle_topic(
     prefix: Option<&Prefix>,
     channel: &str,
     topic: Option<&str>,
-    tags: HashMap<String, String>,
+    tags: Option<HashMap<String, String>>,
 ) {
     let nick = extract_nick(prefix);
     let buffer_id = make_buffer_id(conn_id, channel);
@@ -1739,7 +1741,7 @@ fn handle_topic(
             &buffer_id,
             Message {
                 id,
-                timestamp: message_timestamp(&tags),
+                timestamp: message_timestamp(tags.as_ref()),
                 message_type: MessageType::Event,
                 nick: None,
                 nick_mode: None,
@@ -1761,7 +1763,7 @@ fn handle_mode(
     prefix: Option<&Prefix>,
     target: &str,
     raw_msg: &IrcMessage,
-    tags: HashMap<String, String>,
+    tags: Option<HashMap<String, String>>,
 ) {
     let nick = extract_nick(prefix).unwrap_or_else(|| "server".to_string());
 
@@ -1798,7 +1800,7 @@ fn handle_mode(
         _ => String::new(),
     };
 
-    let ts = message_timestamp(&tags);
+    let ts = message_timestamp(tags.as_ref());
     if is_channel(target) {
         let buffer_id = make_buffer_id(conn_id, target);
         let id = state.next_message_id();
@@ -2028,7 +2030,7 @@ fn handle_invite(
     prefix: Option<&Prefix>,
     nick: &str,
     channel: &str,
-    tags: HashMap<String, String>,
+    tags: Option<HashMap<String, String>>,
 ) {
     let inviter = extract_nick(prefix).unwrap_or_default();
 
@@ -2048,7 +2050,7 @@ fn handle_invite(
             &buffer_id,
             Message {
                 id,
-                timestamp: message_timestamp(&tags),
+                timestamp: message_timestamp(tags.as_ref()),
                 message_type: MessageType::Event,
                 nick: None,
                 nick_mode: None,
@@ -2070,7 +2072,7 @@ fn handle_invite(
                 &buffer_id,
                 Message {
                     id,
-                    timestamp: message_timestamp(&tags),
+                    timestamp: message_timestamp(tags.as_ref()),
                     message_type: MessageType::Event,
                     nick: None,
                     nick_mode: None,
@@ -2599,7 +2601,7 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
                     highlight: false,
                     event_key: None,
                     event_params: None, log_msg_id: None, log_ref_id: None,
-                    tags: HashMap::new(),
+                    tags: None,
                 },
             );
         }
@@ -2657,7 +2659,7 @@ pub fn emit(state: &mut AppState, buffer_id: &str, text: &str) {
             event_params: None,
             log_msg_id: None,
             log_ref_id: None,
-            tags: HashMap::new(),
+            tags: None,
         },
     );
 }
@@ -2955,7 +2957,7 @@ mod tests {
             connection_id: "test".to_string(),
             buffer_type: BufferType::Server,
             name: "TestServer".to_string(),
-            messages: Vec::new(),
+            messages: VecDeque::new(),
             activity: ActivityLevel::None,
             unread_count: 0,
             last_read: Utc::now(),
@@ -2974,7 +2976,7 @@ mod tests {
             connection_id: "test".to_string(),
             buffer_type: BufferType::Channel,
             name: "#test".to_string(),
-            messages: Vec::new(),
+            messages: VecDeque::new(),
             activity: ActivityLevel::None,
             unread_count: 0,
             last_read: Utc::now(),
@@ -3008,7 +3010,7 @@ mod tests {
             connection_id: conn_id.to_string(),
             buffer_type: BufferType::Channel,
             name: name.to_string(),
-            messages: Vec::new(),
+            messages: VecDeque::new(),
             activity: ActivityLevel::None,
             unread_count: 0,
             last_read: Utc::now(),
@@ -3153,7 +3155,7 @@ mod tests {
         // Should also have a join event message
         assert!(
             buf.messages
-                .last()
+                .back()
                 .unwrap()
                 .text
                 .contains("carol (user@host) has joined")
@@ -3200,7 +3202,7 @@ mod tests {
         assert!(!buf.users.contains_key("dave"));
         assert!(
             buf.messages
-                .last()
+                .back()
                 .unwrap()
                 .text
                 .contains("dave (user@host) has left")
@@ -3232,7 +3234,7 @@ mod tests {
         assert!(!buf.users.contains_key("eve"));
         assert!(
             buf.messages
-                .last()
+                .back()
                 .unwrap()
                 .text
                 .contains("eve (user@host) has quit")
@@ -3273,7 +3275,7 @@ mod tests {
         assert!(buf.users.contains_key("frankie"));
         assert!(
             buf.messages
-                .last()
+                .back()
                 .unwrap()
                 .text
                 .contains("frank is now known as frankie")
@@ -3319,7 +3321,7 @@ mod tests {
         assert!(!buf.users.contains_key("troll"));
         assert!(
             buf.messages
-                .last()
+                .back()
                 .unwrap()
                 .text
                 .contains("troll was kicked by op")
@@ -3583,9 +3585,9 @@ mod tests {
         handle_irc_message(&mut state, "test", &msg);
 
         let buf = state.buffers.get("test/testserver").unwrap();
-        assert!(buf.messages.last().unwrap().text.contains("Looking up"));
+        assert!(buf.messages.back().unwrap().text.contains("Looking up"));
         assert_eq!(
-            buf.messages.last().unwrap().message_type,
+            buf.messages.back().unwrap().message_type,
             MessageType::Notice
         );
     }
@@ -3612,7 +3614,7 @@ mod tests {
         assert_eq!(entry.account.as_deref(), Some("patrick"));
 
         // Join message should include account and realname
-        let join_msg = buf.messages.last().unwrap();
+        let join_msg = buf.messages.back().unwrap();
         assert!(join_msg.text.contains("[patrick]"));
         assert!(join_msg.text.contains("Real Name"));
         let params = join_msg.event_params.as_ref().unwrap();
@@ -3683,7 +3685,7 @@ mod tests {
         // Should have an event message
         assert!(
             buf.messages
-                .last()
+                .back()
                 .unwrap()
                 .text
                 .contains("alice is now logged in as alice_account")
@@ -3715,7 +3717,7 @@ mod tests {
         assert_eq!(entry.account, None);
         assert!(
             buf.messages
-                .last()
+                .back()
                 .unwrap()
                 .text
                 .contains("alice has logged out")
@@ -3732,7 +3734,7 @@ mod tests {
             connection_id: "test".to_string(),
             buffer_type: BufferType::Channel,
             name: "#other".to_string(),
-            messages: Vec::new(),
+            messages: VecDeque::new(),
             activity: ActivityLevel::None,
             unread_count: 0,
             last_read: Utc::now(),
@@ -3866,7 +3868,7 @@ mod tests {
             connection_id: "test".to_string(),
             buffer_type: BufferType::Channel,
             name: "#other".to_string(),
-            messages: Vec::new(),
+            messages: VecDeque::new(),
             activity: ActivityLevel::None,
             unread_count: 0,
             last_read: Utc::now(),
@@ -3993,7 +3995,7 @@ mod tests {
             connection_id: "test".to_string(),
             buffer_type: BufferType::Channel,
             name: "#other".to_string(),
-            messages: Vec::new(),
+            messages: VecDeque::new(),
             activity: ActivityLevel::None,
             unread_count: 0,
             last_read: Utc::now(),
@@ -4179,7 +4181,7 @@ mod tests {
         // Valid RFC 3339 timestamp
         let mut tags = HashMap::new();
         tags.insert("time".to_string(), "2023-01-15T08:45:30.123Z".to_string());
-        let ts = message_timestamp(&tags);
+        let ts = message_timestamp(Some(&tags));
         assert_eq!(ts.year(), 2023);
         assert_eq!(ts.month(), 1);
         assert_eq!(ts.day(), 15);
@@ -4187,10 +4189,9 @@ mod tests {
         assert_eq!(ts.minute(), 45);
         assert_eq!(ts.second(), 30);
 
-        // Empty tags → fallback
-        let empty: HashMap<String, String> = HashMap::new();
+        // None tags → fallback
         let before = Utc::now();
-        let ts = message_timestamp(&empty);
+        let ts = message_timestamp(None);
         let after = Utc::now();
         assert!(ts >= before && ts <= after);
 
@@ -4198,7 +4199,7 @@ mod tests {
         let mut bad = HashMap::new();
         bad.insert("time".to_string(), "garbage".to_string());
         let before = Utc::now();
-        let ts = message_timestamp(&bad);
+        let ts = message_timestamp(Some(&bad));
         let after = Utc::now();
         assert!(ts >= before && ts <= after);
     }
@@ -4229,7 +4230,7 @@ mod tests {
             .buffers
             .get(&make_buffer_id("test", "TestServer"))
             .unwrap();
-        let last = buf.messages.last().unwrap();
+        let last = buf.messages.back().unwrap();
         assert!(
             last.text.contains("echo-message"),
             "should mention requested cap"
@@ -4249,7 +4250,7 @@ mod tests {
             .buffers
             .get(&make_buffer_id("test", "TestServer"))
             .unwrap();
-        let last = buf.messages.last().unwrap();
+        let last = buf.messages.back().unwrap();
         assert!(
             last.text.contains("none requested"),
             "should note nothing was requested"
@@ -4297,7 +4298,7 @@ mod tests {
             .buffers
             .get(&make_buffer_id("test", "TestServer"))
             .unwrap();
-        let last = buf.messages.last().unwrap();
+        let last = buf.messages.back().unwrap();
         assert_eq!(last.event_key.as_deref(), Some("cap_del"));
         assert!(last.text.contains("multi-prefix"));
     }
@@ -4315,7 +4316,7 @@ mod tests {
             .buffers
             .get(&make_buffer_id("test", "TestServer"))
             .unwrap();
-        let last = buf.messages.last().unwrap();
+        let last = buf.messages.back().unwrap();
         assert!(last.text.contains("none were enabled"));
     }
 
@@ -4332,7 +4333,7 @@ mod tests {
             .buffers
             .get(&make_buffer_id("test", "TestServer"))
             .unwrap();
-        let last = buf.messages.last().unwrap();
+        let last = buf.messages.back().unwrap();
         assert_eq!(last.event_key.as_deref(), Some("cap_ack"));
         assert!(last.text.contains("echo-message"));
     }
@@ -4350,7 +4351,7 @@ mod tests {
             .buffers
             .get(&make_buffer_id("test", "TestServer"))
             .unwrap();
-        let last = buf.messages.last().unwrap();
+        let last = buf.messages.back().unwrap();
         assert_eq!(last.event_key.as_deref(), Some("cap_nak"));
         assert!(last.text.contains("echo-message"));
     }
@@ -4532,7 +4533,7 @@ mod tests {
             connection_id: "test".to_string(),
             buffer_type: BufferType::Query,
             name: "bob".to_string(),
-            messages: Vec::new(),
+            messages: VecDeque::new(),
             activity: ActivityLevel::None,
             unread_count: 0,
             last_read: Utc::now(),

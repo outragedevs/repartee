@@ -24,6 +24,11 @@ const CREATE_MESSAGES_MSG_ID_IDX: &str = "
 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_msg_id
 ON messages (msg_id) WHERE msg_id IS NOT NULL";
 
+/// Partial index for fast event pruning — only indexes rows with type='event'.
+const CREATE_MESSAGES_EVENT_IDX: &str = "
+CREATE INDEX IF NOT EXISTS idx_messages_event_timestamp
+ON messages (timestamp) WHERE type = 'event'";
+
 const CREATE_READ_MARKERS: &str = "
 CREATE TABLE IF NOT EXISTS read_markers (
     network   TEXT NOT NULL,
@@ -82,6 +87,7 @@ fn create_schema(db: &Connection, encrypt: bool) -> rusqlite::Result<()> {
     db.execute_batch(CREATE_MESSAGES)?;
     db.execute_batch(CREATE_MESSAGES_IDX)?;
     db.execute_batch(CREATE_MESSAGES_MSG_ID_IDX)?;
+    db.execute_batch(CREATE_MESSAGES_EVENT_IDX)?;
     db.execute_batch(CREATE_READ_MARKERS)?;
     db.execute_batch(CREATE_MENTIONS)?;
     db.execute_batch(CREATE_MENTIONS_IDX)?;
@@ -145,6 +151,39 @@ pub fn purge_old_messages(db: &Connection, retention_days: u32, has_fts: bool) -
         Ok(count) => count,
         Err(e) => {
             tracing::warn!("Failed to purge old messages: {e}");
+            0
+        }
+    }
+}
+
+/// Delete event-type messages (join/part/quit/nick/kick/mode) older than `hours`.
+///
+/// Uses the partial index `idx_messages_event_timestamp` for fast scans.
+/// FTS entries are cleaned both manually (for large batch efficiency) and
+/// via the AFTER DELETE trigger as a safety net.
+pub fn purge_old_events(db: &Connection, hours: u32, has_fts: bool) -> usize {
+    let cutoff = chrono::Utc::now().timestamp() - i64::from(hours) * 3600;
+
+    // For FTS-enabled databases, manually remove FTS entries first (triggers handle it,
+    // but explicit delete-before is safer for large batch deletes).
+    if has_fts
+        && let Err(e) = db.execute(
+            "INSERT INTO messages_fts(messages_fts, rowid, nick, text)
+             SELECT 'delete', id, nick, text
+             FROM messages WHERE type = 'event' AND timestamp < ?1",
+            params![cutoff],
+        )
+    {
+        tracing::warn!("Failed to delete FTS entries during event purge: {e}");
+    }
+
+    match db.execute(
+        "DELETE FROM messages WHERE type = 'event' AND timestamp < ?1",
+        params![cutoff],
+    ) {
+        Ok(count) => count,
+        Err(e) => {
+            tracing::warn!("Failed to purge old events: {e}");
             0
         }
     }
@@ -239,5 +278,86 @@ mod tests {
             .query_row("SELECT msg_id FROM messages", [], |row| row.get(0))
             .unwrap();
         assert_eq!(remaining, "new1");
+    }
+
+    #[test]
+    fn purge_events_removes_only_old_events() {
+        let db = open_database(false).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let old = now - 100 * 3600; // 100 hours ago
+
+        // Old event (should be purged)
+        db.execute(
+            "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params!["ev_old", "net", "#chan", old, "event", "alice", "alice joined", 0],
+        )
+        .unwrap();
+
+        // Old chat message (should NOT be purged)
+        db.execute(
+            "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params!["msg_old", "net", "#chan", old, "message", "alice", "hello", 0],
+        )
+        .unwrap();
+
+        // Recent event (should NOT be purged)
+        db.execute(
+            "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params!["ev_new", "net", "#chan", now, "event", "bob", "bob joined", 0],
+        )
+        .unwrap();
+
+        // Recent chat message (should NOT be purged)
+        db.execute(
+            "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params!["msg_new", "net", "#chan", now, "message", "bob", "hi", 0],
+        )
+        .unwrap();
+
+        let removed = purge_old_events(&db, 72, true);
+        assert_eq!(removed, 1, "only the old event should be purged");
+
+        let count: i64 = db
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 3, "3 messages should remain");
+
+        // Verify old chat message survived
+        let old_msg: String = db
+            .query_row(
+                "SELECT msg_id FROM messages WHERE msg_id = 'msg_old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_msg, "msg_old");
+    }
+
+    #[test]
+    fn purge_events_leaves_chat_messages_untouched() {
+        let db = open_database(false).unwrap();
+        let old = chrono::Utc::now().timestamp() - 200 * 3600; // 200 hours ago
+
+        // Insert only chat messages (type != "event")
+        for (id, typ) in [("m1", "message"), ("m2", "action"), ("m3", "notice")] {
+            db.execute(
+                "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![id, "net", "#chan", old, typ, "x", "hello", 0],
+            )
+            .unwrap();
+        }
+
+        let removed = purge_old_events(&db, 72, true);
+        assert_eq!(removed, 0, "chat messages should never be purged by event pruner");
+
+        let count: i64 = db
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 3);
     }
 }

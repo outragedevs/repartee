@@ -102,8 +102,9 @@
 <pre><code class="language-toml">[logging]
 enabled = true
 encrypt = false
-retention_days = 0       # 0 = keep forever
-exclude_types = []       # e.g. [&quot;join&quot;, &quot;part&quot;, &quot;quit&quot;]
+retention_days = 0              # 0 = keep forever
+event_retention_hours = 72      # auto-prune events after 72h (0 = keep forever)
+exclude_types = []              # e.g. [&quot;join&quot;, &quot;part&quot;, &quot;quit&quot;]
 </code></pre>
 <h2>Storage</h2>
 <p>Logs are stored in <code>~/.repartee/logs/messages.db</code> using SQLite with WAL (Write-Ahead Logging) mode for concurrent read/write performance.</p>
@@ -191,6 +192,14 @@ REPARTEE_LOG_KEY=your-secret-passphrase
 <pre><code>─── End of backlog (20 lines) ───
 </code></pre>
 <p>Backlog messages do not trigger highlights or notifications, and are not re-logged to the database (they already exist). This works for autoconnect channels, manual <code>/join</code>, queries opened via incoming messages, and DCC chat reconnections.</p>
+<h2>Event retention</h2>
+<p>Event messages (join, part, quit, nick, kick, mode changes) are high-volume noise that accumulates over time. The <code>event_retention_hours</code> setting automatically prunes old event messages while keeping actual chat history intact.</p>
+<pre><code>/set logging.event_retention_hours 72    # default — keep 3 days of events
+/set logging.event_retention_hours 24    # aggressive — only 1 day
+/set logging.event_retention_hours 0     # disable — keep events forever
+</code></pre>
+<p>Pruning runs on startup and every hour in the background. It only deletes rows with <code>type = &#39;event&#39;</code> — chat messages, actions, notices, and CTCPs are never touched regardless of their age.</p>
+<p>This complements <code>retention_days</code> which controls the maximum age for <strong>all</strong> message types. When both are set, event messages are pruned at whichever threshold is reached first.</p>
 <h2>Batched writes</h2>
 <p>Messages are written to the database in batches (50 rows or every 1 second) using an async writer task connected via a tokio mpsc channel. This minimizes SQLite lock contention and ensures the UI never blocks on disk I/O.</p>
 

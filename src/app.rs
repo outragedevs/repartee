@@ -373,6 +373,8 @@ pub struct App {
     batch_trackers: HashMap<String, crate::irc::batch::BatchTracker>,
     /// Storage subsystem for persistent message logging.
     pub storage: Option<crate::storage::Storage>,
+    /// When the last periodic event-message purge ran.
+    last_event_purge: Instant,
     /// Custom quit message set by `/quit [msg]`.
     pub quit_message: Option<String>,
     /// Current image preview overlay state.
@@ -642,6 +644,7 @@ impl App {
             lag_pings: HashMap::new(),
             batch_trackers: HashMap::new(),
             storage,
+            last_event_purge: Instant::now(),
             quit_message: None,
             image_preview: crate::image_preview::PreviewStatus::default(),
             image_clear_rect: None,
@@ -1077,7 +1080,7 @@ impl App {
             connection_id: conn_id.to_string(),
             buffer_type: BufferType::Server,
             name: server_config.label.clone(),
-            messages: Vec::new(),
+            messages: VecDeque::new(),
             activity: ActivityLevel::None,
             unread_count: 0,
             last_read: Utc::now(),
@@ -1106,7 +1109,7 @@ impl App {
                 event_params: None,
                 log_msg_id: None,
                 log_ref_id: None,
-                tags: std::collections::HashMap::new(),
+                tags: None,
             },
         );
 
@@ -1407,7 +1410,7 @@ impl App {
                 event_params: None,
                 log_msg_id: None,
                 log_ref_id: None,
-                tags: std::collections::HashMap::new(),
+                tags: None,
             },
         );
 
@@ -1749,6 +1752,8 @@ impl App {
                             &format!("DCC CHAT request from {nick} timed out"),
                         );
                     }
+                    // Periodic event message pruning (every 1 hour).
+                    self.maybe_purge_old_events();
                 },
                 _ = paste_tick.tick() => {
                     self.drain_paste_queue();
@@ -1870,7 +1875,7 @@ impl App {
             connection_id: Self::DEFAULT_CONN_ID.to_string(),
             buffer_type: BufferType::Server,
             name: "Status".to_string(),
-            messages: Vec::new(),
+            messages: VecDeque::new(),
             activity: ActivityLevel::None,
             unread_count: 0,
             last_read: Utc::now(),
@@ -1902,7 +1907,7 @@ impl App {
                 event_params: None,
                 log_msg_id: None,
                 log_ref_id: None,
-                tags: std::collections::HashMap::new(),
+                tags: None,
             },
         );
     }
@@ -2025,9 +2030,9 @@ impl App {
             let id = self.state.next_message_id();
             let ts = chrono::DateTime::from_timestamp(stored.timestamp, 0).unwrap_or_else(Utc::now);
 
-            // Insert directly into messages vec — no activity, no logging, no highlight
+            // Insert directly into messages deque — no activity, no logging, no highlight
             if let Some(buf) = self.state.buffers.get_mut(buffer_id) {
-                buf.messages.push(Message {
+                buf.messages.push_back(Message {
                     id,
                     timestamp: ts,
                     message_type: msg_type,
@@ -2039,7 +2044,7 @@ impl App {
                     event_params: None,
                     log_msg_id: None,
                     log_ref_id: None,
-                    tags: std::collections::HashMap::new(),
+                    tags: None,
                 });
             }
         }
@@ -2047,7 +2052,7 @@ impl App {
         // Add separator after backlog
         let sep_id = self.state.next_message_id();
         if let Some(buf) = self.state.buffers.get_mut(buffer_id) {
-            buf.messages.push(Message {
+            buf.messages.push_back(Message {
                 id: sep_id,
                 timestamp: Utc::now(),
                 message_type: MessageType::Event,
@@ -2059,7 +2064,7 @@ impl App {
                 event_params: None,
                 log_msg_id: None,
                 log_ref_id: None,
-                tags: std::collections::HashMap::new(),
+                tags: None,
             });
         }
     }
@@ -2462,7 +2467,7 @@ impl App {
                         connection_id: conn_id.clone(),
                         buffer_type: BufferType::DccChat,
                         name: buf_name,
-                        messages: Vec::new(),
+                        messages: VecDeque::new(),
                         activity: ActivityLevel::None,
                         unread_count: 0,
                         last_read: chrono::Utc::now(),
@@ -2494,7 +2499,7 @@ impl App {
                         event_params: None,
                         log_msg_id: None,
                         log_ref_id: None,
-                        tags: std::collections::HashMap::new(),
+                        tags: None,
                     },
                 );
 
@@ -2548,7 +2553,7 @@ impl App {
                             event_params: None,
                             log_msg_id: None,
                             log_ref_id: None,
-                            tags: std::collections::HashMap::new(),
+                            tags: None,
                         },
                         ActivityLevel::Mention,
                     );
@@ -2582,7 +2587,7 @@ impl App {
                         event_params: None,
                         log_msg_id: None,
                         log_ref_id: None,
-                        tags: std::collections::HashMap::new(),
+                        tags: None,
                     },
                     ActivityLevel::Mention,
                 );
@@ -2627,7 +2632,7 @@ impl App {
                             event_params: None,
                             log_msg_id: None,
                             log_ref_id: None,
-                            tags: std::collections::HashMap::new(),
+                            tags: None,
                         },
                     );
                 }
@@ -2661,7 +2666,7 @@ impl App {
                         event_params: None,
                         log_msg_id: None,
                         log_ref_id: None,
-                        tags: std::collections::HashMap::new(),
+                        tags: None,
                     },
                 );
             }
@@ -2673,6 +2678,33 @@ impl App {
         for tracker in self.batch_trackers.values_mut() {
             tracker.purge_expired();
         }
+    }
+
+    /// Run periodic event-message pruning if enough time has elapsed (1 hour).
+    fn maybe_purge_old_events(&mut self) {
+        let hours = self.config.logging.event_retention_hours;
+        if hours == 0 {
+            return;
+        }
+        if self.last_event_purge.elapsed() < Duration::from_secs(3600) {
+            return;
+        }
+        self.last_event_purge = Instant::now();
+
+        let Some(storage) = &self.storage else {
+            return;
+        };
+        let db = Arc::clone(&storage.db);
+        let encrypt = storage.encrypt;
+        // Run the DELETE on a blocking thread to avoid holding the db lock on the async runtime.
+        tokio::task::spawn_blocking(move || {
+            let Ok(conn) = db.lock() else { return };
+            let has_fts = !encrypt;
+            let removed = crate::storage::db::purge_old_events(&conn, hours, has_fts);
+            if removed > 0 {
+                tracing::info!("periodic purge: removed {removed} event messages older than {hours}h");
+            }
+        });
     }
 
     /// Add an event message to the specified buffer.
@@ -2692,7 +2724,7 @@ impl App {
                 event_params: None,
                 log_msg_id: None,
                 log_ref_id: None,
-                tags: std::collections::HashMap::new(),
+                tags: None,
             },
         );
     }
@@ -3020,7 +3052,7 @@ impl App {
                                 "Connection to {conn_id} timed out (no PONG for 5 minutes)"
                             ),
                             highlight: false,
-                            tags: std::collections::HashMap::new(),
+                            tags: None,
                             log_msg_id: None,
                             log_ref_id: None,
                             event_key: None,
@@ -3206,7 +3238,7 @@ impl App {
                             connection_id: conn_id.clone(),
                             buffer_type: BufferType::Channel,
                             name: chan_name.to_string(),
-                            messages: Vec::new(),
+                            messages: VecDeque::new(),
                             activity: ActivityLevel::None,
                             unread_count: 0,
                             last_read: Utc::now(),
@@ -4047,7 +4079,7 @@ impl App {
                 connection_id: conn_id,
                 buffer_type: BufferType::Query,
                 name: nick_name,
-                messages: Vec::new(),
+                messages: VecDeque::new(),
                 activity: ActivityLevel::None,
                 unread_count: 0,
                 last_read: Utc::now(),
@@ -4355,7 +4387,7 @@ impl App {
                         event_params: None,
                         log_msg_id: None,
                         log_ref_id: None,
-                        tags: std::collections::HashMap::new(),
+                        tags: None,
                     },
                 );
             } else {
@@ -4405,7 +4437,7 @@ impl App {
                         event_params: None,
                         log_msg_id: None,
                         log_ref_id: None,
-                        tags: std::collections::HashMap::new(),
+                        tags: None,
                     },
                 );
             }
@@ -4952,6 +4984,15 @@ impl App {
             ScriptAction::TimerFired { id } => {
                 if let Some(manager) = self.script_manager.as_ref() {
                     manager.fire_timer(id);
+                }
+                // Remove completed one-shot timeout handles to prevent unbounded growth.
+                // Repeating timers (StartTimer) are still running, so is_finished() is false.
+                if self
+                    .active_timers
+                    .get(&id)
+                    .is_some_and(tokio::task::JoinHandle::is_finished)
+                {
+                    self.active_timers.remove(&id);
                 }
             }
             ScriptAction::SetScriptConfig { script, key, value } => {

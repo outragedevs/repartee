@@ -42,10 +42,11 @@ Search is not available in encrypted mode since ciphertext cannot be indexed.
 
 ```toml
 [logging]
-enabled = true       # enable/disable logging
-encrypt = false      # AES-256-GCM encryption (disables search)
-retention_days = 0   # 0 = keep forever
-exclude_types = []   # filter: "message", "action", "notice", "ctcp", "event"
+enabled = true                 # enable/disable logging
+encrypt = false                # AES-256-GCM encryption (disables search)
+retention_days = 0             # 0 = keep forever
+event_retention_hours = 72     # auto-prune events after 72h (0 = keep forever)
+exclude_types = []             # filter: "message", "action", "notice", "ctcp", "event"
 ```
 
 ### Encryption
@@ -61,6 +62,17 @@ type remain queryable for the future web frontend.
 
 Set `retention_days` to automatically purge old messages on startup.
 `0` means keep forever.
+
+### Event retention
+
+`event_retention_hours` controls how long event messages (join/part/quit/nick/kick/mode)
+are kept. Defaults to 72 hours. Pruning runs on startup and every hour in the background.
+Only event-type rows are affected — chat messages are never touched.
+
+```
+/set logging.event_retention_hours 72    # default
+/set logging.event_retention_hours 0     # keep forever
+```
 
 ### Excluding Types
 

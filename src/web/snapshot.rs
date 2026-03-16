@@ -123,7 +123,7 @@ mod tests {
     use super::*;
     use crate::state::buffer::{ActivityLevel, Buffer, BufferType, MessageType};
     use chrono::Utc;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
 
     fn make_test_state() -> AppState {
         let mut state = AppState::new();
@@ -134,7 +134,7 @@ mod tests {
                 connection_id: "libera".to_string(),
                 buffer_type: BufferType::Channel,
                 name: "#rust".to_string(),
-                messages: Vec::new(),
+                messages: VecDeque::new(),
                 activity: ActivityLevel::None,
                 unread_count: 3,
                 last_read: Utc::now(),
@@ -190,7 +190,7 @@ mod tests {
             event_params: None,
             log_msg_id: None,
             log_ref_id: None,
-            tags: HashMap::new(),
+            tags: None,
         };
         let wire = message_to_wire(&msg);
         assert_eq!(wire.id, 42);

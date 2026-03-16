@@ -22,7 +22,7 @@ pub fn add_local_event(app: &mut App, text: &str) {
             event_params: None,
             log_msg_id: None,
             log_ref_id: None,
-            tags: std::collections::HashMap::new(),
+            tags: None,
         },
     );
 }
