@@ -187,10 +187,22 @@ impl ShellManager {
     }
 
     /// Feed raw output bytes into the vt100 terminal emulator.
+    ///
+    /// Rewrites `CSI f` (HVP) to `CSI H` (CUP) before parsing, because the
+    /// vt100 crate does not handle HVP. Both are functionally identical
+    /// (absolute cursor positioning). Programs like btop use HVP exclusively.
     pub fn process_output(&mut self, id: &str, bytes: &[u8]) {
-        if let Some(session) = self.sessions.get_mut(id) {
+        let Some(session) = self.sessions.get_mut(id) else {
+            return;
+        };
+        // Fast path: no 'f' byte means no HVP sequences to rewrite.
+        if !bytes.contains(&b'f') {
             session.parser.process(bytes);
+            return;
         }
+        // Rewrite CSI...f → CSI...H for vt100 compatibility.
+        let patched = rewrite_hvp_to_cup(bytes);
+        session.parser.process(&patched);
     }
 
     /// Get the vt100 screen for rendering.
@@ -236,6 +248,52 @@ impl ShellManager {
         }
         self.sessions.clear();
     }
+}
+
+/// Rewrite `CSI ... f` (HVP) sequences to `CSI ... H` (CUP).
+///
+/// The vt100 crate handles CUP but not HVP, despite them being functionally
+/// identical (ECMA-48 §8.3.25 / §8.3.21). This performs a single pass over
+/// the byte stream, tracking CSI state to only replace `f` when it is the
+/// final byte of a CSI sequence.
+///
+/// CSI format: `\x1b[` followed by parameter bytes (0x30..=0x3F),
+/// then optional intermediate bytes (0x20..=0x2F), then a final byte (0x40..=0x7E).
+fn rewrite_hvp_to_cup(input: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(input.len());
+    let mut i = 0;
+
+    while i < input.len() {
+        // Look for ESC [ (CSI introducer).
+        if input[i] == 0x1b && i + 1 < input.len() && input[i + 1] == b'[' {
+            // Start of CSI sequence. Copy the introducer.
+            output.push(0x1b);
+            output.push(b'[');
+            i += 2;
+
+            // Skip parameter bytes (0x30..=0x3F: digits, semicolons, etc.)
+            // and intermediate bytes (0x20..=0x2F).
+            while i < input.len() && (0x20..=0x3F).contains(&input[i]) {
+                output.push(input[i]);
+                i += 1;
+            }
+
+            // Final byte (0x40..=0x7E).
+            if i < input.len() && (0x40..=0x7E).contains(&input[i]) {
+                if input[i] == b'f' {
+                    output.push(b'H'); // HVP → CUP
+                } else {
+                    output.push(input[i]);
+                }
+                i += 1;
+            }
+        } else {
+            output.push(input[i]);
+            i += 1;
+        }
+    }
+
+    output
 }
 
 #[cfg(test)]
@@ -359,6 +417,76 @@ mod tests {
         let (id2, _) = mgr.open(80, 24, Some("/bin/sh"), "shell/sh2").unwrap();
         assert_ne!(id1, id2);
         assert_eq!(mgr.session_count(), 2);
+        mgr.kill_all();
+    }
+
+    // ── rewrite_hvp_to_cup tests ──────────────────────────────────────────
+
+    #[test]
+    fn hvp_rewrite_converts_csi_f_to_csi_h() {
+        // CSI 5;10 f → CSI 5;10 H
+        let input = b"\x1b[5;10f";
+        let output = rewrite_hvp_to_cup(input);
+        assert_eq!(output, b"\x1b[5;10H");
+    }
+
+    #[test]
+    fn hvp_rewrite_preserves_plain_text_with_f() {
+        let input = b"hello from foo";
+        let output = rewrite_hvp_to_cup(input);
+        assert_eq!(output, b"hello from foo");
+    }
+
+    #[test]
+    fn hvp_rewrite_preserves_other_csi_sequences() {
+        // CSI 2 J (clear screen) should not be modified.
+        let input = b"\x1b[2J";
+        let output = rewrite_hvp_to_cup(input);
+        assert_eq!(output, b"\x1b[2J");
+    }
+
+    #[test]
+    fn hvp_rewrite_handles_mixed_content() {
+        // Text, then HVP, then more text, then a normal CSI.
+        let input = b"abc\x1b[1;1fxyz\x1b[0m";
+        let output = rewrite_hvp_to_cup(input);
+        assert_eq!(output, b"abc\x1b[1;1Hxyz\x1b[0m");
+    }
+
+    #[test]
+    fn hvp_rewrite_handles_bare_csi_f() {
+        // CSI f with no params → CSI H (default position 1;1).
+        let input = b"\x1b[f";
+        let output = rewrite_hvp_to_cup(input);
+        assert_eq!(output, b"\x1b[H");
+    }
+
+    #[test]
+    fn hvp_rewrite_multiple_hvp_in_sequence() {
+        let input = b"\x1b[1;1f\x1b[2;5f\x1b[10;20f";
+        let output = rewrite_hvp_to_cup(input);
+        assert_eq!(output, b"\x1b[1;1H\x1b[2;5H\x1b[10;20H");
+    }
+
+    #[test]
+    fn hvp_rewrite_does_not_touch_sgr_with_f_in_params() {
+        // CSI 38;2;255;0;0 m — the '0' params contain no 'f', final byte is 'm'.
+        let input = b"\x1b[38;2;255;0;0m";
+        let output = rewrite_hvp_to_cup(input);
+        assert_eq!(output, b"\x1b[38;2;255;0;0m");
+    }
+
+    #[test]
+    fn hvp_process_output_applies_cursor_position() {
+        let (mut mgr, _rx) = ShellManager::new();
+        let (id, _) = mgr.open(80, 24, Some("/bin/sh"), "shell/sh").unwrap();
+
+        // Feed HVP sequence to move cursor to row 5, col 10 (1-based).
+        mgr.process_output(&id, b"\x1b[5;10f");
+
+        let screen = mgr.screen(&id).unwrap();
+        // vt100 cursor_position() returns 0-based (row, col).
+        assert_eq!(screen.cursor_position(), (4, 9));
         mgr.kill_all();
     }
 }
