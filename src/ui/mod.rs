@@ -75,51 +75,76 @@ pub fn restore_terminal(terminal: &mut Tui) -> Result<()> {
     Ok(())
 }
 
-/// Truncate a string to fit `max_len` visible chars, appending `+` if truncated.
+/// Truncate a string to fit `max_len` display columns, appending `+` if truncated.
+/// Uses `unicode-width` for correct emoji/CJK width measurement.
 pub fn truncate_with_plus(s: &str, max_len: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
     if max_len == 0 {
         return String::new();
     }
-    if s.chars().count() <= max_len {
+    if s.width() <= max_len {
         return s.to_string();
     }
     if max_len <= 1 {
         return "+".to_string();
     }
-    // Use char_indices for correct UTF-8 truncation
-    let end = s
-        .char_indices()
-        .nth(max_len - 1)
-        .map_or(s.len(), |(i, _)| i);
-    format!("{}+", &s[..end])
+    // Accumulate display width char by char, leaving room for the `+` suffix.
+    let budget = max_len - 1;
+    let mut used = 0;
+    let mut byte_end = 0;
+    for (i, ch) in s.char_indices() {
+        let w = ch.width().unwrap_or(0);
+        if used + w > budget {
+            break;
+        }
+        used += w;
+        byte_end = i + ch.len_utf8();
+    }
+    format!("{}+", &s[..byte_end])
 }
 
-/// Count visible text length from parsed format spans (ignoring color codes).
+/// Count visible display width from parsed format spans (ignoring color codes).
+/// Uses `unicode-width` for correct emoji/CJK width measurement.
 pub fn visible_len(spans: &[crate::theme::StyledSpan]) -> usize {
-    spans.iter().map(|s| s.text.chars().count()).sum()
+    use unicode_width::UnicodeWidthStr;
+    spans.iter().map(|s| s.text.width()).sum()
 }
 
-/// Word-wrap a ratatui `Line` to fit within `width` columns.
+/// Word-wrap a ratatui `Line` to fit within `width` display columns.
 ///
 /// Continuation lines are indented with `indent` spaces.  Breaks prefer
 /// word boundaries (spaces); falls back to char boundaries when a single
 /// word exceeds the available width.
+///
+/// Uses `unicode-width` for correct emoji/CJK column measurement —
+/// matching ratatui's internal rendering.
 pub fn wrap_line(line: Line<'static>, width: usize, indent: usize) -> Vec<Line<'static>> {
+    use unicode_width::UnicodeWidthChar;
+
     if width == 0 {
         return vec![line];
     }
 
-    // Fast path: fits on one line.
-    let total_width: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+    // Fast path: fits on one line (measure display width, not char count).
+    let total_width: usize = line
+        .spans
+        .iter()
+        .flat_map(|s| s.content.chars())
+        .map(|ch| ch.width().unwrap_or(0))
+        .sum();
     if total_width <= width {
         return vec![line];
     }
 
-    // Flatten to (char, Style) stream.
-    let styled_chars: Vec<(char, Style)> = line
+    // Flatten to (char, char_display_width, Style) stream.
+    let styled_chars: Vec<(char, usize, Style)> = line
         .spans
         .iter()
-        .flat_map(|span| span.content.chars().map(move |ch| (ch, span.style)))
+        .flat_map(|span| {
+            span.content
+                .chars()
+                .map(move |ch| (ch, ch.width().unwrap_or(0), span.style))
+        })
         .collect();
 
     let mut result: Vec<Line<'static>> = Vec::new();
@@ -137,23 +162,33 @@ pub fn wrap_line(line: Line<'static>, width: usize, indent: usize) -> Vec<Line<'
             break;
         }
 
-        let end = (pos + line_width).min(styled_chars.len());
+        // Walk forward accumulating display width until we exceed the budget.
+        let mut used = 0;
+        let mut end = pos;
+        while end < styled_chars.len() {
+            let w = styled_chars[end].1;
+            if used + w > line_width {
+                break;
+            }
+            used += w;
+            end += 1;
+        }
 
         // Last chunk — take everything remaining.
         if end >= styled_chars.len() {
-            let built = build_line_from_styled_chars(&styled_chars[pos..], !first_line, indent);
+            let built = build_line_from_styled_chars_v2(&styled_chars[pos..], !first_line, indent);
             result.push(built);
             break;
         }
 
         // Try to find a word break point (last space within the chunk).
         let chunk = &styled_chars[pos..end];
-        let break_at = chunk.iter().rposition(|(ch, _)| *ch == ' ');
+        let break_at = chunk.iter().rposition(|(ch, _, _)| *ch == ' ');
 
         let actual_end = break_at.map_or(end, |break_pos| pos + break_pos + 1);
 
         let built =
-            build_line_from_styled_chars(&styled_chars[pos..actual_end], !first_line, indent);
+            build_line_from_styled_chars_v2(&styled_chars[pos..actual_end], !first_line, indent);
         result.push(built);
 
         pos = actual_end;
@@ -172,11 +207,11 @@ pub fn wrap_line(line: Line<'static>, width: usize, indent: usize) -> Vec<Line<'
     result
 }
 
-/// Build a `Line` from a slice of `(char, Style)` pairs, grouping consecutive
-/// chars with the same style into spans.  Prepends `indent` spaces when
+/// Build a `Line` from a slice of `(char, display_width, Style)` tuples, grouping
+/// consecutive chars with the same style into spans.  Prepends `indent` spaces when
 /// `is_continuation` is true.
-fn build_line_from_styled_chars(
-    chars: &[(char, Style)],
+fn build_line_from_styled_chars_v2(
+    chars: &[(char, usize, Style)],
     is_continuation: bool,
     indent: usize,
 ) -> Line<'static> {
@@ -191,9 +226,9 @@ fn build_line_from_styled_chars(
     }
 
     let mut current_text = String::new();
-    let mut current_style = chars[0].1;
+    let mut current_style = chars[0].2;
 
-    for &(ch, style) in chars {
+    for &(ch, _, style) in chars {
         if style != current_style && !current_text.is_empty() {
             spans.push(Span::styled(
                 std::mem::take(&mut current_text),
@@ -297,5 +332,45 @@ mod wrap_tests {
         let line = plain_line("hello");
         let result = wrap_line(line, 0, 0);
         assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn wide_emoji_counted_as_double_width() {
+        // 😀 (U+1F600) is 2 display columns wide, so "a😀b" = 1+2+1 = 4 columns
+        // With width=3, it must wrap.
+        let line = plain_line("a😀b");
+        let result = wrap_line(line, 3, 0);
+        assert!(
+            result.len() >= 2,
+            "wide emoji should cause wrap at width=3, got {} lines",
+            result.len()
+        );
+    }
+
+    #[test]
+    fn truncate_with_plus_respects_wide_char_width() {
+        // "hi😀" = 1+1+2 = 4 columns. Truncate to 3 should give "hi+"
+        let result = super::truncate_with_plus("hi😀", 3);
+        assert_eq!(result, "hi+");
+    }
+
+    #[test]
+    fn short_line_with_wide_emoji_fits() {
+        // 😀 = 2 columns, fits in width=2
+        let line = plain_line("😀");
+        let result = wrap_line(line, 2, 0);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn cjk_characters_are_double_width() {
+        // "中文" = 4 columns (2 each). Should wrap at width=3.
+        let line = plain_line("中文test");
+        let result = wrap_line(line, 5, 0);
+        assert!(
+            result.len() >= 2,
+            "CJK should cause wrap at width=5, got {} lines",
+            result.len()
+        );
     }
 }

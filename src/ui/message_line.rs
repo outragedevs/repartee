@@ -1,3 +1,5 @@
+use unicode_width::UnicodeWidthStr;
+
 use crate::config::AppConfig;
 use crate::state::buffer::{Message, MessageType};
 use crate::theme::{StyledSpan, parse_format_string, resolve_abstractions};
@@ -85,7 +87,7 @@ fn render_chat_message(
     let max_len = config.display.nick_max_length as usize;
 
     // Truncate nick accounting for mode prefix width, so mode+nick fits the column
-    let mode_width = nick_mode.chars().count();
+    let mode_width = nick_mode.width();
     let nick_budget = max_len.saturating_sub(mode_width);
     let mut display_nick = if config.display.nick_truncation {
         super::truncate_with_plus(nick, nick_budget)
@@ -93,8 +95,8 @@ fn render_chat_message(
         nick.to_string()
     };
 
-    // Pad combined mode+nick to fill column width (use char count, not bytes)
-    let total_len = nick_mode.chars().count() + display_nick.chars().count();
+    // Pad combined mode+nick to fill column width (display columns, not char count)
+    let total_len = nick_mode.width() + display_nick.width();
     let pad_size = nick_width.saturating_sub(total_len);
 
     let padded_nick_mode = match config.display.nick_alignment {
