@@ -9,6 +9,10 @@ description: Kick a user from the channel
 
     /kick <nick> [reason]
 
+## Aliases
+
+    /k
+
 ## Description
 
 Kick a user from the current channel. If no reason is given, the
@@ -19,6 +23,7 @@ to use this command.
 
     /kick troll
     /kick spammer Stop spamming
+    /k troll Get out
 
 ## See Also
 
