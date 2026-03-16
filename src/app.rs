@@ -2169,6 +2169,14 @@ impl App {
                 }
                 crate::web::protocol::WebEvent::ActiveBufferChanged { buffer_id } => {
                     tracing::debug!(%buffer_id, "broadcasting ActiveBufferChanged");
+                    // Send shell screen immediately when switching to a shell buffer.
+                    if let Some(shell_id) = self
+                        .shell_mgr
+                        .session_id_for_buffer(&buffer_id)
+                        .map(ToString::to_string)
+                    {
+                        self.force_broadcast_shell_screen(&shell_id);
+                    }
                 }
                 _ => {}
             }
@@ -2225,6 +2233,15 @@ impl App {
             WebCommand::SwitchBuffer { buffer_id } => {
                 // Sync active buffer: web ↔ TUI share the same active buffer.
                 self.state.set_active_buffer(&buffer_id);
+                self.update_shell_input_state();
+                // Send current shell screen to web client immediately.
+                if let Some(shell_id) = self
+                    .shell_mgr
+                    .session_id_for_buffer(&buffer_id)
+                    .map(ToString::to_string)
+                {
+                    self.force_broadcast_shell_screen(&shell_id);
+                }
             }
             WebCommand::MarkRead { buffer_id, .. } => {
                 // TODO: use `up_to` for partial mark-read. Currently resets fully.
@@ -2564,6 +2581,30 @@ impl App {
             return;
         };
 
+        self.broadcast_web(crate::web::protocol::WebEvent::ShellScreen {
+            buffer_id,
+            rows,
+            cursor_row,
+            cursor_col,
+            cursor_visible,
+        });
+    }
+
+    /// Broadcast the shell screen immediately (no throttle). Used when web client
+    /// switches to a shell buffer and needs the initial screen state.
+    fn force_broadcast_shell_screen(&mut self, shell_id: &str) {
+        let Some(buffer_id) = self
+            .shell_mgr
+            .buffer_id(shell_id)
+            .map(ToString::to_string)
+        else {
+            return;
+        };
+        let Some((rows, cursor_row, cursor_col, cursor_visible)) =
+            self.shell_mgr.screen_to_web(shell_id)
+        else {
+            return;
+        };
         self.broadcast_web(crate::web::protocol::WebEvent::ShellScreen {
             buffer_id,
             rows,
