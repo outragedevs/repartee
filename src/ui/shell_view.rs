@@ -18,17 +18,6 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let rows = area.height.min(screen_rows);
     let cols = area.width.min(screen_cols);
 
-    // Log dimension mismatch for debugging full-screen TUI programs.
-    if screen_cols != area.width || screen_rows != area.height {
-        tracing::debug!(
-            screen_cols,
-            screen_rows,
-            render_width = area.width,
-            render_height = area.height,
-            "shell_view: PTY/render dimension mismatch"
-        );
-    }
-
     let ratatui_buf = frame.buffer_mut();
 
     // Write every cell 1:1 from vt100 screen to ratatui buffer.
