@@ -10,6 +10,8 @@ pub mod status_line;
 pub mod styled_text;
 pub mod topic_bar;
 
+use std::io::{self, Write};
+
 use color_eyre::eyre::Result;
 use crossterm::{
     event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
@@ -17,7 +19,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::prelude::*;
-use std::io::{self, Write};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub type Tui = Terminal<CrosstermBackend<Box<dyn Write + Send>>>;
 
@@ -78,7 +80,6 @@ pub fn restore_terminal(terminal: &mut Tui) -> Result<()> {
 /// Truncate a string to fit `max_len` display columns, appending `+` if truncated.
 /// Uses `unicode-width` for correct emoji/CJK width measurement.
 pub fn truncate_with_plus(s: &str, max_len: usize) -> String {
-    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
     if max_len == 0 {
         return String::new();
     }
@@ -106,7 +107,6 @@ pub fn truncate_with_plus(s: &str, max_len: usize) -> String {
 /// Count visible display width from parsed format spans (ignoring color codes).
 /// Uses `unicode-width` for correct emoji/CJK width measurement.
 pub fn visible_len(spans: &[crate::theme::StyledSpan]) -> usize {
-    use unicode_width::UnicodeWidthStr;
     spans.iter().map(|s| s.text.width()).sum()
 }
 
@@ -119,24 +119,11 @@ pub fn visible_len(spans: &[crate::theme::StyledSpan]) -> usize {
 /// Uses `unicode-width` for correct emoji/CJK column measurement —
 /// matching ratatui's internal rendering.
 pub fn wrap_line(line: Line<'static>, width: usize, indent: usize) -> Vec<Line<'static>> {
-    use unicode_width::UnicodeWidthChar;
-
     if width == 0 {
         return vec![line];
     }
 
-    // Fast path: fits on one line (measure display width, not char count).
-    let total_width: usize = line
-        .spans
-        .iter()
-        .flat_map(|s| s.content.chars())
-        .map(|ch| ch.width().unwrap_or(0))
-        .sum();
-    if total_width <= width {
-        return vec![line];
-    }
-
-    // Flatten to (char, char_display_width, Style) stream.
+    // Flatten to (char, display_width, Style) and measure total width in one pass.
     let styled_chars: Vec<(char, usize, Style)> = line
         .spans
         .iter()
@@ -146,6 +133,11 @@ pub fn wrap_line(line: Line<'static>, width: usize, indent: usize) -> Vec<Line<'
                 .map(move |ch| (ch, ch.width().unwrap_or(0), span.style))
         })
         .collect();
+
+    let total_width: usize = styled_chars.iter().map(|(_, w, _)| w).sum();
+    if total_width <= width {
+        return vec![line];
+    }
 
     let mut result: Vec<Line<'static>> = Vec::new();
     let mut pos = 0;
@@ -176,7 +168,7 @@ pub fn wrap_line(line: Line<'static>, width: usize, indent: usize) -> Vec<Line<'
 
         // Last chunk — take everything remaining.
         if end >= styled_chars.len() {
-            let built = build_line_from_styled_chars_v2(&styled_chars[pos..], !first_line, indent);
+            let built = build_line_from_styled_chars(&styled_chars[pos..], !first_line, indent);
             result.push(built);
             break;
         }
@@ -188,7 +180,7 @@ pub fn wrap_line(line: Line<'static>, width: usize, indent: usize) -> Vec<Line<'
         let actual_end = break_at.map_or(end, |break_pos| pos + break_pos + 1);
 
         let built =
-            build_line_from_styled_chars_v2(&styled_chars[pos..actual_end], !first_line, indent);
+            build_line_from_styled_chars(&styled_chars[pos..actual_end], !first_line, indent);
         result.push(built);
 
         pos = actual_end;
@@ -210,7 +202,7 @@ pub fn wrap_line(line: Line<'static>, width: usize, indent: usize) -> Vec<Line<'
 /// Build a `Line` from a slice of `(char, display_width, Style)` tuples, grouping
 /// consecutive chars with the same style into spans.  Prepends `indent` spaces when
 /// `is_continuation` is true.
-fn build_line_from_styled_chars_v2(
+fn build_line_from_styled_chars(
     chars: &[(char, usize, Style)],
     is_continuation: bool,
     indent: usize,
