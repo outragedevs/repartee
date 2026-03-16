@@ -167,7 +167,6 @@ pub struct WireMention {
 /// Complete shell screen state for rendering in the web frontend.
 #[derive(Debug, Clone)]
 pub struct ShellScreenData {
-    pub buffer_id: String,
     pub rows: Vec<ShellScreenRow>,
     pub cursor_row: u16,
     pub cursor_col: u16,

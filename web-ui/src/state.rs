@@ -312,7 +312,6 @@ impl AppState {
                 // Only update if this shell buffer is currently active.
                 if self.active_buffer.get_untracked().as_deref() == Some(buffer_id.as_str()) {
                     self.shell_screen.set(Some(crate::protocol::ShellScreenData {
-                        buffer_id,
                         rows,
                         cursor_row,
                         cursor_col,

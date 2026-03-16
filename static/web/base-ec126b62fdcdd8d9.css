@@ -524,3 +524,17 @@ html, body {
 
 .theme-swatch.active { border-color: var(--accent); }
 .theme-swatch:hover { border-color: var(--fg-muted); }
+
+/* === Shell terminal view (beamterm WebGL2 canvas) === */
+
+.shell-terminal {
+    flex: 1;
+    display: block;
+    width: 100%;
+    background: #000;
+    outline: none;
+}
+
+.shell-terminal:focus {
+    box-shadow: inset 0 0 0 1px var(--accent);
+}
