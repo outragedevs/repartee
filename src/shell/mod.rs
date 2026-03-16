@@ -113,7 +113,8 @@ impl ShellManager {
             .try_clone_reader()
             .map_err(|e| format!("Failed to clone PTY reader: {e}"))?;
         let tx = self.event_tx.clone();
-        let reader_id = id.clone();
+        // Arc<str> avoids a String clone per read in the hot output path.
+        let reader_id: std::sync::Arc<str> = id.as_str().into();
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
             loop {
@@ -128,7 +129,7 @@ impl ShellManager {
                     Ok(n) => {
                         if tx
                             .send(ShellEvent::Output {
-                                id: reader_id.clone(),
+                                id: std::sync::Arc::clone(&reader_id),
                                 bytes: buf[..n].to_vec(),
                             })
                             .is_err()

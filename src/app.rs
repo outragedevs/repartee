@@ -5749,6 +5749,7 @@ fn write_iterm2_tmux_direct(
 /// CSI prefix (`\x1b [`), which programs like vim/less expect.
 fn key_event_to_bytes(key: &event::KeyEvent, app_cursor: bool) -> Vec<u8> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
     // SS3 prefix for application cursor mode, CSI for normal mode.
     let arrow_prefix: &[u8] = if app_cursor { b"\x1bO" } else { b"\x1b[" };
 
@@ -5756,12 +5757,22 @@ fn key_event_to_bytes(key: &event::KeyEvent, app_cursor: bool) -> Vec<u8> {
         KeyCode::Char(c) if ctrl => {
             // Ctrl+letter → control character (0x01..0x1A).
             let byte = (c.to_ascii_lowercase() as u8).wrapping_sub(b'a').wrapping_add(1);
-            vec![byte]
+            if alt {
+                vec![0x1b, byte]
+            } else {
+                vec![byte]
+            }
         }
         KeyCode::Char(c) => {
+            // Alt+char → ESC prefix (standard terminal encoding for meta key).
+            let mut result = Vec::with_capacity(if alt { 5 } else { 4 });
+            if alt {
+                result.push(0x1b);
+            }
             let mut buf = [0u8; 4];
             let s = c.encode_utf8(&mut buf);
-            s.as_bytes().to_vec()
+            result.extend_from_slice(s.as_bytes());
+            result
         }
         KeyCode::Enter => vec![b'\r'],
         KeyCode::Backspace => vec![0x7f],
@@ -6208,6 +6219,30 @@ mod tests {
         assert_eq!(
             key_event_to_bytes(&make_key(KeyCode::Home, KeyModifiers::NONE), true),
             vec![0x1b, b'O', b'H']
+        );
+    }
+
+    #[test]
+    fn key_to_bytes_alt_char() {
+        // Alt+x → ESC followed by 'x' (standard meta encoding).
+        assert_eq!(
+            key_event_to_bytes(&make_key(KeyCode::Char('x'), KeyModifiers::ALT), false),
+            vec![0x1b, b'x']
+        );
+    }
+
+    #[test]
+    fn key_to_bytes_alt_ctrl_c() {
+        // Alt+Ctrl+C → ESC followed by 0x03.
+        assert_eq!(
+            key_event_to_bytes(
+                &make_key(
+                    KeyCode::Char('c'),
+                    KeyModifiers::ALT | KeyModifiers::CONTROL
+                ),
+                false
+            ),
+            vec![0x1b, 0x03]
         );
     }
 }
