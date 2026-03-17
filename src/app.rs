@@ -1747,7 +1747,11 @@ impl App {
                 // Deferred shell broadcast: catch final screen state after output stops.
                 _ = tokio::time::sleep(std::time::Duration::from_millis(150)), if self.shell_broadcast_pending.is_some() => {
                     if let Some(shell_id) = self.shell_broadcast_pending.take() {
-                        self.force_broadcast_shell_screen(&shell_id);
+                        if self.shell_mgr.is_web_session(&shell_id) {
+                            self.force_broadcast_web_shell_screen(&shell_id);
+                        } else {
+                            self.force_broadcast_shell_screen(&shell_id);
+                        }
                     }
                 },
                 _ = tick.tick() => {
@@ -2244,7 +2248,12 @@ impl App {
                 self.state.set_active_buffer(&buffer_id);
                 self.update_shell_input_state();
                 // Send current shell screen to web client immediately.
-                if let Some(shell_id) = self
+                // Broadcast web shell screen if this session has a web PTY,
+                // otherwise fall back to the TUI shell screen.
+                let web_id = format!("web-{session_id}");
+                if self.shell_mgr.has_web_session(&web_id) {
+                    self.force_broadcast_web_shell_screen(&web_id);
+                } else if let Some(shell_id) = self
                     .shell_mgr
                     .session_id_for_buffer(&buffer_id)
                     .map(ToString::to_string)
@@ -2283,33 +2292,35 @@ impl App {
             WebCommand::RunCommand { buffer_id, text } => {
                 self.web_run_command(&buffer_id, &text);
             }
-            WebCommand::ShellInput { buffer_id, data } => {
-                // Decode base64-encoded input bytes and write to the shell PTY.
+            WebCommand::ShellInput { buffer_id: _, data } => {
+                // Write to the web-specific PTY for this session.
+                let web_id = format!("web-{session_id}");
                 if let Ok(bytes) = base64::Engine::decode(
                     &base64::engine::general_purpose::STANDARD,
                     &data,
-                )
-                    && let Some(shell_id) = self
-                        .shell_mgr
-                        .session_id_for_buffer(&buffer_id)
-                        .map(ToString::to_string)
-                {
-                    self.shell_mgr.write(&shell_id, &bytes);
+                ) {
+                    self.shell_mgr.write_web(&web_id, &bytes);
                 }
             }
+            WebCommand::WebDisconnect => {
+                self.shell_mgr.close_web_by_session(session_id);
+            }
             WebCommand::ShellResize {
-                buffer_id,
+                buffer_id: _,
                 cols,
                 rows,
             } => {
-                if let Some(shell_id) = self
-                    .shell_mgr
-                    .session_id_for_buffer(&buffer_id)
-                    .map(ToString::to_string)
-                {
-                    self.shell_mgr.resize(&shell_id, cols, rows);
-                    self.force_broadcast_shell_screen(&shell_id);
+                let web_id = format!("web-{session_id}");
+                // Lazily create the web PTY on first resize.
+                if !self.shell_mgr.has_web_session(&web_id) {
+                    if let Err(e) = self.shell_mgr.open_web(session_id, cols, rows) {
+                        tracing::warn!("failed to open web shell: {e}");
+                        return;
+                    }
+                } else {
+                    self.shell_mgr.resize_web(&web_id, cols, rows);
                 }
+                self.force_broadcast_web_shell_screen(&web_id);
             }
         }
     }
@@ -2434,18 +2445,25 @@ impl App {
     fn handle_shell_event(&mut self, ev: crate::shell::ShellEvent) {
         match ev {
             crate::shell::ShellEvent::Output { id, bytes } => {
-                self.shell_mgr.process_output(&id, &bytes);
-                // Broadcast shell screen to web clients (throttled to ~10fps).
-                self.maybe_broadcast_shell_screen(&id);
+                if self.shell_mgr.is_web_session(&id) {
+                    self.shell_mgr.process_output_web(&id, &bytes);
+                    self.maybe_broadcast_web_shell_screen(&id);
+                } else {
+                    self.shell_mgr.process_output(&id, &bytes);
+                    // Broadcast TUI shell screen to web clients (throttled).
+                    self.maybe_broadcast_shell_screen(&id);
+                }
             }
             crate::shell::ShellEvent::Exited { id, status } => {
                 tracing::info!(shell_id = %id, ?status, "shell process exited");
-                // Find and remove the buffer associated with this shell.
-                if let Some(buffer_id) = self.shell_mgr.buffer_id(&id).map(ToString::to_string) {
+                if self.shell_mgr.is_web_session(&id) {
+                    self.shell_mgr.close_web(&id);
+                } else if let Some(buffer_id) =
+                    self.shell_mgr.buffer_id(&id).map(ToString::to_string)
+                {
                     self.shell_mgr.close(&id);
                     self.state.remove_buffer(&buffer_id);
                     self.maybe_remove_shell_connection();
-                    // If we were viewing this shell, shell_input_active should be off.
                     if self
                         .state
                         .active_buffer()
@@ -2581,26 +2599,13 @@ impl App {
         }
     }
 
-    /// Broadcast the shell screen to web clients if enough time has passed (100ms throttle).
-    ///
-    /// If throttled, sets `shell_broadcast_pending` so the deferred broadcast in
-    /// the event loop catches the final screen state after output stops.
-    fn maybe_broadcast_shell_screen(&mut self, shell_id: &str) {
-        // Throttle to ~10fps to avoid flooding the WebSocket.
-        let now = Instant::now();
-        if now.duration_since(self.last_shell_web_broadcast).as_millis() < 100 {
-            self.shell_broadcast_pending = Some(shell_id.to_string());
-            return;
-        }
-        self.shell_broadcast_pending = None;
-        self.force_broadcast_shell_screen(shell_id);
-    }
+    /// TUI shell screen broadcast — no-op now that web has its own PTY.
+    /// Kept as a stub for the existing call sites in handle_shell_event.
+    fn maybe_broadcast_shell_screen(&mut self, _shell_id: &str) {}
 
-    /// Broadcast the shell screen immediately (no throttle). Used when web client
-    /// switches to a shell buffer and needs the initial screen state.
+    /// TUI shell screen broadcast — used as initial fallback when web client
+    /// switches to a shell buffer before the web PTY is created.
     fn force_broadcast_shell_screen(&mut self, shell_id: &str) {
-        self.last_shell_web_broadcast = Instant::now();
-
         let Some(buffer_id) = self
             .shell_mgr
             .buffer_id(shell_id)
@@ -2614,6 +2619,45 @@ impl App {
             return;
         };
         let cols = self.shell_mgr.screen_cols(shell_id);
+        self.broadcast_web(crate::web::protocol::WebEvent::ShellScreen {
+            buffer_id,
+            cols,
+            rows,
+            cursor_row,
+            cursor_col,
+            cursor_visible,
+        });
+    }
+
+    // ── Web shell PTY broadcast ────────────────────────────────────────────
+
+    /// Broadcast web shell screen (throttled).
+    fn maybe_broadcast_web_shell_screen(&mut self, web_id: &str) {
+        let now = Instant::now();
+        if now.duration_since(self.last_shell_web_broadcast).as_millis() < 100 {
+            self.shell_broadcast_pending = Some(web_id.to_string());
+            return;
+        }
+        self.shell_broadcast_pending = None;
+        self.force_broadcast_web_shell_screen(web_id);
+    }
+
+    /// Broadcast web shell screen immediately.
+    fn force_broadcast_web_shell_screen(&mut self, web_id: &str) {
+        self.last_shell_web_broadcast = Instant::now();
+
+        let Some((rows, cursor_row, cursor_col, cursor_visible)) =
+            self.shell_mgr.screen_to_web_session(web_id)
+        else {
+            return;
+        };
+        let cols = self.shell_mgr.screen_cols_web(web_id);
+        // Use the active buffer ID so the web client's state handler matches.
+        let buffer_id = self
+            .state
+            .active_buffer()
+            .map(|b| b.id.clone())
+            .unwrap_or_default();
         self.broadcast_web(crate::web::protocol::WebEvent::ShellScreen {
             buffer_id,
             cols,

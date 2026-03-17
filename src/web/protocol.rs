@@ -127,6 +127,9 @@ pub enum WebCommand {
     ShellInput { buffer_id: String, data: String },
     /// Resize the shell PTY to match the web client's viewport.
     ShellResize { buffer_id: String, cols: u16, rows: u16 },
+    /// Clean up web-specific resources on disconnect (sent internally).
+    #[serde(skip)]
+    WebDisconnect,
 }
 
 /// Buffer metadata sent in `SyncInit` and `BufferCreated`.

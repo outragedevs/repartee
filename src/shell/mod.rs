@@ -22,8 +22,14 @@ struct ShellSession {
 }
 
 /// Manages all active shell sessions and their PTY connections.
+///
+/// TUI sessions (`sessions`) are rendered in the ratatui terminal.
+/// Web sessions (`web_sessions`) are independent PTYs streamed to web clients.
+/// They are separate processes — no resize fighting between views.
 pub struct ShellManager {
     sessions: HashMap<String, ShellSession>,
+    /// Web-specific PTY sessions, keyed by web session UUID.
+    web_sessions: HashMap<String, ShellSession>,
     event_tx: mpsc::UnboundedSender<ShellEvent>,
     next_id: u32,
 }
@@ -34,6 +40,7 @@ impl ShellManager {
         (
             Self {
                 sessions: HashMap::new(),
+                web_sessions: HashMap::new(),
                 event_tx,
                 next_id: 0,
             },
@@ -219,11 +226,7 @@ impl ShellManager {
             .unwrap_or(80)
     }
 
-    /// Serialize a shell screen to styled rows for web transport.
-    ///
-    /// Merges consecutive cells with identical style into spans (RLE compression).
-    /// A typical btop frame compresses from ~17K cells to ~500 spans.
-    #[expect(clippy::similar_names, reason = "fg/bg are standard terminal color abbreviations")]
+    /// Serialize a TUI shell screen for web transport.
     pub fn screen_to_web(
         &self,
         id: &str,
@@ -234,6 +237,20 @@ impl ShellManager {
         bool,
     )> {
         let screen = self.sessions.get(id)?.parser.screen();
+        self.serialize_screen(screen)
+    }
+
+    /// Convert a vt100 screen to styled rows for web transport.
+    #[expect(clippy::similar_names, reason = "fg/bg are standard terminal color abbreviations")]
+    fn serialize_screen(
+        &self,
+        screen: &vt100::Screen,
+    ) -> Option<(
+        Vec<crate::web::protocol::ShellScreenRow>,
+        u16,
+        u16,
+        bool,
+    )> {
         let (screen_rows, screen_cols) = screen.size();
         let (cursor_row, cursor_col) = screen.cursor_position();
         let cursor_visible = !screen.hide_cursor();
@@ -303,11 +320,23 @@ impl ShellManager {
                 }
             }
 
-            // Flush final span (trim trailing spaces for compression).
-            let trimmed = cur_text.trim_end();
-            if !trimmed.is_empty() {
+            // Flush final span. Only trim trailing spaces if the span has
+            // default styling — styled spaces (colored background, etc.)
+            // must be preserved for status bars and separators.
+            let has_styling = !cur_bg.is_empty()
+                || !cur_fg.is_empty()
+                || cur_bold
+                || cur_italic
+                || cur_underline
+                || cur_inverse;
+            let text = if has_styling {
+                cur_text
+            } else {
+                cur_text.trim_end().to_string()
+            };
+            if !text.is_empty() {
                 spans.push(crate::web::protocol::ShellSpan {
-                    text: trimmed.to_string(),
+                    text,
                     fg: cur_fg,
                     bg: cur_bg,
                     bold: cur_bold,
@@ -360,6 +389,187 @@ impl ShellManager {
             let _ = session.child.kill();
         }
         self.sessions.clear();
+        for session in self.web_sessions.values_mut() {
+            let _ = session.child.kill();
+        }
+        self.web_sessions.clear();
+    }
+
+    // ── Web-specific PTY sessions ────────────────────────────────────────
+
+    /// Open a web-specific shell PTY, independent from the TUI session.
+    /// Returns the web shell ID on success.
+    pub fn open_web(
+        &mut self,
+        web_session_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<String, String> {
+        let id = format!("web-{web_session_id}");
+        if self.web_sessions.contains_key(&id) {
+            return Ok(id);
+        }
+
+        let pty_system = NativePtySystem::default();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| format!("Failed to open web PTY: {e}"))?;
+
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let program = std::path::Path::new(&shell)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("sh");
+        let label = program.to_string();
+
+        let mut cmd = CommandBuilder::new(&shell);
+        cmd.env("TERM", "xterm-256color");
+        cmd.cwd(std::env::current_dir().unwrap_or_else(|_| "/".into()));
+
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .map_err(|e| format!("Failed to spawn web shell: {e}"))?;
+        drop(pair.slave);
+
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|e| format!("Failed to get web PTY writer: {e}"))?;
+        let parser = vt100::Parser::new(rows, cols, 1000);
+
+        // Reader thread with "web-" prefixed ID so handle_shell_event routes correctly.
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|e| format!("Failed to clone web PTY reader: {e}"))?;
+        let tx = self.event_tx.clone();
+        let reader_id: std::sync::Arc<str> = id.as_str().into();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => {
+                        let _ = tx.send(ShellEvent::Exited {
+                            id: reader_id,
+                            status: None,
+                        });
+                        break;
+                    }
+                    Ok(n) => {
+                        if tx
+                            .send(ShellEvent::Output {
+                                id: std::sync::Arc::clone(&reader_id),
+                                bytes: buf[..n].to_vec(),
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        self.web_sessions.insert(
+            id.clone(),
+            ShellSession {
+                parser,
+                writer,
+                child,
+                master: pair.master,
+                buffer_id: String::new(),
+                label,
+            },
+        );
+
+        Ok(id)
+    }
+
+    /// Close a web shell session.
+    pub fn close_web(&mut self, id: &str) {
+        if let Some(mut session) = self.web_sessions.remove(id) {
+            let _ = session.child.kill();
+        }
+    }
+
+    /// Close all web sessions for a given web session UUID.
+    pub fn close_web_by_session(&mut self, web_session_id: &str) {
+        let key = format!("web-{web_session_id}");
+        self.close_web(&key);
+    }
+
+    /// Write to a web shell PTY.
+    pub fn write_web(&mut self, id: &str, data: &[u8]) {
+        if let Some(session) = self.web_sessions.get_mut(id) {
+            let _ = session.writer.write_all(data);
+            let _ = session.writer.flush();
+        }
+    }
+
+    /// Resize a web shell PTY.
+    pub fn resize_web(&mut self, id: &str, cols: u16, rows: u16) {
+        if let Some(session) = self.web_sessions.get_mut(id) {
+            session.parser.screen_mut().set_size(rows, cols);
+            let _ = session.master.resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
+        }
+    }
+
+    /// Process output for a web shell session.
+    pub fn process_output_web(&mut self, id: &str, bytes: &[u8]) {
+        let Some(session) = self.web_sessions.get_mut(id) else {
+            return;
+        };
+        if !bytes.contains(&b'f') {
+            session.parser.process(bytes);
+            return;
+        }
+        let patched = rewrite_hvp_to_cup(bytes);
+        session.parser.process(&patched);
+    }
+
+    /// Serialize a web shell screen for transport.
+    pub fn screen_to_web_session(
+        &self,
+        id: &str,
+    ) -> Option<(
+        Vec<crate::web::protocol::ShellScreenRow>,
+        u16,
+        u16,
+        bool,
+    )> {
+        let session = self.web_sessions.get(id)?;
+        let screen = session.parser.screen();
+        // Reuse the same serialization logic via the session's parser.
+        self.serialize_screen(screen)
+    }
+
+    /// Get the column count for a web session.
+    pub fn screen_cols_web(&self, id: &str) -> u16 {
+        self.web_sessions
+            .get(id)
+            .map(|s| s.parser.screen().size().1)
+            .unwrap_or(80)
+    }
+
+    /// Check if a shell event ID belongs to a web session.
+    pub fn is_web_session(&self, id: &str) -> bool {
+        id.starts_with("web-")
+    }
+
+    /// Check if a web session exists for the given ID.
+    pub fn has_web_session(&self, id: &str) -> bool {
+        self.web_sessions.contains_key(id)
     }
 }
 
