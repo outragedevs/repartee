@@ -234,6 +234,15 @@ fn start_render_loop(
             return;
         };
 
+        // Wait for @font-face fonts to load before creating the atlas.
+        // beamterm's dynamic_font_atlas rasterizes via Canvas 2D API which
+        // bypasses CSS font-display:block — if the TTF isn't loaded yet,
+        // Canvas falls back to a system font and Nerd Font glyphs are missing.
+        if borrow.is_none() && !fonts_loaded() {
+            schedule_next_frame(&cb_clone);
+            return;
+        }
+
         // Lazy-init the beamterm Terminal.
         if borrow.is_none() {
             match Terminal::builder("#shell-canvas")
@@ -394,6 +403,14 @@ fn send_shell_resize(state: &AppState, terminal: &Terminal) {
             rows,
         });
     }
+}
+
+/// Check if browser fonts (including @font-face) have finished loading.
+fn fonts_loaded() -> bool {
+    web_sys::window()
+        .and_then(|w| w.document())
+        .map(|d| d.fonts().status() == web_sys::FontFaceSetLoadStatus::Loaded)
+        .unwrap_or(true) // If API unavailable, proceed anyway.
 }
 
 fn canvas_parent_size() -> (i32, i32) {

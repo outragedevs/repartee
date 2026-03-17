@@ -49,6 +49,13 @@ pub fn Layout() -> impl IntoView {
         state.buffers.get().into_iter().find(|b| b.id == active_id)
     };
 
+    // Hide nick list for shell buffers (shells have no users to list).
+    let is_shell_buffer = move || {
+        active_buf()
+            .map(|b| b.buffer_type == "shell")
+            .unwrap_or(false)
+    };
+
     let mention_count = move || state.mention_count.get();
 
     // Swipe gesture state.
@@ -97,7 +104,7 @@ pub fn Layout() -> impl IntoView {
                 <div class="main-area">
                     <BufferList />
                     <ChatView />
-                    <NickList />
+                    {move || (!is_shell_buffer()).then(|| view! { <NickList /> })}
                 </div>
                 <div class="bottom-bar">
                     <StatusLine />
