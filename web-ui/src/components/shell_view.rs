@@ -7,6 +7,7 @@ use beamterm_renderer::{
 };
 use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::JsFuture;
 use web_sys::KeyboardEvent;
 
 use crate::protocol::{ShellScreenData, ShellSpan, WebCommand};
@@ -164,6 +165,35 @@ pub fn ShellView() -> impl IntoView {
         crate::ws::send_command(&WebCommand::ShellInput { buffer_id, data });
     };
 
+    // Paste handler — read clipboard text and send to PTY with bracketed paste.
+    let on_paste = move |ev: leptos::ev::Event| {
+        ev.prevent_default();
+        let Some(buffer_id) = state.active_buffer.get_untracked() else {
+            return;
+        };
+        // Use the Clipboard API (async) for reliable cross-browser paste.
+        leptos::task::spawn_local(async move {
+            let Some(win) = web_sys::window() else { return };
+            let clipboard = win.navigator().clipboard();
+            let Ok(js_text) = JsFuture::from(clipboard.read_text()).await else {
+                return;
+            };
+            let Some(text) = js_text.as_string() else {
+                return;
+            };
+            if text.is_empty() {
+                return;
+            }
+            // Wrap in bracketed paste mode markers so shells handle it correctly.
+            let mut bytes = Vec::with_capacity(text.len() + 12);
+            bytes.extend_from_slice(b"\x1b[200~");
+            bytes.extend_from_slice(text.as_bytes());
+            bytes.extend_from_slice(b"\x1b[201~");
+            let data = base64_encode(&bytes);
+            crate::ws::send_command(&WebCommand::ShellInput { buffer_id, data });
+        });
+    };
+
     view! {
         <canvas
             id="shell-canvas"
@@ -171,6 +201,7 @@ pub fn ShellView() -> impl IntoView {
             tabindex="0"
             node_ref=canvas_ref
             on:keydown=on_keydown
+            on:paste=on_paste
         />
     }
 }
