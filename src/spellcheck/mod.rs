@@ -36,9 +36,14 @@ struct LangDict {
     dict: Arc<spellbook::Dictionary>,
 }
 
+/// The file stem for the computing/IT supplemental dictionary.
+const COMPUTING_DICT_STEM: &str = "computing";
+
 /// Multilingual spell checker. Thread-safe (`Send + Sync`).
 pub struct SpellChecker {
     dicts: Vec<LangDict>,
+    /// Optional computing/IT dictionary (loaded separately, toggled via config).
+    computing_dict: Option<Arc<spellbook::Dictionary>>,
 }
 
 impl SpellChecker {
@@ -47,7 +52,11 @@ impl SpellChecker {
     /// Each language needs `{lang}.aff` and `{lang}.dic` in the directory.
     /// Languages that fail to load are logged and skipped.
     /// Dictionary order determines suggestion priority (first = highest).
-    pub fn load(languages: &[String], dict_dir: &Path) -> Self {
+    ///
+    /// If `computing` is true, also attempts to load `computing.dic`/`computing.aff`
+    /// from the same directory. This is a supplemental dictionary for IT/programming
+    /// terms that would otherwise be flagged as misspelled.
+    pub fn load(languages: &[String], dict_dir: &Path, computing: bool) -> Self {
         let mut dicts = Vec::new();
         for lang in languages {
             match load_dictionary(lang, dict_dir) {
@@ -63,15 +72,38 @@ impl SpellChecker {
                 }
             }
         }
-        Self { dicts }
+
+        // Load computing dictionary if enabled.
+        let computing_dict = if computing {
+            match load_dictionary(COMPUTING_DICT_STEM, dict_dir) {
+                Ok(dict) => {
+                    tracing::info!("computing/IT dictionary loaded");
+                    Some(Arc::new(dict))
+                }
+                Err(_) => {
+                    tracing::info!(
+                        "computing dictionary not found — run /spellcheck get computing"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        Self {
+            dicts,
+            computing_dict,
+        }
     }
 
     /// Check whether a word should be flagged as misspelled.
     ///
+    /// Check order: skip filters → nicks → computing dict → language dicts.
     /// Returns `true` if the word is correct (or should be skipped).
     /// The word should already be stripped of surrounding punctuation.
     pub fn check(&self, word: &str, nicks: &HashSet<String>) -> bool {
-        if self.dicts.is_empty() || word.len() < MIN_WORD_LEN {
+        if (self.dicts.is_empty() && self.computing_dict.is_none()) || word.len() < MIN_WORD_LEN {
             return true;
         }
         // Skip URLs
@@ -91,12 +123,20 @@ impl SpellChecker {
         if nicks.iter().any(|n| n.to_lowercase() == word_lower) {
             return true;
         }
-        // Union check: correct if ANY dictionary accepts
+        // Computing/IT dictionary check (before regular dicts — fast path for tech terms)
+        if let Some(ref cd) = self.computing_dict {
+            if cd.check(word) {
+                return true;
+            }
+        }
+        // Union check: correct if ANY language dictionary accepts
         self.dicts.iter().any(|ld| ld.dict.check(word))
     }
 
     /// Get spelling suggestions for a misspelled word, ranked by dictionary
     /// priority (config order). First dictionary's suggestions come first.
+    /// Computing dictionary suggestions are not included (it's a whitelist,
+    /// not a suggestion source).
     ///
     /// Returns up to [`MAX_SUGGESTIONS`] unique suggestions.
     pub fn suggest(&self, word: &str) -> Vec<String> {
@@ -124,14 +164,19 @@ impl SpellChecker {
         all
     }
 
-    /// Whether any dictionaries are loaded.
+    /// Whether any dictionaries are loaded (language or computing).
     pub const fn is_active(&self) -> bool {
-        !self.dicts.is_empty()
+        !self.dicts.is_empty() || self.computing_dict.is_some()
     }
 
-    /// Number of loaded dictionaries.
+    /// Number of loaded language dictionaries (excludes computing).
     pub const fn dict_count(&self) -> usize {
         self.dicts.len()
+    }
+
+    /// Whether the computing dictionary is loaded.
+    pub const fn has_computing(&self) -> bool {
+        self.computing_dict.is_some()
     }
 
     /// Resolve the dictionary directory path.
@@ -336,41 +381,41 @@ mod tests {
 
     #[test]
     fn empty_checker_accepts_everything() {
-        let checker = SpellChecker { dicts: vec![] };
+        let checker = SpellChecker { dicts: vec![], computing_dict: None };
         assert!(checker.check("anything", &HashSet::new()));
         assert!(checker.check("xyzzy", &HashSet::new()));
     }
 
     #[test]
     fn short_words_always_accepted() {
-        let checker = SpellChecker { dicts: vec![] };
+        let checker = SpellChecker { dicts: vec![], computing_dict: None };
         assert!(checker.check("a", &HashSet::new()));
         assert!(checker.check("", &HashSet::new()));
     }
 
     #[test]
     fn words_with_digits_skipped() {
-        let checker = SpellChecker { dicts: vec![] };
+        let checker = SpellChecker { dicts: vec![], computing_dict: None };
         assert!(checker.check("123", &HashSet::new()));
         assert!(checker.check("10:30", &HashSet::new()));
     }
 
     #[test]
     fn words_with_underscore_skipped() {
-        let checker = SpellChecker { dicts: vec![] };
+        let checker = SpellChecker { dicts: vec![], computing_dict: None };
         assert!(checker.check("foo_bar", &HashSet::new()));
     }
 
     #[test]
     fn urls_skipped() {
-        let checker = SpellChecker { dicts: vec![] };
+        let checker = SpellChecker { dicts: vec![], computing_dict: None };
         assert!(checker.check("https://example.com", &HashSet::new()));
         assert!(checker.check("irc://server", &HashSet::new()));
     }
 
     #[test]
     fn nicks_skipped() {
-        let checker = SpellChecker { dicts: vec![] };
+        let checker = SpellChecker { dicts: vec![], computing_dict: None };
         let nicks: HashSet<String> = ["kofany", "ferris"].iter().map(ToString::to_string).collect();
         assert!(checker.check("kofany", &nicks));
         assert!(checker.check("Kofany", &nicks)); // case-insensitive
@@ -438,7 +483,7 @@ mod tests {
 
     #[test]
     fn is_active_empty() {
-        let checker = SpellChecker { dicts: vec![] };
+        let checker = SpellChecker { dicts: vec![], computing_dict: None };
         assert!(!checker.is_active());
     }
 
@@ -459,6 +504,7 @@ mod tests {
         let checker = SpellChecker::load(
             &["nonexistent_XX".to_string()],
             Path::new("/tmp/repartee_test_no_dicts"),
+            false,
         );
         assert!(!checker.is_active());
         assert_eq!(checker.dict_count(), 0);
@@ -466,7 +512,7 @@ mod tests {
 
     #[test]
     fn suggest_empty_checker() {
-        let checker = SpellChecker { dicts: vec![] };
+        let checker = SpellChecker { dicts: vec![], computing_dict: None };
         let suggestions = checker.suggest("hello");
         assert!(suggestions.is_empty());
     }
@@ -478,6 +524,77 @@ mod tests {
         assert!(is_url("ftp://files"));
         assert!(!is_url("hello"));
         assert!(!is_url("httpwhat"));
+    }
+
+    #[test]
+    fn computing_dict_check() {
+        // Build a minimal computing dictionary in memory.
+        let aff = "SET UTF-8\n";
+        let dic = "2\nKubernetes\nIRCnet\n";
+        let dict = spellbook::Dictionary::new(aff, dic).unwrap();
+        let checker = SpellChecker {
+            dicts: vec![],
+            computing_dict: Some(Arc::new(dict)),
+        };
+        // Computing dict accepts these words.
+        assert!(checker.check("Kubernetes", &HashSet::new()));
+        assert!(checker.check("IRCnet", &HashSet::new()));
+        // Unknown word is rejected (no language dicts loaded).
+        assert!(!checker.check("xyzzyplugh", &HashSet::new()));
+    }
+
+    #[test]
+    fn has_computing_false_when_none() {
+        let checker = SpellChecker { dicts: vec![], computing_dict: None };
+        assert!(!checker.has_computing());
+    }
+
+    #[test]
+    fn has_computing_true_when_loaded() {
+        let aff = "SET UTF-8\n";
+        let dic = "1\ntest\n";
+        let dict = spellbook::Dictionary::new(aff, dic).unwrap();
+        let checker = SpellChecker {
+            dicts: vec![],
+            computing_dict: Some(Arc::new(dict)),
+        };
+        assert!(checker.has_computing());
+    }
+
+    #[test]
+    fn computing_dict_is_active() {
+        // A checker with only a computing dict should still be active.
+        let aff = "SET UTF-8\n";
+        let dic = "1\ntokio\n";
+        let dict = spellbook::Dictionary::new(aff, dic).unwrap();
+        let checker = SpellChecker {
+            dicts: vec![],
+            computing_dict: Some(Arc::new(dict)),
+        };
+        assert!(checker.is_active());
+    }
+
+    #[test]
+    fn load_real_computing_dict() {
+        // Load the actual computing.dic/computing.aff from the dicts/ directory
+        // at the project root. This verifies the file is parseable by spellbook.
+        let dict_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("dicts");
+        if !dict_dir.join("computing.dic").exists() {
+            eprintln!("skipping: computing.dic not found (run scripts/build-computing-dict.sh)");
+            return;
+        }
+        let checker = SpellChecker::load(&[], &dict_dir, true);
+        assert!(checker.has_computing(), "computing dict should be loaded");
+        assert!(checker.is_active());
+
+        // Verify some IRC terms pass.
+        let empty = HashSet::new();
+        assert!(checker.check("IRCnet", &empty));
+        assert!(checker.check("netsplit", &empty));
+        assert!(checker.check("WeeChat", &empty));
+        assert!(checker.check("Kubernetes", &empty));
+        assert!(checker.check("PRIVMSG", &empty));
+        assert!(checker.check("chanserv", &empty));
     }
 
     #[test]

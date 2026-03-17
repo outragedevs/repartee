@@ -4291,21 +4291,39 @@ impl App {
                 self.scroll_offset = self.scroll_offset.saturating_sub(10);
             }
             (_, KeyCode::Tab) => {
-                // Spell suggestion cycling takes priority over tab completion.
-                if self.input.spell_state.is_some() {
+                let is_highlight = self
+                    .input
+                    .spell_state
+                    .as_ref()
+                    .is_some_and(|s| s.highlight_only);
+                if is_highlight {
+                    // Highlight mode: Tab dismisses suggestions and performs normal tab completion.
+                    self.input.spell_state = None;
+                    self.handle_tab();
+                } else if self.input.spell_state.is_some() {
+                    // Replace mode: Tab cycles spell suggestions.
                     self.input.cycle_spell_suggestion();
                 } else {
                     self.handle_tab();
                 }
             }
             (mods, KeyCode::Char(c)) if mods.is_empty() || mods == KeyModifiers::SHIFT => {
-                if self.input.spell_state.is_some() {
-                    // Spell correction is active — handle accept keys specially.
+                let is_highlight = self
+                    .input
+                    .spell_state
+                    .as_ref()
+                    .is_some_and(|s| s.highlight_only);
+                if is_highlight {
+                    // Highlight mode: any keystroke dismisses suggestions, input proceeds normally.
+                    self.input.spell_state = None;
+                    self.input.insert_char(c);
+                    if c == ' ' || (c.is_ascii_punctuation() && c != '/') {
+                        self.check_spelling_after_separator();
+                    }
+                } else if self.input.spell_state.is_some() {
+                    // Replace mode: handle accept keys specially.
                     if c == ' ' {
                         // Space: accept current suggestion.
-                        // If the trigger was a space, it's already in the input — done.
-                        // If the trigger was punctuation (e.g., "word."), add a space
-                        // after it so the user doesn't have to press Space twice.
                         let needs_space = self.input.spell_state.as_ref().is_some_and(|s| {
                             self.input.value[s.word_end..]
                                 .chars()
@@ -4318,7 +4336,6 @@ impl App {
                         }
                     } else if matches!(c, '.' | ',' | '!' | '?' | ';' | ':') {
                         // Punctuation: accept and replace trailing separator with it.
-                        // "corrected_word " → "corrected_word."
                         self.input.accept_spell_with_punctuation(c);
                     } else {
                         // Any other char: accept current suggestion and continue typing.
@@ -4635,10 +4652,17 @@ impl App {
         let dict_dir = crate::spellcheck::SpellChecker::resolve_dict_dir(
             &self.config.spellcheck.dictionary_dir,
         );
-        let checker =
-            crate::spellcheck::SpellChecker::load(&self.config.spellcheck.languages, &dict_dir);
+        let checker = crate::spellcheck::SpellChecker::load(
+            &self.config.spellcheck.languages,
+            &dict_dir,
+            self.config.spellcheck.computing,
+        );
         if checker.is_active() {
-            tracing::info!(dicts = checker.dict_count(), "spell checker initialized");
+            tracing::info!(
+                dicts = checker.dict_count(),
+                computing = checker.has_computing(),
+                "spell checker initialized"
+            );
             self.spellchecker = Some(checker);
         } else {
             tracing::info!("spell checker: no dictionaries loaded");
@@ -4699,17 +4723,21 @@ impl App {
         if suggestions.is_empty() {
             return;
         }
+        let highlight_only = self.config.spellcheck.mode == "highlight";
         self.input.spell_state = Some(crate::ui::input::SpellCorrection {
             word_start,
             word_end,
             original: stripped.to_string(),
             suggestions,
             index: 0,
+            highlight_only,
         });
 
-        // Immediately apply the first suggestion so it's visible in the input
-        // and ready to accept with Space. Tab cycles to the next one.
-        self.input.apply_spell_suggestion(0);
+        if !highlight_only {
+            // Replace mode: immediately apply the first suggestion so it's visible
+            // in the input and ready to accept with Space. Tab cycles to the next one.
+            self.input.apply_spell_suggestion(0);
+        }
     }
 
     fn handle_tab(&mut self) {

@@ -976,6 +976,13 @@ pub(crate) fn cmd_spellcheck(app: &mut App, args: &[String]) {
             ev(
                 app,
                 &format!(
+                    "  Mode: {C_CMD}{}{C_RST}",
+                    app.config.spellcheck.mode
+                ),
+            );
+            ev(
+                app,
+                &format!(
                     "  Languages: {C_CMD}{}{C_RST}",
                     app.config.spellcheck.languages.join(", ")
                 ),
@@ -994,6 +1001,23 @@ pub(crate) fn cmd_spellcheck(app: &mut App, args: &[String]) {
             ev(
                 app,
                 &format!("  Loaded dictionaries: {C_CMD}{loaded}{C_RST}"),
+            );
+            let computing_status = if !app.config.spellcheck.computing {
+                format!("{C_DIM}disabled{C_RST}")
+            } else if app
+                .spellchecker
+                .as_ref()
+                .is_some_and(crate::spellcheck::SpellChecker::has_computing)
+            {
+                format!("{C_OK}loaded{C_RST}")
+            } else {
+                format!(
+                    "{C_ERR}not installed{C_RST} — run {C_CMD}/spellcheck get computing{C_RST}"
+                )
+            };
+            ev(
+                app,
+                &format!("  Computing dict: {computing_status}"),
             );
         }
         "reload" => {
@@ -1035,7 +1059,7 @@ pub(crate) fn cmd_spellcheck(app: &mut App, args: &[String]) {
             let Some(lang) = args.get(1) else {
                 ev(
                     app,
-                    &format!("{C_ERR}Usage: /spellcheck get <lang> (e.g. en_US, pl_PL){C_RST}"),
+                    &format!("{C_ERR}Usage: /spellcheck get <lang> (e.g. en_US, pl_PL, computing){C_RST}"),
                 );
                 return;
             };

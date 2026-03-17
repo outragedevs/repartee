@@ -129,6 +129,8 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
         "spellcheck" => {
             let val = match parts[1] {
                 "enabled" => config.spellcheck.enabled.to_string(),
+                "computing" => config.spellcheck.computing.to_string(),
+                "mode" => config.spellcheck.mode.clone(),
                 "languages" => config.spellcheck.languages.join(", "),
                 "dictionary_dir" => config.spellcheck.dictionary_dir.clone(),
                 _ => return None,
@@ -328,6 +330,14 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
         },
         "spellcheck" => match parts[1] {
             "enabled" => config.spellcheck.enabled = parse_bool(raw)?,
+            "computing" => config.spellcheck.computing = parse_bool(raw)?,
+            "mode" => {
+                let mode = raw.to_lowercase();
+                if mode != "replace" && mode != "highlight" {
+                    return Err("Expected 'replace' or 'highlight'".to_string());
+                }
+                config.spellcheck.mode = mode;
+            }
             "languages" => {
                 config.spellcheck.languages =
                     raw.split(',').map(|s| s.trim().to_string()).collect();
@@ -467,6 +477,8 @@ const BASE_PATHS: &[&str] = &[
     "logging.event_retention_hours",
     "logging.retention_days",
     "spellcheck.enabled",
+    "spellcheck.computing",
+    "spellcheck.mode",
     "spellcheck.languages",
     "spellcheck.dictionary_dir",
     "web.enabled",
@@ -826,7 +838,7 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
 
     // Spellcheck
     lines.push(format!("  {C_DIM}[spellcheck]{C_RST}"));
-    for field in &["enabled", "languages", "dictionary_dir"] {
+    for field in &["enabled", "computing", "mode", "languages", "dictionary_dir"] {
         let path = format!("spellcheck.{field}");
         if let Some(resolved) = get_config_value(config, &path) {
             lines.push(format!(

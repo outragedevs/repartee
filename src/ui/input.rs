@@ -20,6 +20,8 @@ pub struct SpellCorrection {
     pub suggestions: Vec<String>,
     /// Current suggestion index (wraps around).
     pub index: usize,
+    /// Highlight-only mode: word is marked red but NOT replaced. Any keystroke dismisses.
+    pub highlight_only: bool,
 }
 
 #[expect(
@@ -225,6 +227,10 @@ impl InputState {
     /// Dismiss any active spell correction, reverting to the original word.
     pub fn dismiss_spell(&mut self) {
         if let Some(spell) = self.spell_state.take() {
+            // In highlight mode, the word was never replaced — nothing to revert.
+            if spell.highlight_only {
+                return;
+            }
             // Revert to original word (the first suggestion was applied on creation).
             let current_word_len = spell.word_end - spell.word_start;
             let original_len = spell.original.len();
@@ -603,6 +609,40 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(after_cursor, normal_style));
     }
 
+    // In highlight mode, append suggestions right-aligned at end of input line.
+    if let Some(ref spell) = app.input.spell_state {
+        if spell.highlight_only && !spell.suggestions.is_empty() {
+            let accent = hex_to_color(&app.theme.colors.accent).unwrap_or(Color::Yellow);
+            let hint_style = Style::default().fg(accent);
+            let sep_style = Style::default().fg(fg_muted);
+
+            // Calculate how much space the input text (prompt + visible text) uses.
+            let text_width: usize = spans.iter().map(Span::width).sum();
+            let total_width = area.width as usize;
+
+            // Calculate hint width: "word1, word2, word3" without allocating the joined string.
+            let hint_width: usize = spell
+                .suggestions
+                .iter()
+                .map(|s| s.chars().count())
+                .sum::<usize>()
+                + spell.suggestions.len().saturating_sub(1) * 2; // ", " separators
+
+            // Only show if there's room (at least 2 chars gap between text and hints).
+            if text_width + 2 + hint_width <= total_width {
+                let gap = total_width - text_width - hint_width;
+                spans.push(Span::styled(" ".repeat(gap), Style::default()));
+                // Render each suggestion separated by commas.
+                for (i, s) in spell.suggestions.iter().enumerate() {
+                    if i > 0 {
+                        spans.push(Span::styled(", ", sep_style));
+                    }
+                    spans.push(Span::styled(s.as_str(), hint_style));
+                }
+            }
+        }
+    }
+
     let line = Line::from(spans);
     let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, area);
@@ -697,7 +737,7 @@ pub fn render_spell_popup(frame: &mut Frame, input_area: Rect, app: &App) {
     let Some(ref spell) = app.input.spell_state else {
         return;
     };
-    if spell.suggestions.is_empty() {
+    if spell.suggestions.is_empty() || spell.highlight_only {
         return;
     }
 
@@ -1200,6 +1240,7 @@ mod tests {
             original: original.to_string(),
             suggestions: suggestions.iter().map(ToString::to_string).collect(),
             index: 0,
+            highlight_only: false,
         });
         // Immediately apply first suggestion (matching check_spelling_after_separator).
         input.apply_spell_suggestion(0);
@@ -1324,9 +1365,50 @@ mod tests {
             original: "wrod".to_string(),
             suggestions: vec![],
             index: 0,
+            highlight_only: false,
         });
 
         assert!(!input.cycle_spell_suggestion());
+    }
+
+    #[test]
+    fn highlight_mode_dismiss_does_not_revert() {
+        let mut input = InputState::new();
+        input.value = "hello wrod ".to_string();
+        input.cursor_pos = 11;
+        input.spell_state = Some(SpellCorrection {
+            word_start: 6,
+            word_end: 10,
+            original: "wrod".to_string(),
+            suggestions: vec!["word".to_string()],
+            index: 0,
+            highlight_only: true,
+        });
+
+        // In highlight mode, the word was never replaced — dismiss should keep it as-is.
+        input.dismiss_spell();
+        assert_eq!(input.value, "hello wrod ");
+        assert!(input.spell_state.is_none());
+    }
+
+    #[test]
+    fn highlight_mode_insert_char_clears_spell() {
+        let mut input = InputState::new();
+        input.value = "hello wrod ".to_string();
+        input.cursor_pos = 11;
+        input.spell_state = Some(SpellCorrection {
+            word_start: 6,
+            word_end: 10,
+            original: "wrod".to_string(),
+            suggestions: vec!["word".to_string()],
+            index: 0,
+            highlight_only: true,
+        });
+
+        // Any insert_char clears spell_state (line 69 in insert_char).
+        input.insert_char('x');
+        assert!(input.spell_state.is_none());
+        assert_eq!(input.value, "hello wrod x");
     }
 
     #[test]
