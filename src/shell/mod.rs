@@ -308,15 +308,21 @@ impl ShellManager {
                     cur_italic = italic;
                     cur_underline = underline;
                     cur_inverse = inverse;
-                }
-                // Convert color to CSS only when it changed.
-                if fg_changed {
-                    cur_fg_raw = fg_raw;
+                    // After take(), cur_fg/cur_bg are empty. Re-set from raw.
                     cur_fg = vt100_color_to_css(fg_raw);
-                }
-                if bg_changed {
-                    cur_bg_raw = bg_raw;
                     cur_bg = vt100_color_to_css(bg_raw);
+                    cur_fg_raw = fg_raw;
+                    cur_bg_raw = bg_raw;
+                } else {
+                    // No flush — only convert when color actually changed.
+                    if fg_changed {
+                        cur_fg_raw = fg_raw;
+                        cur_fg = vt100_color_to_css(fg_raw);
+                    }
+                    if bg_changed {
+                        cur_bg_raw = bg_raw;
+                        cur_bg = vt100_color_to_css(bg_raw);
+                    }
                 }
                 if cur_text.is_empty() {
                     cur_bold = bold;
