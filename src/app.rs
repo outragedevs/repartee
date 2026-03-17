@@ -1586,6 +1586,10 @@ impl App {
 
         let mut tick = interval(Duration::from_secs(1));
         let mut paste_tick = interval(Duration::from_millis(500));
+        // B1 fix: pinned sleep for deferred shell broadcast. Reset to 150ms
+        // when a broadcast is throttled. Stays at far future when idle.
+        let shell_broadcast_sleep = tokio::time::sleep(std::time::Duration::from_secs(86400));
+        tokio::pin!(shell_broadcast_sleep);
 
         while !self.should_quit {
             // Handle pending detach request.
@@ -1730,6 +1734,12 @@ impl App {
                 shell_ev = self.shell_rx.recv() => {
                     if let Some(ev) = shell_ev {
                         self.handle_shell_event(ev);
+                        // Reset the deferred broadcast timer if a broadcast was throttled.
+                        if self.shell_broadcast_pending.is_some() {
+                            shell_broadcast_sleep.as_mut().reset(
+                                tokio::time::Instant::now() + std::time::Duration::from_millis(150)
+                            );
+                        }
                     }
                 },
                 dict_ev = self.dict_rx.recv() => {
@@ -1744,8 +1754,8 @@ impl App {
                         self.drain_pending_web_events();
                     }
                 },
-                // Deferred shell broadcast: catch final screen state after output stops.
-                _ = tokio::time::sleep(std::time::Duration::from_millis(150)), if self.shell_broadcast_pending.is_some() => {
+                // Deferred shell broadcast: fires 150ms after the last throttled output.
+                _ = &mut shell_broadcast_sleep, if self.shell_broadcast_pending.is_some() => {
                     if let Some(shell_id) = self.shell_broadcast_pending.take() {
                         if self.shell_mgr.is_web_session(&shell_id) {
                             self.force_broadcast_web_shell_screen(&shell_id);
@@ -1753,6 +1763,8 @@ impl App {
                             self.force_broadcast_shell_screen(&shell_id);
                         }
                     }
+                    // Reset to far future until next throttled broadcast.
+                    shell_broadcast_sleep.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_secs(86400));
                 },
                 _ = tick.tick() => {
                     self.handle_netsplit_tick();

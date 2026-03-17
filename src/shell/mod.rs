@@ -258,6 +258,10 @@ impl ShellManager {
         for row in 0..screen_rows {
             let mut spans: Vec<crate::web::protocol::ShellSpan> = Vec::new();
             let mut cur_text = String::new();
+            // B3 fix: track raw vt100::Color (Copy) to avoid String allocation
+            // per cell. Only convert to CSS string when the color actually changes.
+            let mut cur_fg_raw = vt100::Color::Default;
+            let mut cur_bg_raw = vt100::Color::Default;
             let mut cur_fg = String::new();
             let mut cur_bg = String::new();
             let mut cur_bold = false;
@@ -271,17 +275,21 @@ impl ShellManager {
                 };
                 let ch = cell.contents();
 
-                let fg = vt100_color_to_css(cell.fgcolor());
-                let bg = vt100_color_to_css(cell.bgcolor());
+                let fg_raw = cell.fgcolor();
+                let bg_raw = cell.bgcolor();
                 let bold = cell.bold();
                 let italic = cell.italic();
                 let underline = cell.underline();
                 let inverse = cell.inverse();
 
+                // Only allocate CSS string when the raw color changed.
+                let fg_changed = fg_raw != cur_fg_raw;
+                let bg_changed = bg_raw != cur_bg_raw;
+
                 // If style changed, flush current span and start new one.
                 if !cur_text.is_empty()
-                    && (fg != cur_fg
-                        || bg != cur_bg
+                    && (fg_changed
+                        || bg_changed
                         || bold != cur_bold
                         || italic != cur_italic
                         || underline != cur_underline
@@ -300,11 +308,17 @@ impl ShellManager {
                     cur_italic = italic;
                     cur_underline = underline;
                     cur_inverse = inverse;
-                    cur_fg = fg;
-                    cur_bg = bg;
-                } else if cur_text.is_empty() {
-                    cur_fg = fg;
-                    cur_bg = bg;
+                }
+                // Convert color to CSS only when it changed.
+                if fg_changed {
+                    cur_fg_raw = fg_raw;
+                    cur_fg = vt100_color_to_css(fg_raw);
+                }
+                if bg_changed {
+                    cur_bg_raw = bg_raw;
+                    cur_bg = vt100_color_to_css(bg_raw);
+                }
+                if cur_text.is_empty() {
                     cur_bold = bold;
                     cur_italic = italic;
                     cur_underline = underline;
