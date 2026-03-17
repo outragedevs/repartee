@@ -79,80 +79,28 @@ pub fn ShellView() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState not provided");
     let shell_term: Rc<RefCell<Option<ShellTerminal>>> = Rc::new(RefCell::new(None));
     let canvas_ref = NodeRef::<leptos::html::Canvas>::new();
+    // Track whether the rAF loop has been started (start only once).
+    let loop_started: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
 
-    // Combined init + render effect: fires on every shell_screen signal change.
+    // Single Effect: when shell_screen changes, start the rAF loop (once) and
+    // auto-focus. The rAF loop handles ALL rendering — init, resize, update_cells,
+    // render_frame. This avoids borrow conflicts between Effect and rAF.
     let term = shell_term.clone();
+    let started = loop_started.clone();
     Effect::new(move || {
-        let screen = state.shell_screen.get();
-        let mut borrow = term.borrow_mut();
-
-        // Lazy-init the beamterm Terminal on first render.
-        if borrow.is_none() {
-            match Terminal::builder("#shell-canvas")
-                .dynamic_font_atlas(FONT_FAMILIES, DEFAULT_FONT_SIZE)
-                .canvas_padding_color(DEFAULT_BG)
-                .mouse_selection_handler(
-                    MouseSelectOptions::new()
-                        .selection_mode(SelectionMode::Linear)
-                        .trim_trailing_whitespace(true),
-                )
-                .build()
-            {
-                Ok(mut t) => {
-                    let (w, h) = canvas_parent_size();
-                    if w > 0 && h > 0 {
-                        let _ = t.resize(w, h);
-                    }
-                    send_shell_resize(&state, &t);
-                    *borrow = Some(ShellTerminal {
-                        terminal: t,
-                        last_width: w,
-                        last_height: h,
-                        font_size: DEFAULT_FONT_SIZE,
-                    });
-                }
-                Err(e) => {
-                    web_sys::console::error_1(
-                        &format!("beamterm init: {e:?}").into(),
-                    );
-                    return;
-                }
-            }
-        }
-
-        let Some(st) = borrow.as_mut() else { return };
-        let Some(data) = screen else { return };
-
-        // Resize if the container changed (browser window resize).
-        let (w, h) = canvas_parent_size();
-        if w > 0 && h > 0 && (w != st.last_width || h != st.last_height) {
-            let _ = st.terminal.resize(w, h);
-            st.last_width = w;
-            st.last_height = h;
-            send_shell_resize(&state, &st.terminal);
-        }
-
-        // Always rebuild cells — update_cells() calls mark_all() which is
-        // required for flush_cells() to process selection color flipping.
-        // beamterm preserves selection via content hash (same data = selection stays).
-        render_screen(&mut st.terminal, &data);
-        // render_frame() also called by the rAF loop for selection during idle.
-    });
-
-    // Continuous render loop: requestAnimationFrame re-renders every frame so
-    // beamterm's selection color flipping works (requires dirty cells via update_cells).
-    let anim_term = shell_term.clone();
-    Effect::new(move || {
+        // Subscribe to changes.
         let _ = state.shell_screen.get();
-        start_render_loop(anim_term.clone(), state);
-    });
 
-    // Auto-focus the canvas when shell screen updates or mounts.
-    Effect::new(move || {
-        let _ = state.shell_screen.get();
+        // Auto-focus canvas.
         if let Some(el) = canvas_ref.get() {
             let html_el: &web_sys::HtmlElement = el.as_ref();
             let _ = html_el.focus();
+        }
+
+        // Start the rAF render loop exactly once.
+        if !*started.borrow() {
+            *started.borrow_mut() = true;
+            start_render_loop(term.clone(), state);
         }
     });
 
@@ -229,33 +177,88 @@ pub fn ShellView() -> impl IntoView {
 
 // ── Animation loop ───────────────────────────────────────────────────────────
 
-/// Start a requestAnimationFrame loop that re-renders every frame.
+/// Single requestAnimationFrame loop that owns ALL rendering.
 ///
-/// beamterm's `flush_cells()` gates selection color flipping behind a dirty
-/// check — it only processes selections when at least one cell is dirty.
-/// The selection demo solves this by calling `update_cells()` every frame.
-/// We do the same: read the current screen data and rebuild cells each frame.
-/// This is cheap (~1ms for a full terminal) and ensures selection works.
+/// Every frame: lazy-init terminal → check resize → rebuild cells → render.
+/// This avoids borrow conflicts with Leptos Effects and ensures selection
+/// highlights are always painted (beamterm needs dirty cells for selection
+/// color flipping, which requires update_cells() every frame).
 fn start_render_loop(term: Rc<RefCell<Option<ShellTerminal>>>, state: AppState) {
     let cb: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
     let cb_clone = cb.clone();
 
     *cb.borrow_mut() = Some(Closure::new(move || {
-        // Re-apply screen data every frame so dirty regions are set for selection.
-        if let Some(st) = term.borrow_mut().as_mut() {
-            if let Some(data) = state.shell_screen.get_untracked() {
-                render_screen(&mut st.terminal, &data);
-            } else {
-                let _ = st.terminal.render_frame();
+        // Try to borrow — if something else holds it (e.g. keydown handler),
+        // just skip this frame. The next rAF will pick it up.
+        let Ok(mut borrow) = term.try_borrow_mut() else {
+            schedule_next_frame(&cb_clone);
+            return;
+        };
+
+        // Lazy-init the beamterm Terminal.
+        if borrow.is_none() {
+            match Terminal::builder("#shell-canvas")
+                .dynamic_font_atlas(FONT_FAMILIES, DEFAULT_FONT_SIZE)
+                .canvas_padding_color(DEFAULT_BG)
+                .mouse_selection_handler(
+                    MouseSelectOptions::new()
+                        .selection_mode(SelectionMode::Linear)
+                        .trim_trailing_whitespace(true),
+                )
+                .build()
+            {
+                Ok(mut t) => {
+                    let (w, h) = canvas_parent_size();
+                    if w > 0 && h > 0 {
+                        let _ = t.resize(w, h);
+                    }
+                    send_shell_resize(&state, &t);
+                    *borrow = Some(ShellTerminal {
+                        terminal: t,
+                        last_width: w,
+                        last_height: h,
+                        font_size: DEFAULT_FONT_SIZE,
+                    });
+                }
+                Err(e) => {
+                    web_sys::console::error_1(&format!("beamterm init: {e:?}").into());
+                    schedule_next_frame(&cb_clone);
+                    return;
+                }
             }
         }
-        if let Some(win) = web_sys::window() {
-            if let Some(ref closure) = *cb_clone.borrow() {
-                let _ = win.request_animation_frame(closure.as_ref().unchecked_ref());
-            }
+
+        let Some(st) = borrow.as_mut() else {
+            schedule_next_frame(&cb_clone);
+            return;
+        };
+
+        // Check for container resize.
+        let (w, h) = canvas_parent_size();
+        if w > 0 && h > 0 && (w != st.last_width || h != st.last_height) {
+            let _ = st.terminal.resize(w, h);
+            st.last_width = w;
+            st.last_height = h;
+            send_shell_resize(&state, &st.terminal);
         }
+
+        // Rebuild cells from current screen data and render.
+        // update_cells() marks all dirty → flush_cells() does selection flipping.
+        if let Some(data) = state.shell_screen.get_untracked() {
+            render_screen(&mut st.terminal, &data);
+        } else {
+            let _ = st.terminal.render_frame();
+        }
+
+        // Release borrow before scheduling next frame.
+        drop(borrow);
+        schedule_next_frame(&cb_clone);
     }));
 
+    schedule_next_frame(&cb);
+}
+
+fn schedule_next_frame(cb: &Rc<RefCell<Option<Closure<dyn FnMut()>>>>) {
     if let Some(win) = web_sys::window() {
         if let Some(ref closure) = *cb.borrow() {
             let _ = win.request_animation_frame(closure.as_ref().unchecked_ref());
