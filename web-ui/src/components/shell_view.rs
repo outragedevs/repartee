@@ -17,35 +17,38 @@ struct ShellTerminal {
     last_width: i32,
     last_height: i32,
     font_size: f32,
+    /// Hash of the last rendered screen data, to avoid redundant full updates
+    /// that would clear beamterm's selection overlay.
+    last_screen_hash: u64,
 }
 
-// ── Theme: Catppuccin Mocha (matching ghostty/subterm) ───────────────────────
+// ── Theme: Ghostty palette (from user's ghostty config) ──────────────────────
 
-/// Default foreground color (Catppuccin Mocha "text").
-const DEFAULT_FG: u32 = 0xcd_d6_f4;
-/// Default background color (Catppuccin Mocha "base").
-const DEFAULT_BG: u32 = 0x1e_1e_2e;
-/// Cursor color (Catppuccin Mocha "rosewater").
-const CURSOR_COLOR: u32 = 0xf5_e0_dc;
+/// Default foreground color (ghostty foreground).
+const DEFAULT_FG: u32 = 0xed_ef_f1;
+/// Default background color (ghostty background).
+const DEFAULT_BG: u32 = 0x28_32_37;
+/// Cursor color (ghostty cursor-color).
+const CURSOR_COLOR: u32 = 0xee_ee_ee;
 
-/// Catppuccin Mocha 16-color ANSI palette.
+/// Ghostty 16-color ANSI palette.
 const ANSI_COLORS: [u32; 16] = [
-    0x45_47_5a, // 0: black (surface1)
-    0xf3_8b_a8, // 1: red
-    0xa6_e3_a1, // 2: green
-    0xf9_e2_af, // 3: yellow
-    0x89_b4_fa, // 4: blue
-    0xcb_a6_f7, // 5: magenta (mauve)
-    0x94_e2_d5, // 6: cyan (teal)
-    0xba_c2_de, // 7: white (subtext1)
-    0x58_5b_70, // 8: bright black (surface2)
-    0xf3_8b_a8, // 9: bright red
-    0xa6_e3_a1, // 10: bright green
-    0xf9_e2_af, // 11: bright yellow
-    0x89_b4_fa, // 12: bright blue
-    0xcb_a6_f7, // 13: bright magenta
-    0x94_e2_d5, // 14: bright cyan
-    0xcd_d6_f4, // 15: bright white (text)
+    0x43_5b_67, // 0: black
+    0xfc_38_41, // 1: red
+    0x5c_f1_9e, // 2: green
+    0xfe_d0_32, // 3: yellow
+    0x37_b6_ff, // 4: blue
+    0xfc_22_6e, // 5: magenta
+    0x59_ff_d1, // 6: cyan
+    0xff_ff_ff, // 7: white
+    0xa1_b0_b8, // 8: bright black
+    0xfc_74_6d, // 9: bright red
+    0xad_f7_be, // 10: bright green
+    0xfe_e1_6c, // 11: bright yellow
+    0x70_cf_ff, // 12: bright blue
+    0xfc_66_9b, // 13: bright magenta
+    0x9a_ff_e6, // 14: bright cyan
+    0xff_ff_ff, // 15: bright white
 ];
 
 /// 6x6x6 color cube intensity values for 256-color palette (indices 16-231).
@@ -108,6 +111,7 @@ pub fn ShellView() -> impl IntoView {
                         last_width: w,
                         last_height: h,
                         font_size: DEFAULT_FONT_SIZE,
+                        last_screen_hash: 0,
                     });
                 }
                 Err(e) => {
@@ -131,7 +135,12 @@ pub fn ShellView() -> impl IntoView {
             send_shell_resize(&state, &st.terminal);
         }
 
-        render_screen(&mut st.terminal, &data);
+        // Only update cells when screen content changed, to preserve selection.
+        let hash = simple_hash(&data);
+        if hash != st.last_screen_hash {
+            st.last_screen_hash = hash;
+            render_screen(&mut st.terminal, &data);
+        }
     });
 
     // Auto-focus the canvas when shell screen updates or mounts.
@@ -384,6 +393,37 @@ fn ansi_index_to_rgb(idx: u8) -> u32 {
             v << 16 | v << 8 | v
         }
     }
+}
+
+/// Fast non-cryptographic hash of shell screen data for change detection.
+/// Uses FNV-1a to avoid pulling in a hash crate.
+fn simple_hash(data: &ShellScreenData) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
+    let mut feed = |b: u8| {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3); // FNV prime
+    };
+    feed(data.cursor_row as u8);
+    feed((data.cursor_row >> 8) as u8);
+    feed(data.cursor_col as u8);
+    feed((data.cursor_col >> 8) as u8);
+    feed(u8::from(data.cursor_visible));
+    for row in &data.rows {
+        for span in &row.spans {
+            for b in span.text.bytes() {
+                feed(b);
+            }
+            for b in span.fg.bytes() {
+                feed(b);
+            }
+            for b in span.bg.bytes() {
+                feed(b);
+            }
+            feed(u8::from(span.bold));
+            feed(u8::from(span.inverse));
+        }
+    }
+    h
 }
 
 /// Encode bytes to base64 using the browser's `btoa()`.
