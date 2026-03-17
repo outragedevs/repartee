@@ -6,6 +6,7 @@ use beamterm_renderer::{
     mouse::MouseSelectOptions,
 };
 use leptos::prelude::*;
+use wasm_bindgen::prelude::*;
 use web_sys::KeyboardEvent;
 
 use crate::protocol::{ShellScreenData, ShellSpan, WebCommand};
@@ -135,12 +136,22 @@ pub fn ShellView() -> impl IntoView {
             send_shell_resize(&state, &st.terminal);
         }
 
-        // Only update cells when screen content changed, to preserve selection.
+        // Only rebuild cells when screen content changed, to preserve selection.
         let hash = simple_hash(&data);
         if hash != st.last_screen_hash {
             st.last_screen_hash = hash;
             render_screen(&mut st.terminal, &data);
         }
+        // render_frame is called by the animation loop below.
+    });
+
+    // Continuous render loop: requestAnimationFrame calls render_frame() so
+    // selection highlighting, cursor blink, etc. update without new PTY data.
+    let anim_term = shell_term.clone();
+    Effect::new(move || {
+        // Subscribe to shell_screen to restart loop when component remounts.
+        let _ = state.shell_screen.get();
+        start_render_loop(anim_term.clone());
     });
 
     // Auto-focus the canvas when shell screen updates or mounts.
@@ -220,6 +231,36 @@ pub fn ShellView() -> impl IntoView {
             node_ref=canvas_ref
             on:keydown=on_keydown
         />
+    }
+}
+
+// ── Animation loop ───────────────────────────────────────────────────────────
+
+/// Start a requestAnimationFrame loop that calls render_frame() continuously.
+/// This ensures selection highlights and cursor updates are painted even when
+/// no new PTY data arrives. beamterm skips GPU work when dirty regions are clean.
+fn start_render_loop(term: Rc<RefCell<Option<ShellTerminal>>>) {
+    let cb: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
+    let cb_clone = cb.clone();
+    let term_clone = term.clone();
+
+    *cb.borrow_mut() = Some(Closure::new(move || {
+        if let Some(st) = term_clone.borrow_mut().as_mut() {
+            let _ = st.terminal.render_frame();
+        }
+        // Schedule next frame.
+        if let Some(win) = web_sys::window() {
+            if let Some(ref closure) = *cb_clone.borrow() {
+                let _ = win.request_animation_frame(closure.as_ref().unchecked_ref());
+            }
+        }
+    }));
+
+    // Kick off the first frame.
+    if let Some(win) = web_sys::window() {
+        if let Some(ref closure) = *cb.borrow() {
+            let _ = win.request_animation_frame(closure.as_ref().unchecked_ref());
+        }
     }
 }
 

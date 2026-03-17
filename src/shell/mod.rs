@@ -575,30 +575,9 @@ impl ShellManager {
 fn vt100_color_to_css(color: vt100::Color) -> String {
     match color {
         vt100::Color::Default => String::new(),
-        vt100::Color::Idx(n) => {
-            // Map standard 16 ANSI colors to hex. Extended 256 uses the index directly.
-            let hex = match n {
-                0 => "#000000",
-                1 => "#aa0000",
-                2 => "#00aa00",
-                3 => "#aa5500",
-                4 => "#0000aa",
-                5 => "#aa00aa",
-                6 => "#00aaaa",
-                7 => "#aaaaaa",
-                8 => "#555555",
-                9 => "#ff5555",
-                10 => "#55ff55",
-                11 => "#ffff55",
-                12 => "#5555ff",
-                13 => "#ff55ff",
-                14 => "#55ffff",
-                15 => "#ffffff",
-                // 256-color: encode as ansi(N) for the frontend to resolve.
-                _ => return format!("ansi({n})"),
-            };
-            hex.to_string()
-        }
+        // All indexed colors (0-255) sent as ansi(N) so the web frontend
+        // applies its own theme palette (ghostty colors).
+        vt100::Color::Idx(n) => format!("ansi({n})"),
         vt100::Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
     }
 }
