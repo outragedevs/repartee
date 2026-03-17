@@ -211,6 +211,14 @@ impl ShellManager {
         self.sessions.get(id).map(|s| s.parser.screen())
     }
 
+    /// Return the current PTY column count for a shell session.
+    pub fn screen_cols(&self, id: &str) -> u16 {
+        self.sessions
+            .get(id)
+            .map(|s| s.parser.screen().size().1)
+            .unwrap_or(80)
+    }
+
     /// Serialize a shell screen to styled rows for web transport.
     ///
     /// Merges consecutive cells with identical style into spans (RLE compression).

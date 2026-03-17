@@ -1,12 +1,22 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use beamterm_renderer::{CellData, FontStyle, GlyphEffect, Terminal, is_double_width};
+use beamterm_renderer::{
+    CellData, FontStyle, GlyphEffect, SelectionMode, Terminal, is_double_width,
+    mouse::MouseSelectOptions,
+};
 use leptos::prelude::*;
 use web_sys::KeyboardEvent;
 
 use crate::protocol::{ShellScreenData, ShellSpan, WebCommand};
 use crate::state::AppState;
+
+/// Wraps the beamterm Terminal with size tracking to avoid redundant resizes.
+struct ShellTerminal {
+    terminal: Terminal,
+    last_width: i32,
+    last_height: i32,
+}
 
 /// Default terminal colors (dark background, light text).
 const DEFAULT_FG: u32 = 0xc0_c0_c0;
@@ -43,11 +53,11 @@ const COLOR_CUBE: [u8; 6] = [0x00, 0x5f, 0x87, 0xaf, 0xd7, 0xff];
 #[component]
 pub fn ShellView() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState not provided");
-    let terminal: Rc<RefCell<Option<Terminal>>> = Rc::new(RefCell::new(None));
+    let shell_term: Rc<RefCell<Option<ShellTerminal>>> = Rc::new(RefCell::new(None));
     let canvas_ref = NodeRef::<leptos::html::Canvas>::new();
 
     // Combined init + render effect: fires on every shell_screen signal change.
-    let term = terminal.clone();
+    let term = shell_term.clone();
     Effect::new(move || {
         let screen = state.shell_screen.get();
         let mut borrow = term.borrow_mut();
@@ -67,10 +77,28 @@ pub fn ShellView() -> impl IntoView {
                     13.0,
                 )
                 .canvas_padding_color(DEFAULT_BG)
-                .auto_resize_canvas_css(true)
+                .mouse_selection_handler(
+                    MouseSelectOptions::new()
+                        .selection_mode(SelectionMode::Linear)
+                        .trim_trailing_whitespace(true),
+                )
                 .build()
             {
-                Ok(t) => *borrow = Some(t),
+                Ok(mut t) => {
+                    // The canvas defaults to 300x150. Read the actual CSS layout
+                    // dimensions and resize to fill the chat area.
+                    let (w, h) = canvas_parent_size();
+                    if w > 0 && h > 0 {
+                        let _ = t.resize(w, h);
+                    }
+                    // Tell the server to resize the PTY to match our grid.
+                    send_shell_resize(&state, &t);
+                    *borrow = Some(ShellTerminal {
+                        terminal: t,
+                        last_width: w,
+                        last_height: h,
+                    });
+                }
                 Err(e) => {
                     web_sys::console::error_1(
                         &format!("beamterm init: {e:?}").into(),
@@ -80,10 +108,20 @@ pub fn ShellView() -> impl IntoView {
             }
         }
 
-        let Some(term) = borrow.as_mut() else { return };
+        let Some(st) = borrow.as_mut() else { return };
         let Some(data) = screen else { return };
 
-        render_screen(term, &data);
+        // Resize if the container changed (browser window resize).
+        let (w, h) = canvas_parent_size();
+        if w > 0 && h > 0 && (w != st.last_width || h != st.last_height) {
+            let _ = st.terminal.resize(w, h);
+            st.last_width = w;
+            st.last_height = h;
+            // Tell the server to resize the PTY to match our new grid.
+            send_shell_resize(&state, &st.terminal);
+        }
+
+        render_screen(&mut st.terminal, &data);
     });
 
     // Auto-focus the canvas when shell screen updates or mounts.
@@ -136,48 +174,101 @@ pub fn ShellView() -> impl IntoView {
     }
 }
 
-/// Convert the shell screen data into beamterm cells and render a frame.
+/// Full-screen refresh: convert shell screen data to a flat cell grid for beamterm.
+///
+/// Uses `update_cells()` (not `by_position`) so every cell in the grid is written,
+/// which clears stale content and ensures selection rendering works on every frame.
+/// Each PTY row is padded with spaces to match the beamterm grid width.
 fn render_screen(terminal: &mut Terminal, data: &ShellScreenData) {
-    let mut cells = Vec::new();
+    let (grid_cols, grid_rows) = terminal.terminal_size();
+    // Use the smaller of PTY cols vs beamterm grid cols to avoid overflow.
+    let pty_cols = data.cols;
+    let cols = grid_cols.min(pty_cols);
+    let total = grid_cols as usize * grid_rows as usize;
+    let mut cells: Vec<CellData<'_>> = Vec::with_capacity(total);
 
-    for (row_idx, row) in data.rows.iter().enumerate() {
+    let blank = CellData::new(" ", FontStyle::Normal, GlyphEffect::None, DEFAULT_FG, DEFAULT_BG);
+
+    for row_idx in 0..grid_rows as usize {
         let mut col: u16 = 0;
 
-        for span in &row.spans {
-            let (fg, bg) = resolve_colors(span);
-            let style = resolve_style(span);
-            let effect = if span.underline {
-                GlyphEffect::Underline
-            } else {
-                GlyphEffect::None
-            };
+        if let Some(row) = data.rows.get(row_idx) {
+            for span in &row.spans {
+                let (fg, bg) = resolve_colors(span);
+                let style = resolve_style(span);
+                let effect = if span.underline {
+                    GlyphEffect::Underline
+                } else {
+                    GlyphEffect::None
+                };
 
-            for (byte_idx, ch) in span.text.char_indices() {
-                let end = byte_idx + ch.len_utf8();
-                let symbol = &span.text[byte_idx..end];
+                for (byte_idx, ch) in span.text.char_indices() {
+                    if col >= cols {
+                        break;
+                    }
 
-                // Invert colors at cursor position.
-                let is_cursor = data.cursor_visible
-                    && row_idx == data.cursor_row as usize
-                    && col == data.cursor_col;
-                let (cell_fg, cell_bg) = if is_cursor { (bg, fg) } else { (fg, bg) };
+                    let end = byte_idx + ch.len_utf8();
+                    let symbol = &span.text[byte_idx..end];
 
-                cells.push(CellData::new(symbol, style, effect, cell_fg, cell_bg));
-                col += 1;
+                    // Render cursor as inverted block.
+                    let is_cursor = data.cursor_visible
+                        && row_idx == data.cursor_row as usize
+                        && col == data.cursor_col;
 
-                // Wide characters (CJK, emoji) occupy 2 terminal columns.
-                // The backend's continuation cell has empty contents and is
-                // absorbed by RLE compression, so we emit a space for it.
-                if is_double_width(symbol) {
-                    cells.push(CellData::new(" ", FontStyle::Normal, GlyphEffect::None, fg, bg));
+                    if is_cursor {
+                        let cursor_sym = if symbol.trim().is_empty() { "█" } else { symbol };
+                        cells.push(CellData::new(cursor_sym, style, effect, bg, fg));
+                    } else {
+                        cells.push(CellData::new(symbol, style, effect, fg, bg));
+                    }
                     col += 1;
+
+                    // Wide characters occupy 2 terminal columns.
+                    if is_double_width(symbol) && col < cols {
+                        cells.push(CellData::new(" ", FontStyle::Normal, GlyphEffect::None, fg, bg));
+                        col += 1;
+                    }
                 }
             }
+        }
+
+        // Pad remainder of row with blank cells.
+        while col < grid_cols {
+            cells.push(blank);
+            col += 1;
         }
     }
 
     let _ = terminal.update_cells(cells.into_iter());
     let _ = terminal.render_frame();
+}
+
+/// Send a `ShellResize` command to the server so the PTY matches our grid.
+fn send_shell_resize(state: &AppState, terminal: &Terminal) {
+    let Some(buffer_id) = state.active_buffer.get_untracked() else {
+        return;
+    };
+    let (cols, rows) = terminal.terminal_size();
+    if cols > 0 && rows > 0 {
+        crate::ws::send_command(&WebCommand::ShellResize {
+            buffer_id,
+            cols,
+            rows,
+        });
+    }
+}
+
+/// Read the chat-area container dimensions for canvas sizing.
+///
+/// We read the **parent** element (`.chat-area`) rather than the canvas itself,
+/// because the canvas drawing buffer size can differ from its CSS layout size.
+fn canvas_parent_size() -> (i32, i32) {
+    web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("shell-canvas"))
+        .and_then(|el| el.parent_element())
+        .map(|parent| (parent.client_width(), parent.client_height()))
+        .unwrap_or((0, 0))
 }
 
 /// Resolve foreground and background colors from a span, handling inverse.

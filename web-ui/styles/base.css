@@ -528,9 +528,10 @@ html, body {
 /* === Shell terminal view (beamterm WebGL2 canvas) === */
 
 .shell-terminal {
-    flex: 1;
+    flex: 1 1 0;
     display: block;
     width: 100%;
+    min-height: 0;
     background: #000;
     outline: none;
 }

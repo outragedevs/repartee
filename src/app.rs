@@ -480,6 +480,8 @@ pub struct App {
     pub shell_input_active: bool,
     /// Last time a shell screen was broadcast to web clients (for throttling).
     last_shell_web_broadcast: Instant,
+    /// Shell ID that needs a deferred broadcast (set when throttle skips).
+    shell_broadcast_pending: Option<String>,
     /// Spell checker (loaded from Hunspell dictionaries).
     pub spellchecker: Option<crate::spellcheck::SpellChecker>,
     /// Receiver for dictionary download events (list/get results).
@@ -701,6 +703,7 @@ impl App {
             shell_rx,
             shell_input_active: false,
             last_shell_web_broadcast: Instant::now(),
+            shell_broadcast_pending: None,
             spellchecker: None,
             dict_rx,
             dict_tx,
@@ -1741,6 +1744,12 @@ impl App {
                         self.drain_pending_web_events();
                     }
                 },
+                // Deferred shell broadcast: catch final screen state after output stops.
+                _ = tokio::time::sleep(std::time::Duration::from_millis(150)), if self.shell_broadcast_pending.is_some() => {
+                    if let Some(shell_id) = self.shell_broadcast_pending.take() {
+                        self.force_broadcast_shell_screen(&shell_id);
+                    }
+                },
                 _ = tick.tick() => {
                     self.handle_netsplit_tick();
                     self.purge_expired_batches();
@@ -2288,6 +2297,20 @@ impl App {
                     self.shell_mgr.write(&shell_id, &bytes);
                 }
             }
+            WebCommand::ShellResize {
+                buffer_id,
+                cols,
+                rows,
+            } => {
+                if let Some(shell_id) = self
+                    .shell_mgr
+                    .session_id_for_buffer(&buffer_id)
+                    .map(ToString::to_string)
+                {
+                    self.shell_mgr.resize(&shell_id, cols, rows);
+                    self.force_broadcast_shell_screen(&shell_id);
+                }
+            }
         }
     }
 
@@ -2559,40 +2582,25 @@ impl App {
     }
 
     /// Broadcast the shell screen to web clients if enough time has passed (100ms throttle).
+    ///
+    /// If throttled, sets `shell_broadcast_pending` so the deferred broadcast in
+    /// the event loop catches the final screen state after output stops.
     fn maybe_broadcast_shell_screen(&mut self, shell_id: &str) {
         // Throttle to ~10fps to avoid flooding the WebSocket.
         let now = Instant::now();
         if now.duration_since(self.last_shell_web_broadcast).as_millis() < 100 {
+            self.shell_broadcast_pending = Some(shell_id.to_string());
             return;
         }
-        self.last_shell_web_broadcast = now;
-
-        let Some(buffer_id) = self
-            .shell_mgr
-            .buffer_id(shell_id)
-            .map(ToString::to_string)
-        else {
-            return;
-        };
-
-        let Some((rows, cursor_row, cursor_col, cursor_visible)) =
-            self.shell_mgr.screen_to_web(shell_id)
-        else {
-            return;
-        };
-
-        self.broadcast_web(crate::web::protocol::WebEvent::ShellScreen {
-            buffer_id,
-            rows,
-            cursor_row,
-            cursor_col,
-            cursor_visible,
-        });
+        self.shell_broadcast_pending = None;
+        self.force_broadcast_shell_screen(shell_id);
     }
 
     /// Broadcast the shell screen immediately (no throttle). Used when web client
     /// switches to a shell buffer and needs the initial screen state.
     fn force_broadcast_shell_screen(&mut self, shell_id: &str) {
+        self.last_shell_web_broadcast = Instant::now();
+
         let Some(buffer_id) = self
             .shell_mgr
             .buffer_id(shell_id)
@@ -2605,8 +2613,10 @@ impl App {
         else {
             return;
         };
+        let cols = self.shell_mgr.screen_cols(shell_id);
         self.broadcast_web(crate::web::protocol::WebEvent::ShellScreen {
             buffer_id,
+            cols,
             rows,
             cursor_row,
             cursor_col,
