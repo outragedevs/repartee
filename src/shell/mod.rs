@@ -222,8 +222,7 @@ impl ShellManager {
     pub fn screen_cols(&self, id: &str) -> u16 {
         self.sessions
             .get(id)
-            .map(|s| s.parser.screen().size().1)
-            .unwrap_or(80)
+            .map_or(80, |s| s.parser.screen().size().1)
     }
 
     /// Serialize a TUI shell screen for web transport.
@@ -237,13 +236,12 @@ impl ShellManager {
         bool,
     )> {
         let screen = self.sessions.get(id)?.parser.screen();
-        self.serialize_screen(screen)
+        Self::serialize_screen(screen)
     }
 
     /// Convert a vt100 screen to styled rows for web transport.
     #[expect(clippy::similar_names, reason = "fg/bg are standard terminal color abbreviations")]
     fn serialize_screen(
-        &self,
         screen: &vt100::Screen,
     ) -> Option<(
         Vec<crate::web::protocol::ShellScreenRow>,
@@ -551,15 +549,14 @@ impl ShellManager {
         let session = self.web_sessions.get(id)?;
         let screen = session.parser.screen();
         // Reuse the same serialization logic via the session's parser.
-        self.serialize_screen(screen)
+        Self::serialize_screen(screen)
     }
 
     /// Get the column count for a web session.
     pub fn screen_cols_web(&self, id: &str) -> u16 {
         self.web_sessions
             .get(id)
-            .map(|s| s.parser.screen().size().1)
-            .unwrap_or(80)
+            .map_or(80, |s| s.parser.screen().size().1)
     }
 
     /// Check if a shell event ID belongs to a web session.

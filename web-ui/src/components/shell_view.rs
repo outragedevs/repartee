@@ -11,39 +11,62 @@ use web_sys::KeyboardEvent;
 use crate::protocol::{ShellScreenData, ShellSpan, WebCommand};
 use crate::state::AppState;
 
-/// Wraps the beamterm Terminal with size tracking to avoid redundant resizes.
+/// Wraps the beamterm Terminal with size tracking and font state.
 struct ShellTerminal {
     terminal: Terminal,
     last_width: i32,
     last_height: i32,
+    font_size: f32,
 }
 
-/// Default terminal colors (dark background, light text).
-const DEFAULT_FG: u32 = 0xc0_c0_c0;
-const DEFAULT_BG: u32 = 0x00_00_00;
+// ── Theme: Catppuccin Mocha (matching ghostty/subterm) ───────────────────────
 
-/// Standard ANSI 16-color palette.
+/// Default foreground color (Catppuccin Mocha "text").
+const DEFAULT_FG: u32 = 0xcd_d6_f4;
+/// Default background color (Catppuccin Mocha "base").
+const DEFAULT_BG: u32 = 0x1e_1e_2e;
+/// Cursor color (Catppuccin Mocha "rosewater").
+const CURSOR_COLOR: u32 = 0xf5_e0_dc;
+
+/// Catppuccin Mocha 16-color ANSI palette.
 const ANSI_COLORS: [u32; 16] = [
-    0x00_00_00, // 0: black
-    0xaa_00_00, // 1: red
-    0x00_aa_00, // 2: green
-    0xaa_55_00, // 3: brown/yellow
-    0x00_00_aa, // 4: blue
-    0xaa_00_aa, // 5: magenta
-    0x00_aa_aa, // 6: cyan
-    0xaa_aa_aa, // 7: white
-    0x55_55_55, // 8: bright black
-    0xff_55_55, // 9: bright red
-    0x55_ff_55, // 10: bright green
-    0xff_ff_55, // 11: bright yellow
-    0x55_55_ff, // 12: bright blue
-    0xff_55_ff, // 13: bright magenta
-    0x55_ff_ff, // 14: bright cyan
-    0xff_ff_ff, // 15: bright white
+    0x45_47_5a, // 0: black (surface1)
+    0xf3_8b_a8, // 1: red
+    0xa6_e3_a1, // 2: green
+    0xf9_e2_af, // 3: yellow
+    0x89_b4_fa, // 4: blue
+    0xcb_a6_f7, // 5: magenta (mauve)
+    0x94_e2_d5, // 6: cyan (teal)
+    0xba_c2_de, // 7: white (subtext1)
+    0x58_5b_70, // 8: bright black (surface2)
+    0xf3_8b_a8, // 9: bright red
+    0xa6_e3_a1, // 10: bright green
+    0xf9_e2_af, // 11: bright yellow
+    0x89_b4_fa, // 12: bright blue
+    0xcb_a6_f7, // 13: bright magenta
+    0x94_e2_d5, // 14: bright cyan
+    0xcd_d6_f4, // 15: bright white (text)
 ];
 
-/// 6x6x6 color cube intensity values for 256-color palette (indices 16–231).
+/// 6x6x6 color cube intensity values for 256-color palette (indices 16-231).
 const COLOR_CUBE: [u8; 6] = [0x00, 0x5f, 0x87, 0xaf, 0xd7, 0xff];
+
+// ── Font configuration ───────────────────────────────────────────────────────
+
+/// Font families for beamterm dynamic atlas (order = priority).
+const FONT_FAMILIES: &[&str] = &[
+    "FiraCode Nerd Font Mono",
+    "Fira Code",
+    "JetBrains Mono",
+    "monospace",
+];
+
+const DEFAULT_FONT_SIZE: f32 = 15.0;
+const MIN_FONT_SIZE: f32 = 8.0;
+const MAX_FONT_SIZE: f32 = 42.0;
+const FONT_STEP: f32 = 1.0;
+
+// ── Component ────────────────────────────────────────────────────────────────
 
 /// Renders an embedded shell terminal via a WebGL2 canvas powered by beamterm.
 ///
@@ -65,17 +88,7 @@ pub fn ShellView() -> impl IntoView {
         // Lazy-init the beamterm Terminal on first render.
         if borrow.is_none() {
             match Terminal::builder("#shell-canvas")
-                .dynamic_font_atlas(
-                    &[
-                        "Menlo",
-                        "DejaVu Sans Mono",
-                        "Liberation Mono",
-                        "Consolas",
-                        "Courier New",
-                        "monospace",
-                    ],
-                    13.0,
-                )
+                .dynamic_font_atlas(FONT_FAMILIES, DEFAULT_FONT_SIZE)
                 .canvas_padding_color(DEFAULT_BG)
                 .mouse_selection_handler(
                     MouseSelectOptions::new()
@@ -85,18 +98,16 @@ pub fn ShellView() -> impl IntoView {
                 .build()
             {
                 Ok(mut t) => {
-                    // The canvas defaults to 300x150. Read the actual CSS layout
-                    // dimensions and resize to fill the chat area.
                     let (w, h) = canvas_parent_size();
                     if w > 0 && h > 0 {
                         let _ = t.resize(w, h);
                     }
-                    // Tell the server to resize the PTY to match our grid.
                     send_shell_resize(&state, &t);
                     *borrow = Some(ShellTerminal {
                         terminal: t,
                         last_width: w,
                         last_height: h,
+                        font_size: DEFAULT_FONT_SIZE,
                     });
                 }
                 Err(e) => {
@@ -117,7 +128,6 @@ pub fn ShellView() -> impl IntoView {
             let _ = st.terminal.resize(w, h);
             st.last_width = w;
             st.last_height = h;
-            // Tell the server to resize the PTY to match our new grid.
             send_shell_resize(&state, &st.terminal);
         }
 
@@ -133,14 +143,45 @@ pub fn ShellView() -> impl IntoView {
         }
     });
 
-    // Keyboard input — forward to shell PTY via WebSocket.
+    // Keyboard input — forward to shell PTY via WebSocket, handle font resize.
+    let term_key = shell_term.clone();
     let on_keydown = move |ev: KeyboardEvent| {
         let Some(buffer_id) = state.active_buffer.get_untracked() else {
             return;
         };
 
-        // Don't capture browser shortcuts.
+        // Don't capture browser shortcuts (except our font size keys).
         let key_lower = ev.key().to_lowercase();
+        let is_ctrl_or_meta = ev.ctrl_key() || ev.meta_key();
+
+        // Ctrl/Cmd +/- font resize (handled locally, not sent to PTY).
+        if is_ctrl_or_meta
+            && matches!(key_lower.as_str(), "=" | "+" | "-" | "0")
+        {
+            ev.prevent_default();
+            let mut borrow = term_key.borrow_mut();
+            if let Some(st) = borrow.as_mut() {
+                let new_size = match key_lower.as_str() {
+                    "=" | "+" => (st.font_size + FONT_STEP).min(MAX_FONT_SIZE),
+                    "-" => (st.font_size - FONT_STEP).max(MIN_FONT_SIZE),
+                    "0" => DEFAULT_FONT_SIZE,
+                    _ => st.font_size,
+                };
+                if (new_size - st.font_size).abs() > f32::EPSILON {
+                    st.font_size = new_size;
+                    let _ = st.terminal.replace_with_dynamic_atlas(FONT_FAMILIES, new_size);
+                    // Grid dimensions may have changed — resize PTY.
+                    let (w, h) = canvas_parent_size();
+                    if w > 0 && h > 0 {
+                        let _ = st.terminal.resize(w, h);
+                    }
+                    send_shell_resize(&state, &st.terminal);
+                }
+            }
+            return;
+        }
+
+        // Pass through browser shortcuts.
         if ev.meta_key()
             || (ev.ctrl_key()
                 && matches!(
@@ -156,7 +197,6 @@ pub fn ShellView() -> impl IntoView {
             return;
         }
 
-        // Only suppress browser defaults for keys we actually handle.
         ev.prevent_default();
 
         let data = base64_encode(&bytes);
@@ -174,14 +214,14 @@ pub fn ShellView() -> impl IntoView {
     }
 }
 
+// ── Rendering ────────────────────────────────────────────────────────────────
+
 /// Full-screen refresh: convert shell screen data to a flat cell grid for beamterm.
 ///
-/// Uses `update_cells()` (not `by_position`) so every cell in the grid is written,
-/// which clears stale content and ensures selection rendering works on every frame.
-/// Each PTY row is padded with spaces to match the beamterm grid width.
+/// Uses `update_cells()` so every cell in the grid is written, which clears
+/// stale content and ensures selection rendering works on every frame.
 fn render_screen(terminal: &mut Terminal, data: &ShellScreenData) {
     let (grid_cols, grid_rows) = terminal.terminal_size();
-    // Use the smaller of PTY cols vs beamterm grid cols to avoid overflow.
     let pty_cols = data.cols;
     let cols = grid_cols.min(pty_cols);
     let total = grid_cols as usize * grid_rows as usize;
@@ -210,31 +250,51 @@ fn render_screen(terminal: &mut Terminal, data: &ShellScreenData) {
                     let end = byte_idx + ch.len_utf8();
                     let symbol = &span.text[byte_idx..end];
 
-                    // Render cursor as inverted block.
+                    // Cursor: always show block (█) with cursor color.
                     let is_cursor = data.cursor_visible
                         && row_idx == data.cursor_row as usize
                         && col == data.cursor_col;
 
                     if is_cursor {
-                        let cursor_sym = if symbol.trim().is_empty() { "█" } else { symbol };
-                        cells.push(CellData::new(cursor_sym, style, effect, bg, fg));
+                        // Block cursor: show character over cursor-colored background.
+                        let cursor_bg = CURSOR_COLOR;
+                        let cursor_fg = DEFAULT_BG;
+                        cells.push(CellData::new(symbol, style, effect, cursor_fg, cursor_bg));
                     } else {
                         cells.push(CellData::new(symbol, style, effect, fg, bg));
                     }
                     col += 1;
 
-                    // Wide characters occupy 2 terminal columns.
                     if is_double_width(symbol) && col < cols {
-                        cells.push(CellData::new(" ", FontStyle::Normal, GlyphEffect::None, fg, bg));
+                        cells.push(CellData::new(
+                            " ",
+                            FontStyle::Normal,
+                            GlyphEffect::None,
+                            fg,
+                            bg,
+                        ));
                         col += 1;
                     }
                 }
             }
         }
 
-        // Pad remainder of row with blank cells.
+        // Pad remainder of row — check if cursor is in the padding area.
         while col < grid_cols {
-            cells.push(blank);
+            let is_cursor = data.cursor_visible
+                && row_idx == data.cursor_row as usize
+                && col == data.cursor_col;
+            if is_cursor {
+                cells.push(CellData::new(
+                    " ",
+                    FontStyle::Normal,
+                    GlyphEffect::None,
+                    DEFAULT_BG,
+                    CURSOR_COLOR,
+                ));
+            } else {
+                cells.push(blank);
+            }
             col += 1;
         }
     }
@@ -242,6 +302,8 @@ fn render_screen(terminal: &mut Terminal, data: &ShellScreenData) {
     let _ = terminal.update_cells(cells.into_iter());
     let _ = terminal.render_frame();
 }
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Send a `ShellResize` command to the server so the PTY matches our grid.
 fn send_shell_resize(state: &AppState, terminal: &Terminal) {
@@ -259,9 +321,6 @@ fn send_shell_resize(state: &AppState, terminal: &Terminal) {
 }
 
 /// Read the chat-area container dimensions for canvas sizing.
-///
-/// We read the **parent** element (`.chat-area`) rather than the canvas itself,
-/// because the canvas drawing buffer size can differ from its CSS layout size.
 fn canvas_parent_size() -> (i32, i32) {
     web_sys::window()
         .and_then(|w| w.document())
@@ -289,11 +348,6 @@ fn resolve_style(span: &ShellSpan) -> FontStyle {
 }
 
 /// Parse a color string from the backend into a u32 RGB value.
-///
-/// Supported formats:
-/// - `"#rrggbb"` — CSS hex color
-/// - `"ansi(N)"` — 256-color palette index
-/// - `""` (empty) — returns the default
 fn parse_color(color_str: &str, default: u32) -> u32 {
     if color_str.is_empty() {
         return default;
@@ -346,7 +400,7 @@ fn key_event_to_bytes(ev: &KeyboardEvent) -> Vec<u8> {
     let ctrl = ev.ctrl_key();
     let alt = ev.alt_key();
 
-    // Ctrl+letter → control character.
+    // Ctrl+letter -> control character.
     if ctrl && key.len() == 1 {
         let ch = key.bytes().next().unwrap_or(0);
         if ch.is_ascii_alphabetic() {

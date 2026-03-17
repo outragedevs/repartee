@@ -1,5 +1,14 @@
 /* === Repartee Web Base Styles === */
 
+/* Nerd Font for terminal (powerline glyphs, icons) */
+@font-face {
+    font-family: 'FiraCode Nerd Font Mono';
+    src: url('/fonts/FiraCodeNerdFontMono-Regular.ttf') format('truetype');
+    font-weight: normal;
+    font-style: normal;
+    font-display: block;
+}
+
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 html, body {
