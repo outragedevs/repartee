@@ -18,9 +18,6 @@ struct ShellTerminal {
     last_width: i32,
     last_height: i32,
     font_size: f32,
-    /// Hash of the last rendered screen data, to avoid redundant full updates
-    /// that would clear beamterm's selection overlay.
-    last_screen_hash: u64,
 }
 
 // ── Theme: Ghostty palette (from user's ghostty config) ──────────────────────
@@ -112,7 +109,6 @@ pub fn ShellView() -> impl IntoView {
                         last_width: w,
                         last_height: h,
                         font_size: DEFAULT_FONT_SIZE,
-                        last_screen_hash: 0,
                     });
                 }
                 Err(e) => {
@@ -136,22 +132,19 @@ pub fn ShellView() -> impl IntoView {
             send_shell_resize(&state, &st.terminal);
         }
 
-        // Only rebuild cells when screen content changed, to preserve selection.
-        let hash = simple_hash(&data);
-        if hash != st.last_screen_hash {
-            st.last_screen_hash = hash;
-            render_screen(&mut st.terminal, &data);
-        }
-        // render_frame is called by the animation loop below.
+        // Always rebuild cells — update_cells() calls mark_all() which is
+        // required for flush_cells() to process selection color flipping.
+        // beamterm preserves selection via content hash (same data = selection stays).
+        render_screen(&mut st.terminal, &data);
+        // render_frame() also called by the rAF loop for selection during idle.
     });
 
-    // Continuous render loop: requestAnimationFrame calls render_frame() so
-    // selection highlighting, cursor blink, etc. update without new PTY data.
+    // Continuous render loop: requestAnimationFrame re-renders every frame so
+    // beamterm's selection color flipping works (requires dirty cells via update_cells).
     let anim_term = shell_term.clone();
     Effect::new(move || {
-        // Subscribe to shell_screen to restart loop when component remounts.
         let _ = state.shell_screen.get();
-        start_render_loop(anim_term.clone());
+        start_render_loop(anim_term.clone(), state);
     });
 
     // Auto-focus the canvas when shell screen updates or mounts.
@@ -236,19 +229,26 @@ pub fn ShellView() -> impl IntoView {
 
 // ── Animation loop ───────────────────────────────────────────────────────────
 
-/// Start a requestAnimationFrame loop that calls render_frame() continuously.
-/// This ensures selection highlights and cursor updates are painted even when
-/// no new PTY data arrives. beamterm skips GPU work when dirty regions are clean.
-fn start_render_loop(term: Rc<RefCell<Option<ShellTerminal>>>) {
+/// Start a requestAnimationFrame loop that re-renders every frame.
+///
+/// beamterm's `flush_cells()` gates selection color flipping behind a dirty
+/// check — it only processes selections when at least one cell is dirty.
+/// The selection demo solves this by calling `update_cells()` every frame.
+/// We do the same: read the current screen data and rebuild cells each frame.
+/// This is cheap (~1ms for a full terminal) and ensures selection works.
+fn start_render_loop(term: Rc<RefCell<Option<ShellTerminal>>>, state: AppState) {
     let cb: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
     let cb_clone = cb.clone();
-    let term_clone = term.clone();
 
     *cb.borrow_mut() = Some(Closure::new(move || {
-        if let Some(st) = term_clone.borrow_mut().as_mut() {
-            let _ = st.terminal.render_frame();
+        // Re-apply screen data every frame so dirty regions are set for selection.
+        if let Some(st) = term.borrow_mut().as_mut() {
+            if let Some(data) = state.shell_screen.get_untracked() {
+                render_screen(&mut st.terminal, &data);
+            } else {
+                let _ = st.terminal.render_frame();
+            }
         }
-        // Schedule next frame.
         if let Some(win) = web_sys::window() {
             if let Some(ref closure) = *cb_clone.borrow() {
                 let _ = win.request_animation_frame(closure.as_ref().unchecked_ref());
@@ -256,7 +256,6 @@ fn start_render_loop(term: Rc<RefCell<Option<ShellTerminal>>>) {
         }
     }));
 
-    // Kick off the first frame.
     if let Some(win) = web_sys::window() {
         if let Some(ref closure) = *cb.borrow() {
             let _ = win.request_animation_frame(closure.as_ref().unchecked_ref());
@@ -434,37 +433,6 @@ fn ansi_index_to_rgb(idx: u8) -> u32 {
             v << 16 | v << 8 | v
         }
     }
-}
-
-/// Fast non-cryptographic hash of shell screen data for change detection.
-/// Uses FNV-1a to avoid pulling in a hash crate.
-fn simple_hash(data: &ShellScreenData) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
-    let mut feed = |b: u8| {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x0100_0000_01b3); // FNV prime
-    };
-    feed(data.cursor_row as u8);
-    feed((data.cursor_row >> 8) as u8);
-    feed(data.cursor_col as u8);
-    feed((data.cursor_col >> 8) as u8);
-    feed(u8::from(data.cursor_visible));
-    for row in &data.rows {
-        for span in &row.spans {
-            for b in span.text.bytes() {
-                feed(b);
-            }
-            for b in span.fg.bytes() {
-                feed(b);
-            }
-            for b in span.bg.bytes() {
-                feed(b);
-            }
-            feed(u8::from(span.bold));
-            feed(u8::from(span.inverse));
-        }
-    }
-    h
 }
 
 /// Encode bytes to base64 using the browser's `btoa()`.
