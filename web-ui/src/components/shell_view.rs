@@ -148,15 +148,28 @@ pub fn ShellView() -> impl IntoView {
             return;
         }
 
-        // Pass through browser shortcuts (copy, paste, select-all, etc.).
-        if ev.meta_key()
-            || (ev.ctrl_key()
-                && matches!(
-                    key_lower.as_str(),
-                    "c" | "v" | "a" | "r" | "l" | "t" | "w"
-                ))
-        {
+        // Pass through browser shortcuts — but Ctrl+C goes to PTY (SIGINT)
+        // unless there's an active selection (then it's copy).
+        if ev.meta_key() {
             return;
+        }
+        if ev.ctrl_key() {
+            match key_lower.as_str() {
+                // Ctrl+C: send to PTY as SIGINT, unless beamterm has a selection (copy).
+                "c" => {
+                    let has_sel = term_key
+                        .try_borrow()
+                        .ok()
+                        .and_then(|b| b.as_ref().map(|st| st.terminal.has_selection()))
+                        .unwrap_or(false);
+                    if has_sel {
+                        return; // Let browser handle copy.
+                    }
+                    // Fall through to send 0x03 to PTY.
+                }
+                "v" | "a" | "r" | "l" | "t" | "w" => return,
+                _ => {}
+            }
         }
 
         let bytes = key_event_to_bytes(&ev);
