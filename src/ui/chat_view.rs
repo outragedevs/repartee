@@ -49,7 +49,19 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
         for msg in buf.messages.iter().rev() {
             let is_own = msg.nick.as_deref() == Some(current_nick);
-            let line = super::message_line::render_message(msg, is_own, &app.theme, &app.config);
+            let nick_fg = if app.config.display.nick_colors && !is_own && !msg.highlight {
+                msg.nick.as_deref().map(|n| {
+                    crate::nick_color::nick_color(
+                        n,
+                        app.color_support,
+                        app.config.display.nick_color_saturation,
+                        app.config.display.nick_color_lightness,
+                    )
+                })
+            } else {
+                None
+            };
+            let line = super::message_line::render_message(msg, is_own, &app.theme, &app.config, nick_fg);
             let wrapped = super::wrap_line(line, total_width, indent);
 
             // Push in reverse so the final deque is in chronological order.

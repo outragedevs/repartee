@@ -4,6 +4,7 @@ use crate::config::AppConfig;
 use crate::state::buffer::{Message, MessageType};
 use crate::theme::{StyledSpan, parse_format_string, resolve_abstractions};
 use crate::ui::styled_text::styled_spans_to_line;
+use ratatui::style::Color;
 use ratatui::text::Line;
 
 /// Render a single message into a themed ratatui Line.
@@ -12,6 +13,7 @@ pub fn render_message(
     is_own: bool,
     theme: &crate::theme::ThemeFile,
     config: &AppConfig,
+    nick_fg_override: Option<Color>,
 ) -> Line<'static> {
     let abstracts = &theme.abstracts;
 
@@ -32,7 +34,7 @@ pub fn render_message(
     let msg_spans = if msg.message_type == MessageType::Event {
         render_event(msg, theme)
     } else {
-        render_chat_message(msg, is_own, theme, config)
+        render_chat_message(msg, is_own, theme, config, nick_fg_override)
     };
 
     // 3. Combine: timestamp + space + message
@@ -77,6 +79,7 @@ fn render_chat_message(
     is_own: bool,
     theme: &crate::theme::ThemeFile,
     config: &AppConfig,
+    nick_fg_override: Option<Color>,
 ) -> Vec<StyledSpan> {
     let abstracts = &theme.abstracts;
     let messages = &theme.formats.messages;
@@ -130,7 +133,21 @@ fn render_chat_message(
         .unwrap_or_else(|| "$0 $1".to_string());
     let resolved = resolve_abstractions(&msg_format, abstracts, 0);
     // params: $0=displayNick, $1=text, $2=paddedNickMode
-    parse_format_string(&resolved, &[&display_nick, &msg.text, &padded_nick_mode])
+    let mut spans = parse_format_string(&resolved, &[&display_nick, &msg.text, &padded_nick_mode]);
+
+    // Apply nick color override: recolor spans containing the nick text.
+    // Only applies to pubmsg (not own, mention, highlight, action, notice).
+    if let Some(color) = nick_fg_override {
+        for span in &mut spans {
+            // Match the span that contains exactly the nick text (trimmed).
+            // The nick is rendered via {pubnick $0} which creates a separate span.
+            if !span.text.is_empty() && span.text.trim() == display_nick {
+                span.fg = Some(color);
+            }
+        }
+    }
+
+    spans
 }
 
 #[cfg(test)]
@@ -163,7 +180,7 @@ mod tests {
         let msg = test_message("me", "hello world", MessageType::Message);
         let theme = default_theme();
         let config = default_config();
-        let line = render_message(&msg, true, &theme, &config);
+        let line = render_message(&msg, true, &theme, &config, None);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(text.contains("me"));
         assert!(text.contains("hello world"));
@@ -174,7 +191,7 @@ mod tests {
         let msg = test_message("bob", "hi there", MessageType::Message);
         let theme = default_theme();
         let config = default_config();
-        let line = render_message(&msg, false, &theme, &config);
+        let line = render_message(&msg, false, &theme, &config, None);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(text.contains("bob"));
         assert!(text.contains("hi there"));
@@ -188,7 +205,7 @@ mod tests {
         let mut config = default_config();
         config.display.nick_truncation = true;
         config.display.nick_max_length = 4;
-        let line = render_message(&msg, false, &theme, &config);
+        let line = render_message(&msg, false, &theme, &config, None);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(text.contains("Ñóçk"));
         assert!(text.contains("hola mundo"));
@@ -202,7 +219,7 @@ mod tests {
         let mut config = default_config();
         config.display.nick_truncation = true;
         config.display.nick_max_length = 4;
-        let line = render_message(&msg, false, &theme, &config);
+        let line = render_message(&msg, false, &theme, &config, None);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         // Should be truncated to first 3 chars + '+': "Ñóç+"
         assert!(text.contains("Ñóç+"));
@@ -218,7 +235,7 @@ mod tests {
         let mut config = default_config();
         config.display.nick_truncation = true;
         config.display.nick_max_length = 7;
-        let line = render_message(&msg, false, &theme, &config);
+        let line = render_message(&msg, false, &theme, &config, None);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(text.contains("verylo+"));
         assert!(!text.contains("verylon"));
@@ -234,7 +251,7 @@ mod tests {
         let mut config = default_config();
         config.display.nick_truncation = true;
         config.display.nick_max_length = 8;
-        let line = render_message(&msg, false, &theme, &config);
+        let line = render_message(&msg, false, &theme, &config, None);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         // Nick should be "verylo+" (7 chars), not "verylon+" (8 chars)
         assert!(text.contains("verylo+"), "expected 'verylo+' in: {text}");
@@ -245,7 +262,7 @@ mod tests {
 
         // Without mode prefix, same nick gets full budget: "verylon+" (8 chars)
         let msg2 = test_message("verylongnick", "test", MessageType::Message);
-        let line2 = render_message(&msg2, false, &theme, &config);
+        let line2 = render_message(&msg2, false, &theme, &config, None);
         let text2: String = line2.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(
             text2.contains("verylon+"),
@@ -271,8 +288,32 @@ mod tests {
         };
         let theme = default_theme();
         let config = default_config();
-        let line = render_message(&msg, false, &theme, &config);
+        let line = render_message(&msg, false, &theme, &config, None);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(text.contains("system message"));
+    }
+
+    #[test]
+    fn render_message_with_nick_color_override() {
+        let msg = test_message("alice", "hello", MessageType::Message);
+        let mut theme = default_theme();
+        // Use a format that creates a separate nick span (like real themes do).
+        // %Z7aa2f7 applies a color to the nick, producing its own StyledSpan.
+        theme.abstracts.insert("pubnick".into(), "%Z7aa2f7$*%N".into());
+        theme.formats.messages.insert(
+            "pubmsg".into(),
+            "{msgnick $2 {pubnick $0}}$1".into(),
+        );
+        let config = default_config();
+        let override_color = Color::Rgb(255, 0, 0);
+        let line = render_message(&msg, false, &theme, &config, Some(override_color));
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("alice"));
+        // Check that at least one span has the override color
+        let has_override = line
+            .spans
+            .iter()
+            .any(|s| s.style.fg == Some(ratatui::style::Color::Rgb(255, 0, 0)));
+        assert!(has_override, "nick color override should be applied");
     }
 }
