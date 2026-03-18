@@ -141,7 +141,8 @@ fn render_chat_message(
         for span in &mut spans {
             // Match the span that contains exactly the nick text (trimmed).
             // The nick is rendered via {pubnick $0} which creates a separate span.
-            if !span.text.is_empty() && span.text.trim() == display_nick {
+            // Use ASCII case-insensitive compare — IRC nicks are ASCII, avoids allocation.
+            if !span.text.is_empty() && span.text.trim().eq_ignore_ascii_case(&display_nick) {
                 span.fg = Some(color);
             }
         }

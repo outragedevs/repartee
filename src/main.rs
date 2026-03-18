@@ -14,7 +14,6 @@ mod storage;
 mod theme;
 mod ui;
 mod web;
-#[allow(dead_code)] // consumers will be added in upcoming tasks
 mod nick_color;
 
 use color_eyre::eyre::Result;

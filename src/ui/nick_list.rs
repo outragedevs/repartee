@@ -87,11 +87,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, scroll_offset: usize) ->
                 app.config.display.nick_color_saturation,
                 app.config.display.nick_color_lightness,
             );
-            let nick_lower = entry.nick.to_lowercase();
             for span in &mut spans {
                 // Override the nick text span (not the prefix char like @ or +).
                 // The prefix is a separate span from the format string.
-                if !span.text.is_empty() && span.text.to_lowercase().contains(&nick_lower) {
+                // Use ASCII case-insensitive compare — IRC nicks are ASCII, avoids allocation.
+                if !span.text.is_empty() && span.text.trim().eq_ignore_ascii_case(&entry.nick) {
                     span.fg = Some(nick_fg);
                 }
             }
