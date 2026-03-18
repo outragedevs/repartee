@@ -39,6 +39,10 @@ A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by ir
     <div class="card-body">SQLite with optional AES-256-GCM encryption and FTS5 full-text search across all logs.</div>
   </div>
   <div class="card">
+    <div class="card-title">Nick Coloring</div>
+    <div class="card-body">Deterministic per-nick colors (WeeChat-style). HSL hue wheel for truecolor, 256-color and 16-color fallbacks. Auto-detected terminal capability, configurable saturation/lightness.</div>
+  </div>
+  <div class="card">
     <div class="card-title">Theming</div>
     <div class="card-body">irssi-compatible format strings with 24-bit color support and custom abstracts.</div>
   </div>

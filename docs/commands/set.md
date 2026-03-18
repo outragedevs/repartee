@@ -31,6 +31,9 @@ Array values use comma-separated format: `#chan1,#chan2`.
     /set general.theme tokyo-night
     /set servers.libera.tls true
     /set servers.libera.channels #linux,#irc
+    /set display.nick_colors true
+    /set display.nick_colors_in_nicklist false
+    /set display.nick_color_lightness 0.40
 
 ## See Also
 
