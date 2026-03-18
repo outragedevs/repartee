@@ -197,15 +197,16 @@ pub fn handle_connected(state: &mut AppState, conn_id: &str) {
     state.update_connection_status(conn_id, ConnectionStatus::Connected);
 
     // Reset reconnect state on successful connection.
-    // Also reset ISUPPORT, enabled caps, and silent WHO channels — the server
-    // will send fresh 005/CAP data, and stale tokens from a previous session
-    // must not linger.
+    // Reset ISUPPORT (server sends fresh 005 lines) and silent WHO state.
+    // Do NOT clear enabled_caps — the caller sets them from the CAP negotiation
+    // result (IrcEvent::Connected carries the negotiated caps). On reconnect,
+    // `conn.enabled_caps = enabled_caps` at the call site replaces the old set
+    // entirely, so stale caps from a previous session are already gone.
     if let Some(conn) = state.connections.get_mut(conn_id) {
         conn.reconnect_attempts = 0;
         conn.next_reconnect = None;
         conn.error = None;
         conn.isupport_parsed = crate::irc::isupport::Isupport::default();
-        conn.enabled_caps.clear();
         conn.silent_who_channels.clear();
     }
 

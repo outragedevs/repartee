@@ -191,11 +191,16 @@ pub(crate) fn cmd_disconnect(app: &mut App, args: &[String]) {
         conn.next_reconnect = None;
     }
 
+    // Send QUIT and let the server close the connection. The QUIT message
+    // must flush through the crate's flood throttle before the handle is
+    // dropped. IrcEvent::Disconnected fires when the server closes the
+    // connection (after processing our QUIT), and that handler does the
+    // full cleanup (handle removal, UI update, script notification).
+    // This matches the /quit pattern where QUIT is sent while handles
+    // are still alive.
     if let Some(handle) = app.irc_handles.get(&conn_id) {
         let _ = handle.sender.send_quit(quit_msg);
     }
-    app.irc_handles.remove(&conn_id);
-    crate::irc::events::handle_disconnected(&mut app.state, &conn_id, None);
 }
 
 // === Channel ===

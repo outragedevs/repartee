@@ -3381,11 +3381,27 @@ impl App {
                 .send(::irc::proto::Command::WHO(Some(chanlist.clone()), None));
         }
 
-        // Send batched MODE (single command, comma-separated channels).
-        let _ = handle.sender.send(::irc::proto::Command::Raw(
-            "MODE".to_string(),
-            vec![chanlist],
-        ));
+        // Send MODE query for channel modes. Some servers (IRCnet) accept
+        // comma-separated multi-target MODE; others (Solanum/Libera) reject it
+        // with 479 "Illegal channel name". Use ISUPPORT TARGMAX to decide.
+        let multi_mode = self
+            .state
+            .connections
+            .get(conn_id)
+            .is_some_and(|c| c.isupport_parsed.supports_multi_target_mode());
+        if multi_mode {
+            let _ = handle.sender.send(::irc::proto::Command::Raw(
+                "MODE".to_string(),
+                vec![chanlist],
+            ));
+        } else {
+            for ch in &batch {
+                let _ = handle.sender.send(::irc::proto::Command::Raw(
+                    "MODE".to_string(),
+                    vec![ch.clone()],
+                ));
+            }
+        }
     }
 
     /// Handle `RPL_ENDOFWHO` for batch tracking.

@@ -271,11 +271,15 @@ pub struct ServerConfig {
     pub username: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub realname: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Server password. Loaded from `.env` (`SERVERNAME_PASSWORD`).
+    /// Never written back to `config.toml` — credentials belong in `.env`.
+    #[serde(default, skip_serializing)]
     pub password: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sasl_user: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// SASL password. Loaded from `.env` (`SERVERNAME_SASL_PASS`).
+    /// Never written back to `config.toml` — credentials belong in `.env`.
+    #[serde(default, skip_serializing)]
     pub sasl_pass: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_ip: Option<String>,

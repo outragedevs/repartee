@@ -175,6 +175,28 @@ impl Isupport {
         Some((prefix, types.to_string()))
     }
 
+    /// Whether the server supports multi-target MODE queries.
+    ///
+    /// Checks `TARGMAX` for a `MODE` entry. If `TARGMAX` is present but
+    /// `MODE` is not listed, the server does not support multi-target MODE
+    /// (e.g. Solanum/Libera rejects with 479 "Illegal channel name").
+    /// If `TARGMAX` is absent entirely (e.g. IRCnet), assumes multi-target
+    /// MODE is supported (IRCnet ircd 2.12 handles it fine).
+    #[must_use]
+    pub fn supports_multi_target_mode(&self) -> bool {
+        let Some(targmax) = self.tokens.get("TARGMAX") else {
+            return true; // no TARGMAX → assume multi-target is fine
+        };
+        // TARGMAX=NAMES:1,LIST:1,KICK:1,...,MODE:4
+        // If MODE is listed with a limit > 0, multi-target is supported.
+        // If MODE is not listed at all, the server doesn't support it.
+        targmax.split(',').any(|entry| {
+            entry
+                .split_once(':')
+                .is_some_and(|(cmd, limit)| cmd == "MODE" && limit != "1" && limit != "0")
+        })
+    }
+
     /// Look up a raw token value by key.
     #[must_use]
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -378,5 +400,43 @@ mod tests {
         assert_eq!(b, "k");
         assert_eq!(c, "flj");
         assert_eq!(d, "CFLMPQScgimnprstuz");
+    }
+
+    #[test]
+    fn multi_target_mode_with_targmax_no_mode() {
+        // Libera: TARGMAX lists commands but not MODE → multi-target NOT supported
+        let mut is = Isupport::new();
+        is.parse_tokens(&["TARGMAX=NAMES:1,LIST:1,KICK:1,WHOIS:1,PRIVMSG:4,NOTICE:4,ACCEPT:,MONITOR:"]);
+        assert!(!is.supports_multi_target_mode());
+    }
+
+    #[test]
+    fn multi_target_mode_with_targmax_mode_listed() {
+        // Hypothetical server with MODE in TARGMAX
+        let mut is = Isupport::new();
+        is.parse_tokens(&["TARGMAX=NAMES:1,MODE:4,PRIVMSG:4"]);
+        assert!(is.supports_multi_target_mode());
+    }
+
+    #[test]
+    fn multi_target_mode_without_targmax() {
+        // IRCnet: no TARGMAX at all → assume multi-target is fine
+        let is = Isupport::new();
+        assert!(is.supports_multi_target_mode());
+    }
+
+    #[test]
+    fn multi_target_mode_targmax_mode_limited_to_one() {
+        let mut is = Isupport::new();
+        is.parse_tokens(&["TARGMAX=MODE:1,PRIVMSG:4"]);
+        assert!(!is.supports_multi_target_mode());
+    }
+
+    #[test]
+    fn multi_target_mode_targmax_mode_unlimited() {
+        // Empty limit after colon means unlimited per IRC spec
+        let mut is = Isupport::new();
+        is.parse_tokens(&["TARGMAX=MODE:,PRIVMSG:4"]);
+        assert!(is.supports_multi_target_mode());
     }
 }
