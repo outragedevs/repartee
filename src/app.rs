@@ -1778,24 +1778,33 @@ impl App {
                     self.purge_expired_batches();
                     self.check_reconnects();
                     self.measure_lag();
-                    self.update_script_snapshot();
+                    // Only rebuild script snapshot on tick if scripting is active.
+                    // The snapshot is also rebuilt on every IRC/terminal event, so
+                    // the tick rebuild is only needed for timer-driven scripts.
+                    if self.script_manager.is_some() && !self.script_commands.is_empty() {
+                        self.update_script_snapshot();
+                    }
                     self.check_stale_who_batches();
                     // Purge expired web sessions and rate limiter entries.
                     if let Some(ref sessions) = self.web_sessions
                         && let Ok(mut s) = sessions.try_lock() { s.purge_expired(); }
                     if let Some(ref limiter) = self.web_rate_limiter
                         && let Ok(mut l) = limiter.try_lock() { l.purge_expired(); }
-                    // Update web state snapshot.
-                    if let Some(ref snapshot) = self.web_state_snapshot
-                        && let Ok(mut snap) = snapshot.write()
-                    {
-                        let init = crate::web::snapshot::build_sync_init(&self.state, 0, &self.config.web.timestamp_format);
-                        if let crate::web::protocol::WebEvent::SyncInit { buffers, connections, mention_count, active_buffer_id, timestamp_format, .. } = init {
-                            snap.buffers = buffers;
-                            snap.connections = connections;
-                            snap.mention_count = mention_count;
-                            snap.active_buffer_id = active_buffer_id;
-                            snap.timestamp_format = timestamp_format;
+                    // Update web state snapshot — only if web clients are connected.
+                    // Avoids allocating full buffer/connection metadata every second
+                    // when the web frontend is unused.
+                    if self.web_broadcaster.receiver_count() > 0 {
+                        if let Some(ref snapshot) = self.web_state_snapshot
+                            && let Ok(mut snap) = snapshot.write()
+                        {
+                            let init = crate::web::snapshot::build_sync_init(&self.state, 0, &self.config.web.timestamp_format);
+                            if let crate::web::protocol::WebEvent::SyncInit { buffers, connections, mention_count, active_buffer_id, timestamp_format, .. } = init {
+                                snap.buffers = buffers;
+                                snap.connections = connections;
+                                snap.mention_count = mention_count;
+                                snap.active_buffer_id = active_buffer_id;
+                                snap.timestamp_format = timestamp_format;
+                            }
                         }
                     }
                     let expired = self.dcc.purge_expired();
@@ -1807,6 +1816,10 @@ impl App {
                     }
                     // Periodic event message pruning (every 1 hour).
                     self.maybe_purge_old_events();
+                    // Drain web events accumulated during this tick (prevents
+                    // unbounded growth when idle — no terminal/IRC events to
+                    // trigger drain in other select arms).
+                    self.drain_pending_web_events();
                 },
                 _ = paste_tick.tick() => {
                     self.drain_paste_queue();
@@ -2187,7 +2200,10 @@ impl App {
     /// `ActivityChanged`, and `MentionAlert` events to web clients.
     /// Also auto-records highlight mentions to the `SQLite` mentions table.
     fn drain_pending_web_events(&mut self) {
-        let events: Vec<_> = self.state.pending_web_events.drain(..).collect();
+        // Take the entire Vec (moves allocation out, leaves zero-capacity Vec).
+        // Unlike drain(..).collect(), this releases the old Vec's heap capacity
+        // instead of retaining peak allocation permanently.
+        let events = std::mem::take(&mut self.state.pending_web_events);
         if !events.is_empty() {
             tracing::debug!(count = events.len(), "draining {} web events", events.len());
         }
@@ -5522,15 +5538,11 @@ impl App {
                 if let Some(manager) = self.script_manager.as_ref() {
                     manager.fire_timer(id);
                 }
-                // Remove completed one-shot timeout handles to prevent unbounded growth.
-                // Repeating timers (StartTimer) are still running, so is_finished() is false.
-                if self
-                    .active_timers
-                    .get(&id)
-                    .is_some_and(tokio::task::JoinHandle::is_finished)
-                {
-                    self.active_timers.remove(&id);
-                }
+                // Remove completed one-shot timeout handles to prevent unbounded
+                // growth. Also sweep any other finished handles (catches the rare
+                // race where is_finished was false on a previous TimerFired).
+                self.active_timers
+                    .retain(|_, handle| !handle.is_finished());
             }
             ScriptAction::SetScriptConfig { script, key, value } => {
                 self.script_config.insert((script, key), value);

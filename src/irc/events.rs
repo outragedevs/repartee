@@ -196,11 +196,17 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
 pub fn handle_connected(state: &mut AppState, conn_id: &str) {
     state.update_connection_status(conn_id, ConnectionStatus::Connected);
 
-    // Reset reconnect state on successful connection
+    // Reset reconnect state on successful connection.
+    // Also reset ISUPPORT, enabled caps, and silent WHO channels — the server
+    // will send fresh 005/CAP data, and stale tokens from a previous session
+    // must not linger.
     if let Some(conn) = state.connections.get_mut(conn_id) {
         conn.reconnect_attempts = 0;
         conn.next_reconnect = None;
         conn.error = None;
+        conn.isupport_parsed = crate::irc::isupport::Isupport::default();
+        conn.enabled_caps.clear();
+        conn.silent_who_channels.clear();
     }
 
     let label = state
@@ -1317,6 +1323,10 @@ fn handle_part(
 
     if nick == our_nick {
         state.remove_buffer(&buffer_id);
+        // Clean up any pending silent WHO for this channel.
+        if let Some(conn) = state.connections.get_mut(conn_id) {
+            conn.silent_who_channels.remove(channel);
+        }
     } else {
         // Always update nick list regardless of ignore
         state.remove_nick(&buffer_id, &nick);
@@ -1689,6 +1699,10 @@ fn handle_kick(
             },
         );
         state.remove_buffer(&buffer_id);
+        // Clean up any pending silent WHO for this channel.
+        if let Some(conn) = state.connections.get_mut(conn_id) {
+            conn.silent_who_channels.remove(channel);
+        }
     } else {
         state.remove_nick(&buffer_id, kicked_user);
         let id = state.next_message_id();
@@ -2311,7 +2325,7 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
                 let set_by = args.get(3).cloned().unwrap_or_default();
                 let set_at = args.get(4).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
 
-                // Store in buffer's list_modes for /unban numeric refs
+                // Store in buffer's list_modes for /unban numeric refs.
                 let buf_id = crate::state::buffer::make_buffer_id(conn_id, channel);
                 if let Some(buf) = state.buffers.get_mut(&buf_id) {
                     let entries = buf.list_modes.entry("b".to_string()).or_default();

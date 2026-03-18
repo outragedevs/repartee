@@ -649,6 +649,9 @@ pub(crate) fn cmd_script(app: &mut App, args: &[String]) {
             };
             match manager.unload(name) {
                 Ok(()) => {
+                    // Clean up per-script config entries to prevent unbounded growth
+                    // across repeated load/unload/reload cycles.
+                    app.script_config.retain(|(script, _), _| script != name);
                     add_local_event(app, &format!("{C_OK}Unloaded script: {name}{C_RST}"));
                 }
                 Err(e) => {

@@ -29,6 +29,11 @@ impl WebBroadcaster {
         self.tx.send(event).unwrap_or(0)
     }
 
+    /// Number of active receivers (connected web clients).
+    pub fn receiver_count(&self) -> usize {
+        self.tx.receiver_count()
+    }
+
     /// Subscribe to receive events. Each WebSocket session calls this on connect.
     pub fn subscribe(&self) -> broadcast::Receiver<WebEvent> {
         self.tx.subscribe()
