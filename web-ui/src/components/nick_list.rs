@@ -42,6 +42,15 @@ pub fn NickList() -> impl IntoView {
                     nicks.into_iter().map(|n| {
                         let away_class = if n.away { " away" } else { "" };
                         let class = format!("nick-entry{away_class}");
+
+                        // Per-nick color (skip for away nicks — they use opacity dimming).
+                        let nick_style = if !n.away {
+                            let css_color = crate::nick_color::nick_color_css(&n.nick, 0.65, 0.65);
+                            format!("color: {css_color};")
+                        } else {
+                            String::new()
+                        };
+
                         let nick_for_click = n.nick.clone();
                         let buf_id = active_buffer_id.clone();
                         let on_click = move |_| {
@@ -55,7 +64,7 @@ pub fn NickList() -> impl IntoView {
                         view! {
                             <div class=class on:click=on_click>
                                 <span class=prefix_class>{n.prefix}</span>
-                                <span>{n.nick}</span>
+                                <span style=nick_style>{n.nick}</span>
                             </div>
                         }
                     }).collect::<Vec<_>>()

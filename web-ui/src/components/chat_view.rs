@@ -96,14 +96,20 @@ pub fn ChatView() -> impl IntoView {
 
                         if is_action {
                             // Action (/me): render as "* nick text"
-                            let nick = msg.nick.unwrap_or_default();
+                            let nick_text = msg.nick.unwrap_or_default();
+                            let nick_color_style = if !is_own {
+                                let css_color = crate::nick_color::nick_color_css(&nick_text, 0.65, 0.65);
+                                format!("color: {css_color};")
+                            } else {
+                                String::new()
+                            };
                             let styled = render_styled_text(&msg.text);
                             view! {
                                 <div class=class>
                                     <span class="ts">{ts}</span>
                                     <span class="action-body">
                                         "* "
-                                        <span class="action-nick">{nick}</span>
+                                        <span class="action-nick" style=nick_color_style>{nick_text}</span>
                                         " "
                                         {styled}
                                     </span>
@@ -139,16 +145,26 @@ pub fn ChatView() -> impl IntoView {
                             // Regular message: timestamp | right-aligned nick❯ | text
                             let max_len = state.nick_max_length.get() as usize;
                             let col_width = state.nick_column_width.get();
-                            let nick = truncate_nick(&msg.nick.unwrap_or_default(), max_len);
+                            let nick_text = msg.nick.unwrap_or_default();
+                            let nick = truncate_nick(&nick_text, max_len);
                             let mode = msg.nick_mode.unwrap_or_default();
                             let styled = render_styled_text(&msg.text);
+
+                            // Per-nick color: skip for own messages (use --green via CSS) and highlights/mentions
+                            let nick_color_style = if !is_own && !msg.highlight {
+                                let css_color = crate::nick_color::nick_color_css(&nick_text, 0.65, 0.65);
+                                format!("color: {css_color};")
+                            } else {
+                                String::new()
+                            };
+
                             let nick_style = format!("width: {col_width}ch;");
                             view! {
                                 <div class=class>
                                     <span class="ts">{ts}</span>
                                     <span class="nick" style=nick_style>
                                         <span class="mode">{mode}</span>
-                                        <span class="name">{nick}</span>
+                                        <span class="name" style=nick_color_style>{nick}</span>
                                         <span class="sep">"❯"</span>
                                     </span>
                                     <span class="text">{styled}</span>
