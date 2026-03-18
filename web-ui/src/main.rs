@@ -1,6 +1,7 @@
 mod app;
 mod components;
 mod format;
+mod nick_color;
 mod protocol;
 mod state;
 mod ws;
