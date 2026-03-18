@@ -271,4 +271,54 @@ mod tests {
         let second = nick_color("ferris", ColorSupport::Color256, 0.7, 0.5);
         assert_eq!(first, second);
     }
+
+    #[test]
+    fn empty_nick_does_not_panic() {
+        let _ = nick_color("", ColorSupport::TrueColor, 0.65, 0.65);
+        let _ = nick_color("", ColorSupport::Color256, 0.65, 0.65);
+        let _ = nick_color("", ColorSupport::Basic, 0.65, 0.65);
+    }
+
+    #[test]
+    fn unicode_nick_works() {
+        let c = nick_color("Ñóçk", ColorSupport::TrueColor, 0.65, 0.65);
+        assert!(matches!(c, Color::Rgb(_, _, _)));
+    }
+
+    #[test]
+    fn very_long_nick_works() {
+        let long_nick = "a".repeat(100);
+        let c = nick_color(&long_nick, ColorSupport::TrueColor, 0.65, 0.65);
+        assert!(matches!(c, Color::Rgb(_, _, _)));
+    }
+
+    #[test]
+    fn saturation_zero_produces_gray() {
+        let (r, g, b) = hsl_to_rgb(180.0, 0.0, 0.5);
+        assert_eq!(r, g);
+        assert_eq!(g, b);
+    }
+
+    #[test]
+    fn lightness_extremes() {
+        let (r, g, b) = hsl_to_rgb(0.0, 1.0, 0.0);
+        assert_eq!((r, g, b), (0, 0, 0), "lightness 0 = black");
+
+        let (r, g, b) = hsl_to_rgb(0.0, 1.0, 1.0);
+        assert_eq!((r, g, b), (255, 255, 255), "lightness 1 = white");
+    }
+
+    #[test]
+    fn hash_distribution_reasonable() {
+        let nicks = [
+            "alice", "bob", "charlie", "dave", "eve", "ferris", "grace",
+            "heidi", "ivan", "judy", "karl", "linda", "mallory", "nancy",
+            "oscar", "peggy", "quinn", "rachel", "steve", "trudy",
+        ];
+        let colors: std::collections::HashSet<_> = nicks
+            .iter()
+            .map(|n| nick_color(n, ColorSupport::TrueColor, 0.65, 0.65))
+            .collect();
+        assert!(colors.len() >= 15, "expected ≥15 distinct colors from 20 nicks, got {}", colors.len());
+    }
 }
