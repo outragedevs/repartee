@@ -21,6 +21,10 @@ pub struct AppState {
     pub line_height: RwSignal<f32>,
     pub nick_column_width: RwSignal<u32>,
     pub nick_max_length: RwSignal<u32>,
+    pub nick_colors_enabled: RwSignal<bool>,
+    pub nick_colors_in_nicklist: RwSignal<bool>,
+    pub nick_color_saturation: RwSignal<f32>,
+    pub nick_color_lightness: RwSignal<f32>,
     /// Shell screen content for the active shell buffer.
     pub shell_screen: RwSignal<Option<crate::protocol::ShellScreenData>>,
 }
@@ -48,6 +52,10 @@ impl AppState {
             line_height: RwSignal::new(1.35),
             nick_column_width: RwSignal::new(12),
             nick_max_length: RwSignal::new(9),
+            nick_colors_enabled: RwSignal::new(true),
+            nick_colors_in_nicklist: RwSignal::new(true),
+            nick_color_saturation: RwSignal::new(0.65),
+            nick_color_lightness: RwSignal::new(0.65),
             shell_screen: RwSignal::new(None),
         }
     }
@@ -288,6 +296,10 @@ impl AppState {
                 theme,
                 nick_column_width,
                 nick_max_length,
+                nick_colors,
+                nick_colors_in_nicklist,
+                nick_color_saturation,
+                nick_color_lightness,
             } => {
                 self.timestamp_format.set(timestamp_format);
                 self.line_height.set(line_height);
@@ -298,6 +310,10 @@ impl AppState {
                 if nick_max_length > 0 {
                     self.nick_max_length.set(nick_max_length);
                 }
+                self.nick_colors_enabled.set(nick_colors);
+                self.nick_colors_in_nicklist.set(nick_colors_in_nicklist);
+                self.nick_color_saturation.set(nick_color_saturation);
+                self.nick_color_lightness.set(nick_color_lightness);
             }
             WebEvent::Error { message } => {
                 self.error.set(Some(message));

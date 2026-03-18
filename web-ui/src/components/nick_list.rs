@@ -44,8 +44,10 @@ pub fn NickList() -> impl IntoView {
                         let class = format!("nick-entry{away_class}");
 
                         // Per-nick color (skip for away nicks — they use opacity dimming).
-                        let nick_style = if !n.away {
-                            let css_color = crate::nick_color::nick_color_css(&n.nick, 0.65, 0.65);
+                        let nick_style = if !n.away && state.nick_colors_enabled.get() && state.nick_colors_in_nicklist.get() {
+                            let sat = state.nick_color_saturation.get();
+                            let lit = state.nick_color_lightness.get();
+                            let css_color = crate::nick_color::nick_color_css(&n.nick, sat, lit);
                             format!("color: {css_color};")
                         } else {
                             String::new()

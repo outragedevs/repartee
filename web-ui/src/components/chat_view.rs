@@ -97,8 +97,10 @@ pub fn ChatView() -> impl IntoView {
                         if is_action {
                             // Action (/me): render as "* nick text"
                             let nick_text = msg.nick.unwrap_or_default();
-                            let nick_color_style = if !is_own {
-                                let css_color = crate::nick_color::nick_color_css(&nick_text, 0.65, 0.65);
+                            let nick_color_style = if state.nick_colors_enabled.get() && !is_own {
+                                let sat = state.nick_color_saturation.get();
+                                let lit = state.nick_color_lightness.get();
+                                let css_color = crate::nick_color::nick_color_css(&nick_text, sat, lit);
                                 format!("color: {css_color};")
                             } else {
                                 String::new()
@@ -151,8 +153,10 @@ pub fn ChatView() -> impl IntoView {
                             let styled = render_styled_text(&msg.text);
 
                             // Per-nick color: skip for own messages (use --green via CSS) and highlights/mentions
-                            let nick_color_style = if !is_own && !msg.highlight {
-                                let css_color = crate::nick_color::nick_color_css(&nick_text, 0.65, 0.65);
+                            let nick_color_style = if state.nick_colors_enabled.get() && !is_own && !msg.highlight {
+                                let sat = state.nick_color_saturation.get();
+                                let lit = state.nick_color_lightness.get();
+                                let css_color = crate::nick_color::nick_color_css(&nick_text, sat, lit);
                                 format!("color: {css_color};")
                             } else {
                                 String::new()

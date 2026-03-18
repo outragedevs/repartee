@@ -662,6 +662,7 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                 || path == "web.theme"
                 || path == "web.nick_column_width"
                 || path == "web.nick_max_length"
+                || path.starts_with("display.nick_color")
             {
                 app.state.pending_web_events.push(
                     crate::web::protocol::WebEvent::SettingsChanged {
@@ -670,6 +671,10 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                         theme: app.config.web.theme.clone(),
                         nick_column_width: app.config.web.nick_column_width,
                         nick_max_length: app.config.web.nick_max_length,
+                        nick_colors: app.config.display.nick_colors,
+                        nick_colors_in_nicklist: app.config.display.nick_colors_in_nicklist,
+                        nick_color_saturation: app.config.display.nick_color_saturation,
+                        nick_color_lightness: app.config.display.nick_color_lightness,
                     },
                 );
             }
