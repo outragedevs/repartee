@@ -401,6 +401,8 @@ pub struct App {
     pub needs_full_redraw: bool,
     /// Detected outer terminal name (e.g. "ghostty", "iterm2", "kitty").
     pub outer_terminal: String,
+    /// Detected terminal color capability (truecolor, 256-color, or basic).
+    pub color_support: crate::nick_color::ColorSupport,
     /// How the image protocol was resolved (for diagnostics).
     pub image_proto_source: String,
     /// Terminal env vars from the connected shim (overrides daemon's own env for detection).
@@ -635,6 +637,9 @@ impl App {
             }
         }
 
+        let color_support = crate::nick_color::detect_color_support(outer_terminal);
+        tracing::info!(%outer_terminal, ?color_support, "terminal color support detected");
+
         let mut app = Self {
             state,
             config,
@@ -668,6 +673,7 @@ impl App {
             in_tmux,
             needs_full_redraw: false,
             outer_terminal: outer_terminal.to_string(),
+            color_support,
             image_proto_source: source,
             shim_term_env: None,
             channel_query_queues: HashMap::new(),
@@ -818,6 +824,7 @@ impl App {
         }
 
         self.outer_terminal = outer_terminal.to_string();
+        self.color_support = crate::nick_color::detect_color_support(outer_terminal);
         self.image_proto_source = source;
     }
 
