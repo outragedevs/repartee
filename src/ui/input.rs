@@ -609,40 +609,6 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(after_cursor, normal_style));
     }
 
-    // In highlight mode, append suggestions right-aligned at end of input line.
-    if let Some(ref spell) = app.input.spell_state {
-        if spell.highlight_only && !spell.suggestions.is_empty() {
-            let accent = hex_to_color(&app.theme.colors.accent).unwrap_or(Color::Yellow);
-            let hint_style = Style::default().fg(accent);
-            let sep_style = Style::default().fg(fg_muted);
-
-            // Calculate how much space the input text (prompt + visible text) uses.
-            let text_width: usize = spans.iter().map(Span::width).sum();
-            let total_width = area.width as usize;
-
-            // Calculate hint width: "word1, word2, word3" without allocating the joined string.
-            let hint_width: usize = spell
-                .suggestions
-                .iter()
-                .map(|s| s.chars().count())
-                .sum::<usize>()
-                + spell.suggestions.len().saturating_sub(1) * 2; // ", " separators
-
-            // Only show if there's room (at least 2 chars gap between text and hints).
-            if text_width + 2 + hint_width <= total_width {
-                let gap = total_width - text_width - hint_width;
-                spans.push(Span::styled(" ".repeat(gap), Style::default()));
-                // Render each suggestion separated by commas.
-                for (i, s) in spell.suggestions.iter().enumerate() {
-                    if i > 0 {
-                        spans.push(Span::styled(", ", sep_style));
-                    }
-                    spans.push(Span::styled(s.as_str(), hint_style));
-                }
-            }
-        }
-    }
-
     let line = Line::from(spans);
     let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, area);
@@ -737,7 +703,7 @@ pub fn render_spell_popup(frame: &mut Frame, input_area: Rect, app: &App) {
     let Some(ref spell) = app.input.spell_state else {
         return;
     };
-    if spell.suggestions.is_empty() || spell.highlight_only {
+    if spell.suggestions.is_empty() {
         return;
     }
 
@@ -747,8 +713,9 @@ pub fn render_spell_popup(frame: &mut Frame, input_area: Rect, app: &App) {
     let accent = hex_to_color(&colors.accent).unwrap_or(Color::Yellow);
     let fg_muted = hex_to_color(&colors.fg_muted).unwrap_or(Color::DarkGray);
 
-    // Build suggestion text: show all suggestions, highlight the active one.
-    // spell.index is the currently applied suggestion (already in the input).
+    // Build suggestion text.
+    // Replace mode: highlight the active (applied) suggestion.
+    // Highlight mode: no active selection — all suggestions shown equally.
     let mut suggestion_spans: Vec<Span<'_>> = Vec::new();
     suggestion_spans.push(Span::styled(" ", Style::default().bg(bg_alt)));
     for (i, s) in spell.suggestions.iter().enumerate() {
@@ -758,7 +725,7 @@ pub fn render_spell_popup(frame: &mut Frame, input_area: Rect, app: &App) {
                 Style::default().fg(fg_muted).bg(bg_alt),
             ));
         }
-        let style = if i == spell.index {
+        let style = if !spell.highlight_only && i == spell.index {
             Style::default().fg(Color::Black).bg(accent)
         } else {
             Style::default().fg(fg).bg(bg_alt)
@@ -777,14 +744,31 @@ pub fn render_spell_popup(frame: &mut Frame, input_area: Rect, app: &App) {
     let popup_height = 3_u16; // top border + content + bottom border
 
     // Position popup above the input line.
+    // Highlight mode: right-aligned. Replace mode: left-aligned.
     let popup_y = input_area.y.saturating_sub(popup_height);
-    let popup_x = input_area.x;
+    let popup_x = if spell.highlight_only {
+        (input_area.x + input_area.width).saturating_sub(popup_width)
+    } else {
+        input_area.x
+    };
     let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
 
     frame.render_widget(Clear, popup_area);
 
-    let block = Block::default()
-        .title(Line::from(vec![
+    let title_spans = if spell.highlight_only {
+        vec![
+            Span::styled(" spell ", Style::default().fg(accent).bg(bg_alt)),
+            Span::styled(
+                "any key",
+                Style::default()
+                    .fg(fg)
+                    .bg(bg_alt)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("=dismiss ", Style::default().fg(fg_muted).bg(bg_alt)),
+        ]
+    } else {
+        vec![
             Span::styled(" spell ", Style::default().fg(accent).bg(bg_alt)),
             Span::styled(
                 "Tab",
@@ -802,7 +786,11 @@ pub fn render_spell_popup(frame: &mut Frame, input_area: Rect, app: &App) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled("=cancel ", Style::default().fg(fg_muted).bg(bg_alt)),
-        ]))
+        ]
+    };
+
+    let block = Block::default()
+        .title(Line::from(title_spans))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(fg_muted).bg(bg_alt))
         .style(Style::default().bg(bg_alt));
