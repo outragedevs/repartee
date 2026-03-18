@@ -112,6 +112,14 @@ pub struct DisplayConfig {
     /// Number of historical log lines to load when a buffer is first opened.
     /// 0 = disabled. Lines come from `SQLite` storage, not memory.
     pub backlog_lines: usize,
+    /// Enable per-nick deterministic coloring in chat messages.
+    pub nick_colors: bool,
+    /// Also apply nick colors in the nick list sidebar (some users prefer a clean nick list).
+    pub nick_colors_in_nicklist: bool,
+    /// HSL saturation for nick colors (0.0–1.0). Only used in truecolor mode.
+    pub nick_color_saturation: f32,
+    /// HSL lightness for nick colors (0.0–1.0). Tune per theme: dark bg ≈ 0.65, light bg ≈ 0.40.
+    pub nick_color_lightness: f32,
 }
 
 impl Default for DisplayConfig {
@@ -124,6 +132,10 @@ impl Default for DisplayConfig {
             show_timestamps: true,
             scrollback_lines: 2000,
             backlog_lines: 20,
+            nick_colors: true,
+            nick_colors_in_nicklist: true,
+            nick_color_saturation: 0.65,
+            nick_color_lightness: 0.65,
         }
     }
 }
