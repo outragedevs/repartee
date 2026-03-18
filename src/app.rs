@@ -480,6 +480,8 @@ pub struct App {
     pub shell_input_active: bool,
     /// Last time a shell screen was broadcast to web clients (for throttling).
     last_shell_web_broadcast: Instant,
+    /// Shell ID that needs a deferred broadcast (set when throttle skips).
+    shell_broadcast_pending: Option<String>,
     /// Spell checker (loaded from Hunspell dictionaries).
     pub spellchecker: Option<crate::spellcheck::SpellChecker>,
     /// Receiver for dictionary download events (list/get results).
@@ -701,6 +703,7 @@ impl App {
             shell_rx,
             shell_input_active: false,
             last_shell_web_broadcast: Instant::now(),
+            shell_broadcast_pending: None,
             spellchecker: None,
             dict_rx,
             dict_tx,
@@ -1583,6 +1586,10 @@ impl App {
 
         let mut tick = interval(Duration::from_secs(1));
         let mut paste_tick = interval(Duration::from_millis(500));
+        // B1 fix: pinned sleep for deferred shell broadcast. Reset to 150ms
+        // when a broadcast is throttled. Stays at far future when idle.
+        let shell_broadcast_sleep = tokio::time::sleep(std::time::Duration::from_secs(86400));
+        tokio::pin!(shell_broadcast_sleep);
 
         while !self.should_quit {
             // Handle pending detach request.
@@ -1727,6 +1734,12 @@ impl App {
                 shell_ev = self.shell_rx.recv() => {
                     if let Some(ev) = shell_ev {
                         self.handle_shell_event(ev);
+                        // Reset the deferred broadcast timer if a broadcast was throttled.
+                        if self.shell_broadcast_pending.is_some() {
+                            shell_broadcast_sleep.as_mut().reset(
+                                tokio::time::Instant::now() + std::time::Duration::from_millis(150)
+                            );
+                        }
                     }
                 },
                 dict_ev = self.dict_rx.recv() => {
@@ -1740,6 +1753,18 @@ impl App {
                         self.handle_web_command(cmd, &session_id);
                         self.drain_pending_web_events();
                     }
+                },
+                // Deferred shell broadcast: fires 150ms after the last throttled output.
+                _ = &mut shell_broadcast_sleep, if self.shell_broadcast_pending.is_some() => {
+                    if let Some(shell_id) = self.shell_broadcast_pending.take() {
+                        if self.shell_mgr.is_web_session(&shell_id) {
+                            self.force_broadcast_web_shell_screen(&shell_id);
+                        } else {
+                            self.force_broadcast_shell_screen(&shell_id);
+                        }
+                    }
+                    // Reset to far future until next throttled broadcast.
+                    shell_broadcast_sleep.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_secs(86400));
                 },
                 _ = tick.tick() => {
                     self.handle_netsplit_tick();
@@ -2235,7 +2260,12 @@ impl App {
                 self.state.set_active_buffer(&buffer_id);
                 self.update_shell_input_state();
                 // Send current shell screen to web client immediately.
-                if let Some(shell_id) = self
+                // Broadcast web shell screen if this session has a web PTY,
+                // otherwise fall back to the TUI shell screen.
+                let web_id = format!("web-{session_id}");
+                if self.shell_mgr.has_web_session(&web_id) {
+                    self.force_broadcast_web_shell_screen(&web_id);
+                } else if let Some(shell_id) = self
                     .shell_mgr
                     .session_id_for_buffer(&buffer_id)
                     .map(ToString::to_string)
@@ -2274,19 +2304,35 @@ impl App {
             WebCommand::RunCommand { buffer_id, text } => {
                 self.web_run_command(&buffer_id, &text);
             }
-            WebCommand::ShellInput { buffer_id, data } => {
-                // Decode base64-encoded input bytes and write to the shell PTY.
+            WebCommand::ShellInput { buffer_id: _, data } => {
+                // Write to the web-specific PTY for this session.
+                let web_id = format!("web-{session_id}");
                 if let Ok(bytes) = base64::Engine::decode(
                     &base64::engine::general_purpose::STANDARD,
                     &data,
-                )
-                    && let Some(shell_id) = self
-                        .shell_mgr
-                        .session_id_for_buffer(&buffer_id)
-                        .map(ToString::to_string)
-                {
-                    self.shell_mgr.write(&shell_id, &bytes);
+                ) {
+                    self.shell_mgr.write_web(&web_id, &bytes);
                 }
+            }
+            WebCommand::WebDisconnect => {
+                self.shell_mgr.close_web_by_session(session_id);
+            }
+            WebCommand::ShellResize {
+                buffer_id: _,
+                cols,
+                rows,
+            } => {
+                let web_id = format!("web-{session_id}");
+                // Lazily create the web PTY on first resize.
+                if !self.shell_mgr.has_web_session(&web_id) {
+                    if let Err(e) = self.shell_mgr.open_web(session_id, cols, rows) {
+                        tracing::warn!("failed to open web shell: {e}");
+                        return;
+                    }
+                } else {
+                    self.shell_mgr.resize_web(&web_id, cols, rows);
+                }
+                self.force_broadcast_web_shell_screen(&web_id);
             }
         }
     }
@@ -2411,18 +2457,25 @@ impl App {
     fn handle_shell_event(&mut self, ev: crate::shell::ShellEvent) {
         match ev {
             crate::shell::ShellEvent::Output { id, bytes } => {
-                self.shell_mgr.process_output(&id, &bytes);
-                // Broadcast shell screen to web clients (throttled to ~10fps).
-                self.maybe_broadcast_shell_screen(&id);
+                if self.shell_mgr.is_web_session(&id) {
+                    self.shell_mgr.process_output_web(&id, &bytes);
+                    self.maybe_broadcast_web_shell_screen(&id);
+                } else {
+                    self.shell_mgr.process_output(&id, &bytes);
+                    // Broadcast TUI shell screen to web clients (throttled).
+                    self.maybe_broadcast_shell_screen(&id);
+                }
             }
             crate::shell::ShellEvent::Exited { id, status } => {
                 tracing::info!(shell_id = %id, ?status, "shell process exited");
-                // Find and remove the buffer associated with this shell.
-                if let Some(buffer_id) = self.shell_mgr.buffer_id(&id).map(ToString::to_string) {
+                if self.shell_mgr.is_web_session(&id) {
+                    self.shell_mgr.close_web(&id);
+                } else if let Some(buffer_id) =
+                    self.shell_mgr.buffer_id(&id).map(ToString::to_string)
+                {
                     self.shell_mgr.close(&id);
                     self.state.remove_buffer(&buffer_id);
                     self.maybe_remove_shell_connection();
-                    // If we were viewing this shell, shell_input_active should be off.
                     if self
                         .state
                         .active_buffer()
@@ -2558,40 +2611,12 @@ impl App {
         }
     }
 
-    /// Broadcast the shell screen to web clients if enough time has passed (100ms throttle).
-    fn maybe_broadcast_shell_screen(&mut self, shell_id: &str) {
-        // Throttle to ~10fps to avoid flooding the WebSocket.
-        let now = Instant::now();
-        if now.duration_since(self.last_shell_web_broadcast).as_millis() < 100 {
-            return;
-        }
-        self.last_shell_web_broadcast = now;
+    /// TUI shell screen broadcast — no-op now that web has its own PTY.
+    /// Kept as a stub for the existing call sites in handle_shell_event.
+    fn maybe_broadcast_shell_screen(&mut self, _shell_id: &str) {}
 
-        let Some(buffer_id) = self
-            .shell_mgr
-            .buffer_id(shell_id)
-            .map(ToString::to_string)
-        else {
-            return;
-        };
-
-        let Some((rows, cursor_row, cursor_col, cursor_visible)) =
-            self.shell_mgr.screen_to_web(shell_id)
-        else {
-            return;
-        };
-
-        self.broadcast_web(crate::web::protocol::WebEvent::ShellScreen {
-            buffer_id,
-            rows,
-            cursor_row,
-            cursor_col,
-            cursor_visible,
-        });
-    }
-
-    /// Broadcast the shell screen immediately (no throttle). Used when web client
-    /// switches to a shell buffer and needs the initial screen state.
+    /// TUI shell screen broadcast — used as initial fallback when web client
+    /// switches to a shell buffer before the web PTY is created.
     fn force_broadcast_shell_screen(&mut self, shell_id: &str) {
         let Some(buffer_id) = self
             .shell_mgr
@@ -2605,8 +2630,49 @@ impl App {
         else {
             return;
         };
+        let cols = self.shell_mgr.screen_cols(shell_id);
         self.broadcast_web(crate::web::protocol::WebEvent::ShellScreen {
             buffer_id,
+            cols,
+            rows,
+            cursor_row,
+            cursor_col,
+            cursor_visible,
+        });
+    }
+
+    // ── Web shell PTY broadcast ────────────────────────────────────────────
+
+    /// Broadcast web shell screen (throttled).
+    fn maybe_broadcast_web_shell_screen(&mut self, web_id: &str) {
+        let now = Instant::now();
+        if now.duration_since(self.last_shell_web_broadcast).as_millis() < 100 {
+            self.shell_broadcast_pending = Some(web_id.to_string());
+            return;
+        }
+        self.shell_broadcast_pending = None;
+        self.force_broadcast_web_shell_screen(web_id);
+    }
+
+    /// Broadcast web shell screen immediately.
+    fn force_broadcast_web_shell_screen(&mut self, web_id: &str) {
+        self.last_shell_web_broadcast = Instant::now();
+
+        let Some((rows, cursor_row, cursor_col, cursor_visible)) =
+            self.shell_mgr.screen_to_web_session(web_id)
+        else {
+            return;
+        };
+        let cols = self.shell_mgr.screen_cols_web(web_id);
+        // Use the active buffer ID so the web client's state handler matches.
+        let buffer_id = self
+            .state
+            .active_buffer()
+            .map(|b| b.id.clone())
+            .unwrap_or_default();
+        self.broadcast_web(crate::web::protocol::WebEvent::ShellScreen {
+            buffer_id,
+            cols,
             rows,
             cursor_row,
             cursor_col,
@@ -4225,21 +4291,39 @@ impl App {
                 self.scroll_offset = self.scroll_offset.saturating_sub(10);
             }
             (_, KeyCode::Tab) => {
-                // Spell suggestion cycling takes priority over tab completion.
-                if self.input.spell_state.is_some() {
+                let is_highlight = self
+                    .input
+                    .spell_state
+                    .as_ref()
+                    .is_some_and(|s| s.highlight_only);
+                if is_highlight {
+                    // Highlight mode: Tab dismisses suggestions and performs normal tab completion.
+                    self.input.spell_state = None;
+                    self.handle_tab();
+                } else if self.input.spell_state.is_some() {
+                    // Replace mode: Tab cycles spell suggestions.
                     self.input.cycle_spell_suggestion();
                 } else {
                     self.handle_tab();
                 }
             }
             (mods, KeyCode::Char(c)) if mods.is_empty() || mods == KeyModifiers::SHIFT => {
-                if self.input.spell_state.is_some() {
-                    // Spell correction is active — handle accept keys specially.
+                let is_highlight = self
+                    .input
+                    .spell_state
+                    .as_ref()
+                    .is_some_and(|s| s.highlight_only);
+                if is_highlight {
+                    // Highlight mode: any keystroke dismisses suggestions, input proceeds normally.
+                    self.input.spell_state = None;
+                    self.input.insert_char(c);
+                    if c == ' ' || (c.is_ascii_punctuation() && c != '/') {
+                        self.check_spelling_after_separator();
+                    }
+                } else if self.input.spell_state.is_some() {
+                    // Replace mode: handle accept keys specially.
                     if c == ' ' {
                         // Space: accept current suggestion.
-                        // If the trigger was a space, it's already in the input — done.
-                        // If the trigger was punctuation (e.g., "word."), add a space
-                        // after it so the user doesn't have to press Space twice.
                         let needs_space = self.input.spell_state.as_ref().is_some_and(|s| {
                             self.input.value[s.word_end..]
                                 .chars()
@@ -4252,7 +4336,6 @@ impl App {
                         }
                     } else if matches!(c, '.' | ',' | '!' | '?' | ';' | ':') {
                         // Punctuation: accept and replace trailing separator with it.
-                        // "corrected_word " → "corrected_word."
                         self.input.accept_spell_with_punctuation(c);
                     } else {
                         // Any other char: accept current suggestion and continue typing.
@@ -4569,10 +4652,17 @@ impl App {
         let dict_dir = crate::spellcheck::SpellChecker::resolve_dict_dir(
             &self.config.spellcheck.dictionary_dir,
         );
-        let checker =
-            crate::spellcheck::SpellChecker::load(&self.config.spellcheck.languages, &dict_dir);
+        let checker = crate::spellcheck::SpellChecker::load(
+            &self.config.spellcheck.languages,
+            &dict_dir,
+            self.config.spellcheck.computing,
+        );
         if checker.is_active() {
-            tracing::info!(dicts = checker.dict_count(), "spell checker initialized");
+            tracing::info!(
+                dicts = checker.dict_count(),
+                computing = checker.has_computing(),
+                "spell checker initialized"
+            );
             self.spellchecker = Some(checker);
         } else {
             tracing::info!("spell checker: no dictionaries loaded");
@@ -4633,17 +4723,21 @@ impl App {
         if suggestions.is_empty() {
             return;
         }
+        let highlight_only = self.config.spellcheck.mode == "highlight";
         self.input.spell_state = Some(crate::ui::input::SpellCorrection {
             word_start,
             word_end,
             original: stripped.to_string(),
             suggestions,
             index: 0,
+            highlight_only,
         });
 
-        // Immediately apply the first suggestion so it's visible in the input
-        // and ready to accept with Space. Tab cycles to the next one.
-        self.input.apply_spell_suggestion(0);
+        if !highlight_only {
+            // Replace mode: immediately apply the first suggestion so it's visible
+            // in the input and ready to accept with Space. Tab cycles to the next one.
+            self.input.apply_spell_suggestion(0);
+        }
     }
 
     fn handle_tab(&mut self) {

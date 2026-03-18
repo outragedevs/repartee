@@ -433,14 +433,29 @@ Array values use comma-separated format: <code>#chan1,#chan2</code>.</p>
 <h2>Configuration</h2>
 <pre><code class="language-toml">[spellcheck]
 enabled = true
+computing = true           # computing/IT dictionary (7,400+ terms)
+mode = &quot;replace&quot;           # or &quot;highlight&quot;
 languages = [&quot;en_US&quot;, &quot;pl_PL&quot;, &quot;de_DE&quot;]
-dictionary_dir = &quot;&quot;   # default: ~/.repartee/dicts
+dictionary_dir = &quot;&quot;        # default: ~/.repartee/dicts
 </code></pre>
 <p>Runtime settings:</p>
 <pre><code>/set spellcheck.enabled true
+/set spellcheck.computing true
+/set spellcheck.mode replace
 /set spellcheck.languages en_US,pl_PL,de_DE
 /set spellcheck.dictionary_dir /path/to/dicts
 </code></pre>
+<h2>Computing dictionary</h2>
+<p>A bundled 7,400-word dictionary of computing/IT terms — programming languages, frameworks, tools, protocols, IRC vocabulary, and more. Prevents false positives on words like <code>kubectl</code>, <code>PRIVMSG</code>, <code>IRCnet</code>, <code>tokio</code>, <code>rustfmt</code>.</p>
+<p>Install from the repartee-dicts repository:</p>
+<pre><code>/spellcheck get computing
+</code></pre>
+<p>Controlled via <code>spellcheck.computing</code> (default: <code>true</code>). The computing dictionary is checked <strong>before</strong> language dictionaries — if a word is a known computing term, it&#39;s accepted immediately.</p>
+<h2>Modes</h2>
+<h3>replace (default)</h3>
+<p>Misspelled words are immediately replaced with the first suggestion. Tab cycles through alternatives, Space accepts, Escape reverts.</p>
+<h3>highlight</h3>
+<p>Misspelled words stay as-is but are marked with red underline. A popup shows suggestions for reference. Any keystroke dismisses the popup without changing your text. Non-aggressive — useful if you prefer to fix typos manually.</p>
 <h2>Dictionary setup</h2>
 <p>The easiest way is to use the built-in download command:</p>
 <pre><code>/spellcheck list          # see available dictionaries
@@ -457,14 +472,24 @@ dictionary_dir = &quot;&quot;   # default: ~/.repartee/dicts
 <p>When spell checking is active:</p>
 <ol>
 <li>Type a word and press <strong>Space</strong> — the word is checked</li>
-<li>Misspelled words appear <strong>underlined in red</strong></li>
-<li>A popup shows up to 4 suggestions</li>
-<li>Press <strong>Tab</strong> to cycle through suggestions (replaces the word inline)</li>
-<li>Press <strong>Space</strong> or continue typing to accept the current correction</li>
-<li>Press <strong>Escape</strong> to revert to the original word</li>
-<li>Press <strong>Backspace</strong> to dismiss and edit manually</li>
+<li>Check order: skip filters (URLs, numbers) → nick list → computing dict → language dicts</li>
+<li>A word is correct if <strong>any</strong> source accepts it</li>
 </ol>
-<p>A word is correct if <strong>any</strong> active dictionary accepts it — so with <code>en_US</code> + <code>pl_PL</code> active, both English and Polish words pass.</p>
+<h3>Replace mode (default)</h3>
+<ul>
+<li>Misspelled word is replaced with the first suggestion</li>
+<li><strong>Tab</strong> cycles through alternatives (replaces inline)</li>
+<li><strong>Space</strong> or typing accepts the current correction</li>
+<li><strong>Escape</strong> reverts to the original word</li>
+<li><strong>Backspace</strong> dismisses and lets you edit manually</li>
+</ul>
+<h3>Highlight mode</h3>
+<ul>
+<li>Misspelled word stays as-is, marked <strong>red + underlined</strong></li>
+<li>Popup shows suggestions for reference only</li>
+<li><strong>Any keystroke</strong> dismisses the popup without changing text</li>
+<li>Non-aggressive — fix typos in your own time</li>
+</ul>
 <h2>Aliases</h2>
 <p><code>/spell</code></p>
 <h2>See also</h2>

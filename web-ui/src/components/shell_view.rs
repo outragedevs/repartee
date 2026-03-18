@@ -1,120 +1,492 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use beamterm_renderer::{
+    CellData, FontStyle, GlyphEffect, SelectionMode, Terminal, is_double_width,
+    mouse::MouseSelectOptions,
+};
 use leptos::prelude::*;
+use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::KeyboardEvent;
 
-use crate::protocol::{ShellSpan, WebCommand};
+use crate::protocol::{ShellScreenData, ShellSpan, WebCommand};
 use crate::state::AppState;
 
-/// Renders an embedded shell terminal as a grid of styled text spans.
-///
-/// The backend serializes the vt100 screen into rows of RLE-compressed spans
-/// and streams them via `WebEvent::ShellScreen`. This component renders them
-/// as `<pre>` with `<span>` elements per style run.
+/// Wraps the beamterm Terminal with size tracking and font state.
+struct ShellTerminal {
+    terminal: Terminal,
+    last_width: i32,
+    last_height: i32,
+    font_size: f32,
+}
+
+// ── Theme: Ghostty palette (from user's ghostty config) ──────────────────────
+
+/// Default foreground color (ghostty foreground).
+const DEFAULT_FG: u32 = 0xed_ef_f1;
+/// Default background color (ghostty background).
+const DEFAULT_BG: u32 = 0x28_32_37;
+/// Cursor color (ghostty cursor-color).
+const CURSOR_COLOR: u32 = 0xee_ee_ee;
+
+/// Ghostty 16-color ANSI palette.
+const ANSI_COLORS: [u32; 16] = [
+    0x43_5b_67, // 0: black
+    0xfc_38_41, // 1: red
+    0x5c_f1_9e, // 2: green
+    0xfe_d0_32, // 3: yellow
+    0x37_b6_ff, // 4: blue
+    0xfc_22_6e, // 5: magenta
+    0x59_ff_d1, // 6: cyan
+    0xff_ff_ff, // 7: white
+    0xa1_b0_b8, // 8: bright black
+    0xfc_74_6d, // 9: bright red
+    0xad_f7_be, // 10: bright green
+    0xfe_e1_6c, // 11: bright yellow
+    0x70_cf_ff, // 12: bright blue
+    0xfc_66_9b, // 13: bright magenta
+    0x9a_ff_e6, // 14: bright cyan
+    0xff_ff_ff, // 15: bright white
+];
+
+/// 6x6x6 color cube intensity values for 256-color palette (indices 16-231).
+const COLOR_CUBE: [u8; 6] = [0x00, 0x5f, 0x87, 0xaf, 0xd7, 0xff];
+
+// ── Font configuration ───────────────────────────────────────────────────────
+
+/// Font families for beamterm dynamic atlas (order = priority).
+const FONT_FAMILIES: &[&str] = &[
+    "FiraCode Nerd Font Mono",
+    "Fira Code",
+    "JetBrains Mono",
+    "monospace",
+];
+
+const DEFAULT_FONT_SIZE: f32 = 15.0;
+const MIN_FONT_SIZE: f32 = 8.0;
+const MAX_FONT_SIZE: f32 = 42.0;
+const FONT_STEP: f32 = 1.0;
+
+// ── Component ────────────────────────────────────────────────────────────────
+
+/// Renders an embedded shell terminal via a WebGL2 canvas powered by beamterm.
 #[component]
 pub fn ShellView() -> impl IntoView {
     let state = use_context::<AppState>().expect("AppState not provided");
-    let shell_ref = NodeRef::<leptos::html::Div>::new();
+    let shell_term: Rc<RefCell<Option<ShellTerminal>>> = Rc::new(RefCell::new(None));
+    let canvas_ref = NodeRef::<leptos::html::Canvas>::new();
+    // Stop flag: set to true on unmount to break the rAF loop and Rc cycle.
+    // Uses Arc<AtomicBool> because on_cleanup requires Send.
+    let stop_flag: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    let loop_started: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
 
-    // Auto-focus the shell terminal div when it mounts or screen updates.
+    // Start rAF loop once the canvas is in the DOM.
+    let term = shell_term.clone();
+    let stop = stop_flag.clone();
+    let started = loop_started.clone();
     Effect::new(move || {
         let _ = state.shell_screen.get();
-        if let Some(el) = shell_ref.get() {
+
+        // Auto-focus canvas.
+        if let Some(el) = canvas_ref.get() {
             let html_el: &web_sys::HtmlElement = el.as_ref();
             let _ = html_el.focus();
         }
+
+        // Start the rAF render loop exactly once.
+        if !*started.borrow() {
+            *started.borrow_mut() = true;
+            start_render_loop(term.clone(), state, stop.clone());
+        }
     });
 
-    // Handle keyboard input — forward to shell PTY via WebSocket.
+    // Cancel the rAF loop on component unmount to prevent GPU memory leaks.
+    let stop_cleanup = stop_flag.clone();
+    on_cleanup(move || {
+        stop_cleanup.store(true, Ordering::Relaxed);
+    });
+
+    // Keyboard input — forward to shell PTY via WebSocket, handle font resize.
+    let term_key = shell_term.clone();
     let on_keydown = move |ev: KeyboardEvent| {
         let Some(buffer_id) = state.active_buffer.get_untracked() else {
             return;
         };
 
-        // Don't capture browser shortcuts.
-        if ev.meta_key() || (ev.ctrl_key() && matches!(ev.key().as_str(), "c" | "v" | "a" | "r" | "l" | "t" | "w")) {
+        let key_lower = ev.key().to_lowercase();
+        let is_ctrl_or_meta = ev.ctrl_key() || ev.meta_key();
+
+        // Ctrl/Cmd +/- font resize (handled locally, not sent to PTY).
+        if is_ctrl_or_meta
+            && matches!(key_lower.as_str(), "=" | "+" | "-" | "0")
+        {
+            ev.prevent_default();
+            // F5: try_borrow_mut to avoid panic if rAF holds the borrow.
+            let Ok(mut borrow) = term_key.try_borrow_mut() else {
+                return;
+            };
+            if let Some(st) = borrow.as_mut() {
+                let new_size = match key_lower.as_str() {
+                    "=" | "+" => (st.font_size + FONT_STEP).min(MAX_FONT_SIZE),
+                    "-" => (st.font_size - FONT_STEP).max(MIN_FONT_SIZE),
+                    "0" => DEFAULT_FONT_SIZE,
+                    _ => st.font_size,
+                };
+                if (new_size - st.font_size).abs() > f32::EPSILON {
+                    st.font_size = new_size;
+                    let _ = st.terminal.replace_with_dynamic_atlas(FONT_FAMILIES, new_size);
+                    let (w, h) = canvas_parent_size();
+                    if w > 0 && h > 0 {
+                        let _ = st.terminal.resize(w, h);
+                    }
+                    send_shell_resize(&state, &st.terminal);
+                }
+            }
             return;
         }
 
-        ev.prevent_default();
+        // Pass through browser shortcuts — but Ctrl+C goes to PTY (SIGINT)
+        // unless there's an active selection (then it's copy).
+        if ev.meta_key() {
+            return;
+        }
+        if ev.ctrl_key() {
+            match key_lower.as_str() {
+                // Ctrl+C: send to PTY as SIGINT, unless beamterm has a selection (copy).
+                "c" => {
+                    let has_sel = term_key
+                        .try_borrow()
+                        .ok()
+                        .and_then(|b| b.as_ref().map(|st| st.terminal.has_selection()))
+                        .unwrap_or(false);
+                    if has_sel {
+                        return; // Let browser handle copy.
+                    }
+                    // Fall through to send 0x03 to PTY.
+                }
+                "v" | "a" | "r" | "l" | "t" | "w" => return,
+                _ => {}
+            }
+        }
 
         let bytes = key_event_to_bytes(&ev);
         if bytes.is_empty() {
             return;
         }
 
+        ev.prevent_default();
+
+        let data = base64_encode(&bytes);
+        crate::ws::send_command(&WebCommand::ShellInput { buffer_id, data });
+    };
+
+    // F6: Paste handler using synchronous ClipboardEvent data (no async API needed).
+    let on_paste = move |ev: leptos::ev::Event| {
+        ev.prevent_default();
+        let Some(buffer_id) = state.active_buffer.get_untracked() else {
+            return;
+        };
+        // Downcast to ClipboardEvent for clipboard_data() access.
+        let clip_ev: &web_sys::ClipboardEvent = ev.unchecked_ref();
+        let text = clip_ev
+            .clipboard_data()
+            .and_then(|dt| dt.get_data("text/plain").ok())
+            .unwrap_or_default();
+        if text.is_empty() {
+            return;
+        }
+        // Wrap in bracketed paste mode markers.
+        let mut bytes = Vec::with_capacity(text.len() + 12);
+        bytes.extend_from_slice(b"\x1b[200~");
+        bytes.extend_from_slice(text.as_bytes());
+        bytes.extend_from_slice(b"\x1b[201~");
         let data = base64_encode(&bytes);
         crate::ws::send_command(&WebCommand::ShellInput { buffer_id, data });
     };
 
     view! {
-        <div
+        <canvas
+            id="shell-canvas"
             class="shell-terminal"
             tabindex="0"
-            node_ref=shell_ref
+            node_ref=canvas_ref
             on:keydown=on_keydown
-        >
-            {move || {
-                let screen = state.shell_screen.get();
-                match screen {
-                    Some(data) => {
-                        data.rows.iter().map(|row| {
-                            let spans_view: Vec<_> = row.spans.iter().map(|span| {
-                                let css = span_to_css(span);
-                                let text = span.text.clone();
-                                if css.is_empty() {
-                                    view! { <span>{text}</span> }.into_any()
-                                } else {
-                                    view! { <span style=css>{text}</span> }.into_any()
-                                }
-                            }).collect();
-                            view! { <div class="shell-row">{spans_view}</div> }.into_any()
-                        }).collect::<Vec<_>>()
+            on:paste=on_paste
+        />
+    }
+}
+
+// ── Animation loop ───────────────────────────────────────────────────────────
+
+/// Single requestAnimationFrame loop that owns ALL rendering.
+///
+/// Uses a `stop` flag checked each frame. When `on_cleanup` sets it to `true`,
+/// the loop stops scheduling itself, breaking the Rc cycle and allowing the
+/// Terminal + WebGL resources to be collected.
+fn start_render_loop(
+    term: Rc<RefCell<Option<ShellTerminal>>>,
+    state: AppState,
+    stop: Arc<AtomicBool>,
+) {
+    let cb: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
+    let cb_clone = cb.clone();
+
+    *cb.borrow_mut() = Some(Closure::new(move || {
+        // F1+F2: stop flag breaks the Rc cycle on unmount.
+        if stop.load(Ordering::Relaxed) {
+            // Drop the self-reference to break the Rc cycle.
+            *cb_clone.borrow_mut() = None;
+            return;
+        }
+
+        let Ok(mut borrow) = term.try_borrow_mut() else {
+            schedule_next_frame(&cb_clone);
+            return;
+        };
+
+        // Wait for @font-face fonts to load before creating the atlas.
+        // beamterm's dynamic_font_atlas rasterizes via Canvas 2D API which
+        // bypasses CSS font-display:block — if the TTF isn't loaded yet,
+        // Canvas falls back to a system font and Nerd Font glyphs are missing.
+        if borrow.is_none() && !fonts_loaded() {
+            schedule_next_frame(&cb_clone);
+            return;
+        }
+
+        // Lazy-init the beamterm Terminal.
+        if borrow.is_none() {
+            match Terminal::builder("#shell-canvas")
+                .dynamic_font_atlas(FONT_FAMILIES, DEFAULT_FONT_SIZE)
+                .canvas_padding_color(DEFAULT_BG)
+                .mouse_selection_handler(
+                    MouseSelectOptions::new()
+                        .selection_mode(SelectionMode::Linear)
+                        .trim_trailing_whitespace(true),
+                )
+                .build()
+            {
+                Ok(mut t) => {
+                    let (w, h) = canvas_parent_size();
+                    if w > 0 && h > 0 {
+                        let _ = t.resize(w, h);
                     }
-                    None => {
-                        vec![view! { <div class="shell-placeholder">"Shell loading..."</div> }.into_any()]
+                    send_shell_resize(&state, &t);
+                    *borrow = Some(ShellTerminal {
+                        terminal: t,
+                        last_width: w,
+                        last_height: h,
+                        font_size: DEFAULT_FONT_SIZE,
+                    });
+                }
+                Err(e) => {
+                    web_sys::console::error_1(&format!("beamterm init: {e:?}").into());
+                    schedule_next_frame(&cb_clone);
+                    return;
+                }
+            }
+        }
+
+        let Some(st) = borrow.as_mut() else {
+            schedule_next_frame(&cb_clone);
+            return;
+        };
+
+        // Check for container resize.
+        let (w, h) = canvas_parent_size();
+        if w > 0 && h > 0 && (w != st.last_width || h != st.last_height) {
+            let _ = st.terminal.resize(w, h);
+            st.last_width = w;
+            st.last_height = h;
+            send_shell_resize(&state, &st.terminal);
+        }
+
+        // F3: get_untracked clones the signal value. ShellScreenData contains
+        // owned Strings, so this is a deep copy. Acceptable at 60fps for typical
+        // terminal sizes (~50 rows). For optimization, wrap in Arc in state.rs.
+        if let Some(data) = state.shell_screen.get_untracked() {
+            render_screen(&mut st.terminal, &data);
+        } else {
+            let _ = st.terminal.render_frame();
+        }
+
+        drop(borrow);
+        schedule_next_frame(&cb_clone);
+    }));
+
+    schedule_next_frame(&cb);
+}
+
+fn schedule_next_frame(cb: &Rc<RefCell<Option<Closure<dyn FnMut()>>>>) {
+    if let Some(win) = web_sys::window() {
+        if let Some(ref closure) = *cb.borrow() {
+            let _ = win.request_animation_frame(closure.as_ref().unchecked_ref());
+        }
+    }
+}
+
+// ── Rendering ────────────────────────────────────────────────────────────────
+
+/// Full-screen refresh: convert shell screen data to a flat cell grid for beamterm.
+fn render_screen(terminal: &mut Terminal, data: &ShellScreenData) {
+    let (grid_cols, grid_rows) = terminal.terminal_size();
+    let pty_cols = data.cols;
+    let cols = grid_cols.min(pty_cols);
+    let total = grid_cols as usize * grid_rows as usize;
+    // F4: TODO — cache this Vec in ShellTerminal and reuse via clear()+reserve().
+    let mut cells: Vec<CellData<'_>> = Vec::with_capacity(total);
+
+    let blank = CellData::new(" ", FontStyle::Normal, GlyphEffect::None, DEFAULT_FG, DEFAULT_BG);
+
+    for row_idx in 0..grid_rows as usize {
+        let mut col: u16 = 0;
+
+        if let Some(row) = data.rows.get(row_idx) {
+            for span in &row.spans {
+                let (fg, bg) = resolve_colors(span);
+                let style = resolve_style(span);
+                let effect = if span.underline {
+                    GlyphEffect::Underline
+                } else {
+                    GlyphEffect::None
+                };
+
+                for (byte_idx, ch) in span.text.char_indices() {
+                    if col >= cols {
+                        break;
+                    }
+
+                    let end = byte_idx + ch.len_utf8();
+                    let symbol = &span.text[byte_idx..end];
+
+                    let is_cursor = data.cursor_visible
+                        && row_idx == data.cursor_row as usize
+                        && col == data.cursor_col;
+
+                    if is_cursor {
+                        cells.push(CellData::new(symbol, style, effect, DEFAULT_BG, CURSOR_COLOR));
+                    } else {
+                        cells.push(CellData::new(symbol, style, effect, fg, bg));
+                    }
+                    col += 1;
+
+                    if is_double_width(symbol) && col < cols {
+                        cells.push(CellData::new(
+                            " ", FontStyle::Normal, GlyphEffect::None, fg, bg,
+                        ));
+                        col += 1;
                     }
                 }
-            }}
-        </div>
+            }
+        }
+
+        // Pad remainder of row — check if cursor is in the padding area.
+        while col < grid_cols {
+            let is_cursor = data.cursor_visible
+                && row_idx == data.cursor_row as usize
+                && col == data.cursor_col;
+            if is_cursor {
+                cells.push(CellData::new(
+                    " ", FontStyle::Normal, GlyphEffect::None, DEFAULT_BG, CURSOR_COLOR,
+                ));
+            } else {
+                cells.push(blank);
+            }
+            col += 1;
+        }
+    }
+
+    let _ = terminal.update_cells(cells.into_iter());
+    let _ = terminal.render_frame();
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+fn send_shell_resize(state: &AppState, terminal: &Terminal) {
+    let Some(buffer_id) = state.active_buffer.get_untracked() else {
+        return;
+    };
+    let (cols, rows) = terminal.terminal_size();
+    if cols > 0 && rows > 0 {
+        crate::ws::send_command(&WebCommand::ShellResize {
+            buffer_id,
+            cols,
+            rows,
+        });
     }
 }
 
-/// Convert a `ShellSpan` to inline CSS style string.
-fn span_to_css(span: &ShellSpan) -> String {
-    let mut parts = Vec::new();
-
-    if !span.fg.is_empty() && !span.fg.starts_with("ansi(") {
-        if span.inverse {
-            parts.push(format!("background-color:{}", span.fg));
-        } else {
-            parts.push(format!("color:{}", span.fg));
-        }
-    }
-    if !span.bg.is_empty() && !span.bg.starts_with("ansi(") {
-        if span.inverse {
-            parts.push(format!("color:{}", span.bg));
-        } else {
-            parts.push(format!("background-color:{}", span.bg));
-        }
-    }
-    if span.bold {
-        parts.push("font-weight:bold".to_string());
-    }
-    if span.italic {
-        parts.push("font-style:italic".to_string());
-    }
-    if span.underline {
-        parts.push("text-decoration:underline".to_string());
-    }
-    // Handle inverse when no explicit colors — swap default fg/bg via CSS class instead.
-    if span.inverse && span.fg.is_empty() && span.bg.is_empty() {
-        parts.push("filter:invert(1)".to_string());
-    }
-
-    parts.join(";")
+/// Check if browser fonts (including @font-face) have finished loading.
+fn fonts_loaded() -> bool {
+    web_sys::window()
+        .and_then(|w| w.document())
+        .map(|d| d.fonts().status() == web_sys::FontFaceSetLoadStatus::Loaded)
+        .unwrap_or(true) // If API unavailable, proceed anyway.
 }
 
-/// Encode bytes to base64 using the browser's btoa().
+fn canvas_parent_size() -> (i32, i32) {
+    web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("shell-canvas"))
+        .and_then(|el| el.parent_element())
+        .map(|parent| (parent.client_width(), parent.client_height()))
+        .unwrap_or((0, 0))
+}
+
+fn resolve_colors(span: &ShellSpan) -> (u32, u32) {
+    let fg = parse_color(&span.fg, DEFAULT_FG);
+    let bg = parse_color(&span.bg, DEFAULT_BG);
+    if span.inverse { (bg, fg) } else { (fg, bg) }
+}
+
+fn resolve_style(span: &ShellSpan) -> FontStyle {
+    match (span.bold, span.italic) {
+        (true, true) => FontStyle::BoldItalic,
+        (true, false) => FontStyle::Bold,
+        (false, true) => FontStyle::Italic,
+        (false, false) => FontStyle::Normal,
+    }
+}
+
+fn parse_color(color_str: &str, default: u32) -> u32 {
+    if color_str.is_empty() {
+        return default;
+    }
+
+    if let Some(hex) = color_str.strip_prefix('#') {
+        return u32::from_str_radix(hex, 16).unwrap_or(default);
+    }
+
+    if let Some(inner) = color_str
+        .strip_prefix("ansi(")
+        .and_then(|s| s.strip_suffix(')'))
+        && let Ok(idx) = inner.parse::<u8>()
+    {
+        return ansi_index_to_rgb(idx);
+    }
+
+    default
+}
+
+fn ansi_index_to_rgb(idx: u8) -> u32 {
+    match idx {
+        0..=15 => ANSI_COLORS[idx as usize],
+        16..=231 => {
+            let i = idx - 16;
+            let r = COLOR_CUBE[(i / 36) as usize];
+            let g = COLOR_CUBE[((i % 36) / 6) as usize];
+            let b = COLOR_CUBE[(i % 6) as usize];
+            (r as u32) << 16 | (g as u32) << 8 | (b as u32)
+        }
+        232..=255 => {
+            let v = 8 + 10 * (idx as u32 - 232);
+            v << 16 | v << 8 | v
+        }
+    }
+}
+
 fn base64_encode(bytes: &[u8]) -> String {
     let binary: String = bytes.iter().map(|&b| b as char).collect();
     web_sys::window()
@@ -122,22 +494,19 @@ fn base64_encode(bytes: &[u8]) -> String {
         .unwrap_or_default()
 }
 
-/// Convert a browser KeyboardEvent to terminal escape bytes.
 fn key_event_to_bytes(ev: &KeyboardEvent) -> Vec<u8> {
     let key = ev.key();
     let ctrl = ev.ctrl_key();
     let alt = ev.alt_key();
 
-    // Ctrl+letter → control character.
     if ctrl && key.len() == 1 {
         let ch = key.bytes().next().unwrap_or(0);
         if ch.is_ascii_alphabetic() {
-            let byte = (ch.to_ascii_lowercase()) - b'a' + 1;
+            let byte = ch.to_ascii_lowercase() - b'a' + 1;
             return if alt { vec![0x1b, byte] } else { vec![byte] };
         }
     }
 
-    // Special keys.
     let base: &[u8] = match key.as_str() {
         "Enter" => b"\r",
         "Backspace" => &[0x7f],
@@ -172,7 +541,6 @@ fn key_event_to_bytes(ev: &KeyboardEvent) -> Vec<u8> {
         return base.to_vec();
     }
 
-    // Regular character input.
     if key.len() == 1 || key.chars().count() == 1 {
         let mut bytes = Vec::new();
         if alt {

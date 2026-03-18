@@ -144,6 +144,8 @@ fn mime_from_path(path: &str) -> &'static str {
         Some("png") => "image/png",
         Some("ico") => "image/x-icon",
         Some("json") => "application/json",
+        Some("ttf") => "font/ttf",
+        Some("woff2") => "font/woff2",
         _ => "application/octet-stream",
     }
 }

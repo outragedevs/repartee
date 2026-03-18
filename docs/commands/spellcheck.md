@@ -36,17 +36,43 @@ Download a dictionary by language code (e.g. `en_US`, `pl_PL`, `de_DE`). Files a
 ```toml
 [spellcheck]
 enabled = true
+computing = true           # computing/IT dictionary (7,400+ terms)
+mode = "replace"           # or "highlight"
 languages = ["en_US", "pl_PL", "de_DE"]
-dictionary_dir = ""   # default: ~/.repartee/dicts
+dictionary_dir = ""        # default: ~/.repartee/dicts
 ```
 
 Runtime settings:
 
 ```
 /set spellcheck.enabled true
+/set spellcheck.computing true
+/set spellcheck.mode replace
 /set spellcheck.languages en_US,pl_PL,de_DE
 /set spellcheck.dictionary_dir /path/to/dicts
 ```
+
+## Computing dictionary
+
+A bundled 7,400-word dictionary of computing/IT terms — programming languages, frameworks, tools, protocols, IRC vocabulary, and more. Prevents false positives on words like `kubectl`, `PRIVMSG`, `IRCnet`, `tokio`, `rustfmt`.
+
+Install from the repartee-dicts repository:
+
+```
+/spellcheck get computing
+```
+
+Controlled via `spellcheck.computing` (default: `true`). The computing dictionary is checked **before** language dictionaries — if a word is a known computing term, it's accepted immediately.
+
+## Modes
+
+### replace (default)
+
+Misspelled words are immediately replaced with the first suggestion. Tab cycles through alternatives, Space accepts, Escape reverts.
+
+### highlight
+
+Misspelled words stay as-is but are marked with red underline. A popup shows suggestions for reference. Any keystroke dismisses the popup without changing your text. Non-aggressive — useful if you prefer to fix typos manually.
 
 ## Dictionary setup
 
@@ -74,14 +100,23 @@ For languages not included in our repository, you can find additional UTF-8 Huns
 When spell checking is active:
 
 1. Type a word and press **Space** — the word is checked
-2. Misspelled words appear **underlined in red**
-3. A popup shows up to 4 suggestions
-4. Press **Tab** to cycle through suggestions (replaces the word inline)
-5. Press **Space** or continue typing to accept the current correction
-6. Press **Escape** to revert to the original word
-7. Press **Backspace** to dismiss and edit manually
+2. Check order: skip filters (URLs, numbers) → nick list → computing dict → language dicts
+3. A word is correct if **any** source accepts it
 
-A word is correct if **any** active dictionary accepts it — so with `en_US` + `pl_PL` active, both English and Polish words pass.
+### Replace mode (default)
+
+- Misspelled word is replaced with the first suggestion
+- **Tab** cycles through alternatives (replaces inline)
+- **Space** or typing accepts the current correction
+- **Escape** reverts to the original word
+- **Backspace** dismisses and lets you edit manually
+
+### Highlight mode
+
+- Misspelled word stays as-is, marked **red + underlined**
+- Popup shows suggestions for reference only
+- **Any keystroke** dismisses the popup without changing text
+- Non-aggressive — fix typos in your own time
 
 ## Aliases
 

@@ -93,6 +93,7 @@ pub enum WebEvent {
     /// Shell buffer screen update (full screen as styled rows).
     ShellScreen {
         buffer_id: String,
+        cols: u16,
         rows: Vec<ShellScreenRow>,
         cursor_row: u16,
         cursor_col: u16,
@@ -124,6 +125,11 @@ pub enum WebCommand {
     RunCommand { buffer_id: String, text: String },
     /// Raw keyboard input for a shell buffer (base64-encoded bytes).
     ShellInput { buffer_id: String, data: String },
+    /// Resize the shell PTY to match the web client's viewport.
+    ShellResize { buffer_id: String, cols: u16, rows: u16 },
+    /// Clean up web-specific resources on disconnect (sent internally).
+    #[serde(skip)]
+    WebDisconnect,
 }
 
 /// Buffer metadata sent in `SyncInit` and `BufferCreated`.

@@ -89,6 +89,7 @@ pub enum WebEvent {
     },
     ShellScreen {
         buffer_id: String,
+        cols: u16,
         rows: Vec<ShellScreenRow>,
         cursor_row: u16,
         cursor_col: u16,
@@ -107,6 +108,7 @@ pub enum WebCommand {
     FetchMentions,
     RunCommand { buffer_id: String, text: String },
     ShellInput { buffer_id: String, data: String },
+    ShellResize { buffer_id: String, cols: u16, rows: u16 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,7 +169,7 @@ pub struct WireMention {
 /// Complete shell screen state for rendering in the web frontend.
 #[derive(Debug, Clone)]
 pub struct ShellScreenData {
-    pub buffer_id: String,
+    pub cols: u16,
     pub rows: Vec<ShellScreenRow>,
     pub cursor_row: u16,
     pub cursor_col: u16,

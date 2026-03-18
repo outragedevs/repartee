@@ -112,6 +112,12 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppHandl
         }
     }
 
+    // Clean up web-specific shell PTY.
+    let _ = state.web_cmd_tx.send((
+        crate::web::protocol::WebCommand::WebDisconnect,
+        session_id.clone(),
+    ));
+
     tracing::info!(session_id = %session_id, "web client disconnected");
 }
 

@@ -1,5 +1,14 @@
 /* === Repartee Web Base Styles === */
 
+/* Nerd Font for terminal (powerline glyphs, icons) */
+@font-face {
+    font-family: 'FiraCode Nerd Font Mono';
+    src: url('/fonts/FiraCodeNerdFontMono-Regular.ttf') format('truetype');
+    font-weight: normal;
+    font-style: normal;
+    font-display: block;
+}
+
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 html, body {
@@ -524,3 +533,18 @@ html, body {
 
 .theme-swatch.active { border-color: var(--accent); }
 .theme-swatch:hover { border-color: var(--fg-muted); }
+
+/* === Shell terminal view (beamterm WebGL2 canvas) === */
+
+.shell-terminal {
+    flex: 1 1 0;
+    display: block;
+    width: 100%;
+    min-height: 0;
+    background: #000;
+    outline: none;
+}
+
+.shell-terminal:focus {
+    box-shadow: inset 0 0 0 1px var(--accent);
+}

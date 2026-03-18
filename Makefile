@@ -12,7 +12,7 @@ clean:
 wasm:
 	cd web-ui && trunk build --release
 	rm -rf static/web && mkdir -p static/web
-	cp web-ui/dist/* static/web/
+	cp -r web-ui/dist/* static/web/
 
 # Native release build (embeds WASM from static/web/)
 release:

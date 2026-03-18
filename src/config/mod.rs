@@ -370,6 +370,10 @@ impl Default for DccConfig {
 pub struct SpellcheckConfig {
     /// Enable/disable spell checking.
     pub enabled: bool,
+    /// Enable/disable the computing/IT supplemental dictionary.
+    pub computing: bool,
+    /// Spell check mode: `"replace"` (auto-correct with popup) or `"highlight"` (mark red, show suggestions inline).
+    pub mode: String,
     /// Active language codes (Hunspell dict file stems, e.g. `en_US`, `pl_PL`, `de_DE`).
     pub languages: Vec<String>,
     /// Directory containing `.dic`/`.aff` files. Empty = `~/.repartee/dicts`.
@@ -380,6 +384,8 @@ impl Default for SpellcheckConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            computing: true,
+            mode: "replace".to_string(),
             languages: vec!["en_US".to_string()],
             dictionary_dir: String::new(),
         }

@@ -48,7 +48,7 @@ A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by ir
   </div>
   <div class="card">
     <div class="card-title">Spell Checking</div>
-    <div class="card-body">Multilingual inline spell checking with Hunspell dictionaries. Tab cycles suggestions, Space accepts.</div>
+    <div class="card-body">Multilingual inline spell checking with Hunspell dictionaries and a 7,400-word computing/IT dictionary. Replace and highlight modes, Tab cycles suggestions.</div>
   </div>
   <div class="card">
     <div class="card-title">IRCv3 Capabilities</div>
@@ -68,7 +68,7 @@ A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by ir
   </div>
   <div class="card">
     <div class="card-title">Embedded Shell</div>
-    <div class="card-body">Full PTY terminal inside Repartee — run vim, btop, irssi, or any command without leaving the client. Multiple shells, mouse forwarding, true color.</div>
+    <div class="card-body">Full PTY terminal inside Repartee — run vim, btop, irssi, or any command without leaving the client. Available in TUI and web (beamterm WebGL2 renderer with Nerd Font, mouse selection, font resize).</div>
   </div>
   <div class="card">
     <div class="card-title">Detach & Reattach</div>
