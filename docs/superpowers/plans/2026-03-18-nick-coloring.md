@@ -15,8 +15,8 @@
 | File | Action | Responsibility |
 |------|--------|----------------|
 | `src/nick_color.rs` | **Create** | Core module: `ColorSupport` enum, `detect_color_support()`, `nick_color()`, HSL→RGB conversion, 256-color palette, 16-color palette |
-| `src/config/mod.rs` | **Modify** | Add `nick_colors: bool`, `nick_color_saturation: f32`, `nick_color_lightness: f32` to `DisplayConfig` |
-| `src/commands/settings.rs` | **Modify** | Wire `/set display.nick_colors`, `display.nick_color_saturation`, `display.nick_color_lightness`; add to tab-complete list |
+| `src/config/mod.rs` | **Modify** | Add `nick_colors: bool`, `nick_colors_in_nicklist: bool`, `nick_color_saturation: f32`, `nick_color_lightness: f32` to `DisplayConfig` |
+| `src/commands/settings.rs` | **Modify** | Wire `/set display.nick_colors`, `display.nick_colors_in_nicklist`, `display.nick_color_saturation`, `display.nick_color_lightness`; add to tab-complete list |
 | `src/app.rs` | **Modify** | Add `color_support: ColorSupport` field on `App`, initialize from `detect_color_support(outer_terminal)` |
 | `src/ui/message_line.rs` | **Modify** | After theme format parsing, override nick span fg color with `nick_color()` output (skip for own/mention/highlight msgs) |
 | `src/ui/nick_list.rs` | **Modify** | After theme format parsing, override nick text span fg color with `nick_color()` (preserve prefix color from theme) |
@@ -364,8 +364,10 @@ git commit -m "feat(nick-color): add 256-color and 16-color palette fallbacks"
 In `src/config/mod.rs`, add to the `DisplayConfig` struct after `backlog_lines`:
 
 ```rust
-    /// Enable per-nick deterministic coloring in chat and nick list.
+    /// Enable per-nick deterministic coloring in chat messages.
     pub nick_colors: bool,
+    /// Also apply nick colors in the nick list sidebar (some users prefer a clean nick list).
+    pub nick_colors_in_nicklist: bool,
     /// HSL saturation for nick colors (0.0–1.0). Only used in truecolor mode.
     pub nick_color_saturation: f32,
     /// HSL lightness for nick colors (0.0–1.0). Tune per theme: dark bg ≈ 0.65, light bg ≈ 0.40.
@@ -376,6 +378,7 @@ Update `Default for DisplayConfig`:
 
 ```rust
     nick_colors: true,
+    nick_colors_in_nicklist: true,
     nick_color_saturation: 0.65,
     nick_color_lightness: 0.65,
 ```
@@ -386,6 +389,7 @@ In the `"display"` match arm of `get_config_value()`, add:
 
 ```rust
     "nick_colors" => config.display.nick_colors.to_string(),
+    "nick_colors_in_nicklist" => config.display.nick_colors_in_nicklist.to_string(),
     "nick_color_saturation" => config.display.nick_color_saturation.to_string(),
     "nick_color_lightness" => config.display.nick_color_lightness.to_string(),
 ```
@@ -397,6 +401,9 @@ In the `"display"` match arm of `set_config_value()`, add:
 ```rust
     "nick_colors" => {
         config.display.nick_colors = parse_bool(raw)?;
+    }
+    "nick_colors_in_nicklist" => {
+        config.display.nick_colors_in_nicklist = parse_bool(raw)?;
     }
     "nick_color_saturation" => {
         let v: f32 = raw.parse().map_err(|_| format!("invalid float: {raw}"))?;
@@ -420,6 +427,7 @@ In the `ALL_SETTING_PATHS` constant array, add:
 
 ```rust
     "display.nick_colors",
+    "display.nick_colors_in_nicklist",
     "display.nick_color_saturation",
     "display.nick_color_lightness",
 ```
@@ -684,7 +692,7 @@ The function already receives `&App`, which has `app.color_support` and `app.con
 **Important:** Away nicks should still get dimmed. Check: if `entry.away`, skip the color override (let the theme's away_ format handle it). The away formats already use muted colors, and overriding would make away nicks look active.
 
 ```rust
-    if app.config.display.nick_colors && !entry.away {
+    if app.config.display.nick_colors && app.config.display.nick_colors_in_nicklist && !entry.away {
         // ... apply override
     }
 ```
@@ -888,8 +896,11 @@ Inside the `render_nicks` closure (line 42-61), compute the color for each nick:
             let class = format!("nick-entry{away_class}");
 
             // Per-nick color (skip for away nicks — they use opacity dimming).
-            let nick_style = if !n.away {
-                let css_color = crate::nick_color::nick_color_css(&n.nick, 0.65, 0.65);
+            // Respects display.nick_colors_in_nicklist toggle.
+            let nick_style = if !n.away && state.nick_colors_enabled.get() && state.nick_colors_in_nicklist.get() {
+                let sat = state.nick_color_saturation.get();
+                let lit = state.nick_color_lightness.get();
+                let css_color = crate::nick_color::nick_color_css(&n.nick, sat, lit);
                 format!("color: {};", css_color)
             } else {
                 String::new()
@@ -958,6 +969,7 @@ Add 3 new fields to the `SettingsChanged` variant (after `nick_max_length`):
         nick_max_length: u32,
         // Nick coloring settings
         nick_colors: bool,
+        nick_colors_in_nicklist: bool,
         nick_color_saturation: f32,
         nick_color_lightness: f32,
     },
@@ -965,7 +977,7 @@ Add 3 new fields to the `SettingsChanged` variant (after `nick_max_length`):
 
 - [ ] **Step 2: Add matching fields in `web-ui/src/protocol.rs`**
 
-Same 3 fields, with `#[serde(default)]` for backwards compatibility:
+Same 4 fields, with `#[serde(default)]` for backwards compatibility:
 
 ```rust
     SettingsChanged {
@@ -978,6 +990,8 @@ Same 3 fields, with `#[serde(default)]` for backwards compatibility:
         nick_max_length: u32,
         #[serde(default = "default_true")]
         nick_colors: bool,
+        #[serde(default = "default_true")]
+        nick_colors_in_nicklist: bool,
         #[serde(default = "default_saturation")]
         nick_color_saturation: f32,
         #[serde(default = "default_lightness")]
@@ -1017,6 +1031,7 @@ And update the `SettingsChanged` construction (line 639) to include the new fiel
         nick_column_width: app.config.web.nick_column_width,
         nick_max_length: app.config.web.nick_max_length,
         nick_colors: app.config.display.nick_colors,
+        nick_colors_in_nicklist: app.config.display.nick_colors_in_nicklist,
         nick_color_saturation: app.config.display.nick_color_saturation,
         nick_color_lightness: app.config.display.nick_color_lightness,
     },
@@ -1028,6 +1043,7 @@ Add to `AppState` struct:
 
 ```rust
     pub nick_colors_enabled: RwSignal<bool>,
+    pub nick_colors_in_nicklist: RwSignal<bool>,
     pub nick_color_saturation: RwSignal<f32>,
     pub nick_color_lightness: RwSignal<f32>,
 ```
@@ -1036,6 +1052,7 @@ Initialize with defaults:
 
 ```rust
     nick_colors_enabled: RwSignal::new(true),
+    nick_colors_in_nicklist: RwSignal::new(true),
     nick_color_saturation: RwSignal::new(0.65),
     nick_color_lightness: RwSignal::new(0.65),
 ```
@@ -1046,7 +1063,7 @@ Handle in the `SettingsChanged` match arm (destructure the new fields):
     WebEvent::SettingsChanged {
         timestamp_format, line_height, theme,
         nick_column_width, nick_max_length,
-        nick_colors, nick_color_saturation, nick_color_lightness,
+        nick_colors, nick_colors_in_nicklist, nick_color_saturation, nick_color_lightness,
     } => {
         self.timestamp_format.set(timestamp_format);
         self.line_height.set(line_height);
@@ -1054,6 +1071,7 @@ Handle in the `SettingsChanged` match arm (destructure the new fields):
         self.nick_column_width.set(nick_column_width);
         self.nick_max_length.set(nick_max_length);
         self.nick_colors_enabled.set(nick_colors);
+        self.nick_colors_in_nicklist.set(nick_colors_in_nicklist);
         self.nick_color_saturation.set(nick_color_saturation);
         self.nick_color_lightness.set(nick_color_lightness);
     }
@@ -1196,10 +1214,12 @@ git push -u outrage feat/nick-coloring
 3. Verify nick list sidebar shows matching colors
 4. Verify own messages still use green (ownnick theme color)
 5. Verify mentions still use purple (menick theme color)
-6. Verify `/set display.nick_colors false` disables coloring (reverts to theme defaults)
-7. Verify `/set display.nick_color_lightness 0.4` changes the brightness
-8. Open web UI, verify nicks have the same colors
-9. Verify away nicks in nick list are still dimmed
+6. Verify `/set display.nick_colors false` disables coloring everywhere (reverts to theme defaults)
+7. Verify `/set display.nick_colors_in_nicklist false` disables nick list coloring only (chat still colored)
+8. Verify `/set display.nick_color_lightness 0.4` changes the brightness
+9. Open web UI, verify nicks have the same colors
+10. Verify away nicks in nick list are still dimmed
+11. Verify `/set` changes propagate live to web UI
 
 ---
 
