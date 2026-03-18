@@ -83,6 +83,14 @@ pub enum WebEvent {
         nick_column_width: u32,
         #[serde(default)]
         nick_max_length: u32,
+        #[serde(default = "default_true")]
+        nick_colors: bool,
+        #[serde(default = "default_true")]
+        nick_colors_in_nicklist: bool,
+        #[serde(default = "default_saturation")]
+        nick_color_saturation: f32,
+        #[serde(default = "default_lightness")]
+        nick_color_lightness: f32,
     },
     Error {
         message: String,
@@ -165,6 +173,10 @@ pub struct WireMention {
     pub nick: String,
     pub text: String,
 }
+
+fn default_true() -> bool { true }
+fn default_saturation() -> f32 { 0.65 }
+fn default_lightness() -> f32 { 0.65 }
 
 /// Complete shell screen state for rendering in the web frontend.
 #[derive(Debug, Clone)]

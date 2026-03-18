@@ -48,7 +48,16 @@ All web settings live under the `[web]` section in `config.toml` and can be chan
 | `web.nick_column_width` | `12` | Nick column width in characters |
 | `web.nick_max_length` | `9` | Max nick display length before truncation |
 
-Settings changed via `/set web.*` apply immediately to all connected web clients.
+Nick coloring settings live under `[display]` but are also synced to web clients:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `display.nick_colors` | `true` | Enable per-nick deterministic coloring |
+| `display.nick_colors_in_nicklist` | `true` | Also color nicks in the nick list sidebar |
+| `display.nick_color_saturation` | `0.65` | HSL saturation (0.0–1.0) |
+| `display.nick_color_lightness` | `0.65` | HSL lightness (0.0–1.0), lower for light themes |
+
+Settings changed via `/set web.*` or `/set display.nick_color*` apply immediately to all connected web clients.
 
 ## Features
 
@@ -59,7 +68,8 @@ The web frontend provides full 1:1 parity with the terminal UI:
 - **Bidirectional buffer switching** — switch a buffer on web and the TUI follows, and vice versa
 - **Command execution** — run any `/command` from the web input (output visible on web)
 - **Tab completion** — nicks, `/commands`, and `/set` setting paths
-- **Nick list** — grouped by mode (ops, voiced, regular), away status
+- **Nick coloring** — deterministic per-nick colors synced from server settings, same HSL algorithm as TUI
+- **Nick list** — grouped by mode (ops, voiced, regular), away status, per-nick coloring (toggleable separately)
 - **Activity indicators** — unread counts and color-coded activity levels
 - **Mentions** — highlight tracking with mention count badge
 - **Theme picker** — switch themes live (5 built-in themes)

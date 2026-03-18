@@ -50,6 +50,10 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 "show_timestamps" => config.display.show_timestamps.to_string(),
                 "scrollback_lines" => config.display.scrollback_lines.to_string(),
                 "backlog_lines" => config.display.backlog_lines.to_string(),
+                "nick_colors" => config.display.nick_colors.to_string(),
+                "nick_colors_in_nicklist" => config.display.nick_colors_in_nicklist.to_string(),
+                "nick_color_saturation" => config.display.nick_color_saturation.to_string(),
+                "nick_color_lightness" => config.display.nick_color_lightness.to_string(),
                 _ => return None,
             };
             Some(Resolved {
@@ -252,6 +256,26 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
                 config.display.backlog_lines =
                     raw.parse().map_err(|_| "Expected a number".to_string())?;
             }
+            "nick_colors" => {
+                config.display.nick_colors = parse_bool(raw)?;
+            }
+            "nick_colors_in_nicklist" => {
+                config.display.nick_colors_in_nicklist = parse_bool(raw)?;
+            }
+            "nick_color_saturation" => {
+                let v: f32 = raw.parse().map_err(|_| format!("invalid float: {raw}"))?;
+                if !(0.0..=1.0).contains(&v) {
+                    return Err("saturation must be 0.0–1.0".into());
+                }
+                config.display.nick_color_saturation = v;
+            }
+            "nick_color_lightness" => {
+                let v: f32 = raw.parse().map_err(|_| format!("invalid float: {raw}"))?;
+                if !(0.0..=1.0).contains(&v) {
+                    return Err("lightness must be 0.0–1.0".into());
+                }
+                config.display.nick_color_lightness = v;
+            }
             _ => return Err(format!("Unknown field: {path}")),
         },
         "sidepanel" if parts.len() >= 3 => {
@@ -444,6 +468,10 @@ const BASE_PATHS: &[&str] = &[
     "display.show_timestamps",
     "display.scrollback_lines",
     "display.backlog_lines",
+    "display.nick_colors",
+    "display.nick_colors_in_nicklist",
+    "display.nick_color_saturation",
+    "display.nick_color_lightness",
     "sidepanel.left.width",
     "sidepanel.left.visible",
     "sidepanel.right.width",
@@ -634,6 +662,7 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                 || path == "web.theme"
                 || path == "web.nick_column_width"
                 || path == "web.nick_max_length"
+                || path.starts_with("display.nick_color")
             {
                 app.state.pending_web_events.push(
                     crate::web::protocol::WebEvent::SettingsChanged {
@@ -642,6 +671,10 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                         theme: app.config.web.theme.clone(),
                         nick_column_width: app.config.web.nick_column_width,
                         nick_max_length: app.config.web.nick_max_length,
+                        nick_colors: app.config.display.nick_colors,
+                        nick_colors_in_nicklist: app.config.display.nick_colors_in_nicklist,
+                        nick_color_saturation: app.config.display.nick_color_saturation,
+                        nick_color_lightness: app.config.display.nick_color_lightness,
                     },
                 );
             }
@@ -748,6 +781,10 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
                 "show_timestamps",
                 "scrollback_lines",
                 "backlog_lines",
+                "nick_colors",
+                "nick_colors_in_nicklist",
+                "nick_color_saturation",
+                "nick_color_lightness",
             ],
         ),
     ];
@@ -1010,5 +1047,22 @@ mod tests {
         let paths = get_setting_paths(&config);
         assert!(paths.contains(&"servers.test.port".to_string()));
         assert!(paths.contains(&"servers.test.tls".to_string()));
+    }
+
+    #[test]
+    fn get_set_nick_colors() {
+        let mut config = default_config();
+        let r = get_config_value(&config, "display.nick_colors").unwrap();
+        assert_eq!(r.value, "true");
+        set_config_value(&mut config, "display.nick_colors", "false").unwrap();
+        assert!(!config.display.nick_colors);
+    }
+
+    #[test]
+    fn set_nick_color_saturation_validates_range() {
+        let mut config = default_config();
+        assert!(set_config_value(&mut config, "display.nick_color_saturation", "0.7").is_ok());
+        assert!(set_config_value(&mut config, "display.nick_color_saturation", "1.5").is_err());
+        assert!(set_config_value(&mut config, "display.nick_color_saturation", "-0.1").is_err());
     }
 }

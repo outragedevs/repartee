@@ -71,12 +71,32 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, scroll_offset: usize) ->
         let nick_chars = entry.nick.chars().count();
         let overhead = total_visible.saturating_sub(nick_chars);
         let max_nick_len = panel_width.saturating_sub(1 + overhead);
-        let spans = if nick_chars > max_nick_len {
+        let mut spans = if nick_chars > max_nick_len {
             let display_nick = truncate_with_plus(&entry.nick, max_nick_len);
             parse_format_string(&resolved, &[&display_nick])
         } else {
             full_spans
         };
+
+        // Apply per-nick color when enabled, but respect the separate nicklist toggle.
+        // Away nicks keep their dimmed theme colors (overriding would make them look active).
+        if app.config.display.nick_colors && app.config.display.nick_colors_in_nicklist && !entry.away {
+            let nick_fg = crate::nick_color::nick_color(
+                &entry.nick,
+                app.color_support,
+                app.config.display.nick_color_saturation,
+                app.config.display.nick_color_lightness,
+            );
+            for span in &mut spans {
+                // Override the nick text span (not the prefix char like @ or +).
+                // The prefix is a separate span from the format string.
+                // Use ASCII case-insensitive compare — IRC nicks are ASCII, avoids allocation.
+                if !span.text.is_empty() && span.text.trim().eq_ignore_ascii_case(&entry.nick) {
+                    span.fg = Some(nick_fg);
+                }
+            }
+        }
+
         lines.push(styled_spans_to_line(&spans));
     }
 

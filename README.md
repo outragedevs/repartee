@@ -32,6 +32,7 @@ Terminal, mobile web, and desktop web — all in real-time sync:
 - **Persistent logging** — SQLite with WAL, FTS5 full-text search, optional AES-256-GCM encryption
 - **Netsplit detection** — batches join/part floods into single events
 - **Flood protection** — blocks CTCP spam and nick-change floods automatically
+- **Nick coloring** — deterministic per-nick colors (WeeChat-style) with HSL hue wheel for truecolor, 256-color and 16-color fallbacks, auto-detected terminal capability, configurable saturation/lightness
 - **Theming** — irssi-compatible format strings with 24-bit color support and custom abstracts
 - **Web frontend** — built-in HTTPS web UI with mobile support, real-time sync with the terminal, swipe gestures, 5 themes
 - **DCC CHAT** — direct client-to-client messaging with active and passive (reverse) connections

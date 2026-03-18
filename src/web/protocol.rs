@@ -87,6 +87,10 @@ pub enum WebEvent {
         theme: String,
         nick_column_width: u32,
         nick_max_length: u32,
+        nick_colors: bool,
+        nick_colors_in_nicklist: bool,
+        nick_color_saturation: f32,
+        nick_color_lightness: f32,
     },
     /// Server-side error.
     Error { message: String },

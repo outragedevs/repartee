@@ -187,7 +187,37 @@ port = 8443
 <td>Max nick display length before truncation</td>
 </tr>
 </tbody></table>
-<p>Settings changed via <code>/set web.*</code> apply immediately to all connected web clients.</p>
+<p>Nick coloring settings live under <code>[display]</code> but are also synced to web clients:</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>display.nick_colors</code></td>
+<td><code>true</code></td>
+<td>Enable per-nick deterministic coloring</td>
+</tr>
+<tr>
+<td><code>display.nick_colors_in_nicklist</code></td>
+<td><code>true</code></td>
+<td>Also color nicks in the nick list sidebar</td>
+</tr>
+<tr>
+<td><code>display.nick_color_saturation</code></td>
+<td><code>0.65</code></td>
+<td>HSL saturation (0.0–1.0)</td>
+</tr>
+<tr>
+<td><code>display.nick_color_lightness</code></td>
+<td><code>0.65</code></td>
+<td>HSL lightness (0.0–1.0), lower for light themes</td>
+</tr>
+</tbody></table>
+<p>Settings changed via <code>/set web.*</code> or <code>/set display.nick_color*</code> apply immediately to all connected web clients.</p>
 <h2>Features</h2>
 <p>The web frontend provides full 1:1 parity with the terminal UI:</p>
 <ul>
@@ -196,7 +226,8 @@ port = 8443
 <li><strong>Bidirectional buffer switching</strong> — switch a buffer on web and the TUI follows, and vice versa</li>
 <li><strong>Command execution</strong> — run any <code>/command</code> from the web input (output visible on web)</li>
 <li><strong>Tab completion</strong> — nicks, <code>/commands</code>, and <code>/set</code> setting paths</li>
-<li><strong>Nick list</strong> — grouped by mode (ops, voiced, regular), away status</li>
+<li><strong>Nick coloring</strong> — deterministic per-nick colors synced from server settings, same HSL algorithm as TUI</li>
+<li><strong>Nick list</strong> — grouped by mode (ops, voiced, regular), away status, per-nick coloring (toggleable separately)</li>
 <li><strong>Activity indicators</strong> — unread counts and color-coded activity levels</li>
 <li><strong>Mentions</strong> — highlight tracking with mention count badge</li>
 <li><strong>Theme picker</strong> — switch themes live (5 built-in themes)</li>
