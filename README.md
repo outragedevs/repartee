@@ -35,8 +35,8 @@ Terminal, mobile web, and desktop web — all in real-time sync:
 - **Theming** — irssi-compatible format strings with 24-bit color support and custom abstracts
 - **Web frontend** — built-in HTTPS web UI with mobile support, real-time sync with the terminal, swipe gestures, 5 themes
 - **DCC CHAT** — direct client-to-client messaging with active and passive (reverse) connections
-- **Spell check** — inline correction with Hunspell dictionaries, multilingual, Tab to cycle suggestions
-- **Embedded shell** — full PTY terminal inside Repartee (`/shell`) — run vim, btop, irssi without leaving the client
+- **Spell check** — inline correction with Hunspell dictionaries, multilingual, Tab to cycle suggestions, computing/IT dictionary with 7,400+ terms, replace and highlight modes
+- **Embedded shell** — full PTY terminal inside Repartee (`/shell`) — run vim, btop, irssi without leaving the client. Also available in the web frontend via beamterm WebGL2 renderer with Nerd Font, mouse selection, Ctrl+/- font resize, and clipboard paste
 - **Detach & reattach** — detach from your terminal and reattach later; IRC connections stay alive
 - **Extban** — `$a:account` ban type with `/ban -a` shorthand
 - **Single binary** — ~15MB, zero runtime dependencies (SQLite, Lua, and WASM frontend bundled)

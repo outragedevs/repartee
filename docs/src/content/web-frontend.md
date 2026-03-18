@@ -65,6 +65,7 @@ The web frontend provides full 1:1 parity with the terminal UI:
 - **Theme picker** — switch themes live (5 built-in themes)
 - **Multiline input** — paste multiline text, each line sent separately
 - **Persistent sessions** — page refresh reconnects automatically (session stored in browser)
+- **Embedded shell** — full terminal in the browser via beamterm WebGL2 renderer. Separate PTY per web session (no resize fighting with TUI). FiraCode Nerd Font, mouse selection with clipboard, Ctrl+/- font resize, Ctrl+C (SIGINT), clipboard paste with bracketed paste mode
 
 ## Desktop Layout
 
