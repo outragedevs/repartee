@@ -7,6 +7,10 @@ description: Spell checker status and control
 
 Spell checker status and control.
 
+## Description
+
+Two modes: "replace" (default) replaces misspelled words inline — Tab cycles suggestions, Space accepts, Escape reverts. "highlight" marks misspelled words with red underline without changing text. Switch with `/set spellcheck.mode highlight` or `/set spellcheck.mode replace`.
+
 ## Usage
 
 ```
