@@ -967,62 +967,7 @@ pub(crate) fn cmd_spellcheck(app: &mut App, args: &[String]) {
     let sub = args.first().map_or("status", String::as_str);
 
     match sub {
-        "status" => {
-            ev(app, &divider("Spell Check"));
-            let enabled = app.config.spellcheck.enabled;
-            let status = if enabled {
-                format!("{C_OK}enabled{C_RST}")
-            } else {
-                format!("{C_ERR}disabled{C_RST}")
-            };
-            ev(app, &format!("  Status: {status}"));
-            ev(
-                app,
-                &format!(
-                    "  Mode: {C_CMD}{}{C_RST}",
-                    app.config.spellcheck.mode
-                ),
-            );
-            ev(
-                app,
-                &format!(
-                    "  Languages: {C_CMD}{}{C_RST}",
-                    app.config.spellcheck.languages.join(", ")
-                ),
-            );
-            let dict_dir = crate::spellcheck::SpellChecker::resolve_dict_dir(
-                &app.config.spellcheck.dictionary_dir,
-            );
-            ev(
-                app,
-                &format!("  Dictionary dir: {C_CMD}{}{C_RST}", dict_dir.display()),
-            );
-            let loaded = app
-                .spellchecker
-                .as_ref()
-                .map_or(0, crate::spellcheck::SpellChecker::dict_count);
-            ev(
-                app,
-                &format!("  Loaded dictionaries: {C_CMD}{loaded}{C_RST}"),
-            );
-            let computing_status = if !app.config.spellcheck.computing {
-                format!("{C_DIM}disabled{C_RST}")
-            } else if app
-                .spellchecker
-                .as_ref()
-                .is_some_and(crate::spellcheck::SpellChecker::has_computing)
-            {
-                format!("{C_OK}loaded{C_RST}")
-            } else {
-                format!(
-                    "{C_ERR}not installed{C_RST} — run {C_CMD}/spellcheck get computing{C_RST}"
-                )
-            };
-            ev(
-                app,
-                &format!("  Computing dict: {computing_status}"),
-            );
-        }
+        "status" => spellcheck_status(app),
         "reload" => {
             app.reload_spellchecker();
             let loaded = app
@@ -1087,6 +1032,59 @@ pub(crate) fn cmd_spellcheck(app: &mut App, args: &[String]) {
             );
         }
     }
+}
+
+fn spellcheck_status(app: &mut App) {
+    let ev = add_local_event;
+    ev(app, &divider("Spell Check"));
+    let enabled = app.config.spellcheck.enabled;
+    let status = if enabled {
+        format!("{C_OK}enabled{C_RST}")
+    } else {
+        format!("{C_ERR}disabled{C_RST}")
+    };
+    ev(app, &format!("  Status: {status}"));
+    ev(
+        app,
+        &format!("  Mode: {C_CMD}{}{C_RST}", app.config.spellcheck.mode),
+    );
+    ev(
+        app,
+        &format!(
+            "  Languages: {C_CMD}{}{C_RST}",
+            app.config.spellcheck.languages.join(", ")
+        ),
+    );
+    let dict_dir = crate::spellcheck::SpellChecker::resolve_dict_dir(
+        &app.config.spellcheck.dictionary_dir,
+    );
+    ev(
+        app,
+        &format!("  Dictionary dir: {C_CMD}{}{C_RST}", dict_dir.display()),
+    );
+    let loaded = app
+        .spellchecker
+        .as_ref()
+        .map_or(0, crate::spellcheck::SpellChecker::dict_count);
+    ev(
+        app,
+        &format!("  Loaded dictionaries: {C_CMD}{loaded}{C_RST}"),
+    );
+    let computing_status = if !app.config.spellcheck.computing {
+        format!("{C_DIM}disabled{C_RST}")
+    } else if app
+        .spellchecker
+        .as_ref()
+        .is_some_and(crate::spellcheck::SpellChecker::has_computing)
+    {
+        format!("{C_OK}loaded{C_RST}")
+    } else {
+        format!("{C_ERR}not installed{C_RST} — run {C_CMD}/spellcheck get computing{C_RST}")
+    };
+    ev(
+        app,
+        &format!("  Computing dict: {computing_status}"),
+    );
 }
 
 // === Mentions ===

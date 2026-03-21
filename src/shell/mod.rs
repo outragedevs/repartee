@@ -236,19 +236,19 @@ impl ShellManager {
         bool,
     )> {
         let screen = self.sessions.get(id)?.parser.screen();
-        Self::serialize_screen(screen)
+        Some(Self::serialize_screen(screen))
     }
 
     /// Convert a vt100 screen to styled rows for web transport.
     #[expect(clippy::similar_names, reason = "fg/bg are standard terminal color abbreviations")]
     fn serialize_screen(
         screen: &vt100::Screen,
-    ) -> Option<(
+    ) -> (
         Vec<crate::web::protocol::ShellScreenRow>,
         u16,
         u16,
         bool,
-    )> {
+    ) {
         let (screen_rows, screen_cols) = screen.size();
         let (cursor_row, cursor_col) = screen.cursor_position();
         let cursor_visible = !screen.hide_cursor();
@@ -367,7 +367,7 @@ impl ShellManager {
             rows.push(crate::web::protocol::ShellScreenRow { spans });
         }
 
-        Some((rows, cursor_row, cursor_col, cursor_visible))
+        (rows, cursor_row, cursor_col, cursor_visible)
     }
 
     /// Get the buffer ID associated with a shell session.
@@ -568,8 +568,7 @@ impl ShellManager {
     )> {
         let session = self.web_sessions.get(id)?;
         let screen = session.parser.screen();
-        // Reuse the same serialization logic via the session's parser.
-        Self::serialize_screen(screen)
+        Some(Self::serialize_screen(screen))
     }
 
     /// Get the column count for a web session.
@@ -580,6 +579,7 @@ impl ShellManager {
     }
 
     /// Check if a shell event ID belongs to a web session.
+    #[expect(clippy::unused_self, reason = "method semantically belongs on ShellManager — may use self in the future")]
     pub fn is_web_session(&self, id: &str) -> bool {
         id.starts_with("web-")
     }

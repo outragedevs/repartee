@@ -15,7 +15,7 @@ html, body {
     height: 100%;
     background: var(--bg);
     color: var(--fg);
-    font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', monospace;
+    font-family: 'FiraCode Nerd Font Mono', 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', monospace;
     font-size: 13px;
     line-height: var(--line-height, 1.35);
     overflow: hidden;

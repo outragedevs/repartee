@@ -610,7 +610,18 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                 if let Err(e) = crate::config::set_env_value(&env_path, "WEB_PASSWORD", raw) {
                     ev(app, &format!("{C_ERR}Failed to save to .env: {e}{C_RST}"));
                 } else {
-                    ev(app, &format!("{C_DIM}Password saved to .env. Restart to start the web server.{C_RST}"));
+                    ev(app, &format!("{C_DIM}Password saved to .env{C_RST}"));
+                }
+            }
+
+            // Hot restart web server when lifecycle settings change.
+            if matches!(path.as_str(),
+                "web.enabled" | "web.port" | "web.bind_address" | "web.password"
+                | "web.tls_cert" | "web.tls_key" | "web.session_hours"
+            ) {
+                app.web_restart_pending = true;
+                if path.as_str() != "web.enabled" || raw == "true" {
+                    ev(app, &format!("{C_DIM}Web server will restart...{C_RST}"));
                 }
             }
 

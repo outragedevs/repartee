@@ -506,6 +506,9 @@ pub struct App {
     web_rate_limiter: Option<std::sync::Arc<tokio::sync::Mutex<crate::web::auth::RateLimiter>>>,
     /// Shared state snapshot for web handlers (updated every 1s tick).
     web_state_snapshot: Option<std::sync::Arc<std::sync::RwLock<crate::web::server::WebStateSnapshot>>>,
+    /// Flag to trigger web server restart in the next event loop iteration.
+    /// Set by `/set web.*` when a lifecycle-affecting setting changes.
+    pub web_restart_pending: bool,
 }
 
 impl App {
@@ -720,6 +723,7 @@ impl App {
             web_sessions: None,
             web_rate_limiter: None,
             web_state_snapshot: None,
+            web_restart_pending: false,
         };
         app.recompute_wrap_indent();
 
@@ -1538,52 +1542,7 @@ impl App {
         }
 
         // Start web server if enabled and password is set.
-        if self.config.web.enabled && !self.config.web.password.is_empty() {
-            let sessions = std::sync::Arc::new(tokio::sync::Mutex::new(
-                crate::web::auth::SessionStore::with_hours(self.config.web.session_hours),
-            ));
-            let limiter = std::sync::Arc::new(tokio::sync::Mutex::new(
-                crate::web::auth::RateLimiter::new(),
-            ));
-            self.web_sessions = Some(std::sync::Arc::clone(&sessions));
-            self.web_rate_limiter = Some(std::sync::Arc::clone(&limiter));
-
-            // Build initial state snapshot for web handlers.
-            let snapshot = std::sync::Arc::new(std::sync::RwLock::new(
-                crate::web::server::WebStateSnapshot {
-                    buffers: Vec::new(),
-                    connections: Vec::new(),
-                    mention_count: 0,
-                    active_buffer_id: None,
-                    timestamp_format: self.config.web.timestamp_format.clone(),
-                },
-            ));
-            self.web_state_snapshot = Some(std::sync::Arc::clone(&snapshot));
-
-            let handle = std::sync::Arc::new(crate::web::server::AppHandle {
-                broadcaster: std::sync::Arc::clone(&self.web_broadcaster),
-                web_cmd_tx: self.web_cmd_tx.clone(),
-                password: self.config.web.password.clone(),
-                session_store: sessions,
-                rate_limiter: limiter,
-                web_state_snapshot: Some(snapshot),
-            });
-            match crate::web::server::start(&self.config.web, handle).await {
-                Ok(h) => {
-                    self.web_server_handle = Some(h);
-                    tracing::info!(
-                        "web frontend at https://{}:{}",
-                        self.config.web.bind_address,
-                        self.config.web.port
-                    );
-                }
-                Err(e) => {
-                    tracing::error!("failed to start web server: {e}");
-                }
-            }
-        } else if self.config.web.enabled && self.config.web.password.is_empty() {
-            tracing::warn!("web.enabled=true but web.password is empty — set WEB_PASSWORD in .env");
-        }
+        self.start_web_server().await;
 
         // Signal handlers for detached mode.
         let mut sigterm =
@@ -1602,6 +1561,13 @@ impl App {
             // Handle pending detach request.
             if self.should_detach {
                 self.perform_detach();
+            }
+
+            // Hot restart web server when /set web.* changes a lifecycle setting.
+            if self.web_restart_pending {
+                self.web_restart_pending = false;
+                self.stop_web_server();
+                self.start_web_server().await;
             }
 
             // Draw only when we have a terminal.
@@ -1762,7 +1728,7 @@ impl App {
                     }
                 },
                 // Deferred shell broadcast: fires 150ms after the last throttled output.
-                _ = &mut shell_broadcast_sleep, if self.shell_broadcast_pending.is_some() => {
+                () = &mut shell_broadcast_sleep, if self.shell_broadcast_pending.is_some() => {
                     if let Some(shell_id) = self.shell_broadcast_pending.take() {
                         if self.shell_mgr.is_web_session(&shell_id) {
                             self.force_broadcast_web_shell_screen(&shell_id);
@@ -1790,21 +1756,18 @@ impl App {
                         && let Ok(mut s) = sessions.try_lock() { s.purge_expired(); }
                     if let Some(ref limiter) = self.web_rate_limiter
                         && let Ok(mut l) = limiter.try_lock() { l.purge_expired(); }
-                    // Update web state snapshot — only if web clients are connected.
-                    // Avoids allocating full buffer/connection metadata every second
-                    // when the web frontend is unused.
-                    if self.web_broadcaster.receiver_count() > 0 {
-                        if let Some(ref snapshot) = self.web_state_snapshot
-                            && let Ok(mut snap) = snapshot.write()
-                        {
-                            let init = crate::web::snapshot::build_sync_init(&self.state, 0, &self.config.web.timestamp_format);
-                            if let crate::web::protocol::WebEvent::SyncInit { buffers, connections, mention_count, active_buffer_id, timestamp_format, .. } = init {
-                                snap.buffers = buffers;
-                                snap.connections = connections;
-                                snap.mention_count = mention_count;
-                                snap.active_buffer_id = active_buffer_id;
-                                snap.timestamp_format = timestamp_format;
-                            }
+                    // Update web state snapshot every tick so the first
+                    // connecting client gets current data in its SyncInit.
+                    if let Some(ref snapshot) = self.web_state_snapshot
+                        && let Ok(mut snap) = snapshot.write()
+                    {
+                        let init = crate::web::snapshot::build_sync_init(&self.state, 0, &self.config.web.timestamp_format);
+                        if let crate::web::protocol::WebEvent::SyncInit { buffers, connections, mention_count, active_buffer_id, timestamp_format, .. } = init {
+                            snap.buffers = buffers;
+                            snap.connections = connections;
+                            snap.mention_count = mention_count;
+                            snap.active_buffer_id = active_buffer_id;
+                            snap.timestamp_format = timestamp_format;
                         }
                     }
                     let expired = self.dcc.purge_expired();
@@ -2194,6 +2157,94 @@ impl App {
         let _ = self.web_broadcaster.send(event);
     }
 
+    /// Stop the web server if running. Aborts the accept loop task and
+    /// clears per-session state (sessions, rate limiter, snapshot).
+    /// The `web_broadcaster` and `web_cmd_tx/rx` channel survive — they
+    /// are owned by `App` and reused across restarts.
+    fn stop_web_server(&mut self) {
+        if let Some(handle) = self.web_server_handle.take() {
+            handle.abort();
+            tracing::info!("web server stopped");
+            crate::commands::helpers::add_local_event(self, "Web server stopped");
+        }
+        self.web_sessions = None;
+        self.web_rate_limiter = None;
+        self.web_state_snapshot = None;
+    }
+
+    /// Start the web server (HTTPS + WebSocket). Creates fresh session
+    /// store, rate limiter, and state snapshot. Reuses the existing
+    /// `web_broadcaster` and `web_cmd_tx` channel.
+    ///
+    /// Does nothing if `web.enabled` is false or `web.password` is empty.
+    async fn start_web_server(&mut self) {
+        if !self.config.web.enabled {
+            return;
+        }
+        if self.config.web.password.is_empty() {
+            tracing::warn!("web.enabled=true but web.password is empty — set WEB_PASSWORD in .env");
+            crate::commands::helpers::add_local_event(
+                self,
+                "web.enabled=true but web.password is empty — set WEB_PASSWORD in .env",
+            );
+            return;
+        }
+
+        let sessions = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::web::auth::SessionStore::with_hours(self.config.web.session_hours),
+        ));
+        let limiter = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::web::auth::RateLimiter::new(),
+        ));
+        self.web_sessions = Some(std::sync::Arc::clone(&sessions));
+        self.web_rate_limiter = Some(std::sync::Arc::clone(&limiter));
+
+        let snapshot = std::sync::Arc::new(std::sync::RwLock::new(
+            crate::web::server::WebStateSnapshot {
+                buffers: Vec::new(),
+                connections: Vec::new(),
+                mention_count: 0,
+                active_buffer_id: None,
+                timestamp_format: self.config.web.timestamp_format.clone(),
+            },
+        ));
+        self.web_state_snapshot = Some(std::sync::Arc::clone(&snapshot));
+
+        let handle = std::sync::Arc::new(crate::web::server::AppHandle {
+            broadcaster: std::sync::Arc::clone(&self.web_broadcaster),
+            web_cmd_tx: self.web_cmd_tx.clone(),
+            password: self.config.web.password.clone(),
+            session_store: sessions,
+            rate_limiter: limiter,
+            web_state_snapshot: Some(snapshot),
+        });
+
+        match crate::web::server::start(&self.config.web, handle).await {
+            Ok(h) => {
+                self.web_server_handle = Some(h);
+                tracing::info!(
+                    "web frontend at https://{}:{}",
+                    self.config.web.bind_address,
+                    self.config.web.port
+                );
+                crate::commands::helpers::add_local_event(
+                    self,
+                    &format!(
+                        "Web server listening on https://{}:{}",
+                        self.config.web.bind_address, self.config.web.port
+                    ),
+                );
+            }
+            Err(e) => {
+                tracing::error!("failed to start web server: {e}");
+                crate::commands::helpers::add_local_event(
+                    self,
+                    &format!("Failed to start web server: {e}"),
+                );
+            }
+        }
+    }
+
     /// Drain pending web events queued during IRC event processing.
     ///
     /// Called after `handle_irc_message` to broadcast `NewMessage`,
@@ -2220,7 +2271,7 @@ impl App {
                     // Send shell screen immediately when switching to a shell buffer.
                     if let Some(shell_id) = self
                         .shell_mgr
-                        .session_id_for_buffer(&buffer_id)
+                        .session_id_for_buffer(buffer_id)
                         .map(ToString::to_string)
                     {
                         self.force_broadcast_shell_screen(&shell_id);
@@ -2347,13 +2398,11 @@ impl App {
             } => {
                 let web_id = format!("web-{session_id}");
                 // Lazily create the web PTY on first resize.
-                if !self.shell_mgr.has_web_session(&web_id) {
-                    if let Err(e) = self.shell_mgr.open_web(session_id, cols, rows) {
-                        tracing::warn!("failed to open web shell: {e}");
-                        return;
-                    }
-                } else {
+                if self.shell_mgr.has_web_session(&web_id) {
                     self.shell_mgr.resize_web(&web_id, cols, rows);
+                } else if let Err(e) = self.shell_mgr.open_web(session_id, cols, rows) {
+                    tracing::warn!("failed to open web shell: {e}");
+                    return;
                 }
                 self.force_broadcast_web_shell_screen(&web_id);
             }
@@ -2635,12 +2684,13 @@ impl App {
     }
 
     /// TUI shell screen broadcast — no-op now that web has its own PTY.
-    /// Kept as a stub for the existing call sites in handle_shell_event.
-    fn maybe_broadcast_shell_screen(&mut self, _shell_id: &str) {}
+    /// Kept as a stub for the existing call sites in `handle_shell_event`.
+    #[expect(clippy::unused_self, clippy::missing_const_for_fn, reason = "stub — will gain a body when TUI shell broadcast is implemented")]
+    fn maybe_broadcast_shell_screen(&self, _shell_id: &str) {}
 
     /// TUI shell screen broadcast — used as initial fallback when web client
     /// switches to a shell buffer before the web PTY is created.
-    fn force_broadcast_shell_screen(&mut self, shell_id: &str) {
+    fn force_broadcast_shell_screen(&self, shell_id: &str) {
         let Some(buffer_id) = self
             .shell_mgr
             .buffer_id(shell_id)

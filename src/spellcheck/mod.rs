@@ -75,18 +75,18 @@ impl SpellChecker {
 
         // Load computing dictionary if enabled.
         let computing_dict = if computing {
-            match load_dictionary(COMPUTING_DICT_STEM, dict_dir) {
-                Ok(dict) => {
-                    tracing::info!("computing/IT dictionary loaded");
-                    Some(Arc::new(dict))
-                }
-                Err(_) => {
+            load_dictionary(COMPUTING_DICT_STEM, dict_dir).map_or_else(
+                |_| {
                     tracing::info!(
                         "computing dictionary not found — run /spellcheck get computing"
                     );
                     None
-                }
-            }
+                },
+                |dict| {
+                    tracing::info!("computing/IT dictionary loaded");
+                    Some(Arc::new(dict))
+                },
+            )
         } else {
             None
         };
@@ -124,10 +124,10 @@ impl SpellChecker {
             return true;
         }
         // Computing/IT dictionary check (before regular dicts — fast path for tech terms)
-        if let Some(ref cd) = self.computing_dict {
-            if cd.check(word) {
-                return true;
-            }
+        if let Some(ref cd) = self.computing_dict
+            && cd.check(word)
+        {
+            return true;
         }
         // Union check: correct if ANY language dictionary accepts
         self.dicts.iter().any(|ld| ld.dict.check(word))

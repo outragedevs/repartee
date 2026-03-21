@@ -180,8 +180,8 @@ impl Isupport {
     /// Checks `TARGMAX` for a `MODE` entry. If `TARGMAX` is present but
     /// `MODE` is not listed, the server does not support multi-target MODE
     /// (e.g. Solanum/Libera rejects with 479 "Illegal channel name").
-    /// If `TARGMAX` is absent entirely (e.g. IRCnet), assumes multi-target
-    /// MODE is supported (IRCnet ircd 2.12 handles it fine).
+    /// If `TARGMAX` is absent entirely (e.g. `IRCnet`), assumes multi-target
+    /// MODE is supported (`IRCnet` ircd 2.12 handles it fine).
     #[must_use]
     pub fn supports_multi_target_mode(&self) -> bool {
         let Some(targmax) = self.tokens.get("TARGMAX") else {

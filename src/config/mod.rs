@@ -102,6 +102,7 @@ impl Default for GeneralConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[expect(clippy::struct_excessive_bools, reason = "config struct — each bool is an independent user setting")]
 pub struct DisplayConfig {
     pub nick_column_width: u16,
     pub nick_max_length: u16,
