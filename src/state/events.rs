@@ -378,6 +378,10 @@ fn enforce_scrollback(buf: &mut Buffer, limit: usize) {
     if limit > 0 && buf.messages.len() > limit {
         let excess = buf.messages.len() - limit;
         buf.messages.drain(..excess);
+        // Release the ring-buffer capacity retained from the peak.
+        // Without this, a burst of 10K messages → drain to 2000 still
+        // holds 10K slots of heap allocation.
+        buf.messages.shrink_to(limit);
     }
 }
 

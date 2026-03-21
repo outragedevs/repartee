@@ -29,8 +29,13 @@ pub enum IrcEvent {
     /// The connection was lost, optionally with an error description.
     Disconnected(String, Option<String>),
     /// An IRC handle (sender) is ready after async connection completes.
-    /// Third field is the local IP of the TCP socket (for DCC own-IP fallback).
-    HandleReady(String, irc::client::Sender, Option<std::net::IpAddr>),
+    /// Fields: `conn_id`, `sender`, `local_ip`, `outgoing_task_handle`.
+    HandleReady(
+        String,
+        irc::client::Sender,
+        Option<std::net::IpAddr>,
+        Option<tokio::task::JoinHandle<()>>,
+    ),
     /// Diagnostic messages from CAP/SASL negotiation (fires immediately).
     NegotiationInfo(String, Vec<String>),
 }
@@ -52,6 +57,9 @@ pub struct IrcHandle {
     pub sender: irc::client::Sender,
     /// Local IP of the TCP socket (for DCC own-IP fallback).
     pub local_ip: Option<std::net::IpAddr>,
+    /// Handle to the outgoing message task spawned by the irc crate.
+    /// Aborted on disconnect to prevent CLOSE-WAIT socket leaks.
+    pub outgoing_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// SASL authentication mechanism.
@@ -347,6 +355,10 @@ pub async fn connect_server(
     let local_ip = client.local_addr().map(|a| a.ip());
     let sender = client.sender();
     let mut stream = client.stream()?;
+    // Extract the outgoing task handle so we can abort it on disconnect.
+    // Without this, the Pinger inside Outgoing holds a tx_outgoing clone
+    // that keeps the write half of the TCP socket alive (CLOSE-WAIT leak).
+    let outgoing_handle = client.outgoing_handle.take();
 
     let reg_params = RegistrationParams {
         nick,
@@ -423,6 +435,7 @@ pub async fn connect_server(
             conn_id: id2,
             sender,
             local_ip,
+            outgoing_handle,
         },
         rx,
     ))

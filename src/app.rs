@@ -343,6 +343,10 @@ pub struct App {
     pub theme: ThemeFile,
     pub input: ui::input::InputState,
     pub should_quit: bool,
+    /// Dirty flag for the script state snapshot. Set when IRC state changes
+    /// (messages, nicks, connections, buffers). Cleared after rebuild.
+    /// Eliminates ~1.6 MB of allocation churn per rebuild when nothing changed.
+    script_snapshot_dirty: bool,
     /// Splash screen: number of logo lines currently visible (progressive reveal).
     pub splash_visible: usize,
     /// Splash screen dismissed — set to true after animation or keypress.
@@ -649,6 +653,7 @@ impl App {
             theme,
             input: ui::input::InputState::new(),
             should_quit: false,
+            script_snapshot_dirty: true,
             splash_visible: 0,
             splash_done: false,
             scroll_offset: 0,
@@ -1689,6 +1694,7 @@ impl App {
                 irc_ev = self.irc_rx.recv() => {
                     if let Some(event) = irc_ev {
                         self.handle_irc_event(event);
+                        self.script_snapshot_dirty = true;
                         self.update_script_snapshot();
                         self.drain_pending_web_events();
                     }
@@ -1794,6 +1800,7 @@ impl App {
                         while let Ok(action) = self.script_action_rx.try_recv() {
                             self.handle_script_action(action);
                         }
+                        self.script_snapshot_dirty = true;
                         self.update_script_snapshot();
                         self.drain_pending_web_events();
                     }
@@ -1840,6 +1847,12 @@ impl App {
         let quit_msg = self.quit_message.as_deref().unwrap_or(&default_quit);
         for handle in self.irc_handles.values() {
             let _ = handle.sender.send_quit(quit_msg);
+        }
+        // Abort outgoing message tasks to close sockets cleanly.
+        for handle in self.irc_handles.values_mut() {
+            if let Some(oh) = handle.outgoing_handle.take() {
+                oh.abort();
+            }
         }
 
         // Shut down storage writer (flushes remaining rows)
@@ -1958,8 +1971,29 @@ impl App {
     }
 
     /// Handle a completed image preview event from a background task.
+    ///
+    /// Discards stale results: only accepts the event if we are still
+    /// `Loading` the same URL. If the user dismissed the preview (Escape)
+    /// or switched to a different URL, the decoded image is dropped
+    /// immediately instead of resurrecting into `Ready`.
     fn handle_preview_event(&mut self, event: crate::image_preview::ImagePreviewEvent) {
         use crate::image_preview::{ImagePreviewEvent, PreviewStatus};
+
+        let loading_url = match &self.image_preview {
+            PreviewStatus::Loading { url } => url.as_str(),
+            _ => return, // dismissed or different preview — drop the stale event
+        };
+
+        let event_url = match &event {
+            ImagePreviewEvent::Ready { url, .. } | ImagePreviewEvent::Error { url, .. } => {
+                url.as_str()
+            }
+        };
+
+        if loading_url != event_url {
+            return; // stale result from a previous URL
+        }
+
         self.image_preview = match event {
             ImagePreviewEvent::Ready {
                 url,
@@ -3295,6 +3329,7 @@ impl App {
                             handle.conn_id.clone(),
                             handle.sender,
                             handle.local_ip,
+                            handle.outgoing_handle,
                         ));
                         while let Some(event) = rx.recv().await {
                             if tx.send(event).is_err() {
@@ -3649,7 +3684,7 @@ impl App {
     #[allow(clippy::too_many_lines)]
     fn handle_irc_event(&mut self, event: IrcEvent) {
         match event {
-            IrcEvent::HandleReady(conn_id, sender, local_ip) => {
+            IrcEvent::HandleReady(conn_id, sender, local_ip, outgoing_handle) => {
                 // Store local IP on Connection state (for DCC own-IP fallback)
                 if let Some(conn) = self.state.connections.get_mut(&conn_id) {
                     conn.local_ip = local_ip;
@@ -3660,6 +3695,7 @@ impl App {
                         conn_id,
                         sender,
                         local_ip,
+                        outgoing_handle,
                     },
                 );
             }
@@ -3825,6 +3861,14 @@ impl App {
                     let mut params = HashMap::new();
                     params.insert("connection_id".to_string(), conn_id.clone());
                     self.emit_script_event(events::DISCONNECTED, params);
+                }
+                // Abort the outgoing message task BEFORE removing the handle.
+                // The Pinger inside Outgoing holds a tx_outgoing clone that
+                // keeps the write half of the TCP socket alive (CLOSE-WAIT).
+                if let Some(handle) = self.irc_handles.get_mut(&conn_id)
+                    && let Some(oh) = handle.outgoing_handle.take()
+                {
+                    oh.abort();
                 }
                 self.irc_handles.remove(&conn_id);
                 if let Some(fwd) = self.forwarder_handles.remove(&conn_id) {
@@ -4858,10 +4902,13 @@ impl App {
             self.handle_plain_message(text);
         }
         self.scroll_offset = 0;
+        // Submitted text may change state (command or sent message).
+        self.script_snapshot_dirty = true;
     }
 
     fn execute_command(&mut self, parsed: &crate::commands::parser::ParsedCommand) {
         self.execute_command_with_depth(parsed, 0);
+        self.script_snapshot_dirty = true;
     }
 
     fn execute_command_with_depth(
@@ -5385,7 +5432,15 @@ impl App {
     }
 
     /// Push the current `AppState` into the shared script snapshot.
+    ///
+    /// Guarded by `script_snapshot_dirty` flag — skips the expensive
+    /// rebuild (~1.6 MB for 120 buffers × 150 nicks) when no IRC state
+    /// has changed since the last snapshot.
     fn update_script_snapshot(&mut self) {
+        if !self.script_snapshot_dirty {
+            return;
+        }
+        self.script_snapshot_dirty = false;
         let config_toml = self.cached_config_toml.get_or_insert_with(|| {
             toml::Value::try_from(&self.config)
                 .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()))
