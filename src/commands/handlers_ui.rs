@@ -164,8 +164,20 @@ fn show_command_help(app: &mut App, name: &str) {
 }
 
 pub(crate) fn cmd_clear(app: &mut App, _args: &[String]) {
+    let is_mentions = app
+        .state
+        .active_buffer()
+        .is_some_and(|b| b.buffer_type == crate::state::buffer::BufferType::Mentions);
     if let Some(buf) = app.state.active_buffer_mut() {
         buf.messages.clear();
+        buf.messages.shrink_to(0);
+    }
+    // Truncate the mentions DB table when clearing the mentions buffer.
+    if is_mentions
+        && let Some(storage) = &app.storage
+        && let Ok(db) = storage.db.lock()
+    {
+        crate::storage::query::truncate_mentions(&db).ok();
     }
 }
 
@@ -180,7 +192,10 @@ pub(crate) fn cmd_close(app: &mut App, args: &[String]) {
 
     match buf_type {
         crate::state::buffer::BufferType::Mentions => {
-            // Mentions buffer cannot be closed — placeholder for Task 6.
+            app.config.display.mentions_buffer = false;
+            let cfg_path = crate::constants::config_path();
+            crate::config::save_config(&cfg_path, &app.config).ok();
+            app.state.remove_buffer(&buf_id);
         }
         crate::state::buffer::BufferType::Channel => {
             // Send PART for channels

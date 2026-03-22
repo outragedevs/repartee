@@ -1091,58 +1091,16 @@ fn spellcheck_status(app: &mut App) {
 
 pub(crate) fn cmd_mentions(app: &mut App, _args: &[String]) {
     let ev = add_local_event;
-
-    let Some(db_arc) = app.storage.as_ref().map(|s| std::sync::Arc::clone(&s.db)) else {
+    if !app.config.display.mentions_buffer {
         ev(
             app,
-            &format!("{C_ERR}Logging is disabled — mentions require storage{C_RST}"),
+            &format!("{C_ERR}Mentions buffer is disabled — /set display.mentions_buffer true{C_RST}"),
         );
         return;
-    };
-
-    let Ok(db) = db_arc.lock() else {
-        ev(app, &format!("{C_ERR}Failed to access database{C_RST}"));
-        return;
-    };
-
-    let ts_fmt = app.config.general.timestamp_format.clone();
-
-    match storage::query::get_unread_mentions(&db) {
-        Ok(mentions) if mentions.is_empty() => {
-            drop(db);
-            ev(app, &format!("{C_DIM}No unread mentions{C_RST}"));
-        }
-        Ok(mentions) => {
-            // Format all lines before dropping the lock.
-            let mut lines = Vec::with_capacity(mentions.len() + 2);
-            lines.push(divider(&format!("{} unread mention(s)", mentions.len())));
-            for m in &mentions {
-                let ts = chrono::DateTime::from_timestamp(m.timestamp, 0).map_or_else(
-                    || "?".to_string(),
-                    |dt| dt.with_timezone(&chrono::Local).format(&ts_fmt).to_string(),
-                );
-                lines.push(format!(
-                    "  {C_DIM}{ts}{C_RST} {C_CMD}{}{C_RST} <{C_TEXT}{}{C_RST}> {}",
-                    m.channel, m.nick, m.text
-                ));
-            }
-            // Mark all as read while we still hold the lock.
-            if let Err(e) = storage::query::mark_mentions_read(&db) {
-                tracing::warn!("failed to mark mentions read: {e}");
-            }
-            drop(db);
-
-            for line in &lines {
-                ev(app, line);
-            }
-            ev(app, &format!("{C_OK}Mentions marked as read{C_RST}"));
-        }
-        Err(e) => {
-            drop(db);
-            ev(
-                app,
-                &format!("{C_ERR}Failed to query mentions: {e}{C_RST}"),
-            );
-        }
     }
+    if !app.state.buffers.contains_key(App::MENTIONS_BUFFER_ID) {
+        app.create_mentions_buffer();
+    }
+    app.state.set_active_buffer(App::MENTIONS_BUFFER_ID);
+    app.scroll_offset = 0;
 }
