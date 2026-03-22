@@ -18,8 +18,11 @@ pub fn BufferList() -> impl IntoView {
                 let mut num = 1u32;
 
                 for buf in &buffers {
+                    let is_mentions = buf.buffer_type == "mentions";
+
                     // Network header when connection changes.
-                    if buf.connection_id != current_conn {
+                    // Skip header for mentions buffer (empty connection_id).
+                    if buf.connection_id != current_conn && !is_mentions {
                         current_conn = buf.connection_id.clone();
                         let label = connections
                             .iter()
@@ -36,6 +39,7 @@ pub fn BufferList() -> impl IntoView {
                         "server" => " type-server",
                         "query" => " type-query",
                         "dcc_chat" => " type-dcc",
+                        "mentions" => " type-mentions",
                         _ => "",
                     };
                     let activity_class = match buf.activity {
@@ -66,7 +70,16 @@ pub fn BufferList() -> impl IntoView {
                         });
                     };
 
-                    if is_server {
+                    if is_mentions {
+                        views.push(
+                            view! {
+                                <div class=class on:click=on_click>
+                                    <span class="name mentions-name">{name}</span>
+                                </div>
+                            }
+                            .into_any(),
+                        );
+                    } else if is_server {
                         views.push(
                             view! {
                                 <div class=class on:click=on_click>
