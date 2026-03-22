@@ -749,6 +749,8 @@ fn handle_privmsg(
             };
             let mode_prefix = nick_prefix(state, &buffer_id, &nick);
             let id = state.next_message_id();
+            // Save nick before moving into Message — needed for mentions buffer below.
+            let nick_saved = if is_mention { Some(nick.clone()) } else { None };
             state.add_message_with_activity(
                 &buffer_id,
                 Message {
@@ -767,6 +769,39 @@ fn handle_privmsg(
                 },
                 activity,
             );
+
+            // Push to mentions buffer if this is a highlight.
+            if let Some(nick) = nick_saved
+                && state.buffers.contains_key("_mentions")
+            {
+                let conn_label = state
+                    .connections
+                    .get(conn_id)
+                    .map_or(conn_id, |c| c.label.as_str())
+                    .to_string();
+                let mention_text = if target_is_channel {
+                    format!("{target} {nick}❯ * {nick} {action_text}")
+                } else {
+                    format!("{nick}❯ * {nick} {action_text}")
+                };
+                state.message_counter += 1;
+                let mention_msg = Message {
+                    id: state.message_counter,
+                    timestamp: chrono::Utc::now(),
+                    message_type: MessageType::Message,
+                    nick: Some(conn_label),
+                    nick_mode: None,
+                    text: mention_text,
+                    highlight: true,
+                    event_key: None,
+                    event_params: None,
+                    log_msg_id: None,
+                    log_ref_id: None,
+                    tags: None,
+                };
+                state.add_mention_to_buffer(mention_msg);
+            }
+
             return;
         }
 
@@ -835,6 +870,8 @@ fn handle_privmsg(
 
     let mode_prefix = nick_prefix(state, &buffer_id, &nick);
     let id = state.next_message_id();
+    // Save nick before moving into Message — needed for mentions buffer below.
+    let nick_saved = if is_mention { Some(nick.clone()) } else { None };
     state.add_message_with_activity(
         &buffer_id,
         Message {
@@ -853,6 +890,38 @@ fn handle_privmsg(
         },
         activity,
     );
+
+    // Push to mentions buffer if this is a highlight.
+    if let Some(nick) = nick_saved
+        && state.buffers.contains_key("_mentions")
+    {
+        let conn_label = state
+            .connections
+            .get(conn_id)
+            .map_or(conn_id, |c| c.label.as_str())
+            .to_string();
+        let mention_text = if target_is_channel {
+            format!("{target} {nick}❯ {text}")
+        } else {
+            format!("{nick}❯ {text}")
+        };
+        state.message_counter += 1;
+        let mention_msg = Message {
+            id: state.message_counter,
+            timestamp: chrono::Utc::now(),
+            message_type: MessageType::Message,
+            nick: Some(conn_label),
+            nick_mode: None,
+            text: mention_text,
+            highlight: true,
+            event_key: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: None,
+        };
+        state.add_mention_to_buffer(mention_msg);
+    }
 }
 
 fn handle_notice(

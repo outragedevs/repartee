@@ -8,6 +8,7 @@ use crate::theme::{hex_to_color, parse_format_string, resolve_abstractions};
 use crate::ui::styled_text::styled_spans_to_line;
 
 /// Render the buffer list sidebar. Returns total line count for scroll clamping.
+#[allow(clippy::too_many_lines)]
 pub fn render(frame: &mut Frame, area: Rect, app: &App, scroll_offset: usize) -> usize {
     let colors = &app.theme.colors;
     let bg = hex_to_color(&colors.bg).unwrap_or(Color::Reset);
@@ -40,9 +41,39 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, scroll_offset: usize) ->
             continue;
         }
 
+        // Mentions buffer — render with activity colors but no number or connection header
+        if buf.buffer_type == BufferType::Mentions {
+            let is_active = active_id == Some(id.as_str());
+            let format_key = if is_active {
+                "item_selected".to_string()
+            } else {
+                format!("item_activity_{}", buf.activity as u8)
+            };
+            let format = sidepanel
+                .get(&format_key)
+                .or_else(|| sidepanel.get("item"))
+                .cloned()
+                .unwrap_or_else(|| "$0".to_string());
+            let resolved = resolve_abstractions(&format, abstracts, 0);
+
+            let full_spans = parse_format_string(&resolved, &[&buf.name]);
+            let total_visible = visible_len(&full_spans);
+            let name_chars = buf.name.chars().count();
+            let overhead = total_visible.saturating_sub(name_chars);
+            let max_name_len = panel_width.saturating_sub(1 + overhead);
+            let spans = if name_chars > max_name_len {
+                let display_name = truncate_with_plus(&buf.name, max_name_len);
+                parse_format_string(&resolved, &[&display_name])
+            } else {
+                full_spans
+            };
+            lines.push(styled_spans_to_line(&spans));
+            continue;
+        }
+
         // Connection header — render when connection changes.
         // Server-type buffers ARE the header (no separate numbered line).
-        if buf.connection_id != last_conn_id {
+        if buf.connection_id != last_conn_id && !buf.connection_id.is_empty() {
             last_conn_id = buf.connection_id.as_str();
             let conn_label = app
                 .state
