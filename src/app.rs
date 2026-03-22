@@ -379,6 +379,8 @@ pub struct App {
     pub storage: Option<crate::storage::Storage>,
     /// When the last periodic event-message purge ran.
     last_event_purge: Instant,
+    /// When the last periodic mentions purge ran (every hour, 7-day retention).
+    last_mention_purge: Instant,
     /// Custom quit message set by `/quit [msg]`.
     pub quit_message: Option<String>,
     /// Current image preview overlay state.
@@ -671,6 +673,7 @@ impl App {
             batch_trackers: HashMap::new(),
             storage,
             last_event_purge: Instant::now(),
+            last_mention_purge: Instant::now(),
             quit_message: None,
             image_preview: crate::image_preview::PreviewStatus::default(),
             image_clear_rect: None,
@@ -1772,7 +1775,12 @@ impl App {
                     if let Some(ref snapshot) = self.web_state_snapshot
                         && let Ok(mut snap) = snapshot.write()
                     {
-                        let init = crate::web::snapshot::build_sync_init(&self.state, 0, &self.config.web.timestamp_format);
+                        let mention_count = self.storage.as_ref().and_then(|s| {
+                            s.db.try_lock().ok().and_then(|db| {
+                                crate::storage::query::get_unread_mention_count(&db).ok()
+                            })
+                        }).unwrap_or(0);
+                        let init = crate::web::snapshot::build_sync_init(&self.state, mention_count, &self.config.web.timestamp_format);
                         if let crate::web::protocol::WebEvent::SyncInit { buffers, connections, mention_count, active_buffer_id, timestamp_format, .. } = init {
                             snap.buffers = buffers;
                             snap.connections = connections;
@@ -1790,6 +1798,7 @@ impl App {
                     }
                     // Periodic event message pruning (every 1 hour).
                     self.maybe_purge_old_events();
+                    self.maybe_purge_old_mentions();
                     // Drain web events accumulated during this tick (prevents
                     // unbounded growth when idle — no terminal/IRC events to
                     // trigger drain in other select arms).
@@ -3323,6 +3332,40 @@ impl App {
                 tracing::info!("periodic purge: removed {removed} event messages older than {hours}h");
             }
         });
+    }
+
+    /// Purge mentions older than 7 days from DB and in-memory buffer.
+    /// Runs at most once per hour (same cadence as event purge).
+    fn maybe_purge_old_mentions(&mut self) {
+        if self.last_mention_purge.elapsed() < Duration::from_secs(3600) {
+            return;
+        }
+        self.last_mention_purge = Instant::now();
+
+        let seven_days_ago = Utc::now().timestamp() - 7 * 24 * 3600;
+
+        // Purge from DB on a blocking thread to avoid holding the lock.
+        if let Some(storage) = &self.storage {
+            let db = Arc::clone(&storage.db);
+            tokio::task::spawn_blocking(move || {
+                let Ok(conn) = db.lock() else { return };
+                if let Ok(removed) = crate::storage::query::purge_old_mentions(&conn, seven_days_ago)
+                    && removed > 0
+                {
+                    tracing::info!("periodic purge: removed {removed} mentions older than 7 days");
+                }
+            });
+        }
+
+        // Prune in-memory buffer.
+        if let Some(buf) = self.state.buffers.get_mut(Self::MENTIONS_BUFFER_ID) {
+            let cutoff = chrono::DateTime::from_timestamp(seven_days_ago, 0)
+                .unwrap_or_else(Utc::now);
+            buf.messages.retain(|m| m.timestamp >= cutoff);
+            while buf.messages.len() > 1000 {
+                buf.messages.pop_front();
+            }
+        }
     }
 
     /// Add an event message to the specified buffer.
