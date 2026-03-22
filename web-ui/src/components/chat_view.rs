@@ -71,6 +71,7 @@ pub fn ChatView() -> impl IntoView {
                     let nick_self = our_nick();
                     let ts_fmt = state.timestamp_format.get();
                     messages().unwrap_or_default().into_iter().map(|msg| {
+                        let is_mention_log = msg.msg_type == "mention_log";
                         let is_event = msg.msg_type == "event";
                         let is_action = msg.msg_type == "action";
                         let is_notice = msg.msg_type == "notice";
@@ -80,7 +81,9 @@ pub fn ChatView() -> impl IntoView {
                             msg.nick.as_deref() == Some(our.as_str())
                         });
 
-                        let class = if msg.highlight && msg.nick.is_some() {
+                        let class = if is_mention_log {
+                            "chat-line mention-log"
+                        } else if msg.highlight && msg.nick.is_some() {
                             if is_own { "chat-line mention own" } else { "chat-line mention" }
                         } else if is_event {
                             "chat-line event"
@@ -93,6 +96,16 @@ pub fn ChatView() -> impl IntoView {
                         };
 
                         let ts = format_timestamp(msg.timestamp, &ts_fmt);
+
+                        if is_mention_log {
+                            // Pre-formatted mention line — render text as-is, no timestamp/nick column.
+                            let styled = render_styled_text(&msg.text);
+                            return view! {
+                                <div class=class>
+                                    <span class="mention-log-text">{styled}</span>
+                                </div>
+                            }.into_any();
+                        }
 
                         if is_action {
                             // Action (/me): render as "* nick text"

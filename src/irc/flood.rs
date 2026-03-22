@@ -1,4 +1,5 @@
-// Flood protection — antiflood detection for CTCP, tilde-ident, duplicate text, and nick changes.
+// Flood protection — antiflood detection for CTCP, per-nick tilde rate,
+// PM tilde storm, duplicate text, and nick changes.
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -22,18 +23,24 @@ impl FloodResult {
     }
 }
 
-// === Constants (proven thresholds from kokoirc/erssi) ===
+// === Constants ===
 
 const CTCP_THRESHOLD: usize = 5;
 const CTCP_WINDOW: Duration = Duration::from_secs(5);
 const CTCP_BLOCK: Duration = Duration::from_secs(60);
 
-const TILDE_THRESHOLD: usize = 5;
-const TILDE_WINDOW: Duration = Duration::from_secs(5);
-const TILDE_BLOCK: Duration = Duration::from_secs(60);
+// Per-nick tilde rate limit — blocks only the offending nick.
+const TILDE_NICK_THRESHOLD: usize = 5;
+const TILDE_NICK_WINDOW: Duration = Duration::from_secs(5);
+const TILDE_NICK_BLOCK: Duration = Duration::from_secs(60);
 
-const DUP_MIN_IN_WINDOW: usize = 5; // need 5+ msgs in window before checking dups
-const DUP_THRESHOLD: usize = 3; // 3 identical out of those = flood
+// PM tilde storm — many different ~ nicks PMing us = botnet.
+const PM_STORM_THRESHOLD: usize = 6;
+const PM_STORM_WINDOW: Duration = Duration::from_secs(5);
+const PM_STORM_BLOCK: Duration = Duration::from_secs(60);
+
+const DUP_MIN_IN_WINDOW: usize = 5;
+const DUP_THRESHOLD: usize = 3;
 const DUP_WINDOW: Duration = Duration::from_secs(5);
 const DUP_BLOCK: Duration = Duration::from_secs(60);
 
@@ -45,21 +52,25 @@ const NICK_BLOCK: Duration = Duration::from_secs(60);
 
 /// Tracks flood detection state for a single IRC connection.
 pub struct FloodState {
-    // CTCP flood
+    // CTCP flood (global — CTCPs are rare)
     ctcp_times: Vec<Instant>,
     ctcp_blocked_until: Option<Instant>,
 
-    // Tilde (~ident) flood
-    tilde_times: Vec<Instant>,
-    tilde_blocked_until: Option<Instant>,
+    // Per-nick tilde rate limit — only blocks the flooding nick
+    tilde_nick_times: HashMap<u64, Vec<Instant>>,   // nick_hash -> timestamps
+    tilde_nick_blocked: HashMap<u64, Instant>,       // nick_hash -> blocked_until
 
-    // Duplicate text flood — stores hashes instead of full text to avoid heap allocations per message
-    msg_window: Vec<(u64, Instant)>,        // (text_hash, timestamp)
-    blocked_texts: HashMap<u64, Instant>,   // text_hash -> blocked_until
+    // PM tilde storm — tracks unique ~ nicks PMing us
+    pm_storm_nicks: Vec<(u64, Instant)>,             // (nick_hash, timestamp)
+    pm_storm_blocked_until: Option<Instant>,
+
+    // Duplicate text flood — per-text-hash
+    msg_window: Vec<(u64, Instant)>,
+    blocked_texts: HashMap<u64, Instant>,
 
     // Nick change flood (per buffer)
-    nick_times: HashMap<String, Vec<Instant>>, // buffer_id -> timestamps
-    nick_blocked_until: HashMap<String, Instant>, // buffer_id -> blocked_until
+    nick_times: HashMap<String, Vec<Instant>>,
+    nick_blocked_until: HashMap<String, Instant>,
 }
 
 impl FloodState {
@@ -68,8 +79,10 @@ impl FloodState {
         Self {
             ctcp_times: Vec::new(),
             ctcp_blocked_until: None,
-            tilde_times: Vec::new(),
-            tilde_blocked_until: None,
+            tilde_nick_times: HashMap::new(),
+            tilde_nick_blocked: HashMap::new(),
+            pm_storm_nicks: Vec::new(),
+            pm_storm_blocked_until: None,
             msg_window: Vec::new(),
             blocked_texts: HashMap::new(),
             nick_times: HashMap::new(),
@@ -77,9 +90,8 @@ impl FloodState {
         }
     }
 
-    /// Check for CTCP flood. Returns whether the message is allowed, just triggered, or already blocked.
+    /// Check for CTCP flood.
     pub fn check_ctcp_flood(&mut self, now: Instant) -> FloodResult {
-        // If currently blocked, extend the block and suppress silently
         if let Some(until) = self.ctcp_blocked_until {
             if now < until {
                 self.ctcp_blocked_until = Some(now + CTCP_BLOCK);
@@ -100,32 +112,72 @@ impl FloodState {
         FloodResult::Allow
     }
 
-    /// Check for tilde (~ident) flood. Returns whether the message is allowed, just triggered, or already blocked.
-    pub fn check_tilde_flood(&mut self, now: Instant) -> FloodResult {
-        // If currently blocked, extend the block and suppress silently
-        if let Some(until) = self.tilde_blocked_until {
+    /// Per-nick tilde rate limit. Blocks only the specific nick that floods.
+    /// Replaces the old global tilde counter that caused collateral damage.
+    pub fn check_tilde_nick_flood(&mut self, nick: &str, now: Instant) -> FloodResult {
+        let nick_hash = hash_text(nick);
+
+        // Already blocked for this nick?
+        if let Some(&until) = self.tilde_nick_blocked.get(&nick_hash) {
             if now < until {
-                self.tilde_blocked_until = Some(now + TILDE_BLOCK);
+                self.tilde_nick_blocked.insert(nick_hash, now + TILDE_NICK_BLOCK);
                 return FloodResult::Blocked;
             }
-            self.tilde_blocked_until = None;
+            self.tilde_nick_blocked.remove(&nick_hash);
         }
 
-        self.tilde_times.push(now);
-        let count = prune_window(&mut self.tilde_times, now, TILDE_WINDOW);
+        let times = self.tilde_nick_times.entry(nick_hash).or_default();
+        times.push(now);
+        let count = prune_window(times, now, TILDE_NICK_WINDOW);
 
-        if count >= TILDE_THRESHOLD {
-            self.tilde_blocked_until = Some(now + TILDE_BLOCK);
-            self.tilde_times.clear();
+        if count >= TILDE_NICK_THRESHOLD {
+            self.tilde_nick_blocked.insert(nick_hash, now + TILDE_NICK_BLOCK);
+            times.clear();
+            return FloodResult::Triggered;
+        }
+
+        // Periodic cleanup of idle nicks (avoid unbounded growth)
+        if self.tilde_nick_times.len() > 200 {
+            self.tilde_nick_times.retain(|_, v| !v.is_empty());
+            self.tilde_nick_blocked.retain(|_, until| *until > now);
+        }
+
+        FloodResult::Allow
+    }
+
+    /// PM tilde storm: detects many different `~` ident nicks `PM`ing us.
+    /// Counts unique nick hashes in a sliding window. When 6+ unique `~`
+    /// nicks PM us within 5 seconds, blocks ALL incoming `~` PMs for 60s.
+    /// Channel messages are never affected.
+    pub fn check_pm_tilde_storm(&mut self, nick: &str, now: Instant) -> FloodResult {
+        // Already in storm block?
+        if let Some(until) = self.pm_storm_blocked_until {
+            if now < until {
+                self.pm_storm_blocked_until = Some(now + PM_STORM_BLOCK);
+                return FloodResult::Blocked;
+            }
+            self.pm_storm_blocked_until = None;
+        }
+
+        let nick_hash = hash_text(nick);
+        self.pm_storm_nicks.push((nick_hash, now));
+
+        // Prune entries outside the window
+        let cutoff = now.checked_sub(PM_STORM_WINDOW).unwrap_or(now);
+        self.pm_storm_nicks.retain(|(_, t)| *t >= cutoff);
+
+        // Count unique nicks in the window
+        let unique = unique_count(&self.pm_storm_nicks);
+        if unique >= PM_STORM_THRESHOLD {
+            self.pm_storm_blocked_until = Some(now + PM_STORM_BLOCK);
+            self.pm_storm_nicks.clear();
             return FloodResult::Triggered;
         }
 
         FloodResult::Allow
     }
 
-    /// Check for duplicate text flood. Returns whether the message is allowed, just triggered, or already blocked.
-    /// Only checks duplicates for channel messages (`is_channel = true`).
-    /// Uses a hash fingerprint instead of cloning full message text to avoid heap allocations.
+    /// Check for duplicate text flood. Only for channel messages.
     pub fn check_duplicate_flood(
         &mut self,
         text: &str,
@@ -138,7 +190,6 @@ impl FloodState {
 
         let hash = hash_text(text);
 
-        // Check if this exact text is already blocked — suppress silently
         if let Some(&until) = self.blocked_texts.get(&hash)
             && now < until
         {
@@ -146,14 +197,11 @@ impl FloodState {
             return FloodResult::Blocked;
         }
 
-        // Add to sliding message window
         self.msg_window.push((hash, now));
 
-        // Prune old entries
         let cutoff = now.checked_sub(DUP_WINDOW).unwrap_or(now);
         self.msg_window.retain(|(_, t)| *t >= cutoff);
 
-        // Only analyze when enough messages in window
         if self.msg_window.len() >= DUP_MIN_IN_WINDOW {
             let dupes = self.msg_window.iter().filter(|(h, _)| *h == hash).count();
             if dupes >= DUP_THRESHOLD {
@@ -162,7 +210,6 @@ impl FloodState {
             }
         }
 
-        // Clean expired blocked texts periodically
         if self.blocked_texts.len() > 50 {
             self.blocked_texts.retain(|_, until| *until > now);
         }
@@ -171,19 +218,15 @@ impl FloodState {
     }
 
     /// Check for nick change flood in a specific buffer.
-    /// Returns `true` if nick change display should be suppressed.
     pub fn should_suppress_nick_flood(&mut self, buffer_id: &str, now: Instant) -> bool {
-        // Check if currently blocked for this buffer
         if let Some(&until) = self.nick_blocked_until.get(buffer_id)
             && now < until
         {
-            // Extend block silently
             self.nick_blocked_until
                 .insert(buffer_id.to_string(), now + NICK_BLOCK);
             return true;
         }
 
-        // Track nick change timestamp
         let times = self.nick_times.entry(buffer_id.to_string()).or_default();
         times.push(now);
         prune_window(times, now, NICK_WINDOW);
@@ -199,7 +242,6 @@ impl FloodState {
     }
 
     /// Remove all tracking data for a buffer that has been closed.
-    /// Prevents unbounded growth of per-buffer maps over months of join/part cycles.
     pub fn remove_buffer(&mut self, buffer_id: &str) {
         self.nick_times.remove(buffer_id);
         self.nick_blocked_until.remove(buffer_id);
@@ -212,12 +254,23 @@ impl Default for FloodState {
     }
 }
 
-/// Hash a message text into a u64 fingerprint for duplicate detection.
-/// Uses `DefaultHasher` — collision probability is negligible for flood detection.
+/// Hash a string into a u64 fingerprint for flood tracking.
 fn hash_text(text: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     text.hash(&mut hasher);
     hasher.finish()
+}
+
+/// Count unique u64 values in a slice of `(hash, timestamp)` pairs.
+fn unique_count(entries: &[(u64, Instant)]) -> usize {
+    // For small windows (<50 entries), linear scan is faster than HashSet.
+    let mut seen: Vec<u64> = Vec::with_capacity(entries.len());
+    for &(hash, _) in entries {
+        if !seen.contains(&hash) {
+            seen.push(hash);
+        }
+    }
+    seen.len()
 }
 
 /// Remove timestamps older than `window` from the front of `times`.
@@ -240,16 +293,7 @@ pub fn prune_window(times: &mut Vec<Instant>, now: Instant, window: Duration) ->
 mod tests {
     use super::*;
 
-    #[test]
-    fn new_state_has_no_blocks() {
-        let state = FloodState::new();
-        assert!(state.ctcp_blocked_until.is_none());
-        assert!(state.tilde_blocked_until.is_none());
-        assert!(state.msg_window.is_empty());
-        assert!(state.blocked_texts.is_empty());
-        assert!(state.nick_times.is_empty());
-        assert!(state.nick_blocked_until.is_empty());
-    }
+    // --- CTCP flood ---
 
     #[test]
     fn ctcp_under_threshold_passes() {
@@ -270,10 +314,11 @@ mod tests {
         let mut state = FloodState::new();
         let now = Instant::now();
         for i in 0..4 {
-            let t = now + Duration::from_millis(i * 100);
-            assert_eq!(state.check_ctcp_flood(t), FloodResult::Allow);
+            assert_eq!(
+                state.check_ctcp_flood(now + Duration::from_millis(i * 100)),
+                FloodResult::Allow
+            );
         }
-        // 5th request triggers — should be Triggered (not Blocked)
         assert_eq!(
             state.check_ctcp_flood(now + Duration::from_millis(400)),
             FloodResult::Triggered
@@ -284,11 +329,9 @@ mod tests {
     fn ctcp_block_extends_on_continued_flood() {
         let mut state = FloodState::new();
         let now = Instant::now();
-        // Trigger the block
         for i in 0..5 {
             state.check_ctcp_flood(now + Duration::from_millis(i * 100));
         }
-        // Subsequent requests during block should be Blocked (silent), not Triggered
         assert_eq!(
             state.check_ctcp_flood(now + Duration::from_secs(30)),
             FloodResult::Blocked
@@ -299,11 +342,9 @@ mod tests {
     fn ctcp_block_expires() {
         let mut state = FloodState::new();
         let now = Instant::now();
-        // Trigger the block
         for i in 0..5 {
             state.check_ctcp_flood(now + Duration::from_millis(i * 100));
         }
-        // After 61 seconds, should no longer be blocked
         assert_eq!(
             state.check_ctcp_flood(now + Duration::from_secs(61)),
             FloodResult::Allow
@@ -314,57 +355,190 @@ mod tests {
     fn ctcp_outside_window_does_not_trigger() {
         let mut state = FloodState::new();
         let now = Instant::now();
-        // Spread 5 requests over 10 seconds (window is 5s)
         for i in 0..5 {
             let t = now + Duration::from_secs(i * 3);
             assert_eq!(state.check_ctcp_flood(t), FloodResult::Allow);
         }
     }
 
+    // --- Per-nick tilde rate limit ---
+
     #[test]
-    fn tilde_under_threshold_passes() {
+    fn tilde_nick_under_threshold_passes() {
         let mut state = FloodState::new();
         let now = Instant::now();
         for i in 0..4 {
             assert_eq!(
-                state.check_tilde_flood(now + Duration::from_millis(i * 100)),
-                FloodResult::Allow
+                state.check_tilde_nick_flood("jim", now + Duration::from_millis(i * 100)),
+                FloodResult::Allow,
+                "message {i} from jim should pass"
             );
         }
     }
 
     #[test]
-    fn tilde_at_threshold_triggers() {
+    fn tilde_nick_at_threshold_blocks_only_that_nick() {
         let mut state = FloodState::new();
         let now = Instant::now();
+        // jim sends 5 messages in 5s — triggers block
         for i in 0..5 {
-            let result = state.check_tilde_flood(now + Duration::from_millis(i * 100));
-            if i < 4 {
-                assert_eq!(result, FloodResult::Allow);
-            } else {
-                assert_eq!(result, FloodResult::Triggered);
-            }
+            state.check_tilde_nick_flood("jim", now + Duration::from_millis(i * 100));
         }
-    }
-
-    #[test]
-    fn tilde_block_expires() {
-        let mut state = FloodState::new();
-        let now = Instant::now();
-        for i in 0..5 {
-            state.check_tilde_flood(now + Duration::from_millis(i * 100));
-        }
+        // jim is now blocked
         assert_eq!(
-            state.check_tilde_flood(now + Duration::from_secs(61)),
+            state.check_tilde_nick_flood("jim", now + Duration::from_secs(1)),
+            FloodResult::Blocked
+        );
+        // ripsum is NOT blocked — different nick
+        assert_eq!(
+            state.check_tilde_nick_flood("ripsum", now + Duration::from_secs(1)),
             FloodResult::Allow
         );
     }
 
     #[test]
+    fn tilde_nick_block_expires() {
+        let mut state = FloodState::new();
+        let now = Instant::now();
+        for i in 0..5 {
+            state.check_tilde_nick_flood("jim", now + Duration::from_millis(i * 100));
+        }
+        assert_eq!(
+            state.check_tilde_nick_flood("jim", now + Duration::from_secs(61)),
+            FloodResult::Allow,
+        );
+    }
+
+    #[test]
+    fn tilde_nick_different_nicks_independent() {
+        let mut state = FloodState::new();
+        let now = Instant::now();
+        // 4 messages from jim, 4 from alice — neither hits threshold
+        for i in 0..4 {
+            let t = now + Duration::from_millis(i * 100);
+            assert_eq!(state.check_tilde_nick_flood("jim", t), FloodResult::Allow);
+            assert_eq!(state.check_tilde_nick_flood("alice", t), FloodResult::Allow);
+        }
+    }
+
+    #[test]
+    fn tilde_nick_outside_window_does_not_trigger() {
+        let mut state = FloodState::new();
+        let now = Instant::now();
+        // Spread 5 messages over 10 seconds (window is 5s)
+        for i in 0..5 {
+            let t = now + Duration::from_secs(i * 3);
+            assert_eq!(
+                state.check_tilde_nick_flood("jim", t),
+                FloodResult::Allow
+            );
+        }
+    }
+
+    // --- PM tilde storm ---
+
+    #[test]
+    fn pm_storm_under_threshold_passes() {
+        let mut state = FloodState::new();
+        let now = Instant::now();
+        for i in 0..5 {
+            assert_eq!(
+                state.check_pm_tilde_storm(
+                    &format!("bot{i}"),
+                    now + Duration::from_millis(i * 100)
+                ),
+                FloodResult::Allow,
+                "PM from bot{i} should pass"
+            );
+        }
+    }
+
+    #[test]
+    fn pm_storm_at_threshold_triggers() {
+        let mut state = FloodState::new();
+        let now = Instant::now();
+        // 5 unique nicks PM us — still under threshold (6)
+        for i in 0..5 {
+            assert_eq!(
+                state.check_pm_tilde_storm(
+                    &format!("bot{i}"),
+                    now + Duration::from_millis(i * 100)
+                ),
+                FloodResult::Allow,
+            );
+        }
+        // 6th unique nick triggers
+        assert_eq!(
+            state.check_pm_tilde_storm("bot5", now + Duration::from_millis(500)),
+            FloodResult::Triggered
+        );
+    }
+
+    #[test]
+    fn pm_storm_same_nick_does_not_inflate_count() {
+        let mut state = FloodState::new();
+        let now = Instant::now();
+        // Same nick PMs 10 times — only 1 unique nick, never triggers storm
+        for i in 0..10 {
+            assert_eq!(
+                state.check_pm_tilde_storm("spammer", now + Duration::from_millis(i * 50)),
+                FloodResult::Allow,
+                "same nick repeat {i} should not trigger storm"
+            );
+        }
+    }
+
+    #[test]
+    fn pm_storm_block_expires() {
+        let mut state = FloodState::new();
+        let now = Instant::now();
+        // Trigger storm block
+        for i in 0..6 {
+            state.check_pm_tilde_storm(
+                &format!("bot{i}"),
+                now + Duration::from_millis(i * 100),
+            );
+        }
+        // Still blocked at 30s (extends block to 30s + 60s = 90s)
+        assert_eq!(
+            state.check_pm_tilde_storm("late_bot", now + Duration::from_secs(30)),
+            FloodResult::Blocked
+        );
+        // Still blocked at 61s (90s hasn't passed yet)
+        assert_eq!(
+            state.check_pm_tilde_storm("another", now + Duration::from_secs(61)),
+            FloodResult::Blocked
+        );
+        // Expired after 122s (61s extended to 121s, 122 > 121)
+        assert_eq!(
+            state.check_pm_tilde_storm("legit_user", now + Duration::from_secs(122)),
+            FloodResult::Allow
+        );
+    }
+
+    #[test]
+    fn pm_storm_outside_window_does_not_trigger() {
+        let mut state = FloodState::new();
+        let now = Instant::now();
+        // 6 unique nicks but spread over 12 seconds (window is 5s)
+        for i in 0..6 {
+            assert_eq!(
+                state.check_pm_tilde_storm(
+                    &format!("user{i}"),
+                    now + Duration::from_secs(i * 3)
+                ),
+                FloodResult::Allow,
+                "user{i} at {i}*3s should pass"
+            );
+        }
+    }
+
+    // --- Duplicate text ---
+
+    #[test]
     fn duplicate_non_channel_ignored() {
         let mut state = FloodState::new();
         let now = Instant::now();
-        // Private messages should never trigger duplicate detection
         for i in 0..10 {
             assert_eq!(
                 state.check_duplicate_flood(
@@ -380,9 +554,8 @@ mod tests {
     #[test]
     fn duplicate_empty_text_ignored() {
         let mut state = FloodState::new();
-        let now = Instant::now();
         assert_eq!(
-            state.check_duplicate_flood("", true, now),
+            state.check_duplicate_flood("", true, Instant::now()),
             FloodResult::Allow
         );
     }
@@ -391,7 +564,6 @@ mod tests {
     fn duplicate_below_window_size_passes() {
         let mut state = FloodState::new();
         let now = Instant::now();
-        // 4 messages isn't enough to trigger analysis (need DUP_MIN_IN_WINDOW=5)
         for i in 0..4 {
             assert_eq!(
                 state.check_duplicate_flood("spam", true, now + Duration::from_millis(i * 100)),
@@ -404,11 +576,7 @@ mod tests {
     fn duplicate_at_threshold_triggers() {
         let mut state = FloodState::new();
         let now = Instant::now();
-        // 5 messages, 3 of which are identical -> should trigger on the 5th
-        assert_eq!(
-            state.check_duplicate_flood("spam", true, now),
-            FloodResult::Allow
-        );
+        assert_eq!(state.check_duplicate_flood("spam", true, now), FloodResult::Allow);
         assert_eq!(
             state.check_duplicate_flood("other1", true, now + Duration::from_millis(100)),
             FloodResult::Allow
@@ -421,7 +589,6 @@ mod tests {
             state.check_duplicate_flood("other2", true, now + Duration::from_millis(300)),
             FloodResult::Allow
         );
-        // 5th msg, 3rd "spam" — window now has 5 msgs and 3 are "spam"
         assert_eq!(
             state.check_duplicate_flood("spam", true, now + Duration::from_millis(400)),
             FloodResult::Triggered
@@ -432,11 +599,7 @@ mod tests {
     fn duplicate_blocked_text_stays_blocked() {
         let mut state = FloodState::new();
         let now = Instant::now();
-        // Trigger block
-        assert_eq!(
-            state.check_duplicate_flood("spam", true, now),
-            FloodResult::Allow
-        );
+        assert_eq!(state.check_duplicate_flood("spam", true, now), FloodResult::Allow);
         assert_eq!(
             state.check_duplicate_flood("a", true, now + Duration::from_millis(100)),
             FloodResult::Allow
@@ -453,7 +616,6 @@ mod tests {
             state.check_duplicate_flood("spam", true, now + Duration::from_millis(400)),
             FloodResult::Triggered
         );
-        // Now "spam" is blocked — subsequent messages should be Blocked (silent)
         assert_eq!(
             state.check_duplicate_flood("spam", true, now + Duration::from_secs(10)),
             FloodResult::Blocked
@@ -464,7 +626,6 @@ mod tests {
     fn duplicate_different_texts_pass() {
         let mut state = FloodState::new();
         let now = Instant::now();
-        // All different messages should pass even with many in window
         for i in 0..10 {
             assert_eq!(
                 state.check_duplicate_flood(
@@ -477,14 +638,15 @@ mod tests {
         }
     }
 
+    // --- Nick change flood ---
+
     #[test]
     fn nick_under_threshold_passes() {
         let mut state = FloodState::new();
         let now = Instant::now();
         for i in 0..4 {
             assert!(
-                !state
-                    .should_suppress_nick_flood("conn/chan", now + Duration::from_millis(i * 100))
+                !state.should_suppress_nick_flood("conn/chan", now + Duration::from_millis(i * 100))
             );
         }
     }
@@ -508,13 +670,11 @@ mod tests {
     fn nick_different_buffers_independent() {
         let mut state = FloodState::new();
         let now = Instant::now();
-        // Fill buffer A almost to threshold
         for i in 0..4 {
             assert!(
                 !state.should_suppress_nick_flood("buf_a", now + Duration::from_millis(i * 100))
             );
         }
-        // Buffer B should be unaffected
         assert!(!state.should_suppress_nick_flood("buf_b", now + Duration::from_millis(500)));
     }
 
@@ -522,11 +682,9 @@ mod tests {
     fn nick_block_extends_on_continued_flood() {
         let mut state = FloodState::new();
         let now = Instant::now();
-        // Trigger block
         for i in 0..5 {
             state.should_suppress_nick_flood("buf", now + Duration::from_millis(i * 100));
         }
-        // Should still be blocked after 30s
         assert!(state.should_suppress_nick_flood("buf", now + Duration::from_secs(30)));
     }
 
@@ -537,7 +695,6 @@ mod tests {
         for i in 0..5 {
             state.should_suppress_nick_flood("buf", now + Duration::from_millis(i * 100));
         }
-        // After 61 seconds, should no longer be blocked
         assert!(!state.should_suppress_nick_flood("buf", now + Duration::from_secs(61)));
     }
 
@@ -545,7 +702,6 @@ mod tests {
     fn nick_outside_window_does_not_trigger() {
         let mut state = FloodState::new();
         let now = Instant::now();
-        // Spread 5 nick changes over 6 seconds (window is 3s)
         for i in 0..5 {
             let t = now + Duration::from_millis(i * 1500);
             assert!(
@@ -554,6 +710,8 @@ mod tests {
             );
         }
     }
+
+    // --- Utility ---
 
     #[test]
     fn prune_window_removes_old_entries() {
@@ -566,7 +724,7 @@ mod tests {
             now,
         ];
         let count = prune_window(&mut times, now, Duration::from_secs(5));
-        assert_eq!(count, 3); // only the last 3 are within the 5s window
+        assert_eq!(count, 3);
     }
 
     #[test]
@@ -597,6 +755,19 @@ mod tests {
     }
 
     #[test]
+    fn unique_count_deduplicates() {
+        let now = Instant::now();
+        let entries = vec![
+            (1, now),
+            (2, now),
+            (1, now), // duplicate
+            (3, now),
+            (2, now), // duplicate
+        ];
+        assert_eq!(unique_count(&entries), 3);
+    }
+
+    #[test]
     fn default_impl_matches_new() {
         let a = FloodState::new();
         let b = FloodState::default();
@@ -610,13 +781,11 @@ mod tests {
     fn remove_buffer_cleans_nick_tracking() {
         let mut state = FloodState::new();
         let now = Instant::now();
-        // Accumulate nick changes for a buffer
         for i in 0..3 {
             state.should_suppress_nick_flood("conn/#old", now + Duration::from_millis(i * 100));
         }
         assert!(state.nick_times.contains_key("conn/#old"));
 
-        // Remove the buffer — should clean up
         state.remove_buffer("conn/#old");
         assert!(!state.nick_times.contains_key("conn/#old"));
         assert!(!state.nick_blocked_until.contains_key("conn/#old"));

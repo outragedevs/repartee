@@ -824,18 +824,33 @@ fn handle_privmsg(
     if state.flood_protection && nick != our_nick {
         let now = Instant::now();
 
-        // Tilde (~ident) flood check
         if ident.starts_with('~') {
-            let result = state.flood_state.check_tilde_flood(now);
+            // Per-nick tilde rate limit — blocks only the flooding nick
+            let result = state.flood_state.check_tilde_nick_flood(&nick, now);
             if result.suppressed() {
                 if result == crate::irc::flood::FloodResult::Triggered {
                     emit(
                         state,
                         &buffer_id,
-                        "Tilde-ident flood detected — suppressing",
+                        &format!("Flood from {nick} detected — suppressing"),
                     );
                 }
                 return;
+            }
+
+            // PM tilde storm — many unique ~ nicks PMing us = botnet
+            if !target_is_channel {
+                let storm = state.flood_state.check_pm_tilde_storm(&nick, now);
+                if storm.suppressed() {
+                    if storm == crate::irc::flood::FloodResult::Triggered {
+                        emit(
+                            state,
+                            &buffer_id,
+                            "PM flood storm detected — suppressing all ~ PMs",
+                        );
+                    }
+                    return;
+                }
             }
         }
 

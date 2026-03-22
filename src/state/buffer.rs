@@ -53,6 +53,8 @@ pub enum MessageType {
     Event,
     Notice,
     Ctcp,
+    /// Pre-formatted mention log line — rendered as-is without auto-timestamp or nick column.
+    MentionLog,
 }
 
 impl MessageType {
@@ -63,6 +65,7 @@ impl MessageType {
             Self::Event => "event",
             Self::Notice => "notice",
             Self::Ctcp => "ctcp",
+            Self::MentionLog => "mention_log",
         }
     }
 }

@@ -17,6 +17,12 @@ pub fn render_message(
 ) -> Line<'static> {
     let abstracts = &theme.abstracts;
 
+    // MentionLog: pre-formatted line — render text as-is, no timestamp/nick column.
+    if msg.message_type == MessageType::MentionLog {
+        let spans = parse_format_string(&msg.text, &[]);
+        return styled_spans_to_line(&spans);
+    }
+
     // 1. Format timestamp
     let ts = msg
         .timestamp

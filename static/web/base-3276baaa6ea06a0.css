@@ -163,6 +163,10 @@ html, body {
 .chat-line.highlight { background: var(--highlight-bg); }
 .chat-line.highlight .text { color: var(--red); }
 
+/* Mention log: pre-formatted line (mentions buffer) — no timestamp/nick column */
+.chat-line.mention-log { background: var(--mention-bg); }
+.chat-line.mention-log .mention-log-text { color: var(--purple); }
+
 /* Events: no nick column — text follows timestamp inline */
 
 .chat-line .join-arrow { color: var(--green); }

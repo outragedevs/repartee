@@ -2048,12 +2048,16 @@ impl App {
         let ts = chrono::DateTime::from_timestamp(row.timestamp, 0)
             .unwrap_or_else(chrono::Utc::now);
         let date = ts.format("%m/%d");
-        let text = format!("[{date}] {} {}\u{276F} {}", row.channel, row.nick, row.text);
+        let time = ts.with_timezone(&chrono::Local).format("%H:%M:%S");
+        let text = format!(
+            "[{date}] [{}] {time} {} {}\u{276F} {}",
+            row.network, row.channel, row.nick, row.text
+        );
         Message {
             id,
             timestamp: ts,
-            message_type: MessageType::Message,
-            nick: Some(row.network.clone()),
+            message_type: MessageType::MentionLog,
+            nick: None,
             nick_mode: None,
             text,
             highlight: true,

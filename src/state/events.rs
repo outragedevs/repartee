@@ -415,7 +415,7 @@ fn track_speaker(buf: &mut Buffer, message: &Message) {
             MessageType::Message | MessageType::Action | MessageType::Notice => {
                 buf.touch_speaker(nick);
             }
-            MessageType::Event | MessageType::Ctcp => {}
+            MessageType::Event | MessageType::Ctcp | MessageType::MentionLog => {}
         }
     }
 }
