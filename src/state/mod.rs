@@ -41,6 +41,10 @@ pub struct AppState {
     /// Pending web events to broadcast after IRC event processing.
     /// Drained by `App` after each `handle_irc_message` call.
     pub pending_web_events: Vec<crate::web::protocol::WebEvent>,
+    /// Nick color HSL saturation (synced from config for mention line formatting).
+    pub nick_color_sat: f32,
+    /// Nick color HSL lightness (synced from config for mention line formatting).
+    pub nick_color_lit: f32,
 }
 
 impl AppState {

@@ -534,6 +534,8 @@ impl App {
         state.flood_protection = config.general.flood_protection;
         state.ignores.clone_from(&config.ignores);
         state.scrollback_limit = config.display.scrollback_lines;
+        state.nick_color_sat = config.display.nick_color_saturation;
+        state.nick_color_lit = config.display.nick_color_lightness;
         let (irc_tx, irc_rx) = mpsc::unbounded_channel();
 
         // Initialize storage if logging is enabled
@@ -2034,7 +2036,12 @@ impl App {
         };
         for (i, row) in rows.iter().enumerate() {
             buf.messages
-                .push_back(Self::mention_row_to_message(row, base_id + i as u64));
+                .push_back(Self::mention_row_to_message(
+                    row,
+                    base_id + i as u64,
+                    self.config.display.nick_color_saturation,
+                    self.config.display.nick_color_lightness,
+                ));
         }
     }
 
@@ -2044,14 +2051,23 @@ impl App {
     fn mention_row_to_message(
         row: &crate::storage::types::MentionRow,
         id: u64,
+        nick_sat: f32,
+        nick_lit: f32,
     ) -> Message {
         let ts = chrono::DateTime::from_timestamp(row.timestamp, 0)
             .unwrap_or_else(chrono::Utc::now);
-        let date = ts.format("%m/%d");
-        let time = ts.with_timezone(&chrono::Local).format("%H:%M:%S");
-        let text = format!(
-            "[{date}] [{}] {time} {} {}\u{276F} {}",
-            row.network, row.channel, row.nick, row.text
+        let datetime = ts
+            .with_timezone(&chrono::Local)
+            .format("%Y/%m/%d %H:%M:%S")
+            .to_string();
+        let text = crate::ui::format_mention_line(
+            &datetime,
+            &row.network,
+            &row.channel,
+            &row.nick,
+            &row.text,
+            nick_sat,
+            nick_lit,
         );
         Message {
             id,

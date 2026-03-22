@@ -13,6 +13,12 @@ pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
         Ok(new_config) => {
             app.config = new_config;
             app.cached_config_toml = None;
+            // Sync derived state from new config
+            app.state.scrollback_limit = app.config.display.scrollback_lines;
+            app.state.flood_protection = app.config.general.flood_protection;
+            app.state.ignores.clone_from(&app.config.ignores);
+            app.state.nick_color_sat = app.config.display.nick_color_saturation;
+            app.state.nick_color_lit = app.config.display.nick_color_lightness;
             add_local_event(app, &format!("{C_OK}Config reloaded{C_RST}"));
         }
         Err(e) => {

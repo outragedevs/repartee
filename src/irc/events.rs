@@ -780,16 +780,26 @@ fn handle_privmsg(
                 let conn_label = state
                     .connections
                     .get(conn_id)
-                    .map_or(conn_id, |c| c.label.as_str())
+                    .map_or(conn_id, |c| c.label.as_str());
+                let datetime = ts
+                    .with_timezone(&chrono::Local)
+                    .format("%Y/%m/%d %H:%M:%S")
                     .to_string();
-                let date = ts.format("%m/%d");
-                let mention_text =
-                    format!("[{date}] {target} {nick}❯ * {nick} {action_text}");
+                let action_body = format!("* {nick} {action_text}");
+                let mention_text = crate::ui::format_mention_line(
+                    &datetime,
+                    conn_label,
+                    target,
+                    &nick,
+                    &action_body,
+                    state.nick_color_sat,
+                    state.nick_color_lit,
+                );
                 let mention_msg = Message {
                     id: state.next_message_id(),
                     timestamp: ts,
-                    message_type: MessageType::Message,
-                    nick: Some(conn_label),
+                    message_type: MessageType::MentionLog,
+                    nick: None,
                     nick_mode: None,
                     text: mention_text,
                     highlight: true,
@@ -916,15 +926,25 @@ fn handle_privmsg(
         let conn_label = state
             .connections
             .get(conn_id)
-            .map_or(conn_id, |c| c.label.as_str())
+            .map_or(conn_id, |c| c.label.as_str());
+        let datetime = ts
+            .with_timezone(&chrono::Local)
+            .format("%Y/%m/%d %H:%M:%S")
             .to_string();
-        let date = ts.format("%m/%d");
-        let mention_text = format!("[{date}] {target} {nick}❯ {text}");
+        let mention_text = crate::ui::format_mention_line(
+            &datetime,
+            conn_label,
+            target,
+            &nick,
+            text,
+            state.nick_color_sat,
+            state.nick_color_lit,
+        );
         let mention_msg = Message {
             id: state.next_message_id(),
             timestamp: ts,
-            message_type: MessageType::Message,
-            nick: Some(conn_label),
+            message_type: MessageType::MentionLog,
+            nick: None,
             nick_mode: None,
             text: mention_text,
             highlight: true,

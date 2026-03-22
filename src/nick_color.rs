@@ -64,6 +64,20 @@ const fn djb2_hash(nick: &str) -> usize {
     hash as usize
 }
 
+/// Compute a deterministic hex color string for a nick (e.g. `"a3c4f7"`).
+/// Uses the same djb2 hash + HSL hue wheel as `nick_color`, but always
+/// returns a 6-char hex string suitable for embedding in `%Z` format codes.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "hash % 360 is at most 359, which fits exactly in f32"
+)]
+pub fn nick_color_hex(nick: &str, saturation: f32, lightness: f32) -> String {
+    let hash = djb2_hash(nick);
+    let hue = (hash % 360) as f32;
+    let (r, g, b) = hsl_to_rgb(hue, saturation, lightness);
+    format!("{r:02x}{g:02x}{b:02x}")
+}
+
 /// Convert HSL to RGB.
 ///
 /// * `hue` -- degrees 0..360

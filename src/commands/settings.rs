@@ -634,6 +634,12 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
             if path == "display.scrollback_lines" {
                 app.state.scrollback_limit = app.config.display.scrollback_lines;
             }
+            if path == "display.nick_color_saturation" {
+                app.state.nick_color_sat = app.config.display.nick_color_saturation;
+            }
+            if path == "display.nick_color_lightness" {
+                app.state.nick_color_lit = app.config.display.nick_color_lightness;
+            }
 
             if path == "display.mentions_buffer" {
                 if app.config.display.mentions_buffer {

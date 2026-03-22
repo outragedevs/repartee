@@ -111,6 +111,39 @@ pub fn visible_len(spans: &[crate::theme::StyledSpan]) -> usize {
     spans.iter().map(|s| s.text.width()).sum()
 }
 
+// === Mention log line formatting ===
+
+// Theme colors (same hex values used in default.theme).
+const COLOR_TIMESTAMP: &str = "6e738d"; // muted gray — matches {timestamp} abstract
+const COLOR_NETWORK: &str = "565f89";   // dim gray — matches hostname in join events
+const COLOR_CHANNEL: &str = "7aa2f7";   // accent blue — matches {channel} abstract
+const COLOR_SEP: &str = "7aa2f7";       // accent blue — nick separator ❯
+
+/// Build a pre-formatted mention log line with irssi `%Z` color codes.
+///
+/// Layout: `[datetime] [network] [channel] nick❯ text`
+///
+/// Called from both `irc/events.rs` (live mentions) and `app.rs` (DB reload).
+pub fn format_mention_line(
+    datetime: &str,
+    network: &str,
+    channel: &str,
+    nick: &str,
+    text: &str,
+    nick_sat: f32,
+    nick_lit: f32,
+) -> String {
+    let nick_hex = crate::nick_color::nick_color_hex(nick, nick_sat, nick_lit);
+
+    format!(
+        "%Z{COLOR_TIMESTAMP}[{datetime}]%N \
+         %Z{COLOR_NETWORK}[{network}]%N \
+         %Z{COLOR_CHANNEL}[{channel}]%N \
+         %Z{nick_hex}%_{nick}%_%N\
+         %Z{COLOR_SEP}\u{276F}%N {text}",
+    )
+}
+
 /// Word-wrap a ratatui `Line` to fit within `width` display columns.
 ///
 /// Continuation lines are indented with `indent` spaces.  Breaks prefer

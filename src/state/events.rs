@@ -20,6 +20,8 @@ impl AppState {
             log_exclude_types: Vec::new(),
             scrollback_limit: 2000,
             pending_web_events: Vec::new(),
+            nick_color_sat: 0.65,
+            nick_color_lit: 0.65,
         }
     }
 
