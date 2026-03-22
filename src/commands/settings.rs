@@ -635,10 +635,13 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                 app.state.scrollback_limit = app.config.display.scrollback_lines;
             }
 
-            if path == "display.mentions_buffer" && !app.config.display.mentions_buffer {
-                app.state.remove_buffer("_mentions");
+            if path == "display.mentions_buffer" {
+                if app.config.display.mentions_buffer {
+                    app.create_mentions_buffer();
+                } else {
+                    app.state.remove_buffer("_mentions");
+                }
             }
-            // create_mentions_buffer() will be wired in Task 4 when mentions_buffer is enabled
 
             // Sync DCC runtime state from config
             if path.starts_with("dcc.") {

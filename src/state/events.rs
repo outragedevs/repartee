@@ -157,6 +157,43 @@ impl AppState {
         }
     }
 
+    /// Add a mention message to the `_mentions` buffer.
+    ///
+    /// Unlike `add_message_with_activity`, this:
+    /// - Does NOT log to the messages DB (mention is already in the mentions table)
+    /// - Does NOT push a `MentionAlert` web event (avoids double-counting the badge)
+    /// - DOES push `NewMessage` for web clients
+    /// - DOES set `ActivityLevel::Mention` on the buffer
+    #[allow(dead_code, reason = "wired in Task 5 when mention detection calls this")]
+    pub fn add_mention_to_buffer(&mut self, message: Message) {
+        let buffer_id = "_mentions";
+        let wire = crate::web::snapshot::message_to_wire(&message);
+        self.pending_web_events
+            .push(crate::web::protocol::WebEvent::NewMessage {
+                buffer_id: buffer_id.to_string(),
+                message: wire,
+            });
+        let Some(buf) = self.buffers.get_mut(buffer_id) else {
+            return;
+        };
+        buf.messages.push_back(message);
+        // Hard cap at 1000 messages — matches the DB LIMIT.
+        while buf.messages.len() > 1000 {
+            buf.messages.pop_front();
+        }
+        let is_active = self.active_buffer_id.as_deref() == Some(buffer_id);
+        if !is_active && buf.activity < ActivityLevel::Mention {
+            buf.activity = ActivityLevel::Mention;
+            buf.unread_count += 1;
+            self.pending_web_events
+                .push(crate::web::protocol::WebEvent::ActivityChanged {
+                    buffer_id: buffer_id.to_string(),
+                    activity: ActivityLevel::Mention as u8,
+                    unread_count: buf.unread_count,
+                });
+        }
+    }
+
     pub fn add_message_with_activity(
         &mut self,
         buffer_id: &str,

@@ -1536,6 +1536,11 @@ impl App {
         // Autoload scripts from ~/.repartee/scripts/
         self.autoload_scripts();
 
+        // Create mentions buffer if enabled.
+        if self.config.display.mentions_buffer {
+            self.create_mentions_buffer();
+        }
+
         // Spawn terminal event reader thread (only if we have a local terminal).
         if self.terminal.is_some() && !self.is_socket_attached {
             self.start_term_reader();
@@ -1967,6 +1972,86 @@ impl App {
             .any(|b| b.connection_id != Self::DEFAULT_CONN_ID);
         if !has_real_buffers {
             Self::create_default_status(&mut self.state);
+        }
+    }
+
+    /// Buffer ID for the mentions aggregation buffer.
+    pub const MENTIONS_BUFFER_ID: &'static str = "_mentions";
+
+    /// Create the mentions buffer if it doesn't already exist.
+    pub(crate) fn create_mentions_buffer(&mut self) {
+        if self.state.buffers.contains_key(Self::MENTIONS_BUFFER_ID) {
+            return;
+        }
+        let buf = Buffer {
+            id: Self::MENTIONS_BUFFER_ID.to_string(),
+            connection_id: String::new(),
+            buffer_type: BufferType::Mentions,
+            name: "Mentions".to_string(),
+            messages: std::collections::VecDeque::new(),
+            activity: ActivityLevel::None,
+            unread_count: 0,
+            last_read: Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: std::collections::HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: std::collections::HashMap::new(),
+            last_speakers: Vec::new(),
+        };
+        self.state
+            .buffers
+            .insert(Self::MENTIONS_BUFFER_ID.to_string(), buf);
+        self.load_mentions_history();
+    }
+
+    /// Load recent mentions from DB into the mentions buffer (7 days, max 1000).
+    fn load_mentions_history(&mut self) {
+        let Some(storage) = &self.storage else { return };
+        let Ok(db) = storage.db.lock() else { return };
+        let seven_days_ago = chrono::Utc::now().timestamp() - 7 * 24 * 3600;
+        let Ok(rows) =
+            crate::storage::query::load_recent_mentions(&db, seven_days_ago, 1000)
+        else {
+            return;
+        };
+        drop(db);
+        let Some(buf) = self.state.buffers.get_mut(Self::MENTIONS_BUFFER_ID) else {
+            return;
+        };
+        for row in rows {
+            buf.messages.push_back(Self::mention_row_to_message(&row));
+        }
+    }
+
+    /// Convert a `MentionRow` to a `Message` for the mentions buffer.
+    fn mention_row_to_message(
+        row: &crate::storage::types::MentionRow,
+    ) -> Message {
+        let is_channel = row.channel.starts_with('#')
+            || row.channel.starts_with('&')
+            || row.channel.starts_with('!')
+            || row.channel.starts_with('+');
+        let text = if is_channel {
+            format!("{} {}\u{276F} {}", row.channel, row.nick, row.text)
+        } else {
+            format!("{}\u{276F} {}", row.nick, row.text)
+        };
+        Message {
+            id: 0,
+            timestamp: chrono::DateTime::from_timestamp(row.timestamp, 0)
+                .unwrap_or_else(chrono::Utc::now),
+            message_type: MessageType::Message,
+            nick: Some(row.network.clone()),
+            nick_mode: None,
+            text,
+            highlight: true,
+            event_key: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: None,
         }
     }
 
