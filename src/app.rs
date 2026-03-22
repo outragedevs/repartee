@@ -4878,8 +4878,20 @@ impl App {
             self.state.active_buffer().map_or_else(
                 || (Vec::new(), Vec::new()),
                 |buf| {
-                    let nicks = buf.users.values().map(|e| e.nick.clone()).collect();
-                    let speakers = buf.last_speakers.clone();
+                    let nicks: Vec<String> =
+                        buf.users.values().map(|e| e.nick.clone()).collect();
+                    // Filter last_speakers to only nicks still on the channel.
+                    // Speakers who PARTed/QUITed stay in last_speakers for
+                    // history but should not appear in tab completion.
+                    let speakers: Vec<String> = buf
+                        .last_speakers
+                        .iter()
+                        .filter(|s| {
+                            let lower = s.to_lowercase();
+                            buf.users.contains_key(&lower)
+                        })
+                        .cloned()
+                        .collect();
                     (nicks, speakers)
                 },
             );
