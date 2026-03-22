@@ -83,6 +83,10 @@ const CREATE_MENTIONS_IDX: &str = "
 CREATE INDEX IF NOT EXISTS idx_mentions_unread
 ON mentions (read_at) WHERE read_at IS NULL";
 
+const CREATE_MENTIONS_TIMESTAMP_IDX: &str = "
+CREATE INDEX IF NOT EXISTS idx_mentions_timestamp
+ON mentions (timestamp)";
+
 fn create_schema(db: &Connection, encrypt: bool) -> rusqlite::Result<()> {
     db.execute_batch(CREATE_MESSAGES)?;
     db.execute_batch(CREATE_MESSAGES_IDX)?;
@@ -91,6 +95,7 @@ fn create_schema(db: &Connection, encrypt: bool) -> rusqlite::Result<()> {
     db.execute_batch(CREATE_READ_MARKERS)?;
     db.execute_batch(CREATE_MENTIONS)?;
     db.execute_batch(CREATE_MENTIONS_IDX)?;
+    db.execute_batch(CREATE_MENTIONS_TIMESTAMP_IDX)?;
     if !encrypt {
         db.execute_batch(CREATE_FTS)?;
         db.execute_batch(CREATE_FTS_TRIGGERS)?;

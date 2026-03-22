@@ -334,10 +334,55 @@ pub fn mark_mentions_read(db: &Connection) -> rusqlite::Result<usize> {
     )
 }
 
+/// Load recent mentions for the mentions buffer.
+/// Returns up to `limit` mentions newer than `since_ts` (Unix timestamp), oldest first.
+pub fn load_recent_mentions(
+    db: &Connection,
+    since_ts: i64,
+    limit: u32,
+) -> rusqlite::Result<Vec<super::types::MentionRow>> {
+    let mut stmt = db.prepare(
+        "SELECT id, timestamp, network, buffer, channel, nick, text
+         FROM mentions
+         WHERE timestamp > ?1
+         ORDER BY timestamp ASC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![since_ts, limit], |row| {
+        Ok(super::types::MentionRow {
+            id: row.get(0)?,
+            timestamp: row.get(1)?,
+            network: row.get(2)?,
+            buffer: row.get(3)?,
+            channel: row.get(4)?,
+            nick: row.get(5)?,
+            text: row.get(6)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Delete mentions older than the given Unix timestamp.
+pub fn purge_old_mentions(db: &Connection, before_ts: i64) -> rusqlite::Result<usize> {
+    db.execute(
+        "DELETE FROM mentions WHERE timestamp < ?1",
+        params![before_ts],
+    )
+}
+
+/// Delete ALL mentions (used by `/clear` on mentions buffer).
+pub fn truncate_mentions(db: &Connection) -> rusqlite::Result<usize> {
+    db.execute("DELETE FROM mentions", [])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::db::open_database;
+
+    fn setup_test_db() -> Connection {
+        open_database(false).unwrap()
+    }
 
     /// Insert a test message with the given timestamp and text.
     fn insert_msg(db: &Connection, network: &str, buffer: &str, ts: i64, text: &str) {
@@ -525,5 +570,53 @@ mod tests {
         // New mention after marking still shows as unread.
         insert_mention(&db, 3000, "net", "#c", "#c", "z", "yo").unwrap();
         assert_eq!(get_unread_mention_count(&db).unwrap(), 1);
+    }
+
+    #[test]
+    fn load_recent_mentions_returns_within_window_oldest_first() {
+        let db = setup_test_db();
+        let now = chrono::Utc::now().timestamp();
+        insert_mention(&db, now - 100, "net", "buf", "#ch", "nick", "old").unwrap();
+        insert_mention(&db, now - 50, "net", "buf", "#ch", "nick", "mid").unwrap();
+        insert_mention(&db, now, "net", "buf", "#ch", "nick", "new").unwrap();
+
+        let rows = load_recent_mentions(&db, now - 200, 1000).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].text, "old");
+        assert_eq!(rows[2].text, "new");
+    }
+
+    #[test]
+    fn load_recent_mentions_respects_limit() {
+        let db = setup_test_db();
+        let now = chrono::Utc::now().timestamp();
+        for i in 0..10 {
+            insert_mention(&db, now + i, "net", "buf", "#ch", "nick", &format!("msg{i}")).unwrap();
+        }
+        let rows = load_recent_mentions(&db, now - 1, 5).unwrap();
+        assert_eq!(rows.len(), 5);
+    }
+
+    #[test]
+    fn purge_old_mentions_deletes_expired() {
+        let db = setup_test_db();
+        let now = chrono::Utc::now().timestamp();
+        insert_mention(&db, now - 1000, "net", "buf", "#ch", "nick", "old").unwrap();
+        insert_mention(&db, now, "net", "buf", "#ch", "nick", "new").unwrap();
+        let deleted = purge_old_mentions(&db, now - 500).unwrap();
+        assert_eq!(deleted, 1);
+        let remaining = load_recent_mentions(&db, 0, 1000).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].text, "new");
+    }
+
+    #[test]
+    fn truncate_mentions_deletes_all() {
+        let db = setup_test_db();
+        let now = chrono::Utc::now().timestamp();
+        insert_mention(&db, now, "net", "buf", "#ch", "nick", "msg").unwrap();
+        truncate_mentions(&db).unwrap();
+        let remaining = load_recent_mentions(&db, 0, 1000).unwrap();
+        assert!(remaining.is_empty());
     }
 }
