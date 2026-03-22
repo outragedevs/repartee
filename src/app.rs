@@ -2039,23 +2039,19 @@ impl App {
     }
 
     /// Convert a `MentionRow` to a `Message` for the mentions buffer.
+    /// Only channel mentions are stored (PMs are filtered at detection time),
+    /// so the format always includes `#channel`.
     fn mention_row_to_message(
         row: &crate::storage::types::MentionRow,
         id: u64,
     ) -> Message {
-        let is_channel = row.channel.starts_with('#')
-            || row.channel.starts_with('&')
-            || row.channel.starts_with('!')
-            || row.channel.starts_with('+');
-        let text = if is_channel {
-            format!("{} {}\u{276F} {}", row.channel, row.nick, row.text)
-        } else {
-            format!("{}\u{276F} {}", row.nick, row.text)
-        };
+        let ts = chrono::DateTime::from_timestamp(row.timestamp, 0)
+            .unwrap_or_else(chrono::Utc::now);
+        let date = ts.format("%m/%d");
+        let text = format!("[{date}] {} {}\u{276F} {}", row.channel, row.nick, row.text);
         Message {
             id,
-            timestamp: chrono::DateTime::from_timestamp(row.timestamp, 0)
-                .unwrap_or_else(chrono::Utc::now),
+            timestamp: ts,
             message_type: MessageType::Message,
             nick: Some(row.network.clone()),
             nick_mode: None,
@@ -2579,6 +2575,32 @@ impl App {
 
     /// Fetch messages from `SQLite` for a web client.
     fn web_fetch_messages(&self, buffer_id: &str, limit: u32, before: Option<i64>, session_id: &str) {
+        // The _mentions buffer is in-memory only (backed by the mentions
+        // table, not the messages table). Return its messages directly.
+        if buffer_id == Self::MENTIONS_BUFFER_ID {
+            if let Some(buf) = self.state.buffers.get(buffer_id) {
+                let capped = limit.min(500) as usize;
+                let msgs: Vec<_> = buf
+                    .messages
+                    .iter()
+                    .rev()
+                    .take(capped)
+                    .rev()
+                    .map(crate::web::snapshot::message_to_wire)
+                    .collect();
+                tracing::debug!(
+                    %buffer_id, count = msgs.len(),
+                    "web FetchMessages: sending {} in-memory mention messages", msgs.len()
+                );
+                self.broadcast_web(crate::web::protocol::WebEvent::Messages {
+                    buffer_id: buffer_id.to_string(),
+                    messages: msgs,
+                    has_more: false,
+                    session_id: Some(session_id.to_string()),
+                });
+            }
+            return;
+        }
         let Some(ref storage) = self.storage else {
             tracing::warn!("web FetchMessages: storage not available");
             return;

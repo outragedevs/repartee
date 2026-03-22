@@ -771,20 +771,20 @@ fn handle_privmsg(
                 activity,
             );
 
-            // Push to mentions buffer if this is a highlight.
-            if let Some(nick) = nick_saved
+            // Push to mentions buffer — channel highlights only.
+            if is_mention
+                && target_is_channel
                 && state.buffers.contains_key("_mentions")
             {
+                let nick = nick_saved.unwrap_or_default();
                 let conn_label = state
                     .connections
                     .get(conn_id)
                     .map_or(conn_id, |c| c.label.as_str())
                     .to_string();
-                let mention_text = if target_is_channel {
-                    format!("{target} {nick}❯ * {nick} {action_text}")
-                } else {
-                    format!("{nick}❯ * {nick} {action_text}")
-                };
+                let date = ts.format("%m/%d");
+                let mention_text =
+                    format!("[{date}] {target} {nick}❯ * {nick} {action_text}");
                 let mention_msg = Message {
                     id: state.next_message_id(),
                     timestamp: ts,
@@ -892,20 +892,19 @@ fn handle_privmsg(
         activity,
     );
 
-    // Push to mentions buffer if this is a highlight.
-    if let Some(nick) = nick_saved
+    // Push to mentions buffer — channel highlights only (not PMs/queries).
+    if is_mention
+        && target_is_channel
         && state.buffers.contains_key("_mentions")
     {
+        let nick = nick_saved.unwrap_or_default();
         let conn_label = state
             .connections
             .get(conn_id)
             .map_or(conn_id, |c| c.label.as_str())
             .to_string();
-        let mention_text = if target_is_channel {
-            format!("{target} {nick}❯ {text}")
-        } else {
-            format!("{nick}❯ {text}")
-        };
+        let date = ts.format("%m/%d");
+        let mention_text = format!("[{date}] {target} {nick}❯ {text}");
         let mention_msg = Message {
             id: state.next_message_id(),
             timestamp: ts,

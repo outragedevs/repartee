@@ -56,7 +56,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, scroll_offset: usize) ->
                 .unwrap_or_else(|| "$0".to_string());
             let resolved = resolve_abstractions(&format, abstracts, 0);
 
-            let full_spans = parse_format_string(&resolved, &[&buf.name]);
+            // Pass two params to match theme format: $0=placeholder, $1=name.
+            // Theme expects "$0. $1" where $0 is the buffer number — we use
+            // an empty string so only the name renders in the activity color.
+            let full_spans = parse_format_string(&resolved, &["", &buf.name]);
             let total_visible = visible_len(&full_spans);
             let name_chars = buf.name.chars().count();
             let overhead = total_visible.saturating_sub(name_chars);
