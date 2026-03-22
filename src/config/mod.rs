@@ -121,6 +121,8 @@ pub struct DisplayConfig {
     pub nick_color_saturation: f32,
     /// HSL lightness for nick colors (0.0–1.0). Tune per theme: dark bg ≈ 0.65, light bg ≈ 0.40.
     pub nick_color_lightness: f32,
+    /// Show the Mentions buffer at the top of the buffer list.
+    pub mentions_buffer: bool,
 }
 
 impl Default for DisplayConfig {
@@ -137,6 +139,7 @@ impl Default for DisplayConfig {
             nick_colors_in_nicklist: true,
             nick_color_saturation: 0.65,
             nick_color_lightness: 0.65,
+            mentions_buffer: true,
         }
     }
 }

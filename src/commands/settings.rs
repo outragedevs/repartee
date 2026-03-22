@@ -54,6 +54,7 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 "nick_colors_in_nicklist" => config.display.nick_colors_in_nicklist.to_string(),
                 "nick_color_saturation" => config.display.nick_color_saturation.to_string(),
                 "nick_color_lightness" => config.display.nick_color_lightness.to_string(),
+                "mentions_buffer" => config.display.mentions_buffer.to_string(),
                 _ => return None,
             };
             Some(Resolved {
@@ -276,6 +277,9 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
                 }
                 config.display.nick_color_lightness = v;
             }
+            "mentions_buffer" => {
+                config.display.mentions_buffer = parse_bool(raw)?;
+            }
             _ => return Err(format!("Unknown field: {path}")),
         },
         "sidepanel" if parts.len() >= 3 => {
@@ -472,6 +476,7 @@ const BASE_PATHS: &[&str] = &[
     "display.nick_colors_in_nicklist",
     "display.nick_color_saturation",
     "display.nick_color_lightness",
+    "display.mentions_buffer",
     "sidepanel.left.width",
     "sidepanel.left.visible",
     "sidepanel.right.width",
@@ -629,6 +634,11 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
             if path == "display.scrollback_lines" {
                 app.state.scrollback_limit = app.config.display.scrollback_lines;
             }
+
+            if path == "display.mentions_buffer" && !app.config.display.mentions_buffer {
+                app.state.remove_buffer("_mentions");
+            }
+            // create_mentions_buffer() will be wired in Task 4 when mentions_buffer is enabled
 
             // Sync DCC runtime state from config
             if path.starts_with("dcc.") {
