@@ -461,7 +461,7 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
             "mentions",
             CommandDef {
                 handler: cmd_mentions,
-                description: "Show and clear unread mentions",
+                description: "Switch to the mentions buffer",
                 aliases: &[],
                 category: CommandCategory::Info,
             },

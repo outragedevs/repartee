@@ -749,13 +749,14 @@ fn handle_privmsg(
             };
             let mode_prefix = nick_prefix(state, &buffer_id, &nick);
             let id = state.next_message_id();
+            let ts = message_timestamp(tags.as_ref());
             // Save nick before moving into Message — needed for mentions buffer below.
             let nick_saved = if is_mention { Some(nick.clone()) } else { None };
             state.add_message_with_activity(
                 &buffer_id,
                 Message {
                     id,
-                    timestamp: message_timestamp(tags.as_ref()),
+                    timestamp: ts,
                     message_type: MessageType::Action,
                     nick: Some(nick),
                     nick_mode: mode_prefix.map(String::from),
@@ -784,10 +785,9 @@ fn handle_privmsg(
                 } else {
                     format!("{nick}❯ * {nick} {action_text}")
                 };
-                state.message_counter += 1;
                 let mention_msg = Message {
-                    id: state.message_counter,
-                    timestamp: chrono::Utc::now(),
+                    id: state.next_message_id(),
+                    timestamp: ts,
                     message_type: MessageType::Message,
                     nick: Some(conn_label),
                     nick_mode: None,
@@ -870,13 +870,14 @@ fn handle_privmsg(
 
     let mode_prefix = nick_prefix(state, &buffer_id, &nick);
     let id = state.next_message_id();
+    let ts = message_timestamp(tags.as_ref());
     // Save nick before moving into Message — needed for mentions buffer below.
     let nick_saved = if is_mention { Some(nick.clone()) } else { None };
     state.add_message_with_activity(
         &buffer_id,
         Message {
             id,
-            timestamp: message_timestamp(tags.as_ref()),
+            timestamp: ts,
             message_type: MessageType::Message,
             nick: Some(nick),
             nick_mode: mode_prefix.map(String::from),
@@ -905,10 +906,9 @@ fn handle_privmsg(
         } else {
             format!("{nick}❯ {text}")
         };
-        state.message_counter += 1;
         let mention_msg = Message {
-            id: state.message_counter,
-            timestamp: chrono::Utc::now(),
+            id: state.next_message_id(),
+            timestamp: ts,
             message_type: MessageType::Message,
             nick: Some(conn_label),
             nick_mode: None,

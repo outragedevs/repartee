@@ -2026,17 +2026,22 @@ impl App {
             return;
         };
         drop(db);
+        // Pre-allocate message IDs before borrowing buffers mutably.
+        let base_id = self.state.message_counter + 1;
+        self.state.message_counter += rows.len() as u64;
         let Some(buf) = self.state.buffers.get_mut(Self::MENTIONS_BUFFER_ID) else {
             return;
         };
-        for row in rows {
-            buf.messages.push_back(Self::mention_row_to_message(&row));
+        for (i, row) in rows.iter().enumerate() {
+            buf.messages
+                .push_back(Self::mention_row_to_message(row, base_id + i as u64));
         }
     }
 
     /// Convert a `MentionRow` to a `Message` for the mentions buffer.
     fn mention_row_to_message(
         row: &crate::storage::types::MentionRow,
+        id: u64,
     ) -> Message {
         let is_channel = row.channel.starts_with('#')
             || row.channel.starts_with('&')
@@ -2048,7 +2053,7 @@ impl App {
             format!("{}\u{276F} {}", row.nick, row.text)
         };
         Message {
-            id: 0,
+            id,
             timestamp: chrono::DateTime::from_timestamp(row.timestamp, 0)
                 .unwrap_or_else(chrono::Utc::now),
             message_type: MessageType::Message,

@@ -189,8 +189,11 @@ impl AppState {
             buf.messages.drain(..excess);
             buf.messages.shrink_to(1000);
         }
+        // Always increment unread_count for non-active buffer — every
+        // mention matters, not just the first one. Activity level is only
+        // escalated once (it's already Mention after the first).
         let is_active = self.active_buffer_id.as_deref() == Some(buffer_id);
-        if !is_active && buf.activity < ActivityLevel::Mention {
+        if !is_active {
             buf.activity = ActivityLevel::Mention;
             buf.unread_count += 1;
             self.pending_web_events
