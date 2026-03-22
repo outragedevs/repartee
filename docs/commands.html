@@ -825,19 +825,37 @@ specific subcommand.</p>
 </div>
 <div class="command-entry" data-command="mentions" data-category="Info">
 <h1>/mentions</h1>
-<p>Show all unread highlight mentions across all buffers, then mark them as read.</p>
+<p>Switch to the Mentions buffer — a persistent buffer pinned at the top of the sidebar that aggregates all highlight mentions from all networks.</p>
 <h2>Usage</h2>
 <pre><code>/mentions
 </code></pre>
-<h2>Output</h2>
-<p>Each mention shows: <code>[timestamp] #channel &lt;nick&gt; message text</code></p>
-<p>After displaying, all mentions are marked as read and the counter resets to 0.</p>
-<h2>Requirements</h2>
-<p>Logging must be enabled (<code>logging.enabled = true</code> in config) — mentions are stored in the SQLite database alongside message logs.</p>
-<h2>Web Integration</h2>
-<p>On the web frontend, the unread mention count appears as a badge in the top bar. Viewing mentions on either the terminal or web clears them on both — state is shared.</p>
+<h2>Description</h2>
+<p>The Mentions buffer collects every message where your nick is mentioned across all connected networks. Messages are displayed in a scrollable chat view with the format:</p>
+<pre><code>[timestamp] network  #channel nick❯ message text
+</code></pre>
+<p>The network name appears in the nick column, and the channel + sender are shown in the message text.</p>
+<h2>Buffer Behavior</h2>
+<ul>
+<li><strong>Always first</strong> in the buffer list (no number, pinned to top)</li>
+<li><strong>Scrollback</strong>: 7 days or 1000 messages, whichever is smaller</li>
+<li><strong>Activity</strong>: highlights in the sidebar when new mentions arrive</li>
+<li><strong>Switching</strong> to the buffer clears the highlight (standard buffer behavior)</li>
+</ul>
+<h2>Configuration</h2>
+<p>Toggle the mentions buffer on or off:</p>
+<pre><code>/set display.mentions_buffer true    — show the buffer (default)
+/set display.mentions_buffer false   — hide the buffer (mentions still stored in DB)
+</code></pre>
+<h2>Commands</h2>
+<ul>
+<li><code>/mentions</code> — switch to the mentions buffer</li>
+<li><code>/clear</code> — when used in the mentions buffer, clears all messages AND deletes all mentions from the database</li>
+<li><code>/close</code> — hides the mentions buffer and sets <code>display.mentions_buffer false</code></li>
+</ul>
+<h2>Storage</h2>
+<p>Mentions are stored in the SQLite database. When the buffer is re-enabled after being disabled, the last 7 days of mentions (up to 1000) are loaded from the database. Old mentions (&gt;7 days) are automatically purged every hour.</p>
 <h2>See also</h2>
-<p><code>/set logging.enabled</code>, <code>/log</code></p>
+<p><code>/set display.mentions_buffer</code>, <code>/clear</code></p>
 </div>
 <div class="command-entry" data-command="mode" data-category="Info">
 <h1>/mode</h1>

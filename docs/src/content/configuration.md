@@ -42,6 +42,7 @@ nick_color_lightness = 0.65    # HSL lightness (0.0–1.0), tune per theme
 show_timestamps = true
 scrollback_lines = 2000
 backlog_lines = 20             # history lines loaded when buffer opens (0 = off)
+mentions_buffer = true         # show Mentions buffer at top of sidebar
 
 [sidepanel.left]
 width = 20
@@ -138,6 +139,8 @@ Global identity and behavior. The `nick`, `username`, and `realname` are used as
 ### `[display]`
 
 Controls how messages are rendered. `nick_column_width` sets the fixed-width column for nicks in chat view. `scrollback_lines` is the number of messages kept in memory per buffer. `backlog_lines` sets how many historical messages to load from the log database when a channel, query, or DCC buffer is first opened (0 to disable).
+
+**Mentions buffer:** `mentions_buffer = true` (default) shows a persistent Mentions buffer pinned at the top of the sidebar. It aggregates all highlight mentions from all networks in a scrollable chat view. Scrollback is capped at 7 days or 1000 messages. Use `/clear` in the mentions buffer to wipe all stored mentions. Set to `false` to hide the buffer (mentions are still stored in the database and will reappear when re-enabled).
 
 **Nick coloring:** `nick_colors = true` enables deterministic per-nick coloring (WeeChat-style). Each nick gets a consistent color based on a hash of its name. Truecolor terminals use an HSL hue wheel (~360 distinct colors); 256-color terminals fall back to a curated 68-color palette; 16-color terminals use 12 safe ANSI colors. Terminal capability is auto-detected (and re-detected on `repartee a` reattach). Set `nick_colors_in_nicklist = false` to keep the sidebar nick list using theme colors while chat messages stay colored. Tune `nick_color_saturation` and `nick_color_lightness` (0.0–1.0) per theme — dark themes work well with ~0.65, light themes around ~0.40.
 
