@@ -103,6 +103,7 @@ pub fn stored_to_wire(msg: &crate::storage::types::StoredMessage) -> WireMessage
 
 pub const fn buffer_type_str(bt: &BufferType) -> &'static str {
     match bt {
+        BufferType::Mentions => "mentions",
         BufferType::Server => "server",
         BufferType::Channel => "channel",
         BufferType::Query => "query",

@@ -63,6 +63,7 @@ impl AppState {
             .values()
             .map(|b| {
                 let bt = match b.buffer_type {
+                    buffer::BufferType::Mentions => "mentions",
                     buffer::BufferType::Server => "server",
                     buffer::BufferType::Channel => "channel",
                     buffer::BufferType::Query => "query",

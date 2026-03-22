@@ -19,7 +19,12 @@ where
         })
         .collect();
     keyed.sort_by(|(la, na, a), (lb, nb, b)| {
-        la.cmp(lb)
+        // Mentions buffer is always pinned first, regardless of connection.
+        let a_mentions = matches!(a.buffer_type, crate::state::buffer::BufferType::Mentions);
+        let b_mentions = matches!(b.buffer_type, crate::state::buffer::BufferType::Mentions);
+        b_mentions
+            .cmp(&a_mentions)
+            .then_with(|| la.cmp(lb))
             .then_with(|| a.buffer_type.sort_group().cmp(&b.buffer_type.sort_group()))
             .then_with(|| na.cmp(nb))
     });

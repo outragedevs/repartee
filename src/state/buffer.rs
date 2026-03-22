@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BufferType {
+    /// Aggregated mentions buffer — pinned at top of sidebar.
+    Mentions,
     Server,
     Channel,
     Query,
@@ -20,6 +22,7 @@ pub enum BufferType {
 impl BufferType {
     pub const fn sort_group(&self) -> u8 {
         match self {
+            Self::Mentions => 0,
             Self::Server => 1,
             Self::Channel => 2,
             Self::Query => 3,
@@ -271,6 +274,7 @@ mod tests {
 
     #[test]
     fn buffer_type_sort_group() {
+        assert!(BufferType::Mentions.sort_group() < BufferType::Server.sort_group());
         assert!(BufferType::Server.sort_group() < BufferType::Channel.sort_group());
         assert!(BufferType::Channel.sort_group() < BufferType::Query.sort_group());
         assert!(BufferType::Query.sort_group() < BufferType::DccChat.sort_group());

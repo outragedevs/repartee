@@ -179,6 +179,9 @@ pub(crate) fn cmd_close(app: &mut App, args: &[String]) {
     let conn_id = buf.connection_id.clone();
 
     match buf_type {
+        crate::state::buffer::BufferType::Mentions => {
+            // Mentions buffer cannot be closed — placeholder for Task 6.
+        }
         crate::state::buffer::BufferType::Channel => {
             // Send PART for channels
             let reason = if args.is_empty() {
