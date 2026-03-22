@@ -136,9 +136,15 @@ impl FloodState {
             return FloodResult::Triggered;
         }
 
-        // Periodic cleanup of idle nicks (avoid unbounded growth)
+        // Periodic cleanup of idle nicks (avoid unbounded growth).
+        // Prune timestamps inside each Vec before checking emptiness,
+        // otherwise stale entries with expired-but-non-empty Vecs survive.
         if self.tilde_nick_times.len() > 200 {
-            self.tilde_nick_times.retain(|_, v| !v.is_empty());
+            let cutoff = now.checked_sub(TILDE_NICK_WINDOW).unwrap_or(now);
+            self.tilde_nick_times.retain(|_, v| {
+                v.retain(|t| *t >= cutoff);
+                !v.is_empty()
+            });
             self.tilde_nick_blocked.retain(|_, until| *until > now);
         }
 
@@ -219,12 +225,13 @@ impl FloodState {
 
     /// Check for nick change flood in a specific buffer.
     pub fn should_suppress_nick_flood(&mut self, buffer_id: &str, now: Instant) -> bool {
-        if let Some(&until) = self.nick_blocked_until.get(buffer_id)
-            && now < until
-        {
-            self.nick_blocked_until
-                .insert(buffer_id.to_string(), now + NICK_BLOCK);
-            return true;
+        // Already blocked — extend without re-allocating the key
+        if let Some(until) = self.nick_blocked_until.get_mut(buffer_id) {
+            if now < *until {
+                *until = now + NICK_BLOCK;
+                return true;
+            }
+            self.nick_blocked_until.remove(buffer_id);
         }
 
         let times = self.nick_times.entry(buffer_id.to_string()).or_default();
