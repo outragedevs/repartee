@@ -164,9 +164,14 @@ impl AppState {
     /// - Does NOT push a `MentionAlert` web event (avoids double-counting the badge)
     /// - DOES push `NewMessage` for web clients
     /// - DOES set `ActivityLevel::Mention` on the buffer
-    #[allow(dead_code, reason = "wired in Task 5 when mention detection calls this")]
     pub fn add_mention_to_buffer(&mut self, message: Message) {
         let buffer_id = "_mentions";
+        // Guard buffer existence BEFORE doing any work — avoids
+        // broadcasting orphaned web events when display.mentions_buffer
+        // is disabled and the buffer doesn't exist.
+        if !self.buffers.contains_key(buffer_id) {
+            return;
+        }
         let wire = crate::web::snapshot::message_to_wire(&message);
         self.pending_web_events
             .push(crate::web::protocol::WebEvent::NewMessage {
@@ -178,8 +183,11 @@ impl AppState {
         };
         buf.messages.push_back(message);
         // Hard cap at 1000 messages — matches the DB LIMIT.
-        while buf.messages.len() > 1000 {
-            buf.messages.pop_front();
+        // Uses drain + shrink_to to release peak VecDeque capacity.
+        if buf.messages.len() > 1000 {
+            let excess = buf.messages.len() - 1000;
+            buf.messages.drain(..excess);
+            buf.messages.shrink_to(1000);
         }
         let is_active = self.active_buffer_id.as_deref() == Some(buffer_id);
         if !is_active && buf.activity < ActivityLevel::Mention {

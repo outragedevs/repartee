@@ -3357,13 +3357,18 @@ impl App {
             });
         }
 
-        // Prune in-memory buffer.
+        // Prune in-memory buffer. shrink_to releases VecDeque capacity
+        // retained from the pre-purge peak (retain does not shrink).
         if let Some(buf) = self.state.buffers.get_mut(Self::MENTIONS_BUFFER_ID) {
             let cutoff = chrono::DateTime::from_timestamp(seven_days_ago, 0)
                 .unwrap_or_else(Utc::now);
+            let before = buf.messages.len();
             buf.messages.retain(|m| m.timestamp >= cutoff);
             while buf.messages.len() > 1000 {
                 buf.messages.pop_front();
+            }
+            if buf.messages.len() < before {
+                buf.messages.shrink_to(buf.messages.len());
             }
         }
     }
