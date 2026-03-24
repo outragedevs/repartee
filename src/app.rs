@@ -4813,8 +4813,6 @@ impl App {
     }
 
     fn handle_buffer_list_click(&mut self, y_offset: usize) {
-        use crate::state::buffer::BufferType;
-
         // Clamp scroll the same way the renderer does — prevents click offset
         // when buffer_list_scroll exceeds max_scroll (e.g. after reattach or
         // channels parted while scrolled).
@@ -4827,34 +4825,13 @@ impl App {
         self.buffer_list_scroll = clamped_scroll;
         let logical_row = y_offset + clamped_scroll;
         let sorted_ids = self.state.sorted_buffer_ids();
-        // Map logical_row to the correct buffer, accounting for headers.
-        // Server buffers are rendered as headers (not numbered items).
-        let mut row = 0;
-        let mut last_conn_id = String::new();
+        // Every non-default buffer occupies one row — matches the renderer.
+        let mut row = 0usize;
         for id in &sorted_ids {
             let Some(buf) = self.state.buffers.get(id.as_str()) else {
                 continue;
             };
             if buf.connection_id == Self::DEFAULT_CONN_ID {
-                continue;
-            }
-            // Connection header row
-            if buf.connection_id != last_conn_id {
-                last_conn_id.clone_from(&buf.connection_id);
-                if row == logical_row {
-                    // Clicked on header — switch to server buffer for this connection
-                    if buf.buffer_type == BufferType::Server {
-                        self.state.set_active_buffer(id);
-                        self.scroll_offset = 0;
-                        self.nick_list_scroll = 0;
-                        self.update_shell_input_state();
-                    }
-                    return;
-                }
-                row += 1;
-            }
-            // Server buffers are the header, no separate row
-            if buf.buffer_type == BufferType::Server {
                 continue;
             }
             if row == logical_row {

@@ -340,18 +340,24 @@ impl AppState {
         }
     }
 
-    /// Sort buffers to match TUI order: connection label → buffer type → name.
+    /// Sort buffers to match TUI order: mentions first → connection label → buffer type → name.
     ///
-    /// Buffer type sort order: server(0) < channel(1) < query(2) < dcc_chat(3) < special(4).
+    /// Buffer type sort order: mentions(0) < server(1) < channel(2) < query(3) < dcc_chat(4) < special(5).
     fn sort_buffers(&self) {
         let connections = self.connections.get_untracked();
         self.buffers.update(|bufs| {
             bufs.sort_by(|a, b| {
-                let label_a = connections.iter().find(|c| c.id == a.connection_id)
-                    .map_or_else(|| a.connection_id.to_lowercase(), |c| c.label.to_lowercase());
-                let label_b = connections.iter().find(|c| c.id == b.connection_id)
-                    .map_or_else(|| b.connection_id.to_lowercase(), |c| c.label.to_lowercase());
-                label_a.cmp(&label_b)
+                // Mentions always sorts first, regardless of connection label.
+                let a_mentions = a.buffer_type == "mentions";
+                let b_mentions = b.buffer_type == "mentions";
+                b_mentions.cmp(&a_mentions)
+                    .then_with(|| {
+                        let label_a = connections.iter().find(|c| c.id == a.connection_id)
+                            .map_or_else(|| a.connection_id.to_lowercase(), |c| c.label.to_lowercase());
+                        let label_b = connections.iter().find(|c| c.id == b.connection_id)
+                            .map_or_else(|| b.connection_id.to_lowercase(), |c| c.label.to_lowercase());
+                        label_a.cmp(&label_b)
+                    })
                     .then_with(|| buf_type_order(&a.buffer_type).cmp(&buf_type_order(&b.buffer_type)))
                     .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
             });
@@ -361,13 +367,14 @@ impl AppState {
 
 fn buf_type_order(t: &str) -> u8 {
     match t {
-        "server" => 0,
-        "channel" => 1,
-        "query" => 2,
-        "dcc_chat" => 3,
-        "special" => 4,
-        "shell" => 5,
-        _ => 6,
+        "mentions" => 0,
+        "server" => 1,
+        "channel" => 2,
+        "query" => 3,
+        "dcc_chat" => 4,
+        "special" => 5,
+        "shell" => 6,
+        _ => 7,
     }
 }
 

@@ -14,25 +14,9 @@ pub fn BufferList() -> impl IntoView {
                 let connections = state.connections.get();
                 let active_id = state.active_buffer.get();
                 let mut views: Vec<leptos::prelude::AnyView> = Vec::new();
-                let mut current_conn = String::new();
                 let mut num = 1u32;
 
                 for buf in &buffers {
-                    let is_mentions = buf.buffer_type == "mentions";
-
-                    // Network header when connection changes.
-                    // Skip header for mentions buffer (empty connection_id).
-                    if buf.connection_id != current_conn && !is_mentions {
-                        current_conn = buf.connection_id.clone();
-                        let label = connections
-                            .iter()
-                            .find(|c| c.id == buf.connection_id)
-                            .map_or_else(|| buf.connection_id.clone(), |c| c.label.clone());
-                        views.push(
-                            view! { <div class="network-header">{label}</div> }.into_any(),
-                        );
-                    }
-
                     let is_server = buf.buffer_type == "server";
                     let is_active = active_id.as_deref() == Some(buf.id.as_str());
                     let type_class = match buf.buffer_type.as_str() {
@@ -70,37 +54,27 @@ pub fn BufferList() -> impl IntoView {
                         });
                     };
 
-                    if is_mentions {
-                        views.push(
-                            view! {
-                                <div class=class on:click=on_click>
-                                    <span class="name mentions-name">{name}</span>
-                                </div>
-                            }
-                            .into_any(),
-                        );
-                    } else if is_server {
-                        views.push(
-                            view! {
-                                <div class=class on:click=on_click>
-                                    <span class="name status-name">"(status)"</span>
-                                </div>
-                            }
-                            .into_any(),
-                        );
+                    // Server buffers display the connection label —
+                    // they serve as both the network grouping and status window.
+                    let display_name = if is_server {
+                        connections
+                            .iter()
+                            .find(|c| c.id == buf.connection_id)
+                            .map_or_else(|| name.clone(), |c| c.label.clone())
                     } else {
-                        views.push(
-                            view! {
-                                <div class=class on:click=on_click>
-                                    <span class="num">{current_num}"."</span>
-                                    " "
-                                    <span class="name">{name}</span>
-                                </div>
-                            }
-                            .into_any(),
-                        );
-                        num += 1;
-                    }
+                        name
+                    };
+                    views.push(
+                        view! {
+                            <div class=class on:click=on_click>
+                                <span class="num">{current_num}"."</span>
+                                " "
+                                <span class="name">{display_name}</span>
+                            </div>
+                        }
+                        .into_any(),
+                    );
+                    num += 1;
                 }
                 views
             }}

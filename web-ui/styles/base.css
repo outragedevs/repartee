@@ -69,16 +69,6 @@ html, body {
     padding: 1px 0;
 }
 
-.buffer-list .network-header {
-    padding: 0 6px;
-    color: var(--accent);
-    font-weight: bold;
-    line-height: 1.4;
-    margin-top: 2px;
-}
-
-.buffer-list .network-header:first-child { margin-top: 0; }
-
 .buffer-list .buffer-item {
     padding: 0 6px;
     line-height: 1.4;
@@ -95,7 +85,6 @@ html, body {
 .buffer-item .num { color: var(--fg-muted); }
 .buffer-item .name { color: var(--fg-dim); }
 .buffer-item.type-server .name { color: var(--fg-muted); }
-.buffer-item.type-server .status-name { font-style: italic; font-size: 11px; }
 .buffer-item.type-query .name { color: var(--cyan); }
 .buffer-item.type-dcc .name { color: var(--yellow); }
 .buffer-item.active .num { color: var(--yellow); }

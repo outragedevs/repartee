@@ -3,7 +3,6 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::{truncate_with_plus, visible_len};
 use crate::app::App;
-use crate::state::buffer::BufferType;
 use crate::theme::{hex_to_color, parse_format_string, resolve_abstractions};
 use crate::ui::styled_text::styled_spans_to_line;
 
@@ -28,7 +27,6 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, scroll_offset: usize) ->
     let panel_width = app.config.sidepanel.left.width as usize;
 
     let mut lines: Vec<Line> = Vec::new();
-    let mut last_conn_id: &str = "";
     let mut ref_num = 1u32;
 
     for id in &sorted_ids {
@@ -38,74 +36,6 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, scroll_offset: usize) ->
 
         // Skip default Status buffer
         if buf.connection_id == crate::app::App::DEFAULT_CONN_ID {
-            continue;
-        }
-
-        // Mentions buffer — render with activity colors but no number or connection header
-        if buf.buffer_type == BufferType::Mentions {
-            let is_active = active_id == Some(id.as_str());
-            let format_key = if is_active {
-                "item_selected".to_string()
-            } else {
-                format!("item_activity_{}", buf.activity as u8)
-            };
-            let format = sidepanel
-                .get(&format_key)
-                .or_else(|| sidepanel.get("item"))
-                .cloned()
-                .unwrap_or_else(|| "$0".to_string());
-            let resolved = resolve_abstractions(&format, abstracts, 0);
-
-            // Pass two params to match theme format: $0=placeholder, $1=name.
-            // Theme expects "$0. $1" where $0 is the buffer number — we use
-            // an empty string so only the name renders in the activity color.
-            let full_spans = parse_format_string(&resolved, &["", &buf.name]);
-            let total_visible = visible_len(&full_spans);
-            let name_chars = buf.name.chars().count();
-            let overhead = total_visible.saturating_sub(name_chars);
-            let max_name_len = panel_width.saturating_sub(1 + overhead);
-            let spans = if name_chars > max_name_len {
-                let display_name = truncate_with_plus(&buf.name, max_name_len);
-                parse_format_string(&resolved, &[&display_name])
-            } else {
-                full_spans
-            };
-            lines.push(styled_spans_to_line(&spans));
-            continue;
-        }
-
-        // Connection header — render when connection changes.
-        // Server-type buffers ARE the header (no separate numbered line).
-        if buf.connection_id != last_conn_id && !buf.connection_id.is_empty() {
-            last_conn_id = buf.connection_id.as_str();
-            let conn_label = app
-                .state
-                .connections
-                .get(&buf.connection_id)
-                .map_or(buf.connection_id.as_str(), |c| c.label.as_str());
-            let header_fmt = sidepanel
-                .get("header")
-                .cloned()
-                .unwrap_or_else(|| "$0".to_string());
-            let resolved = resolve_abstractions(&header_fmt, abstracts, 0);
-
-            // Single parse: use full label, then truncate if needed
-            let full_spans = parse_format_string(&resolved, &[conn_label]);
-            let total_visible = visible_len(&full_spans);
-            let label_chars = conn_label.chars().count();
-            let overhead = total_visible.saturating_sub(label_chars);
-            let max_label_len = panel_width.saturating_sub(1 + overhead);
-            let spans = if label_chars > max_label_len {
-                let display_label = truncate_with_plus(conn_label, max_label_len);
-                parse_format_string(&resolved, &[&display_label])
-            } else {
-                full_spans
-            };
-            lines.push(styled_spans_to_line(&spans));
-        }
-
-        // Server buffers don't get a numbered line — they're represented by the header
-        if buf.buffer_type == BufferType::Server {
             continue;
         }
 
@@ -123,16 +53,28 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, scroll_offset: usize) ->
             .unwrap_or_else(|| "$0. $1".to_string());
         let resolved = resolve_abstractions(&format, abstracts, 0);
 
+        // Server buffers display the connection label instead of the buffer name —
+        // they serve as both the visual network separator and the status window.
+        let display_name = if buf.buffer_type == crate::state::buffer::BufferType::Server {
+            app.state
+                .connections
+                .get(&buf.connection_id)
+                .map_or(buf.connection_id.as_str(), |c| c.label.as_str())
+                .to_string()
+        } else {
+            buf.name.clone()
+        };
+
         let num_str = ref_num.to_string();
-        let full_spans = parse_format_string(&resolved, &[&num_str, &buf.name]);
+        let full_spans = parse_format_string(&resolved, &[&num_str, &display_name]);
         let total_visible = visible_len(&full_spans);
-        let name_chars = buf.name.chars().count();
+        let name_chars = display_name.chars().count();
         let num_chars = num_str.chars().count();
         let overhead = total_visible.saturating_sub(name_chars + num_chars);
         let max_name_len = panel_width.saturating_sub(1 + overhead + num_chars);
         let spans = if name_chars > max_name_len {
-            let display_name = truncate_with_plus(&buf.name, max_name_len);
-            parse_format_string(&resolved, &[&num_str, &display_name])
+            let truncated = truncate_with_plus(&display_name, max_name_len);
+            parse_format_string(&resolved, &[&num_str, &truncated])
         } else {
             full_spans
         };
