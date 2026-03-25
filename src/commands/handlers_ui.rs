@@ -9,7 +9,7 @@ use crate::state::buffer::{ActivityLevel, Buffer, BufferType, make_buffer_id};
 
 pub(crate) fn cmd_quit(app: &mut App, args: &[String]) {
     if !args.is_empty() {
-        app.quit_message = Some(args[0].clone());
+        app.quit_message = Some(args.join(" "));
     }
     app.should_quit = true;
     // QUIT is sent once in the post-loop cleanup (App::run) to avoid

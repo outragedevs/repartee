@@ -151,6 +151,41 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
         Command::ERROR(message) => {
             handle_error(state, conn_id, message);
         }
+        // RPL_CREATIONTIME (329): channel creation timestamp.
+        // args = [our_nick, #channel, unix_timestamp]
+        Command::Raw(cmd, args) if cmd == "329" => {
+            if args.len() >= 3 {
+                let channel = &args[1];
+                let buffer_id = make_buffer_id(conn_id, channel);
+                if let Ok(ts) = args[2].parse::<i64>() {
+                    let created = chrono::DateTime::from_timestamp(ts, 0)
+                        .unwrap_or_else(Utc::now);
+                    let formatted = created
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string();
+                    let id = state.next_message_id();
+                    state.add_message(
+                        &buffer_id,
+                        Message {
+                            id,
+                            timestamp: Utc::now(),
+                            message_type: MessageType::Event,
+                            nick: None,
+                            nick_mode: None,
+                            text: format!("Channel {channel} created {formatted}"),
+                            highlight: false,
+                            event_key: Some("channel_created".to_string()),
+                            // $0=channel, $1=formatted date
+                            event_params: Some(vec![channel.to_string(), formatted]),
+                            log_msg_id: None,
+                            log_ref_id: None,
+                            tags: None,
+                        },
+                    );
+                }
+            }
+        }
         // WHOX response (354) comes as Command::Raw because the irc crate
         // doesn't recognize this non-standard numeric.
         Command::Raw(cmd, args) if cmd == "354" => {

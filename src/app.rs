@@ -1858,13 +1858,22 @@ impl App {
         // Kill all shell processes.
         self.shell_mgr.kill_all();
 
-        // Send QUIT to all connected servers (once — cmd_quit defers to here)
+        // Send QUIT to all connected servers (once — cmd_quit defers to here).
+        // The outgoing task flushes each message to TCP immediately after reading
+        // it from the channel (poll_flush in the Outgoing future). We yield to the
+        // runtime so it can poll those tasks, then abort them. The Pinger holds a
+        // Sender clone so the tasks won't exit on their own — abort is required.
         let default_quit = crate::constants::default_quit_message();
         let quit_msg = self.quit_message.as_deref().unwrap_or(&default_quit);
         for handle in self.irc_handles.values() {
             let _ = handle.sender.send_quit(quit_msg);
         }
-        // Abort outgoing message tasks to close sockets cleanly.
+        // Yield to let outgoing tasks flush the QUIT to TCP, then give the
+        // kernel time to actually push the data onto the wire.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         for handle in self.irc_handles.values_mut() {
             if let Some(oh) = handle.outgoing_handle.take() {
                 oh.abort();

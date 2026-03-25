@@ -175,10 +175,12 @@ fn spawn_connection(app: &mut App, conn_id: &str, server_config: &crate::config:
 
 pub(crate) fn cmd_disconnect(app: &mut App, args: &[String]) {
     let default_quit = crate::constants::default_quit_message();
+    let joined_args;
     let quit_msg = if args.is_empty() {
         default_quit.as_str()
     } else {
-        &args[0]
+        joined_args = args.join(" ");
+        joined_args.as_str()
     };
 
     let Some(conn_id) = app.active_conn_id().map(str::to_owned) else {
