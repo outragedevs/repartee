@@ -17,6 +17,9 @@ use crate::state::buffer::{
 };
 use crate::state::connection::ConnectionStatus;
 
+/// Maximum number of entries stored per list mode type (bans, excepts, etc.).
+const MAX_LIST_MODE_ENTRIES: usize = 500;
+
 /// Route an incoming IRC protocol message to the appropriate handler,
 /// mutating `AppState` as needed.
 #[expect(
@@ -2473,6 +2476,9 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
                         set_by: set_by.clone(),
                         set_at,
                     });
+                    if entries.len() > MAX_LIST_MODE_ENTRIES {
+                        entries.drain(..entries.len() - MAX_LIST_MODE_ENTRIES);
+                    }
                 }
 
                 // Display numbered entry

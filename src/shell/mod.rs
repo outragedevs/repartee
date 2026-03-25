@@ -8,6 +8,9 @@ use tokio::sync::mpsc;
 
 pub use types::ShellEvent;
 
+/// Maximum number of concurrent web shell sessions.
+const MAX_WEB_SESSIONS: usize = 10;
+
 /// A single shell session backed by a PTY and a vt100 terminal emulator.
 struct ShellSession {
     parser: vt100::Parser,
@@ -426,6 +429,11 @@ impl ShellManager {
         let id = format!("web-{web_session_id}");
         if self.web_sessions.contains_key(&id) {
             return Ok(id);
+        }
+        if self.web_sessions.len() >= MAX_WEB_SESSIONS {
+            return Err(format!(
+                "maximum web shell sessions ({MAX_WEB_SESSIONS}) reached"
+            ));
         }
 
         let pty_system = NativePtySystem::default();

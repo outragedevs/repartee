@@ -245,6 +245,16 @@ impl FloodState {
             return true;
         }
 
+        // Periodic cleanup of idle buffers (avoid unbounded growth).
+        if self.nick_times.len() > 200 {
+            let cutoff = now.checked_sub(NICK_WINDOW).unwrap_or(now);
+            self.nick_times.retain(|_, v| {
+                v.retain(|t| *t >= cutoff);
+                !v.is_empty()
+            });
+            self.nick_blocked_until.retain(|_, until| *until > now);
+        }
+
         false
     }
 

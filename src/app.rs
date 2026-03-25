@@ -24,6 +24,9 @@ use crate::ui::layout::UiRegions;
 
 use ratatui_image::picker::ProtocolType;
 
+/// Maximum number of lines queued from a multiline paste.
+const MAX_PASTE_LINES: usize = 1000;
+
 /// Detect the outer terminal program name and its image protocol capability.
 ///
 /// This always runs — not just as a fallback — so we know WHO we're talking
@@ -4735,6 +4738,15 @@ impl App {
         // Queue remaining lines
         for line in &non_empty[1..] {
             self.paste_queue.push_back((*line).to_string());
+        }
+
+        // Cap paste queue to avoid unbounded memory growth from huge pastes.
+        if self.paste_queue.len() > MAX_PASTE_LINES {
+            let dropped = self.paste_queue.len() - MAX_PASTE_LINES;
+            self.paste_queue.truncate(MAX_PASTE_LINES);
+            tracing::warn!(
+                "paste truncated to {MAX_PASTE_LINES} lines ({dropped} dropped)"
+            );
         }
     }
 
