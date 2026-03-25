@@ -85,7 +85,7 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppHandl
                     Some(Ok(axum::extract::ws::Message::Text(text))) => {
                         match serde_json::from_str::<WebCommand>(&text) {
                             Ok(cmd) => {
-                                let _ = state.web_cmd_tx.send((cmd, session_id.clone()));
+                                let _ = state.web_cmd_tx.try_send((cmd, session_id.clone()));
                             }
                             Err(e) => {
                                 tracing::debug!(session_id = %session_id, error = %e, "invalid web command");
@@ -113,7 +113,7 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppHandl
     }
 
     // Clean up web-specific shell PTY.
-    let _ = state.web_cmd_tx.send((
+    let _ = state.web_cmd_tx.try_send((
         crate::web::protocol::WebCommand::WebDisconnect,
         session_id.clone(),
     ));

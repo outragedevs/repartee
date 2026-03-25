@@ -233,7 +233,7 @@ pub enum DictEvent {
 pub fn spawn_fetch_manifest(
     client: reqwest::Client,
     dict_dir: PathBuf,
-    tx: mpsc::UnboundedSender<DictEvent>,
+    tx: mpsc::Sender<DictEvent>,
 ) {
     tokio::spawn(async move {
         let event = match fetch_manifest(&client).await {
@@ -257,7 +257,7 @@ pub fn spawn_fetch_manifest(
                 message: format!("Failed to fetch dictionary list: {e}"),
             },
         };
-        let _ = tx.send(event);
+        let _ = tx.send(event).await;
     });
 }
 
@@ -266,7 +266,7 @@ pub fn spawn_download_dict(
     lang: String,
     client: reqwest::Client,
     dict_dir: PathBuf,
-    tx: mpsc::UnboundedSender<DictEvent>,
+    tx: mpsc::Sender<DictEvent>,
 ) {
     tokio::spawn(async move {
         let base = crate::constants::DICTS_REPO_URL;
@@ -276,7 +276,7 @@ pub fn spawn_download_dict(
                 message: format!("Failed to download {lang}: {e}"),
             },
         };
-        let _ = tx.send(event);
+        let _ = tx.send(event).await;
     });
 }
 

@@ -140,7 +140,7 @@ fn accept_dcc_chat(app: &mut App, nick: &str, id: &str) {
         }
 
         // Create line sender channel and spawn listener task
-        let (line_tx, line_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (line_tx, line_rx) = tokio::sync::mpsc::channel(256);
         app.dcc.chat_senders.insert(id.to_string(), line_tx);
 
         let task_id = id.to_string();
@@ -167,7 +167,7 @@ fn accept_dcc_chat(app: &mut App, nick: &str, id: &str) {
             rec.state = crate::dcc::types::DccState::Connecting;
         }
 
-        let (line_tx, line_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (line_tx, line_rx) = tokio::sync::mpsc::channel(256);
         app.dcc.chat_senders.insert(id.to_string(), line_tx);
 
         let task_id = id.to_string();
@@ -307,7 +307,7 @@ fn initiate_dcc_chat(app: &mut App, nick: &str, passive: bool) {
         }
 
         // Create line sender channel and spawn listener task
-        let (line_tx, line_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (line_tx, line_rx) = tokio::sync::mpsc::channel(256);
         app.dcc.chat_senders.insert(id.clone(), line_tx);
 
         let event_tx = app.dcc.dcc_tx.clone();

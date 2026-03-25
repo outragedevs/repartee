@@ -33,13 +33,13 @@ pub struct ShellManager {
     sessions: HashMap<String, ShellSession>,
     /// Web-specific PTY sessions, keyed by web session UUID.
     web_sessions: HashMap<String, ShellSession>,
-    event_tx: mpsc::UnboundedSender<ShellEvent>,
+    event_tx: mpsc::Sender<ShellEvent>,
     next_id: u32,
 }
 
 impl ShellManager {
-    pub fn new() -> (Self, mpsc::UnboundedReceiver<ShellEvent>) {
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
+    pub fn new() -> (Self, mpsc::Receiver<ShellEvent>) {
+        let (event_tx, event_rx) = mpsc::channel(256);
         (
             Self {
                 sessions: HashMap::new(),
@@ -130,7 +130,7 @@ impl ShellManager {
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => {
-                        let _ = tx.send(ShellEvent::Exited {
+                        let _ = tx.blocking_send(ShellEvent::Exited {
                             id: reader_id,
                             status: None,
                         });
@@ -138,7 +138,7 @@ impl ShellManager {
                     }
                     Ok(n) => {
                         if tx
-                            .send(ShellEvent::Output {
+                            .blocking_send(ShellEvent::Output {
                                 id: std::sync::Arc::clone(&reader_id),
                                 bytes: buf[..n].to_vec(),
                             })
@@ -481,7 +481,7 @@ impl ShellManager {
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => {
-                        let _ = tx.send(ShellEvent::Exited {
+                        let _ = tx.blocking_send(ShellEvent::Exited {
                             id: reader_id,
                             status: None,
                         });
@@ -489,7 +489,7 @@ impl ShellManager {
                     }
                     Ok(n) => {
                         if tx
-                            .send(ShellEvent::Output {
+                            .blocking_send(ShellEvent::Output {
                                 id: std::sync::Arc::clone(&reader_id),
                                 bytes: buf[..n].to_vec(),
                             })

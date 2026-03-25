@@ -297,7 +297,9 @@ impl AppState {
             tags: tags_json,
         };
 
-        let _ = tx.send(row);
+        if let Err(e) = tx.try_send(row) {
+            tracing::warn!("log queue full, dropping message: {e}");
+        }
     }
 
     #[allow(dead_code, reason = "reserved for scripting API; used in tests")]
@@ -706,7 +708,7 @@ mod tests {
 
     #[test]
     fn maybe_log_sends_ref_id_with_empty_text() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         let mut state = make_test_state();
         state.log_tx = Some(tx);
 
@@ -806,7 +808,7 @@ mod tests {
 
     #[test]
     fn add_local_message_does_not_log_to_storage() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         let mut state = make_test_state();
         state.log_tx = Some(tx);
 
@@ -826,7 +828,7 @@ mod tests {
 
     #[test]
     fn add_message_does_log_to_storage() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         let mut state = make_test_state();
         state.log_tx = Some(tx);
 

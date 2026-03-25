@@ -180,7 +180,7 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
                             highlight: false,
                             event_key: Some("channel_created".to_string()),
                             // $0=channel, $1=formatted date
-                            event_params: Some(vec![channel.to_string(), formatted]),
+                            event_params: Some(vec![channel.clone(), formatted]),
                             log_msg_id: None,
                             log_ref_id: None,
                             tags: None,

@@ -49,9 +49,9 @@ pub struct DccManager {
     /// All active DCC records, keyed by their unique ID.
     pub records: HashMap<String, DccRecord>,
     /// Sender half — async tasks post [`DccEvent`]s through this.
-    pub dcc_tx: mpsc::UnboundedSender<DccEvent>,
+    pub dcc_tx: mpsc::Sender<DccEvent>,
     /// Per-session senders for outgoing chat lines (keyed by record ID).
-    pub chat_senders: HashMap<String, mpsc::UnboundedSender<String>>,
+    pub chat_senders: HashMap<String, mpsc::Sender<String>>,
 
     // ── Configuration ────────────────────────────────────────────────────────
     /// How long a pending/listening session waits before timing out (seconds).
@@ -72,8 +72,8 @@ impl DccManager {
     /// Create a new manager and the corresponding event receiver.
     ///
     /// The caller must poll the receiver inside the main `tokio::select!` loop.
-    pub fn new() -> (Self, mpsc::UnboundedReceiver<DccEvent>) {
-        let (dcc_tx, dcc_rx) = mpsc::unbounded_channel();
+    pub fn new() -> (Self, mpsc::Receiver<DccEvent>) {
+        let (dcc_tx, dcc_rx) = mpsc::channel(256);
         let manager = Self {
             records: HashMap::new(),
             dcc_tx,
@@ -232,8 +232,8 @@ impl DccManager {
             .get(id)
             .ok_or_else(|| format!("no active DCC CHAT session for id {id:?}"))?;
         sender
-            .send(text.to_owned())
-            .map_err(|_| format!("DCC CHAT session {id:?} channel is closed"))
+            .try_send(text.to_owned())
+            .map_err(|e| format!("DCC CHAT session {id:?} send failed: {e}"))
     }
 
     /// Return `true` if this incoming offer should be auto-accepted.
@@ -385,7 +385,7 @@ mod tests {
             make_record("dave", "Dave", DccState::Connected),
         );
         // Simulate an active chat sender for the old ID.
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(256);
         mgr.chat_senders.insert("dave".to_owned(), tx);
 
         let tuples = mgr.update_nick("Dave", "Dave_");

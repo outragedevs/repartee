@@ -96,7 +96,7 @@ pub fn spawn_preview(
     config: &ImagePreviewConfig,
     picker: &Picker,
     http_client: &reqwest::Client,
-    tx: mpsc::UnboundedSender<ImagePreviewEvent>,
+    tx: mpsc::Sender<ImagePreviewEvent>,
     term_size: (u16, u16),
 ) {
     let config = config.clone();
@@ -151,7 +151,7 @@ pub fn spawn_preview(
             }
         };
 
-        if tx.send(event).is_err() {
+        if tx.send(event).await.is_err() {
             warn!("image preview channel closed before result could be sent");
         }
     });

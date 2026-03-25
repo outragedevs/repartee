@@ -293,7 +293,7 @@ pub async fn connect_server(
     conn_id: &str,
     server_config: &crate::config::ServerConfig,
     general: &crate::config::GeneralConfig,
-) -> Result<(IrcHandle, mpsc::UnboundedReceiver<IrcEvent>)> {
+) -> Result<(IrcHandle, mpsc::Receiver<IrcEvent>)> {
     let nick = server_config.nick.as_deref().unwrap_or(&general.nick);
     let username = server_config
         .username
@@ -373,7 +373,7 @@ pub async fn connect_server(
 
     let neg = negotiate_caps(&sender, &mut stream, &reg_params).await?;
 
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::channel(4096);
     let id = conn_id.to_string();
     let id2 = id.clone();
 
@@ -381,7 +381,7 @@ pub async fn connect_server(
     tokio::spawn(async move {
         // Send negotiation diagnostics immediately so they're visible even if
         // registration fails (e.g. server requires SASL but auth didn't complete).
-        let _ = tx.send(IrcEvent::NegotiationInfo(id.clone(), neg.diagnostics));
+        let _ = tx.send(IrcEvent::NegotiationInfo(id.clone(), neg.diagnostics)).await;
 
         let mut sent_connected = false;
         let mut error = None;
@@ -393,10 +393,11 @@ pub async fn connect_server(
             if !sent_connected && let Command::Response(Response::RPL_WELCOME, _) = &message.command
             {
                 sent_connected = true;
-                let _ = tx.send(IrcEvent::Connected(id.clone(), neg.enabled_caps.clone()));
+                let _ = tx.send(IrcEvent::Connected(id.clone(), neg.enabled_caps.clone())).await;
             }
             if tx
                 .send(IrcEvent::Message(id.clone(), Box::new(message)))
+                .await
                 .is_err()
             {
                 return;
@@ -411,10 +412,11 @@ pub async fn connect_server(
                         && let Command::Response(Response::RPL_WELCOME, _) = &message.command
                     {
                         sent_connected = true;
-                        let _ = tx.send(IrcEvent::Connected(id.clone(), neg.enabled_caps.clone()));
+                        let _ = tx.send(IrcEvent::Connected(id.clone(), neg.enabled_caps.clone())).await;
                     }
                     if tx
                         .send(IrcEvent::Message(id.clone(), Box::new(message)))
+                        .await
                         .is_err()
                     {
                         return;
@@ -427,7 +429,7 @@ pub async fn connect_server(
             }
         }
         // Stream ended — send disconnect with error if any
-        let _ = tx.send(IrcEvent::Disconnected(id, error));
+        let _ = tx.send(IrcEvent::Disconnected(id, error)).await;
     });
 
     Ok((

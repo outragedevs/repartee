@@ -21,28 +21,28 @@ pub async fn listen_for_chat(
     id: String,
     listener: TcpListener,
     timeout_dur: Duration,
-    event_tx: mpsc::UnboundedSender<DccEvent>,
-    line_rx: mpsc::UnboundedReceiver<String>,
+    event_tx: mpsc::Sender<DccEvent>,
+    line_rx: mpsc::Receiver<String>,
 ) {
     let accept_result = timeout(timeout_dur, listener.accept()).await;
 
     match accept_result {
         Ok(Ok((stream, _peer_addr))) => {
             // Notify: TCP handshake done.
-            let _ = event_tx.send(DccEvent::ChatConnected { id: id.clone() });
+            let _ = event_tx.send(DccEvent::ChatConnected { id: id.clone() }).await;
             run_chat_session(id, stream, event_tx, line_rx).await;
         }
         Ok(Err(e)) => {
             let _ = event_tx.send(DccEvent::ChatError {
                 id,
                 error: format!("DCC CHAT accept error: {e}"),
-            });
+            }).await;
         }
         Err(_elapsed) => {
             let _ = event_tx.send(DccEvent::ChatError {
                 id,
                 error: "DCC CHAT request timed out".to_owned(),
-            });
+            }).await;
         }
     }
 }
@@ -55,27 +55,27 @@ pub async fn connect_for_chat(
     id: String,
     addr: SocketAddr,
     timeout_dur: Duration,
-    event_tx: mpsc::UnboundedSender<DccEvent>,
-    line_rx: mpsc::UnboundedReceiver<String>,
+    event_tx: mpsc::Sender<DccEvent>,
+    line_rx: mpsc::Receiver<String>,
 ) {
     let connect_result = timeout(timeout_dur, TcpStream::connect(addr)).await;
 
     match connect_result {
         Ok(Ok(stream)) => {
-            let _ = event_tx.send(DccEvent::ChatConnected { id: id.clone() });
+            let _ = event_tx.send(DccEvent::ChatConnected { id: id.clone() }).await;
             run_chat_session(id, stream, event_tx, line_rx).await;
         }
         Ok(Err(e)) => {
             let _ = event_tx.send(DccEvent::ChatError {
                 id,
                 error: format!("DCC CHAT connect error: {e}"),
-            });
+            }).await;
         }
         Err(_elapsed) => {
             let _ = event_tx.send(DccEvent::ChatError {
                 id,
                 error: "DCC CHAT connect timed out".to_owned(),
-            });
+            }).await;
         }
     }
 }
@@ -91,8 +91,8 @@ pub async fn connect_for_chat(
 async fn run_chat_session(
     id: String,
     stream: TcpStream,
-    event_tx: mpsc::UnboundedSender<DccEvent>,
-    mut line_rx: mpsc::UnboundedReceiver<String>,
+    event_tx: mpsc::Sender<DccEvent>,
+    mut line_rx: mpsc::Receiver<String>,
 ) {
     // Split the stream so reader and writer can run concurrently.
     let (read_half, write_half) = stream.into_split();
@@ -112,7 +112,7 @@ async fn run_chat_session(
                     let _ = reader_tx.send(DccEvent::ChatClosed {
                         id: reader_id,
                         reason: None,
-                    });
+                    }).await;
                     break;
                 }
                 Ok(_) => {
@@ -133,19 +133,19 @@ async fn run_chat_session(
                         let _ = reader_tx.send(DccEvent::ChatAction {
                             id: reader_id.clone(),
                             text: action_text.to_owned(),
-                        });
+                        }).await;
                     } else {
                         let _ = reader_tx.send(DccEvent::ChatMessage {
                             id: reader_id.clone(),
                             text,
-                        });
+                        }).await;
                     }
                 }
                 Err(e) => {
                     let _ = reader_tx.send(DccEvent::ChatClosed {
                         id: reader_id,
                         reason: Some(format!("read error: {e}")),
-                    });
+                    }).await;
                     break;
                 }
             }
@@ -167,7 +167,7 @@ async fn run_chat_session(
                 let _ = writer_tx.send(DccEvent::ChatClosed {
                     id: writer_id,
                     reason: Some(format!("write error: {e}")),
-                });
+                }).await;
                 return;
             }
 
@@ -175,7 +175,7 @@ async fn run_chat_session(
                 let _ = writer_tx.send(DccEvent::ChatClosed {
                     id: writer_id,
                     reason: Some(format!("flush error: {e}")),
-                });
+                }).await;
                 return;
             }
         }
@@ -283,12 +283,12 @@ mod tests {
         let server_addr = server_listener.local_addr().expect("local_addr");
 
         // Channels for the client side (connect_for_chat).
-        let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<DccEvent>();
-        let (client_line_tx, client_line_rx) = mpsc::unbounded_channel::<String>();
+        let (client_event_tx, mut client_event_rx) = mpsc::channel::<DccEvent>(256);
+        let (client_line_tx, client_line_rx) = mpsc::channel::<String>(256);
 
         // Channels for the server side (run_chat_session on the accepted stream).
-        let (server_event_tx, mut server_event_rx) = mpsc::unbounded_channel::<DccEvent>();
-        let (server_line_tx, server_line_rx) = mpsc::unbounded_channel::<String>();
+        let (server_event_tx, mut server_event_rx) = mpsc::channel::<DccEvent>(256);
+        let (server_line_tx, server_line_rx) = mpsc::channel::<String>(256);
 
         // 2. Spawn connect_for_chat — connects to the server listener.
         tokio::spawn(connect_for_chat(
@@ -320,6 +320,7 @@ mod tests {
         // 5b. Server side: send a plain text line to the client.
         server_line_tx
             .send("hello from server".to_owned())
+            .await
             .expect("send plain");
 
         // Client should receive ChatMessage.
@@ -333,6 +334,7 @@ mod tests {
         // 6. Client side: send a CTCP ACTION to the server.
         client_line_tx
             .send("\x01ACTION waves\x01".to_owned())
+            .await
             .expect("send action");
 
         // Server should receive ChatAction.

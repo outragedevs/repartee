@@ -159,15 +159,15 @@ fn spawn_connection(app: &mut App, conn_id: &str, server_config: &crate::config:
                     handle.sender,
                     handle.local_ip,
                     handle.outgoing_handle,
-                ));
+                )).await;
                 while let Some(event) = rx.recv().await {
-                    if tx.send(event).is_err() {
+                    if tx.send(event).await.is_err() {
                         break;
                     }
                 }
             }
             Err(e) => {
-                let _ = tx.send(crate::irc::IrcEvent::Disconnected(id, Some(e.to_string())));
+                let _ = tx.send(crate::irc::IrcEvent::Disconnected(id, Some(e.to_string()))).await;
             }
         }
     });

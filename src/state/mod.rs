@@ -33,7 +33,7 @@ pub struct AppState {
     /// Ignore rules (from config).
     pub ignores: Vec<IgnoreEntry>,
     /// Sender for the storage writer. When `Some`, messages are logged to `SQLite`.
-    pub log_tx: Option<mpsc::UnboundedSender<LogRow>>,
+    pub log_tx: Option<mpsc::Sender<LogRow>>,
     /// Message types excluded from logging (e.g. "event" to skip quit/join/nick fan-out).
     pub log_exclude_types: Vec<String>,
     /// Maximum messages per buffer (FIFO eviction). 0 = unlimited.

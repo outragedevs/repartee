@@ -26,7 +26,7 @@ use crate::constants;
 #[allow(dead_code)]
 pub struct Storage {
     pub db: Arc<Mutex<Connection>>,
-    pub log_tx: mpsc::UnboundedSender<LogRow>,
+    pub log_tx: mpsc::Sender<LogRow>,
     writer: writer::LogWriterHandle,
     pub encrypt: bool,
 }

@@ -24,8 +24,8 @@ impl LogWriterHandle {
     pub fn spawn(
         db: Arc<Mutex<Connection>>,
         crypto_key: Option<Key<Aes256Gcm>>,
-    ) -> (Self, mpsc::UnboundedSender<LogRow>) {
-        let (row_tx, row_rx) = mpsc::unbounded_channel();
+    ) -> (Self, mpsc::Sender<LogRow>) {
+        let (row_tx, row_rx) = mpsc::channel(4096);
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let join = tokio::spawn(writer_loop(db, row_rx, shutdown_rx, crypto_key));
@@ -43,7 +43,7 @@ impl LogWriterHandle {
 
 async fn writer_loop(
     db: Arc<Mutex<Connection>>,
-    mut row_rx: mpsc::UnboundedReceiver<LogRow>,
+    mut row_rx: mpsc::Receiver<LogRow>,
     mut shutdown_rx: mpsc::Receiver<()>,
     crypto_key: Option<Key<Aes256Gcm>>,
 ) {
@@ -196,7 +196,7 @@ mod tests {
         let (handle, tx) = LogWriterHandle::spawn(Arc::clone(&db), None);
 
         for _ in 0..5 {
-            tx.send(make_row("hello")).unwrap();
+            tx.send(make_row("hello")).await.unwrap();
         }
 
         handle.shutdown().await;
@@ -211,7 +211,7 @@ mod tests {
         let (handle, tx) = LogWriterHandle::spawn(Arc::clone(&db), None);
 
         for _ in 0..BATCH_SIZE {
-            tx.send(make_row("batch")).unwrap();
+            tx.send(make_row("batch")).await.unwrap();
         }
 
         // Give the writer loop time to process the batch.
@@ -234,7 +234,7 @@ mod tests {
         let (handle, tx) = LogWriterHandle::spawn(Arc::clone(&db), None);
 
         let unique = "xyzzyplughmagicword";
-        tx.send(make_row(unique)).unwrap();
+        tx.send(make_row(unique)).await.unwrap();
 
         handle.shutdown().await;
 
@@ -260,7 +260,7 @@ mod tests {
         let (handle, tx) = LogWriterHandle::spawn(Arc::clone(&db), Some(key));
 
         let plaintext = "super secret message";
-        tx.send(make_row(plaintext)).unwrap();
+        tx.send(make_row(plaintext)).await.unwrap();
 
         handle.shutdown().await;
 

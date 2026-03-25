@@ -30,7 +30,7 @@ pub struct WebStateSnapshot {
 /// Shared state passed to all axum handlers.
 pub struct AppHandle {
     pub broadcaster: Arc<WebBroadcaster>,
-    pub web_cmd_tx: mpsc::UnboundedSender<(WebCommand, String)>,
+    pub web_cmd_tx: mpsc::Sender<(WebCommand, String)>,
     pub password: String,
     pub session_store: Arc<Mutex<SessionStore>>,
     pub rate_limiter: Arc<Mutex<RateLimiter>>,
@@ -229,7 +229,7 @@ mod tests {
     use super::*;
 
     fn make_test_handle() -> Arc<AppHandle> {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(256);
         Arc::new(AppHandle {
             broadcaster: Arc::new(WebBroadcaster::new(16)),
             web_cmd_tx: tx,

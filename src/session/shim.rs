@@ -55,7 +55,7 @@ pub async fn run_shim(target_pid: Option<u32>, show_splash: bool) -> Result<()> 
     protocol::write_message(&mut write_half, &term_env).await?;
 
     // Input channel: blocking reader + SIGWINCH → upstream messages.
-    let (input_tx, mut input_rx) = mpsc::unbounded_channel::<ShimMessage>();
+    let (input_tx, mut input_rx) = mpsc::channel::<ShimMessage>(1024);
     let input_stop = Arc::new(AtomicBool::new(false));
 
     spawn_input_reader(input_tx.clone(), Arc::clone(&input_stop));
@@ -65,13 +65,13 @@ pub async fn run_shim(target_pid: Option<u32>, show_splash: bool) -> Result<()> 
     // and forwards them through an mpsc channel. This avoids the cancellation-
     // safety bug where `select!` could cancel a `read_exact` mid-read on large
     // messages (e.g. Kitty image frames), desynchronizing the byte stream.
-    let (downstream_tx, mut downstream_rx) = mpsc::unbounded_channel::<MainMessage>();
+    let (downstream_tx, mut downstream_rx) = mpsc::channel::<MainMessage>(1024);
     tokio::spawn(async move {
         let mut reader = read_half;
         loop {
             match protocol::read_message::<_, MainMessage>(&mut reader).await {
                 Ok(msg) => {
-                    if downstream_tx.send(msg).is_err() {
+                    if downstream_tx.send(msg).await.is_err() {
                         break;
                     }
                 }
@@ -247,8 +247,8 @@ pub async fn run_splash(sock_path: Option<&std::path::Path>) -> Result<()> {
 /// Intercepts `Ctrl+\` and `Ctrl+Z` at the shim level, converting them to
 /// `ShimMessage::Detach` instead of forwarding the raw key event. This keeps
 /// detach as a protocol-level concept — the daemon never sees the keystroke.
-fn spawn_input_reader(tx: mpsc::UnboundedSender<ShimMessage>, stop: Arc<AtomicBool>) {
-    tokio::task::spawn_blocking(move || {
+fn spawn_input_reader(tx: mpsc::Sender<ShimMessage>, stop: Arc<AtomicBool>) {
+    std::thread::spawn(move || {
         while !stop.load(Ordering::Relaxed) {
             if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
                 match event::read() {
@@ -258,7 +258,7 @@ fn spawn_input_reader(tx: mpsc::UnboundedSender<ShimMessage>, stop: Arc<AtomicBo
                         } else {
                             ShimMessage::TermEvent(ev)
                         };
-                        if tx.send(msg).is_err() {
+                        if tx.blocking_send(msg).is_err() {
                             break;
                         }
                     }
@@ -283,7 +283,7 @@ const fn is_detach_key(ev: &crossterm::event::Event) -> bool {
 }
 
 /// Spawn a task that forwards SIGWINCH as Resize messages.
-fn spawn_sigwinch_handler(tx: mpsc::UnboundedSender<ShimMessage>) {
+fn spawn_sigwinch_handler(tx: mpsc::Sender<ShimMessage>) {
     tokio::spawn(async move {
         let Ok(mut sigwinch) =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
@@ -292,7 +292,7 @@ fn spawn_sigwinch_handler(tx: mpsc::UnboundedSender<ShimMessage>) {
         };
         while sigwinch.recv().await.is_some() {
             let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-            if tx.send(ShimMessage::Resize { cols, rows }).is_err() {
+            if tx.send(ShimMessage::Resize { cols, rows }).await.is_err() {
                 break;
             }
         }
@@ -305,9 +305,9 @@ fn spawn_sigwinch_handler(tx: mpsc::UnboundedSender<ShimMessage>) {
 /// The downstream reader task handles the actual socket read (with non-
 /// cancellation-safe `read_exact`) in its own dedicated task.
 async fn run_relay_loop<W>(
-    input_rx: &mut mpsc::UnboundedReceiver<ShimMessage>,
+    input_rx: &mut mpsc::Receiver<ShimMessage>,
     write_half: &mut W,
-    downstream_rx: &mut mpsc::UnboundedReceiver<MainMessage>,
+    downstream_rx: &mut mpsc::Receiver<MainMessage>,
 ) -> RelayExit
 where
     W: tokio::io::AsyncWriteExt + Unpin + Send,

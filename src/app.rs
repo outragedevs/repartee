@@ -361,9 +361,9 @@ pub struct App {
     /// Forwarder task handles keyed by connection ID — aborted on disconnect/shutdown.
     forwarder_handles: HashMap<String, tokio::task::JoinHandle<()>>,
     /// Shared event sender — each connection's reader task sends here.
-    pub irc_tx: mpsc::UnboundedSender<IrcEvent>,
+    pub irc_tx: mpsc::Sender<IrcEvent>,
     /// Single receiver for all IRC events.
-    irc_rx: mpsc::UnboundedReceiver<IrcEvent>,
+    irc_rx: mpsc::Receiver<IrcEvent>,
     /// Timestamp of last ESC keypress for ESC+key buffer switching.
     last_esc_time: Option<Instant>,
     /// Scroll offset for the buffer list (left sidebar).
@@ -393,9 +393,9 @@ pub struct App {
     /// full terminal clear. Consumed by the renderer on the next draw.
     pub image_clear_rect: Option<Rect>,
     /// Channel receiver for image preview results from background tasks.
-    preview_rx: mpsc::UnboundedReceiver<crate::image_preview::ImagePreviewEvent>,
+    preview_rx: mpsc::Receiver<crate::image_preview::ImagePreviewEvent>,
     /// Channel sender cloned into each preview task.
-    preview_tx: mpsc::UnboundedSender<crate::image_preview::ImagePreviewEvent>,
+    preview_tx: mpsc::Sender<crate::image_preview::ImagePreviewEvent>,
     /// Shared HTTP client for image fetching.
     pub http_client: reqwest::Client,
     /// Terminal image protocol picker (for ratatui-image).
@@ -432,7 +432,7 @@ pub struct App {
     /// Shared snapshot of app state for script callbacks.
     pub script_state: Arc<std::sync::RwLock<crate::scripting::engine::ScriptStateSnapshot>>,
     /// Receiver for actions requested by script callbacks.
-    script_action_rx: mpsc::UnboundedReceiver<crate::scripting::ScriptAction>,
+    script_action_rx: mpsc::Receiver<crate::scripting::ScriptAction>,
     /// Script-registered command names (tracked so we can show them in /help).
     pub script_commands: HashMap<String, (String, String)>,
     /// Per-script config storage: (`script_name`, key) → value.
@@ -441,7 +441,7 @@ pub struct App {
     active_timers: HashMap<u64, tokio::task::JoinHandle<()>>,
     /// Sender for script actions — cloned into timer tasks so they can send
     /// `TimerFired` back to the event loop.
-    script_action_tx: mpsc::UnboundedSender<crate::scripting::ScriptAction>,
+    script_action_tx: mpsc::Sender<crate::scripting::ScriptAction>,
     /// Cached wrap-indent width (columns) for chat continuation lines.
     /// Recomputed when config or theme changes.
     pub wrap_indent: usize,
@@ -458,16 +458,16 @@ pub struct App {
     socket_listener: Option<tokio::net::UnixListener>,
     /// Sender for output/control messages to the connected shim.
     socket_output_tx:
-        Option<tokio::sync::mpsc::UnboundedSender<crate::session::protocol::MainMessage>>,
+        Option<tokio::sync::mpsc::Sender<crate::session::protocol::MainMessage>>,
     /// Receiver for messages from a connected shim.
     shim_event_rx:
-        Option<tokio::sync::mpsc::UnboundedReceiver<crate::session::protocol::ShimMessage>>,
+        Option<tokio::sync::mpsc::Receiver<crate::session::protocol::ShimMessage>>,
     /// True when terminal is socket-backed (vs local stdout).
     pub is_socket_attached: bool,
     /// Stop flag for the terminal reader thread.
     term_reader_stop: Arc<AtomicBool>,
     /// Receiver for terminal events from the blocking reader thread.
-    term_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crossterm::event::Event>>,
+    term_rx: Option<tokio::sync::mpsc::Receiver<crossterm::event::Event>>,
     /// Handle for the shim output writer task (so we can abort on disconnect).
     shim_output_handle: Option<tokio::task::JoinHandle<()>>,
     /// Handle for the shim input reader task.
@@ -482,11 +482,11 @@ pub struct App {
     /// DCC connection manager (owns all DCC records, senders, config).
     pub dcc: crate::dcc::DccManager,
     /// Receiver for events from DCC async tasks.
-    dcc_rx: mpsc::UnboundedReceiver<crate::dcc::DccEvent>,
+    dcc_rx: mpsc::Receiver<crate::dcc::DccEvent>,
     /// Embedded shell terminal manager (PTY sessions).
     pub shell_mgr: crate::shell::ShellManager,
     /// Receiver for events from shell PTY reader threads.
-    shell_rx: mpsc::UnboundedReceiver<crate::shell::ShellEvent>,
+    shell_rx: mpsc::Receiver<crate::shell::ShellEvent>,
     /// Whether keyboard input is routed to the active shell PTY.
     pub shell_input_active: bool,
     /// Last time a shell screen was broadcast to web clients (for throttling).
@@ -496,16 +496,16 @@ pub struct App {
     /// Spell checker (loaded from Hunspell dictionaries).
     pub spellchecker: Option<crate::spellcheck::SpellChecker>,
     /// Receiver for dictionary download events (list/get results).
-    dict_rx: mpsc::UnboundedReceiver<crate::spellcheck::DictEvent>,
+    dict_rx: mpsc::Receiver<crate::spellcheck::DictEvent>,
     /// Sender cloned into dictionary download tasks.
-    pub dict_tx: mpsc::UnboundedSender<crate::spellcheck::DictEvent>,
+    pub dict_tx: mpsc::Sender<crate::spellcheck::DictEvent>,
     // --- Web frontend ---
     /// Event broadcaster for connected web clients.
     pub web_broadcaster: std::sync::Arc<crate::web::broadcast::WebBroadcaster>,
     /// Receiver for commands from web clients (processed in the main event loop).
-    web_cmd_rx: mpsc::UnboundedReceiver<(crate::web::protocol::WebCommand, String)>,
+    web_cmd_rx: mpsc::Receiver<(crate::web::protocol::WebCommand, String)>,
     /// Sender side — cloned into the web server's `AppHandle`.
-    web_cmd_tx: mpsc::UnboundedSender<(crate::web::protocol::WebCommand, String)>,
+    web_cmd_tx: mpsc::Sender<(crate::web::protocol::WebCommand, String)>,
     /// Handle for the web server task (if running).
     /// Held to keep the spawned server task alive — dropped with App.
     web_server_handle: Option<tokio::task::JoinHandle<()>>,
@@ -539,7 +539,7 @@ impl App {
         state.scrollback_limit = config.display.scrollback_lines;
         state.nick_color_sat = config.display.nick_color_saturation;
         state.nick_color_lit = config.display.nick_color_lightness;
-        let (irc_tx, irc_rx) = mpsc::unbounded_channel();
+        let (irc_tx, irc_rx) = mpsc::channel(4096);
 
         // Initialize storage if logging is enabled
         let storage = if config.logging.enabled {
@@ -560,7 +560,7 @@ impl App {
             None
         };
 
-        let (preview_tx, preview_rx) = mpsc::unbounded_channel();
+        let (preview_tx, preview_rx) = mpsc::channel(64);
 
         // Detect terminal image protocol capabilities.
         // Must be called before entering raw mode (setup_terminal).
@@ -611,10 +611,10 @@ impl App {
         let http_client = reqwest::Client::new();
 
         // --- Dictionary download channel ---
-        let (dict_tx, dict_rx) = mpsc::unbounded_channel();
+        let (dict_tx, dict_rx) = mpsc::channel(64);
 
         // --- Web frontend channel ---
-        let (web_tx, web_rx) = mpsc::unbounded_channel();
+        let (web_tx, web_rx) = mpsc::channel(256);
 
         // --- DCC subsystem ---
         let (mut dcc, dcc_rx) = crate::dcc::DccManager::new();
@@ -631,7 +631,7 @@ impl App {
         let (shell_mgr, shell_rx) = crate::shell::ShellManager::new();
 
         // --- Scripting system ---
-        let (script_action_tx, script_action_rx) = mpsc::unbounded_channel();
+        let (script_action_tx, script_action_rx) = mpsc::channel(1024);
         let script_state = Arc::new(std::sync::RwLock::new(state.script_snapshot()));
         let next_timer_id = Arc::new(std::sync::atomic::AtomicU64::new(1));
         let script_api = Self::build_script_api(
@@ -1184,7 +1184,7 @@ impl App {
                 // Spawn task to forward events from per-connection receiver to shared channel
                 let fwd_handle = tokio::spawn(async move {
                     while let Some(event) = rx.recv().await {
-                        if tx.send(event).is_err() {
+                        if tx.send(event).await.is_err() {
                             break;
                         }
                     }
@@ -1269,15 +1269,15 @@ impl App {
 
     /// Spawn the blocking terminal event reader thread for local terminal mode.
     fn start_term_reader(&mut self) {
-        let (term_tx, term_rx) = mpsc::unbounded_channel();
+        let (term_tx, term_rx) = mpsc::channel(4096);
         let stop = Arc::clone(&self.term_reader_stop);
         self.term_reader_stop.store(false, Ordering::Relaxed);
-        tokio::task::spawn_blocking(move || {
+        std::thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
                 if event::poll(std::time::Duration::from_millis(100)).unwrap_or(false) {
                     match event::read() {
                         Ok(ev) => {
-                            if term_tx.send(ev).is_err() {
+                            if term_tx.blocking_send(ev).is_err() {
                                 break;
                             }
                         }
@@ -1360,7 +1360,7 @@ impl App {
         // Set up output channel: SocketWriter → mpsc → write_half.
         // Both normal output (from terminal.draw()) and control messages
         // (Detached, Quit) flow through this single typed channel.
-        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<MainMessage>();
+        let (output_tx, mut output_rx) = mpsc::channel::<MainMessage>(1024);
         let output_handle = tokio::spawn(async move {
             let mut write_half = write_half;
             while let Some(msg) = output_rx.recv().await {
@@ -1380,13 +1380,13 @@ impl App {
         let terminal = ui::setup_socket_terminal(Box::new(socket_writer), cols, rows)?;
 
         // Set up input reader: read ShimMessages from socket → mpsc.
-        let (shim_tx, shim_rx) = mpsc::unbounded_channel::<ShimMessage>();
+        let (shim_tx, shim_rx) = mpsc::channel::<ShimMessage>(1024);
         let input_handle = tokio::spawn(async move {
             let mut reader = read_half;
             loop {
                 match protocol::read_message::<_, ShimMessage>(&mut reader).await {
                     Ok(msg) => {
-                        if shim_tx.send(msg).is_err() {
+                        if shim_tx.send(msg).await.is_err() {
                             tracing::debug!("shim input channel closed");
                             break;
                         }
@@ -1462,8 +1462,10 @@ impl App {
 
     /// Send a control `MainMessage` through the shim output channel.
     fn send_shim_control(&self, msg: crate::session::protocol::MainMessage) {
-        if let Some(ref tx) = self.socket_output_tx {
-            let _ = tx.send(msg);
+        if let Some(ref tx) = self.socket_output_tx
+            && let Err(e) = tx.try_send(msg)
+        {
+            tracing::warn!("shim control channel full or closed: {e}");
         }
     }
 
@@ -3522,15 +3524,15 @@ impl App {
                             handle.sender,
                             handle.local_ip,
                             handle.outgoing_handle,
-                        ));
+                        )).await;
                         while let Some(event) = rx.recv().await {
-                            if tx.send(event).is_err() {
+                            if tx.send(event).await.is_err() {
                                 break;
                             }
                         }
                     }
                     Err(e) => {
-                        let _ = tx.send(IrcEvent::Disconnected(id, Some(e.to_string())));
+                        let _ = tx.send(IrcEvent::Disconnected(id, Some(e.to_string()))).await;
                     }
                 }
             });
@@ -4262,7 +4264,7 @@ impl App {
                                         rec.state = crate::dcc::types::DccState::Connecting;
                                     }
 
-                                    let (line_tx, line_rx) = tokio::sync::mpsc::unbounded_channel();
+                                    let (line_tx, line_rx) = tokio::sync::mpsc::channel(256);
                                     self.dcc.chat_senders.insert(id.clone(), line_tx);
 
                                     let task_id = id.clone();
@@ -5322,7 +5324,7 @@ impl App {
         clippy::needless_pass_by_value
     )]
     fn build_script_api(
-        tx: mpsc::UnboundedSender<crate::scripting::ScriptAction>,
+        tx: mpsc::Sender<crate::scripting::ScriptAction>,
         snapshot: Arc<std::sync::RwLock<crate::scripting::engine::ScriptStateSnapshot>>,
         timer_id_counter: Arc<std::sync::atomic::AtomicU64>,
     ) -> crate::scripting::engine::ScriptAPI {
@@ -5331,7 +5333,7 @@ impl App {
         let t = tx.clone();
         let say: Arc<dyn Fn((String, String, Option<String>)) + Send + Sync> =
             Arc::new(move |(target, text, conn_id)| {
-                let _ = t.send(ScriptAction::Say {
+                let _ = t.try_send(ScriptAction::Say {
                     target,
                     text,
                     conn_id,
@@ -5341,7 +5343,7 @@ impl App {
         let t = tx.clone();
         let action: Arc<dyn Fn((String, String, Option<String>)) + Send + Sync> =
             Arc::new(move |(target, text, conn_id)| {
-                let _ = t.send(ScriptAction::Action {
+                let _ = t.try_send(ScriptAction::Action {
                     target,
                     text,
                     conn_id,
@@ -5351,7 +5353,7 @@ impl App {
         let t = tx.clone();
         let notice: Arc<dyn Fn((String, String, Option<String>)) + Send + Sync> =
             Arc::new(move |(target, text, conn_id)| {
-                let _ = t.send(ScriptAction::Notice {
+                let _ = t.try_send(ScriptAction::Notice {
                     target,
                     text,
                     conn_id,
@@ -5361,13 +5363,13 @@ impl App {
         let t = tx.clone();
         let raw: Arc<dyn Fn((String, Option<String>)) + Send + Sync> =
             Arc::new(move |(line, conn_id)| {
-                let _ = t.send(ScriptAction::Raw { line, conn_id });
+                let _ = t.try_send(ScriptAction::Raw { line, conn_id });
             });
 
         let t = tx.clone();
         let join: Arc<dyn Fn((String, Option<String>, Option<String>)) + Send + Sync> =
             Arc::new(move |(channel, key, conn_id)| {
-                let _ = t.send(ScriptAction::Join {
+                let _ = t.try_send(ScriptAction::Join {
                     channel,
                     key,
                     conn_id,
@@ -5377,7 +5379,7 @@ impl App {
         let t = tx.clone();
         let part: Arc<dyn Fn((String, Option<String>, Option<String>)) + Send + Sync> =
             Arc::new(move |(channel, msg, conn_id)| {
-                let _ = t.send(ScriptAction::Part {
+                let _ = t.try_send(ScriptAction::Part {
                     channel,
                     msg,
                     conn_id,
@@ -5387,19 +5389,19 @@ impl App {
         let t = tx.clone();
         let change_nick: Arc<dyn Fn((String, Option<String>)) + Send + Sync> =
             Arc::new(move |(nick, conn_id)| {
-                let _ = t.send(ScriptAction::ChangeNick { nick, conn_id });
+                let _ = t.try_send(ScriptAction::ChangeNick { nick, conn_id });
             });
 
         let t = tx.clone();
         let whois: Arc<dyn Fn((String, Option<String>)) + Send + Sync> =
             Arc::new(move |(nick, conn_id)| {
-                let _ = t.send(ScriptAction::Whois { nick, conn_id });
+                let _ = t.try_send(ScriptAction::Whois { nick, conn_id });
             });
 
         let t = tx.clone();
         let mode: Arc<dyn Fn((String, String, Option<String>)) + Send + Sync> =
             Arc::new(move |(channel, mode_string, conn_id)| {
-                let _ = t.send(ScriptAction::Mode {
+                let _ = t.try_send(ScriptAction::Mode {
                     channel,
                     mode_string,
                     conn_id,
@@ -5409,7 +5411,7 @@ impl App {
         let t = tx.clone();
         let kick: Arc<dyn Fn((String, String, Option<String>, Option<String>)) + Send + Sync> =
             Arc::new(move |(channel, nick, reason, conn_id)| {
-                let _ = t.send(ScriptAction::Kick {
+                let _ = t.try_send(ScriptAction::Kick {
                     channel,
                     nick,
                     reason,
@@ -5420,7 +5422,7 @@ impl App {
         let t = tx.clone();
         let ctcp: Arc<dyn Fn((String, String, Option<String>, Option<String>)) + Send + Sync> =
             Arc::new(move |(target, ctcp_type, message, conn_id)| {
-                let _ = t.send(ScriptAction::Ctcp {
+                let _ = t.try_send(ScriptAction::Ctcp {
                     target,
                     ctcp_type,
                     message,
@@ -5430,29 +5432,29 @@ impl App {
 
         let t = tx.clone();
         let add_local_event: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |text| {
-            let _ = t.send(ScriptAction::LocalEvent { text });
+            let _ = t.try_send(ScriptAction::LocalEvent { text });
         });
 
         let t = tx.clone();
         let add_buffer_event: Arc<dyn Fn((String, String)) + Send + Sync> =
             Arc::new(move |(buffer_id, text)| {
-                let _ = t.send(ScriptAction::BufferEvent { buffer_id, text });
+                let _ = t.try_send(ScriptAction::BufferEvent { buffer_id, text });
             });
 
         let t = tx.clone();
         let switch_buffer: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |buffer_id| {
-            let _ = t.send(ScriptAction::SwitchBuffer { buffer_id });
+            let _ = t.try_send(ScriptAction::SwitchBuffer { buffer_id });
         });
 
         let t = tx.clone();
         let execute_command: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |line| {
-            let _ = t.send(ScriptAction::ExecuteCommand { line });
+            let _ = t.try_send(ScriptAction::ExecuteCommand { line });
         });
 
         let t = tx.clone();
         let register_command: Arc<dyn Fn((String, String, String)) + Send + Sync> =
             Arc::new(move |(name, description, usage)| {
-                let _ = t.send(ScriptAction::RegisterCommand {
+                let _ = t.try_send(ScriptAction::RegisterCommand {
                     name,
                     description,
                     usage,
@@ -5461,13 +5463,13 @@ impl App {
 
         let t = tx.clone();
         let unregister_command: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |name| {
-            let _ = t.send(ScriptAction::UnregisterCommand { name });
+            let _ = t.try_send(ScriptAction::UnregisterCommand { name });
         });
 
         let t = tx.clone();
         let log: Arc<dyn Fn((String, String)) + Send + Sync> =
             Arc::new(move |(script, message)| {
-                let _ = t.send(ScriptAction::Log { script, message });
+                let _ = t.try_send(ScriptAction::Log { script, message });
             });
 
         // Read-only state queries: read from the shared snapshot.
@@ -5541,7 +5543,7 @@ impl App {
         let counter = Arc::clone(&timer_id_counter);
         let start_timer: Arc<dyn Fn(u64) -> u64 + Send + Sync> = Arc::new(move |interval_ms| {
             let id = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let _ = t.send(ScriptAction::StartTimer { id, interval_ms });
+            let _ = t.try_send(ScriptAction::StartTimer { id, interval_ms });
             id
         });
 
@@ -5549,13 +5551,13 @@ impl App {
         let counter = Arc::clone(&timer_id_counter);
         let start_timeout: Arc<dyn Fn(u64) -> u64 + Send + Sync> = Arc::new(move |delay_ms| {
             let id = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let _ = t.send(ScriptAction::StartTimeout { id, delay_ms });
+            let _ = t.try_send(ScriptAction::StartTimeout { id, delay_ms });
             id
         });
 
         let t = tx.clone();
         let cancel_timer: Arc<dyn Fn(u64) + Send + Sync> = Arc::new(move |id| {
-            let _ = t.send(ScriptAction::CancelTimer { id });
+            let _ = t.try_send(ScriptAction::CancelTimer { id });
         });
 
         // Config: per-script get/set reads from snapshot, set sends ScriptAction.
@@ -5566,7 +5568,7 @@ impl App {
             });
         let config_set: Arc<dyn Fn((String, String, String)) + Send + Sync> =
             Arc::new(move |(script, key, value)| {
-                let _ = tx.send(ScriptAction::SetScriptConfig { script, key, value });
+                let _ = tx.try_send(ScriptAction::SetScriptConfig { script, key, value });
             });
         let snap = Arc::clone(&snapshot);
         let app_config_get: Arc<dyn Fn(String) -> Option<String> + Send + Sync> =
@@ -5824,6 +5826,7 @@ impl App {
                         interval.tick().await;
                         if tx
                             .send(crate::scripting::ScriptAction::TimerFired { id })
+                            .await
                             .is_err()
                         {
                             break;
@@ -5836,7 +5839,7 @@ impl App {
                 let tx = self.script_action_tx.clone();
                 let handle = tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    let _ = tx.send(crate::scripting::ScriptAction::TimerFired { id });
+                    let _ = tx.send(crate::scripting::ScriptAction::TimerFired { id }).await;
                 });
                 self.active_timers.insert(id, handle);
             }
