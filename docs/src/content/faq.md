@@ -101,4 +101,4 @@ The shell also works in the **web frontend** — each web session gets its own i
 
 ## How do I report bugs?
 
-Open an issue on the [GitHub repository](https://github.com/outragedevs/repartee/issues).
+Open an issue on [GitHub](https://github.com/outragedevs/repartee/issues) or visit [repart.ee](https://repart.ee/).

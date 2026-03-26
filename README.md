@@ -7,7 +7,7 @@ Inspired by irssi. Designed for the future.
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://www.rust-lang.org)
 [![Crates.io](https://img.shields.io/crates/v/repartee.svg)](https://crates.io/crates/repartee)
-[![GitHub Pages](https://img.shields.io/badge/docs-online-brightgreen.svg)](https://outragedevs.github.io/repartee/)
+[![Website](https://img.shields.io/badge/web-repart.ee-brightgreen.svg)](https://repart.ee/)
 
 ---
 

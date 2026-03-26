@@ -84,7 +84,10 @@ html, body {
 
 .buffer-item .num { color: var(--fg-muted); }
 .buffer-item .name { color: var(--fg-dim); }
-.buffer-item.type-server .name { color: var(--fg-muted); }
+.buffer-item.type-server { margin-top: 4px; border-top: 1px solid var(--border); padding-top: 2px; }
+.buffer-item.type-server:first-child { margin-top: 0; border-top: none; padding-top: 0; }
+.buffer-item.type-server .num { color: var(--accent); }
+.buffer-item.type-server .name { color: var(--accent); font-weight: bold; }
 .buffer-item.type-query .name { color: var(--cyan); }
 .buffer-item.type-dcc .name { color: var(--yellow); }
 .buffer-item.active .num { color: var(--yellow); }

@@ -1,6 +1,6 @@
 pub const APP_NAME: &str = "repartee";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const APP_URL: &str = "https://github.com/outragedevs/repartee";
+pub const APP_URL: &str = "https://repart.ee/";
 
 /// Base URL for the dictionary repository (raw GitHub content).
 pub const DICTS_REPO_URL: &str =
@@ -10,7 +10,7 @@ pub const DICTS_REPO_URL: &str =
 pub const DICTS_MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/outragedevs/repartee-dicts/main/manifest.json";
 
-/// Default quit/part message: "repartee 0.1.2 — <https://github.com/outragedevs/repartee>"
+/// Default quit/part message: "repartee 0.7.4 — <https://repart.ee/>"
 pub fn default_quit_message() -> String {
     format!("{APP_NAME} {APP_VERSION} — {APP_URL}")
 }

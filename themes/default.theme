@@ -50,6 +50,8 @@ item_activity_1 = "%Z565f89$0.%N %Z9ece6a$1%N"
 item_activity_2 = "%Z565f89$0.%N %Zf7768e$1%N"
 item_activity_3 = "%Z565f89$0.%N %Ze0af68$1%N"
 item_activity_4 = "%Z565f89$0.%N %Zbb9af7$1%N"
+item_server = "%Z7aa2f7$0. %_$1%_%N"
+item_server_selected = "%Ze0af68$0.%N %Zc0caf5%_$1%_%N"
 
 [formats.nicklist]
 owner = "%Ze0af68~%Zc0caf5$0%N"
