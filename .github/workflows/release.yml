@@ -38,11 +38,7 @@ jobs:
 
       - name: Install system dependencies (Linux)
         if: contains(matrix.runner, 'ubuntu')
-        run: |
-          ${{ matrix.deps }}
-          find / -name 'chafa.pc' 2>/dev/null || echo "chafa.pc NOT FOUND"
-          dpkg -L libchafa-dev | grep -i pc || true
-          pkg-config --libs --cflags chafa || echo "pkg-config cannot find chafa"
+        run: ${{ matrix.deps }}
 
       - name: Install system dependencies (macOS)
         if: contains(matrix.runner, 'macos')
@@ -51,8 +47,15 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-v2
+
       - name: Build release binary
-        run: cargo build --release --locked
+        run: |
+          pkg-config --modversion chafa 2>/dev/null || true
+          cargo build --release --locked
 
       - name: Strip binary
         run: strip target/release/repartee
