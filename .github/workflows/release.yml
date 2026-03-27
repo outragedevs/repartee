@@ -84,7 +84,7 @@ jobs:
           mem: 8192
           cpu: 4
           prepare: |
-            pkg install -y rust cargo chafa pkgconf
+            pkg install -y rust chafa pkgconf
           run: |
             cargo build --release --locked
             strip target/release/repartee
