@@ -27,12 +27,12 @@ jobs:
             runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             artifact: repartee-linux-amd64
-            deps: sudo apt-get update && sudo apt-get install -y libchafa-dev
+            deps: sudo apt-get update && sudo apt-get install -y libchafa-dev pkg-config
           - name: Linux ARM64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             artifact: repartee-linux-arm64
-            deps: sudo apt-get update && sudo apt-get install -y libchafa-dev
+            deps: sudo apt-get update && sudo apt-get install -y libchafa-dev pkg-config
     steps:
       - uses: actions/checkout@v6
 
