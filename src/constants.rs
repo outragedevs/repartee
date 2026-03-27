@@ -10,7 +10,7 @@ pub const DICTS_REPO_URL: &str =
 pub const DICTS_MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/outragedevs/repartee-dicts/main/manifest.json";
 
-/// Default quit/part message: "repartee 0.7.4 — <https://repart.ee/>"
+/// Default quit/part message: "repartee 0.8.0 — <https://repart.ee/>"
 pub fn default_quit_message() -> String {
     format!("{APP_NAME} {APP_VERSION} — {APP_URL}")
 }
