@@ -27,12 +27,22 @@ jobs:
             runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             artifact: repartee-linux-amd64
+            deps: sudo apt-get update && sudo apt-get install -y libchafa-dev
           - name: Linux ARM64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             artifact: repartee-linux-arm64
+            deps: sudo apt-get update && sudo apt-get install -y libchafa-dev
     steps:
       - uses: actions/checkout@v6
+
+      - name: Install system dependencies (Linux)
+        if: contains(matrix.runner, 'ubuntu')
+        run: ${{ matrix.deps }}
+
+      - name: Install system dependencies (macOS)
+        if: contains(matrix.runner, 'macos')
+        run: brew install chafa
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -74,7 +84,7 @@ jobs:
           mem: 8192
           cpu: 4
           prepare: |
-            pkg install -y rust cargo
+            pkg install -y rust cargo chafa pkgconf
           run: |
             cargo build --release --locked
             strip target/release/repartee
