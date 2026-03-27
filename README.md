@@ -40,11 +40,28 @@ Terminal, mobile web, and desktop web — all in real-time sync:
 - **Embedded shell** — full PTY terminal inside Repartee (`/shell`) — run vim, btop, irssi without leaving the client. Also available in the web frontend via beamterm WebGL2 renderer with Nerd Font, mouse selection, Ctrl+/- font resize, and clipboard paste
 - **Detach & reattach** — detach from your terminal and reattach later; IRC connections stay alive
 - **Extban** — `$a:account` ban type with `/ban -a` shorthand
-- **Single binary** — ~15MB, zero runtime dependencies (SQLite, Lua, and WASM frontend bundled)
+- **Single binary** — ~20MB (SQLite, Lua, and WASM frontend bundled). Runtime dependency: `libchafa` (image rendering)
 
 ---
 
 ## Installation
+
+### Pre-built binaries
+
+Download from [GitHub Releases](https://github.com/outragedevs/repartee/releases/latest):
+
+| Platform | Binary |
+|----------|--------|
+| macOS ARM64 | `repartee-macos-arm64.tar.gz` |
+| Linux x86_64 | `repartee-linux-amd64.tar.gz` |
+| Linux ARM64 | `repartee-linux-arm64.tar.gz` |
+| FreeBSD x86_64 | `repartee-freebsd-amd64.tar.gz` |
+
+### From crates.io
+
+```bash
+cargo install repartee
+```
 
 ### From source
 
@@ -57,7 +74,8 @@ cargo build --release
 
 ### Requirements
 
-- **Rust 1.85+** (2024 edition) — install via [rustup](https://rustup.rs)
+- **Runtime**: `libchafa` >= 1.8.0 (image rendering) — `brew install chafa` / `apt install libchafa-dev` / `pkg install chafa`
+- **Build**: Rust 1.85+ (2024 edition) — install via [rustup](https://rustup.rs)
 - A terminal with 256-color or truecolor support (iTerm2, Alacritty, kitty, WezTerm, Ghostty, Subterm, etc.)
 - A modern web browser for the web frontend (optional)
 
@@ -203,17 +221,17 @@ theme = "mytheme"
 
 ## Documentation
 
-Full documentation is available at **[outragedevs.github.io/repartee](https://outragedevs.github.io/repartee/)**.
+Full documentation is available at **[repart.ee](https://repart.ee/)**.
 
-- [Installation](https://outragedevs.github.io/repartee/installation.html)
-- [First Connection](https://outragedevs.github.io/repartee/first-connection.html)
-- [Configuration Reference](https://outragedevs.github.io/repartee/configuration.html)
-- [Command List](https://outragedevs.github.io/repartee/commands.html)
-- [Web Frontend](https://outragedevs.github.io/repartee/web-frontend.html)
-- [Sessions & Detach](https://outragedevs.github.io/repartee/sessions.html)
-- [Scripting API](https://outragedevs.github.io/repartee/scripting-api.html)
-- [Theming](https://outragedevs.github.io/repartee/theming.html)
-- [Logging & Search](https://outragedevs.github.io/repartee/logging.html)
+- [Installation](https://repart.ee/installation.html)
+- [First Connection](https://repart.ee/first-connection.html)
+- [Configuration Reference](https://repart.ee/configuration.html)
+- [Command List](https://repart.ee/commands.html)
+- [Web Frontend](https://repart.ee/web-frontend.html)
+- [Sessions & Detach](https://repart.ee/sessions.html)
+- [Scripting API](https://repart.ee/scripting-api.html)
+- [Theming](https://repart.ee/theming.html)
+- [Logging & Search](https://repart.ee/logging.html)
 
 ---
 
