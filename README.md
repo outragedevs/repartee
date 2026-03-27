@@ -221,17 +221,18 @@ theme = "mytheme"
 
 ## Documentation
 
-Full documentation is available at **[repart.ee](https://repart.ee/)**.
+Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
-- [Installation](https://repart.ee/installation.html)
-- [First Connection](https://repart.ee/first-connection.html)
-- [Configuration Reference](https://repart.ee/configuration.html)
-- [Command List](https://repart.ee/commands.html)
-- [Web Frontend](https://repart.ee/web-frontend.html)
-- [Sessions & Detach](https://repart.ee/sessions.html)
-- [Scripting API](https://repart.ee/scripting-api.html)
-- [Theming](https://repart.ee/theming.html)
-- [Logging & Search](https://repart.ee/logging.html)
+- [Installation](https://repart.ee/docs/installation)
+- [Quick Start](https://repart.ee/docs/quick-start)
+- [Configuration](https://repart.ee/docs/configuration)
+- [Themes](https://repart.ee/docs/configuration/themes)
+- [Commands](https://repart.ee/docs/reference/commands)
+- [Web Frontend](https://repart.ee/docs/features/web-frontend)
+- [Sessions & Detach](https://repart.ee/docs/features/sessions)
+- [Lua Scripting](https://repart.ee/docs/features/lua-scripting)
+- [Lua API Reference](https://repart.ee/docs/reference/lua-api)
+- [Logging & Search](https://repart.ee/docs/features/logging)
 
 ---
 
