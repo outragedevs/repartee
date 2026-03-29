@@ -33,6 +33,8 @@ line_start = "{timestamp $Z}{sb_background}"
 timestamp = "%Z565f89$*"
 own_msg = "{ownmsgnick $0}$1"
 pubmsg = "{pubmsgnick $0}$1"
+date_separator = "%Z3b4261─── $* ───"
+backlog_end = "%Z565f89─── End of backlog ($* lines) ───"
 ```
 
 ## Colors

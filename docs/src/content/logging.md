@@ -84,6 +84,8 @@ Backlog messages appear at the top of the buffer, followed by a separator:
 ─── End of backlog (20 lines) ───
 ```
 
+Date separator lines are automatically inserted between messages from different days for easier history reading. Day-changed markers also appear at midnight in all active chat buffers. Both the `date_separator` and `backlog_end` formats are customizable via the [theming system](theming.html).
+
 Backlog messages do not trigger highlights or notifications, and are not re-logged to the database (they already exist). This works for autoconnect channels, manual `/join`, queries opened via incoming messages, and DCC chat reconnections.
 
 ## Event retention
