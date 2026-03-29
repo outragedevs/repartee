@@ -75,13 +75,17 @@ pub fn ChatView() -> impl IntoView {
                         let is_event = msg.msg_type == "event";
                         let is_action = msg.msg_type == "action";
                         let is_notice = msg.msg_type == "notice";
+                        // Date/backlog separators: event lines starting with "───"
+                        let is_separator = is_event && msg.nick.is_none() && msg.text.starts_with('\u{2500}');
 
                         // Detect own message.
                         let is_own = nick_self.as_ref().is_some_and(|our| {
                             msg.nick.as_deref() == Some(our.as_str())
                         });
 
-                        let class = if is_mention_log {
+                        let class = if is_separator {
+                            "chat-line date-separator"
+                        } else if is_mention_log {
                             "chat-line mention-log"
                         } else if msg.highlight && msg.nick.is_some() {
                             if is_own { "chat-line mention own" } else { "chat-line mention" }
@@ -96,6 +100,15 @@ pub fn ChatView() -> impl IntoView {
                         };
 
                         let ts = format_timestamp(msg.timestamp, &ts_fmt);
+
+                        // Date/backlog separator: centered, no timestamp.
+                        if is_separator {
+                            return view! {
+                                <div class=class>
+                                    <span class="separator-text">{msg.text}</span>
+                                </div>
+                            }.into_any();
+                        }
 
                         if is_mention_log {
                             // Pre-formatted mention line — render text as-is, no timestamp/nick column.

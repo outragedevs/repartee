@@ -84,7 +84,10 @@ html, body {
 
 .buffer-item .num { color: var(--fg-muted); }
 .buffer-item .name { color: var(--fg-dim); }
-.buffer-item.type-server .name { color: var(--fg-muted); }
+.buffer-item.type-server { margin-top: 4px; border-top: 1px solid var(--border); padding-top: 2px; }
+.buffer-item.type-server:first-child { margin-top: 0; border-top: none; padding-top: 0; }
+.buffer-item.type-server .num { color: var(--accent); }
+.buffer-item.type-server .name { color: var(--accent); font-weight: bold; }
 .buffer-item.type-query .name { color: var(--cyan); }
 .buffer-item.type-dcc .name { color: var(--yellow); }
 .buffer-item.active .num { color: var(--yellow); }
@@ -155,6 +158,18 @@ html, body {
 /* Mention log: pre-formatted line (mentions buffer) — no timestamp/nick column */
 .chat-line.mention-log { background: var(--mention-bg); }
 .chat-line.mention-log .mention-log-text { color: var(--purple); }
+
+/* Date/backlog separator: centered, dimmed, no timestamp */
+.chat-line.date-separator {
+    justify-content: center;
+    color: var(--fg-dim);
+    padding: 4px 8px;
+    opacity: 0.7;
+}
+.chat-line.date-separator .separator-text {
+    text-align: center;
+    letter-spacing: 0.5px;
+}
 
 /* Events: no nick column — text follows timestamp inline */
 

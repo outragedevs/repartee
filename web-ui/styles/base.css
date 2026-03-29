@@ -159,6 +159,18 @@ html, body {
 .chat-line.mention-log { background: var(--mention-bg); }
 .chat-line.mention-log .mention-log-text { color: var(--purple); }
 
+/* Date/backlog separator: centered, dimmed, no timestamp */
+.chat-line.date-separator {
+    justify-content: center;
+    color: var(--fg-dim);
+    padding: 4px 8px;
+    opacity: 0.7;
+}
+.chat-line.date-separator .separator-text {
+    text-align: center;
+    letter-spacing: 0.5px;
+}
+
 /* Events: no nick column — text follows timestamp inline */
 
 .chat-line .join-arrow { color: var(--green); }

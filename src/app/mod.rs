@@ -433,6 +433,8 @@ pub struct App {
     pub(crate) web_rate_limiter: Option<std::sync::Arc<tokio::sync::Mutex<crate::web::auth::RateLimiter>>>,
     pub(crate) web_state_snapshot: Option<std::sync::Arc<std::sync::RwLock<crate::web::server::WebStateSnapshot>>>,
     pub web_restart_pending: bool,
+    /// Tracks the current local date for emitting "day changed" markers.
+    pub(crate) last_day: chrono::NaiveDate,
 }
 
 impl App {
@@ -634,7 +636,7 @@ impl App {
             spellchecker: None,
             dict_rx,
             dict_tx,
-            web_broadcaster: std::sync::Arc::new(crate::web::broadcast::WebBroadcaster::new(256)),
+            web_broadcaster: std::sync::Arc::new(crate::web::broadcast::WebBroadcaster::new(2048)),
             web_cmd_rx: web_rx,
             web_cmd_tx: web_tx,
             web_server_handle: None,
@@ -642,6 +644,7 @@ impl App {
             web_rate_limiter: None,
             web_state_snapshot: None,
             web_restart_pending: false,
+            last_day: chrono::Local::now().date_naive(),
         };
         app.recompute_wrap_indent();
 
@@ -1084,6 +1087,7 @@ impl App {
                     self.purge_expired_batches();
                     self.check_reconnects();
                     self.measure_lag();
+                    self.check_day_changed();
                     if self.script_manager.is_some() && !self.script_commands.is_empty() {
                         self.update_script_snapshot();
                     }

@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use chrono::Utc;
+use chrono::{Local, Utc};
 use tokio::time::Duration;
 
-use crate::state::buffer::{Message, MessageType};
+use crate::state::buffer::{BufferType, Message, MessageType};
 
 use super::App;
 
@@ -101,6 +101,51 @@ impl App {
             if buf.messages.len() < before {
                 buf.messages.shrink_to(buf.messages.len());
             }
+        }
+    }
+
+    /// Check if the local date has changed (midnight) and insert a
+    /// "Day changed" marker in all chat buffers — like irssi/weechat.
+    pub(crate) fn check_day_changed(&mut self) {
+        let today = Local::now().date_naive();
+        if today == self.last_day {
+            return;
+        }
+        self.last_day = today;
+
+        let separator_text = super::backlog::format_date_separator(today);
+        let buffer_ids: Vec<String> = self
+            .state
+            .buffers
+            .iter()
+            .filter(|(_, buf)| {
+                matches!(
+                    buf.buffer_type,
+                    BufferType::Channel | BufferType::Query | BufferType::DccChat | BufferType::Server
+                )
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        for buf_id in buffer_ids {
+            let id = self.state.next_message_id();
+            self.state.add_local_message(
+                &buf_id,
+                Message {
+                    id,
+                    timestamp: Utc::now(),
+                    message_type: MessageType::Event,
+                    nick: None,
+                    nick_mode: None,
+                    text: separator_text.clone(),
+                    highlight: false,
+                    event_key: Some("date_separator".to_string()),
+                    event_params: None,
+                    log_msg_id: None,
+                    log_ref_id: None,
+                    tags: None,
+                },
+            );
         }
     }
 

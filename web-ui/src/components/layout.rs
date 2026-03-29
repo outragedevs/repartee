@@ -16,10 +16,12 @@ pub fn Layout() -> impl IntoView {
     let (left_open, set_left_open) = signal(false);
     let (right_open, set_right_open) = signal(false);
 
-    // Auto-fetch messages and nick list whenever active buffer changes.
+    // Auto-fetch messages and nick list whenever active buffer changes
+    // or after a resync (lag recovery / reconnect bumps sync_version,
+    // which clears the message cache — so has_messages is false).
     Effect::new(move || {
+        let _sync = state.sync_version.get(); // subscribe to resync events
         if let Some(buf_id) = state.active_buffer.get() {
-            // Only fetch from DB if we don't already have messages for this buffer.
             let has_messages = state
                 .messages
                 .get_untracked()

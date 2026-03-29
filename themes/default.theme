@@ -40,6 +40,8 @@ mode = "%Z7aa2f7---%N %Za9b1d6$0%N sets mode %Ze0af68$1%N on {channel $2}"
 account = "%Z565f89---%N %Za9b1d6$0%N %Z565f89$1%N"
 chghost = "%Z565f89---%N %Za9b1d6$0%N %Z565f89changed host to $1@$2%N"
 channel_created = "%Z565f89---%N Channel {channel $0} created %Z565f89$1%N"
+date_separator = "%Z565f89$0%N"
+backlog_end = "%Z565f89$0%N"
 
 [formats.sidepanel]
 header = "%Z7aa2f7%_$0%_%N"

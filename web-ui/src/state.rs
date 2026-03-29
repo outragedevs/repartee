@@ -27,6 +27,9 @@ pub struct AppState {
     pub nick_color_lightness: RwSignal<f32>,
     /// Shell screen content for the active shell buffer.
     pub shell_screen: RwSignal<Option<crate::protocol::ShellScreenData>>,
+    /// Bumped on every SyncInit (initial connect or lag recovery) to force
+    /// the Layout Effect to re-fetch messages for the active buffer.
+    pub sync_version: RwSignal<u32>,
 }
 
 impl AppState {
@@ -57,6 +60,7 @@ impl AppState {
             nick_color_saturation: RwSignal::new(0.65),
             nick_color_lightness: RwSignal::new(0.65),
             shell_screen: RwSignal::new(None),
+            sync_version: RwSignal::new(0),
         }
     }
 
@@ -70,6 +74,11 @@ impl AppState {
                 active_buffer_id,
                 timestamp_format,
             } => {
+                // Clear cached messages and nick lists — forces re-fetch.
+                // This handles both initial connect and lag-recovery resync.
+                self.messages.set(HashMap::new());
+                self.nick_lists.set(HashMap::new());
+
                 self.buffers.set(buffers);
                 self.connections.set(connections);
                 self.mention_count.set(mention_count);
@@ -83,15 +92,21 @@ impl AppState {
                 self.sort_buffers();
 
                 // Sync to the TUI's active buffer.
+                // Clear first so the set always triggers the Layout Effect
+                // (even if the buffer ID is the same as before the resync).
+                self.active_buffer.set(None);
                 if let Some(ref id) = active_buffer_id {
                     self.active_buffer.set(Some(id.clone()));
-                } else if self.active_buffer.get_untracked().is_none() {
+                } else {
                     // Fallback: select first channel buffer.
                     let bufs = self.buffers.get_untracked();
                     if let Some(first) = bufs.iter().find(|b| b.buffer_type == "channel") {
                         self.active_buffer.set(Some(first.id.clone()));
                     }
                 }
+
+                // Bump sync_version to force Layout Effect re-fetch.
+                self.sync_version.update(|v| *v += 1);
             }
             WebEvent::NewMessage {
                 buffer_id,
@@ -185,8 +200,10 @@ impl AppState {
             } => {
                 self.messages.update(|msgs| {
                     let entry = msgs.entry(buffer_id).or_default();
+                    // Insert date separators between messages from different days.
+                    let with_separators = insert_date_separators(messages);
                     // Prepend older messages (they come from scroll-back).
-                    let mut combined = messages;
+                    let mut combined = with_separators;
                     combined.append(entry);
                     *entry = combined;
                 });
@@ -391,4 +408,45 @@ fn prefix_rank(prefix: &str) -> u8 {
     prefix.chars().next()
         .and_then(|c| ORDER.find(c))
         .map_or(ORDER.len() as u8, |i| i as u8)
+}
+
+/// Insert date separator lines between messages from different days.
+///
+/// Mirrors the TUI's `load_backlog` behavior — adds `─── Day, DD Mon YYYY ───`
+/// event lines at each date boundary in the message list.
+fn insert_date_separators(messages: Vec<WireMessage>) -> Vec<WireMessage> {
+    if messages.is_empty() {
+        return messages;
+    }
+
+    let mut result = Vec::with_capacity(messages.len() + 5);
+    let mut last_date: Option<chrono::NaiveDate> = None;
+
+    for msg in messages {
+        let local_date = chrono::DateTime::from_timestamp(msg.timestamp, 0)
+            .map(|dt| {
+                use chrono::TimeZone;
+                chrono::Local.from_utc_datetime(&dt.naive_utc()).date_naive()
+            });
+
+        if let Some(date) = local_date {
+            if last_date.is_some_and(|d| d != date) || last_date.is_none() {
+                let formatted = date.format("%a, %d %b %Y");
+                result.push(WireMessage {
+                    id: 0,
+                    timestamp: msg.timestamp,
+                    msg_type: "event".to_string(),
+                    nick: None,
+                    nick_mode: None,
+                    text: format!("\u{2500}\u{2500}\u{2500} {formatted} \u{2500}\u{2500}\u{2500}"),
+                    highlight: false,
+                });
+            }
+            last_date = Some(date);
+        }
+
+        result.push(msg);
+    }
+
+    result
 }

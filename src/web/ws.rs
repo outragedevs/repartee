@@ -73,7 +73,12 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppHandl
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::debug!(session_id = %session_id, lagged = n, "web client lagged, skipping events");
+                        tracing::warn!(session_id = %session_id, lagged = n, "web client lagged — sending resync");
+                        // Re-send SyncInit so the client can recover missed state.
+                        let resync = build_sync_init_from_snapshot(&state);
+                        if send_json(&mut ws_tx, &resync).await.is_err() {
+                            break;
+                        }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
@@ -85,7 +90,10 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppHandl
                     Some(Ok(axum::extract::ws::Message::Text(text))) => {
                         match serde_json::from_str::<WebCommand>(&text) {
                             Ok(cmd) => {
-                                let _ = state.web_cmd_tx.try_send((cmd, session_id.clone()));
+                                if state.web_cmd_tx.send((cmd, session_id.clone())).await.is_err() {
+                                    tracing::warn!(session_id = %session_id, "web_cmd channel closed");
+                                    break;
+                                }
                             }
                             Err(e) => {
                                 tracing::debug!(session_id = %session_id, error = %e, "invalid web command");
@@ -113,10 +121,10 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppHandl
     }
 
     // Clean up web-specific shell PTY.
-    let _ = state.web_cmd_tx.try_send((
+    let _ = state.web_cmd_tx.send((
         crate::web::protocol::WebCommand::WebDisconnect,
         session_id.clone(),
-    ));
+    )).await;
 
     tracing::info!(session_id = %session_id, "web client disconnected");
 }
