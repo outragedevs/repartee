@@ -17,17 +17,20 @@ pub fn Layout() -> impl IntoView {
     let (right_open, set_right_open) = signal(false);
 
     // Auto-fetch messages and nick list whenever active buffer changes
-    // or after a resync (lag recovery / reconnect bumps sync_version,
-    // which clears the message cache — so has_messages is false).
+    // or after a resync (lag recovery / reconnect clears backlog_loaded).
+    //
+    // Uses `backlog_loaded` (not `has_messages`) to decide whether to fetch:
+    // a buffer may have live NewMessage events cached without ever having
+    // its DB backlog loaded — checking messages.is_empty() would skip the
+    // fetch and show an incomplete buffer.
     Effect::new(move || {
         let _sync = state.sync_version.get(); // subscribe to resync events
         if let Some(buf_id) = state.active_buffer.get() {
-            let has_messages = state
-                .messages
+            let already_loaded = state
+                .backlog_loaded
                 .get_untracked()
-                .get(&buf_id)
-                .is_some_and(|msgs| !msgs.is_empty());
-            if !has_messages {
+                .contains(&buf_id);
+            if !already_loaded {
                 crate::ws::send_command(&WebCommand::FetchMessages {
                     buffer_id: buf_id.clone(),
                     limit: 100,

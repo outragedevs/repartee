@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use leptos::prelude::*;
 
@@ -30,6 +30,10 @@ pub struct AppState {
     /// Bumped on every SyncInit (initial connect or lag recovery) to force
     /// the Layout Effect to re-fetch messages for the active buffer.
     pub sync_version: RwSignal<u32>,
+    /// Tracks which buffers have had their DB backlog fetched via FetchMessages.
+    /// Prevents the Layout Effect from skipping the fetch when only live
+    /// NewMessage events are cached (the root cause of empty-buffer-on-switch).
+    pub backlog_loaded: RwSignal<HashSet<String>>,
 }
 
 impl AppState {
@@ -61,6 +65,7 @@ impl AppState {
             nick_color_lightness: RwSignal::new(0.65),
             shell_screen: RwSignal::new(None),
             sync_version: RwSignal::new(0),
+            backlog_loaded: RwSignal::new(HashSet::new()),
         }
     }
 
@@ -74,10 +79,11 @@ impl AppState {
                 active_buffer_id,
                 timestamp_format,
             } => {
-                // Clear cached messages and nick lists — forces re-fetch.
-                // This handles both initial connect and lag-recovery resync.
+                // Clear cached messages, nick lists, and backlog-loaded flags —
+                // forces re-fetch. Handles both initial connect and lag-recovery resync.
                 self.messages.set(HashMap::new());
                 self.nick_lists.set(HashMap::new());
+                self.backlog_loaded.set(HashSet::new());
 
                 self.buffers.set(buffers);
                 self.connections.set(connections);
@@ -170,6 +176,7 @@ impl AppState {
                 self.buffers.update(|bufs| bufs.retain(|b| b.id != buffer_id));
                 self.messages.update(|msgs| { msgs.remove(&buffer_id); });
                 self.nick_lists.update(|lists| { lists.remove(&buffer_id); });
+                self.backlog_loaded.update(|set| { set.remove(&buffer_id); });
             }
             WebEvent::ConnectionStatus {
                 conn_id,
@@ -199,7 +206,7 @@ impl AppState {
                 ..
             } => {
                 self.messages.update(|msgs| {
-                    let entry = msgs.entry(buffer_id).or_default();
+                    let entry = msgs.entry(buffer_id.clone()).or_default();
                     // Insert date separators between messages from different days.
                     let with_separators = insert_date_separators(messages);
                     // Prepend older messages (they come from scroll-back).
@@ -207,6 +214,9 @@ impl AppState {
                     combined.append(entry);
                     *entry = combined;
                 });
+                // Mark this buffer's DB backlog as loaded so the Layout Effect
+                // won't re-fetch on subsequent switches to this buffer.
+                self.backlog_loaded.update(|set| { set.insert(buffer_id); });
             }
             WebEvent::NickList { buffer_id, nicks, .. } => {
                 self.nick_lists.update(|lists| {
@@ -305,7 +315,14 @@ impl AppState {
                 }
             }
             WebEvent::ActiveBufferChanged { buffer_id } => {
-                self.active_buffer.set(Some(buffer_id));
+                // Skip if the client already switched to this buffer locally
+                // (the click handler sets active_buffer before the server echoes).
+                // Without this guard:
+                // - The echo re-fires the Layout Effect, causing duplicate FetchMessages
+                // - Rapid clicks can be overridden by a stale echo for a previous buffer
+                if self.active_buffer.get_untracked().as_deref() != Some(&buffer_id) {
+                    self.active_buffer.set(Some(buffer_id));
+                }
             }
             WebEvent::SettingsChanged {
                 timestamp_format,
