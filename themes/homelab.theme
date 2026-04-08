@@ -1,0 +1,207 @@
+# ============================================================================
+# yooz — HomeLab@tahio v2.2 dark theme for repartee
+# Faithful port of homelab.theme (erssi) → repartee TOML format
+# Color palette from hub.local panel: #1a1a2e → #16213e → #0f3460
+# ============================================================================
+#
+# COLOR PALETTE — hub.local mapping
+# ─────────────────────────────────────────────────────────────────────────────
+# #1a1a2e  bg           main background (deep navy)
+# #16213e  bg_alt       panels, alt background (mid navy)
+# #0f3460  border       separators, statusbar bg (accent navy)
+# #e2e8f0  fg           primary text (light slate)
+# #94a3b8  fg_normal    secondary text (slate gray)
+# #64748b  fg_muted     timestamps, brackets, dim text
+# #334155  fg_dim       very dim, borders
+# #10b981  emerald      joins, success, own nick, server
+# #3b82f6  blue         accent, channel, pubnick, links
+# #f59e0b  amber        mentions, highlights, warnings, activity
+# #ef4444  red          errors, quits, kicks, urgent
+# #06b6d4  cyan         notices, info, bans, dcc
+# #8b5cf6  purple       actions, modes, invites, nick changes
+# ============================================================================
+
+[meta]
+name = "homelab"
+description = "HomeLab@tahio v2.2 — hub.local gradient blues, emerald/amber/purple accents"
+
+[colors]
+bg = "#1a1a2e"
+bg_alt = "#16213e"
+border = "#0f3460"
+fg = "#e2e8f0"
+fg_muted = "#64748b"
+fg_dim = "#334155"
+accent = "#3b82f6"
+cursor = "#10b981"
+
+# ── Abstracts ────────────────────────────────────────────────────────────────
+# Mapped 1:1 from erssi homelab.theme abstracts section
+
+[abstracts]
+
+# timestamp — dim slate with dot separator
+# erssi: timestamp = "%Z64748B$*%N %Z64748B·%N"
+timestamp = "%Z64748b$*%N %Z64748b·%N"
+
+# msgnick — dim slate prefix, blue arrow ❯
+# erssi: msgnick = "%Z64748B$0$1-%Z3B82F6❯%N%| "
+msgnick = "%Z64748b$0$1%Z3b82f6❯%N%| "
+
+# ownnick — emerald double-bold
+# erssi: ownnick = "%Z10B981%_%_$*%_%_%N"
+ownnick = "%Z10b981%_%_$*%_%_%N"
+
+# pubnick — blue (no bold, matching erssi)
+# erssi: pubnick = "%Z3B82F6$*%N"
+pubnick = "%Z3b82f6$*%N"
+
+# menick — amber bold (highlight/mention nick)
+# erssi: menick = "%ZF59E0B%_$*%_%N"
+menick = "%Zf59e0b%_$*%_%N"
+
+# channel — blue bold
+# erssi: channel = "%Z3B82F6%_$*%_%N"
+channel = "%Z3b82f6%_$*%_%N"
+
+# action — purple star ★
+# erssi: action_core = "%Z8B5CF6★%N $*"
+action = "%Z8b5cf6★%N $*"
+
+# error — red
+# erssi: error = "%ZEF4444$*%N"
+error = "%Zef4444$*%N"
+
+# ── Message Formats ──────────────────────────────────────────────────────────
+
+[formats.messages]
+
+# own_msg — emerald own nick, bright text
+# erssi: {ownmsgnick $2 {ownnick $0}}$1
+own_msg = "{msgnick $2 {ownnick $0}}%Ze2e8f0$1%N"
+
+# pubmsg — blue nick, slate gray text
+# erssi: {pubmsgnick $2 {pubnick $0}}$1
+pubmsg = "{msgnick $2 {pubnick $0}}%Z94a3b8$1%N"
+
+# pubmsg_mention — amber nick + amber text (your nick mentioned)
+# erssi: {pubmsgmenick $2 {menick $0}}$1  → amber highlight
+pubmsg_mention = "{msgnick %Zf59e0b$2 {menick $0}}%Zf59e0b$1%N"
+
+# pubmsg_highlight — amber bold highlight
+# erssi: {pubmsghinick $0 $3 $1}$2  → amber
+pubmsg_highlight = "{msgnick %Zf59e0b$2 %Zf59e0b%_$0%_%N}%Zf59e0b$1%N"
+
+# action — purple star ★ with purple text
+# erssi: {pubaction $0}$1  → action_core = %Z8B5CF6★
+action = "{action $0} %Z8b5cf6$1%N"
+
+# notice — cyan hexagon ⬢, blue nick, cyan arrow ⟫
+# erssi: notice = "%Z06B6D4⬢%N %Z3B82F6$*%Z06B6D4 ⟫%N "
+notice = "%Z06b6d4⬢%N %Z3b82f6$0%Z06b6d4 ⟫%N %Z94a3b8$1%N"
+
+# ── Event Formats ────────────────────────────────────────────────────────────
+
+[formats.events]
+
+# join — emerald arrow ⥤
+# erssi: join = "%Z10B981⥤%N {channick_hilight $0} {chanhost_hilight $1} %Z10B981has joined%N {channel $2}"
+join = "%Z10b981⥤%N %Z10b981%_$0%_%N %Z64748b⟨%Z94a3b8$1@$2%Z64748b⟩%N %Z10b981has joined%N {channel $3}"
+
+# part — amber arrow ⥢
+# erssi: part = "%ZF59E0B⥢%N {channick $0} {chanhost $1} %ZF59E0Bhas left%N {channel $2} {reason $3}"
+part = "%Zf59e0b⥢%N %Z94a3b8$0%N %Z64748b⟨%Z64748b$1@$2%Z64748b⟩%N %Zf59e0bhas left%N {channel $3} %Z94a3b8⟨%N$4%Z94a3b8⟩%N"
+
+# quit — red power symbol ⏻
+# erssi: quit = "%ZEF4444⏻%N {channick $0} {chanhost $1} %ZEF4444has quit%N {reason $2}"
+quit = "%Zef4444⏻%N %Z94a3b8$0%N %Z64748b⟨%Z64748b$1@$2%Z64748b⟩%N %Zef4444has quit%N %Z94a3b8⟨%N$3%Z94a3b8⟩%N"
+
+# nick_change — purple hexagon ⬢
+# erssi: nick_changed = "%Z8B5CF6⬢%N {channick $0} %Z64748Bis now known as%N {channick_hilight $1}"
+nick_change = "%Z8b5cf6⬢%N %Z94a3b8$0%N %Z64748bis now known as%N %Z10b981%_$1%_%N"
+
+# topic — cyan pin 📌
+# erssi: new_topic = "%Z06B6D4📌%N {nick $0} %Z64748Bchanged topic of%N {channel $1}%Z64748B:%N $2"
+topic = "%Z06b6d4📌%N %Z64748bTopic set by%N %Z94a3b8$0%N%Z64748b:%N %Ze2e8f0$1%N"
+
+# mode — purple storm ⛈
+# erssi: chanmode_change = "%Z8B5CF6⛈%N {nick $2} %Z64748Bsets%N {mode $1} %Z64748Bon%N {channelhilight $0}"
+mode = "%Z8b5cf6⛈%N %Z94a3b8$0%N %Z64748bsets%N %Z8b5cf6%_$1%_%N %Z64748bon%N {channel $2}"
+
+# account — dim dots
+account = "%Z64748b···%N %Z94a3b8$0%N %Z64748b$1%N"
+
+# kick — red lightning ⚡
+# erssi: kick = "%ZEF4444⚡ {channick_hilight $0} %ZEF4444kicked%N from {channel $1} %Z64748Bby%N {nick $2} {reason $3}"
+kick = "%Zef4444⚡%N %Ze2e8f0%_$0%_%N %Zef4444kicked%N from {channel $1} %Z64748bby%N %Z94a3b8$2%N %Z94a3b8⟨%N$3%Z94a3b8⟩%N"
+
+# chghost — dim dots
+chghost = "%Z64748b···%N %Z94a3b8$0%N %Z64748bchanged host to $1@$2%N"
+
+# channel_created — emerald check
+# erssi: channel_created = "%Z10B981✓%N Channel {channelhilight $0} created $1"
+channel_created = "%Z10b981✓%N Channel {channel $0} created %Z64748b$1%N"
+
+# ── Side Panel ───────────────────────────────────────────────────────────────
+# Mapped from erssi sidepanel activity hierarchy
+
+[formats.sidepanel]
+
+# header — electric blue bold (erssi: %B$0.%N %B$1%N)
+header = "%Z3b82f6%_$0%_%N"
+
+# item — steel gray (erssi: %W$0.%N %W$1%N)
+item = "%Ze2e8f0$0.%N %Ze2e8f0$1%N"
+
+# selected — hub.local purple accent (erssi: %Z8B5CF6$0.%N %Z8B5CF6$1%N)
+item_selected = "%Z8b5cf6$0.%N %Z8b5cf6%_$1%_%N"
+
+# activity 0 — events: green (erssi: sidepanel_item_events = "%G$0.%N %G$1%N")
+item_activity_0 = "%Z10b981$0.%N %Z10b981$1%N"
+
+# activity 1 — channel messages: bright amber (erssi: sidepanel_item_activity = "%ZF59E0B")
+item_activity_1 = "%Zf59e0b$0.%N %Zf59e0b$1%N"
+
+# activity 2 — query messages: red (erssi: sidepanel_item_query_msg = "%ZEF4444")
+item_activity_2 = "%Zef4444$0.%N %Zef4444$1%N"
+
+# activity 3 — highlights: red bold (erssi: sidepanel_item_highlight = "%R$0.%N %R$1%N")
+item_activity_3 = "%Zef4444$0.%N %Zef4444%_$1%_%N"
+
+# activity 4 — nick mention: purple (erssi: sidepanel_item_nick_mention = "%M$0.%N %M$1%N")
+item_activity_4 = "%Z8b5cf6$0.%N %Z8b5cf6%_$1%_%N"
+
+# server items — blue accent
+item_server = "%Z3b82f6$0. %_$1%_%N"
+item_server_selected = "%Z8b5cf6$0.%N %Ze2e8f0%_$1%_%N"
+
+# ── Nick List ────────────────────────────────────────────────────────────────
+# Mapped from erssi names_nick_* abstracts
+
+[formats.nicklist]
+
+# owner — amber tilde, bright nick
+owner = "%Zf59e0b~%Ze2e8f0$0%N"
+
+# admin — red ampersand, bright nick
+admin = "%Zef4444&%Ze2e8f0$0%N"
+
+# op — amber @, blue bold nick (erssi: %ZF59E0B⚡%Z3B82F6%_$1%_)
+op = "%Zf59e0b@%Z3b82f6%_$0%_%N"
+
+# halfop — emerald %, cyan nick (erssi: %Z10B981◆%Z06B6D4$1)
+halfop = "%Z10b981%%%Z06b6d4$0%N"
+
+# voice — emerald +, slate nick (erssi: %Z10B981◆%Z94A3B8$1)
+voice = "%Z10b981+%Z94a3b8$0%N"
+
+# normal — space prefix, slate nick (erssi: %Z64748B$0%Z94A3B8$1)
+normal = " %Z94a3b8$0%N"
+
+# away variants — uniformly dimmed to #64748b (muted slate)
+away_owner = "%Z64748b~%Z64748b$0%N"
+away_admin = "%Z64748b&%Z64748b$0%N"
+away_op = "%Z64748b@%Z64748b$0%N"
+away_halfop = "%Z64748b%%%Z64748b$0%N"
+away_voice = "%Z64748b+%Z64748b$0%N"
+away_normal = " %Z475569$0%N"

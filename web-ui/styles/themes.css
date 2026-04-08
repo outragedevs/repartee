@@ -82,6 +82,26 @@
     --highlight-bg: rgba(204, 36, 29, 0.08);
 }
 
+/* --- Homelab (dark) — deep navy gradient with emerald/amber/purple accents --- */
+[data-theme="homelab"] {
+    --bg: #1a1a2e;
+    --bg-alt: #16213e;
+    --border: #0f3460;
+    --fg: #e2e8f0;
+    --fg-muted: #64748b;
+    --fg-dim: #94a3b8;
+    --accent: #3b82f6;
+    --cursor: #10b981;
+    --green: #10b981;
+    --yellow: #f59e0b;
+    --red: #ef4444;
+    --purple: #8b5cf6;
+    --cyan: #06b6d4;
+    --bright: #e2e8f0;
+    --mention-bg: rgba(245, 158, 11, 0.08);
+    --highlight-bg: rgba(239, 68, 68, 0.08);
+}
+
 /* --- Catppuccin Latte (light) --- */
 [data-theme="catppuccin-latte"] {
     --bg: #eff1f5;
