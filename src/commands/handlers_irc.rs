@@ -317,19 +317,26 @@ pub(crate) fn cmd_topic(app: &mut App, args: &[String]) {
         return;
     }
 
-    let (channel, topic) = if args.len() == 1 {
+    // /topic #channel        → query topic for #channel
+    // /topic #channel text…  → set topic on #channel
+    // /topic text…           → set topic on current buffer's channel
+    let (channel, topic_args) =
         if crate::irc::formatting::is_channel(&args[0]) {
-            let _ = sender.send(irc::proto::Command::TOPIC(args[0].clone(), None));
-            return;
-        }
-        let Some(buf) = app.state.active_buffer() else {
-            return;
+            (args[0].clone(), &args[1..])
+        } else {
+            let Some(buf) = app.state.active_buffer() else {
+                return;
+            };
+            (buf.name.clone(), args)
         };
-        (buf.name.clone(), args[0].clone())
-    } else {
-        (args[0].clone(), args[1].clone())
-    };
 
+    if topic_args.is_empty() {
+        // Query only — no topic body means "show me the topic".
+        let _ = sender.send(irc::proto::Command::TOPIC(channel, None));
+        return;
+    }
+
+    let topic = topic_args.join(" ");
     if let Err(e) = sender.send(irc::proto::Command::TOPIC(channel, Some(topic))) {
         add_local_event(app, &format!("Failed to set topic: {e}"));
     }

@@ -322,18 +322,16 @@ fn event_icon(event_key: Option<&str>, text: &str) -> Option<(&'static str, &'st
             "account" => Some(("\u{2194} ", "account-arrow")),
             _ => None,
         }
+    } else if text.contains("has joined") {
+        Some(("\u{2192} ", "join-arrow"))
+    } else if text.contains("has left") {
+        Some(("\u{2190} ", "part-arrow"))
+    } else if text.contains("has quit") {
+        Some(("\u{2190} ", "quit-arrow"))
+    } else if text.contains("is now known as") {
+        Some(("\u{2194} ", "nick-arrow"))
     } else {
-        if text.contains("has joined") {
-            Some(("\u{2192} ", "join-arrow"))
-        } else if text.contains("has left") {
-            Some(("\u{2190} ", "part-arrow"))
-        } else if text.contains("has quit") {
-            Some(("\u{2190} ", "quit-arrow"))
-        } else if text.contains("is now known as") {
-            Some(("\u{2194} ", "nick-arrow"))
-        } else {
-            None
-        }
+        None
     }
 }
 

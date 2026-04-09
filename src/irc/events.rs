@@ -1827,8 +1827,10 @@ fn handle_kick(
         let server_buffer_id = state
             .connections
             .get(conn_id)
-            .map(|c| make_buffer_id(conn_id, &c.label))
-            .unwrap_or_else(|| make_buffer_id(conn_id, conn_id));
+            .map_or_else(
+                || make_buffer_id(conn_id, conn_id),
+                |c| make_buffer_id(conn_id, &c.label),
+            );
         let kick_params = Some(vec![
             our_nick.to_string(),
             kicker,
@@ -1836,71 +1838,50 @@ fn handle_kick(
             reason_str.to_string(),
         ]);
 
-        // Add to server buffer (always visible, never removed).
-        let id = state.next_message_id();
-        state.add_message(
-            &server_buffer_id,
+        // Helper: build a "kicked" notification message, taking text/params/tags
+        // by reference (clone) or by value (move) on last call.
+        let make_kick_msg = |state: &mut AppState,
+                                  t: String,
+                                  p: Option<Vec<String>>,
+                                  tg: Option<HashMap<String, String>>|
+         -> Message {
+            let id = state.next_message_id();
             Message {
                 id,
                 timestamp: ts,
                 message_type: MessageType::Event,
                 nick: None,
                 nick_mode: None,
-                text: text.clone(),
+                text: t,
                 highlight: true,
                 event_key: Some("kicked".to_string()),
-                event_params: kick_params.clone(),
+                event_params: p,
                 log_msg_id: None,
                 log_ref_id: None,
-                tags: tags.clone(),
-            },
-        );
+                tags: tg,
+            }
+        };
+
+        // Add to server buffer (always visible, never removed).
+        let msg = make_kick_msg(state, text.clone(), kick_params.clone(), tags.clone());
+        state.add_message(&server_buffer_id, msg);
 
         // Also add to the channel buffer before removal so the web client
         // sees it in the channel history (it may still be displayed briefly).
-        let id2 = state.next_message_id();
-        state.add_message(
-            &buffer_id,
-            Message {
-                id: id2,
-                timestamp: ts,
-                message_type: MessageType::Event,
-                nick: None,
-                nick_mode: None,
-                text: text.clone(),
-                highlight: true,
-                event_key: Some("kicked".to_string()),
-                event_params: kick_params.clone(),
-                log_msg_id: None,
-                log_ref_id: None,
-                tags: tags.clone(),
-            },
-        );
+        let msg = make_kick_msg(state, text.clone(), kick_params.clone(), tags.clone());
+        state.add_message(&buffer_id, msg);
 
         // Remove the channel buffer (falls back to previous or first buffer).
         state.remove_buffer(&buffer_id);
 
         // Add a reminder to the landing buffer so the user sees it immediately.
-        let landing_id = state.active_buffer_id.clone().unwrap_or_else(|| server_buffer_id.clone());
+        let landing_id = state
+            .active_buffer_id
+            .clone()
+            .unwrap_or_else(|| server_buffer_id.clone());
         if landing_id != server_buffer_id {
-            let id3 = state.next_message_id();
-            state.add_message(
-                &landing_id,
-                Message {
-                    id: id3,
-                    timestamp: ts,
-                    message_type: MessageType::Event,
-                    nick: None,
-                    nick_mode: None,
-                    text,
-                    highlight: true,
-                    event_key: Some("kicked".to_string()),
-                    event_params: kick_params,
-                    log_msg_id: None,
-                    log_ref_id: None,
-                    tags,
-                },
-            );
+            let msg = make_kick_msg(state, text, kick_params, tags);
+            state.add_message(&landing_id, msg);
         }
 
         // Clean up any pending silent WHO for this channel.
