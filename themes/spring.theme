@@ -1,10 +1,10 @@
 # ============================================================================
-# yooz — HomeLab@tahio v2.2 dark theme for repartee
-# Faithful port of homelab.theme (erssi) → repartee TOML format
-# Color palette from hub.local panel: #1a1a2e → #16213e → #0f3460
+# Spring — deep navy dark theme for repartee
+# Based on HomeLab@tahio v2.2 by yooz
+# Color palette: #1a1a2e → #16213e → #0f3460
 # ============================================================================
 #
-# COLOR PALETTE — hub.local mapping
+# COLOR PALETTE
 # ─────────────────────────────────────────────────────────────────────────────
 # #1a1a2e  bg           main background (deep navy)
 # #16213e  bg_alt       panels, alt background (mid navy)
@@ -22,8 +22,8 @@
 # ============================================================================
 
 [meta]
-name = "homelab"
-description = "HomeLab@tahio v2.2 — hub.local gradient blues, emerald/amber/purple accents"
+name = "spring"
+description = "Spring — deep navy with emerald/amber/purple accents"
 
 [colors]
 bg = "#1a1a2e"
@@ -36,7 +36,7 @@ accent = "#3b82f6"
 cursor = "#10b981"
 
 # ── Abstracts ────────────────────────────────────────────────────────────────
-# Mapped 1:1 from erssi homelab.theme abstracts section
+# Mapped 1:1 from original erssi theme abstracts section
 
 [abstracts]
 
@@ -153,7 +153,7 @@ header = "%Z3b82f6%_$0%_%N"
 # item — steel gray (erssi: %W$0.%N %W$1%N)
 item = "%Ze2e8f0$0.%N %Ze2e8f0$1%N"
 
-# selected — hub.local purple accent (erssi: %Z8B5CF6$0.%N %Z8B5CF6$1%N)
+# selected — purple accent (erssi: %Z8B5CF6$0.%N %Z8B5CF6$1%N)
 item_selected = "%Z8b5cf6$0.%N %Z8b5cf6%_$1%_%N"
 
 # activity 0 — events: green (erssi: sidepanel_item_events = "%G$0.%N %G$1%N")

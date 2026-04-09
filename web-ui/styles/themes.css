@@ -82,8 +82,8 @@
     --highlight-bg: rgba(204, 36, 29, 0.08);
 }
 
-/* --- Homelab (dark) — deep navy gradient with emerald/amber/purple accents --- */
-[data-theme="homelab"] {
+/* --- Spring (dark) — deep navy gradient with emerald/amber/purple accents --- */
+[data-theme="spring"] {
     --bg: #1a1a2e;
     --bg-alt: #16213e;
     --border: #0f3460;

@@ -208,7 +208,7 @@ fn ThemePicker() -> impl IntoView {
         ("nightfall", "#1a1b26"),
         ("catppuccin-mocha", "#1e1e2e"),
         ("tokyo-storm", "#24283b"),
-        ("homelab", "#1a1a2e"),
+        ("spring", "#1a1a2e"),
         ("gruvbox-light", "#fbf1c7"),
         ("catppuccin-latte", "#eff1f5"),
     ];
