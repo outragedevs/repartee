@@ -108,15 +108,39 @@ pub enum WebEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WebCommand {
-    SendMessage { buffer_id: String, text: String },
-    SwitchBuffer { buffer_id: String },
-    MarkRead { buffer_id: String, up_to: i64 },
-    FetchMessages { buffer_id: String, limit: u32, before: Option<i64> },
-    FetchNickList { buffer_id: String },
+    SendMessage {
+        buffer_id: String,
+        text: String,
+    },
+    SwitchBuffer {
+        buffer_id: String,
+    },
+    MarkRead {
+        buffer_id: String,
+        up_to: i64,
+    },
+    FetchMessages {
+        buffer_id: String,
+        limit: u32,
+        before: Option<i64>,
+    },
+    FetchNickList {
+        buffer_id: String,
+    },
     FetchMentions,
-    RunCommand { buffer_id: String, text: String },
-    ShellInput { buffer_id: String, data: String },
-    ShellResize { buffer_id: String, cols: u16, rows: u16 },
+    RunCommand {
+        buffer_id: String,
+        text: String,
+    },
+    ShellInput {
+        buffer_id: String,
+        data: String,
+    },
+    ShellResize {
+        buffer_id: String,
+        cols: u16,
+        rows: u16,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +178,8 @@ pub struct WireMessage {
     pub nick_mode: Option<String>,
     pub text: String,
     pub highlight: bool,
+    #[serde(default)]
+    pub event_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,9 +200,15 @@ pub struct WireMention {
     pub text: String,
 }
 
-fn default_true() -> bool { true }
-fn default_saturation() -> f32 { 0.65 }
-fn default_lightness() -> f32 { 0.65 }
+fn default_true() -> bool {
+    true
+}
+fn default_saturation() -> f32 {
+    0.65
+}
+fn default_lightness() -> f32 {
+    0.65
+}
 
 /// Complete shell screen state for rendering in the web frontend.
 #[derive(Debug, Clone)]

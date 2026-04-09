@@ -34,6 +34,10 @@ pub struct AppState {
     /// Prevents the Layout Effect from skipping the fetch when only live
     /// NewMessage events are cached (the root cause of empty-buffer-on-switch).
     pub backlog_loaded: RwSignal<HashSet<String>>,
+    /// Whether the chat view is scrolled to (or near) the bottom.
+    /// When true, new messages auto-scroll. When false, the user is reading
+    /// backlog and the view stays put.
+    pub is_at_bottom: RwSignal<bool>,
 }
 
 impl AppState {
@@ -66,6 +70,7 @@ impl AppState {
             shell_screen: RwSignal::new(None),
             sync_version: RwSignal::new(0),
             backlog_loaded: RwSignal::new(HashSet::new()),
+            is_at_bottom: RwSignal::new(true),
         }
     }
 
@@ -457,6 +462,7 @@ fn insert_date_separators(messages: Vec<WireMessage>) -> Vec<WireMessage> {
                     nick_mode: None,
                     text: format!("\u{2500}\u{2500}\u{2500} {formatted} \u{2500}\u{2500}\u{2500}"),
                     highlight: false,
+                    event_key: Some("date_separator".to_string()),
                 });
             }
             last_date = Some(date);

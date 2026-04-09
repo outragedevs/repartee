@@ -12,8 +12,40 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  build-wasm:
+    name: Build WASM frontend
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install trunk
+        uses: jetli/trunk-action@v0.5.0
+
+      - name: Build WASM
+        run: |
+          cd web-ui
+          trunk build --release
+
+      - name: Stage WASM assets
+        run: |
+          rm -rf static/web && mkdir -p static/web
+          cp -r web-ui/dist/* static/web/
+
+      - name: Upload WASM assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-assets
+          path: static/web/
+          retention-days: 1
+
   build-unix:
     name: ${{ matrix.name }}
+    needs: build-wasm
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -35,6 +67,12 @@ jobs:
             deps: sudo apt-get update && sudo apt-get install -y libchafa-dev libglib2.0-dev pkg-config
     steps:
       - uses: actions/checkout@v6
+
+      - name: Download WASM assets
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-assets
+          path: static/web/
 
       - name: Install system dependencies (Linux)
         if: contains(matrix.runner, 'ubuntu')
@@ -69,9 +107,16 @@ jobs:
 
   build-freebsd:
     name: FreeBSD AMD64
+    needs: build-wasm
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
+
+      - name: Download WASM assets
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-assets
+          path: static/web/
 
       - name: Build in FreeBSD VM
         uses: vmactions/freebsd-vm@v1

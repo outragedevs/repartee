@@ -1,7 +1,7 @@
-use crate::state::AppState;
 use crate::state::buffer::{BufferType, Message};
 use crate::state::connection::ConnectionStatus;
 use crate::state::sorting::sort_buffers;
+use crate::state::AppState;
 use crate::web::protocol::{BufferMeta, ConnectionMeta, WebEvent, WireMessage, WireNick};
 
 /// Build a `SyncInit` event from the current `AppState`.
@@ -85,6 +85,7 @@ pub fn message_to_wire(msg: &Message) -> WireMessage {
         nick_mode: msg.nick_mode.clone(),
         text: msg.text.clone(),
         highlight: msg.highlight,
+        event_key: msg.event_key.clone(),
     }
 }
 
@@ -98,6 +99,7 @@ pub fn stored_to_wire(msg: &crate::storage::types::StoredMessage) -> WireMessage
         nick_mode: None,
         text: msg.text.clone(),
         highlight: msg.highlight,
+        event_key: None,
     }
 }
 
@@ -115,9 +117,7 @@ pub const fn buffer_type_str(bt: &BufferType) -> &'static str {
 
 /// Split a `buffer_id` (`"connection_id/buffer_name"`) into `(network, buffer)`.
 pub fn split_buffer_id(buffer_id: &str) -> (&str, &str) {
-    buffer_id
-        .split_once('/')
-        .unwrap_or((buffer_id, buffer_id))
+    buffer_id.split_once('/').unwrap_or((buffer_id, buffer_id))
 }
 
 #[cfg(test)]
@@ -199,6 +199,27 @@ mod tests {
         assert_eq!(wire.nick.as_deref(), Some("ferris"));
         assert_eq!(wire.nick_mode.as_deref(), Some("@"));
         assert!(wire.highlight);
+        assert!(wire.event_key.is_none());
+    }
+
+    #[test]
+    fn message_to_wire_preserves_event_key() {
+        let msg = crate::state::buffer::Message {
+            id: 99,
+            timestamp: Utc::now(),
+            message_type: MessageType::Event,
+            nick: None,
+            nick_mode: None,
+            text: "alice has joined #rust".to_string(),
+            highlight: false,
+            event_key: Some("join".to_string()),
+            event_params: Some(vec!["alice".to_string(), "#rust".to_string()]),
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: None,
+        };
+        let wire = message_to_wire(&msg);
+        assert_eq!(wire.event_key.as_deref(), Some("join"));
     }
 
     #[test]

@@ -130,7 +130,11 @@ pub enum WebCommand {
     /// Raw keyboard input for a shell buffer (base64-encoded bytes).
     ShellInput { buffer_id: String, data: String },
     /// Resize the shell PTY to match the web client's viewport.
-    ShellResize { buffer_id: String, cols: u16, rows: u16 },
+    ShellResize {
+        buffer_id: String,
+        cols: u16,
+        rows: u16,
+    },
     /// Clean up web-specific resources on disconnect (sent internally).
     #[serde(skip)]
     WebDisconnect,
@@ -174,6 +178,11 @@ pub struct WireMessage {
     pub nick_mode: Option<String>,
     pub text: String,
     pub highlight: bool,
+    /// IRC event type key (e.g. "join", "part", "quit", "kick", "mode").
+    /// Used by the web frontend to apply event-specific styling.
+    /// `None` for backlog messages that predate this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_key: Option<String>,
 }
 
 /// Wire-format nick entry for transport over WebSocket.
@@ -215,7 +224,10 @@ pub struct ShellScreenRow {
 
 /// A run of characters sharing the same style in a shell screen row.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[expect(clippy::struct_excessive_bools, reason = "terminal cell attributes are inherently boolean flags")]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "terminal cell attributes are inherently boolean flags"
+)]
 pub struct ShellSpan {
     pub text: String,
     /// CSS color string (e.g. "#ff0000" or "").
@@ -234,7 +246,10 @@ pub struct ShellSpan {
     pub inverse: bool,
 }
 
-#[expect(clippy::trivially_copy_pass_by_ref, reason = "serde skip_serializing_if requires &T")]
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if requires &T"
+)]
 const fn is_false(b: &bool) -> bool {
     !(*b)
 }
@@ -270,6 +285,7 @@ mod tests {
             nick_mode: Some("@".into()),
             text: "hello 🚀".into(),
             highlight: false,
+            event_key: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: WireMessage = serde_json::from_str(&json).unwrap();
