@@ -236,6 +236,27 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ---
 
+## Changelog
+
+### v0.8.4
+
+- **Web: sticky scroll** — auto-scroll now only scrolls to bottom when you're already there; scroll-up to read backlog stays put. Scroll-to-bottom button (▼) appears when scrolled up
+- **Web: event_key parity** — web frontend now receives per-event-type keys (join, part, quit, kick, kicked, nick_change, topic_changed, mode, connected, disconnected, chghost, account) for themed icons and colors instead of fragile text heuristics
+- **Web: notice rendering** — notices now render with `-nick- text` format and distinct cyan styling
+- **Web: nick truncation** — accounts for mode prefix width (`@`, `+`) like the TUI does
+- **Kick notification** — when kicked from a channel, the message now appears in the server status window, the channel buffer (before removal), and the landing buffer (where you end up). Themed as `kicked` event with red highlight
+- **`/kick` and `/kb` accept `#channel`** — you can now specify a target channel: `/kick #otherchan nick reason`
+- **Web: in-memory FetchMessages** — initial buffer loads serve from in-memory messages first, ensuring recent events (like kick notifications) are visible immediately even before the log writer flushes to SQLite
+- **`event_key` persisted to DB** — backward-compatible migration adds `event_key TEXT` column so historical messages retain their event type for themed rendering
+- **CI: WASM build step** — release workflow now builds the WASM frontend in a separate job, ensuring every release binary includes the latest web UI
+- Removed dead `MessageType::Ctcp` variant
+
+### v0.8.3
+
+- Web buffer sync reliability fixes
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
