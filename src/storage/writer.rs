@@ -126,8 +126,8 @@ fn flush(
         };
 
         if let Err(e) = conn.execute(
-            "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight, iv, ref_id, tags)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight, iv, ref_id, tags, event_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 row.msg_id,
                 row.network,
@@ -140,6 +140,7 @@ fn flush(
                 iv,
                 row.ref_id,
                 row.tags,
+                row.event_key,
             ],
         ) {
             // Log once and skip — do NOT return the queue for retry, as
@@ -182,6 +183,7 @@ mod tests {
             highlight: false,
             ref_id: None,
             tags: None,
+            event_key: None,
         }
     }
 

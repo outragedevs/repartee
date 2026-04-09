@@ -1,5 +1,5 @@
 use aes_gcm::{Aes256Gcm, Key};
-use rusqlite::{Connection, params, types::ToSql};
+use rusqlite::{params, types::ToSql, Connection};
 
 use super::crypto;
 use super::types::{ReadMarker, StoredMessage};
@@ -39,6 +39,7 @@ fn map_row(
 
     let ref_id: Option<String> = row.get("ref_id")?;
     let tags: Option<String> = row.get("tags")?;
+    let event_key: Option<String> = row.get("event_key")?;
 
     Ok(StoredMessage {
         id,
@@ -52,6 +53,7 @@ fn map_row(
         highlight: highlight_int != 0,
         ref_id,
         tags,
+        event_key,
     })
 }
 
@@ -535,7 +537,16 @@ mod tests {
     fn insert_and_query_mentions() {
         let db = open_database(false).unwrap();
         insert_mention(&db, 1000, "libera", "#rust", "#rust", "bob", "hey kofany!").unwrap();
-        insert_mention(&db, 2000, "libera", "#tokio", "#tokio", "alice", "kofany: look").unwrap();
+        insert_mention(
+            &db,
+            2000,
+            "libera",
+            "#tokio",
+            "#tokio",
+            "alice",
+            "kofany: look",
+        )
+        .unwrap();
 
         let mentions = get_unread_mentions(&db).unwrap();
         assert_eq!(mentions.len(), 2);
@@ -591,7 +602,16 @@ mod tests {
         let db = setup_test_db();
         let now = chrono::Utc::now().timestamp();
         for i in 0..10 {
-            insert_mention(&db, now + i, "net", "buf", "#ch", "nick", &format!("msg{i}")).unwrap();
+            insert_mention(
+                &db,
+                now + i,
+                "net",
+                "buf",
+                "#ch",
+                "nick",
+                &format!("msg{i}"),
+            )
+            .unwrap();
         }
         let rows = load_recent_mentions(&db, now - 1, 5).unwrap();
         assert_eq!(rows.len(), 5);

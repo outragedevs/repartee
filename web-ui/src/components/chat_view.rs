@@ -126,7 +126,9 @@ pub fn ChatView() -> impl IntoView {
                             } else if is_event {
                                 match msg.event_key.as_deref() {
                                     Some("join") | Some("connected") => "chat-line event join-event",
-                                    Some("part") | Some("quit") | Some("disconnected") | Some("kick") => "chat-line event part-event",
+                                    Some("part") | Some("quit") | Some("disconnected") => "chat-line event part-event",
+                                    Some("kick") => "chat-line event kick-event",
+                                    Some("kicked") => "chat-line event kicked-event",
                                     Some("nick_change") | Some("chghost") | Some("account") => "chat-line event nick-event",
                                     Some("topic_changed") => "chat-line event topic-event",
                                     Some("mode") => "chat-line event mode-event",
@@ -310,6 +312,7 @@ fn event_icon(event_key: Option<&str>, text: &str) -> Option<(&'static str, &'st
             "part" => Some(("\u{2190} ", "part-arrow")),
             "quit" => Some(("\u{2190} ", "quit-arrow")),
             "kick" => Some(("\u{2190} ", "kick-arrow")),
+            "kicked" => Some(("\u{2190} ", "kicked-arrow")),
             "nick_change" => Some(("\u{2194} ", "nick-arrow")),
             "topic_changed" => Some(("\u{2192} ", "topic-arrow")),
             "mode" => Some(("\u{25CB} ", "mode-arrow")),

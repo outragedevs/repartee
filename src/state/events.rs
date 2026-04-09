@@ -295,6 +295,7 @@ impl AppState {
             highlight: message.highlight,
             ref_id: message.log_ref_id.clone(),
             tags: tags_json,
+            event_key: message.event_key.clone(),
         };
 
         if let Err(e) = tx.try_send(row) {

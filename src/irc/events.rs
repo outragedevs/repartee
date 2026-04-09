@@ -1822,25 +1822,87 @@ fn handle_kick(
 
     let ts = message_timestamp(tags.as_ref());
     if kicked_user == our_nick {
+        let text = format!("You were kicked from {channel} by {kicker} ({reason_str})");
+        // Use the connection label for the server buffer ID (not the connection id).
+        let server_buffer_id = state
+            .connections
+            .get(conn_id)
+            .map(|c| make_buffer_id(conn_id, &c.label))
+            .unwrap_or_else(|| make_buffer_id(conn_id, conn_id));
+        let kick_params = Some(vec![
+            our_nick.to_string(),
+            kicker,
+            channel.to_string(),
+            reason_str.to_string(),
+        ]);
+
+        // Add to server buffer (always visible, never removed).
         let id = state.next_message_id();
         state.add_message(
-            &buffer_id,
+            &server_buffer_id,
             Message {
                 id,
                 timestamp: ts,
                 message_type: MessageType::Event,
                 nick: None,
                 nick_mode: None,
-                text: format!("You were kicked from {channel} by {kicker} ({reason_str})"),
-                highlight: false,
-                event_key: None,
-                event_params: None,
+                text: text.clone(),
+                highlight: true,
+                event_key: Some("kicked".to_string()),
+                event_params: kick_params.clone(),
                 log_msg_id: None,
                 log_ref_id: None,
-                tags,
+                tags: tags.clone(),
             },
         );
+
+        // Also add to the channel buffer before removal so the web client
+        // sees it in the channel history (it may still be displayed briefly).
+        let id2 = state.next_message_id();
+        state.add_message(
+            &buffer_id,
+            Message {
+                id: id2,
+                timestamp: ts,
+                message_type: MessageType::Event,
+                nick: None,
+                nick_mode: None,
+                text: text.clone(),
+                highlight: true,
+                event_key: Some("kicked".to_string()),
+                event_params: kick_params.clone(),
+                log_msg_id: None,
+                log_ref_id: None,
+                tags: tags.clone(),
+            },
+        );
+
+        // Remove the channel buffer (falls back to previous or first buffer).
         state.remove_buffer(&buffer_id);
+
+        // Add a reminder to the landing buffer so the user sees it immediately.
+        let landing_id = state.active_buffer_id.clone().unwrap_or_else(|| server_buffer_id.clone());
+        if landing_id != server_buffer_id {
+            let id3 = state.next_message_id();
+            state.add_message(
+                &landing_id,
+                Message {
+                    id: id3,
+                    timestamp: ts,
+                    message_type: MessageType::Event,
+                    nick: None,
+                    nick_mode: None,
+                    text,
+                    highlight: true,
+                    event_key: Some("kicked".to_string()),
+                    event_params: kick_params,
+                    log_msg_id: None,
+                    log_ref_id: None,
+                    tags,
+                },
+            );
+        }
+
         // Clean up any pending silent WHO for this channel.
         if let Some(conn) = state.connections.get_mut(conn_id) {
             conn.silent_who_channels.remove(channel);
@@ -3444,7 +3506,7 @@ mod tests {
     // === handle_kick tests ===
 
     #[test]
-    fn kick_our_own_removes_buffer() {
+    fn kick_our_own_removes_buffer_and_notifies() {
         let mut state = make_test_state();
         let msg = make_irc_msg(
             Some("op!user@host"),
@@ -3452,7 +3514,17 @@ mod tests {
         );
         handle_irc_message(&mut state, "test", &msg);
 
+        // Channel buffer is removed.
         assert!(!state.buffers.contains_key("test/#test"));
+
+        // Kick message appears in server buffer.
+        let server_id = make_buffer_id("test", "TestServer");
+        let server_buf = state.buffers.get(&server_id).unwrap();
+        let server_msg = server_buf.messages.back().unwrap();
+        assert!(server_msg.text.contains("You were kicked from #test by op"));
+        assert!(server_msg.text.contains("behave"));
+        assert!(server_msg.highlight);
+        assert_eq!(server_msg.event_key.as_deref(), Some("kicked"));
     }
 
     #[test]

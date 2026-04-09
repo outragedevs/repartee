@@ -111,7 +111,7 @@ fn create_schema(db: &Connection, encrypt: bool) -> rusqlite::Result<()> {
 /// (permissions, corruption, wrong table) is logged as a warning so it does
 /// not go unnoticed.
 fn migrate_schema(db: &Connection) {
-    for col in ["ref_id TEXT", "tags TEXT"] {
+    for col in ["ref_id TEXT", "tags TEXT", "event_key TEXT"] {
         let sql = format!("ALTER TABLE messages ADD COLUMN {col}");
         if let Err(e) = db.execute_batch(&sql) {
             if !e.to_string().contains("duplicate column name") {

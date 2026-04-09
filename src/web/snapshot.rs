@@ -99,7 +99,7 @@ pub fn stored_to_wire(msg: &crate::storage::types::StoredMessage) -> WireMessage
         nick_mode: None,
         text: msg.text.clone(),
         highlight: msg.highlight,
-        event_key: None,
+        event_key: msg.event_key.clone(),
     }
 }
 
@@ -226,5 +226,26 @@ mod tests {
     fn split_buffer_id_works() {
         assert_eq!(split_buffer_id("libera/#rust"), ("libera", "#rust"));
         assert_eq!(split_buffer_id("no_slash"), ("no_slash", "no_slash"));
+    }
+
+    #[test]
+    fn stored_to_wire_preserves_event_key() {
+        let stored = crate::storage::types::StoredMessage {
+            id: 1,
+            msg_id: "msg-1".to_string(),
+            network: "Libera".to_string(),
+            buffer: "#rust".to_string(),
+            timestamp: 1_710_000_000,
+            msg_type: "event".to_string(),
+            nick: None,
+            text: "You were kicked from #rust by op (behave)".to_string(),
+            highlight: true,
+            ref_id: None,
+            tags: None,
+            event_key: Some("kicked".to_string()),
+        };
+        let wire = stored_to_wire(&stored);
+        assert_eq!(wire.event_key.as_deref(), Some("kicked"));
+        assert!(wire.highlight);
     }
 }

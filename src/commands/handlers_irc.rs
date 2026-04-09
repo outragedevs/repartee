@@ -337,7 +337,7 @@ pub(crate) fn cmd_topic(app: &mut App, args: &[String]) {
 
 pub(crate) fn cmd_kick(app: &mut App, args: &[String]) {
     if args.is_empty() {
-        add_local_event(app, "Usage: /kick <nick> [reason]");
+        add_local_event(app, "Usage: /kick [#channel] <nick> [reason]");
         return;
     }
 
@@ -346,17 +346,23 @@ pub(crate) fn cmd_kick(app: &mut App, args: &[String]) {
         return;
     };
 
-    let nick = &args[0];
-    let reason = if args.len() > 1 {
-        Some(args[1].clone())
+    // If first arg is a channel, use it; otherwise use current buffer's channel.
+    let (channel, remaining) =
+        if crate::irc::formatting::is_channel(&args[0]) && args.len() >= 2 {
+            (args[0].clone(), &args[1..])
+        } else {
+            let Some(buf) = app.state.active_buffer() else {
+                return;
+            };
+            (buf.name.clone(), args)
+        };
+
+    let nick = remaining[0].clone();
+    let reason = if remaining.len() > 1 {
+        Some(remaining[1..].join(" "))
     } else {
         None
     };
-
-    let Some(buf) = app.state.active_buffer() else {
-        return;
-    };
-    let channel = buf.name.clone();
 
     if let Err(e) = sender.send(irc::proto::Command::KICK(channel, nick.clone(), reason)) {
         add_local_event(app, &format!("Failed to kick {nick}: {e}"));
@@ -552,7 +558,7 @@ pub(crate) fn cmd_unban(app: &mut App, args: &[String]) {
 
 pub(crate) fn cmd_kickban(app: &mut App, args: &[String]) {
     if args.is_empty() {
-        add_local_event(app, "Usage: /kb <nick> [reason]");
+        add_local_event(app, "Usage: /kb [#channel] <nick> [reason]");
         return;
     }
 
@@ -561,17 +567,24 @@ pub(crate) fn cmd_kickban(app: &mut App, args: &[String]) {
         return;
     };
 
-    let channel = match app.state.active_buffer() {
-        Some(b) if b.buffer_type == crate::state::buffer::BufferType::Channel => b.name.clone(),
-        _ => {
-            add_local_event(app, "Not in a channel");
-            return;
-        }
-    };
+    let (channel, remaining) =
+        if crate::irc::formatting::is_channel(&args[0]) && args.len() >= 2 {
+            (args[0].clone(), &args[1..])
+        } else {
+            let Some(buf) = app.state.active_buffer() else {
+                add_local_event(app, "Not in a channel");
+                return;
+            };
+            if buf.buffer_type != crate::state::buffer::BufferType::Channel {
+                add_local_event(app, "Not in a channel");
+                return;
+            }
+            (buf.name.clone(), args)
+        };
 
-    let nick = &args[0];
-    let reason = if args.len() > 1 {
-        args[1..].join(" ")
+    let nick = remaining[0].clone();
+    let reason = if remaining.len() > 1 {
+        remaining[1..].join(" ")
     } else {
         nick.clone()
     };
@@ -591,7 +604,7 @@ pub(crate) fn cmd_kickban(app: &mut App, args: &[String]) {
     // KICK first, then BAN (same order as kokoirc)
     let _ = sender.send(irc::proto::Command::KICK(
         channel.clone(),
-        nick.clone(),
+        nick,
         Some(reason),
     ));
     let _ = sender.send(irc::proto::Command::Raw(

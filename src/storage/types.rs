@@ -16,6 +16,9 @@ pub struct LogRow {
     pub ref_id: Option<String>,
     /// JSON-serialized `IRCv3` message tags (`None` if empty).
     pub tags: Option<String>,
+    /// IRC event type key (e.g. "join", "kick", "kicked").
+    /// `None` for message types that don't have an event key.
+    pub event_key: Option<String>,
 }
 
 /// A message read back from the database.
@@ -34,6 +37,8 @@ pub struct StoredMessage {
     pub ref_id: Option<String>,
     /// JSON-serialized `IRCv3` message tags (`None` if empty).
     pub tags: Option<String>,
+    /// IRC event type key (e.g. "join", "kick", "kicked").
+    pub event_key: Option<String>,
 }
 
 /// Per-client read position for a buffer.

@@ -210,6 +210,7 @@ html, body {
 .chat-line .quit-arrow { color: var(--red); }
 .chat-line .nick-arrow { color: var(--purple); }
 .chat-line .kick-arrow { color: var(--red); }
+.chat-line .kicked-arrow { color: var(--red); }
 .chat-line .topic-arrow { color: var(--cyan); }
 .chat-line .mode-arrow { color: var(--fg-muted); }
 .chat-line .connect-arrow { color: var(--green); }
@@ -220,6 +221,8 @@ html, body {
 /* Event-key-specific text coloring */
 .chat-line.join-event { color: var(--green); }
 .chat-line.part-event { color: var(--yellow); }
+.chat-line.kick-event { color: var(--yellow); }
+.chat-line.kicked-event { color: var(--red); font-weight: bold; }
 .chat-line.nick-event { color: var(--purple); }
 .chat-line.topic-event { color: var(--cyan); }
 .chat-line.mode-event { color: var(--fg-muted); }

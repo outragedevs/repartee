@@ -267,7 +267,7 @@ impl App {
         });
     }
 
-    /// Fetch messages from `SQLite` for a web client.
+    /// Fetch messages for a web client.
     fn web_fetch_messages(&self, buffer_id: &str, limit: u32, before: Option<i64>, session_id: &str) {
         if buffer_id == Self::MENTIONS_BUFFER_ID {
             if let Some(buf) = self.state.buffers.get(buffer_id) {
@@ -293,6 +293,40 @@ impl App {
             }
             return;
         }
+
+        // Initial load (no scroll-back cursor): serve from in-memory buffer.
+        // This includes messages that haven't been flushed to DB yet (log writer
+        // has a 1s flush interval + batch size of 50).
+        if before.is_none()
+            && let Some(buf) = self.state.buffers.get(buffer_id)
+        {
+            let capped = limit.min(500) as usize;
+            let msgs: Vec<_> = buf
+                .messages
+                .iter()
+                .rev()
+                .take(capped)
+                .rev()
+                .map(crate::web::snapshot::message_to_wire)
+                .collect();
+            if !msgs.is_empty() {
+                let has_more = buf.messages.len() > capped;
+                tracing::debug!(
+                    %buffer_id, count = msgs.len(),
+                    "web FetchMessages: sending {} in-memory messages", msgs.len()
+                );
+                self.broadcast_web(crate::web::protocol::WebEvent::Messages {
+                    buffer_id: buffer_id.to_string(),
+                    messages: msgs,
+                    has_more,
+                    session_id: Some(session_id.to_string()),
+                });
+                return;
+            }
+        }
+
+        // If the in-memory buffer was empty (e.g. brand new buffer or post-reconnect
+        // before messages arrive), fall through to DB. Also used for scroll-back.
         let Some(ref storage) = self.storage else {
             tracing::warn!("web FetchMessages: storage not available");
             return;
