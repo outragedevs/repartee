@@ -6,25 +6,16 @@ use ratatui::widgets::Paragraph;
 use crate::app::App;
 use crate::theme::hex_to_color;
 
-/// Hard upper bound on how many visual (wrapped) lines a single message can
-/// contribute to a frame. Used to cap the render budget so the scroll loop
-/// cannot walk the entire buffer when `scroll_offset` exceeds available
-/// content. Even a ~1000-char NOTICE on an 80-column terminal wraps to
-/// ~13 lines; 16 is a safe over-estimate for realistic IRC workloads.
+// Hard upper bound on wrapped lines per message used by `compute_render_budget`
+// to cap the render loop's work. A ~1000-char NOTICE on an 80-col terminal
+// wraps to ~13 visual lines; 16 is a safe over-estimate for realistic IRC
+// traffic. See docs/superpowers/specs/2026-04-10-v084-oom-fix-design.md.
 const MAX_WRAPPED_LINES_PER_MSG: usize = 16;
 
-/// Compute the target size of the render `VecDeque<Line>` for chat view.
-///
-/// Returns the number of visual lines the render loop should aim to build
-/// before breaking. Capped to `buffer_len * MAX_WRAPPED_LINES_PER_MSG` so
-/// the loop terminates in O(`buffer_len`) regardless of `scroll_offset`.
-/// For empty buffers falls back to `visible_height` so at least a full
-/// screen is aimed for.
-///
-/// This is the minimal guarantee the caller needs: the loop's break
-/// condition `visual_lines.len() > needed` will fire in bounded time even
-/// under pathological `scroll_offset` values (e.g. after a long mouse-wheel
-/// scroll past the top of the buffer).
+// Compute the target size of the render `VecDeque<Line>` for chat view.
+// Capped at `buffer_len * MAX_WRAPPED_LINES_PER_MSG` so the caller's break
+// condition `visual_lines.len() > needed` fires in O(buffer_len) regardless
+// of `scroll_offset`. Empty buffers fall back to `visible_height`.
 fn compute_render_budget(
     buffer_len: usize,
     visible_height: usize,
@@ -71,14 +62,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         // Wrap-indent is pre-computed and cached on App.
         let indent = app.wrap_indent;
 
-        // Process messages from the end of the buffer, wrapping each into
-        // visual lines. Stop once we have enough to fill the screen plus
-        // the current scroll offset. `needed` is capped at
-        // `buf.messages.len() * MAX_WRAPPED_LINES_PER_MSG` by
-        // `compute_render_budget` so the break condition below fires in
-        // O(buf.messages.len()) regardless of how far the user has
-        // scroll-wheeled past available content — this is the fix for the
-        // v0.8.4 OOM. See docs/superpowers/specs/2026-04-10-v084-oom-fix-design.md.
+        // Walk messages in reverse and wrap each into visual lines. The break
+        // below fires in O(buf.messages.len()) via the budget cap — this
+        // prevents the v0.8.4 OOM on long mouse-wheel scrolls.
         let needed = compute_render_budget(buf.messages.len(), visible_height, app.scroll_offset);
         let mut visual_lines: VecDeque<Line<'_>> = VecDeque::new();
 
@@ -132,57 +118,81 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_WRAPPED_LINES_PER_MSG, compute_render_budget};
+    mod compute_render_budget {
+        use super::super::{MAX_WRAPPED_LINES_PER_MSG, compute_render_budget};
 
-    #[test]
-    fn normal_scroll_returns_visible_plus_offset() {
-        // Typical case: user scrolled a bit, offset is small compared to buffer cap.
-        let got = compute_render_budget(2000, 78, 50);
-        assert_eq!(got, 78 + 50);
-    }
+        #[test]
+        fn returns_visible_plus_offset_for_normal_scroll() {
+            // Typical case: user scrolled a bit, offset small vs buffer cap.
+            let got = compute_render_budget(2000, 78, 50);
+            assert_eq!(
+                got,
+                128,
+                "2000-msg buffer with scroll_offset=50 should return visible_height+offset (78+50=128), got {got}"
+            );
+        }
 
-    #[test]
-    fn zero_scroll_returns_visible_height() {
-        let got = compute_render_budget(2000, 78, 0);
-        assert_eq!(got, 78);
-    }
+        #[test]
+        fn returns_visible_height_when_scroll_is_zero() {
+            let got = compute_render_budget(2000, 78, 0);
+            assert_eq!(
+                got, 78,
+                "zero scroll_offset should return exactly visible_height, got {got}"
+            );
+        }
 
-    #[test]
-    fn pathological_scroll_is_capped_to_buffer_len_times_max_wraps() {
-        // The actual OOM bug: scroll_offset pushed far past available content.
-        // `needed` must not exceed buffer_len * MAX_WRAPPED_LINES_PER_MSG —
-        // that is the invariant that guarantees the render loop terminates
-        // in O(buffer_len) instead of walking every message every frame.
-        let buffer_len = 2000;
-        let got = compute_render_budget(buffer_len, 78, usize::MAX / 2);
-        let expected_cap = buffer_len * MAX_WRAPPED_LINES_PER_MSG;
-        assert_eq!(
-            got, expected_cap,
-            "pathological scroll_offset must be capped to buffer_len * MAX_WRAPPED_LINES_PER_MSG"
-        );
-    }
+        #[test]
+        fn caps_at_buffer_times_max_wraps_for_pathological_scroll() {
+            // This test locks in the v0.8.4 OOM fix invariant: scroll_offset
+            // pushed far past available content must NOT cause the render
+            // loop to walk every message per frame. `needed` is bounded by
+            // buffer_len * MAX_WRAPPED_LINES_PER_MSG, guaranteeing
+            // O(buffer_len) termination.
+            let buffer_len = 2000;
+            let got = compute_render_budget(buffer_len, 78, usize::MAX / 2);
+            let expected = buffer_len * MAX_WRAPPED_LINES_PER_MSG;
+            assert_eq!(
+                got, expected,
+                "pathological scroll_offset={} with buffer_len={buffer_len} must cap at buffer_len*MAX_WRAPPED_LINES_PER_MSG={expected}, got {got}",
+                usize::MAX / 2
+            );
+        }
 
-    #[test]
-    fn empty_buffer_returns_visible_height() {
-        // Empty buffer: cap is 0 before the .max(visible_height) floor, but
-        // the floor ensures render still targets a full screen.
-        let got = compute_render_budget(0, 78, 1000);
-        assert_eq!(got, 78);
-    }
+        #[test]
+        fn returns_visible_height_for_empty_buffer() {
+            // Empty buffer: buffer_cap is 0 before the .max(visible_height)
+            // floor. The floor ensures render still targets a full screen
+            // even when scroll_offset is large.
+            let got = compute_render_budget(0, 78, 1000);
+            assert_eq!(
+                got, 78,
+                "empty buffer with any scroll_offset should fall back to visible_height, got {got}"
+            );
+        }
 
-    #[test]
-    fn small_buffer_large_scroll_is_capped_to_buffer_cap() {
-        // 10-message buffer cannot produce more than 10 * 16 = 160 visual lines.
-        // Even with scroll_offset of 1M, `needed` caps at 160.
-        let got = compute_render_budget(10, 78, 1_000_000);
-        assert_eq!(got, 10 * MAX_WRAPPED_LINES_PER_MSG);
-    }
+        #[test]
+        fn caps_at_buffer_cap_for_small_buffer_with_large_scroll() {
+            // 10-message buffer cannot produce more than 10*16=160 lines
+            // even if the user scrolled a million ticks up.
+            let got = compute_render_budget(10, 78, 1_000_000);
+            let expected = 10 * MAX_WRAPPED_LINES_PER_MSG;
+            assert_eq!(
+                got, expected,
+                "10-msg buffer with scroll_offset=1M must cap at 10*MAX_WRAPPED_LINES_PER_MSG={expected}, got {got}"
+            );
+        }
 
-    #[test]
-    fn overflow_safe_on_usize_max_scroll() {
-        // visible_height + scroll_offset must not overflow. saturating_add
-        // protects the intermediate, then min() with cap brings it down.
-        let got = compute_render_budget(100, 78, usize::MAX);
-        assert_eq!(got, 100 * MAX_WRAPPED_LINES_PER_MSG);
+        #[test]
+        fn is_overflow_safe_for_usize_max_scroll() {
+            // visible_height + scroll_offset must never panic on overflow.
+            // saturating_add protects the intermediate, then .min() with
+            // the cap brings the final value down to a sane number.
+            let got = compute_render_budget(100, 78, usize::MAX);
+            let expected = 100 * MAX_WRAPPED_LINES_PER_MSG;
+            assert_eq!(
+                got, expected,
+                "usize::MAX scroll_offset must not overflow and must cap at 100*MAX_WRAPPED_LINES_PER_MSG={expected}, got {got}"
+            );
+        }
     }
 }
