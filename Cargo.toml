@@ -52,6 +52,13 @@ hmac = "0.12"
 pbkdf2 = { version = "0.12", features = ["simple"] }
 uuid = { version = "1.21", features = ["v4"] }
 hex = "0.4"
+# E2E encryption (RPE2E v1.0)
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+bip39 = "2"
+zeroize = { version = "1", features = ["derive"] }
 mlua = { version = "0.11.6", features = ["lua54", "vendored", "send"] }
 ratatui-image = "10.0"
 spellbook = "0.4"
