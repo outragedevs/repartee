@@ -20,7 +20,15 @@
     clippy::missing_const_for_fn,
     clippy::unnecessary_wraps,
     clippy::module_name_repetitions,
-    clippy::doc_markdown
+    clippy::doc_markdown,
+    // Every keyring method grabs `self.db.lock()` as its first line and
+    // releases it when the single SQL statement returns. Tightening further
+    // buys nothing and hurts readability for no real contention win.
+    clippy::significant_drop_tightening,
+    // Keyring::load_identity returns a 4-tuple read straight from SQLite
+    // columns; naming an alias just for the return type would obscure, not
+    // clarify.
+    clippy::type_complexity
 )]
 
 pub mod chunker;
@@ -34,7 +42,11 @@ pub mod wire;
 
 #[allow(unused_imports)]
 pub use error::E2eError;
-// E2eManager re-exported after Task 12b lands.
+#[allow(unused_imports)]
+pub use manager::E2eManager;
+
+#[cfg(test)]
+mod integration_tests;
 
 /// Protocol version string embedded in wire format and AAD.
 pub const PROTO: &str = "RPE2E01";
