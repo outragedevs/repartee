@@ -3,7 +3,7 @@ members = [".", "web-ui"]
 
 [package]
 name = "repartee"
-version = "0.8.4"
+version = "0.8.5"
 edition = "2024"
 description = "A modern terminal IRC client built with Ratatui and Tokio"
 license = "MIT"

@@ -238,6 +238,12 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v0.8.5
+
+- **Critical: fix 3 GB OOM crash on long mouse-wheel scroll** — the chat view's render loop could walk the entire message buffer on every frame when `scroll_offset` exceeded available content. Under sustained wheel scrolling this produced 200–600 MB/s of allocation churn, fragmenting glibc's arena until the kernel (or `systemd-oomd`) killed the process at ~3 GB RSS. The loop is now capped at `buffer_len × 16` visual lines so it terminates in `O(buffer_len)` regardless of scroll position. Observed on Debian with v0.8.4 after a week of uptime; pre-existing bug, not a 0.8.4 regression, but v0.8.4 had enough baseline churn to make it reachable in normal use.
+- **jemalloc on Linux** — `tikv-jemallocator` is now the global allocator on Linux builds via `#[cfg(target_os = "linux")]`. Defense-in-depth against glibc ptmalloc2 fragmentation in long-running sessions (weeks of uptime). macOS keeps `libsystem_malloc`, FreeBSD keeps its native jemalloc — builds on those platforms are byte-identical to v0.8.4, the dependency is not pulled into their build graph at all.
+- **Regression tests** — six unit tests lock in the render-budget invariant so the OOM cannot regress silently; tests are organized under `compute_render_budget::...` for IDE filtering and carry diagnostic assert messages.
+
 ### v0.8.4
 
 - **Web: sticky scroll** — auto-scroll now only scrolls to bottom when you're already there; scroll-up to read backlog stays put. Scroll-to-bottom button (▼) appears when scrolled up
