@@ -1,4 +1,5 @@
 /target
+/dist
 *.db
 *.db-shm
 *.db-wal
@@ -10,3 +11,34 @@ skills-lock.json
 memory.db*
 # Brainstorm artifacts
 .superpowers/
+# MemPalace local state
+entities.json
+mempalace.yaml
+# Per-user AI/agent tool state (not project config)
+/.adal
+/.agent
+/.augment
+/.codebuddy
+/.commandcode
+/.continue
+/.crush
+/.factory
+/.goose
+/.iflow
+/.junie
+/.kilocode
+/.kiro
+/.kode
+/.mcpjam
+/.mux
+/.neovate
+/.openhands
+/.pi
+/.pochi
+/.qoder
+/.qwen
+/.roo
+/.trae
+/.vibe
+/.windsurf
+/.zencoder

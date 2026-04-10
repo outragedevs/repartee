@@ -84,3 +84,26 @@ web-ui/            # Leptos WASM frontend (separate workspace crate)
 - Clippy: pedantic=warn, nursery=warn, perf=deny, redundant_clone=deny (0 warnings policy)
 - Commands use function pointer handlers: `fn(&mut App, &[String])`
 - State is UI-agnostic — no ratatui imports in `state/`
+
+## MemPalace — long-term memory for this project
+
+This project has a dedicated wing in MemPalace (palace at `~/.mempalace/palace`, shared between Claude Code and opencode). As of 2026-04-10 `wing=repartee` holds ~3577 drawers — past decisions, debugging sessions, design rationale, cross-references to `~/dev/kokoirc` (the reference project) and `~/dev/erssi` (theme format reference).
+
+**How to access:**
+- In Claude Code: 19 MCP tools under the `mempalace` plugin (`plugin:mempalace:mempalace`). Key ones: `mempalace_search`, `mempalace_kg_query`, `mempalace_list_rooms`, `mempalace_add_drawer`.
+- In opencode: same tools via the MCP server at `python3 -m mempalace.mcp_server` (config in `~/.config/opencode/opencode.json`).
+- Slash commands in Claude Code: `/mempalace:search`, `/mempalace:status`, `/mempalace:mine`.
+
+**When to query the palace in this repo:**
+1. **Before answering questions about past design decisions** — "why do we use ratatui over cursive", "what was the reason for the irc-repartee fork", "how did we decide on the theme format" — call `mempalace_search "<topic>" --wing repartee` first. Don't guess from memory.
+2. **When looking for prior bug investigations** — if you're about to debug something that feels familiar, search `wing=repartee` before reading code. A previous session may have already traced the same issue.
+3. **For entity/person facts** (Rust crate authors, collaborators, maintainers of `irc-repartee`) — use `mempalace_kg_query` which returns temporal entity relationships.
+4. **Cross-reference to kokoirc or erssi** — if you need to check how the TypeScript/OpenTUI reference (kokoirc) or the irssi fork (erssi) implements something, search without a wing filter or use the specific wing (`wing=erssi` has ~6423 drawers including theme format details).
+
+**When filing NEW memories:**
+- Design decisions → `wing=repartee room=general` with verbatim user quotes where possible
+- Code-level discoveries / bug fixes → `wing=repartee room=src`
+- Documentation notes → `wing=repartee room=documentation`
+- Use `mempalace_check_duplicate` (threshold 0.85) before `mempalace_add_drawer` to avoid bloat
+
+**Auto-save hooks**: Stop (every 15 messages) and PreCompact hooks are provided by the mempalace plugin globally — when blocked, file drawers as classified above, don't skip.
