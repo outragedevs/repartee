@@ -11,6 +11,8 @@ skills-lock.json
 memory.db*
 # Brainstorm artifacts
 .superpowers/
+# Planning docs — drafts only, not tracked
+/docs/plans
 # MemPalace local state
 entities.json
 mempalace.yaml
