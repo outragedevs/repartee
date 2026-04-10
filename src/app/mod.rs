@@ -478,6 +478,25 @@ impl App {
             None
         };
 
+        // RPE2E manager — needs storage to be up. The keyring shares the
+        // same SQLite connection owned by Storage.
+        if config.e2e.enabled
+            && let Some(storage_ref) = storage.as_ref()
+        {
+            let keyring = crate::e2e::keyring::Keyring::new(storage_ref.db.clone());
+            match crate::e2e::E2eManager::load_or_init(keyring) {
+                Ok(mgr) => {
+                    let fp = mgr.fingerprint();
+                    tracing::info!(
+                        "e2e: manager initialized, fingerprint={}",
+                        crate::e2e::crypto::fingerprint::fingerprint_hex(&fp)
+                    );
+                    state.e2e_manager = Some(std::sync::Arc::new(mgr));
+                }
+                Err(e) => tracing::error!("e2e: manager init failed: {e}"),
+            }
+        }
+
         let (preview_tx, preview_rx) = mpsc::channel(64);
 
         let in_tmux = std::env::var("TMUX").is_ok_and(|s| !s.is_empty());

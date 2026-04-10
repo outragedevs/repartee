@@ -13,6 +13,7 @@ use connection::Connection;
 use connection::ConnectionStatus;
 
 use crate::config::IgnoreEntry;
+use crate::e2e::E2eManager;
 use crate::irc::flood::FloodState;
 use crate::irc::netsplit::NetsplitState;
 use crate::scripting::engine::{BufferInfo, ConnectionInfo, NickInfo, ScriptStateSnapshot};
@@ -45,6 +46,9 @@ pub struct AppState {
     pub nick_color_sat: f32,
     /// Nick color HSL lightness (synced from config for mention line formatting).
     pub nick_color_lit: f32,
+    /// RPE2E manager, initialized once storage is up. `None` when the
+    /// `[e2e] enabled = false` config switch disables E2E entirely.
+    pub e2e_manager: Option<std::sync::Arc<E2eManager>>,
 }
 
 impl AppState {

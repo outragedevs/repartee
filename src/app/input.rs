@@ -865,8 +865,12 @@ impl App {
             return;
         }
 
-        // Split long messages at word boundaries to stay within IRC byte limits.
-        let chunks = crate::irc::split_irc_message(text, crate::irc::MESSAGE_MAX_BYTES);
+        // E2E: if enabled for this channel, encrypt the full text into a
+        // list of RPE2E01 wire-format lines (one per chunk). Each wire line
+        // already fits inside the IRC byte budget, so we skip
+        // `split_irc_message`. The plaintext is still displayed locally as
+        // the original (unencrypted) text — the user reads what they typed.
+        let (wire_lines, plain_echo) = self.e2e_encrypt_or_passthrough(&buffer_name, text);
 
         // When echo-message is enabled, the server will echo our message back
         // with authoritative server-time — skip local display and wait for echo.
@@ -878,16 +882,27 @@ impl App {
 
         let own_mode = self.state.nick_prefix(&active_id, &nick);
 
-        for chunk in chunks {
+        for wire in wire_lines {
             // Try to send via IRC if connected
             if let Some(handle) = self.irc_handles.get(&conn_id)
-                && handle.sender.send_privmsg(&buffer_name, &chunk).is_err()
+                && handle.sender.send_privmsg(&buffer_name, &wire).is_err()
             {
                 crate::commands::helpers::add_local_event(self, "Failed to send message");
                 return;
             }
+        }
 
-            if !echo_message_enabled {
+        if !echo_message_enabled {
+            // Local echo: show the user what they typed (plaintext), not the
+            // wire format. For non-E2E messages we split at word boundaries
+            // so very long lines wrap in the local buffer the same way they
+            // used to.
+            let local_chunks = if plain_echo.len() <= crate::irc::MESSAGE_MAX_BYTES {
+                vec![plain_echo.clone()]
+            } else {
+                crate::irc::split_irc_message(&plain_echo, crate::irc::MESSAGE_MAX_BYTES)
+            };
+            for chunk in local_chunks {
                 let id = self.state.next_message_id();
                 self.state.add_message(
                     &active_id,
@@ -906,6 +921,49 @@ impl App {
                         tags: None,
                     },
                 );
+            }
+        }
+    }
+
+    /// Return `(wire_lines, local_plain)` where `wire_lines` is what goes out
+    /// on IRC (encrypted when e2e is enabled on the channel, otherwise the
+    /// plain text split at IRC byte boundaries) and `local_plain` is what is
+    /// echoed into the local buffer for the user.
+    fn e2e_encrypt_or_passthrough(&self, buffer_name: &str, text: &str) -> (Vec<String>, String) {
+        let Some(mgr) = self.state.e2e_manager.as_ref() else {
+            return (
+                crate::irc::split_irc_message(text, crate::irc::MESSAGE_MAX_BYTES),
+                text.to_string(),
+            );
+        };
+        let cfg = mgr.keyring().get_channel_config(buffer_name).ok().flatten();
+        let enabled = cfg.map(|c| c.enabled).unwrap_or(false);
+        if !enabled {
+            return (
+                crate::irc::split_irc_message(text, crate::irc::MESSAGE_MAX_BYTES),
+                text.to_string(),
+            );
+        }
+        // Build the sender handle from our own connection. If the server
+        // hasn't told us our ident/host yet we fall back to a placeholder
+        // that still produces a valid (albeit weak) AAD — the receiving
+        // side's strict handle check will simply need to be trained on the
+        // same placeholder. In practice irc-repartee populates userhost
+        // after the welcome 001 so this only affects pre-registration sends.
+        let my_handle = self
+            .state
+            .active_buffer()
+            .and_then(|b| self.state.connections.get(&b.connection_id))
+            .map(|c| format!("{}!unknown@unknown", c.nick))
+            .unwrap_or_else(|| "unknown!unknown@unknown".to_string());
+        match mgr.encrypt_outgoing(&my_handle, buffer_name, text) {
+            Ok(wires) => (wires, text.to_string()),
+            Err(e) => {
+                tracing::warn!("e2e encrypt failed on {buffer_name}: {e}; sending cleartext");
+                (
+                    crate::irc::split_irc_message(text, crate::irc::MESSAGE_MAX_BYTES),
+                    text.to_string(),
+                )
             }
         }
     }

@@ -702,6 +702,14 @@ fn handle_privmsg(
     };
     let buffer_id = make_buffer_id(conn_id, buffer_name);
 
+    // E2E decrypt: if this looks like an RPE2E01 wire-format line, swap
+    // `text` for the plaintext before any further processing. Strict handle
+    // check uses the raw server-stamped `ident@host`, so attackers cannot
+    // decrypt by spoofing a nick.
+    let decrypted_owned =
+        try_decrypt_e2e(state, &format!("{ident}@{host}"), buffer_name, text);
+    let text: &str = decrypted_owned.as_deref().unwrap_or(text);
+
     // Check if this is a CTCP (ACTION or other)
     let is_ctcp = text.starts_with('\x01') && text.ends_with('\x01');
     let is_action = is_ctcp && text.len() > 2 && text[1..text.len() - 1].starts_with("ACTION ");
@@ -3096,6 +3104,42 @@ fn handle_whox_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
                 "%Zc0caf5{nick}%Z565f89 ({user}@{host}) [{flags}] {channel}%Za9b1d6 {realname}%Z565f89 [{account_str}]%N"
             ),
         );
+    }
+}
+
+/// Best-effort E2E decryption for an incoming PRIVMSG. Returns the
+/// decrypted plaintext as an owned `String` when the wire line parses and
+/// decrypts successfully; returns `None` otherwise (leaving `text`
+/// untouched for the rest of `handle_privmsg`).
+///
+/// The `sender_handle` must be built from the raw IRC prefix (`ident@host`)
+/// — that is what the `E2eManager` keyring is keyed on.
+fn try_decrypt_e2e(
+    state: &AppState,
+    sender_handle: &str,
+    channel: &str,
+    text: &str,
+) -> Option<String> {
+    let mgr = state.e2e_manager.as_ref()?;
+    if !text.starts_with("+RPE2E01") {
+        return None;
+    }
+    match mgr.decrypt_incoming(sender_handle, channel, text) {
+        Ok(crate::e2e::manager::DecryptOutcome::Plaintext(s)) => Some(s),
+        Ok(crate::e2e::manager::DecryptOutcome::MissingKey { .. }) => {
+            // No session yet — surface a placeholder in the buffer so the
+            // user sees that encrypted traffic is arriving but the key
+            // exchange hasn't happened. A proper KEYREQ is triggered by the
+            // /e2e handshake command or an auto-accept channel mode.
+            Some(format!("[E2E: awaiting session with {sender_handle}]"))
+        }
+        Ok(crate::e2e::manager::DecryptOutcome::Rejected(reason)) => {
+            Some(format!("[E2E rejected: {reason}]"))
+        }
+        Err(e) => {
+            tracing::warn!("e2e decrypt error on {channel}: {e}");
+            None
+        }
     }
 }
 
