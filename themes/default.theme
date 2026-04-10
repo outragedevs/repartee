@@ -46,6 +46,9 @@ disconnected = "%Zf7768e<--%N Disconnected from %Za9b1d6$0%N %Z565f89($1)%N"
 channel_created = "%Z565f89---%N Channel {channel $0} created %Z565f89$1%N"
 date_separator = "%Z565f89$0%N"
 backlog_end = "%Z565f89$0%N"
+e2e_info = "%Z9ece6a[E2E]%N $*"
+e2e_warning = "%Ze0af68[E2E]%N $*"
+e2e_error = "%Zf7768e[E2E]%N $*"
 
 [formats.sidepanel]
 header = "%Z7aa2f7%_$0%_%N"
