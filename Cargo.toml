@@ -71,6 +71,14 @@ vt100 = "0.16.2"
 [dev-dependencies]
 tempfile = "3.26"
 
+# Swap glibc ptmalloc2 for jemalloc on Linux. glibc fragments its arena
+# under bursty allocation patterns in long-running processes (we observed
+# RSS growth to 3 GB over a week of uptime before the v0.8.4 chat_view fix).
+# jemalloc returns memory to the OS more aggressively and is already the
+# default system allocator on FreeBSD. macOS keeps libsystem_malloc.
+[target.'cfg(target_os = "linux")'.dependencies]
+tikv-jemallocator = "0.6"
+
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }

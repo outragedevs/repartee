@@ -16,6 +16,19 @@ mod ui;
 mod web;
 mod nick_color;
 
+// Swap glibc ptmalloc2 for jemalloc on Linux. glibc fragments its arena under
+// bursty allocation patterns in long-running processes — we observed 3 GB RSS
+// growth on Debian before the v0.8.4 chat_view render-budget fix, and even
+// post-fix the baseline working set drifts upward over weeks of uptime.
+// jemalloc returns memory to the OS more aggressively and is already the
+// default system allocator on FreeBSD, so this brings Linux in line with BSD.
+// macOS keeps libsystem_malloc — no #[cfg] coverage here means the dep is not
+// even pulled into the build graph on non-Linux targets. See
+// docs/superpowers/specs/2026-04-10-v084-oom-fix-design.md for rationale.
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use color_eyre::eyre::Result;
 use tracing_subscriber::EnvFilter;
 
