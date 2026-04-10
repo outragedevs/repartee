@@ -114,6 +114,38 @@ html, body {
     overscroll-behavior: contain;
 }
 
+.chat-messages-outer {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    position: relative;
+}
+
+.scroll-bottom-btn {
+    position: absolute;
+    bottom: 8px;
+    right: 12px;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    color: var(--fg-muted);
+    font-size: 14px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 5;
+    opacity: 0.85;
+    transition: opacity 0.15s;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.scroll-bottom-btn:hover { opacity: 1; }
+.scroll-bottom-btn.hidden { display: none; }
+
 /* Chat line — flex row, all items on same baseline */
 .chat-line {
     padding: 0 8px;
@@ -177,11 +209,30 @@ html, body {
 .chat-line .part-arrow { color: var(--yellow); }
 .chat-line .quit-arrow { color: var(--red); }
 .chat-line .nick-arrow { color: var(--purple); }
+.chat-line .kick-arrow { color: var(--red); }
+.chat-line .kicked-arrow { color: var(--red); }
+.chat-line .topic-arrow { color: var(--cyan); }
+.chat-line .mode-arrow { color: var(--fg-muted); }
+.chat-line .connect-arrow { color: var(--green); }
+.chat-line .disconnect-arrow { color: var(--red); }
+.chat-line .chghost-arrow { color: var(--purple); }
+.chat-line .account-arrow { color: var(--fg-muted); }
+
+/* Event-key-specific text coloring */
+.chat-line.join-event { color: var(--green); }
+.chat-line.part-event { color: var(--yellow); }
+.chat-line.kick-event { color: var(--yellow); }
+.chat-line.kicked-event { color: var(--red); font-weight: bold; }
+.chat-line.nick-event { color: var(--purple); }
+.chat-line.topic-event { color: var(--cyan); }
+.chat-line.mode-event { color: var(--fg-muted); }
 
 /* Action: * nick action text */
 .chat-line.action { color: var(--yellow); }
 
 /* Notice: -nick- text */
+.chat-line.notice { color: var(--cyan); }
+.chat-line .notice-body { color: var(--fg-muted); }
 .chat-line .notice-nick { color: var(--cyan); }
 
 /* === Nick List (right panel) === */
