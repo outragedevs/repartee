@@ -3,6 +3,10 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+#[allow(
+    dead_code,
+    reason = "variants are constructed in later phases (handshake, keyring, manager)"
+)]
 pub enum E2eError {
     #[error("crypto error: {0}")]
     Crypto(String),

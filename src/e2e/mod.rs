@@ -11,6 +11,18 @@
 //! - CTCP NOTICE handshake with KEYREQ/KEYRSP
 //! - Strict handle check on decrypt path
 
+// The e2e module is built in phases; several primitives are written before
+// the consumers (handshake, manager, command handlers) land. Silence lints
+// that would otherwise fire on intentionally-unused helpers until the later
+// phases wire them up.
+#![allow(
+    dead_code,
+    clippy::missing_const_for_fn,
+    clippy::unnecessary_wraps,
+    clippy::module_name_repetitions,
+    clippy::doc_markdown
+)]
+
 pub mod chunker;
 pub mod commands;
 pub mod crypto;
