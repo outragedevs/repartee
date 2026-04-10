@@ -898,7 +898,7 @@ impl App {
             // so very long lines wrap in the local buffer the same way they
             // used to.
             let local_chunks = if plain_echo.len() <= crate::irc::MESSAGE_MAX_BYTES {
-                vec![plain_echo.clone()]
+                vec![plain_echo]
             } else {
                 crate::irc::split_irc_message(&plain_echo, crate::irc::MESSAGE_MAX_BYTES)
             };
@@ -937,7 +937,7 @@ impl App {
             );
         };
         let cfg = mgr.keyring().get_channel_config(buffer_name).ok().flatten();
-        let enabled = cfg.map(|c| c.enabled).unwrap_or(false);
+        let enabled = cfg.is_some_and(|c| c.enabled);
         if !enabled {
             return (
                 crate::irc::split_irc_message(text, crate::irc::MESSAGE_MAX_BYTES),
@@ -954,8 +954,10 @@ impl App {
             .state
             .active_buffer()
             .and_then(|b| self.state.connections.get(&b.connection_id))
-            .map(|c| format!("{}!unknown@unknown", c.nick))
-            .unwrap_or_else(|| "unknown!unknown@unknown".to_string());
+            .map_or_else(
+                || "unknown!unknown@unknown".to_string(),
+                |c| format!("{}!unknown@unknown", c.nick),
+            );
         match mgr.encrypt_outgoing(&my_handle, buffer_name, text) {
             Ok(wires) => (wires, text.to_string()),
             Err(e) => {
