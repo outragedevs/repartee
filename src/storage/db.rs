@@ -87,6 +87,63 @@ const CREATE_MENTIONS_TIMESTAMP_IDX: &str = "
 CREATE INDEX IF NOT EXISTS idx_mentions_timestamp
 ON mentions (timestamp)";
 
+// ---------- RPE2E tables ----------
+
+const CREATE_E2E_IDENTITY: &str = "
+CREATE TABLE IF NOT EXISTS e2e_identity (
+    id            INTEGER PRIMARY KEY CHECK (id = 1),
+    pubkey        BLOB NOT NULL,
+    privkey       BLOB NOT NULL,
+    fingerprint   BLOB NOT NULL,
+    created_at    INTEGER NOT NULL
+)";
+
+const CREATE_E2E_PEERS: &str = "
+CREATE TABLE IF NOT EXISTS e2e_peers (
+    fingerprint   BLOB PRIMARY KEY,
+    pubkey        BLOB NOT NULL,
+    last_handle   TEXT,
+    last_nick     TEXT,
+    first_seen    INTEGER NOT NULL,
+    last_seen     INTEGER NOT NULL,
+    global_status TEXT NOT NULL DEFAULT 'pending'
+)";
+
+const CREATE_E2E_OUTGOING: &str = "
+CREATE TABLE IF NOT EXISTS e2e_outgoing_sessions (
+    channel           TEXT PRIMARY KEY,
+    sk                BLOB NOT NULL,
+    created_at        INTEGER NOT NULL,
+    pending_rotation  INTEGER NOT NULL DEFAULT 0
+)";
+
+const CREATE_E2E_INCOMING: &str = "
+CREATE TABLE IF NOT EXISTS e2e_incoming_sessions (
+    handle       TEXT NOT NULL,
+    channel      TEXT NOT NULL,
+    fingerprint  BLOB NOT NULL,
+    sk           BLOB NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'pending',
+    created_at   INTEGER NOT NULL,
+    PRIMARY KEY (handle, channel)
+)";
+
+const CREATE_E2E_CHANNEL_CONFIG: &str = "
+CREATE TABLE IF NOT EXISTS e2e_channel_config (
+    channel  TEXT PRIMARY KEY,
+    enabled  INTEGER NOT NULL DEFAULT 0,
+    mode     TEXT NOT NULL DEFAULT 'normal'
+)";
+
+const CREATE_E2E_AUTOTRUST: &str = "
+CREATE TABLE IF NOT EXISTS e2e_autotrust (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope           TEXT NOT NULL,
+    handle_pattern  TEXT NOT NULL,
+    created_at      INTEGER NOT NULL,
+    UNIQUE(scope, handle_pattern)
+)";
+
 fn create_schema(db: &Connection, encrypt: bool) -> rusqlite::Result<()> {
     db.execute_batch(CREATE_MESSAGES)?;
     db.execute_batch(CREATE_MESSAGES_IDX)?;
@@ -96,6 +153,13 @@ fn create_schema(db: &Connection, encrypt: bool) -> rusqlite::Result<()> {
     db.execute_batch(CREATE_MENTIONS)?;
     db.execute_batch(CREATE_MENTIONS_IDX)?;
     db.execute_batch(CREATE_MENTIONS_TIMESTAMP_IDX)?;
+    // RPE2E tables — always created, independent of the message-log encrypt flag.
+    db.execute_batch(CREATE_E2E_IDENTITY)?;
+    db.execute_batch(CREATE_E2E_PEERS)?;
+    db.execute_batch(CREATE_E2E_OUTGOING)?;
+    db.execute_batch(CREATE_E2E_INCOMING)?;
+    db.execute_batch(CREATE_E2E_CHANNEL_CONFIG)?;
+    db.execute_batch(CREATE_E2E_AUTOTRUST)?;
     if !encrypt {
         db.execute_batch(CREATE_FTS)?;
         db.execute_batch(CREATE_FTS_TRIGGERS)?;
@@ -219,6 +283,28 @@ mod tests {
     fn open_creates_read_markers_table() {
         let db = open_database(false).unwrap();
         assert!(table_exists(&db, "read_markers"));
+    }
+
+    #[test]
+    fn open_creates_e2e_tables() {
+        let db = open_database(false).unwrap();
+        for t in [
+            "e2e_identity",
+            "e2e_peers",
+            "e2e_outgoing_sessions",
+            "e2e_incoming_sessions",
+            "e2e_channel_config",
+            "e2e_autotrust",
+        ] {
+            assert!(table_exists(&db, t), "missing table {t}");
+        }
+    }
+
+    #[test]
+    fn open_creates_e2e_tables_when_encrypted() {
+        let db = open_database(true).unwrap();
+        assert!(table_exists(&db, "e2e_identity"));
+        assert!(table_exists(&db, "e2e_peers"));
     }
 
     #[test]
