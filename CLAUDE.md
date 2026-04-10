@@ -28,6 +28,35 @@ pub const APP_NAME: &str = "repartee";
   - `make test` / `make clippy` — testing and linting
 - **CI**: GitHub Actions release workflow on tag push (`v*`) — macOS ARM64, Linux AMD64/ARM64, FreeBSD AMD64
 
+## Release
+
+Manual release — tag push triggers CI binary builds, `cargo publish` is a separate manual step.
+
+### Pre-flight (local only)
+
+1. Bump `version` in `Cargo.toml` (`[package]` section — the only place that needs changing)
+2. `cargo check -p repartee` — regenerates `Cargo.lock`
+3. Add a `### vX.Y.Z` entry to the changelog in `README.md` (match the style of existing entries — user-facing bullet list)
+4. `make test && make clippy` — both must pass with 0 warnings (pedantic + nursery + perf=deny + redundant_clone=deny)
+5. `make release` — verifies the LTO/codegen-units=1/strip release profile builds locally
+6. `git add Cargo.toml Cargo.lock README.md && git commit -m "chore: bump version to X.Y.Z"`
+
+Optional: if `web-ui/` changed, run `make wasm` before step 6 and include `static/web/` in the commit. CI also runs `build-wasm` as a dependency of all native build jobs, so CI-built releases always embed the latest web UI regardless.
+
+### Publishing (destructive — requires explicit confirmation in agent sessions)
+
+7. `cargo publish --dry-run -p repartee` — packaging sanity check, no network upload
+8. `git push outrage main` — push pending commits (remote is `outrage`, not `origin` — verify with `git remote -v`)
+9. `git tag vX.Y.Z && git push outrage vX.Y.Z` — lightweight tag, triggers `.github/workflows/release.yml` which builds macOS ARM + Linux AMD64/ARM64 + FreeBSD AMD64 tarballs and creates a GitHub Release with auto-generated notes
+10. `cargo publish -p repartee` — publishes to crates.io. **Irreversible**: `cargo yank --version X.Y.Z` can mark a version unfetchable for new consumers but cannot delete it. Use `--allow-dirty` only if unavoidable generated artifacts require it.
+
+### Notes
+
+- CI does not run `cargo publish` — it is strictly manual.
+- The `irc-repartee` and `irc-proto-repartee` crates are published separately from `~/dev/irc/` (a fork of the `irc` crate family), not from this workspace. Only publish those when the fork itself needs bumping.
+- The release workflow runs `cargo build --release --locked`, so the version-bump commit must land on `outrage/main` **before** the tag is pushed — otherwise CI fails with a `Cargo.lock` mismatch.
+- `~/.cargo/credentials.toml` must contain a valid crates.io token (set via `cargo login <token>` once per machine). Never commit or print this file.
+
 ## Architecture
 
 - **Pattern**: TEA (Model → Message → Update → View)
