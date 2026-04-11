@@ -510,6 +510,51 @@ impl Keyring {
         Ok(())
     }
 
+    /// Delete every incoming session row belonging to `handle` across all
+    /// channels. Used by `/e2e reverify` to purge a stale identity's
+    /// session footprint before upserting the new key.
+    ///
+    /// Returns the number of rows removed so callers can surface a
+    /// human-readable summary.
+    pub fn delete_incoming_sessions_for_handle(&self, handle: &str) -> Result<usize> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let n = conn.execute(
+            "DELETE FROM e2e_incoming_sessions WHERE handle = ?1",
+            params![handle],
+        )?;
+        Ok(n)
+    }
+
+    /// Delete every outgoing-recipient row referencing `handle`. Mirrors
+    /// `delete_incoming_sessions_for_handle` for the reverse direction
+    /// (we stop pushing our outgoing session key to this identity until
+    /// it re-handshakes under the new pubkey). Returns the number of
+    /// rows removed.
+    pub fn delete_outgoing_recipients_for_handle(&self, handle: &str) -> Result<usize> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let n = conn.execute(
+            "DELETE FROM e2e_outgoing_recipients WHERE handle = ?1",
+            params![handle],
+        )?;
+        Ok(n)
+    }
+
+    /// Delete the peer row identified by `fp`. Used by `/e2e reverify`
+    /// to evict a stale identity before upserting the newly-consented
+    /// pubkey. Intentionally does NOT cascade to incoming-sessions or
+    /// outgoing-recipients — the reverify path deletes those explicitly
+    /// via `delete_incoming_sessions_for_handle` and
+    /// `delete_outgoing_recipients_for_handle` so the two cleanups are
+    /// visible side-by-side.
+    pub fn delete_peer_by_fingerprint(&self, fp: &Fingerprint) -> Result<()> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        conn.execute(
+            "DELETE FROM e2e_peers WHERE fingerprint = ?1",
+            params![fp.as_slice()],
+        )?;
+        Ok(())
+    }
+
     /// List all incoming sessions on `channel` whose status is `trusted`.
     pub fn list_trusted_peers_for_channel(&self, channel: &str) -> Result<Vec<IncomingSession>> {
         let conn = self.db.lock().expect("keyring mutex poisoned");

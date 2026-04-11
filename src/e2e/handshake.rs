@@ -26,7 +26,7 @@
 //! `crypto_sign_ed25519_pk_to_curve25519`). This lets Alice push a new key
 //! to peers she has never received a KEYREQ from in the current session.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use crate::e2e::crypto::aead::NONCE_LEN;
@@ -37,6 +37,16 @@ pub const PROTO_VERSION: u8 = 1;
 
 /// Minimum gap between outgoing KEYREQ to the same peer.
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(30);
+
+/// Sliding-window length for the incoming-KEYREQ rate limiter (spec §5.4).
+const INCOMING_WINDOW: Duration = Duration::from_secs(60);
+
+/// Maximum incoming KEYREQs per peer within `INCOMING_WINDOW` before the
+/// peer is pushed into backoff.
+const INCOMING_MAX_PER_WINDOW: usize = 3;
+
+/// Backoff duration applied after a peer exceeds the incoming window.
+const INCOMING_BACKOFF: Duration = Duration::from_secs(5 * 60);
 
 /// KEYREQ message. `pubkey` is the initiator's long-term Ed25519 identity;
 /// `eph_x25519` is a fresh ephemeral X25519 public used for ECDH. Both are
@@ -352,12 +362,30 @@ fn hex64(s: &str) -> Result<[u8; 64]> {
 
 // ---------- rate limiter ----------
 
-/// Per-peer rate limiter for outgoing KEYREQ. Enforces a minimum 30 second
-/// window between requests to the same `peer_handle` to avoid spamming
-/// passive/offline peers.
+/// Per-peer incoming bucket. Sliding 60-second window of recent KEYREQ
+/// arrivals; once the window fills with `INCOMING_MAX_PER_WINDOW` hits the
+/// peer is pushed into `backoff_until` and every further KEYREQ is dropped
+/// until the backoff expires, at which point the window resets.
+#[derive(Debug, Default)]
+struct IncomingBucket {
+    /// Timestamps of recent KEYREQs received from this peer (sliding 60s window).
+    recent: VecDeque<Instant>,
+    /// When set, the peer is in 5-minute backoff — reject all until `Instant`.
+    backoff_until: Option<Instant>,
+}
+
+/// Per-peer rate limiter for RPE2E handshake traffic. Enforces:
+/// - outgoing: a minimum 30 second gap between KEYREQs to the same peer
+///   so we don't flood passive/offline nicks.
+/// - incoming: max `INCOMING_MAX_PER_WINDOW` KEYREQs per peer per
+///   `INCOMING_WINDOW`; exceeding that puts the peer into
+///   `INCOMING_BACKOFF` backoff during which every further KEYREQ is
+///   dropped without any crypto work. Cheap to reject a signature flood
+///   before the expensive Ed25519 verify runs.
 #[derive(Debug, Default)]
 pub struct RateLimiter {
     last_sent: HashMap<String, Instant>,
+    incoming: HashMap<String, IncomingBucket>,
 }
 
 impl RateLimiter {
@@ -377,6 +405,50 @@ impl RateLimiter {
         }
         self.last_sent.insert(peer_handle.to_string(), now);
         true
+    }
+
+    /// Returns `true` if we should respond to an incoming KEYREQ from
+    /// `peer_handle`. Enforces the spec §5.4 limit of
+    /// `INCOMING_MAX_PER_WINDOW` per `INCOMING_WINDOW` with an
+    /// `INCOMING_BACKOFF` timeout on excess.
+    pub fn allow_incoming(&mut self, peer_handle: &str) -> bool {
+        let now = Instant::now();
+        let bucket = self
+            .incoming
+            .entry(peer_handle.to_string())
+            .or_default();
+        if let Some(until) = bucket.backoff_until {
+            if now < until {
+                return false;
+            }
+            bucket.backoff_until = None;
+            bucket.recent.clear();
+        }
+        // Evict entries older than the sliding window.
+        while let Some(front) = bucket.recent.front() {
+            if now.duration_since(*front) > INCOMING_WINDOW {
+                bucket.recent.pop_front();
+            } else {
+                break;
+            }
+        }
+        if bucket.recent.len() >= INCOMING_MAX_PER_WINDOW {
+            bucket.backoff_until = Some(now + INCOMING_BACKOFF);
+            return false;
+        }
+        bucket.recent.push_back(now);
+        true
+    }
+
+    /// Test-only helper: forcibly expire any backoff on `peer_handle` so a
+    /// unit test can simulate the wait without sleeping. Clears the recent
+    /// window as well, matching the end-of-backoff path in `allow_incoming`.
+    #[cfg(test)]
+    fn force_expire_backoff(&mut self, peer_handle: &str) {
+        if let Some(bucket) = self.incoming.get_mut(peer_handle) {
+            bucket.backoff_until = None;
+            bucket.recent.clear();
+        }
     }
 }
 
@@ -546,6 +618,61 @@ mod tests {
         assert!(rl.allow_outgoing("~bob@host"));
         assert!(!rl.allow_outgoing("~bob@host"));
         assert!(rl.allow_outgoing("~alice@host"));
+    }
+
+    #[test]
+    fn allow_incoming_permits_first_three_then_backoffs() {
+        let mut rl = RateLimiter::new();
+        // The first three arrivals inside the 60s window are accepted.
+        assert!(rl.allow_incoming("~bob@host"));
+        assert!(rl.allow_incoming("~bob@host"));
+        assert!(rl.allow_incoming("~bob@host"));
+        // The fourth tips the bucket into backoff — rejected AND an
+        // `INCOMING_BACKOFF` timeout is installed.
+        assert!(!rl.allow_incoming("~bob@host"));
+        // Every subsequent arrival while the backoff is live is rejected
+        // without consulting the sliding window at all.
+        assert!(!rl.allow_incoming("~bob@host"));
+        assert!(!rl.allow_incoming("~bob@host"));
+        // Sanity: the bucket records the backoff_until timestamp.
+        let bucket = rl.incoming.get("~bob@host").expect("bucket present");
+        assert!(bucket.backoff_until.is_some());
+    }
+
+    #[test]
+    fn allow_incoming_backoff_expires_after_window() {
+        let mut rl = RateLimiter::new();
+        // Fill the window and trip the backoff.
+        assert!(rl.allow_incoming("~bob@host"));
+        assert!(rl.allow_incoming("~bob@host"));
+        assert!(rl.allow_incoming("~bob@host"));
+        assert!(!rl.allow_incoming("~bob@host"));
+        // Simulate the 5-minute backoff elapsing without actually sleeping.
+        rl.force_expire_backoff("~bob@host");
+        // Once the backoff has expired the bucket accepts the next three
+        // KEYREQs again — we're back to the fresh-window state.
+        assert!(rl.allow_incoming("~bob@host"));
+        assert!(rl.allow_incoming("~bob@host"));
+        assert!(rl.allow_incoming("~bob@host"));
+        // And the fourth trips the next backoff cycle.
+        assert!(!rl.allow_incoming("~bob@host"));
+    }
+
+    #[test]
+    fn allow_incoming_independent_per_peer() {
+        let mut rl = RateLimiter::new();
+        // Bob fills his bucket and lands in backoff.
+        assert!(rl.allow_incoming("~bob@host"));
+        assert!(rl.allow_incoming("~bob@host"));
+        assert!(rl.allow_incoming("~bob@host"));
+        assert!(!rl.allow_incoming("~bob@host"));
+        // Alice's bucket is independent — she still has her full quota.
+        assert!(rl.allow_incoming("~alice@host"));
+        assert!(rl.allow_incoming("~alice@host"));
+        assert!(rl.allow_incoming("~alice@host"));
+        assert!(!rl.allow_incoming("~alice@host"));
+        // Bob still blocked.
+        assert!(!rl.allow_incoming("~bob@host"));
     }
 
     #[test]

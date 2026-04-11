@@ -13,7 +13,7 @@ use rusqlite::Connection;
 
 use crate::e2e::error::E2eError;
 use crate::e2e::keyring::{ChannelConfig, ChannelMode, Keyring, TrustStatus};
-use crate::e2e::manager::{DecryptOutcome, E2eManager, TrustChange};
+use crate::e2e::manager::{DecryptOutcome, E2eManager, ReverifyOutcome, TrustChange};
 
 const SCHEMA: &str = "
 CREATE TABLE e2e_identity (id INTEGER PRIMARY KEY CHECK (id = 1), pubkey BLOB NOT NULL, privkey BLOB NOT NULL, fingerprint BLOB NOT NULL, created_at INTEGER NOT NULL);
@@ -30,6 +30,21 @@ fn make_manager() -> E2eManager {
     conn.execute_batch(SCHEMA).unwrap();
     let kr = Keyring::new(Arc::new(Mutex::new(conn)));
     E2eManager::load_or_init(kr).unwrap()
+}
+
+/// Build a fresh manager with a custom replay-window tolerance. Used by
+/// the `ts_tolerance` configuration test to verify the per-instance value
+/// is honoured by `decrypt_incoming` (spec §5.4 + G11 gap 4).
+fn make_manager_with_tolerance(ts_tolerance_secs: i64) -> E2eManager {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(SCHEMA).unwrap();
+    let kr = Keyring::new(Arc::new(Mutex::new(conn)));
+    let cfg = crate::config::E2eConfig {
+        enabled: true,
+        default_mode: "normal".to_string(),
+        ts_tolerance_secs,
+    };
+    E2eManager::load_or_init_with_config(kr, &cfg).unwrap()
 }
 
 fn enable_channel(mgr: &E2eManager, channel: &str, mode: ChannelMode) {
@@ -1013,4 +1028,276 @@ fn context_key_channels_vs_pms() {
         "@~bob@b.host",
         "PM target must be rewritten to @<peer_handle>"
     );
+}
+
+// ---------- G11 gap 3: /e2e reverify is a real path (not an alias) ----------
+
+#[test]
+fn reverify_applies_pending_fingerprint_change() {
+    // Reproduce `handshake_with_changed_fingerprint_is_rejected`:
+    //   1. Alice and Bob_orig complete a handshake → alice has a peer row
+    //      + trusted incoming session pinned to bob_orig's fingerprint.
+    //   2. Bob regenerates his identity (bob_new) and retries a KEYREQ
+    //      from the same handle — alice MUST reject with a
+    //      FingerprintChanged PendingTrustNotice.
+    //   3. User runs `/e2e reverify` — `mgr.reverify_peer("~bob@b.host")`
+    //      consumes the notice, deletes the old peer + sessions, and
+    //      installs bob_new's pubkey.
+    //   4. A third handshake attempt from bob_new under the SAME handle
+    //      must now succeed (the alice-side TOFU classifier sees the
+    //      fingerprint as Known or New, never FingerprintChanged).
+    let alice = make_manager();
+    let bob_orig = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob_orig, "#x", ChannelMode::AutoAccept);
+
+    let bob_handle = "~bob@b.host";
+    let alice_handle = "~alice@a.host";
+
+    // (1) initial handshake pins bob_orig.
+    let req1 = bob_orig.build_keyreq("#x").unwrap();
+    let rsp1 = alice.handle_keyreq(bob_handle, &req1).unwrap().unwrap();
+    bob_orig.handle_keyrsp(alice_handle, &rsp1).unwrap();
+    assert!(alice.take_pending_trust_changes().is_empty());
+
+    // (2) bob regenerates identity and retries.
+    let bob_new = make_manager();
+    enable_channel(&bob_new, "#x", ChannelMode::AutoAccept);
+    assert_ne!(bob_orig.fingerprint(), bob_new.fingerprint());
+
+    let req2 = bob_new.build_keyreq("#x").unwrap();
+    let err = alice
+        .handle_keyreq(bob_handle, &req2)
+        .expect_err("must reject changed fingerprint");
+    match err {
+        E2eError::HandleMismatch { .. } => {}
+        other => panic!("expected HandleMismatch, got {other:?}"),
+    }
+    // One FingerprintChanged notice is queued. The test intentionally
+    // does NOT drain it via take_pending_trust_changes — reverify_peer
+    // consumes it instead.
+
+    // (3) user runs /e2e reverify — manager consumes the pending notice.
+    let outcome = alice.reverify_peer(bob_handle).unwrap();
+    match outcome {
+        ReverifyOutcome::Applied { old_fp, new_fp } => {
+            assert_eq!(old_fp, bob_orig.fingerprint());
+            assert_eq!(new_fp, bob_new.fingerprint());
+        }
+        other => panic!("expected Applied, got {other:?}"),
+    }
+    // The pending queue is now empty (reverify consumed the matching
+    // notice and preserved everything else).
+    assert!(alice.take_pending_trust_changes().is_empty());
+
+    // Alice's peer table now has bob_new's fingerprint (and NOT
+    // bob_orig's) under bob_handle.
+    assert!(
+        alice
+            .keyring()
+            .get_peer_by_fingerprint(&bob_orig.fingerprint())
+            .unwrap()
+            .is_none(),
+        "old peer row must be deleted"
+    );
+    let peer_new = alice
+        .keyring()
+        .get_peer_by_fingerprint(&bob_new.fingerprint())
+        .unwrap()
+        .expect("new peer row installed by reverify");
+    assert_eq!(peer_new.last_handle.as_deref(), Some(bob_handle));
+    // Incoming session for bob_handle on #x was purged; a third
+    // handshake is required to re-establish it with bob_new's key.
+    assert!(
+        alice
+            .keyring()
+            .get_incoming_session(bob_handle, "#x")
+            .unwrap()
+            .is_none(),
+        "stale incoming session must be purged"
+    );
+
+    // (4) Replay the same req2 back to alice. After reverify consumed
+    // the FingerprintChanged notice AND upserted bob_new's pubkey as
+    // Trusted, alice's TOFU classifier sees (new_fp, bob_handle) as
+    // Known rather than FingerprintChanged — so the second attempt
+    // succeeds and produces a KEYRSP. We reuse req2 instead of
+    // building a fresh req3 because bob_new still has a live pending
+    // handshake entry from req2, and the v1 initiator only scans the
+    // pending map by channel — a second build_keyreq for the same
+    // channel would race the stale entry. In real deployment this is
+    // rate-limited away by the 30s outgoing window; in the test we
+    // just replay the already-built request.
+    let rsp2_accepted = alice
+        .handle_keyreq(bob_handle, &req2)
+        .unwrap()
+        .expect("after reverify the replayed KEYREQ should be accepted");
+    bob_new.handle_keyrsp(alice_handle, &rsp2_accepted).unwrap();
+
+    // And the trust change queue stays empty — no more FingerprintChanged
+    // warnings fire for this handle.
+    assert!(alice.take_pending_trust_changes().is_empty());
+
+    // End-to-end: Alice encrypts for #x and bob_new decrypts using the
+    // session his handle_keyrsp just installed.
+    let wires = alice.encrypt_outgoing("#x", "hello after reverify").unwrap();
+    match bob_new
+        .decrypt_incoming(alice_handle, "#x", &wires[0])
+        .unwrap()
+    {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "hello after reverify"),
+        other => panic!("expected Plaintext, got {other:?}"),
+    }
+}
+
+#[test]
+fn reverify_without_pending_notice_purges_handle() {
+    // When `/e2e reverify <nick>` is run without a queued
+    // FingerprintChanged notice, the command falls back to a
+    // destructive purge of the handle's keyring state. This is the
+    // documented recovery path for users who've already compared SAS
+    // out-of-band and just need the old identity gone.
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+
+    let bob_handle = "~bob@b.host";
+    let alice_handle = "~alice@a.host";
+
+    // Full handshake populates peer + incoming session + recipient row.
+    let req = bob.build_keyreq("#x").unwrap();
+    let rsp = alice.handle_keyreq(bob_handle, &req).unwrap().unwrap();
+    bob.handle_keyrsp(alice_handle, &rsp).unwrap();
+    assert!(alice.take_pending_trust_changes().is_empty());
+
+    // Reverify with no pending notice → Cleared.
+    match alice.reverify_peer(bob_handle).unwrap() {
+        ReverifyOutcome::Cleared { deleted } => {
+            assert!(deleted >= 1, "expected at least one row purged");
+        }
+        other => panic!("expected Cleared, got {other:?}"),
+    }
+
+    // Peer row is gone, incoming session is gone.
+    assert!(
+        alice
+            .keyring()
+            .get_peer_by_fingerprint(&bob.fingerprint())
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        alice
+            .keyring()
+            .get_incoming_session(bob_handle, "#x")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn reverify_unknown_handle_is_not_found() {
+    let alice = make_manager();
+    match alice.reverify_peer("~ghost@nowhere.test").unwrap() {
+        ReverifyOutcome::NotFound => {}
+        other => panic!("expected NotFound, got {other:?}"),
+    }
+}
+
+// ---------- G11 gap 4: config.e2e.ts_tolerance_secs is honoured ----------
+
+#[test]
+fn decrypt_respects_configured_ts_tolerance() {
+    // Spec §5.4 ts-replay window. Construct a manager with a 10-second
+    // tolerance, run a full handshake, and then hand-craft wire chunks
+    // under alice's outgoing session key (which bob, as the initiator,
+    // installed as his incoming session via the KEYRSP unwrap). We
+    // feed the chunks to `bob.decrypt_incoming` with synthesised
+    // timestamps: 15s stale must be rejected, 5s stale must succeed.
+    use crate::e2e::crypto::aead;
+    use crate::e2e::wire::{build_aad, fresh_msgid, WireChunk};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let alice = make_manager_with_tolerance(10);
+    let bob = make_manager_with_tolerance(10);
+
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+
+    let alice_handle = "~alice@a.host";
+    let bob_handle = "~bob@b.host";
+
+    // Bob → Alice handshake: bob initiates, alice responds. Alice
+    // creates (or already had) an outgoing session for #x, wraps it in
+    // the KEYRSP, and bob installs it as his incoming session for
+    // alice on #x.
+    let req = bob.build_keyreq("#x").unwrap();
+    let rsp = alice.handle_keyreq(bob_handle, &req).unwrap().unwrap();
+    bob.handle_keyrsp(alice_handle, &rsp).unwrap();
+
+    // Alice's outgoing session is what we'll encrypt with. Bob's
+    // incoming session for (alice_handle, #x) must share the same key.
+    let alice_outgoing_sk = alice
+        .keyring()
+        .get_outgoing_session("#x")
+        .unwrap()
+        .expect("handshake installs alice's outgoing session")
+        .sk;
+    let bob_incoming = bob
+        .keyring()
+        .get_incoming_session(alice_handle, "#x")
+        .unwrap()
+        .expect("bob has an incoming session for alice");
+    assert_eq!(bob_incoming.sk, alice_outgoing_sk);
+
+    let now = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap();
+
+    // Helper: build a wire chunk with a given ts under alice's outgoing sk.
+    let craft = |ts: i64, plaintext: &str| -> String {
+        let msgid = fresh_msgid();
+        let aad = build_aad("#x", msgid, ts, 1, 1);
+        let (nonce, ct) = aead::encrypt(&alice_outgoing_sk, &aad, plaintext.as_bytes()).unwrap();
+        WireChunk {
+            msgid,
+            ts,
+            part: 1,
+            total: 1,
+            nonce,
+            ciphertext: ct,
+        }
+        .encode()
+        .unwrap()
+    };
+
+    // 15 seconds in the past → outside the 10s tolerance → Rejected.
+    let stale = craft(now - 15, "too-old");
+    let out_stale = bob
+        .decrypt_incoming(alice_handle, "#x", &stale)
+        .unwrap();
+    match out_stale {
+        DecryptOutcome::Rejected(reason) => {
+            assert!(
+                reason.contains("ts outside tolerance window"),
+                "expected replay-window rejection, got: {reason}"
+            );
+        }
+        other => panic!("expected Rejected for 15s skew, got {other:?}"),
+    }
+
+    // 5 seconds in the past → inside the 10s tolerance → Plaintext.
+    let fresh = craft(now - 5, "within window");
+    let out_fresh = bob
+        .decrypt_incoming(alice_handle, "#x", &fresh)
+        .unwrap();
+    match out_fresh {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "within window"),
+        other => panic!("expected Plaintext for 5s skew, got {other:?}"),
+    }
 }

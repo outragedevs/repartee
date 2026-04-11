@@ -484,7 +484,7 @@ impl App {
             && let Some(storage_ref) = storage.as_ref()
         {
             let keyring = crate::e2e::keyring::Keyring::new(storage_ref.db.clone());
-            match crate::e2e::E2eManager::load_or_init(keyring) {
+            match crate::e2e::E2eManager::load_or_init_with_config(keyring, &config.e2e) {
                 Ok(mgr) => {
                     let fp = mgr.fingerprint();
                     tracing::info!(

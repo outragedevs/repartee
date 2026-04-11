@@ -43,7 +43,7 @@ use crate::e2e::keyring::{
     ChannelMode, IncomingSession, Keyring, PeerRecord, TrustStatus,
 };
 use crate::e2e::wire::{build_aad, fresh_msgid, WireChunk};
-use crate::e2e::TS_TOLERANCE_SECS;
+use crate::e2e::DEFAULT_TS_TOLERANCE_SECS;
 
 /// In-flight handshake state — the initiator's ephemeral X25519 secret,
 /// held until the matching KEYRSP arrives. Stored as raw bytes because
@@ -92,6 +92,10 @@ pub struct E2eManager {
     identity: Identity,
     keyring: Keyring,
     rate_limiter: Mutex<RateLimiter>,
+    /// Configured replay-protection window (seconds). Plumbed in from
+    /// `config.e2e.ts_tolerance_secs` at construction time so an operator
+    /// can tighten or loosen the window per deployment without a rebuild.
+    ts_tolerance_secs: i64,
     /// In-flight handshakes keyed by `(channel, keyreq_nonce)`. The
     /// responder doesn't echo the KEYREQ nonce in KEYRSP, so lookup in
     /// `handle_keyrsp` scans entries by channel.
@@ -152,11 +156,41 @@ pub enum TrustChange {
 /// the buffer the warning belongs in (always the handshake channel, i.e.
 /// the value from the KEYREQ/KEYRSP payload — never the IRC target, which
 /// is our own nick for CTCP NOTICEs).
+///
+/// `new_pubkey` is set on `FingerprintChanged` (and only on that variant)
+/// so the `/e2e reverify` path can upsert the new identity directly from
+/// the queued notice — otherwise we would have to re-read it off a peer
+/// row that, by construction, does not exist yet because the rejected
+/// KEYREQ never got to upsert it.
 #[derive(Debug, Clone)]
 pub struct PendingTrustNotice {
     pub handle: String,
     pub channel: String,
     pub change: TrustChange,
+    pub new_pubkey: Option<[u8; 32]>,
+}
+
+/// Outcome of `E2eManager::reverify_peer`. The UI layer renders each
+/// variant with a different message so the user knows whether their
+/// `/e2e reverify <nick>` actually consumed a pending trust-change or
+/// whether it was a cold purge of an existing identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReverifyOutcome {
+    /// A `PendingTrustNotice` was waiting in the queue — the old peer row
+    /// was deleted and the new pubkey was installed in its place. The
+    /// caller should prompt the user to re-handshake under the new key.
+    Applied {
+        old_fp: Fingerprint,
+        new_fp: Fingerprint,
+    },
+    /// No pending notice but the handle had existing keyring state;
+    /// everything associated with `handle` (peer row, incoming sessions,
+    /// outgoing recipients) has been deleted. `deleted` counts the rows
+    /// removed so the UI can surface a short summary.
+    Cleared { deleted: usize },
+    /// Nothing to reverify — no pending notice AND no existing state
+    /// for this handle.
+    NotFound,
 }
 
 /// Outcome of attempting to decrypt an incoming wire-format line.
@@ -177,8 +211,25 @@ pub enum DecryptOutcome {
 
 impl E2eManager {
     /// Load the identity row from the keyring, or generate and persist a
-    /// fresh one if none exists.
+    /// fresh one if none exists. Uses the built-in default replay-window
+    /// tolerance (`DEFAULT_TS_TOLERANCE_SECS`). Production callers should
+    /// prefer [`Self::load_or_init_with_config`] to honor the operator's
+    /// `config.e2e.ts_tolerance_secs` setting.
     pub fn load_or_init(keyring: Keyring) -> Result<Self> {
+        Self::load_or_init_with_tolerance(keyring, DEFAULT_TS_TOLERANCE_SECS)
+    }
+
+    /// Like [`Self::load_or_init`] but reads the replay-window tolerance
+    /// from the supplied `E2eConfig`. This is the entry point used by the
+    /// main application at startup.
+    pub fn load_or_init_with_config(
+        keyring: Keyring,
+        cfg: &crate::config::E2eConfig,
+    ) -> Result<Self> {
+        Self::load_or_init_with_tolerance(keyring, cfg.ts_tolerance_secs)
+    }
+
+    fn load_or_init_with_tolerance(keyring: Keyring, ts_tolerance_secs: i64) -> Result<Self> {
         let identity = if let Some((_pk, sk, _fp, _ts)) = keyring.load_identity()? {
             Identity::from_secret_bytes(&sk)
         } else {
@@ -194,6 +245,7 @@ impl E2eManager {
             identity,
             keyring,
             rate_limiter: Mutex::new(RateLimiter::new()),
+            ts_tolerance_secs,
             pending: Mutex::new(HashMap::new()),
             pending_trust_change: Mutex::new(Vec::new()),
             pending_rekey_sends: Mutex::new(Vec::new()),
@@ -261,6 +313,108 @@ impl E2eManager {
             .lock()
             .expect("e2e pending trust change mutex poisoned");
         std::mem::take(&mut *guard)
+    }
+
+    /// Reverify a peer after a fingerprint change.
+    ///
+    /// Looks for a `PendingTrustNotice` in the queue whose handle
+    /// matches `nick_or_handle`. If one is found AND it carries the
+    /// new pubkey (i.e. it was a `FingerprintChanged` notice threaded
+    /// through the handshake path), this:
+    ///   1. Deletes the old peer row by fingerprint.
+    ///   2. Deletes every incoming-session row for the handle across
+    ///      all channels — the old key is stale in every context.
+    ///   3. Deletes every outgoing-recipient row for the handle so we
+    ///      stop pushing our key at the evicted identity.
+    ///   4. Upserts a brand-new peer row carrying the fingerprint and
+    ///      pubkey extracted from the notice. The status is set to
+    ///      `Trusted` because `/e2e reverify` IS the user's explicit
+    ///      consent to the new key.
+    ///   5. Clears the notice from the pending queue (and any other
+    ///      queued notices for the same handle so the user is not
+    ///      warned twice for a single reverification).
+    ///
+    /// If no pending notice is found — or a notice was found but it
+    /// did not carry a new pubkey (a `HandleChanged` or `Revoked`
+    /// warning, neither of which the reverify path knows how to apply
+    /// automatically) — the handle is still purged from the keyring so
+    /// a subsequent handshake starts cold. This is the destructive
+    /// reverify path documented in the `/e2e reverify` help text.
+    ///
+    /// Returns `ReverifyOutcome::NotFound` only when there is neither a
+    /// pending notice nor any existing keyring state for this handle.
+    pub fn reverify_peer(&self, nick_or_handle: &str) -> Result<ReverifyOutcome> {
+        // Drain the pending-notice queue into two partitions: notices
+        // for `nick_or_handle` (consumed here) and everything else
+        // (preserved). Within the consumed set we look for the first
+        // FingerprintChanged variant whose notice also carries the new
+        // pubkey — that's the only combination the automatic apply
+        // path can act on without a second handshake.
+        let mut notices_guard = self
+            .pending_trust_change
+            .lock()
+            .expect("e2e pending trust change mutex poisoned");
+        let mut applied: Option<(Fingerprint, Fingerprint, [u8; 32])> = None;
+        let mut kept: Vec<PendingTrustNotice> = Vec::with_capacity(notices_guard.len());
+        for notice in std::mem::take(&mut *notices_guard) {
+            if notice.handle != nick_or_handle {
+                kept.push(notice);
+                continue;
+            }
+            if applied.is_none()
+                && let TrustChange::FingerprintChanged { old_fp, new_fp, .. } = &notice.change
+                && let Some(pk) = notice.new_pubkey
+            {
+                applied = Some((*old_fp, *new_fp, pk));
+            }
+            // Other match-handle notices are dropped (consumed) so we
+            // don't surface a duplicate warning after the user has
+            // already signalled consent via /e2e reverify.
+        }
+        *notices_guard = kept;
+        drop(notices_guard);
+
+        // Branch 1: we found a pending FingerprintChanged notice with
+        // an attached pubkey. Install the new identity directly.
+        if let Some((old_fp, new_fp, new_pubkey)) = applied {
+            self.keyring.delete_peer_by_fingerprint(&old_fp)?;
+            self.keyring
+                .delete_incoming_sessions_for_handle(nick_or_handle)?;
+            self.keyring
+                .delete_outgoing_recipients_for_handle(nick_or_handle)?;
+            let now = now_unix();
+            self.keyring.upsert_peer(&PeerRecord {
+                fingerprint: new_fp,
+                pubkey: new_pubkey,
+                last_handle: Some(nick_or_handle.to_string()),
+                last_nick: None,
+                first_seen: now,
+                last_seen: now,
+                // Reverify is the user consenting to the NEW key.
+                global_status: TrustStatus::Trusted,
+            })?;
+            return Ok(ReverifyOutcome::Applied { old_fp, new_fp });
+        }
+
+        // Branch 2: destructive purge. Remove every trace of this
+        // handle so a subsequent handshake starts cold. If nothing is
+        // found, return NotFound so the UI can warn the user.
+        let mut deleted: usize = 0;
+        if let Some(peer) = self.keyring.get_peer_by_handle(nick_or_handle)? {
+            self.keyring.delete_peer_by_fingerprint(&peer.fingerprint)?;
+            deleted += 1;
+        }
+        deleted += self
+            .keyring
+            .delete_incoming_sessions_for_handle(nick_or_handle)?;
+        deleted += self
+            .keyring
+            .delete_outgoing_recipients_for_handle(nick_or_handle)?;
+        if deleted == 0 {
+            Ok(ReverifyOutcome::NotFound)
+        } else {
+            Ok(ReverifyOutcome::Cleared { deleted })
+        }
     }
 
     #[must_use]
@@ -494,10 +648,16 @@ impl E2eManager {
             | TrustChange::FingerprintChanged { .. }
             | TrustChange::Revoked { .. } => {
                 let err = handle_mismatch_for(&change, sender_handle);
+                // On FingerprintChanged we carry the rekey sender's
+                // pubkey into the notice so `/e2e reverify` can install
+                // it directly without waiting for a second handshake.
+                let new_pubkey = matches!(change, TrustChange::FingerprintChanged { .. })
+                    .then_some(rekey.pubkey);
                 self.record_trust_change(PendingTrustNotice {
                     handle: sender_handle.to_string(),
                     channel: rekey.channel.clone(),
                     change,
+                    new_pubkey,
                 });
                 return Err(err);
             }
@@ -559,10 +719,12 @@ impl E2eManager {
             return Ok(DecryptOutcome::Plaintext(wire_line.to_string()));
         };
 
-        // Replay window check (application layer, on top of AEAD).
+        // Replay window check (application layer, on top of AEAD). The
+        // tolerance is a per-instance value plumbed in from
+        // `config.e2e.ts_tolerance_secs` at construction time.
         let now = now_unix();
         let skew = (now - wire.ts).abs();
-        if skew > TS_TOLERANCE_SECS {
+        if skew > self.ts_tolerance_secs {
             return Ok(DecryptOutcome::Rejected(format!(
                 "ts outside tolerance window ({skew}s skew)"
             )));
@@ -651,6 +813,18 @@ impl E2eManager {
             .allow_outgoing(peer_handle)
     }
 
+    /// Rate-limit check for incoming KEYREQ. Returns `true` if we should
+    /// respond to a KEYREQ from `peer_handle` right now. Enforces spec
+    /// §5.4 — max 3 KEYREQ per peer per minute, then a 5-minute backoff.
+    /// Call this BEFORE any crypto work so a signature-flood is cheap to
+    /// reject.
+    pub fn allow_incoming_keyreq(&self, peer_handle: &str) -> bool {
+        self.rate_limiter
+            .lock()
+            .expect("rate limiter mutex poisoned")
+            .allow_incoming(peer_handle)
+    }
+
     // ---------- handshake responder ----------
 
     /// Handle an incoming KEYREQ. Returns `Some(KeyRsp)` ready to send back
@@ -712,10 +886,17 @@ impl E2eManager {
             | TrustChange::FingerprintChanged { .. }
             | TrustChange::Revoked { .. } => {
                 let err_msg = handle_mismatch_for(&change, sender_handle);
+                // Same rationale as `handle_rekey`: on FingerprintChanged
+                // we thread the KEYREQ's pubkey into the notice so that
+                // `/e2e reverify <nick>` can install the new identity
+                // directly after the user has compared SAS out-of-band.
+                let new_pubkey = matches!(change, TrustChange::FingerprintChanged { .. })
+                    .then_some(req.pubkey);
                 self.record_trust_change(PendingTrustNotice {
                     handle: sender_handle.to_string(),
                     channel: req.channel.clone(),
                     change,
+                    new_pubkey,
                 });
                 Err(err_msg)
             }
@@ -764,6 +945,18 @@ impl E2eManager {
     }
 
     pub fn handle_keyreq(&self, sender_handle: &str, req: &KeyReq) -> Result<Option<KeyRsp>> {
+        // Rate-limit gate (spec §5.4). Must come BEFORE any crypto work so
+        // a signature-flood from one peer is cheap to reject — we don't
+        // even want to do the Ed25519 verify on traffic beyond the limit.
+        if !self
+            .rate_limiter
+            .lock()
+            .expect("rate limiter mutex poisoned")
+            .allow_incoming(sender_handle)
+        {
+            return Err(E2eError::RateLimit(sender_handle.to_string()));
+        }
+
         // Verify signature over the full KEYREQ payload, binding `eph_x25519`.
         let sig_payload =
             signed_keyreq_payload(&req.channel, &req.pubkey, &req.eph_x25519, &req.nonce);
@@ -1086,10 +1279,13 @@ impl E2eManager {
             | TrustChange::FingerprintChanged { .. }
             | TrustChange::Revoked { .. } => {
                 let err = handle_mismatch_for(&change, sender_handle);
+                let new_pubkey = matches!(change, TrustChange::FingerprintChanged { .. })
+                    .then_some(sender_pubkey);
                 self.record_trust_change(PendingTrustNotice {
                     handle: sender_handle.to_string(),
                     channel: rsp.channel.clone(),
                     change,
+                    new_pubkey,
                 });
                 return Err(err);
             }
@@ -1126,6 +1322,7 @@ impl E2eManager {
                         old_fp: existing_fp,
                         new_fp: fp,
                     },
+                    new_pubkey: Some(sender_pubkey),
                 });
             }
             return Err(e);

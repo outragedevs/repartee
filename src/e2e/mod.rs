@@ -59,8 +59,12 @@ pub const MAX_CHUNKS: u8 = 16;
 /// Chosen so that a chunk fits in ~400 bytes of IRC payload after base64.
 pub const MAX_PLAINTEXT_PER_CHUNK: usize = 180;
 
-/// Replay-protection window for `ts` in AAD (seconds).
-pub const TS_TOLERANCE_SECS: i64 = 300;
+/// Default replay-protection window for `ts` in AAD (seconds). Used by
+/// `E2eManager::load_or_init_with_default` and tests — the runtime value
+/// is plumbed through `E2eConfig::ts_tolerance_secs` into each
+/// `E2eManager` instance, so the manager reads `self.ts_tolerance_secs`
+/// rather than this constant when processing real traffic.
+pub const DEFAULT_TS_TOLERANCE_SECS: i64 = 300;
 
 /// Derive the keyring `channel` context for a conversation.
 ///

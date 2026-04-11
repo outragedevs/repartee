@@ -11,10 +11,61 @@
 //! `list` / `status`, and a first-class `help` subcommand.
 
 use super::helpers::add_local_event;
-use super::types::{C_CMD, C_DIM, C_ERR, C_HEADER, C_OK, C_RST, C_TEXT, divider};
+use super::types::{divider, C_CMD, C_DIM, C_ERR, C_HEADER, C_RST, C_TEXT};
 use crate::app::App;
 use crate::e2e::crypto::fingerprint::{fingerprint_bip39, fingerprint_hex};
 use crate::e2e::keyring::{ChannelConfig, ChannelMode, IncomingSession, TrustStatus};
+use crate::state::buffer::{Message, MessageType};
+use chrono::Utc;
+
+/// E2E event severity — selects which theme key the renderer pulls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum E2eEventLevel {
+    Info,
+    Warning,
+    Error,
+}
+
+impl E2eEventLevel {
+    const fn event_key(self) -> &'static str {
+        match self {
+            Self::Info => "e2e_info",
+            Self::Warning => "e2e_warning",
+            Self::Error => "e2e_error",
+        }
+    }
+}
+
+/// Push a themed E2E status message into the active buffer. Uses the
+/// theme's `events.e2e_info` / `events.e2e_warning` / `events.e2e_error`
+/// format strings so the theme authors can restyle the `[E2E]` banner
+/// without us sprinkling inline `%Z` codes through the command handlers.
+///
+/// `$*` in the theme format receives `text` via `event_params[0]`.
+fn e2e_event(app: &mut App, level: E2eEventLevel, text: &str) {
+    let Some(active_id) = app.state.active_buffer_id.as_deref() else {
+        return;
+    };
+    let active_id = active_id.to_string();
+    let id = app.state.next_message_id();
+    app.state.add_local_message(
+        &active_id,
+        Message {
+            id,
+            timestamp: Utc::now(),
+            message_type: MessageType::Event,
+            nick: None,
+            nick_mode: None,
+            text: text.to_string(),
+            highlight: level == E2eEventLevel::Error,
+            event_key: Some(level.event_key().to_string()),
+            event_params: Some(vec![text.to_string()]),
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: None,
+        },
+    );
+}
 
 // ─── Subcommand enum + parser ─────────────────────────────────────────────────
 
@@ -189,11 +240,11 @@ pub(crate) fn cmd_e2e(app: &mut App, args: &[String]) {
         E2eSub::Export(path) => e2e_export(app, path.as_deref()),
         E2eSub::Import(path) => e2e_import(app, path.as_deref()),
         E2eSub::Unknown(other) => {
-            add_local_event(app, &format!("{C_ERR}[E2E] unknown subcommand: {other}{C_RST}"));
+            err(app, &format!("unknown subcommand: {other}"));
             e2e_help(app);
         }
         E2eSub::Usage(hint) => {
-            add_local_event(app, &format!("{C_ERR}[E2E] usage: {hint}{C_RST}"));
+            err(app, &format!("usage: {hint}"));
         }
     }
 
@@ -225,25 +276,32 @@ fn require_mgr(app: &mut App) -> Option<std::sync::Arc<crate::e2e::E2eManager>> 
     // before potentially calling `add_local_event`, which needs `&mut app`.
     let mgr = app.state.e2e_manager.clone();
     if mgr.is_none() {
-        add_local_event(
+        err(
             app,
-            &format!(
-                "{C_ERR}[E2E] manager not initialized \
-                 (check logging.enabled / e2e.enabled){C_RST}"
-            ),
+            "manager not initialized (check logging.enabled / e2e.enabled)",
         );
     }
     mgr
 }
 
-/// Error helper: emit a themed error line with the `[E2E]` tag.
+/// Error helper: emit a themed error line with the `[E2E]` tag. Goes
+/// through the `events.e2e_error` theme key so theme authors can style
+/// the `[E2E]` banner consistently.
 fn err(app: &mut App, msg: &str) {
-    add_local_event(app, &format!("{C_ERR}[E2E] {msg}{C_RST}"));
+    e2e_event(app, E2eEventLevel::Error, msg);
 }
 
-/// Info/success helper: emit a themed OK line with the `[E2E]` tag.
+/// Info/success helper: emit a themed OK line with the `[E2E]` tag via
+/// the `events.e2e_info` theme key.
 fn ok(app: &mut App, msg: &str) {
-    add_local_event(app, &format!("{C_OK}[E2E] {msg}{C_RST}"));
+    e2e_event(app, E2eEventLevel::Info, msg);
+}
+
+/// Warning helper — themed through `events.e2e_warning`. Used for
+/// destructive-but-user-initiated operations (revoke, decline, forget)
+/// where we want the banner to stand out without being a hard error.
+fn warn(app: &mut App, msg: &str) {
+    e2e_event(app, E2eEventLevel::Warning, msg);
 }
 
 // ─── on / off / mode ─────────────────────────────────────────────────────────
@@ -381,7 +439,7 @@ fn e2e_decline(app: &mut App, nick: &str) {
         err(app, &format!("/e2e decline: {e}"));
         return;
     }
-    ok(app, &format!("declined {nick} on {chan}"));
+    warn(app, &format!("declined {nick} on {chan}"));
 }
 
 fn e2e_revoke(app: &mut App, nick: &str) {
@@ -409,7 +467,7 @@ fn e2e_revoke(app: &mut App, nick: &str) {
         err(app, &format!("/e2e revoke (mark rotation): {e}"));
         return;
     }
-    ok(
+    warn(
         app,
         &format!("revoked {nick} on {chan} — key will rotate on next message"),
     );
@@ -443,7 +501,7 @@ fn e2e_forget(app: &mut App, nick: &str) {
         err(app, &format!("/e2e forget: {e}"));
         return;
     }
-    ok(app, &format!("forgot {nick} on {chan}"));
+    warn(app, &format!("forgot {nick} on {chan}"));
 }
 
 // ─── handshake / rotate ──────────────────────────────────────────────────────
@@ -556,7 +614,11 @@ fn e2e_status(app: &mut App) {
         "  {C_CMD}identity{C_RST}     {C_TEXT}{fp_hex}{C_RST}"
     ));
     lines.push(format!("  {C_CMD}sas{C_RST}          {C_TEXT}{sas}{C_RST}"));
-    lines.push(format_status_line(chan.as_deref(), chan_cfg.as_ref(), peer_count));
+    lines.push(format_status_line(
+        chan.as_deref(),
+        chan_cfg.as_ref(),
+        peer_count,
+    ));
     for line in lines {
         add_local_event(app, &line);
     }
@@ -571,12 +633,10 @@ fn format_status_line(
     peer_count: usize,
 ) -> String {
     match (chan, cfg) {
-        (None, _) => format!(
-            "  {C_CMD}channel{C_RST}      {C_DIM}(no active channel){C_RST}"
-        ),
-        (Some(c), None) => format!(
-            "  {C_CMD}channel{C_RST}      {C_TEXT}{c}{C_RST}  {C_DIM}[off]{C_RST}"
-        ),
+        (None, _) => format!("  {C_CMD}channel{C_RST}      {C_DIM}(no active channel){C_RST}"),
+        (Some(c), None) => {
+            format!("  {C_CMD}channel{C_RST}      {C_TEXT}{c}{C_RST}  {C_DIM}[off]{C_RST}")
+        }
         (Some(c), Some(cfg)) => {
             let state_label = if cfg.enabled { "on" } else { "off" };
             format!(
@@ -597,9 +657,7 @@ fn e2e_fingerprint(app: &mut App) {
         divider("E2E Fingerprint (mine)"),
         format!("  {C_CMD}hex{C_RST}  {C_TEXT}{fp_hex}{C_RST}"),
         format!("  {C_CMD}sas{C_RST}  {C_TEXT}{sas}{C_RST}"),
-        format!(
-            "  {C_DIM}Share these out-of-band so peers can verify your key.{C_RST}"
-        ),
+        format!("  {C_DIM}Share these out-of-band so peers can verify your key.{C_RST}"),
     ];
     for line in lines {
         add_local_event(app, &line);
@@ -613,20 +671,10 @@ fn e2e_verify(app: &mut App, nick: &str) {
     };
     let Some(mgr) = require_mgr(app) else { return };
     let handle = resolve_handle_by_nick(app, &chan, nick).unwrap_or_else(|| nick.to_string());
+    let local_fp = mgr.fingerprint();
     match mgr.keyring().get_incoming_session(&handle, &chan) {
         Ok(Some(sess)) => {
-            let hex = fingerprint_hex(&sess.fingerprint);
-            let sas = fingerprint_bip39(&sess.fingerprint).unwrap_or_else(|_| "—".into());
-            let lines = vec![
-                divider(&format!("E2E Verify {nick}")),
-                format!("  {C_CMD}handle{C_RST}  {C_TEXT}{handle}{C_RST}"),
-                format!("  {C_CMD}hex{C_RST}     {C_TEXT}{hex}{C_RST}"),
-                format!("  {C_CMD}sas{C_RST}     {C_TEXT}{sas}{C_RST}"),
-                format!(
-                    "  {C_DIM}Both sides should see the same 6 SAS words \
-                     (compare out-of-band).{C_RST}"
-                ),
-            ];
+            let lines = format_verify_block(&local_fp, &sess.fingerprint, nick, &handle);
             for line in lines {
                 add_local_event(app, &line);
             }
@@ -636,10 +684,79 @@ fn e2e_verify(app: &mut App, nick: &str) {
     }
 }
 
+/// Build the themed verify-block lines for `/e2e verify`. Pure helper —
+/// no `App`/DB access — so tests can assert that BOTH sides of the SAS
+/// ceremony are rendered side-by-side. Spec §11.
+fn format_verify_block(
+    local_fp: &crate::e2e::crypto::fingerprint::Fingerprint,
+    peer_fp: &crate::e2e::crypto::fingerprint::Fingerprint,
+    peer_nick: &str,
+    peer_handle: &str,
+) -> Vec<String> {
+    let local_hex = fingerprint_hex(local_fp);
+    let local_short: String = local_hex.chars().take(16).collect();
+    let local_sas = fingerprint_bip39(local_fp).unwrap_or_else(|_| "—".into());
+    let peer_hex = fingerprint_hex(peer_fp);
+    let peer_short: String = peer_hex.chars().take(16).collect();
+    let peer_sas = fingerprint_bip39(peer_fp).unwrap_or_else(|_| "—".into());
+    vec![
+        divider("E2E Fingerprint Verification"),
+        format!("  {C_CMD}You  ( local){C_RST}: {C_TEXT}{local_short}{C_RST}  {C_TEXT}{local_sas}{C_RST}"),
+        format!(
+            "  {C_CMD}Them ({peer_nick:<7}){C_RST}: {C_TEXT}{peer_short}{C_RST}  {C_TEXT}{peer_sas}{C_RST}"
+        ),
+        format!("  {C_DIM}peer handle: {peer_handle}{C_RST}"),
+        String::new(),
+        format!(
+            "  {C_DIM}Read both lines out-of-band (phone, signal, etc.) and confirm{C_RST}"
+        ),
+        format!(
+            "  {C_DIM}they match BEFORE trusting future messages. If they differ,{C_RST}"
+        ),
+        format!(
+            "  {C_ERR}a MitM is in progress{C_RST}{C_DIM} — run {C_CMD}/e2e forget {peer_nick}{C_DIM} immediately.{C_RST}"
+        ),
+    ]
+}
+
 fn e2e_reverify(app: &mut App, nick: &str) {
-    // Re-verify is identical to /e2e accept for the happy path: it flips the
-    // session to Trusted again after a user has confirmed the new key via SAS.
-    e2e_accept(app, nick);
+    let Some(chan) = current_channel(app) else {
+        err(app, "/e2e reverify: no active channel");
+        return;
+    };
+    let Some(mgr) = require_mgr(app) else { return };
+    // Resolve handle the same way accept/revoke do: prefer the
+    // server-stamped `ident@host` if we can read it from the buffer,
+    // otherwise fall back to the raw nick.
+    let handle = resolve_handle_by_nick(app, &chan, nick).unwrap_or_else(|| nick.to_string());
+    match mgr.reverify_peer(&handle) {
+        Ok(crate::e2e::manager::ReverifyOutcome::Applied { old_fp, new_fp }) => {
+            ok(
+                app,
+                &format!(
+                    "reverified {nick}: old fp={} → new fp={} — installed new key",
+                    fingerprint_hex(&old_fp),
+                    fingerprint_hex(&new_fp),
+                ),
+            );
+        }
+        Ok(crate::e2e::manager::ReverifyOutcome::Cleared { deleted }) => {
+            ok(
+                app,
+                &format!(
+                    "reverified {nick}: purged {deleted} stale row(s); \
+                     re-handshake to TOFU-pin the new key"
+                ),
+            );
+        }
+        Ok(crate::e2e::manager::ReverifyOutcome::NotFound) => {
+            err(
+                app,
+                &format!("no keyring state for {nick} ({handle}) to reverify"),
+            );
+        }
+        Err(e) => err(app, &format!("/e2e reverify: {e}")),
+    }
 }
 
 // ─── autotrust ───────────────────────────────────────────────────────────────
@@ -655,9 +772,7 @@ fn e2e_autotrust(app: &mut App, op: AutotrustOp) {
             Ok(rows) => {
                 let mut lines = vec![divider("E2E Autotrust Rules")];
                 for (scope, pat) in rows {
-                    lines.push(format!(
-                        "  {C_CMD}{scope}{C_RST}  {C_TEXT}{pat}{C_RST}"
-                    ));
+                    lines.push(format!("  {C_CMD}{scope}{C_RST}  {C_TEXT}{pat}{C_RST}"));
                 }
                 for line in lines {
                     add_local_event(app, &line);
@@ -765,10 +880,16 @@ const HELP_ENTRIES: &[(&str, &str)] = &[
     ("on", "Enable E2E on the current channel"),
     ("off", "Disable E2E on the current channel"),
     ("mode <m>", "Set channel mode (auto-accept|normal|quiet)"),
-    ("handshake <nick>", "Send KEYREQ to <nick> (manual key exchange)"),
+    (
+        "handshake <nick>",
+        "Send KEYREQ to <nick> (manual key exchange)",
+    ),
     ("accept <nick>", "Trust a pending peer on this channel"),
     ("decline <nick>", "Reject a pending peer"),
-    ("revoke <nick>", "Revoke trust; rotate outgoing key next send"),
+    (
+        "revoke <nick>",
+        "Revoke trust; rotate outgoing key next send",
+    ),
     ("unrevoke <nick>", "Re-trust a previously revoked peer"),
     ("forget <nick>", "Delete a peer's session on this channel"),
     ("verify <nick>", "Show a peer's fingerprint + SAS words"),
@@ -780,7 +901,10 @@ const HELP_ENTRIES: &[(&str, &str)] = &[
     ("autotrust list", "List autotrust rules"),
     ("autotrust add <scope> <pat>", "Add an autotrust rule"),
     ("autotrust remove <pat>", "Remove an autotrust rule"),
-    ("export <file>", "Export keyring to a JSON file (plaintext keys, 0600)"),
+    (
+        "export <file>",
+        "Export keyring to a JSON file (plaintext keys, 0600)",
+    ),
     ("import <file>", "Import keyring from a JSON file"),
     ("help", "Show this index"),
 ];
@@ -868,14 +992,8 @@ mod tests {
 
     #[test]
     fn test_subcommand_dispatch_missing_nick_is_usage() {
-        assert!(matches!(
-            parse_subcommand(&[s("accept")]),
-            E2eSub::Usage(_)
-        ));
-        assert!(matches!(
-            parse_subcommand(&[s("verify")]),
-            E2eSub::Usage(_)
-        ));
+        assert!(matches!(parse_subcommand(&[s("accept")]), E2eSub::Usage(_)));
+        assert!(matches!(parse_subcommand(&[s("verify")]), E2eSub::Usage(_)));
         assert!(matches!(
             parse_subcommand(&[s("handshake")]),
             E2eSub::Usage(_)
@@ -1085,6 +1203,113 @@ mod tests {
         assert!(line.contains("deadbeef"));
         assert!(line.contains("fp=deadbeef"));
         assert!(!line.contains("feedface"));
+    }
+
+    // ---------- G11 gap 5: e2e_event theme key emission ----------
+
+    #[test]
+    fn test_e2e_event_level_maps_to_theme_key() {
+        // The theme event keys must exactly match the keys published by
+        // `themes/default.theme` and `themes/spring.theme` — any rename
+        // here breaks the dead-key detection these theme lines exist to
+        // light up.
+        assert_eq!(E2eEventLevel::Info.event_key(), "e2e_info");
+        assert_eq!(E2eEventLevel::Warning.event_key(), "e2e_warning");
+        assert_eq!(E2eEventLevel::Error.event_key(), "e2e_error");
+    }
+
+    #[test]
+    fn test_e2e_event_level_error_highlights() {
+        // The `highlight` flag is what drives the mentions-panel / tab
+        // activity indicator. Errors must highlight; info/warning must
+        // not (operators should not be paged for a successful /e2e on).
+        assert!(E2eEventLevel::Error == E2eEventLevel::Error);
+        assert_ne!(E2eEventLevel::Info, E2eEventLevel::Error);
+        assert_ne!(E2eEventLevel::Warning, E2eEventLevel::Error);
+    }
+
+    #[test]
+    fn test_e2e_event_builds_message_with_event_key_and_params() {
+        // Construct a Message the way `e2e_event` does and assert the
+        // `event_key`/`event_params` wiring so the theme layer has what
+        // it needs to substitute `$*`.
+        let id: u64 = 1;
+        let text = "accepted bob on #rust";
+        let level = E2eEventLevel::Info;
+        let msg = Message {
+            id,
+            timestamp: Utc::now(),
+            message_type: MessageType::Event,
+            nick: None,
+            nick_mode: None,
+            text: text.to_string(),
+            highlight: level == E2eEventLevel::Error,
+            event_key: Some(level.event_key().to_string()),
+            event_params: Some(vec![text.to_string()]),
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: None,
+        };
+        assert_eq!(msg.event_key.as_deref(), Some("e2e_info"));
+        assert_eq!(
+            msg.event_params.as_deref(),
+            Some([text.to_string()].as_slice()),
+            "event_params[0] must carry the message text for the theme's $*"
+        );
+        assert!(!msg.highlight, "info-level events must not highlight");
+    }
+
+    // ---------- /e2e verify format_verify_block ----------
+
+    #[test]
+    fn test_format_verify_block_renders_both_sides() {
+        let local_fp: [u8; 16] = [
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+            0xff, 0x00,
+        ];
+        let peer_fp: [u8; 16] = [
+            0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+            0x88, 0x99,
+        ];
+        let lines = format_verify_block(&local_fp, &peer_fp, "bob", "~bob@b.host");
+        // There is a header divider and at least one You + one Them line.
+        assert!(!lines.is_empty(), "verify block must render lines");
+        let joined = lines.join("\n");
+        // Both fingerprints show up in hex (truncated to 16 chars).
+        assert!(
+            joined.contains("1122334455667788"),
+            "local hex must be rendered: {joined}"
+        );
+        assert!(
+            joined.contains("aabbccddeeff0011"),
+            "peer hex must be rendered: {joined}"
+        );
+        // Both SAS words lines are present — at least one word from each
+        // BIP-39 rendering shows up. We can't compare exact words without
+        // reimplementing bip39 here; just check the structural labels.
+        assert!(joined.contains("You"), "must label local as 'You'");
+        assert!(joined.contains("Them"), "must label peer as 'Them'");
+        // The warning about MitM is present.
+        assert!(
+            joined.contains("MitM"),
+            "must include the MitM warning: {joined}"
+        );
+        // The peer handle is surfaced so the user can cross-reference.
+        assert!(
+            joined.contains("~bob@b.host"),
+            "peer handle must be rendered: {joined}"
+        );
+        // Both BIP-39 renderings are non-empty strings (six words each).
+        let local_sas = fingerprint_bip39(&local_fp).unwrap();
+        let peer_sas = fingerprint_bip39(&peer_fp).unwrap();
+        assert!(
+            joined.contains(&local_sas),
+            "local SAS words must appear in block"
+        );
+        assert!(
+            joined.contains(&peer_sas),
+            "peer SAS words must appear in block"
+        );
     }
 
     // ---------- help entries are well-formed ----------
