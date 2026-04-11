@@ -976,7 +976,16 @@ fn accept_completes_pending_keyreq_by_sending_keyrsp() {
         .unwrap()
         .expect("accept should return Some(KeyRsp)");
 
-    // Bob consumes it and can decrypt alice's next message.
+    // The cached placeholder must stay Pending until the reciprocal
+    // handshake installs a real Bob→Alice session.
+    let pending = alice
+        .keyring()
+        .get_incoming_session("~bob@b.host", "#x")
+        .unwrap()
+        .expect("placeholder session should still exist");
+    assert_eq!(pending.status, TrustStatus::Pending);
+
+    // Bob consumes the KEYRSP and can decrypt Alice's next message.
     bob.handle_keyrsp("~alice@a.host", &rsp).unwrap();
     let w = alice.encrypt_outgoing("#x", "hello after accept").unwrap();
     let out = bob
@@ -985,6 +994,28 @@ fn accept_completes_pending_keyreq_by_sending_keyrsp() {
     assert!(
         matches!(out, DecryptOutcome::Plaintext(ref s) if s == "hello after accept"),
         "expected Plaintext, got {out:?}"
+    );
+
+    // Accept must also queue the reciprocal KEYREQ so Bob→Alice
+    // converges without a separate manual handshake.
+    let recs = alice.take_pending_outbound_keyreqs();
+    assert_eq!(recs.len(), 1, "accept should queue one reciprocal KEYREQ");
+    assert_eq!(recs[0].peer_handle, "~bob@b.host");
+    assert_eq!(recs[0].channel, "#x");
+
+    let rsp2 = bob
+        .handle_keyreq("~alice@a.host", &recs[0].req)
+        .unwrap()
+        .expect("bob should answer the reciprocal KEYREQ");
+    alice.handle_keyrsp("~bob@b.host", &rsp2).unwrap();
+
+    let w2 = bob.encrypt_outgoing("#x", "hello back").unwrap();
+    let out2 = alice
+        .decrypt_incoming("~bob@b.host", "#x", &w2[0])
+        .unwrap();
+    assert!(
+        matches!(out2, DecryptOutcome::Plaintext(ref s) if s == "hello back"),
+        "expected reciprocal Plaintext, got {out2:?}"
     );
 
     // A second accept for the same (handle, channel) returns Ok(None)

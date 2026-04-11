@@ -1166,18 +1166,10 @@ impl E2eManager {
             return Ok(None);
         };
 
-        // Promote the stored row to trusted now so the subsequent
-        // `handle_keyreq` re-entry sees `already_trusted = true` and
-        // takes the AutoAccept path. The strict installer above already
-        // seeded the row with the real fingerprint.
-        self.keyring
-            .update_incoming_status(sender_handle, channel, TrustStatus::Trusted)?;
-
-        // Re-enter `handle_keyreq` under AutoAccept semantics. We cannot
-        // just mark the channel config, so we temporarily cache the
-        // channel's real config, force AutoAccept, run the branch, and
-        // restore. Simpler: call a dedicated internal branch that is the
-        // body of the AutoAccept arm, sharing the same crypto path.
+        // Keep the placeholder incoming-session row as `Pending` until the
+        // reciprocal KEYREQ/KEYRSP actually installs a real Bob→Alice
+        // session. Marking the zero-filled placeholder `Trusted` would make
+        // the decrypt path try to use it and reject legitimate traffic.
         self.build_keyrsp_for_accepted_request(sender_handle, &req)
             .map(Some)
     }
@@ -1236,6 +1228,32 @@ impl E2eManager {
             &rsp_nonce,
         );
         let sig_bytes = sig::sign(self.identity.signing_key(), &sig_payload);
+
+        // Mirror the AutoAccept path: after serving a KEYRSP we also queue a
+        // reciprocal KEYREQ so the reverse direction converges without a
+        // separate manual handshake. This is especially important for
+        // Normal-mode `/e2e accept`, where the cached incoming-session row is
+        // still only a pending placeholder until the reciprocal completes.
+        let already_incoming = self
+            .keyring
+            .get_incoming_session(sender_handle, &req.channel)?
+            .is_some_and(|s| s.status == TrustStatus::Trusted);
+        let allow_out = self
+            .rate_limiter
+            .lock()
+            .expect("rate limiter mutex poisoned")
+            .allow_outgoing(sender_handle);
+        if !already_incoming && allow_out {
+            let reciprocal = self.build_keyreq(&req.channel)?;
+            self.pending_outbound_keyreqs
+                .lock()
+                .expect("e2e pending outbound keyreqs mutex poisoned")
+                .push(PendingOutboundKeyReq {
+                    peer_handle: sender_handle.to_string(),
+                    channel: req.channel.clone(),
+                    req: reciprocal,
+                });
+        }
 
         Ok(KeyRsp {
             channel: req.channel.clone(),
