@@ -234,7 +234,7 @@ pub fn parse(body: &str) -> Result<Option<HandshakeMsg>> {
         .ok_or_else(|| E2eError::Handshake("missing type".into()))?;
     let rest: Vec<&str> = parts.collect();
 
-    let kv = parse_kv(&rest);
+    let kv = parse_kv(&rest)?;
     let v: u8 = kv
         .get("v")
         .ok_or_else(|| E2eError::Handshake("missing v".into()))?
@@ -311,14 +311,23 @@ fn parse_keyrekey(kv: &HashMap<&str, &str>) -> Result<KeyRekey> {
     })
 }
 
-fn parse_kv<'a>(fields: &'a [&'a str]) -> HashMap<&'a str, &'a str> {
-    let mut out = HashMap::new();
+/// Parse `k=v` fields from a whitespace-split handshake body.
+///
+/// Strict on duplicates: if the same key appears twice in the same body we
+/// return `Err(E2eError::Wire("duplicate key: <name>"))` rather than
+/// silently last-wins. An ambiguous body like `chan=#a chan=#b` could
+/// otherwise let a crafted payload shift the semantic channel of a
+/// signed KEYREQ/KEYRSP/REKEY after the fact.
+fn parse_kv<'a>(fields: &'a [&'a str]) -> Result<HashMap<&'a str, &'a str>> {
+    let mut out: HashMap<&'a str, &'a str> = HashMap::new();
     for f in fields {
-        if let Some((k, v)) = f.split_once('=') {
-            out.insert(k, v);
+        if let Some((k, v)) = f.split_once('=')
+            && out.insert(k, v).is_some()
+        {
+            return Err(E2eError::Wire(format!("duplicate key: {k}")));
         }
     }
-    out
+    Ok(out)
 }
 
 fn hex32(s: &str) -> Result<[u8; 32]> {
@@ -598,6 +607,51 @@ mod tests {
     fn parse_non_rpee2e_returns_none() {
         assert!(parse("SOMETHING ELSE").unwrap().is_none());
         assert!(parse("").unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_kv_rejects_duplicate_key() {
+        // Hand-craft a KEYREQ body with a duplicated `chan=` field — this
+        // must be rejected outright so a crafted payload can't silently
+        // shift the semantic channel of a signed KEYREQ after the fact.
+        let line = format!(
+            "{CTCP_TAG} KEYREQ v=1 chan=#a chan=#b pub={p} eph={e} nonce={n} sig={s}",
+            p = hex::encode([0u8; 32]),
+            e = hex::encode([0u8; 32]),
+            n = hex::encode([0u8; 16]),
+            s = hex::encode([0u8; 64]),
+        );
+        match parse(&line) {
+            Err(E2eError::Wire(msg)) => {
+                assert!(
+                    msg.contains("duplicate key"),
+                    "expected 'duplicate key' in error, got: {msg}"
+                );
+                assert!(msg.contains("chan"), "expected 'chan' in error, got: {msg}");
+            }
+            other => panic!("expected Err(Wire(duplicate key)), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_kv_rejects_duplicate_key_in_keyrsp() {
+        // Same protection applies to KEYRSP — a duplicated `wrap=` would
+        // otherwise let a MitM slip a second (unsigned) ciphertext in.
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+        let line = format!(
+            "{CTCP_TAG} KEYRSP v=1 chan=#x pub={p} eph={e} wnonce={wn} wrap={w} wrap={w2} nonce={n} sig={s}",
+            p = hex::encode([0u8; 32]),
+            e = hex::encode([0u8; 32]),
+            wn = hex::encode([0u8; NONCE_LEN]),
+            w = B64.encode([0u8; 4]),
+            w2 = B64.encode([1u8; 4]),
+            n = hex::encode([0u8; 16]),
+            s = hex::encode([0u8; 64]),
+        );
+        match parse(&line) {
+            Err(E2eError::Wire(msg)) => assert!(msg.contains("duplicate key: wrap")),
+            other => panic!("expected Err(Wire(duplicate key: wrap)), got {other:?}"),
+        }
     }
 
     #[test]

@@ -511,17 +511,28 @@ def hkdf_sha256(salt: bytes, ikm: bytes, info: bytes, length: int) -> bytes:
 
 
 def build_aad(channel: str, msgid: bytes, ts: int, part: int, total: int) -> bytes:
+    """Byte-identical to Rust `src/e2e/wire.rs::build_aad`.
+
+    AAD layout (length-prefixed, big-endian):
+        PROTO(7 bytes, fixed)
+          || be16(channel.len) || channel
+          || be16(8)  || msgid (8 bytes)
+          || be16(8)  || ts_be (8 bytes)
+          || be16(1)  || part  (1 byte)
+          || be16(1)  || total (1 byte)
+    """
+    chan_bytes = channel.encode()
     return (
         PROTO.encode()
-        + b":"
-        + channel.encode()
-        + b":"
+        + struct.pack(">H", len(chan_bytes))
+        + chan_bytes
+        + struct.pack(">H", 8)
         + msgid
-        + b":"
+        + struct.pack(">H", 8)
         + struct.pack(">q", ts)
-        + b":"
+        + struct.pack(">H", 1)
         + bytes([part])
-        + b":"
+        + struct.pack(">H", 1)
         + bytes([total])
     )
 
@@ -812,15 +823,32 @@ def _prnt_warn(buf: str, msg: str) -> None:
         weechat.prnt(buf, f"{C_WARN}[E2E] {msg}{C_RST}")
 
 
+def _parse_kv_strict(fields: list[str]) -> dict[str, str] | None:
+    """Parse `k=v` fields with strict duplicate rejection.
+
+    Mirrors Rust `src/e2e/handshake.rs::parse_kv` — if the same key appears
+    twice in the same handshake body we return None rather than silently
+    last-wins. An ambiguous body like `chan=#a chan=#b` could otherwise
+    let a crafted payload shift the semantic channel of a signed
+    KEYREQ/KEYRSP/REKEY after the fact.
+    """
+    out: dict[str, str] = {}
+    for p in fields:
+        if "=" in p:
+            k, v = p.split("=", 1)
+            if k in out:
+                return None
+            out[k] = v
+    return out
+
+
 def parse_keyreq(body: str) -> dict | None:
     parts = body.split()
     if len(parts) < 7 or parts[0] != CTCP_TAG or parts[1] != "KEYREQ":
         return None
-    kv: dict[str, str] = {}
-    for p in parts[2:]:
-        if "=" in p:
-            k, v = p.split("=", 1)
-            kv[k] = v
+    kv = _parse_kv_strict(parts[2:])
+    if kv is None:
+        return None
     try:
         if kv.get("v") != "1":
             return None
@@ -846,11 +874,9 @@ def parse_keyrsp(body: str) -> dict | None:
     parts = body.split()
     if len(parts) < 9 or parts[0] != CTCP_TAG or parts[1] != "KEYRSP":
         return None
-    kv: dict[str, str] = {}
-    for p in parts[2:]:
-        if "=" in p:
-            k, v = p.split("=", 1)
-            kv[k] = v
+    kv = _parse_kv_strict(parts[2:])
+    if kv is None:
+        return None
     try:
         if kv.get("v") != "1":
             return None
@@ -886,11 +912,9 @@ def parse_keyrekey(body: str) -> dict | None:
     parts = body.split()
     if len(parts) < 9 or parts[0] != CTCP_TAG or parts[1] != "REKEY":
         return None
-    kv: dict[str, str] = {}
-    for p in parts[2:]:
-        if "=" in p:
-            k, v = p.split("=", 1)
-            kv[k] = v
+    kv = _parse_kv_strict(parts[2:])
+    if kv is None:
+        return None
     try:
         if kv.get("v") != "1":
             return None
@@ -1395,8 +1419,11 @@ def encode_wire(
 
 
 def split_plaintext(pt: str) -> list[bytes]:
+    # G13: refuse empty plaintext outright — mirrors Rust
+    # `src/e2e/chunker.rs::split_plaintext`. No zero-length-ciphertext
+    # chunk should ever be shipped to a peer.
     if not pt:
-        return [b""]
+        raise ValueError("empty plaintext")
     b = pt.encode("utf-8")
     chunks: list[bytes] = []
     i = 0
@@ -1513,6 +1540,12 @@ def hook_input_text_display(data, modifier, modifier_data, text):
         if not payload.startswith(":"):
             return text
         plain = payload[1:]
+        # G13: refuse to encrypt an empty line. The user typed either
+        # whitespace-only or literally nothing; pass the original text
+        # through so weechat can decide what to do with it instead of
+        # shipping a zero-ciphertext chunk to the peer.
+        if not plain:
+            return text
         ctx = context_key(target, "")
         is_channel = target and target[0] in CHANNEL_PREFIXES
         if is_channel:

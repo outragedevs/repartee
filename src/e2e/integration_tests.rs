@@ -1301,3 +1301,137 @@ fn decrypt_respects_configured_ts_tolerance() {
         other => panic!("expected Plaintext for 5s skew, got {other:?}"),
     }
 }
+
+// ─── G13: symmetric handshake + identity self-check ─────────────────────────
+
+/// After Alice serves a KEYRSP in AutoAccept mode she must queue a
+/// reciprocal KEYREQ so the us→peer direction gets established in the
+/// same round-trip. The reciprocal must also close the loop — once Bob
+/// holds a trusted incoming session from Alice his own handle_keyreq
+/// must NOT queue a second reciprocal (otherwise the two sides
+/// perpetually ping-pong KEYREQs).
+#[test]
+fn autoaccept_keyreq_queues_reciprocal_and_converges() {
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+
+    let alice_handle = "~alice@a.host";
+    let bob_handle = "~bob@b.host";
+
+    // Bob initiates.
+    let req = bob.build_keyreq("#x").unwrap();
+    let rsp1 = alice
+        .handle_keyreq(bob_handle, &req)
+        .unwrap()
+        .expect("auto-accept should produce a KEYRSP");
+    bob.handle_keyrsp(alice_handle, &rsp1).unwrap();
+
+    // Alice's symmetric-handshake path must have queued exactly one
+    // reciprocal KEYREQ back to Bob on the same channel.
+    let recs = alice.take_pending_outbound_keyreqs();
+    assert_eq!(recs.len(), 1, "expected one reciprocal from AutoAccept path");
+    assert_eq!(recs[0].peer_handle, bob_handle);
+    assert_eq!(recs[0].channel, "#x");
+    let reciprocal_req = recs.into_iter().next().unwrap().req;
+
+    // Bob handles the reciprocal. Because Bob already holds a trusted
+    // incoming session from Alice (installed by `handle_keyrsp` above),
+    // Bob must skip its OWN reciprocal — otherwise the two clients would
+    // loop KEYREQs forever.
+    let rsp2 = bob
+        .handle_keyreq(alice_handle, &reciprocal_req)
+        .unwrap()
+        .expect("bob should still serve the reciprocal KEYRSP");
+    assert!(
+        bob.take_pending_outbound_keyreqs().is_empty(),
+        "bob must skip its reciprocal when it already holds a trusted incoming session"
+    );
+    alice.handle_keyrsp(bob_handle, &rsp2).unwrap();
+
+    // One KEYREQ in, three messages out — full bidirectional traffic now works.
+    let wire_a = alice.encrypt_outgoing("#x", "hello bob").unwrap();
+    match bob
+        .decrypt_incoming(alice_handle, "#x", &wire_a[0])
+        .unwrap()
+    {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "hello bob"),
+        other => panic!("alice→bob decrypt failed: {other:?}"),
+    }
+    let wire_b = bob.encrypt_outgoing("#x", "hi alice").unwrap();
+    match alice
+        .decrypt_incoming(bob_handle, "#x", &wire_b[0])
+        .unwrap()
+    {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "hi alice"),
+        other => panic!("bob→alice decrypt failed: {other:?}"),
+    }
+}
+
+/// G13 item 7: `load_or_init` must verify the stored pubkey matches the
+/// recomputed one. Corrupt the pubkey column in place and the next
+/// load must return an error instead of silently running on a key
+/// triple where the public column lies about what the secret encodes.
+#[test]
+fn load_identity_detects_corrupted_pubkey() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(SCHEMA).unwrap();
+    let conn_arc = Arc::new(Mutex::new(conn));
+
+    // Save a fresh valid identity first.
+    let kr = Keyring::new(conn_arc.clone());
+    let _ = E2eManager::load_or_init(kr).unwrap();
+
+    // Corrupt the pubkey column in place.
+    conn_arc
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE e2e_identity SET pubkey = ?1 WHERE id = 1",
+            rusqlite::params![vec![0xffu8; 32]],
+        )
+        .unwrap();
+
+    // Reloading must now fail with a clear diagnostic.
+    let kr2 = Keyring::new(conn_arc);
+    match E2eManager::load_or_init(kr2) {
+        Err(E2eError::Crypto(msg)) => assert!(
+            msg.contains("public key does not match"),
+            "expected pk mismatch error, got: {msg}"
+        ),
+        Err(e) => panic!("expected Err(Crypto), got different Err: {e:?}"),
+        Ok(_) => panic!("expected Err(Crypto), got Ok"),
+    }
+}
+
+/// G13 item 7: same as above but corrupt only the fingerprint column —
+/// the recomputed fingerprint from the valid pubkey must still catch it.
+#[test]
+fn load_identity_detects_corrupted_fingerprint() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(SCHEMA).unwrap();
+    let conn_arc = Arc::new(Mutex::new(conn));
+
+    let kr = Keyring::new(conn_arc.clone());
+    let _ = E2eManager::load_or_init(kr).unwrap();
+
+    conn_arc
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE e2e_identity SET fingerprint = ?1 WHERE id = 1",
+            rusqlite::params![vec![0xeeu8; 16]],
+        )
+        .unwrap();
+
+    let kr2 = Keyring::new(conn_arc);
+    match E2eManager::load_or_init(kr2) {
+        Err(E2eError::Crypto(msg)) => assert!(
+            msg.contains("fingerprint does not match"),
+            "expected fp mismatch error, got: {msg}"
+        ),
+        Err(e) => panic!("expected Err(Crypto), got different Err: {e:?}"),
+        Ok(_) => panic!("expected Err(Crypto), got Ok"),
+    }
+}

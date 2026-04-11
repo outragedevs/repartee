@@ -16,11 +16,15 @@ use crate::e2e::{MAX_CHUNKS, MAX_PLAINTEXT_PER_CHUNK};
 ///
 /// Splitting is byte-based on UTF-8 boundaries. Input is assumed to be
 /// valid UTF-8 (it came from the user's terminal).
+///
+/// Empty plaintext is refused (`Err(E2eError::Wire("empty plaintext"))`)
+/// so upstream callers cannot accidentally ship a zero-length-ciphertext
+/// chunk the peer would render as a blank message. Input layers that
+/// might generate a blank line (empty /say, trimmed whitespace, etc.)
+/// must guard before calling `encrypt_outgoing`.
 pub fn split_plaintext(plaintext: &str) -> Result<Vec<Vec<u8>>> {
     if plaintext.is_empty() {
-        // Empty message still gets one (empty) chunk so wire format carries
-        // a valid "1/1". This is an edge case and should rarely be hit.
-        return Ok(vec![Vec::new()]);
+        return Err(E2eError::Wire("empty plaintext".into()));
     }
 
     let bytes = plaintext.as_bytes();
@@ -70,10 +74,17 @@ mod tests {
     }
 
     #[test]
-    fn empty_message_is_one_empty_chunk() {
-        let chunks = split_plaintext("").unwrap();
-        assert_eq!(chunks.len(), 1);
-        assert!(chunks[0].is_empty());
+    fn empty_plaintext_is_rejected() {
+        // G13: refuse to chunk empty input so `encrypt_outgoing` cannot
+        // ship a zero-length-ciphertext chunk that peers would render as
+        // a blank message.
+        match split_plaintext("") {
+            Err(E2eError::Wire(msg)) => assert!(
+                msg.contains("empty plaintext"),
+                "expected 'empty plaintext', got: {msg}"
+            ),
+            other => panic!("expected Err(Wire(empty plaintext)), got {other:?}"),
+        }
     }
 
     #[test]

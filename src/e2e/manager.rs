@@ -77,6 +77,21 @@ pub struct PendingRekeySend {
     pub notice_text: String,
 }
 
+/// An outbound KEYREQ produced by the symmetric-handshake path inside
+/// `handle_keyreq`: after serving a peer a KEYRSP (which establishes the
+/// peer→us direction) we also queue a reciprocal KEYREQ back to the same
+/// peer so the us→peer direction gets established in the same round-trip
+/// from the user's POV. Drained by `take_pending_outbound_keyreqs` right
+/// after each `handle_keyreq` call so the IRC event dispatcher can enqueue
+/// the reciprocal NOTICE on the same tick, matching the KEYRSP dispatch
+/// pattern.
+#[derive(Debug, Clone)]
+pub struct PendingOutboundKeyReq {
+    pub peer_handle: String,
+    pub channel: String,
+    pub req: KeyReq,
+}
+
 /// Info surfaced when a Normal-mode KEYREQ arrives from an as-yet-untrusted
 /// peer. Drained by `take_pending_accept_requests` and rendered as a themed
 /// prompt instructing the user to run `/e2e accept` or `/e2e decline`.
@@ -110,6 +125,11 @@ pub struct E2eManager {
     /// encrypt call and appends them to `AppState::pending_e2e_sends`,
     /// matching the KEYRSP dispatch pattern.
     pending_rekey_sends: Mutex<Vec<PendingRekeySend>>,
+    /// Reciprocal KEYREQs queued by the symmetric-handshake path in
+    /// `handle_keyreq`. The IRC event dispatcher drains these right
+    /// after `handle_keyreq` returns and appends each entry to
+    /// `AppState::pending_e2e_sends`, mirroring the KEYRSP dispatch.
+    pending_outbound_keyreqs: Mutex<Vec<PendingOutboundKeyReq>>,
     /// Inbound KEYREQs cached in Normal mode when the peer is not yet
     /// trusted. Keyed by `(sender_handle, channel)`. Consumed by
     /// `accept_pending_inbound` when the user runs `/e2e accept`.
@@ -230,8 +250,28 @@ impl E2eManager {
     }
 
     fn load_or_init_with_tolerance(keyring: Keyring, ts_tolerance_secs: i64) -> Result<Self> {
-        let identity = if let Some((_pk, sk, _fp, _ts)) = keyring.load_identity()? {
-            Identity::from_secret_bytes(&sk)
+        let identity = if let Some((stored_pk, sk, stored_fp, _ts)) = keyring.load_identity()? {
+            // Self-consistency check (G13): recompute the public key from
+            // the stored secret and the fingerprint from that public key,
+            // and reject the keyring if either column has drifted. Guards
+            // against partial SQLite writes, manual edits to the identity
+            // row, or library version drift in the Ed25519 backend.
+            let id = Identity::from_secret_bytes(&sk);
+            let computed_pk = id.public_bytes();
+            if computed_pk != stored_pk {
+                return Err(E2eError::Crypto(
+                    "stored identity public key does not match secret — keyring may be corrupted"
+                        .into(),
+                ));
+            }
+            let computed_fp = fingerprint(&computed_pk);
+            if computed_fp != stored_fp {
+                return Err(E2eError::Crypto(
+                    "stored identity fingerprint does not match pubkey — keyring may be corrupted"
+                        .into(),
+                ));
+            }
+            id
         } else {
             let id = Identity::generate()?;
             let pk = id.public_bytes();
@@ -249,6 +289,7 @@ impl E2eManager {
             pending: Mutex::new(HashMap::new()),
             pending_trust_change: Mutex::new(Vec::new()),
             pending_rekey_sends: Mutex::new(Vec::new()),
+            pending_outbound_keyreqs: Mutex::new(Vec::new()),
             pending_inbound: Mutex::new(HashMap::new()),
             pending_accept_requests: Mutex::new(Vec::new()),
         })
@@ -440,12 +481,17 @@ impl E2eManager {
     /// generated first.
     pub fn encrypt_outgoing(&self, channel: &str, plaintext: &str) -> Result<Vec<String>> {
         let sk = self.get_or_generate_outgoing_key(channel)?;
+        // `split_plaintext` refuses empty input outright (G13) and always
+        // returns ≥1 chunks on success, so no zero-ciphertext chunk can
+        // reach the wire. The `total == 0` branch below is a belt-and-
+        // -suspenders invariant — it can only fire if `split_plaintext`
+        // is later modified to permit empty input, at which point the
+        // `build_aad` / wire format `part >= 1` invariant would already
+        // be broken.
         let chunks = split_plaintext(plaintext)?;
         let total_usize = chunks.len();
         let total = u8::try_from(total_usize).map_err(|_| E2eError::ChunkLimit(u8::MAX))?;
         if total == 0 {
-            // split_plaintext always returns at least one chunk, but keep a
-            // defensive check — `build_aad` and wire format require part ≥ 1.
             return Err(E2eError::Wire("chunker produced zero chunks".into()));
         }
         let msgid = fresh_msgid();
@@ -600,6 +646,19 @@ impl E2eManager {
             .pending_rekey_sends
             .lock()
             .expect("e2e pending rekey mutex poisoned");
+        std::mem::take(&mut *guard)
+    }
+
+    /// Drain any reciprocal KEYREQs queued by the most recent
+    /// `handle_keyreq` call via the symmetric-handshake path. The IRC
+    /// event dispatcher calls this right after `handle_keyreq` returns
+    /// and enqueues each entry on `AppState::pending_e2e_sends` for
+    /// dispatch, mirroring the KEYRSP queueing pattern.
+    pub fn take_pending_outbound_keyreqs(&self) -> Vec<PendingOutboundKeyReq> {
+        let mut guard = self
+            .pending_outbound_keyreqs
+            .lock()
+            .expect("e2e pending outbound keyreqs mutex poisoned");
         std::mem::take(&mut *guard)
     }
 
@@ -1042,17 +1101,36 @@ impl E2eManager {
         );
         let sig_bytes = sig::sign(self.identity.signing_key(), &sig_payload);
 
-        // We have also just shipped *our own* outgoing session to the peer.
-        // Record an incoming-session row on our side pointing at the
-        // initiator so that when they start sending encrypted PRIVMSGs we
-        // can decrypt them — except we don't know *their* key yet because
-        // in this model the two sides each use their own outgoing key. The
-        // peer's future KEYREQ→KEYRSP (or the reciprocal of this one
-        // initiated by us) installs the other direction.
-        //
-        // NOTE: this v1 model is "unidirectional per KEYREQ"; a fully
-        // symmetric exchange requires either side to send its own KEYREQ.
-        // The integration tests only drive one direction.
+        // Symmetric handshake (spec §5.3, G13): after serving a KEYRSP
+        // we also queue a reciprocal KEYREQ from us back to the peer so
+        // the us→peer direction gets established in the same round-trip.
+        // Skip when we already hold a trusted incoming session for this
+        // peer on this channel — the peer has already completed their
+        // own KEYREQ→KEYRSP in that direction and another reciprocal
+        // would be pure churn. The outgoing rate limiter is an
+        // additional backstop against mutual-KEYREQ loops: two clients
+        // that both start ticking their reciprocals will each hit the
+        // 30-second per-peer bucket and skip.
+        let already_incoming = self
+            .keyring
+            .get_incoming_session(sender_handle, &req.channel)?
+            .is_some_and(|s| s.status == TrustStatus::Trusted);
+        let allow_out = self
+            .rate_limiter
+            .lock()
+            .expect("rate limiter mutex poisoned")
+            .allow_outgoing(sender_handle);
+        if !already_incoming && allow_out {
+            let reciprocal = self.build_keyreq(&req.channel)?;
+            self.pending_outbound_keyreqs
+                .lock()
+                .expect("e2e pending outbound keyreqs mutex poisoned")
+                .push(PendingOutboundKeyReq {
+                    peer_handle: sender_handle.to_string(),
+                    channel: req.channel.clone(),
+                    req: reciprocal,
+                });
+        }
 
         Ok(Some(KeyRsp {
             channel: req.channel.clone(),

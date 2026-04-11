@@ -3282,9 +3282,24 @@ fn try_dispatch_rpe2e_ctcp(
                         .pending_e2e_sends
                         .push(crate::state::PendingE2eSend {
                             connection_id: conn_id.to_string(),
-                            target: nick,
+                            target: nick.clone(),
                             notice_text: body,
                         });
+                    // Symmetric handshake (spec §5.3, G13): drain any
+                    // reciprocal KEYREQs queued by `handle_keyreq` so
+                    // the us→peer direction gets a fresh NOTICE in the
+                    // same tick as the KEYRSP. Each reciprocal targets
+                    // the same peer who just initiated the handshake.
+                    for out in mgr.take_pending_outbound_keyreqs() {
+                        let ctcp = mgr.encode_keyreq_ctcp(&out.req);
+                        state
+                            .pending_e2e_sends
+                            .push(crate::state::PendingE2eSend {
+                                connection_id: conn_id.to_string(),
+                                target: nick.clone(),
+                                notice_text: ctcp,
+                            });
+                    }
                     Some(RpEe2eOutcome::Handled)
                 }
                 Ok(None) => Some(RpEe2eOutcome::Handled),

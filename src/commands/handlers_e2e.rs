@@ -374,10 +374,15 @@ fn e2e_accept(app: &mut App, nick: &str) {
         err(app, "/e2e accept: no active channel");
         return;
     };
-    // We match by nick — the keyring key is ident@host, but at command time
-    // the user types the nick. Look up the sender's full handle from buffer
-    // users if present, otherwise accept any handle starting with the nick.
-    let handle = resolve_handle_by_nick(app, &chan, nick).unwrap_or_else(|| nick.to_string());
+    // We match by nick — the keyring key is ident@host, but at command
+    // time the user types the nick. Strict resolution: we refuse to
+    // fall back to the raw nick because that would upsert a zombie peer
+    // row keyed on nick-as-handle. `require_handle_for_nick` surfaces a
+    // themed `[E2E]` error line on miss, so the user gets a clean
+    // "has the user spoken yet?" instead of a silent no-op.
+    let Some(handle) = require_handle_for_nick(app, &chan, nick) else {
+        return;
+    };
     // Capture the active connection id before we grab the mutable-ish manager
     // borrow so we can enqueue the KEYRSP on the correct connection.
     let conn_id_opt = app.state.active_buffer().map(|b| b.connection_id.clone());
@@ -430,8 +435,10 @@ fn e2e_decline(app: &mut App, nick: &str) {
         err(app, "/e2e decline: no active channel");
         return;
     };
+    let Some(handle) = require_handle_for_nick(app, &chan, nick) else {
+        return;
+    };
     let Some(mgr) = require_mgr(app) else { return };
-    let handle = resolve_handle_by_nick(app, &chan, nick).unwrap_or_else(|| nick.to_string());
     if let Err(e) = mgr
         .keyring()
         .update_incoming_status(&handle, &chan, TrustStatus::Revoked)
@@ -447,8 +454,10 @@ fn e2e_revoke(app: &mut App, nick: &str) {
         err(app, "/e2e revoke: no active channel");
         return;
     };
+    let Some(handle) = require_handle_for_nick(app, &chan, nick) else {
+        return;
+    };
     let Some(mgr) = require_mgr(app) else { return };
-    let handle = resolve_handle_by_nick(app, &chan, nick).unwrap_or_else(|| nick.to_string());
     if let Err(e) = mgr
         .keyring()
         .update_incoming_status(&handle, &chan, TrustStatus::Revoked)
@@ -478,8 +487,10 @@ fn e2e_unrevoke(app: &mut App, nick: &str) {
         err(app, "/e2e unrevoke: no active channel");
         return;
     };
+    let Some(handle) = require_handle_for_nick(app, &chan, nick) else {
+        return;
+    };
     let Some(mgr) = require_mgr(app) else { return };
-    let handle = resolve_handle_by_nick(app, &chan, nick).unwrap_or_else(|| nick.to_string());
     if let Err(e) = mgr
         .keyring()
         .update_incoming_status(&handle, &chan, TrustStatus::Trusted)
@@ -495,8 +506,10 @@ fn e2e_forget(app: &mut App, nick: &str) {
         err(app, "/e2e forget: no active channel");
         return;
     };
+    let Some(handle) = require_handle_for_nick(app, &chan, nick) else {
+        return;
+    };
     let Some(mgr) = require_mgr(app) else { return };
-    let handle = resolve_handle_by_nick(app, &chan, nick).unwrap_or_else(|| nick.to_string());
     if let Err(e) = mgr.keyring().delete_incoming_session(&handle, &chan) {
         err(app, &format!("/e2e forget: {e}"));
         return;
@@ -669,8 +682,10 @@ fn e2e_verify(app: &mut App, nick: &str) {
         err(app, "/e2e verify: no active channel");
         return;
     };
+    let Some(handle) = require_handle_for_nick(app, &chan, nick) else {
+        return;
+    };
     let Some(mgr) = require_mgr(app) else { return };
-    let handle = resolve_handle_by_nick(app, &chan, nick).unwrap_or_else(|| nick.to_string());
     let local_fp = mgr.fingerprint();
     match mgr.keyring().get_incoming_session(&handle, &chan) {
         Ok(Some(sess)) => {
@@ -724,11 +739,12 @@ fn e2e_reverify(app: &mut App, nick: &str) {
         err(app, "/e2e reverify: no active channel");
         return;
     };
+    // Strict handle resolution — see `require_handle_for_nick` for the
+    // rationale (no raw-nick fallback, themed-error on miss).
+    let Some(handle) = require_handle_for_nick(app, &chan, nick) else {
+        return;
+    };
     let Some(mgr) = require_mgr(app) else { return };
-    // Resolve handle the same way accept/revoke do: prefer the
-    // server-stamped `ident@host` if we can read it from the buffer,
-    // otherwise fall back to the raw nick.
-    let handle = resolve_handle_by_nick(app, &chan, nick).unwrap_or_else(|| nick.to_string());
     match mgr.reverify_peer(&handle) {
         Ok(crate::e2e::manager::ReverifyOutcome::Applied { old_fp, new_fp }) => {
             ok(
@@ -928,8 +944,20 @@ fn e2e_help(app: &mut App) {
 
 // ─── internal helpers ────────────────────────────────────────────────────────
 
-/// Best-effort nick→handle resolver. Reads the users map of the channel buffer
-/// and returns the first entry whose nick matches (case-insensitively).
+/// Strict nick→handle resolver.
+///
+/// Reads the users map of the channel buffer and returns the
+/// server-stamped `ident@host` for the matching nick, or `None` if the
+/// nick is not currently present in the buffer (i.e. we have never
+/// received a WHO/JOIN/PRIVMSG-prefix message carrying their handle).
+///
+/// Returning `None` here is load-bearing: the old behavior was to fall
+/// back to the raw nick at the caller via `unwrap_or_else(|| nick.into())`,
+/// which created zombie peer rows because later code `upsert`s with the
+/// nick-as-handle. That leaked identity rows whenever an `/e2e` subcommand
+/// referenced a user who had not spoken yet, and broke the invariant that
+/// every keyring row is keyed by a real `ident@host`. Callers MUST surface
+/// a themed error to the user on `None` — see `require_handle_for_nick`.
 fn resolve_handle_by_nick(app: &App, channel: &str, nick: &str) -> Option<String> {
     use crate::state::buffer::make_buffer_id;
     // We need to know the connection id. Use the active buffer's.
@@ -944,6 +972,23 @@ fn resolve_handle_by_nick(app: &App, channel: &str, nick: &str) -> Option<String
     } else {
         Some(format!("{ident}@{host}"))
     }
+}
+
+/// Wrap `resolve_handle_by_nick` with themed-error surfacing.
+///
+/// Every `/e2e` subcommand that takes a `<nick>` argument needs to map
+/// the nick to an `ident@host` before touching the keyring. On miss we
+/// emit a `[E2E]` error line through the `events.e2e_error` theme key
+/// and return `None` so the caller can bail cleanly.
+fn require_handle_for_nick(app: &mut App, channel: &str, nick: &str) -> Option<String> {
+    let handle = resolve_handle_by_nick(app, channel, nick);
+    if handle.is_none() {
+        err(
+            app,
+            &format!("cannot resolve handle for {nick} — has the user spoken yet?"),
+        );
+    }
+    handle
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -1112,29 +1157,45 @@ mod tests {
         );
     }
 
-    // ---------- handle resolution fallback ----------
+    // ---------- handle resolution: strict, no raw-nick fallback ----------
     //
-    // `resolve_handle_by_nick` reaches into `App.state`, so direct unit testing
-    // requires a full App. We instead replicate its fallback contract in a
-    // pure helper and test *that*: when resolution yields None, the caller
-    // must use the raw nick as the handle.
+    // G13 removed the raw-nick fallback that caused zombie peer rows.
+    // `resolve_handle_by_nick` returns `Option<String>` and every `/e2e`
+    // caller now surfaces a themed `[E2E]` error on `None` instead of
+    // silently upserting `nick` as the handle. The function itself reaches
+    // into `App.state`, so we replicate its new contract in a pure helper
+    // below and assert each expected outcome.
 
-    fn resolve_or_fallback(resolved: Option<String>, nick: &str) -> String {
-        resolved.unwrap_or_else(|| nick.to_string())
+    fn strict_resolve(resolved: Option<String>) -> Result<String, &'static str> {
+        resolved.ok_or("cannot resolve handle — has the user spoken yet?")
     }
 
     #[test]
-    fn test_handle_resolution_fallback_none_uses_nick() {
-        assert_eq!(resolve_or_fallback(None, "alice"), "alice");
-        assert_eq!(resolve_or_fallback(None, "Bob"), "Bob");
-    }
-
-    #[test]
-    fn test_handle_resolution_fallback_some_passthrough() {
+    fn test_strict_resolve_some_passthrough() {
         assert_eq!(
-            resolve_or_fallback(Some(s("~alice@host")), "alice"),
-            "~alice@host"
+            strict_resolve(Some(s("~alice@host.example"))).unwrap(),
+            "~alice@host.example"
         );
+    }
+
+    #[test]
+    fn test_strict_resolve_none_is_error_not_nick_fallback() {
+        // This is the core G13 invariant: on a None resolution the caller
+        // MUST surface an error, NOT silently fall back to the raw nick
+        // (which would create a zombie peer row keyed on nick-as-handle).
+        match strict_resolve(None) {
+            Err(msg) => assert!(msg.contains("has the user spoken yet?")),
+            Ok(s) => panic!("expected Err, got Ok({s})"),
+        }
+    }
+
+    #[test]
+    fn test_strict_resolve_none_for_multiple_nicks() {
+        // Sanity: the nick value is irrelevant when there is no buffer
+        // entry — the function must not embed the raw nick into its
+        // return value.
+        assert!(strict_resolve(None).is_err());
+        assert!(strict_resolve(None).is_err());
     }
 
     // ---------- format_status_line ----------

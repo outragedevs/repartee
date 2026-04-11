@@ -104,7 +104,21 @@ impl WireChunk {
 
 /// Construct the AAD (Additional Authenticated Data) for a chunk.
 ///
-/// AAD = `"RPE2E01" || channel || msgid || ts || part || total`
+/// AAD layout (length-prefixed, big-endian):
+///
+/// ```text
+/// PROTO(7 bytes, fixed)
+///   || be16(channel.len)   || channel
+///   || be16(8)              || msgid (8 bytes)
+///   || be16(8)              || ts_be (8 bytes)
+///   || be16(1)              || part  (1 byte)
+///   || be16(1)              || total (1 byte)
+/// ```
+///
+/// Every non-const field gets a `u16` big-endian length prefix — even the
+/// fixed-size ones — so the parser is trivially position-independent and
+/// no malicious channel name can shift later fields. The PROTO prefix is
+/// a constant 7 bytes (`"RPE2E01"`) and is therefore not length-prefixed.
 ///
 /// Note — the sender handle is **not** in AAD. Sender authentication is
 /// enforced at the keyring layer: on decrypt the receiver looks up the
@@ -114,17 +128,24 @@ impl WireChunk {
 /// force the sender to know its own `ident@host` before encrypting, which
 /// it does not on every IRC network.
 pub fn build_aad(channel: &str, msgid: MsgId, ts: i64, part: u8, total: u8) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(32 + channel.len());
+    // 7 (PROTO) + 2 + channel.len() + 2 + 8 + 2 + 8 + 2 + 1 + 2 + 1 = 35 + channel.len()
+    let mut aad = Vec::with_capacity(35 + channel.len());
     aad.extend_from_slice(PROTO.as_bytes());
-    aad.push(b':');
+    // be16(channel.len) || channel
+    let chan_len = u16::try_from(channel.len()).unwrap_or(u16::MAX);
+    aad.extend_from_slice(&chan_len.to_be_bytes());
     aad.extend_from_slice(channel.as_bytes());
-    aad.push(b':');
+    // be16(8) || msgid
+    aad.extend_from_slice(&8u16.to_be_bytes());
     aad.extend_from_slice(&msgid);
-    aad.push(b':');
+    // be16(8) || ts_be
+    aad.extend_from_slice(&8u16.to_be_bytes());
     aad.extend_from_slice(&ts.to_be_bytes());
-    aad.push(b':');
+    // be16(1) || part
+    aad.extend_from_slice(&1u16.to_be_bytes());
     aad.push(part);
-    aad.push(b':');
+    // be16(1) || total
+    aad.extend_from_slice(&1u16.to_be_bytes());
     aad.push(total);
     aad
 }
@@ -205,6 +226,62 @@ mod tests {
         assert_ne!(base, build_aad("#chan", [1; 8], 101, 1, 3));
         assert_ne!(base, build_aad("#chan", [1; 8], 100, 2, 3));
         assert_ne!(base, build_aad("#chan", [1; 8], 100, 1, 4));
+    }
+
+    /// Golden AAD byte sequence for `build_aad("#chan", [1;8], 100, 1, 3)`.
+    ///
+    /// This is load-bearing for cross-client interop — the weechat
+    /// `scripts/weechat/rpe2e.py::build_aad` must produce the exact same
+    /// bytes for the same inputs. If you change this vector, update the
+    /// Python script in lockstep.
+    ///
+    /// Reproducible in Python:
+    ///
+    /// ```python
+    /// import struct
+    /// PROTO = b"RPE2E01"
+    /// chan = b"#chan"; msgid = b"\x01"*8; ts = 100; part = 1; total = 3
+    /// out = PROTO
+    /// out += struct.pack(">H", len(chan)) + chan
+    /// out += struct.pack(">H", 8) + msgid
+    /// out += struct.pack(">H", 8) + struct.pack(">q", ts)
+    /// out += struct.pack(">H", 1) + bytes([part])
+    /// out += struct.pack(">H", 1) + bytes([total])
+    /// assert len(out) == 40
+    /// ```
+    #[test]
+    fn build_aad_golden_vector() {
+        let got = build_aad("#chan", [1u8; 8], 100, 1, 3);
+        let expected: Vec<u8> = vec![
+            // PROTO = "RPE2E01"
+            0x52, 0x50, 0x45, 0x32, 0x45, 0x30, 0x31,
+            // be16(5) || "#chan"
+            0x00, 0x05, 0x23, 0x63, 0x68, 0x61, 0x6e,
+            // be16(8) || msgid (8x 0x01)
+            0x00, 0x08, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+            // be16(8) || ts=100 be64
+            0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64,
+            // be16(1) || part=1
+            0x00, 0x01, 0x01,
+            // be16(1) || total=3
+            0x00, 0x01, 0x03,
+        ];
+        assert_eq!(got.len(), 40, "AAD length mismatch");
+        assert_eq!(got, expected, "AAD golden byte sequence mismatch");
+    }
+
+    /// Colon-in-channel attack: with the old `:`-joined format, a channel
+    /// containing `:` could shift later AAD fields. The length-prefixed
+    /// layout must keep `"#a:b"` distinct from any other arrangement that
+    /// happens to concatenate the same bytes.
+    #[test]
+    fn build_aad_length_prefix_rejects_colon_ambiguity() {
+        let a = build_aad("#a:b", [1; 8], 100, 1, 3);
+        let b = build_aad("#a", [1; 8], 100, 1, 3);
+        assert_ne!(a, b);
+        // `#a` has len 2 whose be16 is 0x00 0x02 — never equal to the bytes
+        // of `#a:b` under a length-prefixed layout.
+        assert_ne!(a.len(), b.len());
     }
 
     #[test]

@@ -11,24 +11,44 @@
 //! - CTCP NOTICE handshake with KEYREQ/KEYRSP
 //! - Strict handle check on decrypt path
 
-// The e2e module is built in phases; several primitives are written before
-// the consumers (handshake, manager, command handlers) land. Silence lints
-// that would otherwise fire on intentionally-unused helpers until the later
-// phases wire them up.
-#![allow(
+// G13: replaced the old blanket `#![allow(...)]` with a module-level
+// `#![expect(...)]` so the rustc lint engine complains the moment one
+// of these categories stops firing — keeping the justification honest.
+//
+// Per-lint rationale:
+//
+// * `dead_code` — several helpers are part of the public crypto /
+//   keyring / manager API surface even though the current event
+//   pipeline does not call every one on the hot path. They stay
+//   available for script interop, follow-on features, and tests.
+//   `EphemeralKeypair`, `Identity::verifying_key`,
+//   `Keyring::clear_outgoing_pending_rotation`, and a few
+//   `E2eManager` accessors fall into this bucket.
+// * `clippy::missing_const_for_fn` — a few small getters are fn, not
+//   const fn, so future versions can add per-instance state without a
+//   visible API break.
+// * `clippy::unnecessary_wraps` — a handful of crypto helpers return
+//   `Result` even though today they never fail, so a future backend
+//   swap (different Ed25519 crate, hardware token, etc.) does not
+//   force a signature change through every call site.
+// * `clippy::doc_markdown` — doc comments mention protocol tokens
+//   (KEYREQ, KEYRSP, REKEY, RPE2E01, CTCP) that are spec-level
+//   identifiers and read more naturally without backticks.
+// * `clippy::significant_drop_tightening` — every keyring method
+//   grabs `self.db.lock()` as its first line and releases it when the
+//   single SQL statement returns. Tightening further buys nothing and
+//   hurts readability for no real contention win.
+// * `clippy::type_complexity` — `Keyring::load_identity` returns a
+//   4-tuple read straight from SQLite columns; a dedicated alias
+//   would obscure, not clarify.
+#![expect(
     dead_code,
     clippy::missing_const_for_fn,
     clippy::unnecessary_wraps,
-    clippy::module_name_repetitions,
     clippy::doc_markdown,
-    // Every keyring method grabs `self.db.lock()` as its first line and
-    // releases it when the single SQL statement returns. Tightening further
-    // buys nothing and hurts readability for no real contention win.
     clippy::significant_drop_tightening,
-    // Keyring::load_identity returns a 4-tuple read straight from SQLite
-    // columns; naming an alias just for the return type would obscure, not
-    // clarify.
-    clippy::type_complexity
+    clippy::type_complexity,
+    reason = "see per-category rationale above"
 )]
 
 pub mod chunker;
