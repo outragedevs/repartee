@@ -104,27 +104,22 @@ impl WireChunk {
 
 /// Construct the AAD (Additional Authenticated Data) for a chunk.
 ///
-/// AAD = `"RPE2E01" || sender_handle || channel || msgid || ts || part || total`
+/// AAD = `"RPE2E01" || channel || msgid || ts || part || total`
 ///
-/// All fields are length-prefixed with a single `:` separator so no ambiguity
-/// arises from handles containing colons.
-#[allow(clippy::trivially_copy_pass_by_ref)] // callers hold owned MsgId and pass &msgid
-pub fn build_aad(
-    sender_handle: &str,
-    channel: &str,
-    msgid: &MsgId,
-    ts: i64,
-    part: u8,
-    total: u8,
-) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(64 + sender_handle.len() + channel.len());
+/// Note — the sender handle is **not** in AAD. Sender authentication is
+/// enforced at the keyring layer: on decrypt the receiver looks up the
+/// incoming session by `(handle_from_IRC_prefix, channel)`, so only the
+/// real server-stamped sender can produce a ciphertext the receiver will
+/// even attempt to decrypt. Duplicating that binding inside AAD would
+/// force the sender to know its own `ident@host` before encrypting, which
+/// it does not on every IRC network.
+pub fn build_aad(channel: &str, msgid: MsgId, ts: i64, part: u8, total: u8) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(32 + channel.len());
     aad.extend_from_slice(PROTO.as_bytes());
-    aad.push(b':');
-    aad.extend_from_slice(sender_handle.as_bytes());
     aad.push(b':');
     aad.extend_from_slice(channel.as_bytes());
     aad.push(b':');
-    aad.extend_from_slice(msgid);
+    aad.extend_from_slice(&msgid);
     aad.push(b':');
     aad.extend_from_slice(&ts.to_be_bytes());
     aad.push(b':');
@@ -197,20 +192,19 @@ mod tests {
 
     #[test]
     fn build_aad_is_deterministic() {
-        let a = build_aad("alice@host", "#chan", &[1; 8], 100, 1, 3);
-        let b = build_aad("alice@host", "#chan", &[1; 8], 100, 1, 3);
+        let a = build_aad("#chan", [1; 8], 100, 1, 3);
+        let b = build_aad("#chan", [1; 8], 100, 1, 3);
         assert_eq!(a, b);
     }
 
     #[test]
     fn build_aad_sensitive_to_every_field() {
-        let base = build_aad("alice@host", "#chan", &[1; 8], 100, 1, 3);
-        assert_ne!(base, build_aad("bob@host", "#chan", &[1; 8], 100, 1, 3));
-        assert_ne!(base, build_aad("alice@host", "#other", &[1; 8], 100, 1, 3));
-        assert_ne!(base, build_aad("alice@host", "#chan", &[2; 8], 100, 1, 3));
-        assert_ne!(base, build_aad("alice@host", "#chan", &[1; 8], 101, 1, 3));
-        assert_ne!(base, build_aad("alice@host", "#chan", &[1; 8], 100, 2, 3));
-        assert_ne!(base, build_aad("alice@host", "#chan", &[1; 8], 100, 1, 4));
+        let base = build_aad("#chan", [1; 8], 100, 1, 3);
+        assert_ne!(base, build_aad("#other", [1; 8], 100, 1, 3));
+        assert_ne!(base, build_aad("#chan", [2; 8], 100, 1, 3));
+        assert_ne!(base, build_aad("#chan", [1; 8], 101, 1, 3));
+        assert_ne!(base, build_aad("#chan", [1; 8], 100, 2, 3));
+        assert_ne!(base, build_aad("#chan", [1; 8], 100, 1, 4));
     }
 
     #[test]

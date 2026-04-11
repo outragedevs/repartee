@@ -165,8 +165,8 @@ sub xchacha20_decrypt {
 }
 
 sub build_aad {
-    my ($sender, $chan, $msgid, $ts, $part, $total) = @_;
-    return "$PROTO:$sender:$chan:" . $msgid . ':' . pack('q>', $ts) . ':' . chr($part) . ':' . chr($total);
+    my ($chan, $msgid, $ts, $part, $total) = @_;
+    return "$PROTO:$chan:" . $msgid . ':' . pack('q>', $ts) . ':' . chr($part) . ':' . chr($total);
 }
 
 # ── Wire format ───────────────────────────────────────────────────────────────
@@ -433,17 +433,10 @@ sub signal_send_text {
     my $total = scalar @$chunks;
     my $msgid = $sodium->random_bytes(8);
     my $ts    = now_unix();
-    my $my_handle = (($server->{userhost} || $server->{nick}) =~ /@/)
-        ? $server->{userhost}
-        : $server->{nick} . '!' . ($server->{userhost} // 'unknown@unknown');
-    # irssi doesn't always surface our userhost; fall back to nick!unknown
-    if ($my_handle !~ /\@/) {
-        $my_handle = $server->{nick} . '!unknown@unknown';
-    }
     my $idx = 0;
     for my $chunk (@$chunks) {
         $idx++;
-        my $aad = build_aad($my_handle, $chan, $msgid, $ts, $idx, $total);
+        my $aad = build_aad($chan, $msgid, $ts, $idx, $total);
         my ($nonce, $ct) = xchacha20_encrypt($sk, $aad, $chunk);
         my $wire = encode_wire($msgid, $ts, $idx, $total, $nonce, $ct);
         $server->command("MSG $chan $wire");
@@ -472,7 +465,7 @@ sub signal_message_public {
         return;
     }
     my $sk_raw = b64d($sess->{sk});
-    my $aad = build_aad($handle, $target, $wire->{msgid}, $wire->{ts}, $wire->{part}, $wire->{total});
+    my $aad = build_aad($target, $wire->{msgid}, $wire->{ts}, $wire->{part}, $wire->{total});
     my $pt = xchacha20_decrypt($sk_raw, $wire->{nonce}, $aad, $wire->{ct});
     if (defined $pt) {
         Irssi::signal_continue($server, $pt, $nick, $host, $target);

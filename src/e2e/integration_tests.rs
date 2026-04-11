@@ -64,9 +64,7 @@ fn full_handshake_and_encrypted_exchange() {
         .unwrap();
 
     // Alice encrypts a message for #x.
-    let wire_lines = alice
-        .encrypt_outgoing(alice_handle, "#x", "hello bob")
-        .unwrap();
+    let wire_lines = alice.encrypt_outgoing("#x", "hello bob").unwrap();
     assert_eq!(wire_lines.len(), 1);
 
     // Bob decrypts using the session installed by the handshake.
@@ -91,9 +89,7 @@ fn strict_handle_check_rejects_wrong_sender() {
     bob.handle_keyrsp("~alice@a.host", &alice.identity_pub(), &rsp)
         .unwrap();
 
-    let wire = alice
-        .encrypt_outgoing("~alice@a.host", "#x", "secret")
-        .unwrap();
+    let wire = alice.encrypt_outgoing("#x", "secret").unwrap();
 
     // Bob tries to decrypt claiming the sender is someone else. Because the
     // session is indexed by (handle, channel) there is no entry for the
@@ -125,9 +121,7 @@ fn revoke_then_lazy_rotate_locks_out_revoked_peer() {
     }
 
     // Alice sends msg 1; bob decrypts successfully.
-    let w1 = alice
-        .encrypt_outgoing("~alice@a.host", "#x", "msg-1")
-        .unwrap();
+    let w1 = alice.encrypt_outgoing("#x", "msg-1").unwrap();
     let bob_out1 = bob.decrypt_incoming("~alice@a.host", "#x", &w1[0]).unwrap();
     assert!(matches!(
         &bob_out1,
@@ -142,9 +136,7 @@ fn revoke_then_lazy_rotate_locks_out_revoked_peer() {
 
     // Alice sends msg 2 → lazy rotate generates a fresh key; bob's old
     // incoming session key no longer decrypts it.
-    let w2 = alice
-        .encrypt_outgoing("~alice@a.host", "#x", "msg-2")
-        .unwrap();
+    let w2 = alice.encrypt_outgoing("#x", "msg-2").unwrap();
     let bob_out2 = bob.decrypt_incoming("~alice@a.host", "#x", &w2[0]).unwrap();
     assert!(matches!(bob_out2, DecryptOutcome::Rejected(_)));
 }

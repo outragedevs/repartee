@@ -146,11 +146,9 @@ def hkdf_sha256(salt: bytes, ikm: bytes, info: bytes, length: int) -> bytes:
     return out[:length]
 
 
-def build_aad(sender: str, channel: str, msgid: bytes, ts: int, part: int, total: int) -> bytes:
+def build_aad(channel: str, msgid: bytes, ts: int, part: int, total: int) -> bytes:
     return (
         PROTO.encode()
-        + b":"
-        + sender.encode()
         + b":"
         + channel.encode()
         + b":"
@@ -311,7 +309,7 @@ def hook_irc_in_privmsg(data, modifier, server, msg):
         if row is None or row[1] != "trusted":
             return ""  # unknown peer → drop
         sk = row[0]
-        aad = build_aad(handle, target, wire["msgid"], wire["ts"], wire["part"], wire["total"])
+        aad = build_aad(target, wire["msgid"], wire["ts"], wire["part"], wire["total"])
         pt = aead_decrypt(sk, wire["nonce"], aad, wire["ct"])
         if pt is None:
             return ""
@@ -354,17 +352,12 @@ def hook_input_text_display(data, modifier, modifier_data, text):
         msgid = nacl_random(8)
         ts = int(time.time())
 
-        # We need to resolve our own handle (ident@host) from the server info.
-        # WeeChat exposes it via /info "irc_nick_modes" but not directly —
-        # fall back to $nick!unknown@unknown so AAD is still well-formed.
         server = modifier_data
-        my_nick = weechat.info_get("irc_nick", server) if weechat else "me"
-        my_handle = f"{my_nick}!unknown@unknown"
 
         # Send each chunk as its own PRIVMSG line.
         wire_lines = []
         for idx, chunk in enumerate(chunks, start=1):
-            aad = build_aad(my_handle, target, msgid, ts, idx, total)
+            aad = build_aad(target, msgid, ts, idx, total)
             nonce, ct = aead_encrypt(sk, aad, chunk)
             wire_lines.append(encode_wire(msgid, ts, idx, total, nonce, ct))
 

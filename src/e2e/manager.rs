@@ -128,12 +128,7 @@ impl E2eManager {
     /// chunk. Callers send these verbatim via PRIVMSG. Honors lazy rotation:
     /// if the outgoing session is flagged `pending_rotation`, a fresh key is
     /// generated first.
-    pub fn encrypt_outgoing(
-        &self,
-        sender_handle: &str,
-        channel: &str,
-        plaintext: &str,
-    ) -> Result<Vec<String>> {
+    pub fn encrypt_outgoing(&self, channel: &str, plaintext: &str) -> Result<Vec<String>> {
         let sk = self.get_or_generate_outgoing_key(channel)?;
         let chunks = split_plaintext(plaintext)?;
         let total_usize = chunks.len();
@@ -150,7 +145,7 @@ impl E2eManager {
             // idx is in 0..total, so idx+1 fits in u8 because total ≤ u8::MAX.
             let part = u8::try_from(idx + 1)
                 .map_err(|_| E2eError::ChunkLimit(u8::MAX))?;
-            let aad = build_aad(sender_handle, channel, &msgid, ts, part, total);
+            let aad = build_aad(channel, msgid, ts, part, total);
             let (nonce, ct) = aead::encrypt(&sk, &aad, plain)?;
             let wire = WireChunk {
                 msgid,
@@ -220,14 +215,7 @@ impl E2eManager {
             )));
         }
 
-        let aad = build_aad(
-            sender_handle,
-            channel,
-            &wire.msgid,
-            wire.ts,
-            wire.part,
-            wire.total,
-        );
+        let aad = build_aad(channel, wire.msgid, wire.ts, wire.part, wire.total);
         match aead::decrypt(&sess.sk, &wire.nonce, &aad, &wire.ciphertext) {
             Ok(pt) => match String::from_utf8(pt) {
                 Ok(s) => Ok(DecryptOutcome::Plaintext(s)),
@@ -585,7 +573,7 @@ mod tests {
         let mgr = make_manager();
         // No incoming session installed → decrypt_incoming returns MissingKey.
         let wire = mgr
-            .encrypt_outgoing("~alice@host", "#x", "hi")
+            .encrypt_outgoing("#x", "hi")
             .unwrap()
             .remove(0);
         let outcome = mgr.decrypt_incoming("~alice@host", "#x", &wire).unwrap();

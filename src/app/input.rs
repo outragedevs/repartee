@@ -944,21 +944,7 @@ impl App {
                 text.to_string(),
             );
         }
-        // Build the sender handle from our own connection. If the server
-        // hasn't told us our ident/host yet we fall back to a placeholder
-        // that still produces a valid (albeit weak) AAD — the receiving
-        // side's strict handle check will simply need to be trained on the
-        // same placeholder. In practice irc-repartee populates userhost
-        // after the welcome 001 so this only affects pre-registration sends.
-        let my_handle = self
-            .state
-            .active_buffer()
-            .and_then(|b| self.state.connections.get(&b.connection_id))
-            .map_or_else(
-                || "unknown!unknown@unknown".to_string(),
-                |c| format!("{}!unknown@unknown", c.nick),
-            );
-        match mgr.encrypt_outgoing(&my_handle, buffer_name, text) {
+        match mgr.encrypt_outgoing(buffer_name, text) {
             Ok(wires) => (wires, text.to_string()),
             Err(e) => {
                 tracing::warn!("e2e encrypt failed on {buffer_name}: {e}; sending cleartext");
