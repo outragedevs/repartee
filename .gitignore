@@ -11,6 +11,8 @@ skills-lock.json
 memory.db*
 # Brainstorm artifacts
 .superpowers/
+# Python bytecode cache
+__pycache__/
 # Planning docs — drafts only, not tracked
 /docs/plans
 # MemPalace local state
