@@ -144,6 +144,22 @@ CREATE TABLE IF NOT EXISTS e2e_autotrust (
     UNIQUE(scope, handle_pattern)
 )";
 
+/// Recipients of our outgoing session key, per channel. Populated when we
+/// serve a KEYRSP (auto-accept or explicit /e2e accept), consumed by the
+/// lazy-rotate distribution loop to know which peers must receive a REKEY
+/// when we regenerate the outgoing session for a channel. This is NOT the
+/// same as `e2e_incoming_sessions` — that table tracks session keys used
+/// to DECRYPT peer-sent messages; this one tracks the peer's handle +
+/// fingerprint so we can re-push our outgoing key after a /e2e revoke.
+const CREATE_E2E_OUTGOING_RECIPIENTS: &str = "
+CREATE TABLE IF NOT EXISTS e2e_outgoing_recipients (
+    channel        TEXT NOT NULL,
+    handle         TEXT NOT NULL,
+    fingerprint    BLOB NOT NULL,
+    first_sent_at  INTEGER NOT NULL,
+    PRIMARY KEY (channel, handle)
+)";
+
 fn create_schema(db: &Connection, encrypt: bool) -> rusqlite::Result<()> {
     db.execute_batch(CREATE_MESSAGES)?;
     db.execute_batch(CREATE_MESSAGES_IDX)?;
@@ -160,6 +176,7 @@ fn create_schema(db: &Connection, encrypt: bool) -> rusqlite::Result<()> {
     db.execute_batch(CREATE_E2E_INCOMING)?;
     db.execute_batch(CREATE_E2E_CHANNEL_CONFIG)?;
     db.execute_batch(CREATE_E2E_AUTOTRUST)?;
+    db.execute_batch(CREATE_E2E_OUTGOING_RECIPIENTS)?;
     if !encrypt {
         db.execute_batch(CREATE_FTS)?;
         db.execute_batch(CREATE_FTS_TRIGGERS)?;

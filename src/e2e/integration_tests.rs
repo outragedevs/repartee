@@ -22,6 +22,7 @@ CREATE TABLE e2e_outgoing_sessions (channel TEXT PRIMARY KEY, sk BLOB NOT NULL, 
 CREATE TABLE e2e_incoming_sessions (handle TEXT NOT NULL, channel TEXT NOT NULL, fingerprint BLOB NOT NULL, sk BLOB NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, PRIMARY KEY (handle, channel));
 CREATE TABLE e2e_channel_config (channel TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, mode TEXT NOT NULL DEFAULT 'normal');
 CREATE TABLE e2e_autotrust (id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, handle_pattern TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(scope, handle_pattern));
+CREATE TABLE e2e_outgoing_recipients (channel TEXT NOT NULL, handle TEXT NOT NULL, fingerprint BLOB NOT NULL, first_sent_at INTEGER NOT NULL, PRIMARY KEY (channel, handle));
 ";
 
 fn make_manager() -> E2eManager {
@@ -640,6 +641,360 @@ fn pm_pseudochannel_distinguishes_same_nick_different_host() {
         !matches!(cross, DecryptOutcome::Plaintext(_)),
         "cross-decrypt must not succeed, got {cross:?}"
     );
+}
+
+// ---------- G10: lazy rotate distribution via REKEY ----------
+
+#[test]
+fn lazy_rotate_distributes_new_key_to_remaining_trusted_peers() {
+    let alice = make_manager();
+    let bob = make_manager();
+    let carol = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+    enable_channel(&carol, "#x", ChannelMode::AutoAccept);
+
+    // Bob and Carol each handshake with Alice so alice has two trusted
+    // incoming sessions on #x — alice's perspective.
+    for (peer, ph) in [(&bob, "~bob@b.host"), (&carol, "~carol@c.host")] {
+        let req = peer.build_keyreq("#x").unwrap();
+        let rsp = alice.handle_keyreq(ph, &req).unwrap().unwrap();
+        peer.handle_keyrsp("~alice@a.host", &rsp).unwrap();
+    }
+
+    // Alice sends msg 1; both bob and carol decrypt with alice's v1 key.
+    let w1 = alice.encrypt_outgoing("#x", "msg-1").unwrap();
+    match bob.decrypt_incoming("~alice@a.host", "#x", &w1[0]).unwrap() {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "msg-1"),
+        other => panic!("bob decrypt 1: {other:?}"),
+    }
+    match carol.decrypt_incoming("~alice@a.host", "#x", &w1[0]).unwrap() {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "msg-1"),
+        other => panic!("carol decrypt 1: {other:?}"),
+    }
+
+    // /e2e revoke bob: flip bob's incoming row to Revoked, drop bob from
+    // the outgoing-recipients list, and mark outgoing pending_rotation
+    // (the three steps e2e_revoke performs).
+    alice
+        .keyring()
+        .update_incoming_status("~bob@b.host", "#x", TrustStatus::Revoked)
+        .unwrap();
+    alice
+        .keyring()
+        .remove_outgoing_recipient("#x", "~bob@b.host")
+        .unwrap();
+    alice.keyring().mark_outgoing_pending_rotation("#x").unwrap();
+
+    // Alice sends msg 2 — this triggers lazy rotate and builds a REKEY
+    // for every remaining trusted peer (carol only; bob is revoked).
+    let w2 = alice.encrypt_outgoing("#x", "msg-2").unwrap();
+    let rekeys = alice.take_pending_rekey_sends();
+    assert_eq!(
+        rekeys.len(),
+        1,
+        "expected exactly one rekey targeted at carol"
+    );
+    let (target, ctcp) = (&rekeys[0].target_handle, &rekeys[0].notice_text);
+    assert_eq!(target, "~carol@c.host");
+
+    // Carol consumes the REKEY: strip CTCP framing, parse, handle.
+    let inner = ctcp
+        .strip_prefix('\x01')
+        .and_then(|s| s.strip_suffix('\x01'))
+        .unwrap();
+    let parsed = crate::e2e::handshake::parse(inner).unwrap().unwrap();
+    let rk = match parsed {
+        crate::e2e::handshake::HandshakeMsg::Rekey(r) => r,
+        other => panic!("expected Rekey, got {other:?}"),
+    };
+    carol.handle_rekey("~alice@a.host", &rk).unwrap();
+
+    // After the rekey, carol can decrypt msg-2 but bob cannot.
+    match carol.decrypt_incoming("~alice@a.host", "#x", &w2[0]).unwrap() {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "msg-2"),
+        other => panic!("carol decrypt 2: {other:?}"),
+    }
+    let bob_out = bob.decrypt_incoming("~alice@a.host", "#x", &w2[0]).unwrap();
+    assert!(
+        !matches!(bob_out, DecryptOutcome::Plaintext(_)),
+        "bob should not be able to decrypt msg-2 after revoke+rotate"
+    );
+
+    // And the rotate queue is empty on the next send (no new revokes).
+    let _w3 = alice.encrypt_outgoing("#x", "msg-3").unwrap();
+    assert!(
+        alice.take_pending_rekey_sends().is_empty(),
+        "no further rekey sends should be queued after rotation completes"
+    );
+}
+
+#[test]
+fn rekey_rejects_unknown_peer() {
+    let alice = make_manager();
+    let stranger = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+
+    // Stranger fabricates a REKEY for alice. They've never handshaked,
+    // so alice's classify_peer_change returns New → reject.
+    let sk = crate::e2e::crypto::aead::generate_session_key().unwrap();
+    // Borrow the private builder indirectly: have stranger install a fake
+    // peer record referencing alice's pubkey so they can sign+encrypt.
+    // The check is on alice's side (TrustChange::New → reject).
+    let fake_peer = crate::e2e::keyring::PeerRecord {
+        fingerprint: [0u8; 16],
+        pubkey: alice.identity_pub(),
+        last_handle: Some("~alice@a.host".into()),
+        last_nick: None,
+        first_seen: 0,
+        last_seen: 0,
+        global_status: TrustStatus::Trusted,
+    };
+    let _ = fake_peer; // only used for documentation; stranger's build path below is the real one.
+
+    // We build a real REKEY by having stranger call their own internal
+    // build_rekey_for_peer pointed at alice — but that method is private.
+    // Instead: round-trip by making stranger handshake with alice first
+    // to establish the peer row, then forging a new REKEY on top.
+    // Simpler: exercise the unknown-peer path by directly calling
+    // handle_rekey with a manually-assembled payload signed by stranger.
+    let eph_sk_bytes = [9u8; 32];
+    let eph_sk = x25519_dalek::StaticSecret::from(eph_sk_bytes);
+    let eph_pub = x25519_dalek::PublicKey::from(&eph_sk).to_bytes();
+    let alice_x = crate::e2e::crypto::ecdh::ed25519_pub_to_x25519(&alice.identity_pub()).unwrap();
+    let shared = eph_sk.diffie_hellman(&x25519_dalek::PublicKey::from(alice_x));
+    let info = "RPE2E01-REKEY:#x";
+    let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(b"RPE2E01-WRAP"), shared.as_bytes());
+    let mut wrap_key = [0u8; 32];
+    hk.expand(info.as_bytes(), &mut wrap_key).unwrap();
+    let (wrap_nonce, wrap_ct) =
+        crate::e2e::crypto::aead::encrypt(&wrap_key, info.as_bytes(), &sk).unwrap();
+    let nonce = [7u8; 16];
+    let pubkey = stranger.identity_pub();
+    let sig_payload = crate::e2e::handshake::signed_keyrekey_payload(
+        "#x", &pubkey, &eph_pub, &wrap_nonce, &wrap_ct, &nonce,
+    );
+    // Sign using stranger's identity — we reach into the internal API via
+    // a reciprocal manager build_keyreq + extract signing key? Not exposed.
+    // Easier: use stranger to sign via their own build_keyreq path and
+    // reuse the manager test helper. But build_rekey_for_peer is private.
+    //
+    // Instead: assert via the shorter proof that *some* unknown-peer
+    // REKEY arriving at alice is rejected — we can simulate this by
+    // constructing a KeyRekey with a *valid self-signed* shape for a
+    // freshly-generated identity (stranger). Alice's classify_peer_change
+    // returns New → E2eError::Handshake.
+    //
+    // Build signature via stranger's signing_key. The signing_key itself
+    // isn't exposed publicly, so use the crypto::sig helper through the
+    // public signing_key accessor on Identity. For tests we re-derive an
+    // Identity from stranger's secret_bytes... but that accessor is also
+    // not public. Instead use the `crypto::identity::Identity::from_secret_bytes`
+    // path via the manager's helper. Easiest: round-trip through
+    // crate::e2e::crypto::identity::Identity directly.
+    let stranger_id = crate::e2e::crypto::identity::Identity::from_secret_bytes(&{
+        // We need stranger's secret — since we don't expose it, construct
+        // a brand-new identity specifically for this forgery test.
+        let mut seed = [0u8; 32];
+        rand::fill(&mut seed);
+        seed
+    });
+    let stranger_pub = stranger_id.public_bytes();
+    let sig_payload2 = crate::e2e::handshake::signed_keyrekey_payload(
+        "#x",
+        &stranger_pub,
+        &eph_pub,
+        &wrap_nonce,
+        &wrap_ct,
+        &nonce,
+    );
+    let sig_bytes =
+        crate::e2e::crypto::sig::sign(stranger_id.signing_key(), &sig_payload2);
+
+    let fake_rekey = crate::e2e::handshake::KeyRekey {
+        channel: "#x".into(),
+        pubkey: stranger_pub,
+        eph_pub,
+        wrap_nonce,
+        wrap_ct,
+        nonce,
+        sig: sig_bytes,
+    };
+    let res = alice.handle_rekey("~stranger@s.host", &fake_rekey);
+    assert!(
+        res.is_err(),
+        "REKEY from unknown peer must be rejected, got {res:?}"
+    );
+    // And no incoming session row should have been created.
+    let sess = alice
+        .keyring()
+        .get_incoming_session("~stranger@s.host", "#x")
+        .unwrap();
+    assert!(sess.is_none(), "no session installed from unknown REKEY");
+    let _ = sig_payload; // silence unused-let-binding when tests compile with warnings-as-errors
+}
+
+// ---------- G10: autotrust enforcement ----------
+
+#[test]
+fn autotrust_global_accepts_matching_peer_in_normal_mode() {
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::Normal);
+    enable_channel(&bob, "#x", ChannelMode::Normal);
+    // Alice marks anyone on `*.trusted.org` as autotrust globally.
+    alice
+        .keyring()
+        .add_autotrust("global", "*@*.trusted.org", 100)
+        .unwrap();
+
+    let req = bob.build_keyreq("#x").unwrap();
+    let rsp = alice
+        .handle_keyreq("~bob@shell.trusted.org", &req)
+        .unwrap()
+        .expect("autotrust should have forced AutoAccept semantics");
+    // Bob can consume the KEYRSP and decrypt alice's subsequent messages.
+    bob.handle_keyrsp("~alice@a.host", &rsp).unwrap();
+    let w = alice.encrypt_outgoing("#x", "hi bob").unwrap();
+    let out = bob
+        .decrypt_incoming("~alice@a.host", "#x", &w[0])
+        .unwrap();
+    assert!(matches!(out, DecryptOutcome::Plaintext(s) if s == "hi bob"));
+}
+
+#[test]
+fn autotrust_scoped_to_channel_does_not_leak_to_other_channels() {
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::Normal);
+    enable_channel(&alice, "#y", ChannelMode::Normal);
+    enable_channel(&bob, "#x", ChannelMode::Normal);
+    enable_channel(&bob, "#y", ChannelMode::Normal);
+    alice
+        .keyring()
+        .add_autotrust("#x", "~bob@*", 100)
+        .unwrap();
+
+    // #x: autotrust hit → AutoAccept promotion → KEYRSP returned.
+    let req_x = bob.build_keyreq("#x").unwrap();
+    let rsp_x = alice.handle_keyreq("~bob@b.host", &req_x).unwrap();
+    assert!(rsp_x.is_some(), "autotrust should allow #x");
+
+    // #y: no matching rule, normal mode, peer not previously trusted →
+    // Normal mode caches the KEYREQ and returns Ok(None).
+    let req_y = bob.build_keyreq("#y").unwrap();
+    let rsp_y = alice.handle_keyreq("~bob@b.host", &req_y).unwrap();
+    assert!(
+        rsp_y.is_none(),
+        "#y should fall through to Normal-mode pending (not AutoAccept)"
+    );
+    // A pending-accept prompt should have been queued.
+    let accepts = alice.take_pending_accept_requests();
+    assert_eq!(accepts.len(), 1);
+    assert_eq!(accepts[0].channel, "#y");
+    assert_eq!(accepts[0].handle, "~bob@b.host");
+}
+
+#[test]
+fn autotrust_wildcard_matching_is_case_insensitive() {
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::Normal);
+    enable_channel(&bob, "#x", ChannelMode::Normal);
+    alice
+        .keyring()
+        .add_autotrust("global", "*bob*@Example.Org", 100)
+        .unwrap();
+
+    let req = bob.build_keyreq("#x").unwrap();
+    let rsp = alice
+        .handle_keyreq("~BoB@example.org", &req)
+        .unwrap()
+        .expect("case-insensitive glob should match");
+    let _ = rsp;
+}
+
+// ---------- G10: Normal mode pending prompt + accept completes handshake ----------
+
+#[test]
+fn normal_mode_stores_pending_keyreq_and_emits_prompt() {
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::Normal);
+    enable_channel(&bob, "#x", ChannelMode::Normal);
+
+    let req = bob.build_keyreq("#x").unwrap();
+    let rsp = alice.handle_keyreq("~bob@b.host", &req).unwrap();
+    assert!(
+        rsp.is_none(),
+        "Normal mode must not auto-respond to unknown peer"
+    );
+    // Pending prompt was queued.
+    let prompts = alice.take_pending_accept_requests();
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0].handle, "~bob@b.host");
+    assert_eq!(prompts[0].channel, "#x");
+    // Incoming session row exists, status = Pending.
+    let sess = alice
+        .keyring()
+        .get_incoming_session("~bob@b.host", "#x")
+        .unwrap()
+        .expect("pending session row should be installed");
+    assert_eq!(sess.status, TrustStatus::Pending);
+}
+
+#[test]
+fn accept_completes_pending_keyreq_by_sending_keyrsp() {
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::Normal);
+    enable_channel(&bob, "#x", ChannelMode::Normal);
+
+    // Bob sends KEYREQ; alice stashes it.
+    let req = bob.build_keyreq("#x").unwrap();
+    let none = alice.handle_keyreq("~bob@b.host", &req).unwrap();
+    assert!(none.is_none());
+
+    // Alice runs /e2e accept — manager produces the KEYRSP.
+    let rsp = alice
+        .accept_pending_inbound("~bob@b.host", "#x")
+        .unwrap()
+        .expect("accept should return Some(KeyRsp)");
+
+    // Bob consumes it and can decrypt alice's next message.
+    bob.handle_keyrsp("~alice@a.host", &rsp).unwrap();
+    let w = alice.encrypt_outgoing("#x", "hello after accept").unwrap();
+    let out = bob
+        .decrypt_incoming("~alice@a.host", "#x", &w[0])
+        .unwrap();
+    assert!(
+        matches!(out, DecryptOutcome::Plaintext(ref s) if s == "hello after accept"),
+        "expected Plaintext, got {out:?}"
+    );
+
+    // A second accept for the same (handle, channel) returns Ok(None)
+    // because the pending-inbound cache is drained on the first call.
+    let again = alice
+        .accept_pending_inbound("~bob@b.host", "#x")
+        .unwrap();
+    assert!(
+        again.is_none(),
+        "pending-inbound cache must be consumed by the first accept"
+    );
+}
+
+#[test]
+fn quiet_mode_silently_drops_unknown_peer() {
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::Quiet);
+    enable_channel(&bob, "#x", ChannelMode::Quiet);
+
+    let req = bob.build_keyreq("#x").unwrap();
+    let rsp = alice.handle_keyreq("~bob@b.host", &req).unwrap();
+    assert!(rsp.is_none(), "Quiet mode must drop unknown peer silently");
+    // No pending prompt, no pending-inbound cache.
+    assert!(alice.take_pending_accept_requests().is_empty());
 }
 
 #[test]

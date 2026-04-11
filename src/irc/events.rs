@@ -3274,6 +3274,7 @@ fn try_dispatch_rpe2e_ctcp(
         HandshakeMsg::Req(req) => {
             let result = mgr.handle_keyreq(&sender_handle, &req);
             surface_pending_trust_changes(state, conn_id, &mgr);
+            surface_pending_accept_requests(state, conn_id, &mgr);
             match result {
                 Ok(Some(rsp)) => {
                     let body = mgr.encode_keyrsp_ctcp(&rsp);
@@ -3298,6 +3299,14 @@ fn try_dispatch_rpe2e_ctcp(
             surface_pending_trust_changes(state, conn_id, &mgr);
             if let Err(e) = result {
                 tracing::warn!("handle_keyrsp error: {e}");
+            }
+            Some(RpEe2eOutcome::Handled)
+        }
+        HandshakeMsg::Rekey(rekey) => {
+            let result = mgr.handle_rekey(&sender_handle, &rekey);
+            surface_pending_trust_changes(state, conn_id, &mgr);
+            if let Err(e) = result {
+                tracing::warn!("handle_rekey error: {e}");
             }
             Some(RpEe2eOutcome::Handled)
         }
@@ -3396,6 +3405,58 @@ fn surface_pending_trust_changes(
                 text,
                 highlight: true,
                 event_key: Some(event_key.to_string()),
+                event_params: None,
+                log_msg_id: None,
+                log_ref_id: None,
+                tags: None,
+            },
+        );
+    }
+}
+
+/// Drain the manager's Normal-mode pending-accept queue and render each
+/// prompt in the buffer that corresponds to the channel carried in the
+/// KEYREQ payload. Falls back to the active-or-server buffer if that
+/// channel has no local buffer yet (e.g. PM pseudochannel before the
+/// Query buffer exists).
+fn surface_pending_accept_requests(
+    state: &mut AppState,
+    conn_id: &str,
+    mgr: &crate::e2e::E2eManager,
+) {
+    let requests = mgr.take_pending_accept_requests();
+    if requests.is_empty() {
+        return;
+    }
+    for req in requests {
+        let target_buffer = if req.channel.is_empty() {
+            active_or_server_buffer(state, conn_id)
+        } else {
+            let cand = make_buffer_id(conn_id, &req.channel);
+            if state.buffers.contains_key(&cand) {
+                cand
+            } else {
+                active_or_server_buffer(state, conn_id)
+            }
+        };
+        let text = format!(
+            "[E2E] Pending key exchange from {handle} for {channel}.\n      \
+             Run /e2e accept <nick> or /e2e decline <nick>.",
+            handle = req.handle,
+            channel = req.channel,
+        );
+        let id = state.next_message_id();
+        state.add_message(
+            &target_buffer,
+            Message {
+                id,
+                timestamp: Utc::now(),
+                message_type: MessageType::Event,
+                nick: None,
+                nick_mode: None,
+                text,
+                highlight: true,
+                event_key: Some("e2e_pending_accept".to_string()),
                 event_params: None,
                 log_msg_id: None,
                 log_ref_id: None,

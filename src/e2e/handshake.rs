@@ -1,10 +1,11 @@
-//! RPE2E CTCP handshake: KEYREQ / KEYRSP encode/parse and rate limiting.
+//! RPE2E CTCP handshake: KEYREQ / KEYRSP / REKEY encode/parse and rate limiting.
 //!
 //! Wire form (inside the CTCP `\x01 ... \x01` framing, sent via NOTICE):
 //!
 //! ```text
 //! RPEE2E KEYREQ v=1 chan=#x pub=<hex32> eph=<hex32> nonce=<hex16> sig=<hex64>
-//! RPEE2E KEYRSP v=1 chan=#x eph=<hex32> wnonce=<hex24> wrap=<b64> nonce=<hex16> sig=<hex64>
+//! RPEE2E KEYRSP v=1 chan=#x pub=<hex32> eph=<hex32> wnonce=<hex24> wrap=<b64> nonce=<hex16> sig=<hex64>
+//! RPEE2E REKEY  v=1 chan=#x pub=<hex32> eph=<hex32> wnonce=<hex24> wrap=<b64> nonce=<hex16> sig=<hex64>
 //! ```
 //!
 //! `pub` carries the initiator's long-term Ed25519 identity pubkey. `eph` on
@@ -13,6 +14,17 @@
 //! responder's ephemeral X25519 pubkey. The wrap key is derived by either
 //! side from an X25519 ECDH of their own ephemeral secret with the peer's
 //! ephemeral public (HKDF-SHA256, see `crypto::ecdh`).
+//!
+//! `REKEY` is the unsolicited-distribution variant used for lazy rotate
+//! (spec §5.3): after a `/e2e revoke` the sender pushes a freshly generated
+//! session key to every remaining trusted peer. Unlike KEYRSP — which is a
+//! response to a KEYREQ and derives its wrap key from the initiator's
+//! ephemeral X25519 — REKEY is initiator-driven: the sender makes a fresh
+//! ephemeral X25519 keypair and encrypts to the peer's **long-term Ed25519
+//! identity converted to X25519** via the standard birational map
+//! (RFC 7748 Appendix A, matching libsodium's
+//! `crypto_sign_ed25519_pk_to_curve25519`). This lets Alice push a new key
+//! to peers she has never received a KEYREQ from in the current session.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -76,6 +88,22 @@ fn sig_payload_keyreq(
     v
 }
 
+/// Unsolicited REKEY message. Shape is identical to KEYRSP on the wire
+/// except that (a) the ECDH wrap is derived from the peer's long-term
+/// Ed25519 identity (via the RFC 7748 birational map to X25519), and
+/// (b) the sender is the initiator of the distribution rather than a
+/// responder to an incoming KEYREQ.
+#[derive(Debug, Clone)]
+pub struct KeyRekey {
+    pub channel: String,
+    pub pubkey: [u8; 32],
+    pub eph_pub: [u8; 32],
+    pub wrap_nonce: [u8; NONCE_LEN],
+    pub wrap_ct: Vec<u8>,
+    pub nonce: [u8; 16],
+    pub sig: [u8; 64],
+}
+
 /// Canonical payload signed by the responder in KEYRSP. Binds the
 /// responder's identity `pubkey` so a MitM cannot substitute its own
 /// long-term key without breaking the Ed25519 signature, even though the
@@ -91,6 +119,35 @@ fn sig_payload_keyrsp(
     let mut v =
         Vec::with_capacity(16 + channel.len() + 32 + 32 + NONCE_LEN + wrap_ct.len() + 16);
     v.extend_from_slice(b"KEYRSP:");
+    v.extend_from_slice(channel.as_bytes());
+    v.push(b':');
+    v.extend_from_slice(pubkey);
+    v.push(b':');
+    v.extend_from_slice(eph_pub);
+    v.push(b':');
+    v.extend_from_slice(wrap_nonce);
+    v.push(b':');
+    v.extend_from_slice(wrap_ct);
+    v.push(b':');
+    v.extend_from_slice(nonce);
+    v
+}
+
+/// Canonical payload signed by the sender in REKEY. Binds the
+/// sender's identity `pubkey`, the channel, the fresh ephemeral X25519
+/// public, the wrap nonce+ciphertext, and an anti-replay nonce. The
+/// leading `REKEY:` domain separator prevents cross-protocol confusion
+/// with KEYREQ / KEYRSP payloads.
+fn sig_payload_keyrekey(
+    channel: &str,
+    pubkey: &[u8; 32],
+    eph_pub: &[u8; 32],
+    wrap_nonce: &[u8; NONCE_LEN],
+    wrap_ct: &[u8],
+    nonce: &[u8; 16],
+) -> Vec<u8> {
+    let mut v = Vec::with_capacity(8 + channel.len() + 32 + 32 + NONCE_LEN + wrap_ct.len() + 16);
+    v.extend_from_slice(b"REKEY:");
     v.extend_from_slice(channel.as_bytes());
     v.push(b':');
     v.extend_from_slice(pubkey);
@@ -132,10 +189,26 @@ pub fn encode_keyrsp(rsp: &KeyRsp) -> String {
     )
 }
 
+#[must_use]
+pub fn encode_keyrekey(rk: &KeyRekey) -> String {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    format!(
+        "{CTCP_TAG} REKEY v={PROTO_VERSION} chan={chan} pub={pub_} eph={eph} wnonce={wnonce} wrap={wrap} nonce={nonce} sig={sig}",
+        chan = rk.channel,
+        pub_ = hex::encode(rk.pubkey),
+        eph = hex::encode(rk.eph_pub),
+        wnonce = hex::encode(rk.wrap_nonce),
+        wrap = B64.encode(&rk.wrap_ct),
+        nonce = hex::encode(rk.nonce),
+        sig = hex::encode(rk.sig),
+    )
+}
+
 #[derive(Debug)]
 pub enum HandshakeMsg {
     Req(KeyReq),
     Rsp(KeyRsp),
+    Rekey(KeyRekey),
 }
 
 /// Parse a single RPE2E handshake body (what lives inside the `\x01...\x01`
@@ -162,88 +235,70 @@ pub fn parse(body: &str) -> Result<Option<HandshakeMsg>> {
     }
 
     match kind {
-        "KEYREQ" => {
-            let channel = kv
-                .get("chan")
-                .ok_or_else(|| E2eError::Handshake("chan".into()))?
-                .to_string();
-            let pubkey = hex32(
-                kv.get("pub")
-                    .ok_or_else(|| E2eError::Handshake("pub".into()))?,
-            )?;
-            let eph_x25519 = hex32(
-                kv.get("eph")
-                    .ok_or_else(|| E2eError::Handshake("eph".into()))?,
-            )?;
-            let nonce = hex16(
-                kv.get("nonce")
-                    .ok_or_else(|| E2eError::Handshake("nonce".into()))?,
-            )?;
-            let sig = hex64(
-                kv.get("sig")
-                    .ok_or_else(|| E2eError::Handshake("sig".into()))?,
-            )?;
-            Ok(Some(HandshakeMsg::Req(KeyReq {
-                channel,
-                pubkey,
-                eph_x25519,
-                nonce,
-                sig,
-            })))
-        }
-        "KEYRSP" => {
-            use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-            let channel = kv
-                .get("chan")
-                .ok_or_else(|| E2eError::Handshake("chan".into()))?
-                .to_string();
-            let pubkey = hex32(
-                kv.get("pub")
-                    .ok_or_else(|| E2eError::Handshake("pub".into()))?,
-            )?;
-            let ephemeral_pub = hex32(
-                kv.get("eph")
-                    .ok_or_else(|| E2eError::Handshake("eph".into()))?,
-            )?;
-            let wrap_nonce: [u8; NONCE_LEN] = {
-                let raw = hex::decode(
-                    kv.get("wnonce")
-                        .ok_or_else(|| E2eError::Handshake("wnonce".into()))?,
-                )?;
-                if raw.len() != NONCE_LEN {
-                    return Err(E2eError::Handshake(format!(
-                        "wnonce len {} != {NONCE_LEN}",
-                        raw.len()
-                    )));
-                }
-                let mut arr = [0u8; NONCE_LEN];
-                arr.copy_from_slice(&raw);
-                arr
-            };
-            let wrap_ct = B64.decode(
-                kv.get("wrap")
-                    .ok_or_else(|| E2eError::Handshake("wrap".into()))?,
-            )?;
-            let nonce = hex16(
-                kv.get("nonce")
-                    .ok_or_else(|| E2eError::Handshake("nonce".into()))?,
-            )?;
-            let sig = hex64(
-                kv.get("sig")
-                    .ok_or_else(|| E2eError::Handshake("sig".into()))?,
-            )?;
-            Ok(Some(HandshakeMsg::Rsp(KeyRsp {
-                channel,
-                pubkey,
-                ephemeral_pub,
-                wrap_nonce,
-                wrap_ct,
-                nonce,
-                sig,
-            })))
-        }
+        "KEYREQ" => parse_keyreq(&kv).map(|r| Some(HandshakeMsg::Req(r))),
+        "KEYRSP" => parse_keyrsp(&kv).map(|r| Some(HandshakeMsg::Rsp(r))),
+        "REKEY" => parse_keyrekey(&kv).map(|r| Some(HandshakeMsg::Rekey(r))),
         _ => Err(E2eError::Handshake(format!("unknown type {kind}"))),
     }
+}
+
+fn kv_get<'a>(kv: &'a HashMap<&'a str, &'a str>, key: &'static str) -> Result<&'a str> {
+    kv.get(key)
+        .copied()
+        .ok_or_else(|| E2eError::Handshake(key.into()))
+}
+
+fn parse_wrap_nonce(kv: &HashMap<&str, &str>) -> Result<[u8; NONCE_LEN]> {
+    let raw = hex::decode(kv_get(kv, "wnonce")?)?;
+    if raw.len() != NONCE_LEN {
+        return Err(E2eError::Handshake(format!(
+            "wnonce len {} != {NONCE_LEN}",
+            raw.len()
+        )));
+    }
+    let mut arr = [0u8; NONCE_LEN];
+    arr.copy_from_slice(&raw);
+    Ok(arr)
+}
+
+fn parse_wrap_ct(kv: &HashMap<&str, &str>) -> Result<Vec<u8>> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    B64.decode(kv_get(kv, "wrap")?)
+        .map_err(|e| E2eError::Handshake(format!("bad wrap b64: {e}")))
+}
+
+fn parse_keyreq(kv: &HashMap<&str, &str>) -> Result<KeyReq> {
+    Ok(KeyReq {
+        channel: kv_get(kv, "chan")?.to_string(),
+        pubkey: hex32(kv_get(kv, "pub")?)?,
+        eph_x25519: hex32(kv_get(kv, "eph")?)?,
+        nonce: hex16(kv_get(kv, "nonce")?)?,
+        sig: hex64(kv_get(kv, "sig")?)?,
+    })
+}
+
+fn parse_keyrsp(kv: &HashMap<&str, &str>) -> Result<KeyRsp> {
+    Ok(KeyRsp {
+        channel: kv_get(kv, "chan")?.to_string(),
+        pubkey: hex32(kv_get(kv, "pub")?)?,
+        ephemeral_pub: hex32(kv_get(kv, "eph")?)?,
+        wrap_nonce: parse_wrap_nonce(kv)?,
+        wrap_ct: parse_wrap_ct(kv)?,
+        nonce: hex16(kv_get(kv, "nonce")?)?,
+        sig: hex64(kv_get(kv, "sig")?)?,
+    })
+}
+
+fn parse_keyrekey(kv: &HashMap<&str, &str>) -> Result<KeyRekey> {
+    Ok(KeyRekey {
+        channel: kv_get(kv, "chan")?.to_string(),
+        pubkey: hex32(kv_get(kv, "pub")?)?,
+        eph_pub: hex32(kv_get(kv, "eph")?)?,
+        wrap_nonce: parse_wrap_nonce(kv)?,
+        wrap_ct: parse_wrap_ct(kv)?,
+        nonce: hex16(kv_get(kv, "nonce")?)?,
+        sig: hex64(kv_get(kv, "sig")?)?,
+    })
 }
 
 fn parse_kv<'a>(fields: &'a [&'a str]) -> HashMap<&'a str, &'a str> {
@@ -352,6 +407,19 @@ pub fn signed_keyrsp_payload(
     sig_payload_keyrsp(channel, pubkey, eph_pub, wrap_nonce, wrap_ct, nonce)
 }
 
+/// Public accessor: canonical signed payload for REKEY.
+#[must_use]
+pub fn signed_keyrekey_payload(
+    channel: &str,
+    pubkey: &[u8; 32],
+    eph_pub: &[u8; 32],
+    wrap_nonce: &[u8; NONCE_LEN],
+    wrap_ct: &[u8],
+    nonce: &[u8; 16],
+) -> Vec<u8> {
+    sig_payload_keyrekey(channel, pubkey, eph_pub, wrap_nonce, wrap_ct, nonce)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,6 +446,18 @@ mod tests {
         }
     }
 
+    fn sample_rekey() -> KeyRekey {
+        KeyRekey {
+            channel: "#x".into(),
+            pubkey: [13; 32],
+            eph_pub: [14; 32],
+            wrap_nonce: [15; NONCE_LEN],
+            wrap_ct: vec![16, 17, 18, 19, 20],
+            nonce: [21; 16],
+            sig: [22; 64],
+        }
+    }
+
     #[test]
     fn keyreq_roundtrip() {
         let req = sample_req();
@@ -391,7 +471,7 @@ mod tests {
                 assert_eq!(r.nonce, req.nonce);
                 assert_eq!(r.sig, req.sig);
             }
-            HandshakeMsg::Rsp(_) => panic!("expected Req"),
+            HandshakeMsg::Rsp(_) | HandshakeMsg::Rekey(_) => panic!("expected Req"),
         }
     }
 
@@ -410,8 +490,36 @@ mod tests {
                 assert_eq!(r.nonce, rsp.nonce);
                 assert_eq!(r.sig, rsp.sig);
             }
-            HandshakeMsg::Req(_) => panic!("expected Rsp"),
+            HandshakeMsg::Req(_) | HandshakeMsg::Rekey(_) => panic!("expected Rsp"),
         }
+    }
+
+    #[test]
+    fn keyrekey_roundtrip() {
+        let rk = sample_rekey();
+        let enc = encode_keyrekey(&rk);
+        let parsed = parse(&enc).unwrap().unwrap();
+        match parsed {
+            HandshakeMsg::Rekey(r) => {
+                assert_eq!(r.channel, rk.channel);
+                assert_eq!(r.pubkey, rk.pubkey);
+                assert_eq!(r.eph_pub, rk.eph_pub);
+                assert_eq!(r.wrap_nonce, rk.wrap_nonce);
+                assert_eq!(r.wrap_ct, rk.wrap_ct);
+                assert_eq!(r.nonce, rk.nonce);
+                assert_eq!(r.sig, rk.sig);
+            }
+            HandshakeMsg::Req(_) | HandshakeMsg::Rsp(_) => panic!("expected Rekey"),
+        }
+    }
+
+    #[test]
+    fn keyrekey_sig_payload_binds_eph_and_ct() {
+        let p1 = signed_keyrekey_payload("#x", &[1; 32], &[2; 32], &[3; NONCE_LEN], &[4, 5], &[6; 16]);
+        let p2 = signed_keyrekey_payload("#x", &[1; 32], &[9; 32], &[3; NONCE_LEN], &[4, 5], &[6; 16]);
+        let p3 = signed_keyrekey_payload("#x", &[1; 32], &[2; 32], &[3; NONCE_LEN], &[4, 6], &[6; 16]);
+        assert_ne!(p1, p2);
+        assert_ne!(p1, p3);
     }
 
     #[test]

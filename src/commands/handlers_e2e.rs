@@ -316,11 +316,47 @@ fn e2e_accept(app: &mut App, nick: &str) {
         err(app, "/e2e accept: no active channel");
         return;
     };
-    let Some(mgr) = require_mgr(app) else { return };
     // We match by nick — the keyring key is ident@host, but at command time
     // the user types the nick. Look up the sender's full handle from buffer
     // users if present, otherwise accept any handle starting with the nick.
     let handle = resolve_handle_by_nick(app, &chan, nick).unwrap_or_else(|| nick.to_string());
+    // Capture the active connection id before we grab the mutable-ish manager
+    // borrow so we can enqueue the KEYRSP on the correct connection.
+    let conn_id_opt = app.state.active_buffer().map(|b| b.connection_id.clone());
+    let Some(mgr) = require_mgr(app) else { return };
+
+    // First try the pending-inbound path — if there is a cached Normal-mode
+    // KEYREQ for this (handle, channel), build and dispatch the KEYRSP now.
+    match mgr.accept_pending_inbound(&handle, &chan) {
+        Ok(Some(rsp)) => {
+            let ctcp = mgr.encode_keyrsp_ctcp(&rsp);
+            if let Some(conn_id) = conn_id_opt {
+                app.state
+                    .pending_e2e_sends
+                    .push(crate::state::PendingE2eSend {
+                        connection_id: conn_id,
+                        target: nick.to_string(),
+                        notice_text: ctcp,
+                    });
+            } else {
+                err(app, "/e2e accept: no active connection to send KEYRSP");
+                return;
+            }
+            ok(
+                app,
+                &format!("accepted {nick} ({handle}) on {chan} — KEYRSP sent"),
+            );
+            return;
+        }
+        Ok(None) => {
+            // Fall through to the existing status-flip path.
+        }
+        Err(e) => {
+            err(app, &format!("/e2e accept: {e}"));
+            return;
+        }
+    }
+
     if let Err(e) = mgr
         .keyring()
         .update_incoming_status(&handle, &chan, TrustStatus::Trusted)
@@ -360,6 +396,13 @@ fn e2e_revoke(app: &mut App, nick: &str) {
         .update_incoming_status(&handle, &chan, TrustStatus::Revoked)
     {
         err(app, &format!("/e2e revoke: {e}"));
+        return;
+    }
+    // Drop the peer from the outgoing-recipient list so the subsequent
+    // lazy rotate (triggered by mark_outgoing_pending_rotation) does NOT
+    // redistribute the fresh key to them.
+    if let Err(e) = mgr.keyring().remove_outgoing_recipient(&chan, &handle) {
+        err(app, &format!("/e2e revoke (drop recipient): {e}"));
         return;
     }
     if let Err(e) = mgr.keyring().mark_outgoing_pending_rotation(&chan) {

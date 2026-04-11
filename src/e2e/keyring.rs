@@ -606,6 +606,30 @@ impl Keyring {
         Ok(rows)
     }
 
+    /// Return `true` if any autotrust rule matches `handle` for the given
+    /// scope — i.e. any rule with `scope = "global"` OR `scope = channel`
+    /// whose `handle_pattern` glob matches `handle` case-insensitively.
+    ///
+    /// The glob syntax is minimal by design: `*` matches any sequence
+    /// (possibly empty), `?` matches exactly one character, everything
+    /// else is a literal. No bracket expressions. This mirrors spec §7.
+    pub fn autotrust_matches(&self, handle: &str, channel: &str) -> Result<bool> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT handle_pattern FROM e2e_autotrust
+             WHERE scope = 'global' OR scope = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![channel], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for pat in rows {
+            if glob_matches_ci(&pat, handle) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub fn remove_autotrust(&self, pattern: &str) -> Result<()> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
         conn.execute(
@@ -613,6 +637,78 @@ impl Keyring {
             params![pattern],
         )?;
         Ok(())
+    }
+
+    // ---------- outgoing recipients (for lazy rotate distribution) ----------
+
+    /// Record that `handle` (with Ed25519 `fingerprint`) is a recipient of
+    /// our outgoing session key for `channel`. Idempotent — `PRIMARY KEY
+    /// (channel, handle)` de-duplicates, and we keep the earliest
+    /// `first_sent_at` so the row shows the age of the relationship.
+    pub fn record_outgoing_recipient(
+        &self,
+        channel: &str,
+        handle: &str,
+        fingerprint: &Fingerprint,
+        first_sent_at: i64,
+    ) -> Result<()> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        conn.execute(
+            "INSERT INTO e2e_outgoing_recipients
+                (channel, handle, fingerprint, first_sent_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(channel, handle) DO UPDATE SET
+                fingerprint = excluded.fingerprint",
+            params![channel, handle, fingerprint.as_slice(), first_sent_at],
+        )?;
+        Ok(())
+    }
+
+    /// Remove `handle` from the recipient list for `channel`. Called on
+    /// `/e2e revoke` so the subsequent lazy rotate does NOT redistribute
+    /// the fresh key to the revoked peer.
+    pub fn remove_outgoing_recipient(&self, channel: &str, handle: &str) -> Result<()> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        conn.execute(
+            "DELETE FROM e2e_outgoing_recipients
+             WHERE channel = ?1 AND handle = ?2",
+            params![channel, handle],
+        )?;
+        Ok(())
+    }
+
+    /// Return every recipient of our outgoing session key for `channel`.
+    /// The returned tuples are `(handle, fingerprint)`.
+    pub fn list_outgoing_recipients(
+        &self,
+        channel: &str,
+    ) -> Result<Vec<(String, Fingerprint)>> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT handle, fingerprint
+             FROM e2e_outgoing_recipients
+             WHERE channel = ?1
+             ORDER BY first_sent_at ASC",
+        )?;
+        let rows = stmt.query_map(params![channel], |r| {
+            let handle: String = r.get(0)?;
+            let fp: Vec<u8> = r.get(1)?;
+            Ok((handle, fp))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (handle, fp) = row?;
+            if fp.len() != 16 {
+                return Err(crate::e2e::error::E2eError::Keyring(format!(
+                    "e2e_outgoing_recipients row fingerprint has unexpected length {}",
+                    fp.len()
+                )));
+            }
+            let mut fp_arr = [0u8; 16];
+            fp_arr.copy_from_slice(&fp);
+            out.push((handle, fp_arr));
+        }
+        Ok(out)
     }
 
     // ---------- full-table dump helpers (used by portable export) ----------
@@ -743,6 +839,25 @@ impl Keyring {
         Ok(out)
     }
 
+    /// Return every row of `e2e_channel_config`. Used by `/e2e autotrust`
+    /// enforcement test helpers and by the portable export.
+    #[allow(dead_code, reason = "hook for a future /e2e config list command")]
+    pub(crate) fn get_autotrust_rules_for_scope(
+        &self,
+        channel: &str,
+    ) -> Result<Vec<String>> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT handle_pattern FROM e2e_autotrust
+             WHERE scope = 'global' OR scope = ?1
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![channel], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Return every row of `e2e_channel_config`.
     pub fn list_all_channel_configs(&self) -> Result<Vec<ChannelConfig>> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
@@ -767,6 +882,51 @@ impl Keyring {
         }
         Ok(out)
     }
+}
+
+/// Minimal case-insensitive glob matcher used by `autotrust_matches`.
+///
+/// Supports:
+/// - `*` — any sequence (possibly empty) of characters
+/// - `?` — exactly one character
+/// - everything else — literal, case-insensitive
+///
+/// Lowercasing is ASCII (IRC `ident@host` is always ASCII). No bracket
+/// expressions, no escaping — keep the semantics sharp and the test
+/// surface small. Iterative backtracking at `*` positions handles the
+/// general case.
+fn glob_matches_ci(pattern: &str, input: &str) -> bool {
+    let pat: Vec<char> = pattern.chars().flat_map(char::to_lowercase).collect();
+    let inp: Vec<char> = input.chars().flat_map(char::to_lowercase).collect();
+
+    // Positions into `pat` and `inp`. When we consume a `*`, remember the
+    // positions so we can backtrack and advance `inp` one character.
+    let mut pi = 0usize;
+    let mut ii = 0usize;
+    let mut star_pat: Option<usize> = None;
+    let mut star_inp: usize = 0;
+
+    while ii < inp.len() {
+        if pi < pat.len() && (pat[pi] == '?' || pat[pi] == inp[ii]) {
+            pi += 1;
+            ii += 1;
+        } else if pi < pat.len() && pat[pi] == '*' {
+            star_pat = Some(pi);
+            star_inp = ii;
+            pi += 1;
+        } else if let Some(sp) = star_pat {
+            pi = sp + 1;
+            star_inp += 1;
+            ii = star_inp;
+        } else {
+            return false;
+        }
+    }
+    // Trailing `*`s still allowed.
+    while pi < pat.len() && pat[pi] == '*' {
+        pi += 1;
+    }
+    pi == pat.len()
 }
 
 #[cfg(test)]
@@ -818,6 +978,13 @@ mod tests {
             handle_pattern  TEXT NOT NULL,
             created_at      INTEGER NOT NULL,
             UNIQUE(scope, handle_pattern)
+        );
+        CREATE TABLE e2e_outgoing_recipients (
+            channel        TEXT NOT NULL,
+            handle         TEXT NOT NULL,
+            fingerprint    BLOB NOT NULL,
+            first_sent_at  INTEGER NOT NULL,
+            PRIMARY KEY (channel, handle)
         );
     ";
 
@@ -944,6 +1111,74 @@ mod tests {
         kr.remove_autotrust("~bob@*").unwrap();
         let list = kr.list_autotrust().unwrap();
         assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn glob_matches_ci_literal_and_wildcards() {
+        // Literal, case-insensitive.
+        assert!(glob_matches_ci("~bob@b.host", "~bob@b.host"));
+        assert!(glob_matches_ci("~BOB@B.HOST", "~bob@b.host"));
+        assert!(!glob_matches_ci("~alice@host", "~bob@host"));
+        // `*` matches any sequence including empty.
+        assert!(glob_matches_ci("*", "anything"));
+        assert!(glob_matches_ci("*bob*", "~bob@host"));
+        assert!(glob_matches_ci("~*", "~bob@b.host"));
+        assert!(glob_matches_ci("*@trusted.org", "~anyone@trusted.org"));
+        assert!(!glob_matches_ci("*@trusted.org", "~bob@evil.host"));
+        // `?` matches exactly one char.
+        assert!(glob_matches_ci("~b?b@host", "~bob@host"));
+        assert!(!glob_matches_ci("~b?b@host", "~bb@host"));
+        // Multiple stars — backtracking.
+        assert!(glob_matches_ci("*@*.trusted.org", "~alice@shell.trusted.org"));
+        assert!(glob_matches_ci("*@*", "a@b"));
+        // Trailing stars.
+        assert!(glob_matches_ci("~bob*", "~bob"));
+        // Empty pattern only matches empty input.
+        assert!(glob_matches_ci("", ""));
+        assert!(!glob_matches_ci("", "bob"));
+    }
+
+    #[test]
+    fn autotrust_matches_global_and_scoped() {
+        let kr = open_mem();
+        kr.add_autotrust("global", "*@*.trusted.org", 100).unwrap();
+        kr.add_autotrust("#x", "~bob@*", 100).unwrap();
+
+        // Global rule hits regardless of channel.
+        assert!(kr
+            .autotrust_matches("~alice@shell.trusted.org", "#anything")
+            .unwrap());
+        // Scoped rule hits only on matching channel.
+        assert!(kr.autotrust_matches("~bob@b.host", "#x").unwrap());
+        assert!(!kr.autotrust_matches("~bob@b.host", "#y").unwrap());
+        // No match at all.
+        assert!(!kr
+            .autotrust_matches("~stranger@nowhere", "#x")
+            .unwrap());
+    }
+
+    #[test]
+    fn outgoing_recipients_record_list_remove() {
+        let kr = open_mem();
+        let fp_a = [1u8; 16];
+        let fp_b = [2u8; 16];
+        kr.record_outgoing_recipient("#x", "~alice@a.host", &fp_a, 100)
+            .unwrap();
+        kr.record_outgoing_recipient("#x", "~bob@b.host", &fp_b, 110)
+            .unwrap();
+        // Different channel → not seen when listing #x.
+        kr.record_outgoing_recipient("#y", "~carol@c.host", &[3u8; 16], 120)
+            .unwrap();
+
+        let list_x = kr.list_outgoing_recipients("#x").unwrap();
+        assert_eq!(list_x.len(), 2);
+        assert!(list_x.iter().any(|(h, _)| h == "~alice@a.host"));
+        assert!(list_x.iter().any(|(h, _)| h == "~bob@b.host"));
+
+        kr.remove_outgoing_recipient("#x", "~bob@b.host").unwrap();
+        let list_x2 = kr.list_outgoing_recipients("#x").unwrap();
+        assert_eq!(list_x2.len(), 1);
+        assert_eq!(list_x2[0].0, "~alice@a.host");
     }
 
     // ---------- list_all_* dump helpers (used by portable export) ----------

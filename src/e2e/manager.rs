@@ -29,17 +29,18 @@ use x25519_dalek::{PublicKey as XPub, StaticSecret};
 use crate::e2e::chunker::split_plaintext;
 use crate::e2e::crypto::{
     aead::{self, SessionKey},
+    ecdh,
     fingerprint::{fingerprint, Fingerprint},
     identity::Identity,
     sig,
 };
 use crate::e2e::error::{E2eError, Result};
 use crate::e2e::handshake::{
-    encode_keyreq, encode_keyrsp, signed_keyreq_payload, signed_keyrsp_payload, KeyReq, KeyRsp,
-    RateLimiter,
+    encode_keyreq, encode_keyrekey, encode_keyrsp, signed_keyreq_payload,
+    signed_keyrekey_payload, signed_keyrsp_payload, KeyRekey, KeyReq, KeyRsp, RateLimiter,
 };
 use crate::e2e::keyring::{
-    ChannelConfig, ChannelMode, IncomingSession, Keyring, PeerRecord, TrustStatus,
+    ChannelMode, IncomingSession, Keyring, PeerRecord, TrustStatus,
 };
 use crate::e2e::wire::{build_aad, fresh_msgid, WireChunk};
 use crate::e2e::TS_TOLERANCE_SECS;
@@ -54,6 +55,35 @@ struct PendingHandshake {
     #[allow(dead_code, reason = "future diagnostics: pending channel listing")]
     channel: String,
     eph_x25519_secret: [u8; 32],
+}
+
+/// Inbound KEYREQ cached in Normal mode for a yet-unknown peer, so that a
+/// subsequent `/e2e accept <nick>` can complete the handshake by producing
+/// the KEYRSP that would have been sent immediately under `AutoAccept`.
+///
+/// Keyed by `(sender_handle, channel)` in `pending_inbound`.
+#[derive(Debug, Clone)]
+struct PendingInboundKeyReq {
+    req: KeyReq,
+}
+
+/// An outbound REKEY CTCP ready to ship, paired with the target IRC handle
+/// it must go to. Drained by `take_pending_rekey_sends` right after
+/// `encrypt_outgoing` triggers a lazy rotation, so the caller can enqueue
+/// the per-peer NOTICEs on the same tick.
+#[derive(Debug, Clone)]
+pub struct PendingRekeySend {
+    pub target_handle: String,
+    pub notice_text: String,
+}
+
+/// Info surfaced when a Normal-mode KEYREQ arrives from an as-yet-untrusted
+/// peer. Drained by `take_pending_accept_requests` and rendered as a themed
+/// prompt instructing the user to run `/e2e accept` or `/e2e decline`.
+#[derive(Debug, Clone)]
+pub struct PendingAcceptRequest {
+    pub handle: String,
+    pub channel: String,
 }
 
 /// Top-level E2E controller. One instance lives in `AppState` for the
@@ -71,6 +101,18 @@ pub struct E2eManager {
     /// dispatcher via `take_pending_trust_changes` and surfaced to the
     /// user as themed event messages.
     pending_trust_change: Mutex<Vec<PendingTrustNotice>>,
+    /// Outbound REKEY CTCPs produced by a lazy rotation inside
+    /// `encrypt_outgoing`. The input layer drains these right after each
+    /// encrypt call and appends them to `AppState::pending_e2e_sends`,
+    /// matching the KEYRSP dispatch pattern.
+    pending_rekey_sends: Mutex<Vec<PendingRekeySend>>,
+    /// Inbound KEYREQs cached in Normal mode when the peer is not yet
+    /// trusted. Keyed by `(sender_handle, channel)`. Consumed by
+    /// `accept_pending_inbound` when the user runs `/e2e accept`.
+    pending_inbound: Mutex<HashMap<(String, String), PendingInboundKeyReq>>,
+    /// Per-peer prompts surfaced when a Normal-mode KEYREQ is cached for
+    /// later acceptance. Drained by `take_pending_accept_requests`.
+    pending_accept_requests: Mutex<Vec<PendingAcceptRequest>>,
 }
 
 /// The outcome of evaluating a freshly-arrived peer identity against the
@@ -154,6 +196,9 @@ impl E2eManager {
             rate_limiter: Mutex::new(RateLimiter::new()),
             pending: Mutex::new(HashMap::new()),
             pending_trust_change: Mutex::new(Vec::new()),
+            pending_rekey_sends: Mutex::new(Vec::new()),
+            pending_inbound: Mutex::new(HashMap::new()),
+            pending_accept_requests: Mutex::new(Vec::new()),
         })
     }
 
@@ -271,6 +316,12 @@ impl E2eManager {
         Ok(out)
     }
 
+    /// Return our outgoing session key for `channel`, creating one on
+    /// first use. If the current session is flagged `pending_rotation`
+    /// (spec §5.3 — set by `/e2e revoke` or `/e2e rotate`) a fresh key
+    /// is generated AND a `REKEY` CTCP is queued for every remaining
+    /// trusted peer on the channel. The queue is drained by the caller
+    /// via `take_pending_rekey_sends`.
     fn get_or_generate_outgoing_key(&self, channel: &str) -> Result<SessionKey> {
         if let Some(sess) = self.keyring.get_outgoing_session(channel)?
             && !sess.pending_rotation
@@ -278,12 +329,216 @@ impl E2eManager {
             return Ok(sess.sk);
         }
         // Either no session yet, or the current one is flagged
-        // `pending_rotation` (lazy rotate). Create a fresh session key;
-        // INSERT OR REPLACE in set_outgoing_session also clears the flag.
+        // `pending_rotation` (lazy rotate). Remember whether we need to
+        // distribute before INSERT OR REPLACE clears the flag.
+        let had_pending_rotation = self
+            .keyring
+            .get_outgoing_session(channel)?
+            .is_some_and(|s| s.pending_rotation);
         let fresh = aead::generate_session_key()?;
         self.keyring
             .set_outgoing_session(channel, &fresh, now_unix())?;
+
+        if had_pending_rotation {
+            // Distribute the fresh key to every remaining recipient of
+            // our outgoing key on this channel. The recipients table is
+            // populated on each KEYRSP we serve and pruned on /e2e
+            // revoke, so the list here is exactly the remaining peers
+            // that need the new key (spec §5.3).
+            let recipients = self.keyring.list_outgoing_recipients(channel)?;
+            if !recipients.is_empty() {
+                let mut queue = self
+                    .pending_rekey_sends
+                    .lock()
+                    .expect("e2e pending rekey mutex poisoned");
+                for (handle, fp) in recipients {
+                    // Look up the peer row by fingerprint so we sign
+                    // against the stored long-term Ed25519 pubkey.
+                    let Some(peer) = self.keyring.get_peer_by_fingerprint(&fp)? else {
+                        tracing::warn!(
+                            "rekey: no peer row for fp={} (handle={}); skipping",
+                            hex::encode(fp),
+                            handle,
+                        );
+                        continue;
+                    };
+                    match self.build_rekey_for_peer(channel, &peer, &fresh) {
+                        Ok(rk) => {
+                            let body = format!("\x01{}\x01", encode_keyrekey(&rk));
+                            queue.push(PendingRekeySend {
+                                target_handle: handle,
+                                notice_text: body,
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "rekey: build_rekey_for_peer failed for {handle}: {e}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(fresh)
+    }
+
+    /// Produce a `KeyRekey` CTCP delivering `new_sk` for `channel` to the
+    /// given peer. A fresh X25519 ephemeral is generated; the peer's
+    /// Ed25519 identity is converted to its Montgomery counterpart via
+    /// the RFC 7748 birational map so the ECDH target is a stable key.
+    fn build_rekey_for_peer(
+        &self,
+        channel: &str,
+        peer: &PeerRecord,
+        new_sk: &SessionKey,
+    ) -> Result<KeyRekey> {
+        // Fresh ephemeral X25519 from us (initiator of the distribution).
+        let mut eph_sk_bytes = [0u8; 32];
+        rand::fill(&mut eph_sk_bytes);
+        let eph_sk = StaticSecret::from(eph_sk_bytes);
+        let eph_pub = XPub::from(&eph_sk).to_bytes();
+
+        // Derive the peer's X25519 public from their Ed25519 identity.
+        let peer_x25519_pub = ecdh::ed25519_pub_to_x25519(&peer.pubkey)?;
+        let shared = eph_sk.diffie_hellman(&XPub::from(peer_x25519_pub));
+
+        // HKDF → 32-byte wrap key (same labels as the handshake path so
+        // libsodium-based peers can reuse their existing wrap helpers,
+        // with the `REKEY` info string acting as the domain separator).
+        let info = rekey_info(channel);
+        let hk = Hkdf::<Sha256>::new(Some(b"RPE2E01-WRAP"), shared.as_bytes());
+        let mut wrap_key = [0u8; 32];
+        hk.expand(info.as_bytes(), &mut wrap_key)
+            .expect("hkdf expand 32 bytes never fails");
+
+        let (wrap_nonce, wrap_ct) = aead::encrypt(&wrap_key, info.as_bytes(), new_sk)?;
+
+        let mut nonce = [0u8; 16];
+        rand::fill(&mut nonce);
+        let pubkey = self.identity.public_bytes();
+        let sig_payload = signed_keyrekey_payload(
+            channel,
+            &pubkey,
+            &eph_pub,
+            &wrap_nonce,
+            &wrap_ct,
+            &nonce,
+        );
+        let sig_bytes = sig::sign(self.identity.signing_key(), &sig_payload);
+
+        Ok(KeyRekey {
+            channel: channel.to_string(),
+            pubkey,
+            eph_pub,
+            wrap_nonce,
+            wrap_ct,
+            nonce,
+            sig: sig_bytes,
+        })
+    }
+
+    /// Drain the queue of REKEY CTCPs that accumulated during the most
+    /// recent `encrypt_outgoing` rotation. The caller (`app::input`) drains
+    /// right after encrypt and enqueues each entry into `pending_e2e_sends`.
+    pub fn take_pending_rekey_sends(&self) -> Vec<PendingRekeySend> {
+        let mut guard = self
+            .pending_rekey_sends
+            .lock()
+            .expect("e2e pending rekey mutex poisoned");
+        std::mem::take(&mut *guard)
+    }
+
+    /// Drain the queue of Normal-mode pending-accept prompts accumulated
+    /// during `handle_keyreq` for surfacing to the user.
+    pub fn take_pending_accept_requests(&self) -> Vec<PendingAcceptRequest> {
+        let mut guard = self
+            .pending_accept_requests
+            .lock()
+            .expect("e2e pending accept requests mutex poisoned");
+        std::mem::take(&mut *guard)
+    }
+
+    /// Consume an unsolicited REKEY CTCP from `sender_handle`. Verifies
+    /// signature, runs TOFU classification, unwraps the session key using
+    /// our Ed25519-derived X25519 secret, and installs it as the new
+    /// trusted incoming session for `(sender_handle, channel)`.
+    pub fn handle_rekey(&self, sender_handle: &str, rekey: &KeyRekey) -> Result<()> {
+        // Verify signature first — no state touched until we're sure the
+        // message is authentic against the pubkey it carries.
+        let sig_payload = signed_keyrekey_payload(
+            &rekey.channel,
+            &rekey.pubkey,
+            &rekey.eph_pub,
+            &rekey.wrap_nonce,
+            &rekey.wrap_ct,
+            &rekey.nonce,
+        );
+        sig::verify(&rekey.pubkey, &sig_payload, &rekey.sig)?;
+
+        // TOFU classification. A REKEY from a peer we've never seen is
+        // rejected outright: legitimate lazy-rotate distribution always
+        // happens to peers with whom we've already exchanged a handshake,
+        // so an "unsolicited" REKEY from an unknown peer is either a
+        // replay or an attacker.
+        let new_fp = fingerprint(&rekey.pubkey);
+        let change = self.classify_peer_change(&new_fp, sender_handle)?;
+        match &change {
+            TrustChange::New => {
+                return Err(E2eError::Handshake(
+                    "REKEY from unknown peer; ignoring".into(),
+                ));
+            }
+            TrustChange::Known => {}
+            TrustChange::HandleChanged { .. }
+            | TrustChange::FingerprintChanged { .. }
+            | TrustChange::Revoked { .. } => {
+                let err = handle_mismatch_for(&change, sender_handle);
+                self.record_trust_change(PendingTrustNotice {
+                    handle: sender_handle.to_string(),
+                    channel: rekey.channel.clone(),
+                    change,
+                });
+                return Err(err);
+            }
+        }
+
+        // Derive our X25519 secret from our Ed25519 seed and complete ECDH.
+        let my_seed = self.identity.secret_bytes();
+        let my_x25519_scalar = ecdh::ed25519_seed_to_x25519(&my_seed);
+        let my_sk = StaticSecret::from(my_x25519_scalar);
+        let shared = my_sk.diffie_hellman(&XPub::from(rekey.eph_pub));
+        let info = rekey_info(&rekey.channel);
+        let hk = Hkdf::<Sha256>::new(Some(b"RPE2E01-WRAP"), shared.as_bytes());
+        let mut wrap_key = [0u8; 32];
+        hk.expand(info.as_bytes(), &mut wrap_key)
+            .expect("hkdf expand 32 bytes never fails");
+
+        let new_sk_bytes = aead::decrypt(
+            &wrap_key,
+            &rekey.wrap_nonce,
+            info.as_bytes(),
+            &rekey.wrap_ct,
+        )?;
+        if new_sk_bytes.len() != 32 {
+            return Err(E2eError::Crypto(format!(
+                "rekey sk has unexpected length {}",
+                new_sk_bytes.len()
+            )));
+        }
+        let mut new_sk = [0u8; 32];
+        new_sk.copy_from_slice(&new_sk_bytes);
+
+        let sess = IncomingSession {
+            handle: sender_handle.to_string(),
+            channel: rekey.channel.clone(),
+            fingerprint: new_fp,
+            sk: new_sk,
+            status: TrustStatus::Trusted,
+            created_at: now_unix(),
+        };
+        self.keyring.install_incoming_session_strict(&sess)?;
+        Ok(())
     }
 
     // ---------- decrypt incoming ----------
@@ -400,52 +655,49 @@ impl E2eManager {
 
     /// Handle an incoming KEYREQ. Returns `Some(KeyRsp)` ready to send back
     /// via NOTICE if policy allows, `None` if the request is silently
-    /// ignored (channel disabled / peer not trusted / quiet mode). Returns
-    /// `Err` only on protocol-level problems (bad signature, malformed
-    /// field).
-    pub fn handle_keyreq(&self, sender_handle: &str, req: &KeyReq) -> Result<Option<KeyRsp>> {
-        // Verify signature over the full KEYREQ payload, binding `eph_x25519`.
-        let sig_payload =
-            signed_keyreq_payload(&req.channel, &req.pubkey, &req.eph_x25519, &req.nonce);
-        sig::verify(&req.pubkey, &sig_payload, &req.sig)?;
-
-        // Check channel-level config.
-        let ch_cfg = self
-            .keyring
-            .get_channel_config(&req.channel)?
-            .unwrap_or_else(|| ChannelConfig {
-                channel: req.channel.clone(),
-                enabled: false,
-                mode: ChannelMode::Normal,
-            });
+    /// ignored (channel disabled / quiet mode) or cached for `/e2e accept`
+    /// (Normal mode). Returns `Err` only on protocol-level problems
+    /// (bad signature, malformed field, TOFU failure).
+    /// Return the effective mode for `channel` with autotrust applied, or
+    /// `Ok(None)` if the channel is disabled. Keeps `handle_keyreq` compact.
+    fn effective_channel_mode(
+        &self,
+        sender_handle: &str,
+        channel: &str,
+    ) -> Result<Option<ChannelMode>> {
+        let Some(ch_cfg) = self.keyring.get_channel_config(channel)? else {
+            return Ok(None);
+        };
         if !ch_cfg.enabled {
             return Ok(None);
         }
+        if self.keyring.autotrust_matches(sender_handle, channel)? {
+            return Ok(Some(ChannelMode::AutoAccept));
+        }
+        Ok(Some(ch_cfg.mode))
+    }
 
-        // TOFU classification: only safe outcomes (New / Known) proceed to
-        // the upsert. HandleChanged / FingerprintChanged / Revoked record
-        // a PendingTrustNotice and bail out with HandleMismatch so the
-        // caller surfaces an [E2E] WARNING line.
-        let fp = fingerprint(&req.pubkey);
+    /// Upsert the peer row on a New/Known KEYREQ, or record a trust-change
+    /// notice + bail out on HandleChanged/FingerprintChanged/Revoked.
+    fn tofu_upsert_on_keyreq(
+        &self,
+        sender_handle: &str,
+        req: &KeyReq,
+        fp: &Fingerprint,
+    ) -> Result<()> {
         let now = now_unix();
-        let change = self.classify_peer_change(&fp, sender_handle)?;
+        let change = self.classify_peer_change(fp, sender_handle)?;
         match change {
             TrustChange::New | TrustChange::Known => {
-                // For `New`, record the peer as Pending — receiving a
-                // KEYREQ is not consent, so we refuse to auto-upgrade
-                // Trust. For `Known`, preserve whatever status the
-                // existing row has (Trusted peers stay Trusted across
-                // re-handshakes). `upsert_peer` ON CONFLICT overwrites
-                // global_status with `excluded`, so we read-modify-write.
                 let global_status = if matches!(change, TrustChange::Known) {
                     self.keyring
-                        .get_peer_by_fingerprint(&fp)?
+                        .get_peer_by_fingerprint(fp)?
                         .map_or(TrustStatus::Pending, |p| p.global_status)
                 } else {
                     TrustStatus::Pending
                 };
                 let peer_rec = PeerRecord {
-                    fingerprint: fp,
+                    fingerprint: *fp,
                     pubkey: req.pubkey,
                     last_handle: Some(sender_handle.to_string()),
                     last_nick: None,
@@ -454,6 +706,7 @@ impl E2eManager {
                     global_status,
                 };
                 self.keyring.upsert_peer(&peer_rec)?;
+                Ok(())
             }
             TrustChange::HandleChanged { .. }
             | TrustChange::FingerprintChanged { .. }
@@ -464,19 +717,86 @@ impl E2eManager {
                     channel: req.channel.clone(),
                     change,
                 });
-                return Err(err_msg);
+                Err(err_msg)
             }
         }
+    }
 
-        // Policy: in auto-accept we always respond; in normal/quiet we only
-        // respond if we already have a trusted incoming session from this
-        // peer on this channel (i.e. they were /e2e accept-ed earlier).
-        let allow = match ch_cfg.mode {
+    /// Cache an incoming Normal-mode KEYREQ and emit a pending-accept
+    /// prompt. Installs a `Pending` incoming-session row so `/e2e list`
+    /// surfaces the peer, stashes the full KEYREQ for later
+    /// `accept_pending_inbound`, and queues a `PendingAcceptRequest`.
+    fn cache_pending_inbound_normal_mode(
+        &self,
+        sender_handle: &str,
+        req: &KeyReq,
+        fp: &Fingerprint,
+    ) {
+        let pending_sess = IncomingSession {
+            handle: sender_handle.to_string(),
+            channel: req.channel.clone(),
+            fingerprint: *fp,
+            // Zero-filled placeholder. Row is `Pending`, so the decrypt
+            // path rejects it before ever touching these bytes; it is
+            // replaced on `/e2e accept` when the real KEYRSP session is
+            // installed.
+            sk: [0u8; 32],
+            status: TrustStatus::Pending,
+            created_at: now_unix(),
+        };
+        if let Err(e) = self.keyring.install_incoming_session_strict(&pending_sess) {
+            tracing::warn!("normal-mode pending session install failed: {e}");
+        }
+        self.pending_inbound
+            .lock()
+            .expect("e2e pending inbound mutex poisoned")
+            .insert(
+                (sender_handle.to_string(), req.channel.clone()),
+                PendingInboundKeyReq { req: req.clone() },
+            );
+        self.pending_accept_requests
+            .lock()
+            .expect("e2e pending accept mutex poisoned")
+            .push(PendingAcceptRequest {
+                handle: sender_handle.to_string(),
+                channel: req.channel.clone(),
+            });
+    }
+
+    pub fn handle_keyreq(&self, sender_handle: &str, req: &KeyReq) -> Result<Option<KeyRsp>> {
+        // Verify signature over the full KEYREQ payload, binding `eph_x25519`.
+        let sig_payload =
+            signed_keyreq_payload(&req.channel, &req.pubkey, &req.eph_x25519, &req.nonce);
+        sig::verify(&req.pubkey, &sig_payload, &req.sig)?;
+
+        // Channel config + autotrust mode promotion.
+        let Some(effective_mode) = self.effective_channel_mode(sender_handle, &req.channel)?
+        else {
+            return Ok(None);
+        };
+
+        // TOFU classification: only safe outcomes (New / Known) proceed to
+        // the upsert; warning outcomes record a PendingTrustNotice and bail.
+        let fp = fingerprint(&req.pubkey);
+        self.tofu_upsert_on_keyreq(sender_handle, req, &fp)?;
+
+        // Policy gate (spec §5.2). Normal-mode unknown peers are cached
+        // for later `/e2e accept`; Quiet-mode unknown peers are dropped.
+        let already_trusted = self
+            .keyring
+            .get_incoming_session(sender_handle, &req.channel)?
+            .is_some_and(|s| s.status == TrustStatus::Trusted);
+        let allow = match effective_mode {
             ChannelMode::AutoAccept => true,
-            ChannelMode::Normal | ChannelMode::Quiet => self
-                .keyring
-                .get_incoming_session(sender_handle, &req.channel)?
-                .is_some_and(|s| s.status == TrustStatus::Trusted),
+            ChannelMode::Normal => {
+                if already_trusted {
+                    true
+                } else {
+                    self.cache_pending_inbound_normal_mode(sender_handle, req, &fp);
+                    return Ok(None);
+                }
+            }
+            ChannelMode::Quiet => already_trusted,
         };
         if !allow {
             return Ok(None);
@@ -485,6 +805,16 @@ impl E2eManager {
         // Our outgoing channel key is what we wrap and hand the peer so
         // they can decrypt our future messages.
         let our_sk = self.get_or_generate_outgoing_key(&req.channel)?;
+
+        // Record the peer as a recipient of our outgoing key on this
+        // channel so the lazy-rotate distribution loop knows to push a
+        // fresh key to them on the next `/e2e revoke` rotation.
+        self.keyring.record_outgoing_recipient(
+            &req.channel,
+            sender_handle,
+            &fingerprint(&req.pubkey),
+            now_unix(),
+        )?;
 
         // Fresh ephemeral X25519 keypair for ECDH with the initiator's
         // ephemeral public.
@@ -542,6 +872,111 @@ impl E2eManager {
         }))
     }
 
+    /// Complete a Normal-mode pending KEYREQ by running the full
+    /// auto-accept branch against the cached request. Returns the
+    /// generated `KeyRsp` so the caller can enqueue it for dispatch.
+    ///
+    /// Returns `Ok(None)` if no pending inbound KEYREQ exists for this
+    /// `(handle, channel)` — the `/e2e accept` command uses that return
+    /// shape to emit a "nothing to accept" error message.
+    pub fn accept_pending_inbound(
+        &self,
+        sender_handle: &str,
+        channel: &str,
+    ) -> Result<Option<KeyRsp>> {
+        let cached = {
+            let mut guard = self
+                .pending_inbound
+                .lock()
+                .expect("e2e pending inbound mutex poisoned");
+            guard.remove(&(sender_handle.to_string(), channel.to_string()))
+        };
+        let Some(PendingInboundKeyReq { req }) = cached else {
+            return Ok(None);
+        };
+
+        // Promote the stored row to trusted now so the subsequent
+        // `handle_keyreq` re-entry sees `already_trusted = true` and
+        // takes the AutoAccept path. The strict installer above already
+        // seeded the row with the real fingerprint.
+        self.keyring
+            .update_incoming_status(sender_handle, channel, TrustStatus::Trusted)?;
+
+        // Re-enter `handle_keyreq` under AutoAccept semantics. We cannot
+        // just mark the channel config, so we temporarily cache the
+        // channel's real config, force AutoAccept, run the branch, and
+        // restore. Simpler: call a dedicated internal branch that is the
+        // body of the AutoAccept arm, sharing the same crypto path.
+        self.build_keyrsp_for_accepted_request(sender_handle, &req)
+            .map(Some)
+    }
+
+    /// Build a KEYRSP for an already-vetted KEYREQ (TOFU classification
+    /// done, channel enabled, caller has decided the peer is trusted).
+    /// Shared between the `AutoAccept` branch of `handle_keyreq` and the
+    /// `accept_pending_inbound` path.
+    fn build_keyrsp_for_accepted_request(
+        &self,
+        sender_handle: &str,
+        req: &KeyReq,
+    ) -> Result<KeyRsp> {
+        // Re-upsert the peer row with Trusted status (Normal-mode cache
+        // wrote Pending, and we are now promoting).
+        let fp = fingerprint(&req.pubkey);
+        let now = now_unix();
+        let existing_peer = self.keyring.get_peer_by_fingerprint(&fp)?;
+        let peer_rec = PeerRecord {
+            fingerprint: fp,
+            pubkey: req.pubkey,
+            last_handle: Some(sender_handle.to_string()),
+            last_nick: existing_peer.as_ref().and_then(|p| p.last_nick.clone()),
+            first_seen: existing_peer.as_ref().map_or(now, |p| p.first_seen),
+            last_seen: now,
+            global_status: TrustStatus::Trusted,
+        };
+        self.keyring.upsert_peer(&peer_rec)?;
+
+        // Our outgoing channel key — possibly triggers lazy rotate.
+        let our_sk = self.get_or_generate_outgoing_key(&req.channel)?;
+
+        // Record the peer as a recipient of our outgoing key (accept path).
+        self.keyring
+            .record_outgoing_recipient(&req.channel, sender_handle, &fp, now_unix())?;
+
+        // Fresh ephemeral X25519 keypair for ECDH.
+        let mut our_eph_secret = [0u8; 32];
+        rand::fill(&mut our_eph_secret);
+        let our_eph_sec = StaticSecret::from(our_eph_secret);
+        let our_eph_pub = XPub::from(&our_eph_sec).to_bytes();
+
+        let info = wrap_info(&req.channel);
+        let wrap_key = derive_wrap_key(&our_eph_sec, &req.eph_x25519, info.as_bytes());
+        let (wrap_nonce, wrap_ct) = aead::encrypt(&wrap_key, info.as_bytes(), &our_sk)?;
+
+        let our_pubkey = self.identity.public_bytes();
+        let mut rsp_nonce = [0u8; 16];
+        rand::fill(&mut rsp_nonce);
+        let sig_payload = signed_keyrsp_payload(
+            &req.channel,
+            &our_pubkey,
+            &our_eph_pub,
+            &wrap_nonce,
+            &wrap_ct,
+            &rsp_nonce,
+        );
+        let sig_bytes = sig::sign(self.identity.signing_key(), &sig_payload);
+
+        Ok(KeyRsp {
+            channel: req.channel.clone(),
+            pubkey: our_pubkey,
+            ephemeral_pub: our_eph_pub,
+            wrap_nonce,
+            wrap_ct,
+            nonce: rsp_nonce,
+            sig: sig_bytes,
+        })
+    }
+
     /// Wrap a KEYRSP in CTCP framing ready for NOTICE dispatch.
     #[must_use]
     #[allow(
@@ -550,6 +985,18 @@ impl E2eManager {
     )]
     pub fn encode_keyrsp_ctcp(&self, rsp: &KeyRsp) -> String {
         format!("\x01{}\x01", encode_keyrsp(rsp))
+    }
+
+    /// Wrap a REKEY in CTCP framing ready for NOTICE dispatch. Used by
+    /// tests; the `encrypt_outgoing` lazy-rotate path queues pre-wrapped
+    /// bodies directly into `pending_rekey_sends`.
+    #[must_use]
+    #[allow(
+        clippy::unused_self,
+        reason = "method form is kept for symmetry with the rest of the public API"
+    )]
+    pub fn encode_keyrekey_ctcp(&self, rk: &KeyRekey) -> String {
+        format!("\x01{}\x01", encode_keyrekey(rk))
     }
 
     // ---------- handshake initiator (KEYRSP consumer) ----------
@@ -718,6 +1165,14 @@ fn wrap_info(channel: &str) -> String {
     format!("RPE2E01-WRAP:{channel}")
 }
 
+/// Canonical HKDF `info` / AEAD `aad` for the REKEY distribution wrap.
+/// The distinct `REKEY` prefix is a hard domain separator so a leaked
+/// KEYRSP wrap cannot be replayed as a REKEY (and vice versa) even if an
+/// attacker somehow produced the same ECDH shared.
+fn rekey_info(channel: &str) -> String {
+    format!("RPE2E01-REKEY:{channel}")
+}
+
 /// Derive a 32-byte wrap key from a pair of ephemeral X25519 keys. Matches
 /// the same HKDF construction used by `crypto::ecdh::EphemeralKeypair`.
 fn derive_wrap_key(secret: &StaticSecret, peer_pub_bytes: &[u8; 32], info: &[u8]) -> [u8; 32] {
@@ -754,6 +1209,7 @@ mod tests {
         CREATE TABLE e2e_incoming_sessions (handle TEXT NOT NULL, channel TEXT NOT NULL, fingerprint BLOB NOT NULL, sk BLOB NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, PRIMARY KEY (handle, channel));
         CREATE TABLE e2e_channel_config (channel TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, mode TEXT NOT NULL DEFAULT 'normal');
         CREATE TABLE e2e_autotrust (id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, handle_pattern TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(scope, handle_pattern));
+        CREATE TABLE e2e_outgoing_recipients (channel TEXT NOT NULL, handle TEXT NOT NULL, fingerprint BLOB NOT NULL, first_sent_at INTEGER NOT NULL, PRIMARY KEY (channel, handle));
     ";
 
     fn make_manager() -> E2eManager {

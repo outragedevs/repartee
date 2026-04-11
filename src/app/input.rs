@@ -915,6 +915,16 @@ impl App {
             }
         }
 
+        // If lazy-rotate produced REKEY sends we must ship them as NOTICEs
+        // to each remaining trusted peer on this channel (spec §5.3).
+        // `e2e_encrypt_or_passthrough` already pushed entries into
+        // `state.pending_e2e_sends`; drain them now on the same tick so
+        // the fresh session key reaches the peers before their next
+        // decrypt attempt.
+        if !self.state.pending_e2e_sends.is_empty() {
+            self.drain_pending_e2e_sends();
+        }
+
         if !echo_message_enabled {
             // Local echo: show the user what they typed (plaintext), not the
             // wire format. For non-E2E messages we split at word boundaries
@@ -965,7 +975,7 @@ impl App {
     /// unchanged. For Query buffers the context is `@<peer_handle>`
     /// derived from the buffer's cached handle.
     fn e2e_encrypt_or_passthrough(
-        &self,
+        &mut self,
         buffer_name: &str,
         buffer_type: &BufferType,
         text: &str,
@@ -977,7 +987,7 @@ impl App {
             ))
         };
 
-        let Some(mgr) = self.state.e2e_manager.as_ref() else {
+        let Some(mgr) = self.state.e2e_manager.clone() else {
             return plain_passthrough();
         };
 
@@ -1027,7 +1037,62 @@ impl App {
         if !enabled {
             return plain_passthrough();
         }
-        match mgr.encrypt_outgoing(&context, text) {
+        let result = mgr.encrypt_outgoing(&context, text);
+
+        // Drain any REKEY CTCPs produced by a lazy rotate that happened
+        // inside `encrypt_outgoing`. These must go out as NOTICEs to the
+        // remaining trusted peers on this channel. We resolve peer handle
+        // → nick via the active buffer's user list; if the nick can't be
+        // resolved (peer left the channel between handshake and rotation)
+        // the distribution entry is dropped with a warning — the peer
+        // will re-handshake on next ciphertext if they come back.
+        let rekey_sends = mgr.take_pending_rekey_sends();
+        if !rekey_sends.is_empty() {
+            let conn_id_opt = self
+                .state
+                .active_buffer()
+                .map(|b| b.connection_id.clone());
+            if let Some(conn_id) = conn_id_opt {
+                let buf_id = crate::state::buffer::make_buffer_id(&conn_id, &context);
+                for rk in rekey_sends {
+                    let nick = self
+                        .state
+                        .buffers
+                        .get(&buf_id)
+                        .and_then(|b| {
+                            b.users.values().find_map(|u| {
+                                let ident = u.ident.as_deref().unwrap_or("");
+                                let host = u.host.as_deref().unwrap_or("");
+                                let handle = format!("{ident}@{host}");
+                                if handle == rk.target_handle {
+                                    Some(u.nick.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                        });
+                    let Some(nick) = nick else {
+                        tracing::warn!(
+                            target_handle = %rk.target_handle,
+                            channel = %context,
+                            "rekey drop: no nick resolved for handle on current channel"
+                        );
+                        continue;
+                    };
+                    self.state
+                        .pending_e2e_sends
+                        .push(crate::state::PendingE2eSend {
+                            connection_id: conn_id.clone(),
+                            target: nick,
+                            notice_text: rk.notice_text,
+                        });
+                }
+            } else {
+                tracing::warn!("rekey drop: no active buffer to resolve connection");
+            }
+        }
+
+        match result {
             Ok(wires) => Some((wires, text.to_string())),
             Err(e) => {
                 tracing::warn!("e2e encrypt failed on {context}: {e}; sending cleartext");
