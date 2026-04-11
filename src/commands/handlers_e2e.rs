@@ -40,6 +40,14 @@ pub(crate) fn cmd_e2e(app: &mut App, args: &[String]) {
         "import" => e2e_import(app, &args[1..]),
         other => add_local_event(app, &format!("unknown /e2e subcommand: {other}")),
     }
+    // Subcommands like `handshake` enqueue outbound NOTICEs into
+    // `state.pending_e2e_sends`. The IRC event loop drain only fires
+    // after an incoming message is handled, so for command-driven sends
+    // we must drain explicitly here or the KEYREQ would sit in the queue
+    // until the next IRC event arrives.
+    if !app.state.pending_e2e_sends.is_empty() {
+        app.drain_pending_e2e_sends();
+    }
 }
 
 // ---------- helpers ----------
@@ -228,24 +236,39 @@ fn e2e_forget(app: &mut App, args: &[String]) {
 // ---------- handshake / rotate ----------
 
 fn e2e_handshake(app: &mut App, args: &[String]) {
-    let _ = args; // reserved for future: /e2e handshake <nick>
+    let Some(nick) = args.first() else {
+        add_local_event(app, "[E2E] usage: /e2e handshake <nick>");
+        return;
+    };
     let Some(chan) = current_channel(app) else {
         add_local_event(app, "[E2E] /e2e handshake: no active channel");
+        return;
+    };
+    // Grab the connection id before the `require_mgr` mutable borrow
+    // dance — we need it to route the outbound NOTICE.
+    let Some(conn_id) = app
+        .state
+        .active_buffer()
+        .map(|b| b.connection_id.clone())
+    else {
+        add_local_event(app, "[E2E] /e2e handshake: no active connection");
         return;
     };
     let Some(mgr) = require_mgr(app) else { return };
     match mgr.build_keyreq(&chan) {
         Ok(req) => {
             let ctcp = mgr.encode_keyreq_ctcp(&req);
+            app.state
+                .pending_e2e_sends
+                .push(crate::state::PendingE2eSend {
+                    connection_id: conn_id,
+                    target: nick.clone(),
+                    notice_text: ctcp,
+                });
             add_local_event(
                 app,
-                &format!("[E2E] KEYREQ built for {chan} ({} bytes, deliver via NOTICE)", ctcp.len()),
+                &format!("[E2E] KEYREQ sent to {nick} for {chan}"),
             );
-            // NOTE: sending the NOTICE requires the active IRC handle
-            // plumbing; a follow-up patch wires KEYREQ delivery into the
-            // send path. For v0.1 the user can manually `/notice` or rely
-            // on auto-handshake triggered by receiving ciphertext from a
-            // peer in auto-accept mode.
         }
         Err(e) => add_local_event(app, &format!("[E2E] handshake error: {e}")),
     }

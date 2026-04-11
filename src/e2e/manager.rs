@@ -359,11 +359,21 @@ impl E2eManager {
         let wrap_key = derive_wrap_key(&our_eph_sec, &req.eph_x25519, info.as_bytes());
         let (wrap_nonce, wrap_ct) = aead::encrypt(&wrap_key, info.as_bytes(), &our_sk)?;
 
-        // Sign response.
+        // Sign response. `pubkey` is our long-term Ed25519 identity; it is
+        // bound into the signature so the initiator can verify the KEYRSP
+        // against the exact pubkey the responder claims and TOFU-pin that
+        // pubkey in one atomic step.
+        let our_pubkey = self.identity.public_bytes();
         let mut rsp_nonce = [0u8; 16];
         rand::fill(&mut rsp_nonce);
-        let sig_payload =
-            signed_keyrsp_payload(&req.channel, &our_eph_pub, &wrap_nonce, &wrap_ct, &rsp_nonce);
+        let sig_payload = signed_keyrsp_payload(
+            &req.channel,
+            &our_pubkey,
+            &our_eph_pub,
+            &wrap_nonce,
+            &wrap_ct,
+            &rsp_nonce,
+        );
         let sig_bytes = sig::sign(self.identity.signing_key(), &sig_payload);
 
         // We have also just shipped *our own* outgoing session to the peer.
@@ -380,6 +390,7 @@ impl E2eManager {
 
         Ok(Some(KeyRsp {
             channel: req.channel.clone(),
+            pubkey: our_pubkey,
             ephemeral_pub: our_eph_pub,
             wrap_nonce,
             wrap_ct,
@@ -400,27 +411,30 @@ impl E2eManager {
 
     // ---------- handshake initiator (KEYRSP consumer) ----------
 
-    /// Consume an incoming KEYRSP. Verifies the responder's signature with
-    /// `sender_pubkey` (which the caller must have remembered from the
-    /// prior KEYREQ round-trip), looks up our pending ephemeral secret,
-    /// completes the ECDH, unwraps the session key, and installs it as a
+    /// Consume an incoming KEYRSP. The responder's long-term Ed25519 public
+    /// key is carried on the wire inside `rsp.pubkey`; we verify the
+    /// signature against it and simultaneously TOFU-pin that pubkey in the
+    /// peer table. The initiator no longer needs to know the responder's
+    /// pubkey out-of-band. We then look up our pending ephemeral secret,
+    /// complete the ECDH, unwrap the session key, and install it as a
     /// *trusted* incoming session — the initiator already consented by
     /// having sent the KEYREQ in the first place.
-    pub fn handle_keyrsp(
-        &self,
-        sender_handle: &str,
-        sender_pubkey: &[u8; 32],
-        rsp: &KeyRsp,
-    ) -> Result<()> {
+    pub fn handle_keyrsp(&self, sender_handle: &str, rsp: &KeyRsp) -> Result<()> {
+        // The pubkey the initiator will verify against is the one embedded
+        // in the response. Signature binding on `rsp.pubkey` (see
+        // `sig_payload_keyrsp`) means a MitM cannot swap it.
+        let sender_pubkey = rsp.pubkey;
+
         // Verify signature first, before touching any state.
         let sig_payload = signed_keyrsp_payload(
             &rsp.channel,
+            &sender_pubkey,
             &rsp.ephemeral_pub,
             &rsp.wrap_nonce,
             &rsp.wrap_ct,
             &rsp.nonce,
         );
-        sig::verify(sender_pubkey, &sig_payload, &rsp.sig)?;
+        sig::verify(&sender_pubkey, &sig_payload, &rsp.sig)?;
 
         // Find matching pending handshake by channel. v1 allows at most one
         // in-flight handshake per channel at a time — this is fine in
@@ -456,12 +470,14 @@ impl E2eManager {
         sk.copy_from_slice(&sk_bytes);
 
         // Install as trusted incoming session. We also TOFU-record the
-        // peer in `e2e_peers`; upsert is safe.
-        let fp = fingerprint(sender_pubkey);
+        // peer in `e2e_peers`; upsert is safe. This is the TOFU moment for
+        // the initiator side — the responder's pubkey is pinned the first
+        // time we see a valid signed KEYRSP from them.
+        let fp = fingerprint(&sender_pubkey);
         let now = now_unix();
         self.keyring.upsert_peer(&PeerRecord {
             fingerprint: fp,
-            pubkey: *sender_pubkey,
+            pubkey: sender_pubkey,
             last_handle: Some(sender_handle.to_string()),
             last_nick: None,
             first_seen: now,

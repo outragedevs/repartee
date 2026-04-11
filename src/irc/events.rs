@@ -706,8 +706,14 @@ fn handle_privmsg(
     // `text` for the plaintext before any further processing. Strict handle
     // check uses the raw server-stamped `ident@host`, so attackers cannot
     // decrypt by spoofing a nick.
-    let decrypted_owned =
-        try_decrypt_e2e(state, &format!("{ident}@{host}"), buffer_name, text);
+    let decrypted_owned = try_decrypt_e2e(
+        state,
+        conn_id,
+        &nick,
+        &format!("{ident}@{host}"),
+        buffer_name,
+        text,
+    );
     let text: &str = decrypted_owned.as_deref().unwrap_or(text);
 
     // Check if this is a CTCP (ACTION or other)
@@ -872,6 +878,14 @@ fn handle_privmsg(
                 return;
             }
         }
+        // RPE2E handshake CTCP dispatch. Some IRC servers strip trailing
+        // CTCP framing from NOTICE; accepting RPEE2E in PRIVMSG as well
+        // gives us a fallback path that still works on those servers.
+        if try_dispatch_rpe2e_ctcp(state, conn_id, prefix, target, text)
+            == Some(RpEe2eOutcome::Handled)
+        {
+            return;
+        }
         // Non-ACTION CTCP, ignore for now
         return;
     }
@@ -1034,6 +1048,15 @@ fn handle_notice(
         ) {
             return;
         }
+    }
+
+    // RPE2E handshake CTCP dispatch. Travels in NOTICE as
+    // `\x01RPEE2E ... \x01`. We intercept before the NOTICE becomes a
+    // user-visible buffer line so the raw CTCP never leaks into the UI.
+    if try_dispatch_rpe2e_ctcp(state, conn_id, prefix, target, text)
+        == Some(RpEe2eOutcome::Handled)
+    {
+        return;
     }
 
     // echo-message: when the server echoes our own notice to a user, the
@@ -3113,25 +3136,47 @@ fn handle_whox_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
 /// untouched for the rest of `handle_privmsg`).
 ///
 /// The `sender_handle` must be built from the raw IRC prefix (`ident@host`)
-/// — that is what the `E2eManager` keyring is keyed on.
+/// — that is what the `E2eManager` keyring is keyed on. On `MissingKey`
+/// the function also enqueues an outbound KEYREQ (subject to the
+/// per-peer rate limiter) addressed back to `sender_nick` so the
+/// initiator-side handshake starts automatically the first time an
+/// encrypted line arrives from an unknown peer.
 fn try_decrypt_e2e(
-    state: &AppState,
+    state: &mut AppState,
+    conn_id: &str,
+    sender_nick: &str,
     sender_handle: &str,
     channel: &str,
     text: &str,
 ) -> Option<String> {
-    let mgr = state.e2e_manager.as_ref()?;
+    let mgr = state.e2e_manager.clone()?;
     if !text.starts_with("+RPE2E01") {
         return None;
     }
     match mgr.decrypt_incoming(sender_handle, channel, text) {
         Ok(crate::e2e::manager::DecryptOutcome::Plaintext(s)) => Some(s),
-        Ok(crate::e2e::manager::DecryptOutcome::MissingKey { .. }) => {
-            // No session yet — surface a placeholder in the buffer so the
-            // user sees that encrypted traffic is arriving but the key
-            // exchange hasn't happened. A proper KEYREQ is triggered by the
-            // /e2e handshake command or an auto-accept channel mode.
-            Some(format!("[E2E: awaiting session with {sender_handle}]"))
+        Ok(crate::e2e::manager::DecryptOutcome::MissingKey { handle, channel: ch }) => {
+            // No session yet — fire a KEYREQ to the sender if the rate
+            // limiter allows. The message will stay hidden behind the
+            // placeholder until the responder's KEYRSP installs the
+            // session; after that, subsequent ciphertext lines decrypt
+            // normally.
+            if mgr.allow_keyreq(&handle) {
+                match mgr.build_keyreq(&ch) {
+                    Ok(req) => {
+                        let ctcp = mgr.encode_keyreq_ctcp(&req);
+                        state
+                            .pending_e2e_sends
+                            .push(crate::state::PendingE2eSend {
+                                connection_id: conn_id.to_string(),
+                                target: sender_nick.to_string(),
+                                notice_text: ctcp,
+                            });
+                    }
+                    Err(e) => tracing::warn!("build_keyreq failed for {ch}: {e}"),
+                }
+            }
+            Some(format!("[E2E: awaiting session with {handle}]"))
         }
         Ok(crate::e2e::manager::DecryptOutcome::Rejected(reason)) => {
             Some(format!("[E2E rejected: {reason}]"))
@@ -3139,6 +3184,84 @@ fn try_decrypt_e2e(
         Err(e) => {
             tracing::warn!("e2e decrypt error on {channel}: {e}");
             None
+        }
+    }
+}
+
+/// Outcome of attempting to dispatch a CTCP body as an RPE2E handshake.
+#[derive(Debug, PartialEq, Eq)]
+enum RpEe2eOutcome {
+    /// Message was an RPE2E CTCP and has been fully handled — do not
+    /// render it in the normal NOTICE/PRIVMSG buffer.
+    Handled,
+    /// Not RPE2E traffic — caller continues with normal rendering.
+    NotE2e,
+}
+
+/// Try to dispatch an incoming CTCP body as an RPE2E KEYREQ/KEYRSP.
+/// Returns `None` if the E2E manager is not initialized (caller treats
+/// this as "not handled" and falls through to the default rendering).
+/// Returns `Some(Handled)` if the body was an RPE2E CTCP (even if the
+/// crypto rejected it — we still want to suppress the raw body from
+/// surfacing in the UI). Returns `Some(NotE2e)` if the body was not a
+/// RPEE2E tag so the caller can keep rendering it.
+fn try_dispatch_rpe2e_ctcp(
+    state: &mut AppState,
+    conn_id: &str,
+    prefix: Option<&Prefix>,
+    target: &str,
+    text: &str,
+) -> Option<RpEe2eOutcome> {
+    use crate::e2e::handshake::HandshakeMsg;
+
+    // Strip optional CTCP framing \x01...\x01. Servers sometimes drop the
+    // trailing byte, so accept both variants and anything in between.
+    let trimmed = text.strip_prefix('\x01').unwrap_or(text);
+    let inner = trimmed.strip_suffix('\x01').unwrap_or(trimmed);
+    if !inner.starts_with(crate::e2e::handshake::CTCP_TAG) {
+        return Some(RpEe2eOutcome::NotE2e);
+    }
+    let mgr = state.e2e_manager.clone()?;
+
+    let parsed = match crate::e2e::handshake::parse(inner) {
+        Ok(Some(msg)) => msg,
+        Ok(None) => return Some(RpEe2eOutcome::NotE2e),
+        Err(e) => {
+            tracing::warn!("rpe2e handshake parse error: {e}");
+            return Some(RpEe2eOutcome::Handled); // suppress bad body
+        }
+    };
+
+    let (nick, ident, host) = extract_nick_userhost(prefix);
+    let sender_handle = format!("{ident}@{host}");
+    // RPEE2E target is always us — the channel being negotiated is
+    // carried inside the payload rather than in the IRC target.
+    let _ = target;
+
+    match parsed {
+        HandshakeMsg::Req(req) => match mgr.handle_keyreq(&sender_handle, &req) {
+            Ok(Some(rsp)) => {
+                let body = mgr.encode_keyrsp_ctcp(&rsp);
+                state
+                    .pending_e2e_sends
+                    .push(crate::state::PendingE2eSend {
+                        connection_id: conn_id.to_string(),
+                        target: nick,
+                        notice_text: body,
+                    });
+                Some(RpEe2eOutcome::Handled)
+            }
+            Ok(None) => Some(RpEe2eOutcome::Handled),
+            Err(e) => {
+                tracing::warn!("handle_keyreq error: {e}");
+                Some(RpEe2eOutcome::Handled)
+            }
+        },
+        HandshakeMsg::Rsp(rsp) => {
+            if let Err(e) = mgr.handle_keyrsp(&sender_handle, &rsp) {
+                tracing::warn!("handle_keyrsp error: {e}");
+            }
+            Some(RpEe2eOutcome::Handled)
         }
     }
 }

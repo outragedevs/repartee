@@ -40,10 +40,13 @@ pub struct KeyReq {
 
 /// KEYRSP message. Carries the responder's ephemeral X25519 pub and an AEAD
 /// ciphertext containing the channel session key wrapped under the derived
-/// ECDH+HKDF wrap key.
+/// ECDH+HKDF wrap key. `pubkey` is the responder's long-term Ed25519
+/// identity — the initiator verifies the signature against it and uses it
+/// as the TOFU pin, so the pubkey does not need to be known out-of-band.
 #[derive(Debug, Clone)]
 pub struct KeyRsp {
     pub channel: String,
+    pub pubkey: [u8; 32],
     pub ephemeral_pub: [u8; 32],
     pub wrap_nonce: [u8; NONCE_LEN],
     pub wrap_ct: Vec<u8>,
@@ -73,17 +76,24 @@ fn sig_payload_keyreq(
     v
 }
 
-/// Canonical payload signed by the responder in KEYRSP.
+/// Canonical payload signed by the responder in KEYRSP. Binds the
+/// responder's identity `pubkey` so a MitM cannot substitute its own
+/// long-term key without breaking the Ed25519 signature, even though the
+/// initiator has no prior record of the responder.
 fn sig_payload_keyrsp(
     channel: &str,
+    pubkey: &[u8; 32],
     eph_pub: &[u8; 32],
     wrap_nonce: &[u8; NONCE_LEN],
     wrap_ct: &[u8],
     nonce: &[u8; 16],
 ) -> Vec<u8> {
-    let mut v = Vec::with_capacity(16 + channel.len() + 32 + NONCE_LEN + wrap_ct.len() + 16);
+    let mut v =
+        Vec::with_capacity(16 + channel.len() + 32 + 32 + NONCE_LEN + wrap_ct.len() + 16);
     v.extend_from_slice(b"KEYRSP:");
     v.extend_from_slice(channel.as_bytes());
+    v.push(b':');
+    v.extend_from_slice(pubkey);
     v.push(b':');
     v.extend_from_slice(eph_pub);
     v.push(b':');
@@ -111,8 +121,9 @@ pub fn encode_keyreq(req: &KeyReq) -> String {
 pub fn encode_keyrsp(rsp: &KeyRsp) -> String {
     use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
     format!(
-        "{CTCP_TAG} KEYRSP v={PROTO_VERSION} chan={chan} eph={eph} wnonce={wnonce} wrap={wrap} nonce={nonce} sig={sig}",
+        "{CTCP_TAG} KEYRSP v={PROTO_VERSION} chan={chan} pub={pub_} eph={eph} wnonce={wnonce} wrap={wrap} nonce={nonce} sig={sig}",
         chan = rsp.channel,
+        pub_ = hex::encode(rsp.pubkey),
         eph = hex::encode(rsp.ephemeral_pub),
         wnonce = hex::encode(rsp.wrap_nonce),
         wrap = B64.encode(&rsp.wrap_ct),
@@ -186,6 +197,10 @@ pub fn parse(body: &str) -> Result<Option<HandshakeMsg>> {
                 .get("chan")
                 .ok_or_else(|| E2eError::Handshake("chan".into()))?
                 .to_string();
+            let pubkey = hex32(
+                kv.get("pub")
+                    .ok_or_else(|| E2eError::Handshake("pub".into()))?,
+            )?;
             let ephemeral_pub = hex32(
                 kv.get("eph")
                     .ok_or_else(|| E2eError::Handshake("eph".into()))?,
@@ -219,6 +234,7 @@ pub fn parse(body: &str) -> Result<Option<HandshakeMsg>> {
             )?;
             Ok(Some(HandshakeMsg::Rsp(KeyRsp {
                 channel,
+                pubkey,
                 ephemeral_pub,
                 wrap_nonce,
                 wrap_ct,
@@ -321,16 +337,19 @@ pub fn signed_keyreq_payload(
     sig_payload_keyreq(channel, pubkey, eph_x25519, nonce)
 }
 
-/// Public accessor: canonical signed payload for KEYRSP.
+/// Public accessor: canonical signed payload for KEYRSP. `pubkey` is the
+/// responder's long-term Ed25519 identity — see `sig_payload_keyrsp` for
+/// the MitM-resistance rationale.
 #[must_use]
 pub fn signed_keyrsp_payload(
     channel: &str,
+    pubkey: &[u8; 32],
     eph_pub: &[u8; 32],
     wrap_nonce: &[u8; NONCE_LEN],
     wrap_ct: &[u8],
     nonce: &[u8; 16],
 ) -> Vec<u8> {
-    sig_payload_keyrsp(channel, eph_pub, wrap_nonce, wrap_ct, nonce)
+    sig_payload_keyrsp(channel, pubkey, eph_pub, wrap_nonce, wrap_ct, nonce)
 }
 
 #[cfg(test)]
@@ -350,6 +369,7 @@ mod tests {
     fn sample_rsp() -> KeyRsp {
         KeyRsp {
             channel: "#x".into(),
+            pubkey: [12; 32],
             ephemeral_pub: [4; 32],
             wrap_nonce: [5; NONCE_LEN],
             wrap_ct: vec![6, 7, 8, 9],
@@ -383,6 +403,7 @@ mod tests {
         match parsed {
             HandshakeMsg::Rsp(r) => {
                 assert_eq!(r.channel, rsp.channel);
+                assert_eq!(r.pubkey, rsp.pubkey);
                 assert_eq!(r.ephemeral_pub, rsp.ephemeral_pub);
                 assert_eq!(r.wrap_nonce, rsp.wrap_nonce);
                 assert_eq!(r.wrap_ct, rsp.wrap_ct);

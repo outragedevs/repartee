@@ -59,9 +59,9 @@ fn full_handshake_and_encrypted_exchange() {
         .expect("auto-accept should produce a KEYRSP");
 
     // Bob receives KEYRSP from Alice and installs alice's outgoing session
-    // as his incoming session for alice.
-    bob.handle_keyrsp(alice_handle, &alice.identity_pub(), &rsp)
-        .unwrap();
+    // as his incoming session for alice. `rsp.pubkey` carries Alice's
+    // long-term identity, so bob doesn't need it out-of-band.
+    bob.handle_keyrsp(alice_handle, &rsp).unwrap();
 
     // Alice encrypts a message for #x.
     let wire_lines = alice.encrypt_outgoing("#x", "hello bob").unwrap();
@@ -86,8 +86,7 @@ fn strict_handle_check_rejects_wrong_sender() {
 
     let req = bob.build_keyreq("#x").unwrap();
     let rsp = alice.handle_keyreq("~bob@b.host", &req).unwrap().unwrap();
-    bob.handle_keyrsp("~alice@a.host", &alice.identity_pub(), &rsp)
-        .unwrap();
+    bob.handle_keyrsp("~alice@a.host", &rsp).unwrap();
 
     let wire = alice.encrypt_outgoing("#x", "secret").unwrap();
 
@@ -116,8 +115,7 @@ fn revoke_then_lazy_rotate_locks_out_revoked_peer() {
     for (peer, peer_handle) in [(&bob, "~bob@b.host"), (&carol, "~carol@c.host")] {
         let req = peer.build_keyreq("#x").unwrap();
         let rsp = alice.handle_keyreq(peer_handle, &req).unwrap().unwrap();
-        peer.handle_keyrsp("~alice@a.host", &alice.identity_pub(), &rsp)
-            .unwrap();
+        peer.handle_keyrsp("~alice@a.host", &rsp).unwrap();
     }
 
     // Alice sends msg 1; bob decrypts successfully.
@@ -139,4 +137,30 @@ fn revoke_then_lazy_rotate_locks_out_revoked_peer() {
     let w2 = alice.encrypt_outgoing("#x", "msg-2").unwrap();
     let bob_out2 = bob.decrypt_incoming("~alice@a.host", "#x", &w2[0]).unwrap();
     assert!(matches!(bob_out2, DecryptOutcome::Rejected(_)));
+}
+
+#[test]
+fn keyrsp_carries_pubkey_for_self_contained_verification() {
+    // Regression-style: proves that the initiator (`bob`) no longer needs
+    // to know Alice's Ed25519 pubkey out-of-band. The KEYRSP itself
+    // carries `rsp.pubkey`, which `handle_keyrsp` uses to verify the
+    // signature and TOFU-pin the peer.
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+
+    let req = bob.build_keyreq("#x").unwrap();
+    let rsp = alice.handle_keyreq("~bob@b.host", &req).unwrap().unwrap();
+    assert_eq!(rsp.pubkey, alice.identity_pub());
+    bob.handle_keyrsp("~alice@a.host", &rsp).unwrap();
+
+    let wires = alice.encrypt_outgoing("#x", "hello").unwrap();
+    let out = bob
+        .decrypt_incoming("~alice@a.host", "#x", &wires[0])
+        .unwrap();
+    match out {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "hello"),
+        other => panic!("expected Plaintext, got {other:?}"),
+    }
 }

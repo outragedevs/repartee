@@ -131,6 +131,32 @@ impl App {
         }
     }
 
+    /// Drain any queued RPE2E CTCP NOTICE sends produced by the E2E
+    /// event handlers and ship them via the appropriate connection's IRC
+    /// sender. Mirrors `drain_pending_web_events` and runs right after it
+    /// inside the IRC event loop so handshake traffic reaches the wire
+    /// in the same dispatch turn.
+    pub(crate) fn drain_pending_e2e_sends(&mut self) {
+        let pending: Vec<crate::state::PendingE2eSend> =
+            std::mem::take(&mut self.state.pending_e2e_sends);
+        for send in pending {
+            let Some(handle) = self.irc_handles.get(&send.connection_id) else {
+                tracing::warn!(
+                    connection_id = %send.connection_id,
+                    "e2e send dropped: no IRC handle for connection"
+                );
+                continue;
+            };
+            if let Err(e) = handle.sender.send_notice(&send.target, &send.notice_text) {
+                tracing::warn!(
+                    target = %send.target,
+                    error = %e,
+                    "e2e send_notice failed"
+                );
+            }
+        }
+    }
+
     /// Insert a mention into the `SQLite` mentions table.
     pub(crate) fn record_mention(&self, buffer_id: &str, msg: &crate::web::protocol::WireMessage) {
         let Some(ref storage) = self.storage else {

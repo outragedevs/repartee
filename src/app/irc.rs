@@ -752,6 +752,9 @@ impl App {
 
                     // Drain pending web events and broadcast + auto-record mentions.
                     self.drain_pending_web_events();
+                    // Drain queued RPE2E NOTICE sends (handshake replies,
+                    // auto-KEYREQ on MissingKey) produced by the handlers.
+                    self.drain_pending_e2e_sends();
 
                     // Load backlog for any buffers created by handle_irc_message
                     // (e.g. query buffer on first PRIVMSG from a new nick)

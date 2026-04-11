@@ -19,6 +19,22 @@ use crate::irc::netsplit::NetsplitState;
 use crate::scripting::engine::{BufferInfo, ConnectionInfo, NickInfo, ScriptStateSnapshot};
 use crate::storage::LogRow;
 
+/// A queued outbound IRC NOTICE produced by the E2E event handlers.
+/// Drained by `App::drain_pending_e2e_sends` after each
+/// `handle_irc_message`, mirroring the `pending_web_events` pattern so
+/// event handlers can produce outbound traffic without holding a mutable
+/// borrow of `App`.
+#[derive(Debug, Clone)]
+pub struct PendingE2eSend {
+    /// Connection the NOTICE must be shipped over.
+    pub connection_id: String,
+    /// NOTICE target — peer nick for handshake replies.
+    pub target: String,
+    /// Full CTCP-framed body ready to hand to `send_notice` — i.e.
+    /// already wrapped in `\x01RPEE2E ...\x01`.
+    pub notice_text: String,
+}
+
 pub struct AppState {
     pub connections: HashMap<String, Connection>,
     pub buffers: IndexMap<String, Buffer>,
@@ -42,6 +58,10 @@ pub struct AppState {
     /// Pending web events to broadcast after IRC event processing.
     /// Drained by `App` after each `handle_irc_message` call.
     pub pending_web_events: Vec<crate::web::protocol::WebEvent>,
+    /// Pending E2E CTCP NOTICE sends produced by the event handlers.
+    /// Drained by `App::drain_pending_e2e_sends` right after
+    /// `drain_pending_web_events`. Same pattern as `pending_web_events`.
+    pub pending_e2e_sends: Vec<PendingE2eSend>,
     /// Nick color HSL saturation (synced from config for mention line formatting).
     pub nick_color_sat: f32,
     /// Nick color HSL lightness (synced from config for mention line formatting).
