@@ -11,8 +11,9 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 
-use crate::e2e::keyring::{ChannelConfig, ChannelMode, Keyring};
-use crate::e2e::manager::{DecryptOutcome, E2eManager};
+use crate::e2e::error::E2eError;
+use crate::e2e::keyring::{ChannelConfig, ChannelMode, Keyring, TrustStatus};
+use crate::e2e::manager::{DecryptOutcome, E2eManager, TrustChange};
 
 const SCHEMA: &str = "
 CREATE TABLE e2e_identity (id INTEGER PRIMARY KEY CHECK (id = 1), pubkey BLOB NOT NULL, privkey BLOB NOT NULL, fingerprint BLOB NOT NULL, created_at INTEGER NOT NULL);
@@ -311,6 +312,162 @@ fn import_rejects_bad_status_enum() {
         msg.contains("globalStatus"),
         "error should name field: {msg}"
     );
+}
+
+#[test]
+fn handshake_with_changed_fingerprint_is_rejected() {
+    // Alice fully handshakes with Bob, then Bob's identity is regenerated
+    // (a fresh E2eManager → fresh Ed25519 keypair) and he tries a second
+    // KEYREQ from the same `~bob@b.host`. Alice's handle_keyreq must
+    // reject the new key with HandleMismatch and surface a
+    // FingerprintChanged TrustChange.
+    let alice = make_manager();
+    let bob_original = make_manager();
+
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob_original, "#x", ChannelMode::AutoAccept);
+
+    let bob_handle = "~bob@b.host";
+    let alice_handle = "~alice@a.host";
+
+    // First handshake completes normally; Alice records bob's fingerprint.
+    let req1 = bob_original.build_keyreq("#x").unwrap();
+    let rsp1 = alice.handle_keyreq(bob_handle, &req1).unwrap().unwrap();
+    bob_original.handle_keyrsp(alice_handle, &rsp1).unwrap();
+    // Pending changes should be empty so far.
+    assert!(alice.take_pending_trust_changes().is_empty());
+
+    // Bob's identity is regenerated (simulate: new E2eManager → new
+    // Ed25519 keypair and thus new fingerprint).
+    let bob_new = make_manager();
+    enable_channel(&bob_new, "#x", ChannelMode::AutoAccept);
+    // Ensure fingerprints actually differ — if by astronomical luck they
+    // collide, the test premise is broken and we should know.
+    assert_ne!(bob_original.fingerprint(), bob_new.fingerprint());
+
+    // Second KEYREQ from the same handle with a brand-new key.
+    let req2 = bob_new.build_keyreq("#x").unwrap();
+    let err = alice
+        .handle_keyreq(bob_handle, &req2)
+        .expect_err("must reject changed fingerprint");
+    match err {
+        E2eError::HandleMismatch { .. } => {}
+        other => panic!("expected HandleMismatch, got {other:?}"),
+    }
+
+    // A FingerprintChanged notice was recorded.
+    let notices = alice.take_pending_trust_changes();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].handle, bob_handle);
+    assert_eq!(notices[0].channel, "#x");
+    match &notices[0].change {
+        TrustChange::FingerprintChanged { handle, old_fp, new_fp } => {
+            assert_eq!(handle, bob_handle);
+            assert_eq!(*old_fp, bob_original.fingerprint());
+            assert_eq!(*new_fp, bob_new.fingerprint());
+        }
+        other => panic!("expected FingerprintChanged, got {other:?}"),
+    }
+}
+
+#[test]
+fn handshake_with_changed_handle_is_warned() {
+    // Bob completes a handshake from one handle, then reconnects from a
+    // different host (same identity, new handle) and does another KEYREQ.
+    // Alice must refuse to auto-accept and surface a HandleChanged notice.
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+
+    let home_handle = "~bob@home.host";
+    let vpn_handle = "~bob@vpn.mullvad.net";
+
+    // First handshake: pins bob's fp under the home handle.
+    let req1 = bob.build_keyreq("#x").unwrap();
+    alice.handle_keyreq(home_handle, &req1).unwrap().unwrap();
+    assert!(alice.take_pending_trust_changes().is_empty());
+
+    // Second KEYREQ from bob (same identity — we reuse the same E2eManager,
+    // so the long-term Ed25519 is unchanged) but under a different handle.
+    let req2 = bob.build_keyreq("#x").unwrap();
+    assert_eq!(req1.pubkey, req2.pubkey, "same bob → same pubkey");
+    let err = alice
+        .handle_keyreq(vpn_handle, &req2)
+        .expect_err("must refuse to auto-rebind handle");
+    match err {
+        E2eError::HandleMismatch { .. } => {}
+        other => panic!("expected HandleMismatch, got {other:?}"),
+    }
+
+    let notices = alice.take_pending_trust_changes();
+    assert_eq!(notices.len(), 1);
+    match &notices[0].change {
+        TrustChange::HandleChanged {
+            old_handle,
+            new_handle,
+            fingerprint,
+        } => {
+            assert_eq!(old_handle, home_handle);
+            assert_eq!(new_handle, vpn_handle);
+            assert_eq!(*fingerprint, bob.fingerprint());
+        }
+        other => panic!("expected HandleChanged, got {other:?}"),
+    }
+}
+
+#[test]
+fn revoked_peer_cannot_re_handshake() {
+    // Alice handshakes with Bob, then revokes him. A subsequent KEYREQ
+    // must be refused and surface a Revoked notice.
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+
+    let bob_handle = "~bob@b.host";
+
+    // Initial handshake pins bob.
+    let req1 = bob.build_keyreq("#x").unwrap();
+    alice.handle_keyreq(bob_handle, &req1).unwrap().unwrap();
+    assert!(alice.take_pending_trust_changes().is_empty());
+
+    // Revoke bob in alice's keyring.
+    alice
+        .keyring()
+        .upsert_peer(&crate::e2e::keyring::PeerRecord {
+            fingerprint: bob.fingerprint(),
+            pubkey: bob.identity_pub(),
+            last_handle: Some(bob_handle.to_string()),
+            last_nick: None,
+            first_seen: 0,
+            last_seen: 1,
+            global_status: TrustStatus::Revoked,
+        })
+        .unwrap();
+
+    // Bob retries a KEYREQ; alice must refuse and warn.
+    let req2 = bob.build_keyreq("#x").unwrap();
+    let err = alice
+        .handle_keyreq(bob_handle, &req2)
+        .expect_err("must refuse revoked peer");
+    match err {
+        E2eError::HandleMismatch { .. } => {}
+        other => panic!("expected HandleMismatch for revoked, got {other:?}"),
+    }
+
+    let notices = alice.take_pending_trust_changes();
+    assert_eq!(notices.len(), 1);
+    match &notices[0].change {
+        TrustChange::Revoked {
+            handle,
+            fingerprint,
+        } => {
+            assert_eq!(handle, bob_handle);
+            assert_eq!(*fingerprint, bob.fingerprint());
+        }
+        other => panic!("expected Revoked, got {other:?}"),
+    }
 }
 
 #[test]

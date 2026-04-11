@@ -3239,30 +3239,137 @@ fn try_dispatch_rpe2e_ctcp(
     let _ = target;
 
     match parsed {
-        HandshakeMsg::Req(req) => match mgr.handle_keyreq(&sender_handle, &req) {
-            Ok(Some(rsp)) => {
-                let body = mgr.encode_keyrsp_ctcp(&rsp);
-                state
-                    .pending_e2e_sends
-                    .push(crate::state::PendingE2eSend {
-                        connection_id: conn_id.to_string(),
-                        target: nick,
-                        notice_text: body,
-                    });
-                Some(RpEe2eOutcome::Handled)
+        HandshakeMsg::Req(req) => {
+            let result = mgr.handle_keyreq(&sender_handle, &req);
+            surface_pending_trust_changes(state, conn_id, &mgr);
+            match result {
+                Ok(Some(rsp)) => {
+                    let body = mgr.encode_keyrsp_ctcp(&rsp);
+                    state
+                        .pending_e2e_sends
+                        .push(crate::state::PendingE2eSend {
+                            connection_id: conn_id.to_string(),
+                            target: nick,
+                            notice_text: body,
+                        });
+                    Some(RpEe2eOutcome::Handled)
+                }
+                Ok(None) => Some(RpEe2eOutcome::Handled),
+                Err(e) => {
+                    tracing::warn!("handle_keyreq error: {e}");
+                    Some(RpEe2eOutcome::Handled)
+                }
             }
-            Ok(None) => Some(RpEe2eOutcome::Handled),
-            Err(e) => {
-                tracing::warn!("handle_keyreq error: {e}");
-                Some(RpEe2eOutcome::Handled)
-            }
-        },
+        }
         HandshakeMsg::Rsp(rsp) => {
-            if let Err(e) = mgr.handle_keyrsp(&sender_handle, &rsp) {
+            let result = mgr.handle_keyrsp(&sender_handle, &rsp);
+            surface_pending_trust_changes(state, conn_id, &mgr);
+            if let Err(e) = result {
                 tracing::warn!("handle_keyrsp error: {e}");
             }
             Some(RpEe2eOutcome::Handled)
         }
+    }
+}
+
+/// Drain all pending TOFU warnings from the manager and emit them as
+/// themed `[E2E]` event messages. Each notice targets the channel the
+/// handshake referenced (from the KEYREQ/KEYRSP payload); if that channel
+/// has no buffer yet the message falls back to the active-or-server
+/// buffer so the warning still reaches the user.
+fn surface_pending_trust_changes(
+    state: &mut AppState,
+    conn_id: &str,
+    mgr: &crate::e2e::E2eManager,
+) {
+    use crate::e2e::manager::TrustChange;
+    let notices = mgr.take_pending_trust_changes();
+    if notices.is_empty() {
+        return;
+    }
+    for notice in notices {
+        let target_buffer = if notice.channel.is_empty() {
+            active_or_server_buffer(state, conn_id)
+        } else {
+            let cand = make_buffer_id(conn_id, &notice.channel);
+            if state.buffers.contains_key(&cand) {
+                cand
+            } else {
+                active_or_server_buffer(state, conn_id)
+            }
+        };
+        let (text, event_key) = match &notice.change {
+            TrustChange::FingerprintChanged {
+                handle,
+                old_fp,
+                new_fp,
+            } => {
+                let old_hex = hex::encode(old_fp);
+                let new_hex = hex::encode(new_fp);
+                let short_old = &old_hex[..old_hex.len().min(16)];
+                let short_new = &new_hex[..new_hex.len().min(16)];
+                (
+                    format!(
+                        "[E2E] WARNING: {handle} identity key has CHANGED\n      \
+                         old fp: {short_old}\n      \
+                         new fp: {short_new}\n      \
+                         run /e2e reverify {handle} to accept the new key"
+                    ),
+                    "e2e_error",
+                )
+            }
+            TrustChange::HandleChanged {
+                old_handle,
+                new_handle,
+                fingerprint,
+            } => {
+                let fp_hex = hex::encode(fingerprint);
+                let short = &fp_hex[..fp_hex.len().min(16)];
+                (
+                    format!(
+                        "[E2E] notice: known key {short} appeared under new handle\n      \
+                         old handle: {old_handle}\n      \
+                         new handle: {new_handle}\n      \
+                         run /e2e reverify {new_handle} to accept"
+                    ),
+                    "e2e_warning",
+                )
+            }
+            TrustChange::Revoked {
+                handle,
+                fingerprint,
+            } => {
+                let fp_hex = hex::encode(fingerprint);
+                let short = &fp_hex[..fp_hex.len().min(16)];
+                (
+                    format!(
+                        "[E2E] ERROR: peer {handle} (fp={short}) is REVOKED; \
+                         handshake refused. run /e2e unrevoke {handle} to restore"
+                    ),
+                    "e2e_error",
+                )
+            }
+            // Known / New never produce a notice but we match exhaustively.
+            TrustChange::Known | TrustChange::New => continue,
+        };
+        let id = state.next_message_id();
+        state.add_message(
+            &target_buffer,
+            Message {
+                id,
+                timestamp: Utc::now(),
+                message_type: MessageType::Event,
+                nick: None,
+                nick_mode: None,
+                text,
+                highlight: true,
+                event_key: Some(event_key.to_string()),
+                event_params: None,
+                log_msg_id: None,
+                log_ref_id: None,
+                tags: None,
+            },
+        );
     }
 }
 

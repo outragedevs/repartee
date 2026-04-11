@@ -264,6 +264,60 @@ impl Keyring {
         }))
     }
 
+    /// Find a peer by their last known handle (`ident@host`). This is the
+    /// reverse lookup used for the `(known fingerprint, new handle)` warning
+    /// case in TOFU classification. Returns `None` if no row matches. If
+    /// multiple peer rows share the same `last_handle` (theoretically
+    /// possible if two different identities lived under the same host at
+    /// different times), the most recently seen wins.
+    pub fn get_peer_by_handle(&self, handle: &str) -> Result<Option<PeerRecord>> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let row: Option<(Vec<u8>, Vec<u8>, Option<String>, Option<String>, i64, i64, String)> =
+            conn.query_row(
+                "SELECT fingerprint, pubkey, last_handle, last_nick, first_seen, last_seen, global_status
+                 FROM e2e_peers
+                 WHERE last_handle = ?1
+                 ORDER BY last_seen DESC
+                 LIMIT 1",
+                params![handle],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((fp, pk, last_handle, last_nick, first, last, status)) = row else {
+            return Ok(None);
+        };
+        if fp.len() != 16 || pk.len() != 32 {
+            return Err(crate::e2e::error::E2eError::Keyring(format!(
+                "e2e_peers row has unexpected blob lengths (fp={}, pk={})",
+                fp.len(),
+                pk.len()
+            )));
+        }
+        let mut fp_arr = [0u8; 16];
+        let mut pk_arr = [0u8; 32];
+        fp_arr.copy_from_slice(&fp);
+        pk_arr.copy_from_slice(&pk);
+        Ok(Some(PeerRecord {
+            fingerprint: fp_arr,
+            pubkey: pk_arr,
+            last_handle,
+            last_nick,
+            first_seen: first,
+            last_seen: last,
+            global_status: TrustStatus::parse(&status),
+        }))
+    }
+
     // ---------- outgoing sessions ----------
 
     pub fn set_outgoing_session(
@@ -333,6 +387,52 @@ impl Keyring {
 
     pub fn set_incoming_session(&self, s: &IncomingSession) -> Result<()> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
+        conn.execute(
+            "INSERT OR REPLACE INTO e2e_incoming_sessions
+                (handle, channel, fingerprint, sk, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                s.handle,
+                s.channel,
+                s.fingerprint.as_slice(),
+                s.sk.as_slice(),
+                s.status.as_str(),
+                s.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Install an incoming session under strict TOFU semantics. If a row
+    /// already exists for the same `(handle, channel)` with a DIFFERENT
+    /// fingerprint, this returns `E2eError::HandleMismatch` and leaves the
+    /// existing row untouched — callers surface that as a TOFU warning and
+    /// require `/e2e reverify` to accept the new key.
+    ///
+    /// Idempotent refresh (same fingerprint) is allowed: the row is updated
+    /// in place, preserving `(handle, channel)` as the logical identity.
+    ///
+    /// This is the method the handshake consumer uses. The plain
+    /// `set_incoming_session` remains for explicit-override paths
+    /// (`/e2e reverify`, import, tests).
+    pub fn install_incoming_session_strict(&self, s: &IncomingSession) -> Result<()> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let existing: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT fingerprint FROM e2e_incoming_sessions
+                 WHERE handle = ?1 AND channel = ?2",
+                params![s.handle, s.channel],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(existing_fp) = existing
+            && existing_fp.as_slice() != s.fingerprint.as_slice()
+        {
+            return Err(crate::e2e::error::E2eError::HandleMismatch {
+                expected: format!("fp={}", hex::encode(&existing_fp)),
+                got: format!("fp={}", hex::encode(s.fingerprint)),
+            });
+        }
         conn.execute(
             "INSERT OR REPLACE INTO e2e_incoming_sessions
                 (handle, channel, fingerprint, sk, status, created_at)
@@ -939,6 +1039,106 @@ mod tests {
         assert!(all[0].pending_rotation);
         assert_eq!(all[1].channel, "#rust");
         assert!(!all[1].pending_rotation);
+    }
+
+    #[test]
+    fn install_incoming_session_strict_rejects_fingerprint_change() {
+        let kr = open_mem();
+        let first = IncomingSession {
+            handle: "~alice@host".into(),
+            channel: "#x".into(),
+            fingerprint: [0xaa; 16],
+            sk: [1u8; 32],
+            status: TrustStatus::Trusted,
+            created_at: 100,
+        };
+        kr.install_incoming_session_strict(&first).unwrap();
+
+        // A second KEYRSP under the same (handle, channel) signed by a
+        // different Ed25519 identity — must be rejected.
+        let imposter = IncomingSession {
+            fingerprint: [0xbb; 16],
+            sk: [2u8; 32],
+            created_at: 200,
+            ..first
+        };
+        let err = kr
+            .install_incoming_session_strict(&imposter)
+            .expect_err("imposter must be rejected");
+        match err {
+            crate::e2e::error::E2eError::HandleMismatch { .. } => {}
+            other => panic!("expected HandleMismatch, got {other:?}"),
+        }
+
+        // Existing row is untouched: fingerprint and sk are still the first.
+        let loaded = kr.get_incoming_session("~alice@host", "#x").unwrap().unwrap();
+        assert_eq!(loaded.fingerprint, [0xaa; 16]);
+        assert_eq!(loaded.sk, [1u8; 32]);
+    }
+
+    #[test]
+    fn install_incoming_session_strict_accepts_same_fingerprint() {
+        let kr = open_mem();
+        let first = IncomingSession {
+            handle: "~alice@host".into(),
+            channel: "#x".into(),
+            fingerprint: [0xaa; 16],
+            sk: [1u8; 32],
+            status: TrustStatus::Trusted,
+            created_at: 100,
+        };
+        kr.install_incoming_session_strict(&first).unwrap();
+
+        // Same fingerprint, rotated session key, later timestamp → allowed.
+        let refresh = IncomingSession {
+            sk: [2u8; 32],
+            created_at: 200,
+            ..first
+        };
+        kr.install_incoming_session_strict(&refresh).unwrap();
+
+        let loaded = kr.get_incoming_session("~alice@host", "#x").unwrap().unwrap();
+        assert_eq!(loaded.fingerprint, [0xaa; 16]);
+        assert_eq!(loaded.sk, [2u8; 32]);
+        assert_eq!(loaded.created_at, 200);
+    }
+
+    #[test]
+    fn get_peer_by_handle_returns_most_recent() {
+        let kr = open_mem();
+        // Two different identities that both lived under ~alice@host at
+        // different times. get_peer_by_handle must return the most recent
+        // one so TrustChange classification surfaces the freshest row.
+        let older = PeerRecord {
+            fingerprint: [0x11; 16],
+            pubkey: [1; 32],
+            last_handle: Some("~alice@host".into()),
+            last_nick: Some("alice-old".into()),
+            first_seen: 100,
+            last_seen: 150,
+            global_status: TrustStatus::Trusted,
+        };
+        let newer = PeerRecord {
+            fingerprint: [0x22; 16],
+            pubkey: [2; 32],
+            last_handle: Some("~alice@host".into()),
+            last_nick: Some("alice-new".into()),
+            first_seen: 200,
+            last_seen: 250,
+            global_status: TrustStatus::Trusted,
+        };
+        kr.upsert_peer(&older).unwrap();
+        kr.upsert_peer(&newer).unwrap();
+
+        let loaded = kr
+            .get_peer_by_handle("~alice@host")
+            .unwrap()
+            .expect("reverse lookup must find a row");
+        assert_eq!(loaded.fingerprint, [0x22; 16]);
+        assert_eq!(loaded.last_nick.as_deref(), Some("alice-new"));
+
+        // Unknown handle → None.
+        assert!(kr.get_peer_by_handle("~ghost@nowhere").unwrap().is_none());
     }
 
     #[test]
