@@ -41,8 +41,11 @@ from nacl.bindings import (
     crypto_aead_xchacha20poly1305_ietf_decrypt,
     crypto_aead_xchacha20poly1305_ietf_NPUBBYTES,
     crypto_aead_xchacha20poly1305_ietf_KEYBYTES,
+    crypto_scalarmult,
+    crypto_scalarmult_base,
     crypto_sign_BYTES,
 )
+from nacl.exceptions import BadSignatureError
 from nacl.public import PrivateKey as X25519Priv, PublicKey as X25519Pub
 from nacl.utils import random as nacl_random
 
@@ -117,6 +120,11 @@ CREATE TABLE IF NOT EXISTS channels (
     enabled INTEGER NOT NULL DEFAULT 0,
     mode    TEXT NOT NULL DEFAULT 'normal'
 );
+CREATE TABLE IF NOT EXISTS pending (
+    channel     TEXT PRIMARY KEY,
+    eph_sk      BLOB NOT NULL,
+    created_at  INTEGER NOT NULL
+);
 """
 
 
@@ -189,6 +197,298 @@ def ensure_identity() -> tuple[bytes, bytes, bytes]:
             (pk, sk, fp, int(time.time())),
         )
         return pk, sk, fp
+
+
+# ── Ed25519 / X25519 primitives ──────────────────────────────────────────────
+
+
+def ed25519_sign(sk_bytes: bytes, msg: bytes) -> bytes:
+    """Detached Ed25519 signature. `sk_bytes` is the 32-byte seed stored in
+    the identity row (what SigningKey.__bytes__ returns)."""
+    signing = SigningKey(sk_bytes)
+    return signing.sign(msg).signature  # 64 bytes
+
+
+def ed25519_verify(pk_bytes: bytes, msg: bytes, sig: bytes) -> bool:
+    try:
+        VerifyKey(pk_bytes).verify(msg, sig)
+        return True
+    except BadSignatureError:
+        return False
+    except Exception:
+        return False
+
+
+def generate_x25519_keypair() -> tuple[bytes, bytes]:
+    """Fresh ephemeral X25519 keypair. We clamp the secret explicitly even
+    though libsodium's crypto_scalarmult_base already clamps internally —
+    this keeps the stored bytes in canonical RFC 7748 form for interop with
+    the Rust side (x25519-dalek's StaticSecret also stores clamped bytes).
+    """
+    sk_arr = bytearray(nacl_random(32))
+    sk_arr[0] &= 248
+    sk_arr[31] &= 127
+    sk_arr[31] |= 64
+    sk = bytes(sk_arr)
+    pk = crypto_scalarmult_base(sk)
+    return sk, pk
+
+
+def x25519_ecdh(sk: bytes, peer_pk: bytes) -> bytes:
+    """Raw X25519 scalar multiplication. libsodium's crypto_scalarmult
+    already validates the output is non-zero (low-order point rejection),
+    so no extra check is required here."""
+    return crypto_scalarmult(sk, peer_pk)
+
+
+# ── Handshake: KEYREQ / KEYRSP ───────────────────────────────────────────────
+
+
+def _sig_payload_keyreq(channel: str, pub: bytes, eph_x25519: bytes, nonce: bytes) -> bytes:
+    return (
+        b"KEYREQ:"
+        + channel.encode()
+        + b":"
+        + pub
+        + b":"
+        + eph_x25519
+        + b":"
+        + nonce
+    )
+
+
+def _sig_payload_keyrsp(
+    channel: str,
+    pub: bytes,
+    eph_pub: bytes,
+    wrap_nonce: bytes,
+    wrap_ct: bytes,
+    nonce: bytes,
+) -> bytes:
+    return (
+        b"KEYRSP:"
+        + channel.encode()
+        + b":"
+        + pub
+        + b":"
+        + eph_pub
+        + b":"
+        + wrap_nonce
+        + b":"
+        + wrap_ct
+        + b":"
+        + nonce
+    )
+
+
+def parse_keyreq(body: str) -> dict | None:
+    """Parse the body inside `\\x01 ... \\x01` for a KEYREQ frame. Returns
+    None on any malformed input."""
+    parts = body.split()
+    if len(parts) < 7 or parts[0] != CTCP_TAG or parts[1] != "KEYREQ":
+        return None
+    kv: dict[str, str] = {}
+    for p in parts[2:]:
+        if "=" in p:
+            k, v = p.split("=", 1)
+            kv[k] = v
+    try:
+        if kv.get("v") != "1":
+            return None
+        channel = kv["chan"]
+        pub = bytes.fromhex(kv["pub"])
+        eph_x25519 = bytes.fromhex(kv["eph"])
+        nonce = bytes.fromhex(kv["nonce"])
+        sig = bytes.fromhex(kv["sig"])
+    except (KeyError, ValueError):
+        return None
+    if len(pub) != 32 or len(eph_x25519) != 32 or len(nonce) != 16 or len(sig) != 64:
+        return None
+    return {
+        "channel": channel,
+        "pub": pub,
+        "eph_x25519": eph_x25519,
+        "nonce": nonce,
+        "sig": sig,
+    }
+
+
+def parse_keyrsp(body: str) -> dict | None:
+    """Parse the body inside `\\x01 ... \\x01` for a KEYRSP frame. Returns
+    None on any malformed input."""
+    parts = body.split()
+    if len(parts) < 9 or parts[0] != CTCP_TAG or parts[1] != "KEYRSP":
+        return None
+    kv: dict[str, str] = {}
+    for p in parts[2:]:
+        if "=" in p:
+            k, v = p.split("=", 1)
+            kv[k] = v
+    try:
+        if kv.get("v") != "1":
+            return None
+        channel = kv["chan"]
+        pub = bytes.fromhex(kv["pub"])
+        eph_pub = bytes.fromhex(kv["eph"])
+        wrap_nonce = bytes.fromhex(kv["wnonce"])
+        wrap_ct = base64.b64decode(kv["wrap"])
+        nonce = bytes.fromhex(kv["nonce"])
+        sig = bytes.fromhex(kv["sig"])
+    except (KeyError, ValueError):
+        return None
+    if (
+        len(pub) != 32
+        or len(eph_pub) != 32
+        or len(wrap_nonce) != NONCE_LEN
+        or len(nonce) != 16
+        or len(sig) != 64
+    ):
+        return None
+    return {
+        "channel": channel,
+        "pub": pub,
+        "eph_pub": eph_pub,
+        "wrap_nonce": wrap_nonce,
+        "wrap_ct": wrap_ct,
+        "nonce": nonce,
+        "sig": sig,
+    }
+
+
+def build_keyreq(channel: str) -> str:
+    """Build a signed KEYREQ for `channel`. Stores the ephemeral secret in
+    the `pending` table so the matching KEYRSP can complete the ECDH.
+    Returns the full `\\x01 ... \\x01` CTCP frame ready to send as a NOTICE
+    payload."""
+    pk, sk, _fp = ensure_identity()
+    eph_sk, eph_pk = generate_x25519_keypair()
+    req_nonce = nacl_random(16)
+    sig_payload = _sig_payload_keyreq(channel, pk, eph_pk, req_nonce)
+    sig = ed25519_sign(sk, sig_payload)
+
+    with db_conn() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO pending VALUES (?, ?, ?)",
+            (channel, eph_sk, int(time.time())),
+        )
+
+    body = (
+        f"{CTCP_TAG} KEYREQ v=1 chan={channel} pub={pk.hex()} "
+        f"eph={eph_pk.hex()} nonce={req_nonce.hex()} sig={sig.hex()}"
+    )
+    return "\x01" + body + "\x01"
+
+
+def handle_keyreq(sender_handle: str, body: str) -> str | None:
+    """Handle an inbound KEYREQ. On success returns the full `\\x01 ... \\x01`
+    KEYRSP frame to send back; on any validation failure returns None."""
+    req = parse_keyreq(body)
+    if req is None:
+        return None
+
+    sig_payload = _sig_payload_keyreq(
+        req["channel"], req["pub"], req["eph_x25519"], req["nonce"]
+    )
+    if not ed25519_verify(req["pub"], sig_payload, req["sig"]):
+        return None
+
+    with db_conn() as c:
+        row = c.execute(
+            "SELECT enabled FROM channels WHERE channel = ?", (req["channel"],)
+        ).fetchone()
+    if row is None or not row[0]:
+        return None
+
+    # TOFU upsert peer.
+    peer_fp = fingerprint(req["pub"])
+    now = int(time.time())
+    with db_conn() as c:
+        existing = c.execute(
+            "SELECT first_seen FROM peers WHERE fp = ?", (peer_fp,)
+        ).fetchone()
+        first = existing[0] if existing else now
+        c.execute(
+            "INSERT OR REPLACE INTO peers VALUES (?, ?, ?, ?, ?, ?)",
+            (peer_fp, req["pub"], sender_handle, first, now, "trusted"),
+        )
+
+    # Responder ephemeral keypair + ECDH + HKDF wrap key.
+    eph_sk, eph_pk = generate_x25519_keypair()
+    shared = x25519_ecdh(eph_sk, req["eph_x25519"])
+    info = b"RPE2E01-WRAP:" + req["channel"].encode()
+    wrap_key = hkdf_sha256(HKDF_SALT, shared, info, KEY_LEN)
+
+    # Wrap the outgoing session key for this channel under the derived key.
+    our_sk_bytes = get_or_generate_outgoing_key(req["channel"])
+    wrap_nonce, wrap_ct = aead_encrypt(wrap_key, info, our_sk_bytes)
+
+    # Sign the KEYRSP.
+    my_pk, my_sk, _my_fp = ensure_identity()
+    rsp_nonce = nacl_random(16)
+    sig_payload2 = _sig_payload_keyrsp(
+        req["channel"], my_pk, eph_pk, wrap_nonce, wrap_ct, rsp_nonce
+    )
+    sig = ed25519_sign(my_sk, sig_payload2)
+
+    body_out = (
+        f"{CTCP_TAG} KEYRSP v=1 chan={req['channel']} pub={my_pk.hex()} "
+        f"eph={eph_pk.hex()} wnonce={wrap_nonce.hex()} "
+        f"wrap={base64.b64encode(wrap_ct).decode()} "
+        f"nonce={rsp_nonce.hex()} sig={sig.hex()}"
+    )
+    return "\x01" + body_out + "\x01"
+
+
+def handle_keyrsp(sender_handle: str, body: str) -> bool:
+    """Handle an inbound KEYRSP, completing a previously initiated handshake.
+    Returns True if a trusted incoming session was installed, False otherwise."""
+    rsp = parse_keyrsp(body)
+    if rsp is None:
+        return False
+
+    sig_payload = _sig_payload_keyrsp(
+        rsp["channel"],
+        rsp["pub"],
+        rsp["eph_pub"],
+        rsp["wrap_nonce"],
+        rsp["wrap_ct"],
+        rsp["nonce"],
+    )
+    if not ed25519_verify(rsp["pub"], sig_payload, rsp["sig"]):
+        return False
+
+    with db_conn() as c:
+        row = c.execute(
+            "SELECT eph_sk FROM pending WHERE channel = ?", (rsp["channel"],)
+        ).fetchone()
+        if row is None:
+            return False
+        eph_sk = row[0]
+        c.execute("DELETE FROM pending WHERE channel = ?", (rsp["channel"],))
+
+    shared = x25519_ecdh(eph_sk, rsp["eph_pub"])
+    info = b"RPE2E01-WRAP:" + rsp["channel"].encode()
+    wrap_key = hkdf_sha256(HKDF_SALT, shared, info, KEY_LEN)
+    session_key = aead_decrypt(wrap_key, rsp["wrap_nonce"], info, rsp["wrap_ct"])
+    if session_key is None or len(session_key) != KEY_LEN:
+        return False
+
+    peer_fp = fingerprint(rsp["pub"])
+    now = int(time.time())
+    with db_conn() as c:
+        existing = c.execute(
+            "SELECT first_seen FROM peers WHERE fp = ?", (peer_fp,)
+        ).fetchone()
+        first = existing[0] if existing else now
+        c.execute(
+            "INSERT OR REPLACE INTO peers VALUES (?, ?, ?, ?, ?, ?)",
+            (peer_fp, rsp["pub"], sender_handle, first, now, "trusted"),
+        )
+        c.execute(
+            "INSERT OR REPLACE INTO incoming VALUES (?, ?, ?, ?, ?, ?)",
+            (sender_handle, rsp["channel"], peer_fp, session_key, "trusted", now),
+        )
+    return True
 
 
 # ── Wire format ───────────────────────────────────────────────────────────────
@@ -307,7 +607,22 @@ def hook_irc_in_privmsg(data, modifier, server, msg):
                 (handle, target),
             ).fetchone()
         if row is None or row[1] != "trusted":
-            return ""  # unknown peer → drop
+            # Auto-KEYREQ on missing/untrusted session, subject to the
+            # per-peer rate limit (30s) matching the Rust RateLimiter.
+            last = _rate_limit_sent.get(handle, 0.0)
+            now_f = time.time()
+            if now_f - last >= KEYREQ_MIN_INTERVAL:
+                _rate_limit_sent[handle] = now_f
+                try:
+                    kreq = build_keyreq(target)
+                    if weechat is not None:
+                        weechat.command(
+                            weechat.buffer_search("irc", f"{server}.{target}"),
+                            f"/quote NOTICE {nick} :{kreq}",
+                        )
+                except Exception:
+                    pass
+            return ""  # drop the encrypted line, nothing to render yet
         sk = row[0]
         aad = build_aad(target, wire["msgid"], wire["ts"], wire["part"], wire["total"])
         pt = aead_decrypt(sk, wire["nonce"], aad, wire["ct"])
@@ -374,6 +689,53 @@ def hook_input_text_display(data, modifier, modifier_data, text):
         return text
 
 
+def hook_irc_in_notice(data, modifier, server, msg):
+    """Intercept inbound NOTICEs and dispatch RPE2E CTCP handshake frames.
+
+    Weechat's modifier signature here is `(data, modifier, server_name, msg)`
+    with `msg` being a raw IRC line like
+    `:nick!ident@host NOTICE target :\x01RPEE2E KEYREQ ...\x01`.
+    Returning `""` suppresses rendering; returning the original `msg`
+    lets weechat process it normally.
+    """
+    try:
+        if not msg.startswith(":"):
+            return msg
+        prefix_end = msg.index(" ")
+        prefix = msg[1:prefix_end]
+        rest = msg[prefix_end + 1 :]
+        if "!" not in prefix or "@" not in prefix:
+            return msg
+        nick, userhost = prefix.split("!", 1)
+        sender_handle = userhost  # ident@host
+
+        rest_parts = rest.split(" ", 2)
+        if len(rest_parts) < 3 or rest_parts[0] != "NOTICE":
+            return msg
+        text = rest_parts[2][1:] if rest_parts[2].startswith(":") else rest_parts[2]
+
+        if not (text.startswith("\x01") and text.endswith("\x01")) or len(text) < 2:
+            return msg
+        inner = text[1:-1]
+        if not inner.startswith(CTCP_TAG + " "):
+            return msg
+
+        if inner.startswith(CTCP_TAG + " KEYREQ "):
+            rsp_wire = handle_keyreq(sender_handle, inner)
+            if rsp_wire is not None and weechat is not None:
+                weechat.command(
+                    weechat.buffer_search("irc", f"server.{server}"),
+                    f"/quote NOTICE {nick} :{rsp_wire}",
+                )
+            return ""  # suppress CTCP rendering
+        if inner.startswith(CTCP_TAG + " KEYRSP "):
+            handle_keyrsp(sender_handle, inner)
+            return ""
+        return msg
+    except Exception:
+        return msg
+
+
 # ── Commands ──────────────────────────────────────────────────────────────────
 
 
@@ -386,7 +748,7 @@ def cmd_e2e(data, buffer, args):
         if weechat:
             weechat.prnt(
                 "",
-                "Usage: /e2e <on|off|mode|fingerprint|list|status|accept|revoke|forget|rotate>",
+                "Usage: /e2e <on|off|mode|fingerprint|list|status|accept|revoke|forget|rotate|handshake>",
             )
     elif sub == "fingerprint":
         pk, sk, fp = ensure_identity()
@@ -496,6 +858,34 @@ def cmd_e2e(data, buffer, args):
             c.execute("DELETE FROM incoming WHERE handle LIKE ?", (f"{nick}%",))
         if weechat:
             weechat.prnt("", f"[E2E] forgot {nick}")
+    elif sub == "handshake":
+        if not rest:
+            if weechat:
+                weechat.prnt("", "Usage: /e2e handshake <nick>")
+            return weechat.WEECHAT_RC_OK if weechat else 0
+        nick = rest[0]
+        channel = (
+            weechat.buffer_get_string(buffer, "localvar_channel") if weechat else ""
+        )
+        server = (
+            weechat.buffer_get_string(buffer, "localvar_server") if weechat else ""
+        )
+        if not channel:
+            if weechat:
+                weechat.prnt("", "/e2e handshake: no active channel")
+            return weechat.WEECHAT_RC_OK if weechat else 0
+        try:
+            kreq = build_keyreq(channel)
+        except Exception as e:
+            if weechat:
+                weechat.prnt(buffer, f"[E2E] handshake failed: {e}")
+            return weechat.WEECHAT_RC_OK if weechat else 0
+        if weechat:
+            weechat.command(
+                weechat.buffer_search("irc", f"{server}.{channel}"),
+                f"/quote NOTICE {nick} :{kreq}",
+            )
+            weechat.prnt(buffer, f"[E2E] KEYREQ sent to {nick} for {channel}")
 
     return weechat.WEECHAT_RC_OK if weechat else 0
 
@@ -519,14 +909,16 @@ def main() -> None:
     ensure_identity()
     weechat.hook_modifier("irc_in_privmsg", "hook_irc_in_privmsg", "")
     weechat.hook_modifier("irc_out_privmsg", "hook_input_text_display", "")
+    weechat.hook_modifier("irc_in_notice", "hook_irc_in_notice", "")
     weechat.hook_command(
         "e2e",
         SCRIPT_DESC,
-        "<on|off|mode|fingerprint|list|status|accept|revoke|forget|rotate> [args]",
+        "<on|off|mode|fingerprint|list|status|accept|revoke|forget|rotate|handshake> [args]",
         "Manage RPE2E end-to-end encryption",
         "on || off || mode auto-accept|normal|quiet || fingerprint || list || status"
         " || accept %(irc_channel_nicks) || revoke %(irc_channel_nicks)"
-        " || forget %(irc_channel_nicks) || rotate",
+        " || forget %(irc_channel_nicks) || rotate"
+        " || handshake %(irc_channel_nicks)",
         "cmd_e2e",
         "",
     )
