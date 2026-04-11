@@ -61,3 +61,56 @@ pub const MAX_PLAINTEXT_PER_CHUNK: usize = 180;
 
 /// Replay-protection window for `ts` in AAD (seconds).
 pub const TS_TOLERANCE_SECS: i64 = 300;
+
+/// Derive the keyring `channel` context for a conversation.
+///
+/// For real IRC channels (prefixes `#`, `&`, `!`, `+`) the target is
+/// passed through unchanged. For private messages we construct the
+/// pseudochannel `@<peer_handle>` per spec §6, where `peer_handle` is
+/// the server-stamped `ident@host` of the remote peer. Two PMs from
+/// peers that happen to share a nick across different hosts — or the
+/// same peer reconnecting from a new host — therefore live under
+/// distinct keyring rows instead of colliding under a bare nick.
+///
+/// Callers **must** pass the raw server-stamped peer handle
+/// (`ident@host` as seen in the IRC prefix), never the peer's nick.
+/// Passing a nick reintroduces the collision the pseudochannel exists
+/// to prevent.
+#[must_use]
+pub fn context_key(target: &str, peer_handle: &str) -> String {
+    if target.starts_with(['#', '&', '!', '+']) {
+        target.to_string()
+    } else {
+        format!("@{peer_handle}")
+    }
+}
+
+#[cfg(test)]
+mod context_key_tests {
+    use super::context_key;
+
+    #[test]
+    fn channels_pass_through_unchanged() {
+        assert_eq!(context_key("#rust", "~bob@b.host"), "#rust");
+        assert_eq!(context_key("&local", "~bob@b.host"), "&local");
+        assert_eq!(context_key("!HXYZ", "~bob@b.host"), "!HXYZ");
+        assert_eq!(context_key("+modeless", "~bob@b.host"), "+modeless");
+    }
+
+    #[test]
+    fn pm_targets_become_pseudochannel() {
+        assert_eq!(
+            context_key("bob", "~bob@home.example.org"),
+            "@~bob@home.example.org"
+        );
+        // Same nick, different host → different pseudochannel.
+        assert_eq!(
+            context_key("bob", "~bob@vpn.example.org"),
+            "@~bob@vpn.example.org"
+        );
+        assert_ne!(
+            context_key("bob", "~bob@home.example.org"),
+            context_key("bob", "~bob@vpn.example.org")
+        );
+    }
+}

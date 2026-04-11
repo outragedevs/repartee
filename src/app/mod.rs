@@ -846,6 +846,7 @@ impl App {
             mode_params: None,
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
+            peer_handle: None,
         });
         state.set_active_buffer(&buf_id);
 

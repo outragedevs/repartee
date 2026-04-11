@@ -130,6 +130,7 @@ impl App {
             mode_params: None,
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
+            peer_handle: None,
         });
     }
 

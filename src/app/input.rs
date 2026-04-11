@@ -530,6 +530,7 @@ impl App {
                 mode_params: None,
                 list_modes: HashMap::new(),
                 last_speakers: Vec::new(),
+                peer_handle: None,
             });
         }
         self.state.set_active_buffer(&query_buf_id);
@@ -870,7 +871,29 @@ impl App {
         // already fits inside the IRC byte budget, so we skip
         // `split_irc_message`. The plaintext is still displayed locally as
         // the original (unencrypted) text — the user reads what they typed.
-        let (wire_lines, plain_echo) = self.e2e_encrypt_or_passthrough(&buffer_name, text);
+        //
+        // For PMs the context key is `@<peer_handle>` (spec §6), so we
+        // pass the buffer type through — the helper derives the
+        // pseudochannel from the Query buffer's cached `peer_handle`.
+        // When E2E is configured for a Query buffer but the peer's
+        // `ident@host` has not been captured yet (the user has never
+        // received a message from them), the helper returns `None` and
+        // we surface a themed refusal rather than leaking cleartext
+        // under a weak key.
+        let Some((wire_lines, plain_echo)) =
+            self.e2e_encrypt_or_passthrough(&buffer_name, &buf_type, text)
+        else {
+            crate::commands::helpers::add_local_event(
+                self,
+                &format!(
+                    "{err}[E2E] cannot encrypt PM without peer handle \
+                     — wait for a message from them first{rst}",
+                    err = crate::commands::types::C_ERR,
+                    rst = crate::commands::types::C_RST,
+                ),
+            );
+            return;
+        };
 
         // When echo-message is enabled, the server will echo our message back
         // with authoritative server-time — skip local display and wait for echo.
@@ -925,33 +948,90 @@ impl App {
         }
     }
 
-    /// Return `(wire_lines, local_plain)` where `wire_lines` is what goes out
-    /// on IRC (encrypted when e2e is enabled on the channel, otherwise the
-    /// plain text split at IRC byte boundaries) and `local_plain` is what is
-    /// echoed into the local buffer for the user.
-    fn e2e_encrypt_or_passthrough(&self, buffer_name: &str, text: &str) -> (Vec<String>, String) {
-        let Some(mgr) = self.state.e2e_manager.as_ref() else {
-            return (
+    /// Return `Some((wire_lines, local_plain))` where `wire_lines` is what
+    /// goes out on IRC (encrypted when e2e is enabled on the conversation,
+    /// otherwise the plain text split at IRC byte boundaries) and
+    /// `local_plain` is what is echoed into the local buffer for the user.
+    ///
+    /// Returns `None` to signal a hard refusal: the conversation is a PM
+    /// with an E2E config enabled under the `@<peer_handle>` pseudochannel
+    /// (spec §6), but the peer's `ident@host` has not been captured yet
+    /// (the user has never received a message from this peer in this
+    /// buffer). The caller must surface a themed error and drop the
+    /// message. This prevents silently encrypting under a nick-keyed row
+    /// that would collide with other peers sharing the same nick.
+    ///
+    /// For real IRC channels (`#&!+`) the context is the channel name,
+    /// unchanged. For Query buffers the context is `@<peer_handle>`
+    /// derived from the buffer's cached handle.
+    fn e2e_encrypt_or_passthrough(
+        &self,
+        buffer_name: &str,
+        buffer_type: &BufferType,
+        text: &str,
+    ) -> Option<(Vec<String>, String)> {
+        let plain_passthrough = || {
+            Some((
                 crate::irc::split_irc_message(text, crate::irc::MESSAGE_MAX_BYTES),
                 text.to_string(),
-            );
+            ))
         };
-        let cfg = mgr.keyring().get_channel_config(buffer_name).ok().flatten();
-        let enabled = cfg.is_some_and(|c| c.enabled);
+
+        let Some(mgr) = self.state.e2e_manager.as_ref() else {
+            return plain_passthrough();
+        };
+
+        // Derive the keyring context from the conversation. Channels pass
+        // through unchanged; PMs require a server-stamped peer handle we
+        // cached on the Query buffer at the first incoming PRIVMSG.
+        let context: String = match buffer_type {
+            BufferType::Channel => buffer_name.to_string(),
+            BufferType::Query => {
+                let active_buf = self.state.active_buffer();
+                let Some(peer_handle) = active_buf
+                    .and_then(|b| b.peer_handle.as_deref())
+                else {
+                    // No peer handle yet. Check whether E2E was
+                    // (mis)configured under the bare-nick key from an
+                    // earlier version — if a legacy enabled row exists,
+                    // refuse rather than falling back to it. Otherwise
+                    // there is no E2E state at all, so plain passthrough
+                    // is safe.
+                    let legacy_enabled = mgr
+                        .keyring()
+                        .get_channel_config(buffer_name)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|c| c.enabled);
+                    if legacy_enabled {
+                        return None;
+                    }
+                    return plain_passthrough();
+                };
+                crate::e2e::context_key(buffer_name, peer_handle)
+            }
+            // Server/Status/DccChat/Shell/Mentions/Special: E2E does not
+            // apply. handle_plain_message already gates messaging on
+            // Channel|Query|DccChat, so we only reach this arm if a new
+            // sendable type is added in the future — passthrough is the
+            // safe default.
+            _ => return plain_passthrough(),
+        };
+
+        let enabled = mgr
+            .keyring()
+            .get_channel_config(&context)
+            .ok()
+            .flatten()
+            .is_some_and(|c| c.enabled);
         if !enabled {
-            return (
-                crate::irc::split_irc_message(text, crate::irc::MESSAGE_MAX_BYTES),
-                text.to_string(),
-            );
+            return plain_passthrough();
         }
-        match mgr.encrypt_outgoing(buffer_name, text) {
-            Ok(wires) => (wires, text.to_string()),
+        match mgr.encrypt_outgoing(&context, text) {
+            Ok(wires) => Some((wires, text.to_string())),
             Err(e) => {
-                tracing::warn!("e2e encrypt failed on {buffer_name}: {e}; sending cleartext");
-                (
-                    crate::irc::split_irc_message(text, crate::irc::MESSAGE_MAX_BYTES),
-                    text.to_string(),
-                )
+                tracing::warn!("e2e encrypt failed on {context}: {e}; sending cleartext");
+                plain_passthrough()
             }
         }
     }

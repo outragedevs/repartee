@@ -495,3 +495,167 @@ fn keyrsp_carries_pubkey_for_self_contained_verification() {
         other => panic!("expected Plaintext, got {other:?}"),
     }
 }
+
+// === PM pseudochannel (spec §6) =========================================
+//
+// The pseudochannel is an opaque label both sides agree on for a PM
+// conversation. Spec §6 prescribes the shape `@<peer_handle>` so two
+// peers who share a nick across different hosts end up under distinct
+// keyring rows. At the KEYRING layer the channel is just an opaque
+// string — AEAD AAD binds it and `(handle, channel)` is the primary
+// lookup key — so the tests below drive the full handshake/encrypt/
+// decrypt pipeline with the same concrete pseudochannel label on both
+// ends, exactly as the existing channel tests do with `"#x"`.
+//
+// The asymmetric-label wiring between two real repartee instances
+// (Alice's "bob" buffer vs Bob's "alice" buffer) is the responsibility
+// of the app layer in `app::input` / `irc::events`, which synthesizes
+// the label from the local `Buffer.peer_handle` on each side. The G9
+// refactor introduces the helper (`context_key`) and the buffer field;
+// reconciling the two sides' labels into a single shared one over the
+// wire is the focus of a later gate.
+
+#[test]
+fn pm_pseudochannel_round_trip() {
+    // A PM round-trips under the `@<peer_handle>` pseudochannel exactly
+    // like a real channel — there is nothing special about the key's
+    // shape from the keyring's point of view.
+    let alice = make_manager();
+    let bob = make_manager();
+
+    // Shared pseudochannel label for this PM conversation. Both sides
+    // agree on the string; the only thing that makes it a "pseudo"
+    // channel is the leading `@` and the fact that it encodes a raw
+    // userhost.
+    let pm_ctx = "@~bob@b.host";
+    enable_channel(&alice, pm_ctx, ChannelMode::AutoAccept);
+    enable_channel(&bob, pm_ctx, ChannelMode::AutoAccept);
+
+    let alice_handle = "~alice@a.host";
+    let bob_handle = "~bob@b.host";
+
+    // Bob initiates the handshake against the shared pseudochannel.
+    let req = bob.build_keyreq(pm_ctx).unwrap();
+    let rsp = alice
+        .handle_keyreq(bob_handle, &req)
+        .unwrap()
+        .expect("auto-accept should produce a KEYRSP");
+    bob.handle_keyrsp(alice_handle, &rsp).unwrap();
+
+    // Alice encrypts a PM under the pseudochannel — note the key is
+    // `@~bob@b.host`, not the bare nick `"bob"`.
+    let wires = alice.encrypt_outgoing(pm_ctx, "hi bob").unwrap();
+    assert_eq!(wires.len(), 1);
+
+    // Bob decrypts under the same pseudochannel.
+    let out = bob.decrypt_incoming(alice_handle, pm_ctx, &wires[0]).unwrap();
+    match out {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "hi bob"),
+        other => panic!("expected Plaintext, got {other:?}"),
+    }
+}
+
+#[test]
+fn pm_pseudochannel_distinguishes_same_nick_different_host() {
+    // The exact collision spec §6 warns about: two peers whose IRC
+    // nicks are both "alice" but whose userhost differs. Under a
+    // bare-nick scheme both sessions would overwrite each other in a
+    // single `channel = "alice"` row. Under the pseudochannel shape
+    // they sit under distinct `@~alice@home.host` and
+    // `@~alice@vpn.host` keys — each alice decrypts only her own
+    // bob-encrypted traffic, and a cross-attempt must not succeed.
+    //
+    // Handshake direction note: `build_keyreq` makes the caller the
+    // *initiator* and the responder the one whose outgoing session
+    // gets installed on both sides (responder's outgoing, initiator's
+    // incoming). To test "bob sends one session key per alice", each
+    // alice initiates a keyreq (so bob is responder and therefore gets
+    // a distinct outgoing session keyed under each alice's
+    // pseudochannel), and messages then flow `bob → aliceN`.
+    let bob = make_manager();
+
+    let alice1_handle = "~alice@home.host";
+    let alice2_handle = "~alice@vpn.host";
+    let pm_ctx_alice1 = format!("@{alice1_handle}");
+    let pm_ctx_alice2 = format!("@{alice2_handle}");
+
+    enable_channel(&bob, &pm_ctx_alice1, ChannelMode::AutoAccept);
+    enable_channel(&bob, &pm_ctx_alice2, ChannelMode::AutoAccept);
+
+    let alice1 = make_manager();
+    let alice2 = make_manager();
+    enable_channel(&alice1, &pm_ctx_alice1, ChannelMode::AutoAccept);
+    enable_channel(&alice2, &pm_ctx_alice2, ChannelMode::AutoAccept);
+
+    let bob_handle = "~bob@b.host";
+
+    // alice1 → bob handshake, then alice2 → bob handshake. After each,
+    // bob has a distinct outgoing session keyed on the respective
+    // pseudochannel, and the corresponding alice has an incoming
+    // session under `(bob_handle, pm_ctx_aliceN)`.
+    let r1 = alice1.build_keyreq(&pm_ctx_alice1).unwrap();
+    let rsp1 = bob.handle_keyreq(alice1_handle, &r1).unwrap().unwrap();
+    alice1.handle_keyrsp(bob_handle, &rsp1).unwrap();
+
+    let r2 = alice2.build_keyreq(&pm_ctx_alice2).unwrap();
+    let rsp2 = bob.handle_keyreq(alice2_handle, &r2).unwrap().unwrap();
+    alice2.handle_keyrsp(bob_handle, &rsp2).unwrap();
+
+    // Bob encrypts one PM for each alice under the matching
+    // pseudochannel. Under the old nick-keyed scheme bob's outgoing
+    // session table would only have one row (`"alice"`), and the
+    // second handshake would clobber the first; under pseudochannels
+    // the rows are distinct.
+    let w1 = bob
+        .encrypt_outgoing(&pm_ctx_alice1, "msg for alice1")
+        .unwrap();
+    let w2 = bob
+        .encrypt_outgoing(&pm_ctx_alice2, "msg for alice2")
+        .unwrap();
+
+    // Each alice decrypts her own message using her incoming session.
+    let o1 = alice1
+        .decrypt_incoming(bob_handle, &pm_ctx_alice1, &w1[0])
+        .unwrap();
+    let o2 = alice2
+        .decrypt_incoming(bob_handle, &pm_ctx_alice2, &w2[0])
+        .unwrap();
+    match (&o1, &o2) {
+        (DecryptOutcome::Plaintext(s1), DecryptOutcome::Plaintext(s2)) => {
+            assert_eq!(s1, "msg for alice1");
+            assert_eq!(s2, "msg for alice2");
+        }
+        _ => panic!("expected two Plaintext outcomes, got {o1:?} / {o2:?}"),
+    }
+
+    // Cross-attempt: alice2 tries to decrypt alice1's ciphertext, but
+    // her keyring has no `(bob_handle, pm_ctx_alice1)` row — she only
+    // has her own pseudochannel. The outcome is MissingKey, which is
+    // the collision isolation the pseudochannel scheme exists to
+    // provide.
+    let cross = alice2
+        .decrypt_incoming(bob_handle, &pm_ctx_alice1, &w1[0])
+        .unwrap();
+    assert!(
+        !matches!(cross, DecryptOutcome::Plaintext(_)),
+        "cross-decrypt must not succeed, got {cross:?}"
+    );
+}
+
+#[test]
+fn context_key_channels_vs_pms() {
+    // Unit-level check that the helper preserves channels and rewrites
+    // PMs — intentionally duplicated here as an integration-test-level
+    // breadcrumb alongside the keyring-driven tests.
+    use crate::e2e::context_key;
+
+    assert_eq!(context_key("#rust", "~bob@b.host"), "#rust");
+    assert_eq!(context_key("&local", "~bob@b.host"), "&local");
+    assert_eq!(context_key("!ABCDE", "~bob@b.host"), "!ABCDE");
+    assert_eq!(context_key("+modeless", "~bob@b.host"), "+modeless");
+    assert_eq!(
+        context_key("bob", "~bob@b.host"),
+        "@~bob@b.host",
+        "PM target must be rewritten to @<peer_handle>"
+    );
+}

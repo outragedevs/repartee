@@ -73,6 +73,7 @@ impl App {
             mode_params: None,
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
+            peer_handle: None,
         });
         self.state.set_active_buffer(&server_buf_id);
 
@@ -415,6 +416,7 @@ impl App {
                             mode_params: None,
                             list_modes: HashMap::new(),
                             last_speakers: Vec::new(),
+                            peer_handle: None,
                         });
                     }
                 }

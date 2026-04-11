@@ -715,6 +715,7 @@ fn shell_open(app: &mut App, command: Option<&str>) {
                 mode_params: None,
                 list_modes: HashMap::new(),
                 last_speakers: Vec::new(),
+                peer_handle: None,
             });
             app.state.set_active_buffer(&buf_id);
             app.shell_input_active = true;

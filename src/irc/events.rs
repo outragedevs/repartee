@@ -706,12 +706,19 @@ fn handle_privmsg(
     // `text` for the plaintext before any further processing. Strict handle
     // check uses the raw server-stamped `ident@host`, so attackers cannot
     // decrypt by spoofing a nick.
+    //
+    // Spec §6: the keyring context for a PM is `@<peer_handle>` (not the
+    // peer's nick), so two peers sharing a nick across different hosts
+    // live under separate session rows. For channels we pass the target
+    // through unchanged. `context_key` encapsulates both cases.
+    let sender_handle = format!("{ident}@{host}");
+    let decrypt_context = crate::e2e::context_key(target, &sender_handle);
     let decrypted_owned = try_decrypt_e2e(
         state,
         conn_id,
         &nick,
-        &format!("{ident}@{host}"),
-        buffer_name,
+        &sender_handle,
+        &decrypt_context,
         text,
     );
     let text: &str = decrypted_owned.as_deref().unwrap_or(text);
@@ -748,7 +755,10 @@ fn handle_privmsg(
         }
     }
 
-    // Create query buffer if it doesn't exist for PMs
+    // Create query buffer if it doesn't exist for PMs. When we create or
+    // find a Query buffer we also stamp `peer_handle` with the raw
+    // `ident@host` from the prefix — the E2E layer uses this to key PM
+    // session rows under `@<peer_handle>` instead of bare nick (spec §6).
     if !target_is_channel && !state.buffers.contains_key(&buffer_id) {
         state.add_buffer(Buffer {
             id: buffer_id.clone(),
@@ -766,7 +776,28 @@ fn handle_privmsg(
             mode_params: None,
             list_modes: std::collections::HashMap::new(),
             last_speakers: Vec::new(),
+            peer_handle: if is_own {
+                None
+            } else {
+                Some(format!("{ident}@{host}"))
+            },
         });
+    }
+
+    // Keep the Query buffer's `peer_handle` in sync with the latest
+    // server-stamped userhost. This matters when the peer reconnects from
+    // a new host — later messages will arrive with a different
+    // `ident@host`, and the cached handle must track it so the encrypt
+    // path picks up the new pseudochannel key. Never overwrite with
+    // `is_own` (echo-message) because that carries our own host.
+    if !target_is_channel
+        && !is_own
+        && let Some(buf) = state.buffers.get_mut(&buffer_id)
+    {
+        let new_handle = format!("{ident}@{host}");
+        if buf.peer_handle.as_deref() != Some(new_handle.as_str()) {
+            buf.peer_handle = Some(new_handle);
+        }
     }
 
     // account-tag: update NickEntry.account from message tags (supplementary)
@@ -1192,6 +1223,7 @@ fn handle_join(
                 mode_params: None,
                 list_modes: std::collections::HashMap::new(),
                 last_speakers: Vec::new(),
+                peer_handle: None,
             });
         }
         state.set_active_buffer(&buffer_id);
@@ -3444,6 +3476,7 @@ mod tests {
             mode_params: None,
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
+            peer_handle: None,
         });
         // Channel buffer
         let chan_id = make_buffer_id("test", "#test");
@@ -3463,6 +3496,7 @@ mod tests {
             mode_params: None,
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
+            peer_handle: None,
         });
         // Add ourselves to the channel
         state.add_nick(
@@ -3497,6 +3531,7 @@ mod tests {
             mode_params: None,
             list_modes: std::collections::HashMap::new(),
             last_speakers: Vec::new(),
+            peer_handle: None,
         }
     }
 
@@ -4231,6 +4266,7 @@ mod tests {
             mode_params: None,
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
+            peer_handle: None,
         });
 
         // Add alice to both channels
@@ -4365,6 +4401,7 @@ mod tests {
             mode_params: None,
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
+            peer_handle: None,
         });
 
         // Add alice to both channels
@@ -4492,6 +4529,7 @@ mod tests {
             mode_params: None,
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
+            peer_handle: None,
         });
 
         // Add alice to both channels
@@ -5030,6 +5068,7 @@ mod tests {
             mode_params: None,
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
+            peer_handle: None,
         });
 
         // Server echoes our NOTICE to "bob"

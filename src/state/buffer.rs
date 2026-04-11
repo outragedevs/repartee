@@ -150,6 +150,14 @@ pub struct Buffer {
     /// Recent speakers for tab completion, most recent first.
     /// Capped at [`LAST_SPEAKERS_CAP`]. Updated on PRIVMSG/NOTICE/ACTION.
     pub last_speakers: Vec<String>,
+    /// For [`BufferType::Query`] buffers, the server-stamped `ident@host`
+    /// of the remote peer, captured from the first PRIVMSG we receive from
+    /// them. Used by the E2E layer to key PM session rows under the
+    /// `@<peer_handle>` pseudochannel form (spec §6). `None` until the
+    /// peer speaks for the first time in this buffer — the encrypt path
+    /// refuses to send E2E traffic in that state rather than falling back
+    /// to a nick-keyed row.
+    pub peer_handle: Option<String>,
 }
 
 impl Buffer {
@@ -195,6 +203,7 @@ mod tests {
             mode_params: None,
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
+            peer_handle: None,
         };
 
         buf.touch_speaker("alice");
@@ -225,6 +234,7 @@ mod tests {
             mode_params: None,
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
+            peer_handle: None,
         };
 
         buf.touch_speaker("Alice");
@@ -251,6 +261,7 @@ mod tests {
             mode_params: None,
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
+            peer_handle: None,
         };
 
         for i in 0..60 {
