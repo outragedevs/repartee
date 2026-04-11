@@ -140,6 +140,180 @@ fn revoke_then_lazy_rotate_locks_out_revoked_peer() {
 }
 
 #[test]
+fn export_import_roundtrip() {
+    let alice = make_manager();
+    enable_channel(&alice, "#rust", ChannelMode::AutoAccept);
+
+    // Populate with peers, an outgoing session, AND an incoming session via
+    // a reciprocal handshake: bob asks alice for her key (alice gets a peer
+    // record + an outgoing session), and alice asks bob for his key (alice
+    // then installs an incoming session keyed to bob's handle).
+    let bob = make_manager();
+    enable_channel(&bob, "#rust", ChannelMode::AutoAccept);
+
+    let req_from_bob = bob.build_keyreq("#rust").unwrap();
+    let rsp_to_bob = alice
+        .handle_keyreq("~bob@b.host", &req_from_bob)
+        .unwrap()
+        .unwrap();
+    bob.handle_keyrsp("~alice@a.host", &rsp_to_bob).unwrap();
+
+    let req_from_alice = alice.build_keyreq("#rust").unwrap();
+    let rsp_to_alice = bob
+        .handle_keyreq("~alice@a.host", &req_from_alice)
+        .unwrap()
+        .unwrap();
+    alice
+        .handle_keyrsp("~bob@b.host", &rsp_to_alice)
+        .unwrap();
+
+    // Add more state to alice: an autotrust rule and a scheduled rotation
+    // so pending_rotation is exercised through the round-trip.
+    alice
+        .keyring()
+        .add_autotrust("#rust", "~carol@*", 1_000)
+        .unwrap();
+    alice
+        .keyring()
+        .mark_outgoing_pending_rotation("#rust")
+        .unwrap();
+
+    // Sanity-check alice before export.
+    let alice_peers_before = alice.keyring().list_all_peers().unwrap();
+    let alice_incoming_before = alice.keyring().list_all_incoming_sessions().unwrap();
+    let alice_outgoing_before = alice.keyring().list_all_outgoing_sessions().unwrap();
+    let alice_channels_before = alice.keyring().list_all_channel_configs().unwrap();
+    let alice_autotrust_before = alice.keyring().list_autotrust().unwrap();
+    let alice_identity_before = alice.keyring().load_identity().unwrap().unwrap();
+    assert!(!alice_peers_before.is_empty());
+    assert!(!alice_incoming_before.is_empty());
+    assert!(!alice_outgoing_before.is_empty());
+    assert!(alice_outgoing_before[0].pending_rotation);
+
+    // Export alice to a tempfile.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let summary =
+        crate::e2e::portable::export_to_path(alice.keyring(), tmp.path()).unwrap();
+    assert!(summary.peers >= 1);
+    assert!(summary.incoming >= 1);
+    assert!(summary.outgoing >= 1);
+    assert_eq!(summary.channels, alice_channels_before.len());
+    assert_eq!(summary.autotrust, alice_autotrust_before.len());
+
+    // Confirm file permissions are 0600 on Unix.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let mode = std::fs::metadata(tmp.path()).unwrap().mode();
+        assert_eq!(mode & 0o777, 0o600, "export should be 0600");
+    }
+
+    // Create a fresh manager with an empty keyring; import alice's snapshot
+    // and verify every table matches row-for-row.
+    let carol = make_manager();
+    let imported =
+        crate::e2e::portable::import_from_path(carol.keyring(), tmp.path()).unwrap();
+    assert!(imported.identity);
+    assert_eq!(imported.peers, alice_peers_before.len());
+    assert_eq!(imported.incoming, alice_incoming_before.len());
+    assert_eq!(imported.outgoing, alice_outgoing_before.len());
+    assert_eq!(imported.channels, alice_channels_before.len());
+    assert_eq!(imported.autotrust, alice_autotrust_before.len());
+
+    // Identity is byte-exact (including the private key).
+    let carol_identity = carol.keyring().load_identity().unwrap().unwrap();
+    assert_eq!(carol_identity.0, alice_identity_before.0); // pubkey
+    assert_eq!(carol_identity.1, alice_identity_before.1); // privkey
+    assert_eq!(carol_identity.2, alice_identity_before.2); // fingerprint
+    assert_eq!(carol_identity.3, alice_identity_before.3); // created_at
+
+    // Peers, sessions, channels, autotrust all have matching cardinality
+    // and content.
+    assert_eq!(
+        alice.keyring().list_all_peers().unwrap().len(),
+        carol.keyring().list_all_peers().unwrap().len()
+    );
+    assert_eq!(
+        alice.keyring().list_all_channel_configs().unwrap().len(),
+        carol.keyring().list_all_channel_configs().unwrap().len()
+    );
+    assert_eq!(
+        alice.keyring().list_autotrust().unwrap(),
+        carol.keyring().list_autotrust().unwrap()
+    );
+
+    // The outgoing session's pending_rotation flag round-trips correctly.
+    let carol_outgoing = carol.keyring().list_all_outgoing_sessions().unwrap();
+    assert_eq!(carol_outgoing.len(), 1);
+    assert!(carol_outgoing[0].pending_rotation);
+    assert_eq!(carol_outgoing[0].sk, alice_outgoing_before[0].sk);
+
+    // The incoming session key matches bit-for-bit.
+    let carol_incoming = carol.keyring().list_all_incoming_sessions().unwrap();
+    assert_eq!(carol_incoming.len(), 1);
+    assert_eq!(carol_incoming[0].sk, alice_incoming_before[0].sk);
+    assert_eq!(
+        carol_incoming[0].fingerprint,
+        alice_incoming_before[0].fingerprint
+    );
+    assert_eq!(carol_incoming[0].handle, alice_incoming_before[0].handle);
+    assert_eq!(
+        carol_incoming[0].status,
+        alice_incoming_before[0].status
+    );
+}
+
+#[test]
+fn import_rejects_bad_version() {
+    let alice = make_manager();
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        tmp.path(),
+        r#"{"version": 99, "exportedAt": 0, "identity": {"pubkey":"aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899","privkey":"aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899","fingerprint":"aabbccddeeff00112233445566778899","createdAt":0}, "peers":[], "incomingSessions":[], "outgoingSessions":[], "channels":[], "autotrust":[]}"#,
+    )
+    .unwrap();
+    let err = crate::e2e::portable::import_from_path(alice.keyring(), tmp.path())
+        .err()
+        .unwrap();
+    let msg = format!("{err}");
+    assert!(msg.contains("version"), "error should name version: {msg}");
+}
+
+#[test]
+fn import_rejects_truncated_hex() {
+    let alice = make_manager();
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    // Truncated identity fingerprint (only 15 bytes / 30 hex chars instead of 16 bytes / 32 hex chars).
+    std::fs::write(
+        tmp.path(),
+        r#"{"version": 1, "exportedAt": 0, "identity": {"pubkey":"aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899","privkey":"aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899","fingerprint":"aabbccddeeff001122334455667788","createdAt":0}, "peers":[], "incomingSessions":[], "outgoingSessions":[], "channels":[], "autotrust":[]}"#,
+    )
+    .unwrap();
+    let result = crate::e2e::portable::import_from_path(alice.keyring(), tmp.path());
+    let msg = format!("{}", result.err().unwrap());
+    assert!(
+        msg.contains("identity.fingerprint"),
+        "error should name field: {msg}"
+    );
+}
+
+#[test]
+fn import_rejects_bad_status_enum() {
+    let alice = make_manager();
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let body = r#"{"version":1,"exportedAt":0,"identity":{"pubkey":"aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899","privkey":"aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899","fingerprint":"aabbccddeeff00112233445566778899","createdAt":0},"peers":[{"fingerprint":"aabbccddeeff00112233445566778899","pubkey":"aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899","lastHandle":null,"lastNick":null,"firstSeen":0,"lastSeen":0,"globalStatus":"wibble"}],"incomingSessions":[],"outgoingSessions":[],"channels":[],"autotrust":[]}"#;
+    std::fs::write(tmp.path(), body).unwrap();
+    let result = crate::e2e::portable::import_from_path(alice.keyring(), tmp.path());
+    let err = result.err().unwrap();
+    let msg = format!("{err}");
+    assert!(msg.contains("wibble"), "error should name bad value: {msg}");
+    assert!(
+        msg.contains("globalStatus"),
+        "error should name field: {msg}"
+    );
+}
+
+#[test]
 fn keyrsp_carries_pubkey_for_self_contained_verification() {
     // Regression-style: proves that the initiator (`bob`) no longer needs
     // to know Alice's Ed25519 pubkey out-of-band. The KEYRSP itself

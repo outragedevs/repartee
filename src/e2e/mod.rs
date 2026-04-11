@@ -38,6 +38,7 @@ pub mod error;
 pub mod handshake;
 pub mod keyring;
 pub mod manager;
+pub mod portable;
 pub mod wire;
 
 #[allow(unused_imports)]

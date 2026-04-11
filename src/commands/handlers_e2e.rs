@@ -643,16 +643,76 @@ fn e2e_autotrust(app: &mut App, op: AutotrustOp) {
 
 // ─── export / import ─────────────────────────────────────────────────────────
 
-fn e2e_export(app: &mut App, _path: Option<&str>) {
-    err(
-        app,
-        "/e2e export: not yet implemented — use `sqlite3 \
-         ~/.repartee/logs/messages.db .dump e2e_%`",
-    );
+fn e2e_export(app: &mut App, path: Option<&str>) {
+    let Some(raw_path) = path else {
+        err(app, "/e2e export: usage: /e2e export <file>");
+        return;
+    };
+    let resolved = match crate::e2e::portable::expand_path(raw_path) {
+        Ok(p) => p,
+        Err(e) => {
+            err(app, &format!("/e2e export: {e}"));
+            return;
+        }
+    };
+    let Some(mgr) = require_mgr(app) else { return };
+    match crate::e2e::portable::export_to_path(mgr.keyring(), &resolved) {
+        Ok(summary) => {
+            let sessions = summary.incoming + summary.outgoing;
+            ok(
+                app,
+                &format!(
+                    "exported keyring to {} (identity + {} peers + {} sessions)",
+                    resolved.display(),
+                    summary.peers,
+                    sessions,
+                ),
+            );
+            // Session keys are written in plaintext — remind the user.
+            add_local_event(
+                app,
+                &format!(
+                    "  {C_DIM}warning: session keys are in plaintext in this file. \
+                     Protect it with filesystem ACLs; never share or commit it.{C_RST}"
+                ),
+            );
+        }
+        Err(e) => err(app, &format!("/e2e export: {e}")),
+    }
 }
 
-fn e2e_import(app: &mut App, _path: Option<&str>) {
-    err(app, "/e2e import: not yet implemented");
+fn e2e_import(app: &mut App, path: Option<&str>) {
+    let Some(raw_path) = path else {
+        err(app, "/e2e import: usage: /e2e import <file>");
+        return;
+    };
+    let resolved = match crate::e2e::portable::expand_path(raw_path) {
+        Ok(p) => p,
+        Err(e) => {
+            err(app, &format!("/e2e import: {e}"));
+            return;
+        }
+    };
+    let Some(mgr) = require_mgr(app) else { return };
+    match crate::e2e::portable::import_from_path(mgr.keyring(), &resolved) {
+        Ok(summary) => {
+            ok(
+                app,
+                &format!(
+                    "imported keyring from {} (identity={}, peers={}, incoming={}, \
+                     outgoing={}, channels={}, autotrust={})",
+                    resolved.display(),
+                    summary.identity,
+                    summary.peers,
+                    summary.incoming,
+                    summary.outgoing,
+                    summary.channels,
+                    summary.autotrust,
+                ),
+            );
+        }
+        Err(e) => err(app, &format!("/e2e import: {e}")),
+    }
 }
 
 // ─── help ────────────────────────────────────────────────────────────────────
@@ -677,8 +737,8 @@ const HELP_ENTRIES: &[(&str, &str)] = &[
     ("autotrust list", "List autotrust rules"),
     ("autotrust add <scope> <pat>", "Add an autotrust rule"),
     ("autotrust remove <pat>", "Remove an autotrust rule"),
-    ("export [path]", "Export keyring as JSON (placeholder)"),
-    ("import [path]", "Import keyring from JSON (placeholder)"),
+    ("export <file>", "Export keyring to a JSON file (plaintext keys, 0600)"),
+    ("import <file>", "Import keyring from a JSON file"),
     ("help", "Show this index"),
 ];
 

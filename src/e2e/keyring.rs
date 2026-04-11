@@ -514,6 +514,159 @@ impl Keyring {
         )?;
         Ok(())
     }
+
+    // ---------- full-table dump helpers (used by portable export) ----------
+
+    /// Return every row of `e2e_peers`, regardless of trust status.
+    ///
+    /// Used by the JSON export path. The existing `get_peer_by_fingerprint`
+    /// and `list_trusted_peers_for_channel` APIs are intentionally scoped
+    /// narrower for the hot-path lookups — this one is only for the bulk
+    /// dump.
+    pub fn list_all_peers(&self) -> Result<Vec<PeerRecord>> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT fingerprint, pubkey, last_handle, last_nick, first_seen, last_seen, global_status
+             FROM e2e_peers ORDER BY first_seen ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let fp: Vec<u8> = r.get(0)?;
+            let pk: Vec<u8> = r.get(1)?;
+            let last_handle: Option<String> = r.get(2)?;
+            let last_nick: Option<String> = r.get(3)?;
+            let first_seen: i64 = r.get(4)?;
+            let last_seen: i64 = r.get(5)?;
+            let status: String = r.get(6)?;
+            Ok((fp, pk, last_handle, last_nick, first_seen, last_seen, status))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (fp, pk, last_handle, last_nick, first_seen, last_seen, status) = row?;
+            if fp.len() != 16 || pk.len() != 32 {
+                return Err(crate::e2e::error::E2eError::Keyring(format!(
+                    "e2e_peers row has unexpected blob lengths (fp={}, pk={})",
+                    fp.len(),
+                    pk.len()
+                )));
+            }
+            let mut fp_arr = [0u8; 16];
+            let mut pk_arr = [0u8; 32];
+            fp_arr.copy_from_slice(&fp);
+            pk_arr.copy_from_slice(&pk);
+            out.push(PeerRecord {
+                fingerprint: fp_arr,
+                pubkey: pk_arr,
+                last_handle,
+                last_nick,
+                first_seen,
+                last_seen,
+                global_status: TrustStatus::parse(&status),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Return every row of `e2e_incoming_sessions`, across every channel.
+    pub fn list_all_incoming_sessions(&self) -> Result<Vec<IncomingSession>> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT handle, channel, fingerprint, sk, status, created_at
+             FROM e2e_incoming_sessions ORDER BY channel ASC, handle ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let handle: String = r.get(0)?;
+            let channel: String = r.get(1)?;
+            let fp: Vec<u8> = r.get(2)?;
+            let sk: Vec<u8> = r.get(3)?;
+            let st: String = r.get(4)?;
+            let ts: i64 = r.get(5)?;
+            Ok((handle, channel, fp, sk, st, ts))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (handle, channel, fp, sk, st, ts) = row?;
+            if fp.len() != 16 || sk.len() != 32 {
+                return Err(crate::e2e::error::E2eError::Keyring(format!(
+                    "e2e_incoming_sessions row has unexpected blob lengths (fp={}, sk={})",
+                    fp.len(),
+                    sk.len()
+                )));
+            }
+            let mut fp_arr = [0u8; 16];
+            let mut sk_arr = [0u8; 32];
+            fp_arr.copy_from_slice(&fp);
+            sk_arr.copy_from_slice(&sk);
+            out.push(IncomingSession {
+                handle,
+                channel,
+                fingerprint: fp_arr,
+                sk: sk_arr,
+                status: TrustStatus::parse(&st),
+                created_at: ts,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Return every row of `e2e_outgoing_sessions`.
+    pub fn list_all_outgoing_sessions(&self) -> Result<Vec<OutgoingSession>> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT channel, sk, created_at, pending_rotation
+             FROM e2e_outgoing_sessions ORDER BY channel ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let channel: String = r.get(0)?;
+            let sk: Vec<u8> = r.get(1)?;
+            let ts: i64 = r.get(2)?;
+            let pr: i64 = r.get(3)?;
+            Ok((channel, sk, ts, pr))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (channel, sk, ts, pr) = row?;
+            if sk.len() != 32 {
+                return Err(crate::e2e::error::E2eError::Keyring(format!(
+                    "e2e_outgoing_sessions row sk has unexpected length {}",
+                    sk.len()
+                )));
+            }
+            let mut sk_arr = [0u8; 32];
+            sk_arr.copy_from_slice(&sk);
+            out.push(OutgoingSession {
+                channel,
+                sk: sk_arr,
+                created_at: ts,
+                pending_rotation: pr != 0,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Return every row of `e2e_channel_config`.
+    pub fn list_all_channel_configs(&self) -> Result<Vec<ChannelConfig>> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT channel, enabled, mode
+             FROM e2e_channel_config ORDER BY channel ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let channel: String = r.get(0)?;
+            let enabled: i64 = r.get(1)?;
+            let mode: String = r.get(2)?;
+            Ok((channel, enabled, mode))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (channel, enabled, mode) = row?;
+            out.push(ChannelConfig {
+                channel,
+                enabled: enabled != 0,
+                mode: ChannelMode::parse(&mode),
+            });
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -691,5 +844,126 @@ mod tests {
         kr.remove_autotrust("~bob@*").unwrap();
         let list = kr.list_autotrust().unwrap();
         assert_eq!(list.len(), 1);
+    }
+
+    // ---------- list_all_* dump helpers (used by portable export) ----------
+
+    #[test]
+    fn list_all_peers_returns_every_row() {
+        let kr = open_mem();
+        let rec_a = PeerRecord {
+            fingerprint: [0xaa; 16],
+            pubkey: [1; 32],
+            last_handle: Some("~alice@a.host".into()),
+            last_nick: Some("alice".into()),
+            first_seen: 100,
+            last_seen: 110,
+            global_status: TrustStatus::Trusted,
+        };
+        let rec_b = PeerRecord {
+            fingerprint: [0xbb; 16],
+            pubkey: [2; 32],
+            last_handle: None,
+            last_nick: None,
+            first_seen: 200,
+            last_seen: 220,
+            global_status: TrustStatus::Pending,
+        };
+        let rec_c = PeerRecord {
+            fingerprint: [0xcc; 16],
+            pubkey: [3; 32],
+            last_handle: Some("~carol@c.host".into()),
+            last_nick: Some("carol".into()),
+            first_seen: 300,
+            last_seen: 330,
+            global_status: TrustStatus::Revoked,
+        };
+        kr.upsert_peer(&rec_a).unwrap();
+        kr.upsert_peer(&rec_b).unwrap();
+        kr.upsert_peer(&rec_c).unwrap();
+
+        let all = kr.list_all_peers().unwrap();
+        assert_eq!(all.len(), 3);
+        // Ordered by first_seen ASC.
+        assert_eq!(all[0].fingerprint, [0xaa; 16]);
+        assert_eq!(all[0].global_status, TrustStatus::Trusted);
+        assert_eq!(all[1].fingerprint, [0xbb; 16]);
+        assert_eq!(all[1].global_status, TrustStatus::Pending);
+        assert_eq!(all[1].last_handle, None);
+        assert_eq!(all[2].fingerprint, [0xcc; 16]);
+        assert_eq!(all[2].global_status, TrustStatus::Revoked);
+    }
+
+    #[test]
+    fn list_all_incoming_sessions_returns_every_row() {
+        let kr = open_mem();
+        for (handle, channel, fp_byte, sk_byte, status) in [
+            ("~alice@a.host", "#rust", 0x11, 0x21, TrustStatus::Trusted),
+            ("~bob@b.host", "#rust", 0x12, 0x22, TrustStatus::Pending),
+            ("~alice@a.host", "#go", 0x13, 0x23, TrustStatus::Revoked),
+        ] {
+            kr.set_incoming_session(&IncomingSession {
+                handle: handle.into(),
+                channel: channel.into(),
+                fingerprint: [fp_byte; 16],
+                sk: [sk_byte; 32],
+                status,
+                created_at: 1_000,
+            })
+            .unwrap();
+        }
+        let all = kr.list_all_incoming_sessions().unwrap();
+        assert_eq!(all.len(), 3);
+        // Check each row round-tripped intact; the set is unordered by row
+        // content but we can confirm every (handle,channel) pair is present.
+        let pairs: Vec<(String, String)> = all
+            .iter()
+            .map(|s| (s.handle.clone(), s.channel.clone()))
+            .collect();
+        assert!(pairs.contains(&("~alice@a.host".into(), "#rust".into())));
+        assert!(pairs.contains(&("~bob@b.host".into(), "#rust".into())));
+        assert!(pairs.contains(&("~alice@a.host".into(), "#go".into())));
+    }
+
+    #[test]
+    fn list_all_outgoing_sessions_returns_every_row() {
+        let kr = open_mem();
+        kr.set_outgoing_session("#rust", &[1u8; 32], 1_000).unwrap();
+        kr.set_outgoing_session("#go", &[2u8; 32], 2_000).unwrap();
+        kr.mark_outgoing_pending_rotation("#go").unwrap();
+        let all = kr.list_all_outgoing_sessions().unwrap();
+        assert_eq!(all.len(), 2);
+        // Ordered by channel ASC — '#' < alphanumerics but both start with
+        // '#', so it's literal channel-name order: "#go" < "#rust".
+        assert_eq!(all[0].channel, "#go");
+        assert!(all[0].pending_rotation);
+        assert_eq!(all[1].channel, "#rust");
+        assert!(!all[1].pending_rotation);
+    }
+
+    #[test]
+    fn list_all_channel_configs_returns_every_row() {
+        let kr = open_mem();
+        kr.set_channel_config(&ChannelConfig {
+            channel: "#rust".into(),
+            enabled: true,
+            mode: ChannelMode::AutoAccept,
+        })
+        .unwrap();
+        kr.set_channel_config(&ChannelConfig {
+            channel: "#go".into(),
+            enabled: false,
+            mode: ChannelMode::Quiet,
+        })
+        .unwrap();
+        let all = kr.list_all_channel_configs().unwrap();
+        assert_eq!(all.len(), 2);
+        // '#go' < '#rust' alphabetically.
+        assert_eq!(all[0].channel, "#go");
+        assert!(!all[0].enabled);
+        assert_eq!(all[0].mode, ChannelMode::Quiet);
+        assert_eq!(all[1].channel, "#rust");
+        assert!(all[1].enabled);
+        assert_eq!(all[1].mode, ChannelMode::AutoAccept);
     }
 }
