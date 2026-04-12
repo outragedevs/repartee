@@ -30,25 +30,27 @@ pub const APP_NAME: &str = "repartee";
 
 ## Release
 
-Manual release — tag push triggers CI binary builds, `cargo publish` is a separate manual step.
+Manual release — push the version-bump commit to `outrage/main`, then push a `vX.Y.Z` tag to trigger the GitHub release workflow, then publish the crate to crates.io as a separate manual step.
 
 ### Pre-flight (local only)
 
 1. Bump `version` in `Cargo.toml` (`[package]` section — the only place that needs changing)
-2. `cargo check -p repartee` — regenerates `Cargo.lock`
-3. Add a `### vX.Y.Z` entry to the changelog in `README.md` (match the style of existing entries — user-facing bullet list)
-4. `make test && make clippy` — both must pass with 0 warnings (pedantic + nursery + perf=deny + redundant_clone=deny)
-5. `make release` — verifies the LTO/codegen-units=1/strip release profile builds locally
-6. `git add Cargo.toml Cargo.lock README.md && git commit -m "chore: bump version to X.Y.Z"`
+2. Add a `### vX.Y.Z` entry to the changelog in `README.md` (match the style of existing entries — user-facing bullet list)
+3. `make build` — refreshes `Cargo.lock` and validates the crate still builds locally after the version bump
+4. `make clippy`
+5. `make test` — steps 4 and 5 must pass with 0 warnings (pedantic + nursery + perf=deny + redundant_clone=deny)
+6. `make release` — verifies the LTO/codegen-units=1/strip release profile builds locally
+7. `git add Cargo.toml Cargo.lock README.md && git commit -m "chore: bump version to X.Y.Z"`
 
 Optional: if `web-ui/` changed, run `make wasm` before step 6 and include `static/web/` in the commit. CI also runs `build-wasm` as a dependency of all native build jobs, so CI-built releases always embed the latest web UI regardless.
 
 ### Publishing (destructive — requires explicit confirmation in agent sessions)
 
-7. `cargo publish --dry-run -p repartee` — packaging sanity check, no network upload
-8. `git push outrage main` — push pending commits (remote is `outrage`, not `origin` — verify with `git remote -v`)
-9. `git tag vX.Y.Z && git push outrage vX.Y.Z` — lightweight tag, triggers `.github/workflows/release.yml` which builds macOS ARM + Linux AMD64/ARM64 + FreeBSD AMD64 tarballs and creates a GitHub Release with auto-generated notes
-10. `cargo publish -p repartee` — publishes to crates.io. **Irreversible**: `cargo yank --version X.Y.Z` can mark a version unfetchable for new consumers but cannot delete it. Use `--allow-dirty` only if unavoidable generated artifacts require it.
+8. `cargo publish --dry-run -p repartee` — packaging sanity check, no network upload
+9. `git push outrage main` — push pending commits (remote is `outrage`, not `origin` — verify with `git remote -v`)
+10. `git tag vX.Y.Z && git push outrage vX.Y.Z` — lightweight tag, triggers `.github/workflows/release.yml` which builds macOS ARM + Linux AMD64/ARM64 + FreeBSD AMD64 tarballs and creates a GitHub Release with auto-generated notes
+11. Wait for the GitHub Actions release workflow for tag `vX.Y.Z` to go green and verify the GitHub Release was created with artifacts attached
+12. `cargo publish -p repartee` — publishes to crates.io. **Irreversible**: `cargo yank --version X.Y.Z` can mark a version unfetchable for new consumers but cannot delete it. Use `--allow-dirty` only if unavoidable generated artifacts require it.
 
 ### Notes
 

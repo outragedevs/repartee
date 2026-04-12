@@ -238,6 +238,12 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v0.9.0
+
+- **RPE2E end-to-end encryption** — native E2E for repartee with per-peer trust, pending accept/decline flow, reciprocal key exchange, key export/import, revoke/reverify, and channel/query support.
+- **Cross-client interoperability** — bundled companion scripts for WeeChat and Irssi/Eerssi now speak the same compact RPE2E v1 wire format, including long-message chunking, UTF-8/emoji handling, auto-handshake, and debug output directly in the current buffer.
+- **Operational hardening** — multiple state-handling fixes landed across repartee and companion scripts: atomic E2E export/import where applicable, safer forget/reverify cleanup, improved multi-peer handshake tracking, and plaintext bypass for bot-style commands starting with `.` or `!`.
+
 ### v0.8.5
 
 - **Critical: fix 3 GB OOM crash on long mouse-wheel scroll** — the chat view's render loop could walk the entire message buffer on every frame when `scroll_offset` exceeded available content. Under sustained wheel scrolling this produced 200–600 MB/s of allocation churn, fragmenting glibc's arena until the kernel (or `systemd-oomd`) killed the process at ~3 GB RSS. The loop is now capped at `buffer_len × 16` visual lines so it terminates in `O(buffer_len)` regardless of scroll position. Observed on Debian with v0.8.4 after a week of uptime; pre-existing bug, not a 0.8.4 regression, but v0.8.4 had enough baseline churn to make it reachable in normal use.
