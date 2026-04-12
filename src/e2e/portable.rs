@@ -254,38 +254,6 @@ fn build_portable(keyring: &Keyring) -> Result<Portable> {
     })
 }
 
-#[cfg(unix)]
-fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|e| E2eError::Keyring(format!("open {}: {e}", path.display())))?;
-    file.write_all(bytes)
-        .map_err(|e| E2eError::Keyring(format!("write {}: {e}", path.display())))?;
-    file.sync_all()
-        .map_err(|e| E2eError::Keyring(format!("fsync {}: {e}", path.display())))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)
-        .map_err(|e| E2eError::Keyring(format!("open {}: {e}", path.display())))?;
-    file.write_all(bytes)
-        .map_err(|e| E2eError::Keyring(format!("write {}: {e}", path.display())))?;
-    file.sync_all()
-        .map_err(|e| E2eError::Keyring(format!("fsync {}: {e}", path.display())))?;
-    Ok(())
-}
-
 // ─── Import ──────────────────────────────────────────────────────────────────
 
 /// Parse a portable JSON document from `path`, validate it in full, then
@@ -305,32 +273,20 @@ pub fn import_from_path(keyring: &Keyring, path: &Path) -> Result<ImportSummary>
     // Validate EVERYTHING first — no writes on failure.
     let validated = validate(&doc)?;
 
-    // Apply.
-    keyring.save_identity(
-        &validated.identity.pubkey,
-        &validated.identity.privkey,
-        &validated.identity.fingerprint,
-        validated.identity.created_at,
+    // Apply atomically, replacing the previous snapshot in full.
+    keyring.replace_all_for_import(
+        (
+            &validated.identity.pubkey,
+            &validated.identity.privkey,
+            &validated.identity.fingerprint,
+            validated.identity.created_at,
+        ),
+        &validated.peers,
+        &validated.incoming,
+        &validated.outgoing,
+        &validated.channels,
+        &validated.autotrust,
     )?;
-
-    for p in &validated.peers {
-        keyring.upsert_peer(p)?;
-    }
-    for s in &validated.incoming {
-        keyring.set_incoming_session(s)?;
-    }
-    for o in &validated.outgoing {
-        keyring.set_outgoing_session(&o.channel, &o.sk, o.created_at)?;
-        if o.pending_rotation {
-            keyring.mark_outgoing_pending_rotation(&o.channel)?;
-        }
-    }
-    for c in &validated.channels {
-        keyring.set_channel_config(c)?;
-    }
-    for (scope, pat, created_at) in &validated.autotrust {
-        keyring.add_autotrust(scope, pat, *created_at)?;
-    }
 
     Ok(ImportSummary {
         identity: true,
@@ -340,6 +296,64 @@ pub fn import_from_path(keyring: &Keyring, path: &Path) -> Result<ImportSummary>
         channels: validated.channels.len(),
         autotrust: validated.autotrust.len(),
     })
+}
+
+#[cfg(unix)]
+fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file_name = path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("rpe2e-export.json");
+    let tmp_path = path.with_file_name(format!(".{file_name}.tmp.{}", std::process::id()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp_path)
+        .map_err(|e| E2eError::Keyring(format!("open {}: {e}", tmp_path.display())))?;
+    file.write_all(bytes)
+        .map_err(|e| E2eError::Keyring(format!("write {}: {e}", tmp_path.display())))?;
+    file.sync_all()
+        .map_err(|e| E2eError::Keyring(format!("fsync {}: {e}", tmp_path.display())))?;
+    std::fs::rename(&tmp_path, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        E2eError::Keyring(format!(
+            "rename {} -> {}: {e}",
+            tmp_path.display(),
+            path.display()
+        ))
+    })?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let file_name = path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("rpe2e-export.json");
+    let tmp_path = path.with_file_name(format!(".{file_name}.tmp.{}", std::process::id()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&tmp_path)
+        .map_err(|e| E2eError::Keyring(format!("open {}: {e}", tmp_path.display())))?;
+    file.write_all(bytes)
+        .map_err(|e| E2eError::Keyring(format!("write {}: {e}", tmp_path.display())))?;
+    file.sync_all()
+        .map_err(|e| E2eError::Keyring(format!("fsync {}: {e}", tmp_path.display())))?;
+    std::fs::rename(&tmp_path, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        E2eError::Keyring(format!(
+            "rename {} -> {}: {e}",
+            tmp_path.display(),
+            path.display()
+        ))
+    })?;
+    Ok(())
 }
 
 /// Intermediate form after validation — all strings have been decoded into

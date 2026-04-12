@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use rusqlite::Connection;
 
 use crate::e2e::error::E2eError;
-use crate::e2e::keyring::{ChannelConfig, ChannelMode, Keyring, TrustStatus};
+use crate::e2e::keyring::{ChannelConfig, ChannelMode, IncomingSession, Keyring, TrustStatus};
 use crate::e2e::manager::{DecryptOutcome, E2eManager, ReverifyOutcome, TrustChange};
 
 const SCHEMA: &str = "
@@ -320,6 +320,90 @@ fn import_rejects_bad_status_enum() {
     assert!(
         msg.contains("globalStatus"),
         "error should name field: {msg}"
+    );
+}
+
+#[test]
+fn import_replaces_existing_keyring_state() {
+    let alice = make_manager();
+    let bob = make_manager();
+    let carol = make_manager();
+
+    enable_channel(&alice, "#rust", ChannelMode::AutoAccept);
+    enable_channel(&bob, "#rust", ChannelMode::AutoAccept);
+    let req = bob.build_keyreq("#rust").unwrap();
+    let rsp = alice.handle_keyreq("~bob@b.host", &req).unwrap().unwrap();
+    bob.handle_keyrsp("~alice@a.host", &rsp).unwrap();
+    alice
+        .keyring()
+        .add_autotrust("#rust", "~bob@*", 1_000)
+        .unwrap();
+
+    enable_channel(&carol, "#stale", ChannelMode::AutoAccept);
+    carol
+        .keyring()
+        .add_autotrust("#stale", "~stale@*", 2_000)
+        .unwrap();
+    carol
+        .keyring()
+        .set_outgoing_session("#stale", &[7u8; 32], 2_000)
+        .unwrap();
+    carol
+        .keyring()
+        .set_incoming_session(&IncomingSession {
+            handle: "~stale@old.host".to_string(),
+            channel: "#stale".to_string(),
+            fingerprint: [9u8; 16],
+            sk: [8u8; 32],
+            status: TrustStatus::Trusted,
+            created_at: 2_000,
+        })
+        .unwrap();
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    crate::e2e::portable::export_to_path(alice.keyring(), tmp.path()).unwrap();
+    crate::e2e::portable::import_from_path(carol.keyring(), tmp.path()).unwrap();
+
+    assert_eq!(
+        carol.keyring().list_all_peers().unwrap().len(),
+        alice.keyring().list_all_peers().unwrap().len()
+    );
+    assert_eq!(
+        carol.keyring().list_all_incoming_sessions().unwrap().len(),
+        alice.keyring().list_all_incoming_sessions().unwrap().len()
+    );
+    assert_eq!(
+        carol.keyring().list_all_outgoing_sessions().unwrap().len(),
+        alice.keyring().list_all_outgoing_sessions().unwrap().len()
+    );
+    assert_eq!(
+        carol.keyring().list_all_channel_configs().unwrap().len(),
+        alice.keyring().list_all_channel_configs().unwrap().len()
+    );
+    assert_eq!(
+        carol.keyring().list_autotrust().unwrap(),
+        alice.keyring().list_autotrust().unwrap()
+    );
+    assert!(
+        carol
+            .keyring()
+            .get_incoming_session("~stale@old.host", "#stale")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        carol
+            .keyring()
+            .get_outgoing_session("#stale")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        carol
+            .keyring()
+            .get_channel_config("#stale")
+            .unwrap()
+            .is_none()
     );
 }
 

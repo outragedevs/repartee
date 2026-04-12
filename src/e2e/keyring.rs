@@ -136,6 +136,104 @@ impl Keyring {
         Self { db }
     }
 
+    pub fn replace_all_for_import(
+        &self,
+        identity: (&[u8; 32], &[u8; 32], &Fingerprint, i64),
+        peers: &[PeerRecord],
+        incoming: &[IncomingSession],
+        outgoing: &[OutgoingSession],
+        channels: &[ChannelConfig],
+        autotrust: &[(String, String, i64)],
+    ) -> Result<()> {
+        let mut conn = self.db.lock().expect("keyring mutex poisoned");
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM e2e_outgoing_recipients", [])?;
+        tx.execute("DELETE FROM e2e_autotrust", [])?;
+        tx.execute("DELETE FROM e2e_channel_config", [])?;
+        tx.execute("DELETE FROM e2e_outgoing_sessions", [])?;
+        tx.execute("DELETE FROM e2e_incoming_sessions", [])?;
+        tx.execute("DELETE FROM e2e_peers", [])?;
+        tx.execute("DELETE FROM e2e_identity", [])?;
+
+        let (pubkey, privkey, fingerprint, created_at) = identity;
+        tx.execute(
+            "INSERT INTO e2e_identity (id, pubkey, privkey, fingerprint, created_at)
+             VALUES (1, ?1, ?2, ?3, ?4)",
+            params![
+                pubkey.as_slice(),
+                privkey.as_slice(),
+                fingerprint.as_slice(),
+                created_at
+            ],
+        )?;
+
+        for rec in peers {
+            tx.execute(
+                "INSERT INTO e2e_peers
+                    (fingerprint, pubkey, last_handle, last_nick, first_seen, last_seen, global_status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    rec.fingerprint.as_slice(),
+                    rec.pubkey.as_slice(),
+                    rec.last_handle,
+                    rec.last_nick,
+                    rec.first_seen,
+                    rec.last_seen,
+                    rec.global_status.as_str(),
+                ],
+            )?;
+        }
+
+        for sess in incoming {
+            tx.execute(
+                "INSERT INTO e2e_incoming_sessions
+                    (handle, channel, fingerprint, sk, status, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    sess.handle,
+                    sess.channel,
+                    sess.fingerprint.as_slice(),
+                    sess.sk.as_slice(),
+                    sess.status.as_str(),
+                    sess.created_at,
+                ],
+            )?;
+        }
+
+        for sess in outgoing {
+            tx.execute(
+                "INSERT INTO e2e_outgoing_sessions
+                    (channel, sk, created_at, pending_rotation)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    sess.channel,
+                    sess.sk.as_slice(),
+                    sess.created_at,
+                    i64::from(sess.pending_rotation),
+                ],
+            )?;
+        }
+
+        for cfg in channels {
+            tx.execute(
+                "INSERT INTO e2e_channel_config (channel, enabled, mode)
+                 VALUES (?1, ?2, ?3)",
+                params![cfg.channel, i64::from(cfg.enabled), cfg.mode.as_str()],
+            )?;
+        }
+
+        for (scope, handle_pattern, created_at) in autotrust {
+            tx.execute(
+                "INSERT INTO e2e_autotrust (scope, handle_pattern, created_at)
+                 VALUES (?1, ?2, ?3)",
+                params![scope, handle_pattern, created_at],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
     // ---------- identity ----------
 
     /// Persist (or replace) the local long-term identity keypair. There is at

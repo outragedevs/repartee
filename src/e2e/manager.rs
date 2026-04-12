@@ -52,6 +52,7 @@ use crate::e2e::wire::{WireChunk, build_aad, fresh_msgid};
 struct PendingHandshake {
     #[allow(dead_code, reason = "future diagnostics: pending channel listing")]
     channel: String,
+    peer_handle: Option<String>,
     eph_x25519_secret: [u8; 32],
 }
 
@@ -229,6 +230,53 @@ pub enum DecryptOutcome {
 }
 
 impl E2eManager {
+    fn clear_pending_state_for_handle(&self, handle: &str) -> usize {
+        let mut deleted = 0usize;
+
+        let mut pending = self.pending.lock().expect("e2e pending mutex poisoned");
+        let pending_before = pending.len();
+        pending.retain(|_, ph| ph.peer_handle.as_deref() != Some(handle));
+        deleted += pending_before.saturating_sub(pending.len());
+        drop(pending);
+
+        let mut pending_inbound = self
+            .pending_inbound
+            .lock()
+            .expect("e2e pending inbound mutex poisoned");
+        let pending_inbound_before = pending_inbound.len();
+        pending_inbound.retain(|(pending_handle, _), _| pending_handle != handle);
+        deleted += pending_inbound_before.saturating_sub(pending_inbound.len());
+        drop(pending_inbound);
+
+        let mut pending_accept = self
+            .pending_accept_requests
+            .lock()
+            .expect("e2e pending accept requests mutex poisoned");
+        let accept_before = pending_accept.len();
+        pending_accept.retain(|req| req.handle != handle);
+        deleted += accept_before.saturating_sub(pending_accept.len());
+        drop(pending_accept);
+
+        let mut notices = self
+            .pending_trust_change
+            .lock()
+            .expect("e2e pending trust change mutex poisoned");
+        let notices_before = notices.len();
+        notices.retain(|notice| notice.handle != handle);
+        deleted += notices_before.saturating_sub(notices.len());
+        drop(notices);
+
+        let mut outbound = self
+            .pending_outbound_keyreqs
+            .lock()
+            .expect("e2e pending outbound keyreqs mutex poisoned");
+        let outbound_before = outbound.len();
+        outbound.retain(|req| req.peer_handle != handle);
+        deleted += outbound_before.saturating_sub(outbound.len());
+
+        deleted
+    }
+
     /// Load the identity row from the keyring, or generate and persist a
     /// fresh one if none exists. Uses the built-in default replay-window
     /// tolerance (`DEFAULT_TS_TOLERANCE_SECS`). Production callers should
@@ -418,6 +466,7 @@ impl E2eManager {
                 .delete_incoming_sessions_for_handle(nick_or_handle)?;
             self.keyring
                 .delete_outgoing_recipients_for_handle(nick_or_handle)?;
+            self.clear_pending_state_for_handle(nick_or_handle);
             let now = now_unix();
             self.keyring.upsert_peer(&PeerRecord {
                 fingerprint: new_fp,
@@ -446,6 +495,7 @@ impl E2eManager {
         deleted += self
             .keyring
             .delete_outgoing_recipients_for_handle(nick_or_handle)?;
+        deleted += self.clear_pending_state_for_handle(nick_or_handle);
         if deleted == 0 {
             Ok(ReverifyOutcome::NotFound)
         } else {
@@ -681,6 +731,21 @@ impl E2eManager {
         let before = requests.len();
         requests.retain(|r| !(r.handle == handle && r.channel == channel));
         deleted += before.saturating_sub(requests.len());
+        drop(requests);
+        let mut pending = self.pending.lock().expect("e2e pending mutex poisoned");
+        let pending_before = pending.len();
+        pending.retain(|(pending_channel, _), ph| {
+            !(pending_channel == channel && ph.peer_handle.as_deref() == Some(handle))
+        });
+        deleted += pending_before.saturating_sub(pending.len());
+        drop(pending);
+        let mut outbound = self
+            .pending_outbound_keyreqs
+            .lock()
+            .expect("e2e pending outbound keyreqs mutex poisoned");
+        let outbound_before = outbound.len();
+        outbound.retain(|req| !(req.peer_handle == handle && req.channel == channel));
+        deleted += outbound_before.saturating_sub(outbound.len());
         Ok(deleted)
     }
 
@@ -692,29 +757,7 @@ impl E2eManager {
         }
         deleted += self.keyring.delete_incoming_sessions_for_handle(handle)?;
         deleted += self.keyring.delete_outgoing_recipients_for_handle(handle)?;
-        let mut pending_inbound = self
-            .pending_inbound
-            .lock()
-            .expect("e2e pending inbound mutex poisoned");
-        let pending_before = pending_inbound.len();
-        pending_inbound.retain(|(pending_handle, _), _| pending_handle != handle);
-        deleted += pending_before.saturating_sub(pending_inbound.len());
-        drop(pending_inbound);
-        let mut pending_accept = self
-            .pending_accept_requests
-            .lock()
-            .expect("e2e pending accept requests mutex poisoned");
-        let accept_before = pending_accept.len();
-        pending_accept.retain(|req| req.handle != handle);
-        deleted += accept_before.saturating_sub(pending_accept.len());
-        drop(pending_accept);
-        let mut notices = self
-            .pending_trust_change
-            .lock()
-            .expect("e2e pending trust change mutex poisoned");
-        let notices_before = notices.len();
-        notices.retain(|notice| notice.handle != handle);
-        deleted += notices_before.saturating_sub(notices.len());
+        deleted += self.clear_pending_state_for_handle(handle);
         Ok(deleted)
     }
 
@@ -864,6 +907,14 @@ impl E2eManager {
     /// ephemeral X25519 secret. The secret is retrieved later in
     /// `handle_keyrsp` to derive the wrap key.
     pub fn build_keyreq(&self, channel: &str) -> Result<KeyReq> {
+        self.build_keyreq_for_peer(channel, None)
+    }
+
+    pub fn build_keyreq_for_peer(
+        &self,
+        channel: &str,
+        peer_handle: Option<&str>,
+    ) -> Result<KeyReq> {
         // Multiple pending handshakes per channel are allowed: each is
         // keyed by `(channel, nonce)` in `self.pending`, and
         // `handle_keyrsp` iterates over matches, trying the stored
@@ -901,6 +952,7 @@ impl E2eManager {
                 (channel.to_string(), nonce),
                 PendingHandshake {
                     channel: channel.to_string(),
+                    peer_handle: peer_handle.map(ToOwned::to_owned),
                     eph_x25519_secret: eph_secret,
                 },
             );
@@ -1203,7 +1255,7 @@ impl E2eManager {
             .expect("rate limiter mutex poisoned")
             .allow_outgoing(sender_handle);
         if !already_incoming && allow_out {
-            let reciprocal = self.build_keyreq(&req.channel)?;
+            let reciprocal = self.build_keyreq_for_peer(&req.channel, Some(sender_handle))?;
             self.pending_outbound_keyreqs
                 .lock()
                 .expect("e2e pending outbound keyreqs mutex poisoned")
@@ -1332,7 +1384,7 @@ impl E2eManager {
             .expect("rate limiter mutex poisoned")
             .allow_outgoing(sender_handle);
         if !already_incoming && allow_out {
-            let reciprocal = self.build_keyreq(&req.channel)?;
+            let reciprocal = self.build_keyreq_for_peer(&req.channel, Some(sender_handle))?;
             self.pending_outbound_keyreqs
                 .lock()
                 .expect("e2e pending outbound keyreqs mutex poisoned")
@@ -1687,5 +1739,54 @@ mod tests {
             DecryptOutcome::MissingKey { .. } => {}
             other => panic!("expected MissingKey, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn forget_peer_everywhere_clears_handle_scoped_pending_state() {
+        let mgr = make_manager();
+        let _ = mgr.build_keyreq_for_peer("#x", Some("~bob@host")).unwrap();
+        mgr.pending_inbound
+            .lock()
+            .expect("pending inbound mutex poisoned in test")
+            .insert(
+                ("~bob@host".to_string(), "#x".to_string()),
+                PendingInboundKeyReq {
+                    req: mgr.build_keyreq("#x").unwrap(),
+                },
+            );
+        mgr.pending_accept_requests
+            .lock()
+            .expect("pending accept mutex poisoned in test")
+            .push(PendingAcceptRequest {
+                nick: Some("bob".to_string()),
+                handle: "~bob@host".to_string(),
+                channel: "#x".to_string(),
+            });
+        mgr.pending_outbound_keyreqs
+            .lock()
+            .expect("pending outbound mutex poisoned in test")
+            .push(PendingOutboundKeyReq {
+                peer_handle: "~bob@host".to_string(),
+                channel: "#x".to_string(),
+                req: mgr.build_keyreq("#x").unwrap(),
+            });
+
+        let deleted = mgr.forget_peer_everywhere("~bob@host").unwrap();
+        assert!(deleted >= 4, "expected multiple pending rows removed");
+        assert!(
+            mgr.pending
+                .lock()
+                .expect("pending mutex poisoned in test")
+                .values()
+                .all(|p| p.peer_handle.as_deref() != Some("~bob@host"))
+        );
+        assert!(
+            mgr.pending_inbound
+                .lock()
+                .expect("pending inbound mutex poisoned in test")
+                .is_empty()
+        );
+        assert!(mgr.take_pending_accept_requests().is_empty());
+        assert!(mgr.take_pending_outbound_keyreqs().is_empty());
     }
 }

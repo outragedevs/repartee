@@ -3228,7 +3228,7 @@ fn try_decrypt_e2e(
             // session; after that, subsequent ciphertext lines decrypt
             // normally.
             if mgr.allow_keyreq(&handle) {
-                match mgr.build_keyreq(&ch) {
+                match mgr.build_keyreq_for_peer(&ch, Some(&handle)) {
                     Ok(req) => {
                         let ctcp = mgr.encode_keyreq_ctcp(&req);
                         state.pending_e2e_sends.push(crate::state::PendingE2eSend {
