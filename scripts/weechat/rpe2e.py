@@ -30,6 +30,8 @@ import struct
 import time
 import fnmatch
 import collections
+import traceback
+from contextlib import contextmanager
 
 try:
     import weechat
@@ -391,13 +393,16 @@ def _allow_incoming(handle: str) -> bool:
     return True
 
 
-def db_conn() -> sqlite3.Connection:
+@contextmanager
+def db_conn():
     if not DB_PATH:
         raise RuntimeError("rpe2e: DB_PATH not initialized")
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 SCHEMA_SQL = """
@@ -482,8 +487,13 @@ CREATE TABLE IF NOT EXISTS pending_trust_change (
 
 def init_db() -> None:
     with db_conn() as c:
+        c.execute("PRAGMA journal_mode=WAL")
         c.executescript(SCHEMA_SQL)
         c.execute("DELETE FROM pending")
+
+
+def _pending_key(channel: str, handle: str | None = None) -> str:
+    return f"{channel}\x1f{handle}" if handle else channel
 
 
 def context_key(target: str, handle: str) -> str:
@@ -1132,18 +1142,19 @@ def parse_keyrekey(body: str) -> dict | None:
     }
 
 
-def build_keyreq(channel: str) -> str:
+def build_keyreq(channel: str, handle: str | None = None) -> str:
     pk, sk, _fp = ensure_identity()
+    pending_key = _pending_key(channel, handle)
     with db_conn() as c:
         row = c.execute(
-            "SELECT created_at FROM pending WHERE channel = ?", (channel,)
+            "SELECT created_at FROM pending WHERE channel = ?", (pending_key,)
         ).fetchone()
     if row is not None:
         created_at = int(row[0])
         if int(time.time()) - created_at < PENDING_KEYREQ_TTL:
-            raise ValueError(f"key exchange already pending for {channel}")
+            raise ValueError(f"key exchange already pending for {pending_key}")
         with db_conn() as c:
-            c.execute("DELETE FROM pending WHERE channel = ?", (channel,))
+            c.execute("DELETE FROM pending WHERE channel = ?", (pending_key,))
     eph_sk, eph_pk = generate_x25519_keypair()
     req_nonce = nacl_random(16)
     sig_payload = _sig_payload_keyreq(channel, pk, eph_pk, req_nonce)
@@ -1151,7 +1162,7 @@ def build_keyreq(channel: str) -> str:
     with db_conn() as c:
         c.execute(
             "INSERT OR REPLACE INTO pending VALUES (?, ?, ?)",
-            (channel, eph_sk, int(time.time())),
+            (pending_key, eph_sk, int(time.time())),
         )
     body = (
         f"{CTCP_TAG} KEYREQ v=1 c={channel} p={_b64u_encode(pk)} "
@@ -1206,7 +1217,8 @@ def _maybe_build_reciprocal_keyreq(channel: str, sender_handle: str) -> str | No
             (sender_handle, channel),
         ).fetchone()
         pending = c.execute(
-            "SELECT 1 FROM pending WHERE channel = ?", (channel,)
+            "SELECT 1 FROM pending WHERE channel = ?",
+            (_pending_key(channel, sender_handle),),
         ).fetchone()
     already_trusted = row is not None and row[0] == "trusted"
     allow = _allow_outgoing_keyreq(sender_handle)
@@ -1216,7 +1228,23 @@ def _maybe_build_reciprocal_keyreq(channel: str, sender_handle: str) -> str | No
     )
     if pending is not None or already_trusted or not allow:
         return None
-    return build_keyreq(channel)
+    return build_keyreq(channel, sender_handle)
+
+
+def _build_reciprocal_keyreq_on_accept(channel: str, sender_handle: str) -> str | None:
+    with db_conn() as c:
+        row = c.execute(
+            "SELECT status FROM incoming WHERE handle = ? AND channel = ?",
+            (sender_handle, channel),
+        ).fetchone()
+        c.execute(
+            "DELETE FROM pending WHERE channel = ?",
+            (_pending_key(channel, sender_handle),),
+        )
+    already_trusted = row is not None and row[0] == "trusted"
+    if already_trusted:
+        return None
+    return build_keyreq(channel, sender_handle)
 
 
 def handle_keyreq(server: str, sender_handle: str, nick: str, body: str) -> tuple[str | None, str | None]:
@@ -1383,14 +1411,24 @@ def handle_keyrsp(server: str, nick: str, sender_handle: str, body: str) -> bool
         return False
     with db_conn() as c:
         row = c.execute(
-            "SELECT eph_sk FROM pending WHERE channel = ?", (ctx,)
+            "SELECT eph_sk FROM pending WHERE channel = ?",
+            (_pending_key(ctx, sender_handle),),
         ).fetchone()
         if row is None:
-            _dbg(f"handle_keyrsp: NO pending outgoing KEYREQ for channel {ctx} — dropping")
-            _prnt_dbg(server, ctx, nick, f"KEYRSP from {nick} ({sender_handle}) dropped on {ctx}: no pending KEYREQ")
-            return False
+            row = c.execute(
+                "SELECT eph_sk FROM pending WHERE channel = ?", (ctx,)
+            ).fetchone()
+            if row is None:
+                _dbg(f"handle_keyrsp: NO pending outgoing KEYREQ for channel {ctx} sender={sender_handle} — dropping")
+                _prnt_dbg(server, ctx, nick, f"KEYRSP from {nick} ({sender_handle}) dropped on {ctx}: no pending KEYREQ")
+                return False
+            c.execute("DELETE FROM pending WHERE channel = ?", (ctx,))
+        else:
+            c.execute(
+                "DELETE FROM pending WHERE channel = ?",
+                (_pending_key(ctx, sender_handle),),
+            )
         eph_sk = row[0]
-        c.execute("DELETE FROM pending WHERE channel = ?", (ctx,))
     _dbg(f"handle_keyrsp: consumed pending entry for channel {ctx}")
     shared = x25519_ecdh(eph_sk, rsp["eph_pub"])
     info = b"RPE2E01-WRAP:" + ctx.encode()
@@ -1772,7 +1810,7 @@ def hook_irc_in_privmsg(data, modifier, server, msg):
                 _rate_limit_sent[handle] = now_f
                 buf = weechat.buffer_search("irc", f"{server}.{target}") if weechat else ""
                 try:
-                    kreq = build_keyreq(ctx)
+                    kreq = build_keyreq(ctx, handle)
                     if weechat:
                         weechat.command(buf, f"/quote NOTICE {nick} :{kreq}")
                         _prnt_ok(buf, f"KEYREQ sent to {nick} for {ctx}")
@@ -1798,7 +1836,6 @@ def hook_irc_in_privmsg(data, modifier, server, msg):
             pt_str = pt.decode("utf-8", errors="replace")
         return f":{prefix} PRIVMSG {target} :{pt_str}"
     except Exception as e:
-        import traceback
         _dbg(f"hook_irc_in_privmsg OUTER EXCEPTION: {e}\n{traceback.format_exc()}")
         return msg
 
@@ -1855,7 +1892,6 @@ def hook_input_text_for_buffer(data, modifier, modifier_data, text):
         _prnt_self_msg(buffer, plain)
         return ""
     except Exception as e:
-        import traceback
         _dbg(f"hook_input_text_for_buffer OUTER EXCEPTION: {e}\n{traceback.format_exc()}")
         return text
 
@@ -1888,7 +1924,6 @@ def hook_irc_in_notice(data, modifier, server, msg):
                     _prnt_dbg(server, parsed["channel"], nick, f"RX KEYREQ from {nick} ({sender_handle}) for {parsed['channel']}")
                 rsp_wire, reciprocal = handle_keyreq(server, sender_handle, nick, inner)
             except Exception as e:
-                import traceback
                 _dbg(f"hook_irc_in_notice KEYREQ EXCEPTION: {e}\n{traceback.format_exc()}")
                 return ""
             _dbg(
@@ -1910,7 +1945,6 @@ def hook_irc_in_notice(data, modifier, server, msg):
             try:
                 result = handle_keyrsp(server, nick, sender_handle, inner)
             except Exception as e:
-                import traceback
                 _dbg(f"hook_irc_in_notice KEYRSP EXCEPTION: {e}\n{traceback.format_exc()}")
                 return ""
             _dbg(f"hook_irc_in_notice KEYRSP processed result={result}")
@@ -1919,12 +1953,10 @@ def hook_irc_in_notice(data, modifier, server, msg):
             try:
                 handle_rekey(sender_handle, nick, inner)
             except Exception as e:
-                import traceback
                 _dbg(f"hook_irc_in_notice REKEY EXCEPTION: {e}\n{traceback.format_exc()}")
             return ""
         return msg
     except Exception as e:
-        import traceback
         _dbg(f"hook_irc_in_notice OUTER EXCEPTION: {e}\n{traceback.format_exc()}")
         return msg
 
@@ -2030,7 +2062,7 @@ def cmd_e2e(data, buffer, args):
                     (ctx, s_handle),
                 )
             rsp_wire = _build_keyrsp_for_req(ctx, s_handle, s_pub, s_eph)
-            reciprocal = _maybe_build_reciprocal_keyreq(ctx, s_handle)
+            reciprocal = _build_reciprocal_keyreq_on_accept(ctx, s_handle)
             if rsp_wire is not None and weechat:
                 _send_raw_notice(server, nick, rsp_wire)
             if reciprocal is not None and weechat:
