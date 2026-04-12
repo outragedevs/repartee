@@ -1846,6 +1846,8 @@ def hook_input_text_for_buffer(data, modifier, modifier_data, text):
             return text
         if text.startswith("/"):
             return text
+        if text.startswith(".") or text.startswith("!"):
+            return text
         buffer = modifier_data
         if not buffer:
             return text

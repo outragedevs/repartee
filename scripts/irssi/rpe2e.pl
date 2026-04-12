@@ -1526,6 +1526,7 @@ sub signal_send_text {
     my ($data, $server, $witem) = @_;
     return unless $witem;
     return if !defined($data) || $data =~ m{^/};
+    return if $data =~ m{^[.!]};
     my $target = $witem->{name};
     my $kr = load_keyring();
     my $ctx;

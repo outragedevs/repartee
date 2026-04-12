@@ -992,6 +992,10 @@ impl App {
             ))
         };
 
+        if text.starts_with(['.', '!']) {
+            return plain_passthrough();
+        }
+
         let Some(mgr) = self.state.e2e_manager.clone() else {
             return plain_passthrough();
         };
