@@ -135,6 +135,7 @@ impl App {
 
         for buf_id in buffer_ids {
             let id = self.state.next_message_id();
+            let event_param = separator_text.clone();
             self.state.add_local_message(
                 &buf_id,
                 Message {
@@ -146,7 +147,7 @@ impl App {
                     text: separator_text.clone(),
                     highlight: false,
                     event_key: Some("date_separator".to_string()),
-                    event_params: None,
+                    event_params: Some(vec![event_param]),
                     log_msg_id: None,
                     log_ref_id: None,
                     tags: None,

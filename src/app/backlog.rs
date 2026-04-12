@@ -145,6 +145,7 @@ fn make_separator(
     text: String,
     event_key: &str,
 ) -> Message {
+    let event_param = text.clone();
     Message {
         id,
         timestamp,
@@ -154,7 +155,7 @@ fn make_separator(
         text,
         highlight: false,
         event_key: Some(event_key.to_string()),
-        event_params: None,
+        event_params: Some(vec![event_param]),
         log_msg_id: None,
         log_ref_id: None,
         tags: None,
@@ -167,4 +168,27 @@ fn make_separator(
 pub fn format_date_separator(date: chrono::NaiveDate) -> String {
     let formatted = date.format("%a, %d %b %Y");
     format!("─── {formatted} ───")
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::make_separator;
+
+    #[test]
+    fn separator_event_carries_text_in_event_params() {
+        let message = make_separator(
+            1,
+            Utc::now(),
+            "─── Mon, 29 Mar 2026 ───".to_string(),
+            "date_separator",
+        );
+
+        assert_eq!(message.event_key.as_deref(), Some("date_separator"));
+        assert_eq!(
+            message.event_params.as_deref(),
+            Some(&["─── Mon, 29 Mar 2026 ───".to_string()][..])
+        );
+    }
 }
