@@ -1,8 +1,6 @@
 use chrono::Utc;
 
-use crate::state::buffer::{
-    ActivityLevel, Buffer, BufferType, Message, MessageType,
-};
+use crate::state::buffer::{ActivityLevel, Buffer, BufferType, Message, MessageType};
 
 use super::App;
 
@@ -44,8 +42,7 @@ impl App {
         let Some(storage) = &self.storage else { return };
         let Ok(db) = storage.db.lock() else { return };
         let seven_days_ago = chrono::Utc::now().timestamp() - 7 * 24 * 3600;
-        let Ok(rows) =
-            crate::storage::query::load_recent_mentions(&db, seven_days_ago, 1000)
+        let Ok(rows) = crate::storage::query::load_recent_mentions(&db, seven_days_ago, 1000)
         else {
             return;
         };
@@ -57,13 +54,12 @@ impl App {
             return;
         };
         for (i, row) in rows.iter().enumerate() {
-            buf.messages
-                .push_back(Self::mention_row_to_message(
-                    row,
-                    base_id + i as u64,
-                    self.config.display.nick_color_saturation,
-                    self.config.display.nick_color_lightness,
-                ));
+            buf.messages.push_back(Self::mention_row_to_message(
+                row,
+                base_id + i as u64,
+                self.config.display.nick_color_saturation,
+                self.config.display.nick_color_lightness,
+            ));
         }
     }
 
@@ -74,8 +70,8 @@ impl App {
         nick_sat: f32,
         nick_lit: f32,
     ) -> Message {
-        let ts = chrono::DateTime::from_timestamp(row.timestamp, 0)
-            .unwrap_or_else(chrono::Utc::now);
+        let ts =
+            chrono::DateTime::from_timestamp(row.timestamp, 0).unwrap_or_else(chrono::Utc::now);
         let datetime = ts
             .with_timezone(&chrono::Local)
             .format("%Y/%m/%d %H:%M:%S")

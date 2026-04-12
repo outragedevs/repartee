@@ -32,7 +32,10 @@ impl Write for SocketWriter {
         if !self.buffer.is_empty() {
             let data = std::mem::replace(&mut self.buffer, Vec::with_capacity(8192));
             self.tx.try_send(MainMessage::Output(data)).map_err(|e| {
-                io::Error::new(io::ErrorKind::BrokenPipe, format!("socket output channel error: {e}"))
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    format!("socket output channel error: {e}"),
+                )
             })?;
         }
         Ok(())

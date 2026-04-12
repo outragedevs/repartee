@@ -65,6 +65,7 @@ MAX_CHUNKS = 16
 MAX_PT_PER_CHUNK = 180
 TS_TOLERANCE = 300
 KEYREQ_MIN_INTERVAL = 30
+PENDING_KEYREQ_TTL = 120
 HKDF_SALT = b"RPE2E01-WRAP"
 NONCE_LEN = crypto_aead_xchacha20poly1305_ietf_NPUBBYTES
 KEY_LEN = crypto_aead_xchacha20poly1305_ietf_KEYBYTES
@@ -79,6 +80,20 @@ C_ERR = weechat.color("red") if weechat else ""
 C_WARN = weechat.color("yellow") if weechat else ""
 C_INFO = weechat.color("cyan") if weechat else ""
 C_RST = weechat.color("reset") if weechat else ""
+
+DEBUG_LOG = os.path.expanduser("~/.weechat/rpe2e-debug.log")
+DEBUG_ENABLED = os.environ.get("RPE2E_DEBUG") == "1"
+DEBUG_BUFFER_ENABLED = os.environ.get("RPE2E_DEBUG_BUFFER") == "1"
+
+
+def _dbg(msg: str) -> None:
+    if not DEBUG_ENABLED:
+        return
+    try:
+        with open(DEBUG_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {msg}\n")
+    except Exception:
+        pass
 
 BIP39_WORDS = [
     "abandon", "ability", "able", "about", "above", "absent", "absorb", "abstract",
@@ -340,8 +355,7 @@ BIP39_WORDS = [
 ]
 
 if weechat is not None:
-    DB_DIR = weechat.info_get("weechat_dir", "") or os.path.expanduser("~/.weechat")
-    DB_PATH = os.path.join(DB_DIR, "rpe2e.db")
+    DB_PATH = ""
 else:
     DB_PATH = os.path.expanduser("~/.weechat/rpe2e.db")
 
@@ -378,6 +392,9 @@ def _allow_incoming(handle: str) -> bool:
 
 
 def db_conn() -> sqlite3.Connection:
+    if not DB_PATH:
+        raise RuntimeError("rpe2e: DB_PATH not initialized")
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
@@ -466,6 +483,7 @@ CREATE TABLE IF NOT EXISTS pending_trust_change (
 def init_db() -> None:
     with db_conn() as c:
         c.executescript(SCHEMA_SQL)
+        c.execute("DELETE FROM pending")
 
 
 def context_key(target: str, handle: str) -> str:
@@ -778,6 +796,26 @@ def _resolve_handle_by_nick(server: str, channel: str, nick: str) -> str | None:
     return None
 
 
+def _resolve_cached_handle_by_nick(nick: str) -> str | None:
+    with db_conn() as c:
+        rows = c.execute(
+            "SELECT last_handle, last_nick, last_seen FROM peers WHERE last_nick IS NOT NULL"
+        ).fetchall()
+    nick_lower = nick.lower()
+    matches = [
+        (last_seen, last_handle)
+        for last_handle, last_nick, last_seen in rows
+        if last_handle
+        and isinstance(last_handle, str)
+        and isinstance(last_nick, str)
+        and last_nick.lower() == nick_lower
+    ]
+    if not matches:
+        return None
+    matches.sort(key=lambda item: item[0])
+    return matches[-1][1]
+
+
 def _ctx_for_target(target: str, handle: str) -> str:
     """Same as context_key but explicit: channel targets pass through,
     PM targets become `@<handle>`. Callers that have a real handle (from
@@ -808,6 +846,30 @@ def _ctx_for_command(buffer_ptr, server: str, target: str, nick: str | None) -> 
     return "@" + handle
 
 
+def _resolve_handle_for_command(server: str, target: str, nick: str) -> str | None:
+    if "@" in nick:
+        return nick
+    handle = _resolve_handle_by_nick(server, target, nick)
+    if handle is not None:
+        return handle
+    return _resolve_cached_handle_by_nick(nick)
+
+
+def _ctx_or_error(buf: str, buffer_ptr, server: str, target: str, nick: str | None, cmd: str) -> str | None:
+    ctx = _ctx_for_command(buffer_ptr, server, target, nick)
+    if ctx is None:
+        who = nick or target or "peer"
+        _prnt_err(buf, f"{cmd}: cannot resolve handle for {who} — has the user spoken yet?")
+    return ctx
+
+
+def _handle_or_error(buf: str, server: str, target: str, nick: str, cmd: str) -> str | None:
+    handle = _resolve_handle_for_command(server, target, nick)
+    if handle is None:
+        _prnt_err(buf, f"{cmd}: cannot resolve handle for {nick} — has the user spoken yet?")
+    return handle
+
+
 def _prnt_ok(buf: str, msg: str) -> None:
     if weechat:
         weechat.prnt(buf, f"{C_OK}[E2E] {msg}{C_RST}")
@@ -821,6 +883,121 @@ def _prnt_err(buf: str, msg: str) -> None:
 def _prnt_warn(buf: str, msg: str) -> None:
     if weechat:
         weechat.prnt(buf, f"{C_WARN}[E2E] {msg}{C_RST}")
+
+
+def _prnt_dbg(server: str, ctx: str, nick: str, msg: str) -> None:
+    if not DEBUG_BUFFER_ENABLED or weechat is None:
+        return
+    buf = _notice_buffer_for_ctx(server, ctx, nick)
+    weechat.prnt(buf, f"{C_INFO}[E2E debug] {msg}{C_RST}")
+
+
+def _notice_buffer_for_ctx(server: str, ctx: str, nick: str) -> str:
+    if weechat is None:
+        return ""
+    if ctx and ctx[0] in CHANNEL_PREFIXES:
+        buf = weechat.buffer_search("irc", f"{server}.{ctx}") or ""
+        if buf:
+            return buf
+    if nick:
+        buf = weechat.buffer_search("irc", f"{server}.{nick}") or ""
+        if buf:
+            return buf
+    # `weechat.buffer_search` does NOT accept wildcards — it does an
+    # exact-name match. The canonical server buffer is
+    # `server.<server>`, so try that as the last resort and fall back
+    # to empty (callers that end up here should use
+    # `_send_raw_notice` which passes `/quote -server` explicitly).
+    return weechat.buffer_search("irc", f"server.{server}") or ""
+
+
+def _send_raw_notice(server: str, nick: str, ctcp_body: str) -> bool:
+    """Send an IRC NOTICE via the named server, independent of which
+    weechat buffer happens to be active.
+
+    Uses `/quote -server <server>` so the command is bound to the
+    correct IRC connection even when dispatched from the core buffer
+    or another server's buffer. Returns True on success, False if we
+    could not resolve any IRC buffer to dispatch the command on.
+
+    This exists because `weechat.buffer_search("irc", f"{server}.*")`
+    does NOT accept wildcards — it does a literal match on the name
+    string, so it always returns an empty buffer pointer. Commands
+    dispatched on an empty buffer land in core.weechat and `/quote`
+    with no `-server` flag has no IRC context → the NOTICE never
+    leaves weechat. That was the exact failure mode for the
+    reciprocal KEYRSP from `hook_irc_in_notice`."""
+    if weechat is None:
+        return False
+    # Any IRC-plugin buffer works as a dispatch point because the
+    # `/quote -server <name>` flag routes the command to the correct
+    # server regardless of the buffer's own context. Prefer the
+    # server buffer, fall back to any IRC buffer on that server, and
+    # finally to the core buffer.
+    buf = weechat.buffer_search("irc", f"server.{server}") or ""
+    if not buf:
+        # Scan for any irc buffer belonging to this server. We walk
+        # the gui_buffers infolist rather than guessing names.
+        infolist = weechat.infolist_get("buffer", "", "")
+        try:
+            while weechat.infolist_next(infolist):
+                plugin = weechat.infolist_string(infolist, "plugin_name")
+                name = weechat.infolist_string(infolist, "name")
+                if plugin == "irc" and name.startswith(f"{server}."):
+                    buf = weechat.infolist_pointer(infolist, "pointer")
+                    break
+        finally:
+            weechat.infolist_free(infolist)
+    rc = weechat.command(buf, f"/quote -server {server} NOTICE {nick} :{ctcp_body}")
+    _dbg(
+        f"_send_raw_notice server={server} nick={nick} buf={buf!r} "
+        f"rc={rc} body_len={len(ctcp_body)}"
+    )
+    return True
+
+
+def _send_raw_privmsg(server: str, target: str, body: str) -> bool:
+    if weechat is None:
+        return False
+    buf = weechat.buffer_search("irc", f"server.{server}") or ""
+    if not buf:
+        infolist = weechat.infolist_get("buffer", "", "")
+        try:
+            while weechat.infolist_next(infolist):
+                plugin = weechat.infolist_string(infolist, "plugin_name")
+                name = weechat.infolist_string(infolist, "name")
+                if plugin == "irc" and name.startswith(f"{server}."):
+                    buf = weechat.infolist_pointer(infolist, "pointer")
+                    break
+        finally:
+            weechat.infolist_free(infolist)
+    rc = weechat.command(buf, f"/quote -server {server} PRIVMSG {target} :{body}")
+    _dbg(
+        f"_send_raw_privmsg server={server} target={target} buf={buf!r} "
+        f"rc={rc} body_len={len(body)}"
+    )
+    return True
+
+
+def _prnt_self_msg(buf: str, text: str) -> None:
+    if weechat is None or not buf:
+        return
+    nick = weechat.buffer_get_string(buf, "localvar_nick") or ""
+    if not nick:
+        server = weechat.buffer_get_string(buf, "localvar_server") or ""
+        nick = weechat.info_get("irc_nick", server) or ""
+    prefix = f"{weechat.color('chat_nick_self')}{nick}{C_RST}" if nick else ""
+    tags = f"self_msg,notify_none,no_highlight,nick_{nick}" if nick else "self_msg,notify_none,no_highlight"
+    weechat.prnt_date_tags(buf, 0, tags, f"{prefix}\t{text}")
+
+
+def _allow_outgoing_keyreq(handle: str) -> bool:
+    now_f = time.time()
+    last = _rate_limit_sent.get(handle, 0.0)
+    if now_f - last < KEYREQ_MIN_INTERVAL:
+        return False
+    _rate_limit_sent[handle] = now_f
+    return True
 
 
 def _parse_kv_strict(fields: list[str]) -> dict[str, str] | None:
@@ -842,6 +1019,15 @@ def _parse_kv_strict(fields: list[str]) -> dict[str, str] | None:
     return out
 
 
+def _b64u_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode().rstrip("=")
+
+
+def _b64u_decode(data: str) -> bytes:
+    pad = "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode(data + pad)
+
+
 def parse_keyreq(body: str) -> dict | None:
     parts = body.split()
     if len(parts) < 7 or parts[0] != CTCP_TAG or parts[1] != "KEYREQ":
@@ -852,11 +1038,11 @@ def parse_keyreq(body: str) -> dict | None:
     try:
         if kv.get("v") != "1":
             return None
-        channel = kv["chan"]
-        pub = bytes.fromhex(kv["pub"])
-        eph_x25519 = bytes.fromhex(kv["eph"])
-        nonce = bytes.fromhex(kv["nonce"])
-        sig = bytes.fromhex(kv["sig"])
+        channel = kv["c"]
+        pub = _b64u_decode(kv["p"])
+        eph_x25519 = _b64u_decode(kv["e"])
+        nonce = _b64u_decode(kv["n"])
+        sig = _b64u_decode(kv["s"])
     except (KeyError, ValueError):
         return None
     if len(pub) != 32 or len(eph_x25519) != 32 or len(nonce) != 16 or len(sig) != 64:
@@ -880,13 +1066,13 @@ def parse_keyrsp(body: str) -> dict | None:
     try:
         if kv.get("v") != "1":
             return None
-        channel = kv["chan"]
-        pub = bytes.fromhex(kv["pub"])
-        eph_pub = bytes.fromhex(kv["eph"])
-        wnonce = bytes.fromhex(kv["wnonce"])
-        wrap_ct = base64.b64decode(kv["wrap"])
-        nonce = bytes.fromhex(kv["nonce"])
-        sig = bytes.fromhex(kv["sig"])
+        channel = kv["c"]
+        pub = _b64u_decode(kv["p"])
+        eph_pub = _b64u_decode(kv["e"])
+        wnonce = _b64u_decode(kv["wn"])
+        wrap_ct = _b64u_decode(kv["w"])
+        nonce = _b64u_decode(kv["n"])
+        sig = _b64u_decode(kv["s"])
     except (KeyError, ValueError):
         return None
     if (
@@ -918,13 +1104,13 @@ def parse_keyrekey(body: str) -> dict | None:
     try:
         if kv.get("v") != "1":
             return None
-        channel = kv["chan"]
-        pub = bytes.fromhex(kv["pub"])
-        eph_pub = bytes.fromhex(kv["eph"])
-        wnonce = bytes.fromhex(kv["wnonce"])
-        wrap_ct = base64.b64decode(kv["wrap"])
-        nonce = bytes.fromhex(kv["nonce"])
-        sig = bytes.fromhex(kv["sig"])
+        channel = kv["c"]
+        pub = _b64u_decode(kv["p"])
+        eph_pub = _b64u_decode(kv["e"])
+        wnonce = _b64u_decode(kv["wn"])
+        wrap_ct = _b64u_decode(kv["w"])
+        nonce = _b64u_decode(kv["n"])
+        sig = _b64u_decode(kv["s"])
     except (KeyError, ValueError):
         return None
     if (
@@ -948,6 +1134,16 @@ def parse_keyrekey(body: str) -> dict | None:
 
 def build_keyreq(channel: str) -> str:
     pk, sk, _fp = ensure_identity()
+    with db_conn() as c:
+        row = c.execute(
+            "SELECT created_at FROM pending WHERE channel = ?", (channel,)
+        ).fetchone()
+    if row is not None:
+        created_at = int(row[0])
+        if int(time.time()) - created_at < PENDING_KEYREQ_TTL:
+            raise ValueError(f"key exchange already pending for {channel}")
+        with db_conn() as c:
+            c.execute("DELETE FROM pending WHERE channel = ?", (channel,))
     eph_sk, eph_pk = generate_x25519_keypair()
     req_nonce = nacl_random(16)
     sig_payload = _sig_payload_keyreq(channel, pk, eph_pk, req_nonce)
@@ -958,8 +1154,8 @@ def build_keyreq(channel: str) -> str:
             (channel, eph_sk, int(time.time())),
         )
     body = (
-        f"{CTCP_TAG} KEYREQ v=1 chan={channel} pub={pk.hex()} "
-        f"eph={eph_pk.hex()} nonce={req_nonce.hex()} sig={sig.hex()}"
+        f"{CTCP_TAG} KEYREQ v=1 c={channel} p={_b64u_encode(pk)} "
+        f"e={_b64u_encode(eph_pk)} n={_b64u_encode(req_nonce)} s={_b64u_encode(sig)}"
     )
     return "\x01" + body + "\x01"
 
@@ -995,38 +1191,65 @@ def _build_keyrsp_for_req(
             (channel, sender_handle, peer_fp, now),
         )
     body = (
-        f"{CTCP_TAG} KEYRSP v=1 chan={channel} pub={pk.hex()} "
-        f"eph={eph_pk.hex()} wnonce={wrap_nonce.hex()} "
-        f"wrap={base64.b64encode(wrap_ct).decode()} "
-        f"nonce={rsp_nonce.hex()} sig={sig.hex()}"
+        f"{CTCP_TAG} KEYRSP v=1 c={channel} p={_b64u_encode(pk)} "
+        f"e={_b64u_encode(eph_pk)} wn={_b64u_encode(wrap_nonce)} "
+        f"w={_b64u_encode(wrap_ct)} "
+        f"n={_b64u_encode(rsp_nonce)} s={_b64u_encode(sig)}"
     )
     return "\x01" + body + "\x01"
 
 
-def handle_keyreq(sender_handle: str, nick: str, body: str) -> str | None:
+def _maybe_build_reciprocal_keyreq(channel: str, sender_handle: str) -> str | None:
+    with db_conn() as c:
+        row = c.execute(
+            "SELECT status FROM incoming WHERE handle = ? AND channel = ?",
+            (sender_handle, channel),
+        ).fetchone()
+        pending = c.execute(
+            "SELECT 1 FROM pending WHERE channel = ?", (channel,)
+        ).fetchone()
+    already_trusted = row is not None and row[0] == "trusted"
+    allow = _allow_outgoing_keyreq(sender_handle)
+    _dbg(
+        f"_maybe_build_reciprocal_keyreq channel={channel} sender={sender_handle} "
+        f"already_trusted={already_trusted} pending={pending} allow_outgoing={allow}"
+    )
+    if pending is not None or already_trusted or not allow:
+        return None
+    return build_keyreq(channel)
+
+
+def handle_keyreq(server: str, sender_handle: str, nick: str, body: str) -> tuple[str | None, str | None]:
+    _dbg(f"handle_keyreq entry server={server} sender={nick}!{sender_handle}")
     req = parse_keyreq(body)
     if req is None:
-        return None
+        _dbg("handle_keyreq: parse_keyreq returned None")
+        return None, None
     if not _allow_incoming(sender_handle):
-        return None
+        _dbg(f"handle_keyreq: rate-limited incoming from {sender_handle}")
+        return None, None
     sig_payload = _sig_payload_keyreq(
         req["channel"], req["pub"], req["eph_x25519"], req["nonce"]
     )
     if not ed25519_verify(req["pub"], sig_payload, req["sig"]):
-        return None
+        _dbg(f"handle_keyreq: sig verify failed for {sender_handle} on {req['channel']}")
+        return None, None
     # The handshake `channel` field is the context key as the sender
     # understood it (channel name or `@<our_handle>` for PMs). We trust
     # that verbatim — the signature binds it.
     ctx = req["channel"]
+    _dbg(f"handle_keyreq: parsed channel={ctx} pub={req['pub'].hex()[:16]}")
     with db_conn() as c:
         row = c.execute(
             "SELECT enabled, mode FROM channels WHERE channel = ?", (ctx,)
         ).fetchone()
     if row is None or not row[0]:
-        return None
+        _dbg(f"handle_keyreq: channel {ctx} not enabled (row={row})")
+        return None, None
     mode = row[1] if row else "normal"
     peer_fp = fingerprint(req["pub"])
     change = _classify_peer_change(peer_fp, sender_handle)
+    _dbg(f"handle_keyreq: channel={ctx} mode={mode} classify={change}")
     if change == "revoked":
         if weechat:
             weechat.prnt(
@@ -1036,7 +1259,7 @@ def handle_keyreq(sender_handle: str, nick: str, body: str) -> str | None:
         _record_pending_trust_change(
             sender_handle, ctx, "revoked", None, peer_fp, peer_fp
         )
-        return None
+        return None, None
     if change.startswith("handle_changed:"):
         old = change.split(":", 1)[1]
         if weechat:
@@ -1047,7 +1270,7 @@ def handle_keyreq(sender_handle: str, nick: str, body: str) -> str | None:
         _record_pending_trust_change(
             sender_handle, ctx, "handle_changed", None, peer_fp, peer_fp
         )
-        return None
+        return None, None
     if change.startswith("fingerprint_changed:"):
         old_fp_hex = change.split(":", 1)[1]
         old_fp_bytes = bytes.fromhex(old_fp_hex) if old_fp_hex else None
@@ -1064,7 +1287,7 @@ def handle_keyreq(sender_handle: str, nick: str, body: str) -> str | None:
             old_fp_bytes,
             peer_fp,
         )
-        return None
+        return None, None
     with db_conn() as c:
         c.execute(
             "INSERT OR REPLACE INTO peers (fp, pk, last_handle, last_nick, first_seen, last_seen, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1089,8 +1312,13 @@ def handle_keyreq(sender_handle: str, nick: str, body: str) -> str | None:
             (sender_handle, ctx),
         ).fetchone()
     already_trusted = sess is not None and sess[0] == "trusted"
+    _dbg(
+        f"handle_keyreq: effective_mode={effective_mode} already_trusted={already_trusted} "
+        f"autotrust={autotrust} sess={sess}"
+    )
     if effective_mode == "quiet" and not already_trusted:
-        return None
+        _dbg("handle_keyreq: quiet mode + not trusted → dropping")
+        return None, None
     if effective_mode == "normal" and not already_trusted and not autotrust:
         with db_conn() as c:
             c.execute(
@@ -1111,23 +1339,38 @@ def handle_keyreq(sender_handle: str, nick: str, body: str) -> str | None:
                 ),
             )
         if weechat:
-            buf = weechat.buffer_search("irc", f"*{ctx}")
+            buf = _notice_buffer_for_ctx(server, ctx, nick)
+            who = f"{nick} ({sender_handle})" if nick else sender_handle
             weechat.prnt(
                 buf,
-                f"{C_WARN}[E2E] Pending key exchange from {sender_handle} for {ctx} — /e2e accept <nick>{C_RST}",
+                f"{C_WARN}[E2E] Pending key exchange from {who} for {ctx} — /e2e accept <nick>{C_RST}",
             )
-        return None
-    return _build_keyrsp_for_req(
+        _dbg(f"handle_keyreq: normal-mode cached pending for {sender_handle} on {ctx}")
+        return None, None
+    _dbg(
+        f"handle_keyreq: building KEYRSP for {sender_handle} on {ctx} "
+        f"(effective_mode={effective_mode}, already_trusted={already_trusted})"
+    )
+    rsp = _build_keyrsp_for_req(
         req["channel"], sender_handle, req["pub"], req["eph_x25519"]
     )
+    _dbg(f"handle_keyreq: _build_keyrsp_for_req returned rsp={'yes' if rsp else 'no'}")
+    reciprocal = _maybe_build_reciprocal_keyreq(req["channel"], sender_handle)
+    _dbg(f"handle_keyreq: reciprocal={'yes' if reciprocal else 'no'}")
+    return rsp, reciprocal
 
 
-def handle_keyrsp(sender_handle: str, body: str) -> bool:
+def handle_keyrsp(server: str, nick: str, sender_handle: str, body: str) -> bool:
+    _dbg(f"handle_keyrsp entry sender={sender_handle}")
     rsp = parse_keyrsp(body)
     if rsp is None:
+        _dbg("handle_keyrsp: parse_keyrsp returned None")
+        _prnt_dbg(server, "", nick, f"RX KEYRSP from {nick} ({sender_handle}) parse failed")
         return False
+    ctx = rsp["channel"]
+    _prnt_dbg(server, ctx, nick, f"RX KEYRSP from {nick} ({sender_handle}) for {ctx}")
     sig_payload = _sig_payload_keyrsp(
-        rsp["channel"],
+        ctx,
         rsp["pub"],
         rsp["eph_pub"],
         rsp["wrap_nonce"],
@@ -1135,24 +1378,26 @@ def handle_keyrsp(sender_handle: str, body: str) -> bool:
         rsp["nonce"],
     )
     if not ed25519_verify(rsp["pub"], sig_payload, rsp["sig"]):
+        _dbg(f"handle_keyrsp: sig verify failed for {sender_handle} on {ctx}")
+        _prnt_dbg(server, ctx, nick, f"KEYRSP from {nick} ({sender_handle}) failed on {ctx}: bad signature")
         return False
-    # `channel` on KEYRSP is the signed context key the initiator used
-    # when building the KEYREQ. The responder echoes it verbatim; the
-    # signature covers it so we can rely on it as the session key.
-    ctx = rsp["channel"]
     with db_conn() as c:
         row = c.execute(
             "SELECT eph_sk FROM pending WHERE channel = ?", (ctx,)
         ).fetchone()
         if row is None:
+            _dbg(f"handle_keyrsp: NO pending outgoing KEYREQ for channel {ctx} — dropping")
+            _prnt_dbg(server, ctx, nick, f"KEYRSP from {nick} ({sender_handle}) dropped on {ctx}: no pending KEYREQ")
             return False
         eph_sk = row[0]
         c.execute("DELETE FROM pending WHERE channel = ?", (ctx,))
+    _dbg(f"handle_keyrsp: consumed pending entry for channel {ctx}")
     shared = x25519_ecdh(eph_sk, rsp["eph_pub"])
     info = b"RPE2E01-WRAP:" + ctx.encode()
     wrap_key = hkdf_sha256(HKDF_SALT, shared, info, KEY_LEN)
     session_key = aead_decrypt(wrap_key, rsp["wrap_nonce"], info, rsp["wrap_ct"])
     if session_key is None or len(session_key) != KEY_LEN:
+        _prnt_dbg(server, ctx, nick, f"KEYRSP from {nick} ({sender_handle}) failed on {ctx}: wrap decrypt failed")
         return False
     peer_fp = fingerprint(rsp["pub"])
     change = _classify_peer_change(peer_fp, sender_handle)
@@ -1165,6 +1410,7 @@ def handle_keyrsp(sender_handle: str, body: str) -> bool:
         _record_pending_trust_change(
             sender_handle, ctx, "revoked", None, peer_fp, peer_fp
         )
+        _prnt_dbg(server, ctx, nick, f"KEYRSP from {nick} ({sender_handle}) rejected on {ctx}: revoked peer")
         return False
     if change.startswith("handle_changed:"):
         old = change.split(":", 1)[1]
@@ -1176,6 +1422,7 @@ def handle_keyrsp(sender_handle: str, body: str) -> bool:
         _record_pending_trust_change(
             sender_handle, ctx, "handle_changed", None, peer_fp, peer_fp
         )
+        _prnt_dbg(server, ctx, nick, f"KEYRSP from {nick} ({sender_handle}) rejected on {ctx}: handle changed from {old}")
         return False
     if change.startswith("fingerprint_changed:"):
         old_fp_hex = change.split(":", 1)[1]
@@ -1193,6 +1440,7 @@ def handle_keyrsp(sender_handle: str, body: str) -> bool:
             old_fp_bytes,
             peer_fp,
         )
+        _prnt_dbg(server, ctx, nick, f"KEYRSP from {nick} ({sender_handle}) rejected on {ctx}: fingerprint changed")
         return False
     now = int(time.time())
     with db_conn() as c:
@@ -1214,6 +1462,8 @@ def handle_keyrsp(sender_handle: str, body: str) -> bool:
                 existing[0],
                 peer_fp,
             )
+            _dbg(f"handle_keyrsp: fingerprint mismatch for {sender_handle} on {ctx}")
+            _prnt_dbg(server, ctx, nick, f"KEYRSP from {nick} ({sender_handle}) rejected on {ctx}: incoming fingerprint mismatch")
             return False
         c.execute(
             "INSERT OR REPLACE INTO peers (fp, pk, last_handle, last_nick, first_seen, last_seen, status) VALUES (?, ?, ?, ?, ?, ?, 'trusted')",
@@ -1223,6 +1473,11 @@ def handle_keyrsp(sender_handle: str, body: str) -> bool:
             "INSERT OR REPLACE INTO incoming (handle, channel, fp, sk, status, created_at) VALUES (?, ?, ?, ?, 'trusted', ?)",
             (sender_handle, ctx, peer_fp, session_key, now),
         )
+    _dbg(
+        f"handle_keyrsp: installed trusted incoming for {sender_handle} on {ctx} "
+        f"fp={peer_fp.hex()[:16]}"
+    )
+    _prnt_dbg(server, ctx, nick, f"KEYRSP from {nick} ({sender_handle}) installed session on {ctx}")
     return True
 
 
@@ -1338,10 +1593,10 @@ def _build_rekey_for_peer(
     sig_payload = _sig_payload_keyrekey(channel, pk, eph_pk, wrap_nonce, wrap_ct, nonce)
     sig = ed25519_sign(sk, sig_payload)
     body = (
-        f"{CTCP_TAG} REKEY v=1 chan={channel} pub={pk.hex()} "
-        f"eph={eph_pk.hex()} wnonce={wrap_nonce.hex()} "
-        f"wrap={base64.b64encode(wrap_ct).decode()} "
-        f"nonce={nonce.hex()} sig={sig.hex()}"
+        f"{CTCP_TAG} REKEY v=1 c={channel} p={_b64u_encode(pk)} "
+        f"e={_b64u_encode(eph_pk)} wn={_b64u_encode(wrap_nonce)} "
+        f"w={_b64u_encode(wrap_ct)} "
+        f"n={_b64u_encode(nonce)} s={_b64u_encode(sig)}"
     )
     return "\x01" + body + "\x01"
 
@@ -1368,14 +1623,13 @@ def _distribute_rekey(channel: str, new_sk: bytes, server: str | None = None) ->
         nick = last_nick or (handle.split("@")[0] if "@" in handle else handle)
         if weechat:
             if server:
-                srv_buf = weechat.buffer_search("irc", f"server.{server}")
-                if not srv_buf:
-                    srv_buf = weechat.buffer_search("irc", f"{server}.*")
-                if srv_buf:
-                    weechat.command(srv_buf, f"/quote -server {server} NOTICE {nick} :{ctcp}")
-                    continue
-            # No server context — send on the currently-active buffer
-            weechat.command("", f"/quote NOTICE {nick} :{ctcp}")
+                _send_raw_notice(server, nick, ctcp)
+            else:
+                # No server context — last resort, send on the
+                # currently-active buffer. Not great, but this branch
+                # is only reached when rekey distribution fires from
+                # a context that didn't carry a server string.
+                weechat.command("", f"/quote NOTICE {nick} :{ctcp}")
 
 
 def parse_wire(line: str) -> dict | None:
@@ -1429,7 +1683,7 @@ def split_plaintext(pt: str) -> list[bytes]:
     i = 0
     while i < len(b):
         j = min(i + MAX_PT_PER_CHUNK, len(b))
-        while j > i and (b[j - 1] & 0xC0) == 0x80:
+        while j > i and j < len(b) and (b[j] & 0xC0) == 0x80:
             j -= 1
         if j == i:
             raise ValueError("cannot split: UTF-8 codepoint too large")
@@ -1491,6 +1745,11 @@ def hook_irc_in_privmsg(data, modifier, server, msg):
         wire = parse_wire(text)
         if wire is None:
             return msg
+        _dbg(
+            f"hook_irc_in_privmsg RPE2E wire from {nick}!{handle} → {target} "
+            f"msgid={wire['msgid'].hex() if isinstance(wire.get('msgid'), bytes) else wire.get('msgid')} "
+            f"part={wire['part']}/{wire['total']}"
+        )
         if wire["total"] > MAX_CHUNKS:
             return ""
         skew = abs(int(time.time()) - wire["ts"])
@@ -1503,63 +1762,83 @@ def hook_irc_in_privmsg(data, modifier, server, msg):
                 (handle, ctx),
             ).fetchone()
         if row is None or row[1] != "trusted":
+            _dbg(
+                f"hook_irc_in_privmsg: no trusted incoming for ({handle},{ctx}) "
+                f"row={row} — firing auto-KEYREQ to {nick}"
+            )
             last = _rate_limit_sent.get(handle, 0.0)
             now_f = time.time()
             if now_f - last >= KEYREQ_MIN_INTERVAL:
                 _rate_limit_sent[handle] = now_f
+                buf = weechat.buffer_search("irc", f"{server}.{target}") if weechat else ""
                 try:
                     kreq = build_keyreq(ctx)
                     if weechat:
-                        weechat.command(
-                            weechat.buffer_search("irc", f"{server}.{target}"),
-                            f"/quote NOTICE {nick} :{kreq}",
-                        )
-                except Exception:
-                    pass
+                        weechat.command(buf, f"/quote NOTICE {nick} :{kreq}")
+                        _prnt_ok(buf, f"KEYREQ sent to {nick} for {ctx}")
+                        _prnt_dbg(server, ctx, nick, f"TX auto-KEYREQ to {nick} for {ctx}")
+                        _dbg(f"hook_irc_in_privmsg: sent auto-KEYREQ to {nick} for {ctx}")
+                except Exception as e:
+                    if weechat:
+                        _prnt_warn(buf, f"automatic KEYREQ to {nick} for {ctx} skipped: {e}")
+                    _dbg(f"hook_irc_in_privmsg: build_keyreq raised {e}")
+            else:
+                _dbg(f"hook_irc_in_privmsg: rate-limited, not sending KEYREQ (last={last} now={now_f})")
             return ""
         sk = row[0]
         aad = build_aad(ctx, wire["msgid"], wire["ts"], wire["part"], wire["total"])
         pt = aead_decrypt(sk, wire["nonce"], aad, wire["ct"])
         if pt is None:
+            _dbg(f"hook_irc_in_privmsg: aead_decrypt returned None for ({handle},{ctx})")
             return ""
+        _dbg(f"hook_irc_in_privmsg: decrypted {len(pt)} bytes for ({handle},{ctx})")
         try:
             pt_str = pt.decode("utf-8")
         except UnicodeDecodeError:
             pt_str = pt.decode("utf-8", errors="replace")
         return f":{prefix} PRIVMSG {target} :{pt_str}"
-    except Exception:
+    except Exception as e:
+        import traceback
+        _dbg(f"hook_irc_in_privmsg OUTER EXCEPTION: {e}\n{traceback.format_exc()}")
         return msg
 
 
-def hook_input_text_display(data, modifier, modifier_data, text):
+def hook_input_text_for_buffer(data, modifier, modifier_data, text):
     try:
-        if not text.startswith("PRIVMSG "):
+        if weechat is None:
             return text
-        _, rest = text.split(" ", 1)
-        target, payload = rest.split(" ", 1)
-        if not payload.startswith(":"):
+        if text.startswith("/"):
             return text
-        plain = payload[1:]
+        buffer = modifier_data
+        if not buffer:
+            return text
+        server = weechat.buffer_get_string(buffer, "localvar_server")
+        target = weechat.buffer_get_string(buffer, "localvar_channel")
+        if not server or not target:
+            return text
+        plain = text
         # G13: refuse to encrypt an empty line. The user typed either
         # whitespace-only or literally nothing; pass the original text
         # through so weechat can decide what to do with it instead of
         # shipping a zero-ciphertext chunk to the peer.
         if not plain:
             return text
-        ctx = context_key(target, "")
         is_channel = target and target[0] in CHANNEL_PREFIXES
         if is_channel:
-            lookup = target
+            channel = target
         else:
-            lookup = "@" + target
+            peer_handle = _resolve_handle_by_nick(server, target, target)
+            if peer_handle is None:
+                _prnt_err(buffer, f"cannot resolve handle for {target} — has the user spoken yet?")
+                return text
+            channel = "@" + peer_handle
         with db_conn() as c:
             row = c.execute(
                 "SELECT enabled FROM channels WHERE channel = ?",
-                (lookup if not is_channel else target,),
+                (channel,),
             ).fetchone()
         if row is None or not row[0]:
             return text
-        channel = lookup if not is_channel else target
         fresh, had_pending = _get_or_generate_outgoing_key_with_rotation(channel)
         if had_pending:
             _distribute_rekey(channel, fresh)
@@ -1568,21 +1847,16 @@ def hook_input_text_display(data, modifier, modifier_data, text):
         total = len(chunks)
         msgid = nacl_random(8)
         ts = int(time.time())
-        server = modifier_data
-        wire_lines = []
         for idx, chunk in enumerate(chunks, start=1):
             aad = build_aad(channel, msgid, ts, idx, total)
             nonce, ct = aead_encrypt(sk, aad, chunk)
-            wire_lines.append(encode_wire(msgid, ts, idx, total, nonce, ct))
-        first = f"PRIVMSG {target} :{wire_lines[0]}"
-        for extra in wire_lines[1:]:
-            if weechat:
-                weechat.command(
-                    weechat.buffer_search("irc", f"{server}.{target}"),
-                    f"/quote PRIVMSG {target} :{extra}",
-                )
-        return first
-    except Exception:
+            wire = encode_wire(msgid, ts, idx, total, nonce, ct)
+            _send_raw_privmsg(server, target, wire)
+        _prnt_self_msg(buffer, plain)
+        return ""
+    except Exception as e:
+        import traceback
+        _dbg(f"hook_input_text_for_buffer OUTER EXCEPTION: {e}\n{traceback.format_exc()}")
         return text
 
 
@@ -1606,20 +1880,52 @@ def hook_irc_in_notice(data, modifier, server, msg):
         inner = text[1:-1]
         if not inner.startswith(CTCP_TAG + " "):
             return msg
+        _dbg(f"hook_irc_in_notice RPEE2E {inner[:60]!r} from {nick}!{sender_handle}")
         if inner.startswith(CTCP_TAG + " KEYREQ "):
-            rsp_wire = handle_keyreq(sender_handle, nick, inner)
+            try:
+                parsed = parse_keyreq(inner)
+                if parsed is not None:
+                    _prnt_dbg(server, parsed["channel"], nick, f"RX KEYREQ from {nick} ({sender_handle}) for {parsed['channel']}")
+                rsp_wire, reciprocal = handle_keyreq(server, sender_handle, nick, inner)
+            except Exception as e:
+                import traceback
+                _dbg(f"hook_irc_in_notice KEYREQ EXCEPTION: {e}\n{traceback.format_exc()}")
+                return ""
+            _dbg(
+                f"hook_irc_in_notice KEYREQ processed rsp_wire={'yes' if rsp_wire else 'no'} "
+                f"reciprocal={'yes' if reciprocal else 'no'}"
+            )
             if rsp_wire is not None and weechat:
-                buf = weechat.buffer_search("irc", f"{server}.*")
-                weechat.command(buf, f"/quote NOTICE {nick} :{rsp_wire}")
+                _send_raw_notice(server, nick, rsp_wire)
+                if parsed is not None:
+                    _prnt_dbg(server, parsed["channel"], nick, f"TX KEYRSP to {nick} for {parsed['channel']}")
+                _dbg(f"hook_irc_in_notice sent KEYRSP to {nick} via _send_raw_notice")
+            if reciprocal is not None and weechat:
+                _send_raw_notice(server, nick, reciprocal)
+                if parsed is not None:
+                    _prnt_dbg(server, parsed["channel"], nick, f"TX reciprocal KEYREQ to {nick} for {parsed['channel']}")
+                _dbg(f"hook_irc_in_notice sent reciprocal KEYREQ to {nick} via _send_raw_notice")
             return ""
         if inner.startswith(CTCP_TAG + " KEYRSP "):
-            handle_keyrsp(sender_handle, inner)
+            try:
+                result = handle_keyrsp(server, nick, sender_handle, inner)
+            except Exception as e:
+                import traceback
+                _dbg(f"hook_irc_in_notice KEYRSP EXCEPTION: {e}\n{traceback.format_exc()}")
+                return ""
+            _dbg(f"hook_irc_in_notice KEYRSP processed result={result}")
             return ""
         if inner.startswith(CTCP_TAG + " REKEY "):
-            handle_rekey(sender_handle, nick, inner)
+            try:
+                handle_rekey(sender_handle, nick, inner)
+            except Exception as e:
+                import traceback
+                _dbg(f"hook_irc_in_notice REKEY EXCEPTION: {e}\n{traceback.format_exc()}")
             return ""
         return msg
-    except Exception:
+    except Exception as e:
+        import traceback
+        _dbg(f"hook_irc_in_notice OUTER EXCEPTION: {e}\n{traceback.format_exc()}")
         return msg
 
 
@@ -1634,20 +1940,20 @@ def cmd_e2e(data, buffer, args):
     if sub in ("", "help"):
         _cmd_help(buf)
     elif sub == "on":
-        if not channel:
-            _prnt_err(buf, "/e2e on: no active channel")
-        else:
+        ctx = _ctx_or_error(buf, buffer, server, channel, None, "/e2e on")
+        if ctx is not None:
             with db_conn() as c:
                 c.execute(
                     "INSERT OR REPLACE INTO channels VALUES (?, 1, 'normal')",
-                    (channel,),
+                    (ctx,),
                 )
-            _prnt_ok(buf, f"enabled on {channel} (mode=normal)")
+            _prnt_ok(buf, f"enabled on {ctx} (mode=normal)")
     elif sub == "off":
-        if channel:
+        ctx = _ctx_or_error(buf, buffer, server, channel, None, "/e2e off")
+        if ctx is not None:
             with db_conn() as c:
-                c.execute("UPDATE channels SET enabled=0 WHERE channel=?", (channel,))
-            _prnt_ok(buf, f"disabled on {channel}")
+                c.execute("UPDATE channels SET enabled=0 WHERE channel=?", (ctx,))
+            _prnt_ok(buf, f"disabled on {ctx}")
     elif sub == "mode":
         if not rest:
             _prnt_err(buf, "Usage: /e2e mode <auto-accept|normal|quiet>")
@@ -1656,12 +1962,14 @@ def cmd_e2e(data, buffer, args):
             if mode not in ("auto-accept", "auto", "normal", "quiet"):
                 _prnt_err(buf, f"invalid mode: {mode}")
             else:
-                with db_conn() as c:
-                    c.execute(
-                        "INSERT OR REPLACE INTO channels VALUES (?, 1, ?)",
-                        (channel, mode),
-                    )
-                _prnt_ok(buf, f"mode={mode} on {channel}")
+                ctx = _ctx_or_error(buf, buffer, server, channel, None, "/e2e mode")
+                if ctx is not None:
+                    with db_conn() as c:
+                        c.execute(
+                            "INSERT OR REPLACE INTO channels VALUES (?, 1, ?)",
+                            (ctx, mode),
+                        )
+                    _prnt_ok(buf, f"mode={mode} on {ctx}")
     elif sub == "fingerprint":
         pk, sk, fp = ensure_identity()
         fp_hex = fingerprint_hex(fp)
@@ -1685,10 +1993,13 @@ def cmd_e2e(data, buffer, args):
             chan_info = f" [{channel} {'on' if ch_row[0] else 'off'} mode={ch_row[1]} peers={n}]"
         _prnt_ok(buf, f"identity={fp_hex} peers={n} enabled_channels={m}{chan_info}")
     elif sub == "list":
-        ctx = context_key(channel, "")
+        ctx = _ctx_or_error(buf, buffer, server, channel, None, "/e2e list")
+        if ctx is None:
+            return weechat.WEECHAT_RC_OK if weechat else 0
         with db_conn() as c:
             rows = c.execute(
-                "SELECT handle, channel, fp, status FROM incoming"
+                "SELECT handle, channel, fp, status FROM incoming WHERE channel = ?",
+                (ctx,),
             ).fetchall()
         if not rows:
             _prnt_ok(buf, "no peers")
@@ -1700,53 +2011,60 @@ def cmd_e2e(data, buffer, args):
             _prnt_err(buf, "Usage: /e2e accept <nick>")
             return weechat.WEECHAT_RC_OK if weechat else 0
         nick = rest[0]
-        ctx = context_key(channel, "")
+        ctx = _ctx_or_error(buf, buffer, server, channel, nick, "/e2e accept")
+        if ctx is None:
+            return weechat.WEECHAT_RC_OK if weechat else 0
+        handle = _handle_or_error(buf, server, channel, nick, "/e2e accept")
+        if handle is None:
+            return weechat.WEECHAT_RC_OK if weechat else 0
         with db_conn() as c:
             pending = c.execute(
                 "SELECT sender_handle, pubkey, eph_x25519, nonce, sig FROM pending_inbound WHERE handle = ? AND channel = ?",
-                (nick if "@" not in nick else nick, ctx),
+                (handle, ctx),
             ).fetchone()
-        if pending is None:
-            with db_conn() as c:
-                pending = c.execute(
-                    "SELECT sender_handle, pubkey, eph_x25519, nonce, sig FROM pending_inbound WHERE channel = ?",
-                    (ctx,),
-                ).fetchone()
         if pending is not None:
             s_handle, s_pub, s_eph, s_nonce, s_sig = pending
             with db_conn() as c:
                 c.execute(
                     "DELETE FROM pending_inbound WHERE channel = ? AND handle = ?",
-                    (s_handle, ctx),
+                    (ctx, s_handle),
                 )
-            rsp_wire = _build_keyrsp_for_req(channel, s_handle, s_pub, s_eph)
+            rsp_wire = _build_keyrsp_for_req(ctx, s_handle, s_pub, s_eph)
+            reciprocal = _maybe_build_reciprocal_keyreq(ctx, s_handle)
             if rsp_wire is not None and weechat:
-                weechat.command(
-                    weechat.buffer_search("irc", f"{server}.*"),
-                    f"/quote NOTICE {nick} :{rsp_wire}",
-                )
+                _send_raw_notice(server, nick, rsp_wire)
+            if reciprocal is not None and weechat:
+                _send_raw_notice(server, nick, reciprocal)
             _prnt_ok(buf, f"accepted {nick} ({s_handle}) on {ctx} — KEYRSP sent")
         else:
             with db_conn() as c:
-                c.execute(
-                    "UPDATE incoming SET status='trusted' WHERE handle LIKE ? AND channel = ?",
-                    (f"{nick}%", ctx),
+                cur = c.execute(
+                    "UPDATE incoming SET status='trusted' WHERE handle = ? AND channel = ?",
+                    (handle, ctx),
                 )
-            _prnt_ok(buf, f"accepted {nick} on {ctx}")
+            if cur.rowcount:
+                _prnt_ok(buf, f"accepted {nick} ({handle}) on {ctx}")
+            else:
+                _prnt_err(buf, f"/e2e accept: no pending exchange or session for {nick} on {ctx}")
     elif sub == "decline":
         if not rest:
             _prnt_err(buf, "Usage: /e2e decline <nick>")
             return weechat.WEECHAT_RC_OK if weechat else 0
         nick = rest[0]
-        ctx = context_key(channel, "")
+        ctx = _ctx_or_error(buf, buffer, server, channel, nick, "/e2e decline")
+        if ctx is None:
+            return weechat.WEECHAT_RC_OK if weechat else 0
+        handle = _handle_or_error(buf, server, channel, nick, "/e2e decline")
+        if handle is None:
+            return weechat.WEECHAT_RC_OK if weechat else 0
         with db_conn() as c:
             c.execute(
-                "DELETE FROM pending_inbound WHERE channel = ? AND handle LIKE ?",
-                (ctx, f"{nick}%"),
+                "DELETE FROM pending_inbound WHERE channel = ? AND handle = ?",
+                (ctx, handle),
             )
             c.execute(
-                "UPDATE incoming SET status='revoked' WHERE handle LIKE ? AND channel = ?",
-                (f"{nick}%", ctx),
+                "UPDATE incoming SET status='revoked' WHERE handle = ? AND channel = ?",
+                (handle, ctx),
             )
         _prnt_warn(buf, f"declined {nick} on {ctx}")
     elif sub == "revoke":
@@ -1754,16 +2072,20 @@ def cmd_e2e(data, buffer, args):
             _prnt_err(buf, "Usage: /e2e revoke <nick>")
             return weechat.WEECHAT_RC_OK if weechat else 0
         nick = rest[0]
-        ctx = context_key(channel, "")
-        handle = nick
+        ctx = _ctx_or_error(buf, buffer, server, channel, nick, "/e2e revoke")
+        if ctx is None:
+            return weechat.WEECHAT_RC_OK if weechat else 0
+        handle = _handle_or_error(buf, server, channel, nick, "/e2e revoke")
+        if handle is None:
+            return weechat.WEECHAT_RC_OK if weechat else 0
         with db_conn() as c:
             c.execute(
-                "UPDATE incoming SET status='revoked' WHERE handle LIKE ? AND channel = ?",
-                (f"{handle}%", ctx),
+                "UPDATE incoming SET status='revoked' WHERE handle = ? AND channel = ?",
+                (handle, ctx),
             )
             c.execute(
-                "DELETE FROM outgoing_recipients WHERE channel = ? AND handle LIKE ?",
-                (ctx, f"{handle}%"),
+                "DELETE FROM outgoing_recipients WHERE channel = ? AND handle = ?",
+                (ctx, handle),
             )
             c.execute("UPDATE outgoing SET pending_rotation=1 WHERE channel=?", (ctx,))
         _prnt_warn(buf, f"revoked {nick} on {ctx} — key will rotate")
@@ -1772,11 +2094,16 @@ def cmd_e2e(data, buffer, args):
             _prnt_err(buf, "Usage: /e2e unrevoke <nick>")
             return weechat.WEECHAT_RC_OK if weechat else 0
         nick = rest[0]
-        ctx = context_key(channel, "")
+        ctx = _ctx_or_error(buf, buffer, server, channel, nick, "/e2e unrevoke")
+        if ctx is None:
+            return weechat.WEECHAT_RC_OK if weechat else 0
+        handle = _handle_or_error(buf, server, channel, nick, "/e2e unrevoke")
+        if handle is None:
+            return weechat.WEECHAT_RC_OK if weechat else 0
         with db_conn() as c:
             c.execute(
-                "UPDATE incoming SET status='trusted' WHERE handle LIKE ? AND channel = ?",
-                (f"{nick}%", ctx),
+                "UPDATE incoming SET status='trusted' WHERE handle = ? AND channel = ?",
+                (handle, ctx),
             )
         _prnt_ok(buf, f"unrevoked {nick} on {ctx}")
     elif sub == "forget":
@@ -1784,11 +2111,16 @@ def cmd_e2e(data, buffer, args):
             _prnt_err(buf, "Usage: /e2e forget <nick>")
             return weechat.WEECHAT_RC_OK if weechat else 0
         nick = rest[0]
-        ctx = context_key(channel, "")
+        ctx = _ctx_or_error(buf, buffer, server, channel, nick, "/e2e forget")
+        if ctx is None:
+            return weechat.WEECHAT_RC_OK if weechat else 0
+        handle = _handle_or_error(buf, server, channel, nick, "/e2e forget")
+        if handle is None:
+            return weechat.WEECHAT_RC_OK if weechat else 0
         with db_conn() as c:
             c.execute(
-                "DELETE FROM incoming WHERE handle LIKE ? AND channel = ?",
-                (f"{nick}%", ctx),
+                "DELETE FROM incoming WHERE handle = ? AND channel = ?",
+                (handle, ctx),
             )
         _prnt_warn(buf, f"forgotten {nick} on {ctx}")
     elif sub == "handshake":
@@ -1796,10 +2128,9 @@ def cmd_e2e(data, buffer, args):
             _prnt_err(buf, "Usage: /e2e handshake <nick>")
             return weechat.WEECHAT_RC_OK if weechat else 0
         nick = rest[0]
-        if not channel:
-            _prnt_err(buf, "/e2e handshake: no active channel")
+        ctx = _ctx_or_error(buf, buffer, server, channel, nick, "/e2e handshake")
+        if ctx is None:
             return weechat.WEECHAT_RC_OK if weechat else 0
-        ctx = context_key(channel, "")
         try:
             kreq = build_keyreq(ctx)
         except Exception as e:
@@ -1816,15 +2147,20 @@ def cmd_e2e(data, buffer, args):
             _prnt_err(buf, "Usage: /e2e verify <nick>")
             return weechat.WEECHAT_RC_OK if weechat else 0
         nick = rest[0]
-        ctx = context_key(channel, "")
+        ctx = _ctx_or_error(buf, buffer, server, channel, nick, "/e2e verify")
+        if ctx is None:
+            return weechat.WEECHAT_RC_OK if weechat else 0
+        handle = _handle_or_error(buf, server, channel, nick, "/e2e verify")
+        if handle is None:
+            return weechat.WEECHAT_RC_OK if weechat else 0
         _, _, local_fp = ensure_identity()
         local_sas = fingerprint_bip39(local_fp)
         local_hex = fingerprint_hex(local_fp)
         local_short = local_hex[:16]
         with db_conn() as c:
             row = c.execute(
-                "SELECT fp FROM incoming WHERE handle LIKE ? AND channel = ?",
-                (f"{nick}%", ctx),
+                "SELECT fp FROM incoming WHERE handle = ? AND channel = ?",
+                (handle, ctx),
             ).fetchone()
         if row is None:
             _prnt_err(buf, f"no session for {nick} on {ctx}")
@@ -1849,7 +2185,9 @@ def cmd_e2e(data, buffer, args):
             _prnt_err(buf, "Usage: /e2e reverify <nick>")
             return weechat.WEECHAT_RC_OK if weechat else 0
         nick = rest[0]
-        handle = nick
+        handle = _handle_or_error(buf, server, channel, nick, "/e2e reverify")
+        if handle is None:
+            return weechat.WEECHAT_RC_OK if weechat else 0
         # Resolve nick → canonical handle via the peers table (LIKE prefix
         # match), so notices recorded under e.g. "alice@host" can still be
         # found when the user typed just "alice".
@@ -1925,14 +2263,13 @@ def cmd_e2e(data, buffer, args):
                 f"reverified {nick}: purged stale state; re-handshake to TOFU-pin the new key",
             )
     elif sub == "rotate":
-        if not channel:
-            _prnt_err(buf, "/e2e rotate: no active channel")
-        else:
+        ctx = _ctx_or_error(buf, buffer, server, channel, None, "/e2e rotate")
+        if ctx is not None:
             with db_conn() as c:
                 c.execute(
-                    "UPDATE outgoing SET pending_rotation=1 WHERE channel=?", (channel,)
+                    "UPDATE outgoing SET pending_rotation=1 WHERE channel=?", (ctx,)
                 )
-            _prnt_ok(buf, f"rotation scheduled for {channel}")
+            _prnt_ok(buf, f"rotation scheduled for {ctx}")
     elif sub == "export":
         if not rest:
             _prnt_err(buf, "Usage: /e2e export <file>")
@@ -2200,6 +2537,7 @@ def _import_keyring(doc: dict) -> None:
 def main() -> None:
     if weechat is None:
         return
+    global DB_PATH
     weechat.register(
         SCRIPT_NAME,
         SCRIPT_AUTHOR,
@@ -2209,11 +2547,13 @@ def main() -> None:
         "",
         "",
     )
+    weechat_dir = weechat.info_get("weechat_dir", "") or os.path.expanduser("~/.weechat")
+    DB_PATH = os.path.join(weechat_dir, "rpe2e.db")
     init_db()
     ensure_identity()
-    weechat.hook_modifier("irc_in_privmsg", "hook_irc_in_privmsg", "")
-    weechat.hook_modifier("irc_out_privmsg", "hook_input_text_display", "")
-    weechat.hook_modifier("irc_in_notice", "hook_irc_in_notice", "")
+    weechat.hook_modifier("irc_in2_privmsg", "hook_irc_in_privmsg", "")
+    weechat.hook_modifier("input_text_for_buffer", "hook_input_text_for_buffer", "")
+    weechat.hook_modifier("irc_in2_notice", "hook_irc_in_notice", "")
     weechat.hook_command(
         "e2e",
         SCRIPT_DESC,

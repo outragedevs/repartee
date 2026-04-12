@@ -138,14 +138,12 @@ pub struct ImportSummary {
 /// to wherever the user ran the client from).
 pub fn expand_path(path: &str) -> Result<PathBuf> {
     if let Some(stripped) = path.strip_prefix("~/") {
-        let home = std::env::var("HOME").map_err(|_| {
-            E2eError::Keyring("cannot expand ~: $HOME is not set".to_string())
-        })?;
+        let home = std::env::var("HOME")
+            .map_err(|_| E2eError::Keyring("cannot expand ~: $HOME is not set".to_string()))?;
         Ok(PathBuf::from(home).join(stripped))
     } else if path == "~" {
-        let home = std::env::var("HOME").map_err(|_| {
-            E2eError::Keyring("cannot expand ~: $HOME is not set".to_string())
-        })?;
+        let home = std::env::var("HOME")
+            .map_err(|_| E2eError::Keyring("cannot expand ~: $HOME is not set".to_string()))?;
         Ok(PathBuf::from(home))
     } else {
         let p = PathBuf::from(path);
@@ -295,14 +293,14 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
 /// strict: version mismatch, wrong hex lengths, and unknown enum strings all
 /// cause `Err` before the keyring is touched.
 pub fn import_from_path(keyring: &Keyring, path: &Path) -> Result<ImportSummary> {
-    let mut file = File::open(path)
-        .map_err(|e| E2eError::Keyring(format!("open {}: {e}", path.display())))?;
+    let mut file =
+        File::open(path).map_err(|e| E2eError::Keyring(format!("open {}: {e}", path.display())))?;
     let mut raw = String::new();
     file.read_to_string(&mut raw)
         .map_err(|e| E2eError::Keyring(format!("read {}: {e}", path.display())))?;
 
-    let doc: Portable = serde_json::from_str(&raw)
-        .map_err(|e| E2eError::Keyring(format!("parse json: {e}")))?;
+    let doc: Portable =
+        serde_json::from_str(&raw).map_err(|e| E2eError::Keyring(format!("parse json: {e}")))?;
 
     // Validate EVERYTHING first — no writes on failure.
     let validated = validate(&doc)?;
@@ -435,11 +433,7 @@ fn validate(doc: &Portable) -> Result<Validated> {
 
     let mut autotrust = Vec::with_capacity(doc.autotrust.len());
     for a in &doc.autotrust {
-        autotrust.push((
-            a.scope.clone(),
-            a.handle_pattern.clone(),
-            doc.exported_at,
-        ));
+        autotrust.push((a.scope.clone(), a.handle_pattern.clone(), doc.exported_at));
     }
 
     Ok(Validated {
@@ -453,9 +447,8 @@ fn validate(doc: &Portable) -> Result<Validated> {
 }
 
 fn parse_hex_array<const N: usize>(field: &str, s: &str) -> Result<[u8; N]> {
-    let bytes = hex::decode(s).map_err(|e| {
-        E2eError::Keyring(format!("{field}: invalid hex ({e})"))
-    })?;
+    let bytes =
+        hex::decode(s).map_err(|e| E2eError::Keyring(format!("{field}: invalid hex ({e})")))?;
     if bytes.len() != N {
         return Err(E2eError::Keyring(format!(
             "{field}: expected {N} bytes (hex length {}), got {}",
@@ -501,7 +494,10 @@ mod tests {
         let r: Result<[u8; 32]> = parse_hex_array::<32>("x.field", "aabb");
         let err = r.err().unwrap();
         let msg = format!("{err}");
-        assert!(msg.contains("x.field"), "message should name the field: {msg}");
+        assert!(
+            msg.contains("x.field"),
+            "message should name the field: {msg}"
+        );
         assert!(msg.contains("expected 32 bytes"), "{msg}");
     }
 
@@ -513,9 +509,18 @@ mod tests {
 
     #[test]
     fn parse_trust_status_known_values() {
-        assert_eq!(parse_trust_status("f", "pending").unwrap(), TrustStatus::Pending);
-        assert_eq!(parse_trust_status("f", "trusted").unwrap(), TrustStatus::Trusted);
-        assert_eq!(parse_trust_status("f", "revoked").unwrap(), TrustStatus::Revoked);
+        assert_eq!(
+            parse_trust_status("f", "pending").unwrap(),
+            TrustStatus::Pending
+        );
+        assert_eq!(
+            parse_trust_status("f", "trusted").unwrap(),
+            TrustStatus::Trusted
+        );
+        assert_eq!(
+            parse_trust_status("f", "revoked").unwrap(),
+            TrustStatus::Revoked
+        );
     }
 
     #[test]
@@ -526,10 +531,22 @@ mod tests {
 
     #[test]
     fn parse_channel_mode_known_values() {
-        assert_eq!(parse_channel_mode("f", "auto-accept").unwrap(), ChannelMode::AutoAccept);
-        assert_eq!(parse_channel_mode("f", "auto").unwrap(), ChannelMode::AutoAccept);
-        assert_eq!(parse_channel_mode("f", "normal").unwrap(), ChannelMode::Normal);
-        assert_eq!(parse_channel_mode("f", "quiet").unwrap(), ChannelMode::Quiet);
+        assert_eq!(
+            parse_channel_mode("f", "auto-accept").unwrap(),
+            ChannelMode::AutoAccept
+        );
+        assert_eq!(
+            parse_channel_mode("f", "auto").unwrap(),
+            ChannelMode::AutoAccept
+        );
+        assert_eq!(
+            parse_channel_mode("f", "normal").unwrap(),
+            ChannelMode::Normal
+        );
+        assert_eq!(
+            parse_channel_mode("f", "quiet").unwrap(),
+            ChannelMode::Quiet
+        );
     }
 
     #[test]

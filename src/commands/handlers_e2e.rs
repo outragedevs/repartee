@@ -11,7 +11,7 @@
 //! `list` / `status`, and a first-class `help` subcommand.
 
 use super::helpers::add_local_event;
-use super::types::{divider, C_CMD, C_DIM, C_ERR, C_HEADER, C_RST, C_TEXT};
+use super::types::{C_CMD, C_DIM, C_ERR, C_HEADER, C_RST, C_TEXT, divider};
 use crate::app::App;
 use crate::e2e::crypto::fingerprint::{fingerprint_bip39, fingerprint_hex};
 use crate::e2e::keyring::{ChannelConfig, ChannelMode, IncomingSession, TrustStatus};
@@ -92,9 +92,14 @@ pub(crate) enum E2eSub {
     Handshake(String),
     Revoke(String),
     Unrevoke(String),
-    Forget(String),
+    Forget {
+        target: String,
+        all: bool,
+    },
     Autotrust(AutotrustOp),
-    List,
+    List {
+        all: bool,
+    },
     Status,
     Fingerprint,
     Verify(String),
@@ -154,13 +159,13 @@ pub(crate) fn parse_subcommand(args: &[String]) -> E2eSub {
             .map_or(E2eSub::Usage("/e2e unrevoke <nick>"), |n| {
                 E2eSub::Unrevoke(n.clone())
             }),
-        "forget" => rest
-            .first()
-            .map_or(E2eSub::Usage("/e2e forget <nick>"), |n| {
-                E2eSub::Forget(n.clone())
-            }),
+        "forget" => parse_forget_subcommand(rest),
         "autotrust" => E2eSub::Autotrust(parse_autotrust_op(rest)),
-        "list" => E2eSub::List,
+        "list" => E2eSub::List {
+            all: rest
+                .first()
+                .is_some_and(|arg| arg.eq_ignore_ascii_case("-all")),
+        },
         "status" => E2eSub::Status,
         "fingerprint" => E2eSub::Fingerprint,
         "verify" => rest
@@ -179,6 +184,27 @@ pub(crate) fn parse_subcommand(args: &[String]) -> E2eSub {
         "help" | "?" => E2eSub::Help,
         other => E2eSub::Unknown(other.to_string()),
     }
+}
+
+fn parse_forget_subcommand(rest: &[String]) -> E2eSub {
+    if rest.is_empty() {
+        return E2eSub::Usage("/e2e forget [-all] <nick|handle>");
+    }
+    let mut all = false;
+    let mut target: Option<String> = None;
+    for arg in rest {
+        if arg.eq_ignore_ascii_case("-all") {
+            all = true;
+        } else if target.is_none() {
+            target = Some(arg.clone());
+        } else {
+            return E2eSub::Usage("/e2e forget [-all] <nick|handle>");
+        }
+    }
+    target.map_or(
+        E2eSub::Usage("/e2e forget [-all] <nick|handle>"),
+        |target| E2eSub::Forget { target, all },
+    )
 }
 
 fn parse_autotrust_op(rest: &[String]) -> AutotrustOp {
@@ -229,9 +255,9 @@ pub(crate) fn cmd_e2e(app: &mut App, args: &[String]) {
         E2eSub::Handshake(nick) => e2e_handshake(app, &nick),
         E2eSub::Revoke(nick) => e2e_revoke(app, &nick),
         E2eSub::Unrevoke(nick) => e2e_unrevoke(app, &nick),
-        E2eSub::Forget(nick) => e2e_forget(app, &nick),
+        E2eSub::Forget { target, all } => e2e_forget(app, &target, all),
         E2eSub::Autotrust(op) => e2e_autotrust(app, op),
-        E2eSub::List => e2e_list(app),
+        E2eSub::List { all } => e2e_list(app, all),
         E2eSub::Status => e2e_status(app),
         E2eSub::Fingerprint => e2e_fingerprint(app),
         E2eSub::Verify(nick) => e2e_verify(app, &nick),
@@ -392,15 +418,25 @@ fn e2e_accept(app: &mut App, nick: &str) {
     // KEYREQ for this (handle, channel), build and dispatch the KEYRSP now.
     match mgr.accept_pending_inbound(&handle, &chan) {
         Ok(Some(rsp)) => {
-            let ctcp = mgr.encode_keyrsp_ctcp(&rsp);
             if let Some(conn_id) = conn_id_opt {
+                let ctcp = mgr.encode_keyrsp_ctcp(&rsp);
                 app.state
                     .pending_e2e_sends
                     .push(crate::state::PendingE2eSend {
-                        connection_id: conn_id,
+                        connection_id: conn_id.clone(),
                         target: nick.to_string(),
                         notice_text: ctcp,
                     });
+                for out in mgr.take_pending_outbound_keyreqs() {
+                    let ctcp = mgr.encode_keyreq_ctcp(&out.req);
+                    app.state
+                        .pending_e2e_sends
+                        .push(crate::state::PendingE2eSend {
+                            connection_id: conn_id.clone(),
+                            target: nick.to_string(),
+                            notice_text: ctcp,
+                        });
+                }
             } else {
                 err(app, "/e2e accept: no active connection to send KEYRSP");
                 return;
@@ -501,20 +537,91 @@ fn e2e_unrevoke(app: &mut App, nick: &str) {
     ok(app, &format!("unrevoked {nick} on {chan}"));
 }
 
-fn e2e_forget(app: &mut App, nick: &str) {
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e forget: no active channel");
+fn e2e_forget(app: &mut App, target: &str, all: bool) {
+    let channel = if all {
+        current_channel(app)
+    } else {
+        let Some(chan) = current_channel(app) else {
+            err(app, "/e2e forget: no active channel");
+            return;
+        };
+        Some(chan)
+    };
+    let Some(active_buffer) = app.state.active_buffer() else {
+        err(app, "/e2e forget: no active buffer");
         return;
     };
-    let Some(handle) = require_handle_for_nick(app, &chan, nick) else {
-        return;
-    };
-    let Some(mgr) = require_mgr(app) else { return };
-    if let Err(e) = mgr.keyring().delete_incoming_session(&handle, &chan) {
-        err(app, &format!("/e2e forget: {e}"));
+    let conn_id = active_buffer.connection_id.clone();
+    let buffer_id = active_buffer.id.clone();
+    if target.contains('@') {
+        perform_e2e_forget(app, buffer_id, target, target, channel.as_deref(), all);
         return;
     }
-    warn(app, &format!("forgot {nick} on {chan}"));
+    let Some(sender) = app.active_irc_sender().cloned() else {
+        err(app, "/e2e forget: not connected");
+        return;
+    };
+    if let Err(e) = sender.send(irc::proto::Command::Raw(
+        "USERHOST".to_string(),
+        vec![target.to_string()],
+    )) {
+        err(app, &format!("/e2e forget: failed to send USERHOST: {e}"));
+        return;
+    }
+    app.state
+        .pending_userhost_requests
+        .push(crate::state::PendingUserhostRequest {
+            connection_id: conn_id,
+            nick: target.to_string(),
+            action: crate::state::PendingUserhostAction::E2eForget {
+                buffer_id,
+                target: target.to_string(),
+                channel,
+                all,
+            },
+        });
+    ok(app, &format!("resolving handle for {target} via USERHOST"));
+}
+
+fn perform_e2e_forget(
+    app: &mut App,
+    target_buffer: String,
+    target: &str,
+    handle: &str,
+    channel: Option<&str>,
+    all: bool,
+) {
+    let current_id = app.state.active_buffer_id.clone();
+    app.state.active_buffer_id = Some(target_buffer);
+    let Some(mgr) = require_mgr(app) else {
+        app.state.active_buffer_id = current_id;
+        return;
+    };
+    let result = if all {
+        mgr.forget_peer_everywhere(handle)
+    } else {
+        let Some(channel) = channel else {
+            err(app, "/e2e forget: no active channel");
+            app.state.active_buffer_id = current_id;
+            return;
+        };
+        mgr.forget_peer_on_channel(handle, channel)
+    };
+    match result {
+        Ok(deleted) if all => warn(
+            app,
+            &format!("forgot {target} ({handle}) globally — removed {deleted} row(s)"),
+        ),
+        Ok(deleted) => warn(
+            app,
+            &format!(
+                "forgot {target} ({handle}) on {} — removed {deleted} row(s)",
+                channel.unwrap_or_default()
+            ),
+        ),
+        Err(e) => err(app, &format!("/e2e forget: {e}")),
+    }
+    app.state.active_buffer_id = current_id;
 }
 
 // ─── handshake / rotate ──────────────────────────────────────────────────────
@@ -562,7 +669,11 @@ fn e2e_rotate(app: &mut App) {
 
 // ─── listings ────────────────────────────────────────────────────────────────
 
-fn e2e_list(app: &mut App) {
+fn e2e_list(app: &mut App, all: bool) {
+    if all {
+        e2e_list_all(app);
+        return;
+    }
     let Some(chan) = current_channel(app) else {
         err(app, "/e2e list: no active channel");
         return;
@@ -588,6 +699,63 @@ fn e2e_list(app: &mut App) {
     let mut lines = vec![divider(&format!("E2E Peers on {chan}"))];
     for p in &peers {
         lines.push(format_peer_line(p));
+    }
+    for line in lines {
+        add_local_event(app, &line);
+    }
+}
+
+fn e2e_list_all(app: &mut App) {
+    let Some(mgr) = require_mgr(app) else { return };
+    let peers = match mgr.keyring().list_all_peers() {
+        Ok(peers) => peers,
+        Err(e) => {
+            err(app, &format!("/e2e list -all: {e}"));
+            return;
+        }
+    };
+    let sessions = match mgr.keyring().list_all_incoming_sessions() {
+        Ok(sessions) => sessions,
+        Err(e) => {
+            err(app, &format!("/e2e list -all: {e}"));
+            return;
+        }
+    };
+    let mut lines = vec![divider("E2E Keyring (all)")];
+    if peers.is_empty() && sessions.is_empty() {
+        lines.push(format!("  {C_DIM}(no remembered E2E state){C_RST}"));
+    } else {
+        lines.push(format!("  {C_HEADER}Peers{C_RST}"));
+        if peers.is_empty() {
+            lines.push(format!("  {C_DIM}(none){C_RST}"));
+        } else {
+            for peer in peers {
+                let fp_hex = fingerprint_hex(&peer.fingerprint);
+                let fp_short: String = fp_hex.chars().take(16).collect();
+                let handle = peer.last_handle.unwrap_or_else(|| "—".to_string());
+                let nick = peer.last_nick.unwrap_or_else(|| "—".to_string());
+                lines.push(format!(
+                    "  {C_CMD}{handle}{C_RST}  {C_TEXT}[{status}]{C_RST}  {C_DIM}nick={nick} fp={fp_short}{C_RST}",
+                    status = peer.global_status.as_str(),
+                ));
+            }
+        }
+        lines.push(String::new());
+        lines.push(format!("  {C_HEADER}Incoming Sessions{C_RST}"));
+        if sessions.is_empty() {
+            lines.push(format!("  {C_DIM}(none){C_RST}"));
+        } else {
+            for sess in sessions {
+                let fp_hex = fingerprint_hex(&sess.fingerprint);
+                let fp_short: String = fp_hex.chars().take(16).collect();
+                lines.push(format!(
+                    "  {C_CMD}{handle}{C_RST}  {C_TEXT}{channel}{C_RST}  {C_TEXT}[{status}]{C_RST}  {C_DIM}fp={fp_short}{C_RST}",
+                    handle = sess.handle,
+                    channel = sess.channel,
+                    status = sess.status.as_str(),
+                ));
+            }
+        }
     }
     for line in lines {
         add_local_event(app, &line);
@@ -716,18 +884,16 @@ fn format_verify_block(
     let peer_sas = fingerprint_bip39(peer_fp).unwrap_or_else(|_| "—".into());
     vec![
         divider("E2E Fingerprint Verification"),
-        format!("  {C_CMD}You  ( local){C_RST}: {C_TEXT}{local_short}{C_RST}  {C_TEXT}{local_sas}{C_RST}"),
+        format!(
+            "  {C_CMD}You  ( local){C_RST}: {C_TEXT}{local_short}{C_RST}  {C_TEXT}{local_sas}{C_RST}"
+        ),
         format!(
             "  {C_CMD}Them ({peer_nick:<7}){C_RST}: {C_TEXT}{peer_short}{C_RST}  {C_TEXT}{peer_sas}{C_RST}"
         ),
         format!("  {C_DIM}peer handle: {peer_handle}{C_RST}"),
         String::new(),
-        format!(
-            "  {C_DIM}Read both lines out-of-band (phone, signal, etc.) and confirm{C_RST}"
-        ),
-        format!(
-            "  {C_DIM}they match BEFORE trusting future messages. If they differ,{C_RST}"
-        ),
+        format!("  {C_DIM}Read both lines out-of-band (phone, signal, etc.) and confirm{C_RST}"),
+        format!("  {C_DIM}they match BEFORE trusting future messages. If they differ,{C_RST}"),
         format!(
             "  {C_ERR}a MitM is in progress{C_RST}{C_DIM} — run {C_CMD}/e2e forget {peer_nick}{C_DIM} immediately.{C_RST}"
         ),
@@ -907,11 +1073,17 @@ const HELP_ENTRIES: &[(&str, &str)] = &[
         "Revoke trust; rotate outgoing key next send",
     ),
     ("unrevoke <nick>", "Re-trust a previously revoked peer"),
-    ("forget <nick>", "Delete a peer's session on this channel"),
+    (
+        "forget [-all] <nick|handle>",
+        "Delete channel or global peer state",
+    ),
     ("verify <nick>", "Show a peer's fingerprint + SAS words"),
     ("reverify <nick>", "Re-trust after SAS comparison"),
     ("rotate", "Schedule outgoing key rotation for this channel"),
-    ("list", "List trusted peers on this channel"),
+    (
+        "list [-all]",
+        "List trusted peers or the full remembered state",
+    ),
     ("status", "Show identity + per-channel summary"),
     ("fingerprint", "Show my own fingerprint + SAS words"),
     ("autotrust list", "List autotrust rules"),
@@ -974,6 +1146,27 @@ fn resolve_handle_by_nick(app: &App, channel: &str, nick: &str) -> Option<String
     }
 }
 
+fn resolve_cached_handle_by_nick(
+    app: &App,
+    nick: &str,
+) -> Option<std::result::Result<String, crate::e2e::error::E2eError>> {
+    let mgr = app.state.e2e_manager.as_ref()?;
+    let mut matches = match mgr.keyring().list_all_peers() {
+        Ok(peers) => peers
+            .into_iter()
+            .filter_map(|peer| match (peer.last_nick, peer.last_handle) {
+                (Some(last_nick), Some(last_handle)) if last_nick.eq_ignore_ascii_case(nick) => {
+                    Some((peer.last_seen, last_handle))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        Err(e) => return Some(Err(e)),
+    };
+    matches.sort_by_key(|(last_seen, _)| *last_seen);
+    matches.pop().map(|(_, handle)| Ok(handle))
+}
+
 /// Wrap `resolve_handle_by_nick` with themed-error surfacing.
 ///
 /// Every `/e2e` subcommand that takes a `<nick>` argument needs to map
@@ -981,14 +1174,23 @@ fn resolve_handle_by_nick(app: &App, channel: &str, nick: &str) -> Option<String
 /// emit a `[E2E]` error line through the `events.e2e_error` theme key
 /// and return `None` so the caller can bail cleanly.
 fn require_handle_for_nick(app: &mut App, channel: &str, nick: &str) -> Option<String> {
-    let handle = resolve_handle_by_nick(app, channel, nick);
-    if handle.is_none() {
-        err(
-            app,
-            &format!("cannot resolve handle for {nick} — has the user spoken yet?"),
-        );
+    if let Some(handle) = resolve_handle_by_nick(app, channel, nick) {
+        return Some(handle);
     }
-    handle
+    match resolve_cached_handle_by_nick(app, nick) {
+        Some(Ok(handle)) => Some(handle),
+        Some(Err(e)) => {
+            err(app, &format!("cannot resolve handle for {nick}: {e}"));
+            None
+        }
+        None => {
+            err(
+                app,
+                &format!("cannot resolve handle for {nick} — has the user spoken yet?"),
+            );
+            None
+        }
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -1014,7 +1216,7 @@ mod tests {
         assert_eq!(parse_subcommand(&[s("off")]), E2eSub::Off);
         assert_eq!(parse_subcommand(&[s("OFF")]), E2eSub::Off);
 
-        assert_eq!(parse_subcommand(&[s("LIST")]), E2eSub::List);
+        assert_eq!(parse_subcommand(&[s("LIST")]), E2eSub::List { all: false });
         assert_eq!(parse_subcommand(&[s("Status")]), E2eSub::Status);
         assert_eq!(parse_subcommand(&[s("FingerPrint")]), E2eSub::Fingerprint);
         assert_eq!(parse_subcommand(&[s("Rotate")]), E2eSub::Rotate);
@@ -1032,6 +1234,28 @@ mod tests {
         assert_eq!(
             parse_subcommand(&[s("verify"), s("BoB")]),
             E2eSub::Verify(s("BoB"))
+        );
+    }
+
+    #[test]
+    fn test_subcommand_dispatch_forget_all_accepts_both_flag_positions() {
+        assert_eq!(
+            parse_subcommand(&[s("forget"), s("-all"), s("k2")]),
+            E2eSub::Forget {
+                target: s("k2"),
+                all: true,
+            }
+        );
+        assert_eq!(
+            parse_subcommand(&[s("forget"), s("k2"), s("-all")]),
+            E2eSub::Forget {
+                target: s("k2"),
+                all: true,
+            }
+        );
+        assert_eq!(
+            parse_subcommand(&[s("list"), s("-all")]),
+            E2eSub::List { all: true }
         );
     }
 

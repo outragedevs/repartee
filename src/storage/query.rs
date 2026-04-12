@@ -1,5 +1,5 @@
 use aes_gcm::{Aes256Gcm, Key};
-use rusqlite::{params, types::ToSql, Connection};
+use rusqlite::{Connection, params, types::ToSql};
 
 use super::crypto;
 use super::types::{ReadMarker, StoredMessage};

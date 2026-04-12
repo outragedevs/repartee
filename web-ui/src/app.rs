@@ -13,8 +13,7 @@ pub fn App() -> impl IntoView {
     Effect::new({
         move || {
             let token = state.token.get();
-            if let Some(storage) = web_sys::window()
-                .and_then(|w| w.local_storage().ok().flatten())
+            if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten())
             {
                 if let Some(ref t) = token {
                     let _ = storage.set_item("repartee-token", t);
@@ -45,9 +44,7 @@ pub fn App() -> impl IntoView {
         {
             let _ = doc.set_attribute("data-theme", &theme);
         }
-        if let Some(storage) = web_sys::window()
-            .and_then(|w| w.local_storage().ok().flatten())
-        {
+        if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
             let _ = storage.set_item("repartee-theme", &theme);
         }
     });

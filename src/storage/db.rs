@@ -398,7 +398,16 @@ mod tests {
         db.execute(
             "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params!["ev_old", "net", "#chan", old, "event", "alice", "alice joined", 0],
+            params![
+                "ev_old",
+                "net",
+                "#chan",
+                old,
+                "event",
+                "alice",
+                "alice joined",
+                0
+            ],
         )
         .unwrap();
 
@@ -406,7 +415,9 @@ mod tests {
         db.execute(
             "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params!["msg_old", "net", "#chan", old, "message", "alice", "hello", 0],
+            params![
+                "msg_old", "net", "#chan", old, "message", "alice", "hello", 0
+            ],
         )
         .unwrap();
 
@@ -414,7 +425,16 @@ mod tests {
         db.execute(
             "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params!["ev_new", "net", "#chan", now, "event", "bob", "bob joined", 0],
+            params![
+                "ev_new",
+                "net",
+                "#chan",
+                now,
+                "event",
+                "bob",
+                "bob joined",
+                0
+            ],
         )
         .unwrap();
 
@@ -461,7 +481,10 @@ mod tests {
         }
 
         let removed = purge_old_events(&db, 72, true);
-        assert_eq!(removed, 0, "chat messages should never be purged by event pruner");
+        assert_eq!(
+            removed, 0,
+            "chat messages should never be purged by event pruner"
+        );
 
         let count: i64 = db
             .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))

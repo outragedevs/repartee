@@ -161,8 +161,7 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
                 let channel = &args[1];
                 let buffer_id = make_buffer_id(conn_id, channel);
                 if let Ok(ts) = args[2].parse::<i64>() {
-                    let created = chrono::DateTime::from_timestamp(ts, 0)
-                        .unwrap_or_else(Utc::now);
+                    let created = chrono::DateTime::from_timestamp(ts, 0).unwrap_or_else(Utc::now);
                     let formatted = created
                         .with_timezone(&chrono::Local)
                         .format("%Y-%m-%d %H:%M:%S")
@@ -720,7 +719,15 @@ fn handle_privmsg(
         &sender_handle,
         &decrypt_context,
         text,
+        is_own,
     );
+    // An empty return from `try_decrypt_e2e` means "own echo-message
+    // echo of our own encrypted PRIVMSG — already rendered locally by
+    // `handle_plain_message`, drop the echo entirely". This path only
+    // triggers when `is_own` is true and the wire is `+RPE2E01…`.
+    if decrypted_owned.as_deref() == Some("") {
+        return;
+    }
     let text: &str = decrypted_owned.as_deref().unwrap_or(text);
 
     // Check if this is a CTCP (ACTION or other)
@@ -855,10 +862,7 @@ fn handle_privmsg(
             );
 
             // Push to mentions buffer — channel highlights only.
-            if is_mention
-                && target_is_channel
-                && state.buffers.contains_key("_mentions")
-            {
+            if is_mention && target_is_channel && state.buffers.contains_key("_mentions") {
                 let nick = nick_saved.unwrap_or_default();
                 let conn_label = state
                     .connections
@@ -1009,10 +1013,7 @@ fn handle_privmsg(
     );
 
     // Push to mentions buffer — channel highlights only (not PMs/queries).
-    if is_mention
-        && target_is_channel
-        && state.buffers.contains_key("_mentions")
-    {
+    if is_mention && target_is_channel && state.buffers.contains_key("_mentions") {
         let nick = nick_saved.unwrap_or_default();
         let conn_label = state
             .connections
@@ -1084,8 +1085,7 @@ fn handle_notice(
     // RPE2E handshake CTCP dispatch. Travels in NOTICE as
     // `\x01RPEE2E ... \x01`. We intercept before the NOTICE becomes a
     // user-visible buffer line so the raw CTCP never leaks into the UI.
-    if try_dispatch_rpe2e_ctcp(state, conn_id, prefix, target, text)
-        == Some(RpEe2eOutcome::Handled)
+    if try_dispatch_rpe2e_ctcp(state, conn_id, prefix, target, text) == Some(RpEe2eOutcome::Handled)
     {
         return;
     }
@@ -1241,16 +1241,18 @@ fn handle_join(
                 host: None,
             },
         );
-        state.pending_web_events.push(crate::web::protocol::WebEvent::NickEvent {
-            buffer_id: buffer_id.clone(),
-            kind: crate::web::protocol::NickEventKind::Join,
-            nick: nick.clone(),
-            new_nick: None,
-            prefix: Some(String::new()),
-            modes: Some(String::new()),
-            away: Some(false),
-            message: None,
-        });
+        state
+            .pending_web_events
+            .push(crate::web::protocol::WebEvent::NickEvent {
+                buffer_id: buffer_id.clone(),
+                kind: crate::web::protocol::NickEventKind::Join,
+                nick: nick.clone(),
+                new_nick: None,
+                prefix: Some(String::new()),
+                modes: Some(String::new()),
+                away: Some(false),
+                message: None,
+            });
 
         // --- Netsplit: check if this is a netjoin ---
         if state.netsplit_state.handle_join(&nick, &buffer_id) {
@@ -1411,9 +1413,7 @@ fn handle_away(state: &mut AppState, conn_id: &str, prefix: Option<&Prefix>, rea
     let affected_bufs: Vec<String> = state
         .buffers
         .iter()
-        .filter(|(_, buf)| {
-            buf.connection_id == conn_id && buf.users.contains_key(&nick_lower)
-        })
+        .filter(|(_, buf)| buf.connection_id == conn_id && buf.users.contains_key(&nick_lower))
         .map(|(id, _)| id.clone())
         .collect();
 
@@ -1427,16 +1427,18 @@ fn handle_away(state: &mut AppState, conn_id: &str, prefix: Option<&Prefix>, rea
     }
 
     for buf_id in affected_bufs {
-        state.pending_web_events.push(crate::web::protocol::WebEvent::NickEvent {
-            buffer_id: buf_id,
-            kind: crate::web::protocol::NickEventKind::AwayChange,
-            nick: nick.clone(),
-            new_nick: None,
-            prefix: None,
-            modes: None,
-            away: Some(is_away),
-            message: reason.map(ToString::to_string),
-        });
+        state
+            .pending_web_events
+            .push(crate::web::protocol::WebEvent::NickEvent {
+                buffer_id: buf_id,
+                kind: crate::web::protocol::NickEventKind::AwayChange,
+                nick: nick.clone(),
+                new_nick: None,
+                prefix: None,
+                modes: None,
+                away: Some(is_away),
+                message: reason.map(ToString::to_string),
+            });
     }
 }
 
@@ -1535,16 +1537,18 @@ fn handle_part(
     } else {
         // Always update nick list regardless of ignore
         state.remove_nick(&buffer_id, &nick);
-        state.pending_web_events.push(crate::web::protocol::WebEvent::NickEvent {
-            buffer_id: buffer_id.clone(),
-            kind: crate::web::protocol::NickEventKind::Part,
-            nick: nick.clone(),
-            new_nick: None,
-            prefix: None,
-            modes: None,
-            away: None,
-            message: reason.map(ToString::to_string),
-        });
+        state
+            .pending_web_events
+            .push(crate::web::protocol::WebEvent::NickEvent {
+                buffer_id: buffer_id.clone(),
+                kind: crate::web::protocol::NickEventKind::Part,
+                nick: nick.clone(),
+                new_nick: None,
+                prefix: None,
+                modes: None,
+                away: None,
+                message: reason.map(ToString::to_string),
+            });
 
         // --- Ignore check ---
         if should_ignore(
@@ -1614,16 +1618,18 @@ fn handle_quit(
     // Always remove from nick lists regardless of ignore/netsplit
     for buf_id in &affected {
         state.remove_nick(buf_id, &nick);
-        state.pending_web_events.push(crate::web::protocol::WebEvent::NickEvent {
-            buffer_id: buf_id.clone(),
-            kind: crate::web::protocol::NickEventKind::Quit,
-            nick: nick.clone(),
-            new_nick: None,
-            prefix: None,
-            modes: None,
-            away: None,
-            message: reason.map(ToString::to_string),
-        });
+        state
+            .pending_web_events
+            .push(crate::web::protocol::WebEvent::NickEvent {
+                buffer_id: buf_id.clone(),
+                kind: crate::web::protocol::NickEventKind::Quit,
+                nick: nick.clone(),
+                new_nick: None,
+                prefix: None,
+                modes: None,
+                away: None,
+                message: reason.map(ToString::to_string),
+            });
     }
 
     // --- Ignore check ---
@@ -1714,7 +1720,10 @@ fn rename_query_buffers(state: &mut AppState, conn_id: &str, new_nick: &str, aff
     clippy::needless_pass_by_value,
     reason = "tags are cloned into each fan-out Message"
 )]
-#[expect(clippy::too_many_lines, reason = "nick change fan-out + web NickEvent broadcasting")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "nick change fan-out + web NickEvent broadcasting"
+)]
 fn handle_nick_change(
     state: &mut AppState,
     conn_id: &str,
@@ -1731,12 +1740,14 @@ fn handle_nick_change(
     {
         conn.nick = new_nick.to_string();
         // Broadcast to web so status bar updates.
-        state.pending_web_events.push(crate::web::protocol::WebEvent::ConnectionStatus {
-            conn_id: conn_id.to_string(),
-            label: conn.label.clone(),
-            connected: conn.status == crate::state::connection::ConnectionStatus::Connected,
-            nick: new_nick.to_string(),
-        });
+        state
+            .pending_web_events
+            .push(crate::web::protocol::WebEvent::ConnectionStatus {
+                conn_id: conn_id.to_string(),
+                label: conn.label.clone(),
+                connected: conn.status == crate::state::connection::ConnectionStatus::Connected,
+                nick: new_nick.to_string(),
+            });
     }
 
     // --- Ignore check (never ignore our own nick changes) ---
@@ -1796,16 +1807,18 @@ fn handle_nick_change(
 
     for buf_id in &affected {
         state.update_nick(buf_id, &old_nick, new_nick);
-        state.pending_web_events.push(crate::web::protocol::WebEvent::NickEvent {
-            buffer_id: buf_id.clone(),
-            kind: crate::web::protocol::NickEventKind::NickChange,
-            nick: old_nick.clone(),
-            new_nick: Some(new_nick.to_string()),
-            prefix: None,
-            modes: None,
-            away: None,
-            message: None,
-        });
+        state
+            .pending_web_events
+            .push(crate::web::protocol::WebEvent::NickEvent {
+                buffer_id: buf_id.clone(),
+                kind: crate::web::protocol::NickEventKind::NickChange,
+                nick: old_nick.clone(),
+                new_nick: Some(new_nick.to_string()),
+                prefix: None,
+                modes: None,
+                away: None,
+                message: None,
+            });
 
         // --- Nick flood check ---
         if state.flood_protection
@@ -1887,13 +1900,10 @@ fn handle_kick(
     if kicked_user == our_nick {
         let text = format!("You were kicked from {channel} by {kicker} ({reason_str})");
         // Use the connection label for the server buffer ID (not the connection id).
-        let server_buffer_id = state
-            .connections
-            .get(conn_id)
-            .map_or_else(
-                || make_buffer_id(conn_id, conn_id),
-                |c| make_buffer_id(conn_id, &c.label),
-            );
+        let server_buffer_id = state.connections.get(conn_id).map_or_else(
+            || make_buffer_id(conn_id, conn_id),
+            |c| make_buffer_id(conn_id, &c.label),
+        );
         let kick_params = Some(vec![
             our_nick.to_string(),
             kicker,
@@ -1904,9 +1914,9 @@ fn handle_kick(
         // Helper: build a "kicked" notification message, taking text/params/tags
         // by reference (clone) or by value (move) on last call.
         let make_kick_msg = |state: &mut AppState,
-                                  t: String,
-                                  p: Option<Vec<String>>,
-                                  tg: Option<HashMap<String, String>>|
+                             t: String,
+                             p: Option<Vec<String>>,
+                             tg: Option<HashMap<String, String>>|
          -> Message {
             let id = state.next_message_id();
             Message {
@@ -1992,11 +2002,13 @@ fn handle_topic(
 
     if let Some(topic_text) = topic {
         state.set_topic(&buffer_id, topic_text.to_string(), nick.clone());
-        state.pending_web_events.push(crate::web::protocol::WebEvent::TopicChanged {
-            buffer_id: buffer_id.clone(),
-            topic: Some(topic_text.to_string()),
-            set_by: nick.clone(),
-        });
+        state
+            .pending_web_events
+            .push(crate::web::protocol::WebEvent::TopicChanged {
+                buffer_id: buffer_id.clone(),
+                topic: Some(topic_text.to_string()),
+                set_by: nick.clone(),
+            });
         let setter = nick.unwrap_or_default();
         let id = state.next_message_id();
         state.add_message(
@@ -2147,16 +2159,18 @@ fn apply_channel_mode(
         entry.prefix = modes_to_prefix(&entry.modes, "~&@%+");
         let new_prefix = entry.prefix.clone();
         let new_modes = entry.modes.clone();
-        state.pending_web_events.push(crate::web::protocol::WebEvent::NickEvent {
-            buffer_id: buffer_id.to_string(),
-            kind: crate::web::protocol::NickEventKind::ModeChange,
-            nick: target_nick.to_string(),
-            new_nick: None,
-            prefix: Some(new_prefix),
-            modes: Some(new_modes),
-            away: None,
-            message: None,
-        });
+        state
+            .pending_web_events
+            .push(crate::web::protocol::WebEvent::NickEvent {
+                buffer_id: buffer_id.to_string(),
+                kind: crate::web::protocol::NickEventKind::ModeChange,
+                nick: target_nick.to_string(),
+                new_nick: None,
+                prefix: Some(new_prefix),
+                modes: Some(new_modes),
+                away: None,
+                message: None,
+            });
         return;
     }
 
@@ -2814,6 +2828,9 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
                 emit(state, &target_buf, "%Z565f89End of WHO list%N");
             }
         }
+        Response::RPL_USERHOST => {
+            handle_userhost_reply(state, conn_id, args);
+        }
 
         // === WHOWAS responses ===
 
@@ -3180,14 +3197,31 @@ fn try_decrypt_e2e(
     sender_handle: &str,
     channel: &str,
     text: &str,
+    is_own: bool,
 ) -> Option<String> {
     let mgr = state.e2e_manager.clone()?;
     if !text.starts_with("+RPE2E01") {
         return None;
     }
+    // Our own echo-message echo of an encrypted PRIVMSG is not a thing
+    // we can decrypt (we have no incoming session keyed on our own
+    // handle), and firing an auto-KEYREQ here would (a) send a NOTICE
+    // to ourselves that goes nowhere and (b) leave a stale entry in
+    // `self.pending` that blocks later reciprocal KEYREQs in
+    // `/e2e accept`. `input.rs::handle_plain_message` already wrote a
+    // local plaintext echo before the server round-tripped the wire
+    // back to us, so the correct response is to swallow the echoed
+    // ciphertext entirely. Returning `Some("")` suppresses the raw
+    // wire from leaking into the buffer.
+    if is_own {
+        return Some(String::new());
+    }
     match mgr.decrypt_incoming(sender_handle, channel, text) {
         Ok(crate::e2e::manager::DecryptOutcome::Plaintext(s)) => Some(s),
-        Ok(crate::e2e::manager::DecryptOutcome::MissingKey { handle, channel: ch }) => {
+        Ok(crate::e2e::manager::DecryptOutcome::MissingKey {
+            handle,
+            channel: ch,
+        }) => {
             // No session yet — fire a KEYREQ to the sender if the rate
             // limiter allows. The message will stay hidden behind the
             // placeholder until the responder's KEYRSP installs the
@@ -3197,13 +3231,11 @@ fn try_decrypt_e2e(
                 match mgr.build_keyreq(&ch) {
                     Ok(req) => {
                         let ctcp = mgr.encode_keyreq_ctcp(&req);
-                        state
-                            .pending_e2e_sends
-                            .push(crate::state::PendingE2eSend {
-                                connection_id: conn_id.to_string(),
-                                target: sender_nick.to_string(),
-                                notice_text: ctcp,
-                            });
+                        state.pending_e2e_sends.push(crate::state::PendingE2eSend {
+                            connection_id: conn_id.to_string(),
+                            target: sender_nick.to_string(),
+                            notice_text: ctcp,
+                        });
                     }
                     Err(e) => tracing::warn!("build_keyreq failed for {ch}: {e}"),
                 }
@@ -3237,6 +3269,10 @@ enum RpEe2eOutcome {
 /// crypto rejected it — we still want to suppress the raw body from
 /// surfacing in the UI). Returns `Some(NotE2e)` if the body was not a
 /// RPEE2E tag so the caller can keep rendering it.
+#[expect(
+    clippy::too_many_lines,
+    reason = "RPE2E handshake dispatch keeps request/response flow together"
+)]
 fn try_dispatch_rpe2e_ctcp(
     state: &mut AppState,
     conn_id: &str,
@@ -3255,36 +3291,54 @@ fn try_dispatch_rpe2e_ctcp(
     }
     let mgr = state.e2e_manager.clone()?;
 
+    let (nick, ident, host) = extract_nick_userhost(prefix);
+    let sender_handle = format!("{ident}@{host}");
     let parsed = match crate::e2e::handshake::parse(inner) {
         Ok(Some(msg)) => msg,
         Ok(None) => return Some(RpEe2eOutcome::NotE2e),
         Err(e) => {
             tracing::warn!("rpe2e handshake parse error: {e}");
+            emit_e2e_debug(
+                state,
+                conn_id,
+                None,
+                format!("[E2E debug] RX handshake parse error from {sender_handle}: {e}"),
+            );
             return Some(RpEe2eOutcome::Handled); // suppress bad body
         }
     };
-
-    let (nick, ident, host) = extract_nick_userhost(prefix);
-    let sender_handle = format!("{ident}@{host}");
     // RPEE2E target is always us — the channel being negotiated is
     // carried inside the payload rather than in the IRC target.
     let _ = target;
 
     match parsed {
         HandshakeMsg::Req(req) => {
-            let result = mgr.handle_keyreq(&sender_handle, &req);
+            emit_e2e_debug(
+                state,
+                conn_id,
+                Some(&req.channel),
+                format!(
+                    "[E2E debug] RX KEYREQ from {nick} ({sender_handle}) for {}",
+                    req.channel
+                ),
+            );
+            let result = mgr.handle_keyreq_with_nick(&sender_handle, Some(&nick), &req);
             surface_pending_trust_changes(state, conn_id, &mgr);
             surface_pending_accept_requests(state, conn_id, &mgr);
             match result {
                 Ok(Some(rsp)) => {
                     let body = mgr.encode_keyrsp_ctcp(&rsp);
-                    state
-                        .pending_e2e_sends
-                        .push(crate::state::PendingE2eSend {
-                            connection_id: conn_id.to_string(),
-                            target: nick.clone(),
-                            notice_text: body,
-                        });
+                    state.pending_e2e_sends.push(crate::state::PendingE2eSend {
+                        connection_id: conn_id.to_string(),
+                        target: nick.clone(),
+                        notice_text: body,
+                    });
+                    emit_e2e_debug(
+                        state,
+                        conn_id,
+                        Some(&req.channel),
+                        format!("[E2E debug] queued KEYRSP to {nick} for {}", req.channel),
+                    );
                     // Symmetric handshake (spec §5.3, G13): drain any
                     // reciprocal KEYREQs queued by `handle_keyreq` so
                     // the us→peer direction gets a fresh NOTICE in the
@@ -3292,38 +3346,283 @@ fn try_dispatch_rpe2e_ctcp(
                     // the same peer who just initiated the handshake.
                     for out in mgr.take_pending_outbound_keyreqs() {
                         let ctcp = mgr.encode_keyreq_ctcp(&out.req);
-                        state
-                            .pending_e2e_sends
-                            .push(crate::state::PendingE2eSend {
-                                connection_id: conn_id.to_string(),
-                                target: nick.clone(),
-                                notice_text: ctcp,
-                            });
+                        state.pending_e2e_sends.push(crate::state::PendingE2eSend {
+                            connection_id: conn_id.to_string(),
+                            target: nick.clone(),
+                            notice_text: ctcp,
+                        });
+                        emit_e2e_debug(
+                            state,
+                            conn_id,
+                            Some(&out.channel),
+                            format!(
+                                "[E2E debug] queued reciprocal KEYREQ to {nick} for {}",
+                                out.channel
+                            ),
+                        );
                     }
                     Some(RpEe2eOutcome::Handled)
                 }
-                Ok(None) => Some(RpEe2eOutcome::Handled),
+                Ok(None) => {
+                    emit_e2e_debug(
+                        state,
+                        conn_id,
+                        Some(&req.channel),
+                        format!(
+                            "[E2E debug] KEYREQ from {nick} ({sender_handle}) is pending on {}",
+                            req.channel
+                        ),
+                    );
+                    Some(RpEe2eOutcome::Handled)
+                }
                 Err(e) => {
                     tracing::warn!("handle_keyreq error: {e}");
+                    emit_e2e_debug(
+                        state,
+                        conn_id,
+                        Some(&req.channel),
+                        format!(
+                            "[E2E debug] KEYREQ from {nick} ({sender_handle}) failed on {}: {e}",
+                            req.channel
+                        ),
+                    );
                     Some(RpEe2eOutcome::Handled)
                 }
             }
         }
         HandshakeMsg::Rsp(rsp) => {
+            emit_e2e_debug(
+                state,
+                conn_id,
+                Some(&rsp.channel),
+                format!(
+                    "[E2E debug] RX KEYRSP from {nick} ({sender_handle}) for {}",
+                    rsp.channel
+                ),
+            );
             let result = mgr.handle_keyrsp(&sender_handle, &rsp);
             surface_pending_trust_changes(state, conn_id, &mgr);
             if let Err(e) = result {
                 tracing::warn!("handle_keyrsp error: {e}");
+                emit_e2e_debug(
+                    state,
+                    conn_id,
+                    Some(&rsp.channel),
+                    format!(
+                        "[E2E debug] KEYRSP from {nick} ({sender_handle}) failed on {}: {e}",
+                        rsp.channel
+                    ),
+                );
+            } else {
+                emit_e2e_debug(
+                    state,
+                    conn_id,
+                    Some(&rsp.channel),
+                    format!(
+                        "[E2E debug] KEYRSP from {nick} ({sender_handle}) installed session on {}",
+                        rsp.channel
+                    ),
+                );
             }
             Some(RpEe2eOutcome::Handled)
         }
         HandshakeMsg::Rekey(rekey) => {
+            emit_e2e_debug(
+                state,
+                conn_id,
+                Some(&rekey.channel),
+                format!(
+                    "[E2E debug] RX REKEY from {nick} ({sender_handle}) for {}",
+                    rekey.channel
+                ),
+            );
             let result = mgr.handle_rekey(&sender_handle, &rekey);
             surface_pending_trust_changes(state, conn_id, &mgr);
             if let Err(e) = result {
                 tracing::warn!("handle_rekey error: {e}");
+                emit_e2e_debug(
+                    state,
+                    conn_id,
+                    Some(&rekey.channel),
+                    format!(
+                        "[E2E debug] REKEY from {nick} ({sender_handle}) failed on {}: {e}",
+                        rekey.channel
+                    ),
+                );
+            } else {
+                emit_e2e_debug(
+                    state,
+                    conn_id,
+                    Some(&rekey.channel),
+                    format!(
+                        "[E2E debug] REKEY from {nick} ({sender_handle}) applied on {}",
+                        rekey.channel
+                    ),
+                );
             }
             Some(RpEe2eOutcome::Handled)
+        }
+    }
+}
+
+fn e2e_debug_enabled() -> bool {
+    std::env::var("REPARTEE_E2E_DEBUG_BUFFER").is_ok_and(|v| {
+        let v = v.trim();
+        !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+    })
+}
+
+fn emit_e2e_debug(
+    state: &mut AppState,
+    conn_id: &str,
+    channel: Option<&str>,
+    text: impl Into<String>,
+) {
+    if !e2e_debug_enabled() {
+        return;
+    }
+    let text = text.into();
+    let target_buffer = channel
+        .map(|channel| make_buffer_id(conn_id, channel))
+        .filter(|id| state.buffers.contains_key(id))
+        .unwrap_or_else(|| active_or_server_buffer(state, conn_id));
+    let id = state.next_message_id();
+    let event_param = text.clone();
+    state.add_message(
+        &target_buffer,
+        Message {
+            id,
+            timestamp: Utc::now(),
+            message_type: MessageType::Event,
+            nick: None,
+            nick_mode: None,
+            text,
+            highlight: false,
+            event_key: Some("e2e_info".to_string()),
+            event_params: Some(vec![event_param]),
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: None,
+        },
+    );
+}
+
+fn emit_e2e_message(
+    state: &mut AppState,
+    buffer_id: &str,
+    event_key: &str,
+    highlight: bool,
+    text: String,
+) {
+    let id = state.next_message_id();
+    state.add_message(
+        buffer_id,
+        Message {
+            id,
+            timestamp: Utc::now(),
+            message_type: MessageType::Event,
+            nick: None,
+            nick_mode: None,
+            text: text.clone(),
+            highlight,
+            event_key: Some(event_key.to_string()),
+            event_params: Some(vec![text]),
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: None,
+        },
+    );
+}
+
+fn parse_userhost_reply(entry: &str) -> Option<(String, String)> {
+    let (nick_part, userhost_part) = entry.split_once('=')?;
+    let nick = nick_part.trim_end_matches('*');
+    let userhost = userhost_part
+        .strip_prefix('+')
+        .or_else(|| userhost_part.strip_prefix('-'))
+        .unwrap_or(userhost_part);
+    let (ident, host) = userhost.split_once('@')?;
+    Some((nick.to_string(), format!("{ident}@{host}")))
+}
+
+fn handle_userhost_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
+    if state.pending_userhost_requests.is_empty() || args.len() < 2 {
+        return;
+    }
+    let replies = args[1..].join(" ");
+    for entry in replies.split_whitespace() {
+        let Some((nick, handle)) = parse_userhost_reply(entry) else {
+            continue;
+        };
+        let mut idx = 0usize;
+        while idx < state.pending_userhost_requests.len() {
+            let req = &state.pending_userhost_requests[idx];
+            if req.connection_id != conn_id || !req.nick.eq_ignore_ascii_case(&nick) {
+                idx += 1;
+                continue;
+            }
+            let req = state.pending_userhost_requests.remove(idx);
+            match req.action {
+                crate::state::PendingUserhostAction::E2eForget {
+                    buffer_id,
+                    target,
+                    channel,
+                    all,
+                } => {
+                    let Some(mgr) = state.e2e_manager.clone() else {
+                        emit_e2e_message(
+                            state,
+                            &buffer_id,
+                            "e2e_error",
+                            true,
+                            "USERHOST resolved but E2E is disabled".to_string(),
+                        );
+                        continue;
+                    };
+                    let result = if all {
+                        mgr.forget_peer_everywhere(&handle)
+                    } else if let Some(channel) = channel.as_deref() {
+                        mgr.forget_peer_on_channel(&handle, channel)
+                    } else {
+                        emit_e2e_message(
+                            state,
+                            &buffer_id,
+                            "e2e_error",
+                            true,
+                            format!("/e2e forget: no channel context for {target}"),
+                        );
+                        continue;
+                    };
+                    match result {
+                        Ok(deleted) if all => emit_e2e_message(
+                            state,
+                            &buffer_id,
+                            "e2e_warning",
+                            false,
+                            format!(
+                                "forgot {target} ({handle}) globally — removed {deleted} row(s)"
+                            ),
+                        ),
+                        Ok(deleted) => emit_e2e_message(
+                            state,
+                            &buffer_id,
+                            "e2e_warning",
+                            false,
+                            format!(
+                                "forgot {target} ({handle}) on {} — removed {deleted} row(s)",
+                                channel.unwrap_or_default()
+                            ),
+                        ),
+                        Err(e) => emit_e2e_message(
+                            state,
+                            &buffer_id,
+                            "e2e_error",
+                            true,
+                            format!("/e2e forget: {e}"),
+                        ),
+                    }
+                }
+            }
         }
     }
 }
@@ -3455,9 +3754,12 @@ fn surface_pending_accept_requests(
             }
         };
         let text = format!(
-            "[E2E] Pending key exchange from {handle} for {channel}.\n      \
+            "[E2E] Pending key exchange from {who} for {channel}.\n      \
              Run /e2e accept <nick> or /e2e decline <nick>.",
-            handle = req.handle,
+            who = req.nick.as_ref().map_or_else(
+                || req.handle.clone(),
+                |nick| format!("{nick} ({})", req.handle)
+            ),
             channel = req.channel,
         );
         let id = state.next_message_id();

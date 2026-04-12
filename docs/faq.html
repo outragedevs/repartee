@@ -49,6 +49,7 @@
     <span class="nav-section-title">Reference</span>
     <ul>
       <li><a href="commands.html">Commands</a></li>
+      <li><a href="e2e.html">End-to-End Encryption</a></li>
     </ul>
   </div>
   <div class="nav-section">
@@ -86,7 +87,7 @@
       <div class="sidebar-footer">
         Built with <a href="https://www.rust-lang.org">Rust</a>
         &middot;
-        <a href="https://repart.ee/">repart.ee</a>
+        <a href="https://repart.ee/">GitHub</a>
       </div>
     </aside>
 
@@ -193,6 +194,10 @@
 <li><strong>WHOX</strong>: auto-detected for account name and full host tracking</li>
 <li><strong>Extban</strong>: <code>$a:account</code> ban type with <code>/ban -a</code> shorthand</li>
 </ul>
+<h2>Does repartee support end-to-end encryption?</h2>
+<p>Yes. repartee includes built-in end-to-end encryption for channels and private conversations. Message bodies are encrypted on the client and decrypted only by trusted peers.</p>
+<p>The IRC server still sees metadata such as nicknames, channels, timing, and message sizes. If you want protection against active impersonation during first contact, verify peer fingerprints out of band.</p>
+<p>See <a href="e2e.html">End-to-End Encryption</a> for the workflow and trust model.</p>
 <h2>How do I keep repartee running in the background?</h2>
 <p>Use <code>/detach</code> (or press <code>Ctrl+\</code> / <code>Ctrl+Z</code>) to detach from the terminal. repartee continues running — IRC connections stay alive, messages are logged, and scripts keep executing.</p>
 <p>Reattach with <code>repartee a</code> from any terminal. You can also start headless with <code>repartee -d</code> and attach later.</p>
@@ -206,7 +211,7 @@
 <p>Yes! Use <code>/shell</code> to open an embedded terminal inside Repartee. You get a full PTY-backed shell (zsh, bash, vim, htop) in a separate buffer. Press <strong>Ctrl+]</strong> to switch back to IRC input, or click another buffer in the sidebar. Type <code>exit</code> in the shell to close it automatically. You can open multiple shells — they appear under a &quot;Shell&quot; group in the sidebar.</p>
 <p>The shell also works in the <strong>web frontend</strong> — each web session gets its own independent PTY sized to the browser viewport. The web shell uses a beamterm WebGL2 renderer with FiraCode Nerd Font, mouse text selection, Ctrl+/- font resize, and clipboard paste.</p>
 <h2>How do I report bugs?</h2>
-<p>Open an issue on the <a href="https://github.com/outragedevs/repartee/issues">GitHub</a> or visit <a href="https://repart.ee/">repart.ee</a>.</p>
+<p>Open an issue on <a href="https://github.com/outragedevs/repartee/issues">GitHub</a> or visit <a href="https://repart.ee/">repart.ee</a>.</p>
 
 
         <!-- Prev / Next navigation -->
@@ -220,7 +225,7 @@
 
         <footer class="site-footer">
           Built with <a href="https://www.rust-lang.org">Rust</a> &middot;
-          <a href="https://repart.ee/">repart.ee</a> &middot;
+          <a href="https://repart.ee/">GitHub</a> &middot;
           MIT License
         </footer>
       </main>

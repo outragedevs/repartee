@@ -3,9 +3,9 @@
 //! Wire form (inside the CTCP `\x01 ... \x01` framing, sent via NOTICE):
 //!
 //! ```text
-//! RPEE2E KEYREQ v=1 chan=#x pub=<hex32> eph=<hex32> nonce=<hex16> sig=<hex64>
-//! RPEE2E KEYRSP v=1 chan=#x pub=<hex32> eph=<hex32> wnonce=<hex24> wrap=<b64> nonce=<hex16> sig=<hex64>
-//! RPEE2E REKEY  v=1 chan=#x pub=<hex32> eph=<hex32> wnonce=<hex24> wrap=<b64> nonce=<hex16> sig=<hex64>
+//! RPEE2E KEYREQ v=1 c=#x p=<b64u32> e=<b64u32> n=<b64u16> s=<b64u64>
+//! RPEE2E KEYRSP v=1 c=#x p=<b64u32> e=<b64u32> wn=<b64u24> w=<b64u> n=<b64u16> s=<b64u64>
+//! RPEE2E REKEY  v=1 c=#x p=<b64u32> e=<b64u32> wn=<b64u24> w=<b64u> n=<b64u16> s=<b64u64>
 //! ```
 //!
 //! `pub` carries the initiator's long-term Ed25519 identity pubkey. `eph` on
@@ -28,6 +28,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
+
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 
 use crate::e2e::crypto::aead::NONCE_LEN;
 use crate::e2e::error::{E2eError, Result};
@@ -126,8 +128,7 @@ fn sig_payload_keyrsp(
     wrap_ct: &[u8],
     nonce: &[u8; 16],
 ) -> Vec<u8> {
-    let mut v =
-        Vec::with_capacity(16 + channel.len() + 32 + 32 + NONCE_LEN + wrap_ct.len() + 16);
+    let mut v = Vec::with_capacity(16 + channel.len() + 32 + 32 + NONCE_LEN + wrap_ct.len() + 16);
     v.extend_from_slice(b"KEYRSP:");
     v.extend_from_slice(channel.as_bytes());
     v.push(b':');
@@ -175,42 +176,40 @@ fn sig_payload_keyrekey(
 #[must_use]
 pub fn encode_keyreq(req: &KeyReq) -> String {
     format!(
-        "{CTCP_TAG} KEYREQ v={PROTO_VERSION} chan={chan} pub={pub_} eph={eph} nonce={nonce} sig={sig}",
+        "{CTCP_TAG} KEYREQ v={PROTO_VERSION} c={chan} p={pub_} e={eph} n={nonce} s={sig}",
         chan = req.channel,
-        pub_ = hex::encode(req.pubkey),
-        eph = hex::encode(req.eph_x25519),
-        nonce = hex::encode(req.nonce),
-        sig = hex::encode(req.sig),
+        pub_ = b64_encode(req.pubkey),
+        eph = b64_encode(req.eph_x25519),
+        nonce = b64_encode(req.nonce),
+        sig = b64_encode(req.sig),
     )
 }
 
 #[must_use]
 pub fn encode_keyrsp(rsp: &KeyRsp) -> String {
-    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
     format!(
-        "{CTCP_TAG} KEYRSP v={PROTO_VERSION} chan={chan} pub={pub_} eph={eph} wnonce={wnonce} wrap={wrap} nonce={nonce} sig={sig}",
+        "{CTCP_TAG} KEYRSP v={PROTO_VERSION} c={chan} p={pub_} e={eph} wn={wnonce} w={wrap} n={nonce} s={sig}",
         chan = rsp.channel,
-        pub_ = hex::encode(rsp.pubkey),
-        eph = hex::encode(rsp.ephemeral_pub),
-        wnonce = hex::encode(rsp.wrap_nonce),
+        pub_ = b64_encode(rsp.pubkey),
+        eph = b64_encode(rsp.ephemeral_pub),
+        wnonce = b64_encode(rsp.wrap_nonce),
         wrap = B64.encode(&rsp.wrap_ct),
-        nonce = hex::encode(rsp.nonce),
-        sig = hex::encode(rsp.sig),
+        nonce = b64_encode(rsp.nonce),
+        sig = b64_encode(rsp.sig),
     )
 }
 
 #[must_use]
 pub fn encode_keyrekey(rk: &KeyRekey) -> String {
-    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
     format!(
-        "{CTCP_TAG} REKEY v={PROTO_VERSION} chan={chan} pub={pub_} eph={eph} wnonce={wnonce} wrap={wrap} nonce={nonce} sig={sig}",
+        "{CTCP_TAG} REKEY v={PROTO_VERSION} c={chan} p={pub_} e={eph} wn={wnonce} w={wrap} n={nonce} s={sig}",
         chan = rk.channel,
-        pub_ = hex::encode(rk.pubkey),
-        eph = hex::encode(rk.eph_pub),
-        wnonce = hex::encode(rk.wrap_nonce),
+        pub_ = b64_encode(rk.pubkey),
+        eph = b64_encode(rk.eph_pub),
+        wnonce = b64_encode(rk.wrap_nonce),
         wrap = B64.encode(&rk.wrap_ct),
-        nonce = hex::encode(rk.nonce),
-        sig = hex::encode(rk.sig),
+        nonce = b64_encode(rk.nonce),
+        sig = b64_encode(rk.sig),
     )
 }
 
@@ -259,10 +258,10 @@ fn kv_get<'a>(kv: &'a HashMap<&'a str, &'a str>, key: &'static str) -> Result<&'
 }
 
 fn parse_wrap_nonce(kv: &HashMap<&str, &str>) -> Result<[u8; NONCE_LEN]> {
-    let raw = hex::decode(kv_get(kv, "wnonce")?)?;
+    let raw = b64_decode(kv_get(kv, "wn")?)?;
     if raw.len() != NONCE_LEN {
         return Err(E2eError::Handshake(format!(
-            "wnonce len {} != {NONCE_LEN}",
+            "wn len {} != {NONCE_LEN}",
             raw.len()
         )));
     }
@@ -272,42 +271,41 @@ fn parse_wrap_nonce(kv: &HashMap<&str, &str>) -> Result<[u8; NONCE_LEN]> {
 }
 
 fn parse_wrap_ct(kv: &HashMap<&str, &str>) -> Result<Vec<u8>> {
-    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-    B64.decode(kv_get(kv, "wrap")?)
+    B64.decode(kv_get(kv, "w")?)
         .map_err(|e| E2eError::Handshake(format!("bad wrap b64: {e}")))
 }
 
 fn parse_keyreq(kv: &HashMap<&str, &str>) -> Result<KeyReq> {
     Ok(KeyReq {
-        channel: kv_get(kv, "chan")?.to_string(),
-        pubkey: hex32(kv_get(kv, "pub")?)?,
-        eph_x25519: hex32(kv_get(kv, "eph")?)?,
-        nonce: hex16(kv_get(kv, "nonce")?)?,
-        sig: hex64(kv_get(kv, "sig")?)?,
+        channel: kv_get(kv, "c")?.to_string(),
+        pubkey: b64_32(kv_get(kv, "p")?)?,
+        eph_x25519: b64_32(kv_get(kv, "e")?)?,
+        nonce: b64_16(kv_get(kv, "n")?)?,
+        sig: b64_64(kv_get(kv, "s")?)?,
     })
 }
 
 fn parse_keyrsp(kv: &HashMap<&str, &str>) -> Result<KeyRsp> {
     Ok(KeyRsp {
-        channel: kv_get(kv, "chan")?.to_string(),
-        pubkey: hex32(kv_get(kv, "pub")?)?,
-        ephemeral_pub: hex32(kv_get(kv, "eph")?)?,
+        channel: kv_get(kv, "c")?.to_string(),
+        pubkey: b64_32(kv_get(kv, "p")?)?,
+        ephemeral_pub: b64_32(kv_get(kv, "e")?)?,
         wrap_nonce: parse_wrap_nonce(kv)?,
         wrap_ct: parse_wrap_ct(kv)?,
-        nonce: hex16(kv_get(kv, "nonce")?)?,
-        sig: hex64(kv_get(kv, "sig")?)?,
+        nonce: b64_16(kv_get(kv, "n")?)?,
+        sig: b64_64(kv_get(kv, "s")?)?,
     })
 }
 
 fn parse_keyrekey(kv: &HashMap<&str, &str>) -> Result<KeyRekey> {
     Ok(KeyRekey {
-        channel: kv_get(kv, "chan")?.to_string(),
-        pubkey: hex32(kv_get(kv, "pub")?)?,
-        eph_pub: hex32(kv_get(kv, "eph")?)?,
+        channel: kv_get(kv, "c")?.to_string(),
+        pubkey: b64_32(kv_get(kv, "p")?)?,
+        eph_pub: b64_32(kv_get(kv, "e")?)?,
         wrap_nonce: parse_wrap_nonce(kv)?,
         wrap_ct: parse_wrap_ct(kv)?,
-        nonce: hex16(kv_get(kv, "nonce")?)?,
-        sig: hex64(kv_get(kv, "sig")?)?,
+        nonce: b64_16(kv_get(kv, "n")?)?,
+        sig: b64_64(kv_get(kv, "s")?)?,
     })
 }
 
@@ -330,43 +328,38 @@ fn parse_kv<'a>(fields: &'a [&'a str]) -> Result<HashMap<&'a str, &'a str>> {
     Ok(out)
 }
 
-fn hex32(s: &str) -> Result<[u8; 32]> {
-    let raw = hex::decode(s)?;
-    if raw.len() != 32 {
+fn b64_encode<const N: usize>(bytes: [u8; N]) -> String {
+    B64.encode(bytes)
+}
+
+fn b64_decode(s: &str) -> Result<Vec<u8>> {
+    B64.decode(s)
+        .map_err(|e| E2eError::Handshake(format!("bad b64: {e}")))
+}
+
+fn b64_fixed<const N: usize>(s: &str) -> Result<[u8; N]> {
+    let raw = b64_decode(s)?;
+    if raw.len() != N {
         return Err(E2eError::Handshake(format!(
-            "expected 32 bytes, got {}",
+            "expected {N} bytes, got {}",
             raw.len()
         )));
     }
-    let mut arr = [0u8; 32];
+    let mut arr = [0u8; N];
     arr.copy_from_slice(&raw);
     Ok(arr)
 }
 
-fn hex16(s: &str) -> Result<[u8; 16]> {
-    let raw = hex::decode(s)?;
-    if raw.len() != 16 {
-        return Err(E2eError::Handshake(format!(
-            "expected 16 bytes, got {}",
-            raw.len()
-        )));
-    }
-    let mut arr = [0u8; 16];
-    arr.copy_from_slice(&raw);
-    Ok(arr)
+fn b64_32(s: &str) -> Result<[u8; 32]> {
+    b64_fixed(s)
 }
 
-fn hex64(s: &str) -> Result<[u8; 64]> {
-    let raw = hex::decode(s)?;
-    if raw.len() != 64 {
-        return Err(E2eError::Handshake(format!(
-            "expected 64 bytes, got {}",
-            raw.len()
-        )));
-    }
-    let mut arr = [0u8; 64];
-    arr.copy_from_slice(&raw);
-    Ok(arr)
+fn b64_16(s: &str) -> Result<[u8; 16]> {
+    b64_fixed(s)
+}
+
+fn b64_64(s: &str) -> Result<[u8; 64]> {
+    b64_fixed(s)
 }
 
 // ---------- rate limiter ----------
@@ -422,10 +415,7 @@ impl RateLimiter {
     /// `INCOMING_BACKOFF` timeout on excess.
     pub fn allow_incoming(&mut self, peer_handle: &str) -> bool {
         let now = Instant::now();
-        let bucket = self
-            .incoming
-            .entry(peer_handle.to_string())
-            .or_default();
+        let bucket = self.incoming.entry(peer_handle.to_string()).or_default();
         if let Some(until) = bucket.backoff_until {
             if now < until {
                 return false;
@@ -596,9 +586,12 @@ mod tests {
 
     #[test]
     fn keyrekey_sig_payload_binds_eph_and_ct() {
-        let p1 = signed_keyrekey_payload("#x", &[1; 32], &[2; 32], &[3; NONCE_LEN], &[4, 5], &[6; 16]);
-        let p2 = signed_keyrekey_payload("#x", &[1; 32], &[9; 32], &[3; NONCE_LEN], &[4, 5], &[6; 16]);
-        let p3 = signed_keyrekey_payload("#x", &[1; 32], &[2; 32], &[3; NONCE_LEN], &[4, 6], &[6; 16]);
+        let p1 =
+            signed_keyrekey_payload("#x", &[1; 32], &[2; 32], &[3; NONCE_LEN], &[4, 5], &[6; 16]);
+        let p2 =
+            signed_keyrekey_payload("#x", &[1; 32], &[9; 32], &[3; NONCE_LEN], &[4, 5], &[6; 16]);
+        let p3 =
+            signed_keyrekey_payload("#x", &[1; 32], &[2; 32], &[3; NONCE_LEN], &[4, 6], &[6; 16]);
         assert_ne!(p1, p2);
         assert_ne!(p1, p3);
     }
@@ -615,11 +608,11 @@ mod tests {
         // must be rejected outright so a crafted payload can't silently
         // shift the semantic channel of a signed KEYREQ after the fact.
         let line = format!(
-            "{CTCP_TAG} KEYREQ v=1 chan=#a chan=#b pub={p} eph={e} nonce={n} sig={s}",
-            p = hex::encode([0u8; 32]),
-            e = hex::encode([0u8; 32]),
-            n = hex::encode([0u8; 16]),
-            s = hex::encode([0u8; 64]),
+            "{CTCP_TAG} KEYREQ v=1 c=#a c=#b p={p} e={e} n={n} s={s}",
+            p = b64_encode([0u8; 32]),
+            e = b64_encode([0u8; 32]),
+            n = b64_encode([0u8; 16]),
+            s = b64_encode([0u8; 64]),
         );
         match parse(&line) {
             Err(E2eError::Wire(msg)) => {
@@ -627,7 +620,7 @@ mod tests {
                     msg.contains("duplicate key"),
                     "expected 'duplicate key' in error, got: {msg}"
                 );
-                assert!(msg.contains("chan"), "expected 'chan' in error, got: {msg}");
+                assert!(msg.contains('c'), "expected 'c' in error, got: {msg}");
             }
             other => panic!("expected Err(Wire(duplicate key)), got {other:?}"),
         }
@@ -637,19 +630,18 @@ mod tests {
     fn parse_kv_rejects_duplicate_key_in_keyrsp() {
         // Same protection applies to KEYRSP — a duplicated `wrap=` would
         // otherwise let a MitM slip a second (unsigned) ciphertext in.
-        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
         let line = format!(
-            "{CTCP_TAG} KEYRSP v=1 chan=#x pub={p} eph={e} wnonce={wn} wrap={w} wrap={w2} nonce={n} sig={s}",
-            p = hex::encode([0u8; 32]),
-            e = hex::encode([0u8; 32]),
-            wn = hex::encode([0u8; NONCE_LEN]),
+            "{CTCP_TAG} KEYRSP v=1 c=#x p={p} e={e} wn={wn} w={w} w={w2} n={n} s={s}",
+            p = b64_encode([0u8; 32]),
+            e = b64_encode([0u8; 32]),
+            wn = b64_encode([0u8; NONCE_LEN]),
             w = B64.encode([0u8; 4]),
             w2 = B64.encode([1u8; 4]),
-            n = hex::encode([0u8; 16]),
-            s = hex::encode([0u8; 64]),
+            n = b64_encode([0u8; 16]),
+            s = b64_encode([0u8; 64]),
         );
         match parse(&line) {
-            Err(E2eError::Wire(msg)) => assert!(msg.contains("duplicate key: wrap")),
+            Err(E2eError::Wire(msg)) => assert!(msg.contains("duplicate key: w")),
             other => panic!("expected Err(Wire(duplicate key: wrap)), got {other:?}"),
         }
     }
@@ -657,13 +649,30 @@ mod tests {
     #[test]
     fn parse_rejects_unknown_version() {
         let line = format!(
-            "{CTCP_TAG} KEYREQ v=9 chan=#x pub={p} eph={e} nonce={n} sig={s}",
-            p = hex::encode([0u8; 32]),
-            e = hex::encode([0u8; 32]),
-            n = hex::encode([0u8; 16]),
-            s = hex::encode([0u8; 64]),
+            "{CTCP_TAG} KEYREQ v=9 c=#x p={p} e={e} n={n} s={s}",
+            p = b64_encode([0u8; 32]),
+            e = b64_encode([0u8; 32]),
+            n = b64_encode([0u8; 16]),
+            s = b64_encode([0u8; 64]),
         );
         assert!(parse(&line).is_err());
+    }
+
+    #[test]
+    fn keyrsp_fits_under_irc_line_limit_with_long_prefix() {
+        let rsp = KeyRsp {
+            channel: "#irc.al".into(),
+            pubkey: [12; 32],
+            ephemeral_pub: [4; 32],
+            wrap_nonce: [5; NONCE_LEN],
+            wrap_ct: vec![6; 48],
+            nonce: [10; 16],
+            sig: [11; 64],
+        };
+        let body = format!("\x01{}\x01", encode_keyrsp(&rsp));
+        let prefix = ":nick!^prostatut@2a14:7584:44e4:7af6:c219:38d4:e5b7:1c63 NOTICE kofany_ :";
+        let line_len = format!("{prefix}{body}\r\n").len();
+        assert!(line_len <= 512, "KEYRSP line too long: {line_len} bytes");
     }
 
     #[test]

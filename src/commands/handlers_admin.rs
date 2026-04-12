@@ -1013,14 +1013,13 @@ pub(crate) fn cmd_spellcheck(app: &mut App, args: &[String]) {
             let Some(lang) = args.get(1) else {
                 ev(
                     app,
-                    &format!("{C_ERR}Usage: /spellcheck get <lang> (e.g. en_US, pl_PL, computing){C_RST}"),
+                    &format!(
+                        "{C_ERR}Usage: /spellcheck get <lang> (e.g. en_US, pl_PL, computing){C_RST}"
+                    ),
                 );
                 return;
             };
-            ev(
-                app,
-                &format!("{C_DIM}Downloading {lang}...{C_RST}"),
-            );
+            ev(app, &format!("{C_DIM}Downloading {lang}...{C_RST}"));
             let dict_dir = crate::spellcheck::SpellChecker::resolve_dict_dir(
                 &app.config.spellcheck.dictionary_dir,
             );
@@ -1061,9 +1060,8 @@ fn spellcheck_status(app: &mut App) {
             app.config.spellcheck.languages.join(", ")
         ),
     );
-    let dict_dir = crate::spellcheck::SpellChecker::resolve_dict_dir(
-        &app.config.spellcheck.dictionary_dir,
-    );
+    let dict_dir =
+        crate::spellcheck::SpellChecker::resolve_dict_dir(&app.config.spellcheck.dictionary_dir);
     ev(
         app,
         &format!("  Dictionary dir: {C_CMD}{}{C_RST}", dict_dir.display()),
@@ -1087,10 +1085,7 @@ fn spellcheck_status(app: &mut App) {
     } else {
         format!("{C_ERR}not installed{C_RST} — run {C_CMD}/spellcheck get computing{C_RST}")
     };
-    ev(
-        app,
-        &format!("  Computing dict: {computing_status}"),
-    );
+    ev(app, &format!("  Computing dict: {computing_status}"));
 }
 
 // === Mentions ===
@@ -1100,7 +1095,9 @@ pub(crate) fn cmd_mentions(app: &mut App, _args: &[String]) {
     if !app.config.display.mentions_buffer {
         ev(
             app,
-            &format!("{C_ERR}Mentions buffer is disabled — /set display.mentions_buffer true{C_RST}"),
+            &format!(
+                "{C_ERR}Mentions buffer is disabled — /set display.mentions_buffer true{C_RST}"
+            ),
         );
         return;
     }

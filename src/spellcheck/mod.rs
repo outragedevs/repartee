@@ -220,9 +220,7 @@ pub struct DictListEntry {
 #[derive(Debug)]
 pub enum DictEvent {
     /// Manifest fetched successfully — contains available dicts and which are installed.
-    ListResult {
-        entries: Vec<DictListEntry>,
-    },
+    ListResult { entries: Vec<DictListEntry> },
     /// A dictionary was downloaded and saved.
     Downloaded { lang: String },
     /// An error occurred during list or download.
@@ -381,42 +379,63 @@ mod tests {
 
     #[test]
     fn empty_checker_accepts_everything() {
-        let checker = SpellChecker { dicts: vec![], computing_dict: None };
+        let checker = SpellChecker {
+            dicts: vec![],
+            computing_dict: None,
+        };
         assert!(checker.check("anything", &HashSet::new()));
         assert!(checker.check("xyzzy", &HashSet::new()));
     }
 
     #[test]
     fn short_words_always_accepted() {
-        let checker = SpellChecker { dicts: vec![], computing_dict: None };
+        let checker = SpellChecker {
+            dicts: vec![],
+            computing_dict: None,
+        };
         assert!(checker.check("a", &HashSet::new()));
         assert!(checker.check("", &HashSet::new()));
     }
 
     #[test]
     fn words_with_digits_skipped() {
-        let checker = SpellChecker { dicts: vec![], computing_dict: None };
+        let checker = SpellChecker {
+            dicts: vec![],
+            computing_dict: None,
+        };
         assert!(checker.check("123", &HashSet::new()));
         assert!(checker.check("10:30", &HashSet::new()));
     }
 
     #[test]
     fn words_with_underscore_skipped() {
-        let checker = SpellChecker { dicts: vec![], computing_dict: None };
+        let checker = SpellChecker {
+            dicts: vec![],
+            computing_dict: None,
+        };
         assert!(checker.check("foo_bar", &HashSet::new()));
     }
 
     #[test]
     fn urls_skipped() {
-        let checker = SpellChecker { dicts: vec![], computing_dict: None };
+        let checker = SpellChecker {
+            dicts: vec![],
+            computing_dict: None,
+        };
         assert!(checker.check("https://example.com", &HashSet::new()));
         assert!(checker.check("irc://server", &HashSet::new()));
     }
 
     #[test]
     fn nicks_skipped() {
-        let checker = SpellChecker { dicts: vec![], computing_dict: None };
-        let nicks: HashSet<String> = ["kofany", "ferris"].iter().map(ToString::to_string).collect();
+        let checker = SpellChecker {
+            dicts: vec![],
+            computing_dict: None,
+        };
+        let nicks: HashSet<String> = ["kofany", "ferris"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
         assert!(checker.check("kofany", &nicks));
         assert!(checker.check("Kofany", &nicks)); // case-insensitive
     }
@@ -483,7 +502,10 @@ mod tests {
 
     #[test]
     fn is_active_empty() {
-        let checker = SpellChecker { dicts: vec![], computing_dict: None };
+        let checker = SpellChecker {
+            dicts: vec![],
+            computing_dict: None,
+        };
         assert!(!checker.is_active());
     }
 
@@ -512,7 +534,10 @@ mod tests {
 
     #[test]
     fn suggest_empty_checker() {
-        let checker = SpellChecker { dicts: vec![], computing_dict: None };
+        let checker = SpellChecker {
+            dicts: vec![],
+            computing_dict: None,
+        };
         let suggestions = checker.suggest("hello");
         assert!(suggestions.is_empty());
     }
@@ -545,7 +570,10 @@ mod tests {
 
     #[test]
     fn has_computing_false_when_none() {
-        let checker = SpellChecker { dicts: vec![], computing_dict: None };
+        let checker = SpellChecker {
+            dicts: vec![],
+            computing_dict: None,
+        };
         assert!(!checker.has_computing());
     }
 

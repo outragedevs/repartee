@@ -21,6 +21,7 @@ impl AppState {
             scrollback_limit: 2000,
             pending_web_events: Vec::new(),
             pending_e2e_sends: Vec::new(),
+            pending_userhost_requests: Vec::new(),
             nick_color_sat: 0.65,
             nick_color_lit: 0.65,
             e2e_manager: None,
@@ -38,7 +39,10 @@ impl AppState {
         self.connections.insert(conn.id.clone(), conn);
     }
 
-    #[expect(dead_code, reason = "reserved for future reconnect/disconnect commands")]
+    #[expect(
+        dead_code,
+        reason = "reserved for future reconnect/disconnect commands"
+    )]
     pub fn remove_connection(&mut self, id: &str) {
         self.connections.remove(id);
     }

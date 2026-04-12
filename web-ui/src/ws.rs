@@ -106,11 +106,7 @@ pub fn send_command(cmd: &WebCommand) {
 }
 
 /// Main WebSocket event loop — polls commands and server messages concurrently.
-async fn run_ws_loop(
-    ws: WebSocket,
-    state: &AppState,
-    mut cmd_rx: mpsc::UnboundedReceiver<String>,
-) {
+async fn run_ws_loop(ws: WebSocket, state: &AppState, mut cmd_rx: mpsc::UnboundedReceiver<String>) {
     let (mut ws_tx, mut ws_rx) = ws.split();
 
     loop {

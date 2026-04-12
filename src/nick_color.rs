@@ -123,18 +123,12 @@ pub fn hsl_to_rgb(hue: f32, saturation: f32, lightness: f32) -> (u8, u8, u8) {
 /// Excludes very dark, very light, and near-white/near-black entries.
 const PALETTE_256: &[u8] = &[
     // Reds/oranges
-    124, 160, 196, 202, 208, 214,
-    // Yellows
-    178, 184, 220, 226,
-    // Greens
-    34, 35, 40, 41, 42, 70, 71, 76, 77, 78, 112, 113, 114,
-    // Cyans/teals
-    30, 31, 36, 37, 38, 43, 44, 73, 74, 79, 80,
-    // Blues
-    24, 25, 26, 27, 32, 33, 62, 63, 68, 69, 75,
-    // Purples/magentas
-    55, 56, 57, 92, 93, 98, 99, 128, 129, 134, 135,
-    // Pinks
+    124, 160, 196, 202, 208, 214, // Yellows
+    178, 184, 220, 226, // Greens
+    34, 35, 40, 41, 42, 70, 71, 76, 77, 78, 112, 113, 114, // Cyans/teals
+    30, 31, 36, 37, 38, 43, 44, 73, 74, 79, 80, // Blues
+    24, 25, 26, 27, 32, 33, 62, 63, 68, 69, 75, // Purples/magentas
+    55, 56, 57, 92, 93, 98, 99, 128, 129, 134, 135, // Pinks
     161, 162, 163, 164, 170, 171, 176, 177,
 ];
 
@@ -325,14 +319,18 @@ mod tests {
     #[test]
     fn hash_distribution_reasonable() {
         let nicks = [
-            "alice", "bob", "charlie", "dave", "eve", "ferris", "grace",
-            "heidi", "ivan", "judy", "karl", "linda", "mallory", "nancy",
-            "oscar", "peggy", "quinn", "rachel", "steve", "trudy",
+            "alice", "bob", "charlie", "dave", "eve", "ferris", "grace", "heidi", "ivan", "judy",
+            "karl", "linda", "mallory", "nancy", "oscar", "peggy", "quinn", "rachel", "steve",
+            "trudy",
         ];
         let colors: std::collections::HashSet<_> = nicks
             .iter()
             .map(|n| nick_color(n, ColorSupport::TrueColor, 0.65, 0.65))
             .collect();
-        assert!(colors.len() >= 15, "expected ≥15 distinct colors from 20 nicks, got {}", colors.len());
+        assert!(
+            colors.len() >= 15,
+            "expected ≥15 distinct colors from 20 nicks, got {}",
+            colors.len()
+        );
     }
 }

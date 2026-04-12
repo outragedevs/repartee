@@ -406,7 +406,9 @@ mod tests {
     fn multi_target_mode_with_targmax_no_mode() {
         // Libera: TARGMAX lists commands but not MODE → multi-target NOT supported
         let mut is = Isupport::new();
-        is.parse_tokens(&["TARGMAX=NAMES:1,LIST:1,KICK:1,WHOIS:1,PRIVMSG:4,NOTICE:4,ACCEPT:,MONITOR:"]);
+        is.parse_tokens(&[
+            "TARGMAX=NAMES:1,LIST:1,KICK:1,WHOIS:1,PRIVMSG:4,NOTICE:4,ACCEPT:,MONITOR:",
+        ]);
         assert!(!is.supports_multi_target_mode());
     }
 

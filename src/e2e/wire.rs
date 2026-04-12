@@ -6,7 +6,7 @@
 // Items in this module are wired into `E2eManager` in later tasks (12+).
 #![allow(dead_code)]
 
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 
 use crate::e2e::error::{E2eError, Result};
 use crate::e2e::{MAX_CHUNKS, PROTO};
@@ -59,10 +59,18 @@ impl WireChunk {
             None => return Ok(None),
         };
         let mut fields = rest.split_whitespace();
-        let msgid_hex = fields.next().ok_or_else(|| E2eError::Wire("missing msgid".into()))?;
-        let ts_str = fields.next().ok_or_else(|| E2eError::Wire("missing ts".into()))?;
-        let parttot = fields.next().ok_or_else(|| E2eError::Wire("missing part/total".into()))?;
-        let body = fields.next().ok_or_else(|| E2eError::Wire("missing body".into()))?;
+        let msgid_hex = fields
+            .next()
+            .ok_or_else(|| E2eError::Wire("missing msgid".into()))?;
+        let ts_str = fields
+            .next()
+            .ok_or_else(|| E2eError::Wire("missing ts".into()))?;
+        let parttot = fields
+            .next()
+            .ok_or_else(|| E2eError::Wire("missing part/total".into()))?;
+        let body = fields
+            .next()
+            .ok_or_else(|| E2eError::Wire("missing body".into()))?;
         if fields.next().is_some() {
             return Err(E2eError::Wire("extra fields".into()));
         }
@@ -81,8 +89,12 @@ impl WireChunk {
         let (p, t) = parttot
             .split_once('/')
             .ok_or_else(|| E2eError::Wire("part/total missing slash".into()))?;
-        let part: u8 = p.parse().map_err(|e| E2eError::Wire(format!("bad part: {e}")))?;
-        let total: u8 = t.parse().map_err(|e| E2eError::Wire(format!("bad total: {e}")))?;
+        let part: u8 = p
+            .parse()
+            .map_err(|e| E2eError::Wire(format!("bad part: {e}")))?;
+        let total: u8 = t
+            .parse()
+            .map_err(|e| E2eError::Wire(format!("bad total: {e}")))?;
         if total == 0 || total > MAX_CHUNKS || part == 0 || part > total {
             return Err(E2eError::Wire(format!("bad part/total {part}/{total}")));
         }
@@ -92,13 +104,23 @@ impl WireChunk {
             .ok_or_else(|| E2eError::Wire("missing nonce:ct separator".into()))?;
         let nonce_vec = B64.decode(nonce_b64)?;
         if nonce_vec.len() != 24 {
-            return Err(E2eError::Wire(format!("nonce must be 24 bytes, got {}", nonce_vec.len())));
+            return Err(E2eError::Wire(format!(
+                "nonce must be 24 bytes, got {}",
+                nonce_vec.len()
+            )));
         }
         let mut nonce = [0u8; 24];
         nonce.copy_from_slice(&nonce_vec);
         let ciphertext = B64.decode(ct_b64)?;
 
-        Ok(Some(Self { msgid, ts, part, total, nonce, ciphertext }))
+        Ok(Some(Self {
+            msgid,
+            ts,
+            part,
+            total,
+            nonce,
+            ciphertext,
+        }))
     }
 }
 
@@ -254,16 +276,13 @@ mod tests {
         let got = build_aad("#chan", [1u8; 8], 100, 1, 3);
         let expected: Vec<u8> = vec![
             // PROTO = "RPE2E01"
-            0x52, 0x50, 0x45, 0x32, 0x45, 0x30, 0x31,
-            // be16(5) || "#chan"
-            0x00, 0x05, 0x23, 0x63, 0x68, 0x61, 0x6e,
-            // be16(8) || msgid (8x 0x01)
+            0x52, 0x50, 0x45, 0x32, 0x45, 0x30, 0x31, // be16(5) || "#chan"
+            0x00, 0x05, 0x23, 0x63, 0x68, 0x61, 0x6e, // be16(8) || msgid (8x 0x01)
             0x00, 0x08, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
             // be16(8) || ts=100 be64
             0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64,
             // be16(1) || part=1
-            0x00, 0x01, 0x01,
-            // be16(1) || total=3
+            0x00, 0x01, 0x01, // be16(1) || total=3
             0x00, 0x01, 0x03,
         ];
         assert_eq!(got.len(), 40, "AAD length mismatch");

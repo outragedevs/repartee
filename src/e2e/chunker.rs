@@ -55,9 +55,7 @@ pub fn split_plaintext(plaintext: &str) -> Result<Vec<Vec<u8>>> {
 
     let total = chunks.len();
     if total > usize::from(MAX_CHUNKS) {
-        return Err(E2eError::ChunkLimit(
-            u8::try_from(total).unwrap_or(u8::MAX),
-        ));
+        return Err(E2eError::ChunkLimit(u8::try_from(total).unwrap_or(u8::MAX)));
     }
     Ok(chunks)
 }

@@ -10,7 +10,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::e2e::crypto::aead::SessionKey;
 use crate::e2e::crypto::fingerprint::Fingerprint;
@@ -627,12 +627,7 @@ impl Keyring {
 
     // ---------- autotrust ----------
 
-    pub fn add_autotrust(
-        &self,
-        scope: &str,
-        handle_pattern: &str,
-        created_at: i64,
-    ) -> Result<()> {
+    pub fn add_autotrust(&self, scope: &str, handle_pattern: &str, created_at: i64) -> Result<()> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
         conn.execute(
             "INSERT OR IGNORE INTO e2e_autotrust (scope, handle_pattern, created_at)
@@ -724,10 +719,7 @@ impl Keyring {
 
     /// Return every recipient of our outgoing session key for `channel`.
     /// The returned tuples are `(handle, fingerprint)`.
-    pub fn list_outgoing_recipients(
-        &self,
-        channel: &str,
-    ) -> Result<Vec<(String, Fingerprint)>> {
+    pub fn list_outgoing_recipients(&self, channel: &str) -> Result<Vec<(String, Fingerprint)>> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT handle, fingerprint
@@ -778,7 +770,15 @@ impl Keyring {
             let first_seen: i64 = r.get(4)?;
             let last_seen: i64 = r.get(5)?;
             let status: String = r.get(6)?;
-            Ok((fp, pk, last_handle, last_nick, first_seen, last_seen, status))
+            Ok((
+                fp,
+                pk,
+                last_handle,
+                last_nick,
+                first_seen,
+                last_seen,
+                status,
+            ))
         })?;
         let mut out = Vec::new();
         for row in rows {
@@ -887,10 +887,7 @@ impl Keyring {
     /// Return every row of `e2e_channel_config`. Used by `/e2e autotrust`
     /// enforcement test helpers and by the portable export.
     #[allow(dead_code, reason = "hook for a future /e2e config list command")]
-    pub(crate) fn get_autotrust_rules_for_scope(
-        &self,
-        channel: &str,
-    ) -> Result<Vec<String>> {
+    pub(crate) fn get_autotrust_rules_for_scope(&self, channel: &str) -> Result<Vec<String>> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT handle_pattern FROM e2e_autotrust
@@ -1126,10 +1123,11 @@ mod tests {
         assert_eq!(trusted[0].handle, "~alice@host");
 
         kr.delete_incoming_session("~alice@host", "#x").unwrap();
-        assert!(kr
-            .get_incoming_session("~alice@host", "#x")
-            .unwrap()
-            .is_none());
+        assert!(
+            kr.get_incoming_session("~alice@host", "#x")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1174,7 +1172,10 @@ mod tests {
         assert!(glob_matches_ci("~b?b@host", "~bob@host"));
         assert!(!glob_matches_ci("~b?b@host", "~bb@host"));
         // Multiple stars — backtracking.
-        assert!(glob_matches_ci("*@*.trusted.org", "~alice@shell.trusted.org"));
+        assert!(glob_matches_ci(
+            "*@*.trusted.org",
+            "~alice@shell.trusted.org"
+        ));
         assert!(glob_matches_ci("*@*", "a@b"));
         // Trailing stars.
         assert!(glob_matches_ci("~bob*", "~bob"));
@@ -1190,16 +1191,15 @@ mod tests {
         kr.add_autotrust("#x", "~bob@*", 100).unwrap();
 
         // Global rule hits regardless of channel.
-        assert!(kr
-            .autotrust_matches("~alice@shell.trusted.org", "#anything")
-            .unwrap());
+        assert!(
+            kr.autotrust_matches("~alice@shell.trusted.org", "#anything")
+                .unwrap()
+        );
         // Scoped rule hits only on matching channel.
         assert!(kr.autotrust_matches("~bob@b.host", "#x").unwrap());
         assert!(!kr.autotrust_matches("~bob@b.host", "#y").unwrap());
         // No match at all.
-        assert!(!kr
-            .autotrust_matches("~stranger@nowhere", "#x")
-            .unwrap());
+        assert!(!kr.autotrust_matches("~stranger@nowhere", "#x").unwrap());
     }
 
     #[test]
@@ -1351,7 +1351,10 @@ mod tests {
         }
 
         // Existing row is untouched: fingerprint and sk are still the first.
-        let loaded = kr.get_incoming_session("~alice@host", "#x").unwrap().unwrap();
+        let loaded = kr
+            .get_incoming_session("~alice@host", "#x")
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded.fingerprint, [0xaa; 16]);
         assert_eq!(loaded.sk, [1u8; 32]);
     }
@@ -1377,7 +1380,10 @@ mod tests {
         };
         kr.install_incoming_session_strict(&refresh).unwrap();
 
-        let loaded = kr.get_incoming_session("~alice@host", "#x").unwrap().unwrap();
+        let loaded = kr
+            .get_incoming_session("~alice@host", "#x")
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded.fingerprint, [0xaa; 16]);
         assert_eq!(loaded.sk, [2u8; 32]);
         assert_eq!(loaded.created_at, 200);

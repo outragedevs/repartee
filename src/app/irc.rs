@@ -101,7 +101,10 @@ impl App {
 
     /// Connect to a server defined in config by its key (e.g. "libera").
     /// Used for autoconnect at startup.
-    pub(crate) async fn connect_server_async(&mut self, server_id: &str) -> color_eyre::eyre::Result<()> {
+    pub(crate) async fn connect_server_async(
+        &mut self,
+        server_id: &str,
+    ) -> color_eyre::eyre::Result<()> {
         let server_config = match self.config.servers.get(server_id) {
             Some(cfg) => cfg.clone(),
             None => {
@@ -229,12 +232,14 @@ impl App {
             tokio::spawn(async move {
                 match crate::irc::connect_server(&id, &cfg, &general).await {
                     Ok((handle, mut rx)) => {
-                        let _ = tx.send(IrcEvent::HandleReady(
-                            handle.conn_id.clone(),
-                            handle.sender,
-                            handle.local_ip,
-                            handle.outgoing_handle,
-                        )).await;
+                        let _ = tx
+                            .send(IrcEvent::HandleReady(
+                                handle.conn_id.clone(),
+                                handle.sender,
+                                handle.local_ip,
+                                handle.outgoing_handle,
+                            ))
+                            .await;
                         while let Some(event) = rx.recv().await {
                             if tx.send(event).await.is_err() {
                                 break;
@@ -242,7 +247,9 @@ impl App {
                         }
                     }
                     Err(e) => {
-                        let _ = tx.send(IrcEvent::Disconnected(id, Some(e.to_string()))).await;
+                        let _ = tx
+                            .send(IrcEvent::Disconnected(id, Some(e.to_string())))
+                            .await;
                     }
                 }
             });

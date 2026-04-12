@@ -26,10 +26,7 @@ pub fn Layout() -> impl IntoView {
     Effect::new(move || {
         let _sync = state.sync_version.get(); // subscribe to resync events
         if let Some(buf_id) = state.active_buffer.get() {
-            let already_loaded = state
-                .backlog_loaded
-                .get_untracked()
-                .contains(&buf_id);
+            let already_loaded = state.backlog_loaded.get_untracked().contains(&buf_id);
             if !already_loaded {
                 crate::ws::send_command(&WebCommand::FetchMessages {
                     buffer_id: buf_id.clone(),
@@ -37,9 +34,7 @@ pub fn Layout() -> impl IntoView {
                     before: None,
                 });
             }
-            crate::ws::send_command(&WebCommand::FetchNickList {
-                buffer_id: buf_id,
-            });
+            crate::ws::send_command(&WebCommand::FetchNickList { buffer_id: buf_id });
         }
     });
 

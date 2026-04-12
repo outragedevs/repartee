@@ -6,40 +6,129 @@ use crate::state::AppState;
 
 /// Known IRC commands for tab completion.
 const COMMANDS: &[&str] = &[
-    "action", "admin", "ban", "clear", "close", "connect", "ctcp", "cycle",
-    "dcc", "dehalfop", "deop", "detach", "devoice", "disconnect",
-    "halfop", "help", "ignore",
-    "info", "invite", "join", "kick", "links", "list", "log", "lusers",
-    "me", "mentions", "mode", "msg", "names", "nick", "notice",
-    "op", "part", "ping", "query", "quit", "raw", "reconnect", "rejoin",
-    "script", "server", "set", "spell", "spellcheck", "stats",
-    "time", "topic", "unban", "unexcept", "unignore", "uninvex", "unreop",
-    "voice", "who", "whois", "window",
+    "action",
+    "admin",
+    "ban",
+    "clear",
+    "close",
+    "connect",
+    "ctcp",
+    "cycle",
+    "dcc",
+    "dehalfop",
+    "deop",
+    "detach",
+    "devoice",
+    "disconnect",
+    "halfop",
+    "help",
+    "ignore",
+    "info",
+    "invite",
+    "join",
+    "kick",
+    "links",
+    "list",
+    "log",
+    "lusers",
+    "me",
+    "mentions",
+    "mode",
+    "msg",
+    "names",
+    "nick",
+    "notice",
+    "op",
+    "part",
+    "ping",
+    "query",
+    "quit",
+    "raw",
+    "reconnect",
+    "rejoin",
+    "script",
+    "server",
+    "set",
+    "spell",
+    "spellcheck",
+    "stats",
+    "time",
+    "topic",
+    "unban",
+    "unexcept",
+    "unignore",
+    "uninvex",
+    "unreop",
+    "voice",
+    "who",
+    "whois",
+    "window",
 ];
 
 /// Known /set setting paths for tab completion.
 const SETTING_PATHS: &[&str] = &[
-    "dcc.autoaccept_lowports", "dcc.autochat_masks", "dcc.max_connections",
-    "dcc.own_ip", "dcc.port_range", "dcc.timeout",
-    "display.backlog_lines", "display.nick_alignment", "display.nick_column_width",
-    "display.nick_max_length", "display.nick_truncation", "display.scrollback_lines",
+    "dcc.autoaccept_lowports",
+    "dcc.autochat_masks",
+    "dcc.max_connections",
+    "dcc.own_ip",
+    "dcc.port_range",
+    "dcc.timeout",
+    "display.backlog_lines",
+    "display.nick_alignment",
+    "display.nick_column_width",
+    "display.nick_max_length",
+    "display.nick_truncation",
+    "display.scrollback_lines",
     "display.show_timestamps",
-    "general.ctcp_version", "general.flood_protection", "general.nick",
-    "general.realname", "general.theme", "general.timestamp_format", "general.username",
-    "logging.event_retention_hours", "logging.retention_days",
-    "image_preview.cache_max_days", "image_preview.cache_max_mb", "image_preview.enabled",
-    "image_preview.fetch_timeout", "image_preview.kitty_format", "image_preview.max_file_size",
-    "image_preview.max_height", "image_preview.max_width", "image_preview.protocol",
-    "sidepanel.left.visible", "sidepanel.left.width",
-    "sidepanel.right.visible", "sidepanel.right.width",
-    "spellcheck.dictionary_dir", "spellcheck.enabled", "spellcheck.languages",
-    "statusbar.accent_color", "statusbar.background", "statusbar.cursor_color",
-    "statusbar.dim_color", "statusbar.enabled", "statusbar.input_color",
-    "statusbar.muted_color", "statusbar.prompt", "statusbar.prompt_color",
-    "statusbar.separator", "statusbar.text_color",
-    "web.bind_address", "web.cloudflare_tunnel_name", "web.enabled", "web.line_height",
-    "web.nick_column_width", "web.nick_max_length", "web.password", "web.port",
-    "web.session_hours", "web.theme", "web.timestamp_format", "web.tls_cert", "web.tls_key",
+    "general.ctcp_version",
+    "general.flood_protection",
+    "general.nick",
+    "general.realname",
+    "general.theme",
+    "general.timestamp_format",
+    "general.username",
+    "logging.event_retention_hours",
+    "logging.retention_days",
+    "image_preview.cache_max_days",
+    "image_preview.cache_max_mb",
+    "image_preview.enabled",
+    "image_preview.fetch_timeout",
+    "image_preview.kitty_format",
+    "image_preview.max_file_size",
+    "image_preview.max_height",
+    "image_preview.max_width",
+    "image_preview.protocol",
+    "sidepanel.left.visible",
+    "sidepanel.left.width",
+    "sidepanel.right.visible",
+    "sidepanel.right.width",
+    "spellcheck.dictionary_dir",
+    "spellcheck.enabled",
+    "spellcheck.languages",
+    "statusbar.accent_color",
+    "statusbar.background",
+    "statusbar.cursor_color",
+    "statusbar.dim_color",
+    "statusbar.enabled",
+    "statusbar.input_color",
+    "statusbar.muted_color",
+    "statusbar.prompt",
+    "statusbar.prompt_color",
+    "statusbar.separator",
+    "statusbar.text_color",
+    "web.bind_address",
+    "web.cloudflare_tunnel_name",
+    "web.enabled",
+    "web.line_height",
+    "web.nick_column_width",
+    "web.nick_max_length",
+    "web.password",
+    "web.port",
+    "web.session_hours",
+    "web.theme",
+    "web.timestamp_format",
+    "web.tls_cert",
+    "web.tls_key",
 ];
 
 #[component]
@@ -78,9 +167,14 @@ pub fn InputLine() -> impl IntoView {
                     return;
                 }
                 // Don't steal focus from shell terminal.
-                let is_shell = state.active_buffer.get_untracked()
+                let is_shell = state
+                    .active_buffer
+                    .get_untracked()
                     .and_then(|id| {
-                        state.buffers.get_untracked().iter()
+                        state
+                            .buffers
+                            .get_untracked()
+                            .iter()
                             .find(|b| b.id == id)
                             .map(|b| b.buffer_type == "shell")
                     })
@@ -89,8 +183,11 @@ pub fn InputLine() -> impl IntoView {
                     return;
                 }
                 let key = ev.key();
-                if key == "Tab" || key == "Enter" || key == "Escape"
-                    || key == "F1" || key.starts_with("Arrow")
+                if key == "Tab"
+                    || key == "Enter"
+                    || key == "Escape"
+                    || key == "F1"
+                    || key.starts_with("Arrow")
                 {
                     return;
                 }
@@ -144,7 +241,7 @@ pub fn InputLine() -> impl IntoView {
             if let Some(el) = input_ref.get_untracked() {
                 let html_el: &web_sys::HtmlTextAreaElement = el.as_ref();
                 let el_html: &web_sys::HtmlElement = html_el.unchecked_ref();
-                    el_html.style().set_property("height", "").ok();
+                el_html.style().set_property("height", "").ok();
             }
             return;
         }
@@ -203,7 +300,11 @@ pub fn InputLine() -> impl IntoView {
                     })
                     .collect();
 
-                let replace_start = if matches[0].starts_with('/') { 0 } else { word_start };
+                let replace_start = if matches[0].starts_with('/') {
+                    0
+                } else {
+                    word_start
+                };
                 let first = &completions[0];
                 let after = &text[cursor..];
                 let new_text = format!("{}{first}{after}", &text[..replace_start]);
@@ -238,10 +339,7 @@ pub fn InputLine() -> impl IntoView {
             let scroll_h = html_el.scroll_height();
             let max_h = 120; // max ~6 lines
             let h = scroll_h.min(max_h);
-            style
-                .style()
-                .set_property("height", &format!("{h}px"))
-                .ok();
+            style.style().set_property("height", &format!("{h}px")).ok();
         }
     };
 

@@ -1,7 +1,7 @@
+use crate::state::AppState;
 use crate::state::buffer::{BufferType, Message};
 use crate::state::connection::ConnectionStatus;
 use crate::state::sorting::sort_buffers;
-use crate::state::AppState;
 use crate::web::protocol::{BufferMeta, ConnectionMeta, WebEvent, WireMessage, WireNick};
 
 /// Build a `SyncInit` event from the current `AppState`.

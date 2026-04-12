@@ -1,6 +1,6 @@
 //! Ed25519 signature helpers for handshake messages.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey, SIGNATURE_LENGTH};
+use ed25519_dalek::{SIGNATURE_LENGTH, Signature, Signer, SigningKey, Verifier, VerifyingKey};
 
 use crate::e2e::error::{E2eError, Result};
 

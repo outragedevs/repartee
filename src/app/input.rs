@@ -9,7 +9,7 @@ use crate::state::buffer::{
 };
 use crate::ui::layout::UiRegions;
 
-use super::{App, MAX_PASTE_LINES, MAX_ALIAS_DEPTH, expand_alias_template};
+use super::{App, MAX_ALIAS_DEPTH, MAX_PASTE_LINES, expand_alias_template};
 
 impl App {
     pub(crate) fn handle_event(&mut self, event: Event) {
@@ -295,8 +295,10 @@ impl App {
             && let Some(buf) = self.state.active_buffer()
         {
             let buf_id = buf.id.clone();
-            if let Some(shell_id) =
-                self.shell_mgr.session_id_for_buffer(&buf_id).map(ToString::to_string)
+            if let Some(shell_id) = self
+                .shell_mgr
+                .session_id_for_buffer(&buf_id)
+                .map(ToString::to_string)
             {
                 // Check if shell enabled bracketed paste mode.
                 let bracketed = self
@@ -354,9 +356,7 @@ impl App {
         if self.paste_queue.len() > MAX_PASTE_LINES {
             let dropped = self.paste_queue.len() - MAX_PASTE_LINES;
             self.paste_queue.truncate(MAX_PASTE_LINES);
-            tracing::warn!(
-                "paste truncated to {MAX_PASTE_LINES} lines ({dropped} dropped)"
-            );
+            tracing::warn!("paste truncated to {MAX_PASTE_LINES} lines ({dropped} dropped)");
         }
     }
 
@@ -375,9 +375,7 @@ impl App {
 
         // Forward mouse events to the shell PTY when in shell input mode
         // and the mouse is within the chat (shell render) area.
-        if self.shell_input_active
-            && regions.chat_area.is_some_and(|r| r.contains(pos))
-        {
+        if self.shell_input_active && regions.chat_area.is_some_and(|r| r.contains(pos)) {
             self.forward_mouse_to_shell(mouse, &regions);
             return;
         }
@@ -667,8 +665,7 @@ impl App {
             self.state.active_buffer().map_or_else(
                 || (Vec::new(), Vec::new()),
                 |buf| {
-                    let nicks: Vec<String> =
-                        buf.users.values().map(|e| e.nick.clone()).collect();
+                    let nicks: Vec<String> = buf.users.values().map(|e| e.nick.clone()).collect();
                     // Filter last_speakers to only nicks still on the channel.
                     // Speakers who PARTed/QUITed stay in last_speakers for
                     // history but should not appear in tab completion.
@@ -720,9 +717,7 @@ impl App {
         if depth > MAX_ALIAS_DEPTH {
             crate::commands::helpers::add_local_event(
                 self,
-                &format!(
-                    "Alias recursion limit reached (max {MAX_ALIAS_DEPTH})"
-                ),
+                &format!("Alias recursion limit reached (max {MAX_ALIAS_DEPTH})"),
             );
             return;
         }
@@ -897,11 +892,21 @@ impl App {
 
         // When echo-message is enabled, the server will echo our message back
         // with authoritative server-time — skip local display and wait for echo.
+        //
+        // E2E is the exception: the server echo is the ciphertext wire,
+        // and `try_decrypt_e2e` cannot decrypt our own outgoing key
+        // (there is no incoming session keyed on our own handle). We
+        // therefore do the local echo immediately for E2E messages
+        // regardless of the cap state, and `handle_privmsg` swallows the
+        // matching server echo in `is_own && starts_with "+RPE2E01"`.
         let echo_message_enabled = self
             .state
             .connections
             .get(&conn_id)
             .is_some_and(|c| c.enabled_caps.contains("echo-message"));
+        let is_e2e_encrypted = wire_lines
+            .first()
+            .is_some_and(|w| w.starts_with("+RPE2E01"));
 
         let own_mode = self.state.nick_prefix(&active_id, &nick);
 
@@ -925,7 +930,7 @@ impl App {
             self.drain_pending_e2e_sends();
         }
 
-        if !echo_message_enabled {
+        if !echo_message_enabled || is_e2e_encrypted {
             // Local echo: show the user what they typed (plaintext), not the
             // wire format. For non-E2E messages we split at word boundaries
             // so very long lines wrap in the local buffer the same way they
@@ -998,9 +1003,7 @@ impl App {
             BufferType::Channel => buffer_name.to_string(),
             BufferType::Query => {
                 let active_buf = self.state.active_buffer();
-                let Some(peer_handle) = active_buf
-                    .and_then(|b| b.peer_handle.as_deref())
-                else {
+                let Some(peer_handle) = active_buf.and_then(|b| b.peer_handle.as_deref()) else {
                     // No peer handle yet. Check whether E2E was
                     // (mis)configured under the bare-nick key from an
                     // earlier version — if a legacy enabled row exists,
@@ -1048,29 +1051,22 @@ impl App {
         // will re-handshake on next ciphertext if they come back.
         let rekey_sends = mgr.take_pending_rekey_sends();
         if !rekey_sends.is_empty() {
-            let conn_id_opt = self
-                .state
-                .active_buffer()
-                .map(|b| b.connection_id.clone());
+            let conn_id_opt = self.state.active_buffer().map(|b| b.connection_id.clone());
             if let Some(conn_id) = conn_id_opt {
                 let buf_id = crate::state::buffer::make_buffer_id(&conn_id, &context);
                 for rk in rekey_sends {
-                    let nick = self
-                        .state
-                        .buffers
-                        .get(&buf_id)
-                        .and_then(|b| {
-                            b.users.values().find_map(|u| {
-                                let ident = u.ident.as_deref().unwrap_or("");
-                                let host = u.host.as_deref().unwrap_or("");
-                                let handle = format!("{ident}@{host}");
-                                if handle == rk.target_handle {
-                                    Some(u.nick.clone())
-                                } else {
-                                    None
-                                }
-                            })
-                        });
+                    let nick = self.state.buffers.get(&buf_id).and_then(|b| {
+                        b.users.values().find_map(|u| {
+                            let ident = u.ident.as_deref().unwrap_or("");
+                            let host = u.host.as_deref().unwrap_or("");
+                            let handle = format!("{ident}@{host}");
+                            if handle == rk.target_handle {
+                                Some(u.nick.clone())
+                            } else {
+                                None
+                            }
+                        })
+                    });
                     let Some(nick) = nick else {
                         tracing::warn!(
                             target_handle = %rk.target_handle,
@@ -1152,11 +1148,7 @@ impl App {
 
     /// Forward a mouse event to the active shell PTY using SGR (mode 1006) encoding.
     /// Coordinates are translated to be relative to the shell render area.
-    pub(crate) fn forward_mouse_to_shell(
-        &mut self,
-        mouse: event::MouseEvent,
-        regions: &UiRegions,
-    ) {
+    pub(crate) fn forward_mouse_to_shell(&mut self, mouse: event::MouseEvent, regions: &UiRegions) {
         let Some(chat_area) = regions.chat_area else {
             return;
         };
@@ -1176,10 +1168,7 @@ impl App {
         let Some(screen) = self.shell_mgr.screen(&shell_id) else {
             return;
         };
-        if matches!(
-            screen.mouse_protocol_mode(),
-            vt100::MouseProtocolMode::None
-        ) {
+        if matches!(screen.mouse_protocol_mode(), vt100::MouseProtocolMode::None) {
             return;
         }
 
@@ -1224,10 +1213,7 @@ impl App {
                     };
                     ev_fn(
                         self,
-                        &format!(
-                            "  {C_CMD}{:<8}{C_RST} {}{status}",
-                            entry.code, entry.name
-                        ),
+                        &format!("  {C_CMD}{:<8}{C_RST} {}{status}", entry.code, entry.name),
                     );
                 }
                 ev_fn(
@@ -1271,12 +1257,10 @@ fn key_event_to_bytes(key: &event::KeyEvent, app_cursor: bool) -> Vec<u8> {
     match key.code {
         KeyCode::Char(c) if ctrl => {
             // Ctrl+letter → control character (0x01..0x1A).
-            let byte = (c.to_ascii_lowercase() as u8).wrapping_sub(b'a').wrapping_add(1);
-            if alt {
-                vec![0x1b, byte]
-            } else {
-                vec![byte]
-            }
+            let byte = (c.to_ascii_lowercase() as u8)
+                .wrapping_sub(b'a')
+                .wrapping_add(1);
+            if alt { vec![0x1b, byte] } else { vec![byte] }
         }
         KeyCode::Char(c) => {
             // Alt+char → ESC prefix (standard terminal encoding for meta key).
@@ -1363,15 +1347,13 @@ mod tests {
 
     #[test]
     fn alias_context_variables() {
-        let result =
-            expand_alias_template("/topic $C", &[], "#rust", "ferris", "libera");
+        let result = expand_alias_template("/topic $C", &[], "#rust", "ferris", "libera");
         assert_eq!(result, "/topic #rust");
     }
 
     #[test]
     fn alias_context_braced_syntax() {
-        let result =
-            expand_alias_template("/msg ${N} hello from ${S}", &[], "#ch", "me", "srv");
+        let result = expand_alias_template("/msg ${N} hello from ${S}", &[], "#ch", "me", "srv");
         assert_eq!(result, "/msg me hello from srv");
     }
 
@@ -1395,13 +1377,8 @@ mod tests {
 
     #[test]
     fn alias_chaining_template() {
-        let result = expand_alias_template(
-            "/join $0; /msg $0 hello",
-            &args(&["#test"]),
-            "",
-            "",
-            "",
-        );
+        let result =
+            expand_alias_template("/join $0; /msg $0 hello", &args(&["#test"]), "", "", "");
         assert_eq!(result, "/join #test; /msg #test hello");
     }
 
@@ -1419,25 +1396,13 @@ mod tests {
 
     #[test]
     fn alias_range_args_out_of_bounds_returns_empty() {
-        let result = expand_alias_template(
-            "/msg $0 $3-",
-            &args(&["nick", "hello"]),
-            "",
-            "",
-            "",
-        );
+        let result = expand_alias_template("/msg $0 $3-", &args(&["nick", "hello"]), "", "", "");
         assert_eq!(result, "/msg nick");
     }
 
     #[test]
     fn alias_range_args_at_boundary() {
-        let result = expand_alias_template(
-            "/msg $0 $2-",
-            &args(&["nick", "hello"]),
-            "",
-            "",
-            "",
-        );
+        let result = expand_alias_template("/msg $0 $2-", &args(&["nick", "hello"]), "", "", "");
         assert_eq!(result, "/msg nick");
     }
 

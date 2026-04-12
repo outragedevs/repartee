@@ -35,7 +35,10 @@ impl App {
         clippy::too_many_lines,
         reason = "flat init sequence, splitting adds indirection"
     )]
-    pub(crate) async fn handle_shim_connect(&mut self, stream: tokio::net::UnixStream) -> Result<()> {
+    pub(crate) async fn handle_shim_connect(
+        &mut self,
+        stream: tokio::net::UnixStream,
+    ) -> Result<()> {
         use crate::session::protocol::{self, MainMessage, ShimMessage};
         use crate::session::writer::SocketWriter;
         use tokio::sync::mpsc;

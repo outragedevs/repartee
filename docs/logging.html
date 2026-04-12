@@ -49,6 +49,7 @@
     <span class="nav-section-title">Reference</span>
     <ul>
       <li><a href="commands.html">Commands</a></li>
+      <li><a href="e2e.html">End-to-End Encryption</a></li>
     </ul>
   </div>
   <div class="nav-section">
@@ -86,7 +87,7 @@
       <div class="sidebar-footer">
         Built with <a href="https://www.rust-lang.org">Rust</a>
         &middot;
-        <a href="https://repart.ee/">repart.ee</a>
+        <a href="https://repart.ee/">GitHub</a>
       </div>
     </aside>
 
@@ -191,6 +192,7 @@ REPARTEE_LOG_KEY=your-secret-passphrase
 <p>Backlog messages appear at the top of the buffer, followed by a separator:</p>
 <pre><code>─── End of backlog (20 lines) ───
 </code></pre>
+<p>Date separator lines are automatically inserted between messages from different days for easier history reading. Day-changed markers also appear at midnight in all active chat buffers. Both the <code>date_separator</code> and <code>backlog_end</code> formats are customizable via the <a href="theming.html">theming system</a>.</p>
 <p>Backlog messages do not trigger highlights or notifications, and are not re-logged to the database (they already exist). This works for autoconnect channels, manual <code>/join</code>, queries opened via incoming messages, and DCC chat reconnections.</p>
 <h2>Event retention</h2>
 <p>Event messages (join, part, quit, nick, kick, mode changes) are high-volume noise that accumulates over time. The <code>event_retention_hours</code> setting automatically prunes old event messages while keeping actual chat history intact.</p>
@@ -218,7 +220,7 @@ REPARTEE_LOG_KEY=your-secret-passphrase
 
         <footer class="site-footer">
           Built with <a href="https://www.rust-lang.org">Rust</a> &middot;
-          <a href="https://repart.ee/">repart.ee</a> &middot;
+          <a href="https://repart.ee/">GitHub</a> &middot;
           MIT License
         </footer>
       </main>

@@ -35,6 +35,23 @@ pub struct PendingE2eSend {
     pub notice_text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingUserhostAction {
+    E2eForget {
+        buffer_id: String,
+        target: String,
+        channel: Option<String>,
+        all: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingUserhostRequest {
+    pub connection_id: String,
+    pub nick: String,
+    pub action: PendingUserhostAction,
+}
+
 pub struct AppState {
     pub connections: HashMap<String, Connection>,
     pub buffers: IndexMap<String, Buffer>,
@@ -62,6 +79,7 @@ pub struct AppState {
     /// Drained by `App::drain_pending_e2e_sends` right after
     /// `drain_pending_web_events`. Same pattern as `pending_web_events`.
     pub pending_e2e_sends: Vec<PendingE2eSend>,
+    pub pending_userhost_requests: Vec<PendingUserhostRequest>,
     /// Nick color HSL saturation (synced from config for mention line formatting).
     pub nick_color_sat: f32,
     /// Nick color HSL lightness (synced from config for mention line formatting).

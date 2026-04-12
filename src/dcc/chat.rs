@@ -29,20 +29,26 @@ pub async fn listen_for_chat(
     match accept_result {
         Ok(Ok((stream, _peer_addr))) => {
             // Notify: TCP handshake done.
-            let _ = event_tx.send(DccEvent::ChatConnected { id: id.clone() }).await;
+            let _ = event_tx
+                .send(DccEvent::ChatConnected { id: id.clone() })
+                .await;
             run_chat_session(id, stream, event_tx, line_rx).await;
         }
         Ok(Err(e)) => {
-            let _ = event_tx.send(DccEvent::ChatError {
-                id,
-                error: format!("DCC CHAT accept error: {e}"),
-            }).await;
+            let _ = event_tx
+                .send(DccEvent::ChatError {
+                    id,
+                    error: format!("DCC CHAT accept error: {e}"),
+                })
+                .await;
         }
         Err(_elapsed) => {
-            let _ = event_tx.send(DccEvent::ChatError {
-                id,
-                error: "DCC CHAT request timed out".to_owned(),
-            }).await;
+            let _ = event_tx
+                .send(DccEvent::ChatError {
+                    id,
+                    error: "DCC CHAT request timed out".to_owned(),
+                })
+                .await;
         }
     }
 }
@@ -62,20 +68,26 @@ pub async fn connect_for_chat(
 
     match connect_result {
         Ok(Ok(stream)) => {
-            let _ = event_tx.send(DccEvent::ChatConnected { id: id.clone() }).await;
+            let _ = event_tx
+                .send(DccEvent::ChatConnected { id: id.clone() })
+                .await;
             run_chat_session(id, stream, event_tx, line_rx).await;
         }
         Ok(Err(e)) => {
-            let _ = event_tx.send(DccEvent::ChatError {
-                id,
-                error: format!("DCC CHAT connect error: {e}"),
-            }).await;
+            let _ = event_tx
+                .send(DccEvent::ChatError {
+                    id,
+                    error: format!("DCC CHAT connect error: {e}"),
+                })
+                .await;
         }
         Err(_elapsed) => {
-            let _ = event_tx.send(DccEvent::ChatError {
-                id,
-                error: "DCC CHAT connect timed out".to_owned(),
-            }).await;
+            let _ = event_tx
+                .send(DccEvent::ChatError {
+                    id,
+                    error: "DCC CHAT connect timed out".to_owned(),
+                })
+                .await;
         }
     }
 }
@@ -109,10 +121,12 @@ async fn run_chat_session(
             match reader.read_line(&mut line).await {
                 Ok(0) => {
                     // EOF — peer closed connection cleanly.
-                    let _ = reader_tx.send(DccEvent::ChatClosed {
-                        id: reader_id,
-                        reason: None,
-                    }).await;
+                    let _ = reader_tx
+                        .send(DccEvent::ChatClosed {
+                            id: reader_id,
+                            reason: None,
+                        })
+                        .await;
                     break;
                 }
                 Ok(_) => {
@@ -130,22 +144,28 @@ async fn run_chat_session(
                         .strip_prefix("\x01ACTION ")
                         .and_then(|s| s.strip_suffix('\x01'))
                     {
-                        let _ = reader_tx.send(DccEvent::ChatAction {
-                            id: reader_id.clone(),
-                            text: action_text.to_owned(),
-                        }).await;
+                        let _ = reader_tx
+                            .send(DccEvent::ChatAction {
+                                id: reader_id.clone(),
+                                text: action_text.to_owned(),
+                            })
+                            .await;
                     } else {
-                        let _ = reader_tx.send(DccEvent::ChatMessage {
-                            id: reader_id.clone(),
-                            text,
-                        }).await;
+                        let _ = reader_tx
+                            .send(DccEvent::ChatMessage {
+                                id: reader_id.clone(),
+                                text,
+                            })
+                            .await;
                     }
                 }
                 Err(e) => {
-                    let _ = reader_tx.send(DccEvent::ChatClosed {
-                        id: reader_id,
-                        reason: Some(format!("read error: {e}")),
-                    }).await;
+                    let _ = reader_tx
+                        .send(DccEvent::ChatClosed {
+                            id: reader_id,
+                            reason: Some(format!("read error: {e}")),
+                        })
+                        .await;
                     break;
                 }
             }
@@ -164,18 +184,22 @@ async fn run_chat_session(
             data.push('\n');
 
             if let Err(e) = write_half.write_all(data.as_bytes()).await {
-                let _ = writer_tx.send(DccEvent::ChatClosed {
-                    id: writer_id,
-                    reason: Some(format!("write error: {e}")),
-                }).await;
+                let _ = writer_tx
+                    .send(DccEvent::ChatClosed {
+                        id: writer_id,
+                        reason: Some(format!("write error: {e}")),
+                    })
+                    .await;
                 return;
             }
 
             if let Err(e) = write_half.flush().await {
-                let _ = writer_tx.send(DccEvent::ChatClosed {
-                    id: writer_id,
-                    reason: Some(format!("flush error: {e}")),
-                }).await;
+                let _ = writer_tx
+                    .send(DccEvent::ChatClosed {
+                        id: writer_id,
+                        reason: Some(format!("flush error: {e}")),
+                    })
+                    .await;
                 return;
             }
         }

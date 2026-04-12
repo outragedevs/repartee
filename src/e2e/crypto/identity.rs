@@ -1,6 +1,6 @@
 //! Ed25519 long-term identity keypair.
 
-use ed25519_dalek::{SigningKey, VerifyingKey, SECRET_KEY_LENGTH};
+use ed25519_dalek::{SECRET_KEY_LENGTH, SigningKey, VerifyingKey};
 use zeroize::Zeroizing;
 
 use crate::e2e::error::Result;

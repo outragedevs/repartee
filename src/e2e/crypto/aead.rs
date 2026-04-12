@@ -2,8 +2,8 @@
 //! message encryption.
 
 use chacha20poly1305::{
-    aead::{Aead, AeadCore, KeyInit, OsRng, Payload},
     XChaCha20Poly1305, XNonce,
+    aead::{Aead, AeadCore, KeyInit, OsRng, Payload},
 };
 
 use crate::e2e::error::{E2eError, Result};
@@ -25,7 +25,13 @@ pub fn encrypt(key: &SessionKey, aad: &[u8], plaintext: &[u8]) -> Result<(Nonce,
     let cipher = XChaCha20Poly1305::new(key.into());
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
     let ct = cipher
-        .encrypt(&nonce, Payload { msg: plaintext, aad })
+        .encrypt(
+            &nonce,
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .map_err(|e| E2eError::Crypto(format!("aead encrypt: {e}")))?;
     let mut n = [0u8; NONCE_LEN];
     n.copy_from_slice(nonce.as_slice());
@@ -33,16 +39,17 @@ pub fn encrypt(key: &SessionKey, aad: &[u8], plaintext: &[u8]) -> Result<(Nonce,
 }
 
 /// Decrypt `ciphertext` using `nonce` and `aad`.
-pub fn decrypt(
-    key: &SessionKey,
-    nonce: &Nonce,
-    aad: &[u8],
-    ciphertext: &[u8],
-) -> Result<Vec<u8>> {
+pub fn decrypt(key: &SessionKey, nonce: &Nonce, aad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
     let cipher = XChaCha20Poly1305::new(key.into());
     let xnonce = XNonce::from_slice(nonce);
     cipher
-        .decrypt(xnonce, Payload { msg: ciphertext, aad })
+        .decrypt(
+            xnonce,
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
         .map_err(|e| E2eError::Crypto(format!("aead decrypt: {e}")))
 }
 

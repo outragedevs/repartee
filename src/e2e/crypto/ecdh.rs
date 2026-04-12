@@ -169,10 +169,8 @@ mod tests {
 
         // The birational map on the public side must agree with the scalar-mult
         // derivation from the secret side.
-        let pub_from_ed_a =
-            ed25519_pub_to_x25519(&signing_a.verifying_key().to_bytes()).unwrap();
-        let pub_from_ed_b =
-            ed25519_pub_to_x25519(&signing_b.verifying_key().to_bytes()).unwrap();
+        let pub_from_ed_a = ed25519_pub_to_x25519(&signing_a.verifying_key().to_bytes()).unwrap();
+        let pub_from_ed_b = ed25519_pub_to_x25519(&signing_b.verifying_key().to_bytes()).unwrap();
         assert_eq!(pub_from_ed_a, PublicKey::from(&x_sk_a).to_bytes());
         assert_eq!(pub_from_ed_b, PublicKey::from(&x_sk_b).to_bytes());
 
@@ -180,11 +178,15 @@ mod tests {
         let expected_shared =
             h32("5166f24a6918368e2af831a4affadd97af0ac326bdf143596c045967cc00230e");
         assert_eq!(
-            x_sk_a.diffie_hellman(&PublicKey::from(pub_from_ed_b)).to_bytes(),
+            x_sk_a
+                .diffie_hellman(&PublicKey::from(pub_from_ed_b))
+                .to_bytes(),
             expected_shared,
         );
         assert_eq!(
-            x_sk_b.diffie_hellman(&PublicKey::from(pub_from_ed_a)).to_bytes(),
+            x_sk_b
+                .diffie_hellman(&PublicKey::from(pub_from_ed_a))
+                .to_bytes(),
             expected_shared,
         );
     }

@@ -49,6 +49,7 @@
     <span class="nav-section-title">Reference</span>
     <ul>
       <li><a href="commands.html" class="active">Commands</a></li>
+      <li><a href="e2e.html">End-to-End Encryption</a></li>
     </ul>
   </div>
   <div class="nav-section">
@@ -86,7 +87,7 @@
       <div class="sidebar-footer">
         Built with <a href="https://www.rust-lang.org">Rust</a>
         &middot;
-        <a href="https://repart.ee/">repart.ee</a>
+        <a href="https://repart.ee/">GitHub</a>
       </div>
     </aside>
 
@@ -1446,6 +1447,100 @@ channel operator to use this command.</p>
 <p>/devoice, /op, /mode</p>
 </div>
 <h2 id="cat-other">Other</h2>
+<div class="command-entry" data-command="e2e" data-category="Other">
+<h1>/e2e</h1>
+<h2>Syntax</h2>
+<pre><code>/e2e &lt;subcommand&gt; [args]
+</code></pre>
+<h2>Description</h2>
+<p>Manage RPE2E encryption, trust, remembered peers, and keyring state.</p>
+<h2>Subcommands</h2>
+<h3>on</h3>
+<p>Enable E2E on the current channel.</p>
+<pre><code>/e2e on
+</code></pre>
+<h3>off</h3>
+<p>Disable E2E on the current channel.</p>
+<pre><code>/e2e off
+</code></pre>
+<h3>mode</h3>
+<p>Set the channel mode.</p>
+<pre><code>/e2e mode &lt;auto-accept|normal|quiet&gt;
+</code></pre>
+<h3>handshake</h3>
+<p>Send a manual KEYREQ to a peer.</p>
+<pre><code>/e2e handshake &lt;nick&gt;
+</code></pre>
+<h3>accept</h3>
+<p>Accept a pending peer and send KEYRSP.</p>
+<pre><code>/e2e accept &lt;nick&gt;
+</code></pre>
+<h3>decline</h3>
+<p>Decline a pending peer.</p>
+<pre><code>/e2e decline &lt;nick&gt;
+</code></pre>
+<h3>revoke</h3>
+<p>Revoke a peer on the current channel.</p>
+<pre><code>/e2e revoke &lt;nick&gt;
+</code></pre>
+<h3>unrevoke</h3>
+<p>Restore a revoked peer.</p>
+<pre><code>/e2e unrevoke &lt;nick&gt;
+</code></pre>
+<h3>forget</h3>
+<p>Forget channel-local or global peer state.</p>
+<pre><code>/e2e forget &lt;nick|handle&gt;
+/e2e forget -all &lt;nick|handle&gt;
+</code></pre>
+<h3>list</h3>
+<p>List trusted peers on the current channel or all remembered state.</p>
+<pre><code>/e2e list
+/e2e list -all
+</code></pre>
+<h3>status</h3>
+<p>Show current identity and channel status.</p>
+<pre><code>/e2e status
+</code></pre>
+<h3>fingerprint</h3>
+<p>Show the local fingerprint and SAS.</p>
+<pre><code>/e2e fingerprint
+</code></pre>
+<h3>verify</h3>
+<p>Show side-by-side SAS for a peer.</p>
+<pre><code>/e2e verify &lt;nick&gt;
+</code></pre>
+<h3>reverify</h3>
+<p>Accept a changed fingerprint after manual verification.</p>
+<pre><code>/e2e reverify &lt;nick&gt;
+</code></pre>
+<h3>rotate</h3>
+<p>Schedule outgoing key rotation.</p>
+<pre><code>/e2e rotate
+</code></pre>
+<h3>autotrust</h3>
+<p>Manage autotrust rules.</p>
+<pre><code>/e2e autotrust &lt;list|add|remove&gt; [args...]
+</code></pre>
+<h3>export</h3>
+<p>Export the keyring.</p>
+<pre><code>/e2e export &lt;file&gt;
+</code></pre>
+<h3>import</h3>
+<p>Import a keyring.</p>
+<pre><code>/e2e import &lt;file&gt;
+</code></pre>
+<h3>help</h3>
+<p>Show built-in <code>/e2e</code> help.</p>
+<pre><code>/e2e help
+</code></pre>
+<h2>Examples</h2>
+<pre><code>/e2e on
+/e2e mode normal
+/e2e list -all
+/e2e forget -all k2
+/e2e forget -all ~k@f7a48125c050.cloak.irc.al
+</code></pre>
+</div>
 <div class="command-entry" data-command="shell" data-category="Other">
 <h1>/shell</h1>
 <h2>Syntax</h2>
@@ -1707,15 +1802,15 @@ commands not yet implemented, testing, or advanced protocol interaction.</p>
   <span class="page-nav-label">&larr; Previous</span>
   <span class="page-nav-title">Configuration</span>
 </a>
-          <a href="scripting-getting-started.html" class="page-nav-link next">
+          <a href="e2e.html" class="page-nav-link next">
   <span class="page-nav-label">Next &rarr;</span>
-  <span class="page-nav-title">Getting Started</span>
+  <span class="page-nav-title">End-to-End Encryption</span>
 </a>
         </nav>
 
         <footer class="site-footer">
           Built with <a href="https://www.rust-lang.org">Rust</a> &middot;
-          <a href="https://repart.ee/">repart.ee</a> &middot;
+          <a href="https://repart.ee/">GitHub</a> &middot;
           MIT License
         </footer>
       </main>

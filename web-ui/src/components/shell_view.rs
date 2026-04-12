@@ -1,15 +1,15 @@
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use beamterm_renderer::{
     CellData, FontStyle, GlyphEffect, SelectionMode, Terminal, is_double_width,
     mouse::MouseSelectOptions,
 };
 use leptos::prelude::*;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use web_sys::KeyboardEvent;
 
 use crate::protocol::{ShellScreenData, ShellSpan, WebCommand};
@@ -120,9 +120,7 @@ pub fn ShellView() -> impl IntoView {
         let is_ctrl_or_meta = ev.ctrl_key() || ev.meta_key();
 
         // Ctrl/Cmd +/- font resize (handled locally, not sent to PTY).
-        if is_ctrl_or_meta
-            && matches!(key_lower.as_str(), "=" | "+" | "-" | "0")
-        {
+        if is_ctrl_or_meta && matches!(key_lower.as_str(), "=" | "+" | "-" | "0") {
             ev.prevent_default();
             // F5: try_borrow_mut to avoid panic if rAF holds the borrow.
             let Ok(mut borrow) = term_key.try_borrow_mut() else {
@@ -137,7 +135,9 @@ pub fn ShellView() -> impl IntoView {
                 };
                 if (new_size - st.font_size).abs() > f32::EPSILON {
                     st.font_size = new_size;
-                    let _ = st.terminal.replace_with_dynamic_atlas(FONT_FAMILIES, new_size);
+                    let _ = st
+                        .terminal
+                        .replace_with_dynamic_atlas(FONT_FAMILIES, new_size);
                     let (w, h) = canvas_parent_size();
                     if w > 0 && h > 0 {
                         let _ = st.terminal.resize(w, h);
@@ -338,7 +338,13 @@ fn render_screen(terminal: &mut Terminal, data: &ShellScreenData) {
     // F4: TODO — cache this Vec in ShellTerminal and reuse via clear()+reserve().
     let mut cells: Vec<CellData<'_>> = Vec::with_capacity(total);
 
-    let blank = CellData::new(" ", FontStyle::Normal, GlyphEffect::None, DEFAULT_FG, DEFAULT_BG);
+    let blank = CellData::new(
+        " ",
+        FontStyle::Normal,
+        GlyphEffect::None,
+        DEFAULT_FG,
+        DEFAULT_BG,
+    );
 
     for row_idx in 0..grid_rows as usize {
         let mut col: u16 = 0;
@@ -366,7 +372,13 @@ fn render_screen(terminal: &mut Terminal, data: &ShellScreenData) {
                         && col == data.cursor_col;
 
                     if is_cursor {
-                        cells.push(CellData::new(symbol, style, effect, DEFAULT_BG, CURSOR_COLOR));
+                        cells.push(CellData::new(
+                            symbol,
+                            style,
+                            effect,
+                            DEFAULT_BG,
+                            CURSOR_COLOR,
+                        ));
                     } else {
                         cells.push(CellData::new(symbol, style, effect, fg, bg));
                     }
@@ -374,7 +386,11 @@ fn render_screen(terminal: &mut Terminal, data: &ShellScreenData) {
 
                     if is_double_width(symbol) && col < cols {
                         cells.push(CellData::new(
-                            " ", FontStyle::Normal, GlyphEffect::None, fg, bg,
+                            " ",
+                            FontStyle::Normal,
+                            GlyphEffect::None,
+                            fg,
+                            bg,
                         ));
                         col += 1;
                     }
@@ -389,7 +405,11 @@ fn render_screen(terminal: &mut Terminal, data: &ShellScreenData) {
                 && col == data.cursor_col;
             if is_cursor {
                 cells.push(CellData::new(
-                    " ", FontStyle::Normal, GlyphEffect::None, DEFAULT_BG, CURSOR_COLOR,
+                    " ",
+                    FontStyle::Normal,
+                    GlyphEffect::None,
+                    DEFAULT_BG,
+                    CURSOR_COLOR,
                 ));
             } else {
                 cells.push(blank);

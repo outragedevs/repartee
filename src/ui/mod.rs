@@ -115,9 +115,9 @@ pub fn visible_len(spans: &[crate::theme::StyledSpan]) -> usize {
 
 // Theme colors (same hex values used in default.theme).
 const COLOR_TIMESTAMP: &str = "6e738d"; // muted gray — matches {timestamp} abstract
-const COLOR_NETWORK: &str = "565f89";   // dim gray — matches hostname in join events
-const COLOR_CHANNEL: &str = "7aa2f7";   // accent blue — matches {channel} abstract
-const COLOR_SEP: &str = "7aa2f7";       // accent blue — nick separator ❯
+const COLOR_NETWORK: &str = "565f89"; // dim gray — matches hostname in join events
+const COLOR_CHANNEL: &str = "7aa2f7"; // accent blue — matches {channel} abstract
+const COLOR_SEP: &str = "7aa2f7"; // accent blue — nick separator ❯
 
 /// Build a pre-formatted mention log line with irssi `%Z` color codes.
 ///

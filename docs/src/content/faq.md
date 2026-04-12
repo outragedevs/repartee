@@ -75,6 +75,14 @@ Yes — repartee has comprehensive IRCv3 support negotiated at connection time:
 - **WHOX**: auto-detected for account name and full host tracking
 - **Extban**: `$a:account` ban type with `/ban -a` shorthand
 
+## Does repartee support end-to-end encryption?
+
+Yes. repartee includes built-in end-to-end encryption for channels and private conversations. Message bodies are encrypted on the client and decrypted only by trusted peers.
+
+The IRC server still sees metadata such as nicknames, channels, timing, and message sizes. If you want protection against active impersonation during first contact, verify peer fingerprints out of band.
+
+See [End-to-End Encryption](e2e.html) for the workflow and trust model.
+
 ## How do I keep repartee running in the background?
 
 Use `/detach` (or press `Ctrl+\` / `Ctrl+Z`) to detach from the terminal. repartee continues running — IRC connections stay alive, messages are logged, and scripts keep executing.

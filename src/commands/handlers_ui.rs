@@ -310,10 +310,7 @@ pub(crate) fn cmd_alias(app: &mut App, args: &[String]) {
                 &format!("  {C_CMD}/{name}{C_RST} = {C_TEXT}{body}{C_RST}"),
             );
         } else {
-            add_local_event(
-                app,
-                &format!("{C_ERR}No alias named: /{name}{C_RST}"),
-            );
+            add_local_event(app, &format!("{C_ERR}No alias named: /{name}{C_RST}"));
         }
         return;
     }
@@ -619,10 +616,7 @@ pub(crate) fn cmd_shell(app: &mut App, args: &[String]) {
                 }
             });
             let Some(buf_id) = shell_buf else {
-                add_local_event(
-                    app,
-                    &format!("{C_ERR}Active buffer is not a shell{C_RST}"),
-                );
+                add_local_event(app, &format!("{C_ERR}Active buffer is not a shell{C_RST}"));
                 return;
             };
             app.close_shell_buffer(&buf_id);
@@ -641,7 +635,10 @@ pub(crate) fn cmd_shell(app: &mut App, args: &[String]) {
             }
             add_local_event(app, &format!("{C_HEADER}Shell sessions:{C_RST}"));
             for (id, label) in &sessions {
-                add_local_event(app, &format!("  {C_CMD}{id}{C_RST} — {C_TEXT}{label}{C_RST}"));
+                add_local_event(
+                    app,
+                    &format!("  {C_CMD}{id}{C_RST} — {C_TEXT}{label}{C_RST}"),
+                );
             }
         }
         _ => {
@@ -678,11 +675,7 @@ fn shell_open(app: &mut App, command: Option<&str>) {
 
     // Determine the display label from the command basename.
     let base_label = command
-        .and_then(|c| {
-            std::path::Path::new(c)
-                .file_name()
-                .and_then(|n| n.to_str())
-        })
+        .and_then(|c| std::path::Path::new(c).file_name().and_then(|n| n.to_str()))
         .map(String::from)
         .or_else(|| {
             std::env::var("SHELL").ok().and_then(|s| {

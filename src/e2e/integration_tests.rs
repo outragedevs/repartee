@@ -180,9 +180,7 @@ fn export_import_roundtrip() {
         .handle_keyreq("~alice@a.host", &req_from_alice)
         .unwrap()
         .unwrap();
-    alice
-        .handle_keyrsp("~bob@b.host", &rsp_to_alice)
-        .unwrap();
+    alice.handle_keyrsp("~bob@b.host", &rsp_to_alice).unwrap();
 
     // Add more state to alice: an autotrust rule and a scheduled rotation
     // so pending_rotation is exercised through the round-trip.
@@ -209,8 +207,7 @@ fn export_import_roundtrip() {
 
     // Export alice to a tempfile.
     let tmp = tempfile::NamedTempFile::new().unwrap();
-    let summary =
-        crate::e2e::portable::export_to_path(alice.keyring(), tmp.path()).unwrap();
+    let summary = crate::e2e::portable::export_to_path(alice.keyring(), tmp.path()).unwrap();
     assert!(summary.peers >= 1);
     assert!(summary.incoming >= 1);
     assert!(summary.outgoing >= 1);
@@ -228,8 +225,7 @@ fn export_import_roundtrip() {
     // Create a fresh manager with an empty keyring; import alice's snapshot
     // and verify every table matches row-for-row.
     let carol = make_manager();
-    let imported =
-        crate::e2e::portable::import_from_path(carol.keyring(), tmp.path()).unwrap();
+    let imported = crate::e2e::portable::import_from_path(carol.keyring(), tmp.path()).unwrap();
     assert!(imported.identity);
     assert_eq!(imported.peers, alice_peers_before.len());
     assert_eq!(imported.incoming, alice_incoming_before.len());
@@ -274,10 +270,7 @@ fn export_import_roundtrip() {
         alice_incoming_before[0].fingerprint
     );
     assert_eq!(carol_incoming[0].handle, alice_incoming_before[0].handle);
-    assert_eq!(
-        carol_incoming[0].status,
-        alice_incoming_before[0].status
-    );
+    assert_eq!(carol_incoming[0].status, alice_incoming_before[0].status);
 }
 
 #[test]
@@ -377,7 +370,11 @@ fn handshake_with_changed_fingerprint_is_rejected() {
     assert_eq!(notices[0].handle, bob_handle);
     assert_eq!(notices[0].channel, "#x");
     match &notices[0].change {
-        TrustChange::FingerprintChanged { handle, old_fp, new_fp } => {
+        TrustChange::FingerprintChanged {
+            handle,
+            old_fp,
+            new_fp,
+        } => {
             assert_eq!(handle, bob_handle);
             assert_eq!(*old_fp, bob_original.fingerprint());
             assert_eq!(*new_fp, bob_new.fingerprint());
@@ -564,7 +561,9 @@ fn pm_pseudochannel_round_trip() {
     assert_eq!(wires.len(), 1);
 
     // Bob decrypts under the same pseudochannel.
-    let out = bob.decrypt_incoming(alice_handle, pm_ctx, &wires[0]).unwrap();
+    let out = bob
+        .decrypt_incoming(alice_handle, pm_ctx, &wires[0])
+        .unwrap();
     match out {
         DecryptOutcome::Plaintext(s) => assert_eq!(s, "hi bob"),
         other => panic!("expected Plaintext, got {other:?}"),
@@ -683,7 +682,10 @@ fn lazy_rotate_distributes_new_key_to_remaining_trusted_peers() {
         DecryptOutcome::Plaintext(s) => assert_eq!(s, "msg-1"),
         other => panic!("bob decrypt 1: {other:?}"),
     }
-    match carol.decrypt_incoming("~alice@a.host", "#x", &w1[0]).unwrap() {
+    match carol
+        .decrypt_incoming("~alice@a.host", "#x", &w1[0])
+        .unwrap()
+    {
         DecryptOutcome::Plaintext(s) => assert_eq!(s, "msg-1"),
         other => panic!("carol decrypt 1: {other:?}"),
     }
@@ -699,7 +701,10 @@ fn lazy_rotate_distributes_new_key_to_remaining_trusted_peers() {
         .keyring()
         .remove_outgoing_recipient("#x", "~bob@b.host")
         .unwrap();
-    alice.keyring().mark_outgoing_pending_rotation("#x").unwrap();
+    alice
+        .keyring()
+        .mark_outgoing_pending_rotation("#x")
+        .unwrap();
 
     // Alice sends msg 2 — this triggers lazy rotate and builds a REKEY
     // for every remaining trusted peer (carol only; bob is revoked).
@@ -726,7 +731,10 @@ fn lazy_rotate_distributes_new_key_to_remaining_trusted_peers() {
     carol.handle_rekey("~alice@a.host", &rk).unwrap();
 
     // After the rekey, carol can decrypt msg-2 but bob cannot.
-    match carol.decrypt_incoming("~alice@a.host", "#x", &w2[0]).unwrap() {
+    match carol
+        .decrypt_incoming("~alice@a.host", "#x", &w2[0])
+        .unwrap()
+    {
         DecryptOutcome::Plaintext(s) => assert_eq!(s, "msg-2"),
         other => panic!("carol decrypt 2: {other:?}"),
     }
@@ -787,7 +795,12 @@ fn rekey_rejects_unknown_peer() {
     let nonce = [7u8; 16];
     let pubkey = stranger.identity_pub();
     let sig_payload = crate::e2e::handshake::signed_keyrekey_payload(
-        "#x", &pubkey, &eph_pub, &wrap_nonce, &wrap_ct, &nonce,
+        "#x",
+        &pubkey,
+        &eph_pub,
+        &wrap_nonce,
+        &wrap_ct,
+        &nonce,
     );
     // Sign using stranger's identity — we reach into the internal API via
     // a reciprocal manager build_keyreq + extract signing key? Not exposed.
@@ -823,8 +836,7 @@ fn rekey_rejects_unknown_peer() {
         &wrap_ct,
         &nonce,
     );
-    let sig_bytes =
-        crate::e2e::crypto::sig::sign(stranger_id.signing_key(), &sig_payload2);
+    let sig_bytes = crate::e2e::crypto::sig::sign(stranger_id.signing_key(), &sig_payload2);
 
     let fake_rekey = crate::e2e::handshake::KeyRekey {
         channel: "#x".into(),
@@ -871,9 +883,7 @@ fn autotrust_global_accepts_matching_peer_in_normal_mode() {
     // Bob can consume the KEYRSP and decrypt alice's subsequent messages.
     bob.handle_keyrsp("~alice@a.host", &rsp).unwrap();
     let w = alice.encrypt_outgoing("#x", "hi bob").unwrap();
-    let out = bob
-        .decrypt_incoming("~alice@a.host", "#x", &w[0])
-        .unwrap();
+    let out = bob.decrypt_incoming("~alice@a.host", "#x", &w[0]).unwrap();
     assert!(matches!(out, DecryptOutcome::Plaintext(s) if s == "hi bob"));
 }
 
@@ -885,10 +895,7 @@ fn autotrust_scoped_to_channel_does_not_leak_to_other_channels() {
     enable_channel(&alice, "#y", ChannelMode::Normal);
     enable_channel(&bob, "#x", ChannelMode::Normal);
     enable_channel(&bob, "#y", ChannelMode::Normal);
-    alice
-        .keyring()
-        .add_autotrust("#x", "~bob@*", 100)
-        .unwrap();
+    alice.keyring().add_autotrust("#x", "~bob@*", 100).unwrap();
 
     // #x: autotrust hit → AutoAccept promotion → KEYRSP returned.
     let req_x = bob.build_keyreq("#x").unwrap();
@@ -939,7 +946,9 @@ fn normal_mode_stores_pending_keyreq_and_emits_prompt() {
     enable_channel(&bob, "#x", ChannelMode::Normal);
 
     let req = bob.build_keyreq("#x").unwrap();
-    let rsp = alice.handle_keyreq("~bob@b.host", &req).unwrap();
+    let rsp = alice
+        .handle_keyreq_with_nick("~bob@b.host", Some("bob"), &req)
+        .unwrap();
     assert!(
         rsp.is_none(),
         "Normal mode must not auto-respond to unknown peer"
@@ -947,6 +956,7 @@ fn normal_mode_stores_pending_keyreq_and_emits_prompt() {
     // Pending prompt was queued.
     let prompts = alice.take_pending_accept_requests();
     assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0].nick.as_deref(), Some("bob"));
     assert_eq!(prompts[0].handle, "~bob@b.host");
     assert_eq!(prompts[0].channel, "#x");
     // Incoming session row exists, status = Pending.
@@ -956,6 +966,12 @@ fn normal_mode_stores_pending_keyreq_and_emits_prompt() {
         .unwrap()
         .expect("pending session row should be installed");
     assert_eq!(sess.status, TrustStatus::Pending);
+    let peer = alice
+        .keyring()
+        .get_peer_by_handle("~bob@b.host")
+        .unwrap()
+        .expect("peer row should be installed");
+    assert_eq!(peer.last_nick.as_deref(), Some("bob"));
 }
 
 #[test]
@@ -988,9 +1004,7 @@ fn accept_completes_pending_keyreq_by_sending_keyrsp() {
     // Bob consumes the KEYRSP and can decrypt Alice's next message.
     bob.handle_keyrsp("~alice@a.host", &rsp).unwrap();
     let w = alice.encrypt_outgoing("#x", "hello after accept").unwrap();
-    let out = bob
-        .decrypt_incoming("~alice@a.host", "#x", &w[0])
-        .unwrap();
+    let out = bob.decrypt_incoming("~alice@a.host", "#x", &w[0]).unwrap();
     assert!(
         matches!(out, DecryptOutcome::Plaintext(ref s) if s == "hello after accept"),
         "expected Plaintext, got {out:?}"
@@ -1010,9 +1024,7 @@ fn accept_completes_pending_keyreq_by_sending_keyrsp() {
     alice.handle_keyrsp("~bob@b.host", &rsp2).unwrap();
 
     let w2 = bob.encrypt_outgoing("#x", "hello back").unwrap();
-    let out2 = alice
-        .decrypt_incoming("~bob@b.host", "#x", &w2[0])
-        .unwrap();
+    let out2 = alice.decrypt_incoming("~bob@b.host", "#x", &w2[0]).unwrap();
     assert!(
         matches!(out2, DecryptOutcome::Plaintext(ref s) if s == "hello back"),
         "expected reciprocal Plaintext, got {out2:?}"
@@ -1020,12 +1032,88 @@ fn accept_completes_pending_keyreq_by_sending_keyrsp() {
 
     // A second accept for the same (handle, channel) returns Ok(None)
     // because the pending-inbound cache is drained on the first call.
-    let again = alice
-        .accept_pending_inbound("~bob@b.host", "#x")
-        .unwrap();
+    let again = alice.accept_pending_inbound("~bob@b.host", "#x").unwrap();
     assert!(
         again.is_none(),
         "pending-inbound cache must be consumed by the first accept"
+    );
+}
+
+/// Regression test for the echo-message self-decrypt bug: a stale
+/// in-flight KEYREQ in `self.pending` (for example, one fired by
+/// `try_decrypt_e2e` on an `echo-message` cap echo of our own encrypted
+/// PRIVMSG) must NOT block the reciprocal KEYREQ that `/e2e accept`
+/// queues for the peer who is waiting on the other side of a
+/// Normal-mode handshake.
+///
+/// Without the fix, `build_keyrsp_for_accepted_request` skips the
+/// reciprocal block because `has_pending_keyreq` returns true on the
+/// stale entry, and the Bob→Alice direction never gets installed —
+/// Alice keeps rejecting Bob's ciphertext with
+/// `peer not trusted (status=Pending)` forever.
+#[test]
+fn stale_self_keyreq_must_not_block_reciprocal_from_accept() {
+    // Use AutoAccept on bob so we don't have to chain through a second
+    // Normal-mode prompt just to test the alice-side reciprocal path.
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::Normal);
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+
+    // Alice writes → generates her outgoing key.
+    let _w = alice.encrypt_outgoing("#x", "hello").unwrap();
+
+    // Simulate the effect of `try_decrypt_e2e` running on Alice's own
+    // echo-message echo: MissingKey → auto-KEYREQ → pending entry in
+    // `alice.pending`. The NOTICE itself would have been targeted at
+    // Alice's own nick and never produced a real KEYRSP, so this entry
+    // is effectively stale forever.
+    let _self_req = alice.build_keyreq("#x").unwrap();
+    assert!(alice.has_pending_keyreq("#x"));
+
+    // Bob sends a real KEYREQ to Alice; Alice is in Normal mode and
+    // caches it as a pending prompt.
+    let bob_req = bob.build_keyreq("#x").unwrap();
+    let none = alice.handle_keyreq("~bob@b.host", &bob_req).unwrap();
+    assert!(none.is_none(), "Normal mode should not auto-respond");
+
+    // Alice runs /e2e accept — the reciprocal KEYREQ MUST be queued so
+    // the Bob→Alice direction can complete. Without the fix the
+    // `has_pending_keyreq` guard short-circuits and leaves the queue
+    // without the bob reciprocal.
+    let _rsp = alice
+        .accept_pending_inbound("~bob@b.host", "#x")
+        .unwrap()
+        .expect("accept must produce a KEYRSP");
+    let recs = alice.take_pending_outbound_keyreqs();
+    let bob_reciprocal = recs
+        .iter()
+        .find(|r| r.peer_handle == "~bob@b.host" && r.channel == "#x")
+        .unwrap_or_else(|| {
+            panic!(
+                "accept must queue a reciprocal KEYREQ for bob even if a stale \
+                 self-targeted pending entry exists; got {} entries",
+                recs.len()
+            )
+        });
+
+    // And the reciprocal must actually complete the round-trip: Bob
+    // serves a KEYRSP (AutoAccept), Alice consumes it, and Alice can
+    // now decrypt Bob's ciphertext (placeholder row promotes to
+    // Trusted).
+    let rsp2 = bob
+        .handle_keyreq("~alice@a.host", &bob_reciprocal.req)
+        .unwrap()
+        .expect("AutoAccept bob should always answer a KEYREQ");
+    alice.handle_keyrsp("~bob@b.host", &rsp2).unwrap();
+
+    let bob_wire = bob.encrypt_outgoing("#x", "hello back").unwrap();
+    let out = alice
+        .decrypt_incoming("~bob@b.host", "#x", &bob_wire[0])
+        .unwrap();
+    assert!(
+        matches!(out, DecryptOutcome::Plaintext(ref s) if s == "hello back"),
+        "alice must decrypt bob's ciphertext after reciprocal completes, got {out:?}"
     );
 }
 
@@ -1171,7 +1259,9 @@ fn reverify_applies_pending_fingerprint_change() {
 
     // End-to-end: Alice encrypts for #x and bob_new decrypts using the
     // session his handle_keyrsp just installed.
-    let wires = alice.encrypt_outgoing("#x", "hello after reverify").unwrap();
+    let wires = alice
+        .encrypt_outgoing("#x", "hello after reverify")
+        .unwrap();
     match bob_new
         .decrypt_incoming(alice_handle, "#x", &wires[0])
         .unwrap()
@@ -1247,7 +1337,7 @@ fn decrypt_respects_configured_ts_tolerance() {
     // feed the chunks to `bob.decrypt_incoming` with synthesised
     // timestamps: 15s stale must be rejected, 5s stale must succeed.
     use crate::e2e::crypto::aead;
-    use crate::e2e::wire::{build_aad, fresh_msgid, WireChunk};
+    use crate::e2e::wire::{WireChunk, build_aad, fresh_msgid};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let alice = make_manager_with_tolerance(10);
@@ -1309,9 +1399,7 @@ fn decrypt_respects_configured_ts_tolerance() {
 
     // 15 seconds in the past → outside the 10s tolerance → Rejected.
     let stale = craft(now - 15, "too-old");
-    let out_stale = bob
-        .decrypt_incoming(alice_handle, "#x", &stale)
-        .unwrap();
+    let out_stale = bob.decrypt_incoming(alice_handle, "#x", &stale).unwrap();
     match out_stale {
         DecryptOutcome::Rejected(reason) => {
             assert!(
@@ -1324,9 +1412,7 @@ fn decrypt_respects_configured_ts_tolerance() {
 
     // 5 seconds in the past → inside the 10s tolerance → Plaintext.
     let fresh = craft(now - 5, "within window");
-    let out_fresh = bob
-        .decrypt_incoming(alice_handle, "#x", &fresh)
-        .unwrap();
+    let out_fresh = bob.decrypt_incoming(alice_handle, "#x", &fresh).unwrap();
     match out_fresh {
         DecryptOutcome::Plaintext(s) => assert_eq!(s, "within window"),
         other => panic!("expected Plaintext for 5s skew, got {other:?}"),
@@ -1362,7 +1448,11 @@ fn autoaccept_keyreq_queues_reciprocal_and_converges() {
     // Alice's symmetric-handshake path must have queued exactly one
     // reciprocal KEYREQ back to Bob on the same channel.
     let recs = alice.take_pending_outbound_keyreqs();
-    assert_eq!(recs.len(), 1, "expected one reciprocal from AutoAccept path");
+    assert_eq!(
+        recs.len(),
+        1,
+        "expected one reciprocal from AutoAccept path"
+    );
     assert_eq!(recs[0].peer_handle, bob_handle);
     assert_eq!(recs[0].channel, "#x");
     let reciprocal_req = recs.into_iter().next().unwrap().req;

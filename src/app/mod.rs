@@ -429,9 +429,12 @@ pub struct App {
     pub(crate) web_cmd_rx: mpsc::Receiver<(crate::web::protocol::WebCommand, String)>,
     pub(crate) web_cmd_tx: mpsc::Sender<(crate::web::protocol::WebCommand, String)>,
     pub(crate) web_server_handle: Option<tokio::task::JoinHandle<()>>,
-    pub(crate) web_sessions: Option<std::sync::Arc<tokio::sync::Mutex<crate::web::auth::SessionStore>>>,
-    pub(crate) web_rate_limiter: Option<std::sync::Arc<tokio::sync::Mutex<crate::web::auth::RateLimiter>>>,
-    pub(crate) web_state_snapshot: Option<std::sync::Arc<std::sync::RwLock<crate::web::server::WebStateSnapshot>>>,
+    pub(crate) web_sessions:
+        Option<std::sync::Arc<tokio::sync::Mutex<crate::web::auth::SessionStore>>>,
+    pub(crate) web_rate_limiter:
+        Option<std::sync::Arc<tokio::sync::Mutex<crate::web::auth::RateLimiter>>>,
+    pub(crate) web_state_snapshot:
+        Option<std::sync::Arc<std::sync::RwLock<crate::web::server::WebStateSnapshot>>>,
     pub web_restart_pending: bool,
     /// Tracks the current local date for emitting "day changed" markers.
     pub(crate) last_day: chrono::NaiveDate,

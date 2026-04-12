@@ -26,24 +26,22 @@ use hkdf::Hkdf;
 use sha2::Sha256;
 use x25519_dalek::{PublicKey as XPub, StaticSecret};
 
+use crate::e2e::DEFAULT_TS_TOLERANCE_SECS;
 use crate::e2e::chunker::split_plaintext;
 use crate::e2e::crypto::{
     aead::{self, SessionKey},
     ecdh,
-    fingerprint::{fingerprint, Fingerprint},
+    fingerprint::{Fingerprint, fingerprint},
     identity::Identity,
     sig,
 };
 use crate::e2e::error::{E2eError, Result};
 use crate::e2e::handshake::{
-    encode_keyreq, encode_keyrekey, encode_keyrsp, signed_keyreq_payload,
-    signed_keyrekey_payload, signed_keyrsp_payload, KeyRekey, KeyReq, KeyRsp, RateLimiter,
+    KeyRekey, KeyReq, KeyRsp, RateLimiter, encode_keyrekey, encode_keyreq, encode_keyrsp,
+    signed_keyrekey_payload, signed_keyreq_payload, signed_keyrsp_payload,
 };
-use crate::e2e::keyring::{
-    ChannelMode, IncomingSession, Keyring, PeerRecord, TrustStatus,
-};
-use crate::e2e::wire::{build_aad, fresh_msgid, WireChunk};
-use crate::e2e::DEFAULT_TS_TOLERANCE_SECS;
+use crate::e2e::keyring::{ChannelMode, IncomingSession, Keyring, PeerRecord, TrustStatus};
+use crate::e2e::wire::{WireChunk, build_aad, fresh_msgid};
 
 /// In-flight handshake state — the initiator's ephemeral X25519 secret,
 /// held until the matching KEYRSP arrives. Stored as raw bytes because
@@ -97,6 +95,7 @@ pub struct PendingOutboundKeyReq {
 /// prompt instructing the user to run `/e2e accept` or `/e2e decline`.
 #[derive(Debug, Clone)]
 pub struct PendingAcceptRequest {
+    pub nick: Option<String>,
     pub handle: String,
     pub channel: String,
 }
@@ -304,11 +303,7 @@ impl E2eManager {
     /// 4. Fingerprint unknown, but the handle maps to a different
     ///    fingerprint in `e2e_peers` → `FingerprintChanged`.
     /// 5. Otherwise → `New` (safe to TOFU-pin).
-    fn classify_peer_change(
-        &self,
-        new_fp: &Fingerprint,
-        new_handle: &str,
-    ) -> Result<TrustChange> {
+    fn classify_peer_change(&self, new_fp: &Fingerprint, new_handle: &str) -> Result<TrustChange> {
         if let Some(existing) = self.keyring.get_peer_by_fingerprint(new_fp)? {
             if existing.global_status == TrustStatus::Revoked {
                 return Ok(TrustChange::Revoked {
@@ -499,8 +494,7 @@ impl E2eManager {
         let mut out = Vec::with_capacity(total_usize);
         for (idx, plain) in chunks.iter().enumerate() {
             // idx is in 0..total, so idx+1 fits in u8 because total ≤ u8::MAX.
-            let part = u8::try_from(idx + 1)
-                .map_err(|_| E2eError::ChunkLimit(u8::MAX))?;
+            let part = u8::try_from(idx + 1).map_err(|_| E2eError::ChunkLimit(u8::MAX))?;
             let aad = build_aad(channel, msgid, ts, part, total);
             let (nonce, ct) = aead::encrypt(&sk, &aad, plain)?;
             let wire = WireChunk {
@@ -571,9 +565,7 @@ impl E2eManager {
                             });
                         }
                         Err(e) => {
-                            tracing::warn!(
-                                "rekey: build_rekey_for_peer failed for {handle}: {e}"
-                            );
+                            tracing::warn!("rekey: build_rekey_for_peer failed for {handle}: {e}");
                         }
                     }
                 }
@@ -617,14 +609,8 @@ impl E2eManager {
         let mut nonce = [0u8; 16];
         rand::fill(&mut nonce);
         let pubkey = self.identity.public_bytes();
-        let sig_payload = signed_keyrekey_payload(
-            channel,
-            &pubkey,
-            &eph_pub,
-            &wrap_nonce,
-            &wrap_ct,
-            &nonce,
-        );
+        let sig_payload =
+            signed_keyrekey_payload(channel, &pubkey, &eph_pub, &wrap_nonce, &wrap_ct, &nonce);
         let sig_bytes = sig::sign(self.identity.signing_key(), &sig_payload);
 
         Ok(KeyRekey {
@@ -670,6 +656,66 @@ impl E2eManager {
             .lock()
             .expect("e2e pending accept requests mutex poisoned");
         std::mem::take(&mut *guard)
+    }
+
+    pub fn forget_peer_on_channel(&self, handle: &str, channel: &str) -> Result<usize> {
+        let mut deleted = usize::from(
+            self.keyring
+                .get_incoming_session(handle, channel)?
+                .is_some(),
+        );
+        if deleted != 0 {
+            self.keyring.delete_incoming_session(handle, channel)?;
+        }
+        let removed_pending_inbound = self
+            .pending_inbound
+            .lock()
+            .expect("e2e pending inbound mutex poisoned")
+            .remove(&(handle.to_string(), channel.to_string()))
+            .is_some();
+        deleted += usize::from(removed_pending_inbound);
+        let mut requests = self
+            .pending_accept_requests
+            .lock()
+            .expect("e2e pending accept requests mutex poisoned");
+        let before = requests.len();
+        requests.retain(|r| !(r.handle == handle && r.channel == channel));
+        deleted += before.saturating_sub(requests.len());
+        Ok(deleted)
+    }
+
+    pub fn forget_peer_everywhere(&self, handle: &str) -> Result<usize> {
+        let mut deleted = 0usize;
+        if let Some(peer) = self.keyring.get_peer_by_handle(handle)? {
+            self.keyring.delete_peer_by_fingerprint(&peer.fingerprint)?;
+            deleted += 1;
+        }
+        deleted += self.keyring.delete_incoming_sessions_for_handle(handle)?;
+        deleted += self.keyring.delete_outgoing_recipients_for_handle(handle)?;
+        let mut pending_inbound = self
+            .pending_inbound
+            .lock()
+            .expect("e2e pending inbound mutex poisoned");
+        let pending_before = pending_inbound.len();
+        pending_inbound.retain(|(pending_handle, _), _| pending_handle != handle);
+        deleted += pending_before.saturating_sub(pending_inbound.len());
+        drop(pending_inbound);
+        let mut pending_accept = self
+            .pending_accept_requests
+            .lock()
+            .expect("e2e pending accept requests mutex poisoned");
+        let accept_before = pending_accept.len();
+        pending_accept.retain(|req| req.handle != handle);
+        deleted += accept_before.saturating_sub(pending_accept.len());
+        drop(pending_accept);
+        let mut notices = self
+            .pending_trust_change
+            .lock()
+            .expect("e2e pending trust change mutex poisoned");
+        let notices_before = notices.len();
+        notices.retain(|notice| notice.handle != handle);
+        deleted += notices_before.saturating_sub(notices.len());
+        Ok(deleted)
     }
 
     /// Consume an unsolicited REKEY CTCP from `sender_handle`. Verifies
@@ -818,6 +864,22 @@ impl E2eManager {
     /// ephemeral X25519 secret. The secret is retrieved later in
     /// `handle_keyrsp` to derive the wrap key.
     pub fn build_keyreq(&self, channel: &str) -> Result<KeyReq> {
+        // Multiple pending handshakes per channel are allowed: each is
+        // keyed by `(channel, nonce)` in `self.pending`, and
+        // `handle_keyrsp` iterates over matches, trying the stored
+        // ephemeral secrets until one unwraps the KEYRSP successfully.
+        //
+        // Reasons this is not guarded:
+        // 1. Legitimate re-handshake paths (user runs /e2e handshake
+        //    twice, peer rejoins with a new host, /e2e reverify replay)
+        //    need to create a fresh entry without tearing down older
+        //    in-flight state.
+        // 2. The `try_decrypt_e2e` self-echo auto-KEYREQ used to
+        //    create a stale, unreachable entry that blocked subsequent
+        //    reciprocal KEYREQs in `/e2e accept` — fixed at source in
+        //    `handle_privmsg`, but even if something else leaks a
+        //    stale entry in the future, the match-by-unwrap in
+        //    `handle_keyrsp` makes it harmless.
         let mut nonce = [0u8; 16];
         rand::fill(&mut nonce);
 
@@ -850,6 +912,15 @@ impl E2eManager {
             nonce,
             sig: sig_bytes,
         })
+    }
+
+    #[must_use]
+    pub fn has_pending_keyreq(&self, channel: &str) -> bool {
+        self.pending
+            .lock()
+            .expect("e2e pending mutex poisoned")
+            .keys()
+            .any(|(pending_channel, _)| pending_channel == channel)
     }
 
     /// Wrap a KEYREQ in CTCP framing ready for NOTICE dispatch.
@@ -915,6 +986,7 @@ impl E2eManager {
     fn tofu_upsert_on_keyreq(
         &self,
         sender_handle: &str,
+        sender_nick: Option<&str>,
         req: &KeyReq,
         fp: &Fingerprint,
     ) -> Result<()> {
@@ -933,7 +1005,7 @@ impl E2eManager {
                     fingerprint: *fp,
                     pubkey: req.pubkey,
                     last_handle: Some(sender_handle.to_string()),
-                    last_nick: None,
+                    last_nick: sender_nick.map(ToOwned::to_owned),
                     first_seen: now,
                     last_seen: now,
                     global_status,
@@ -949,8 +1021,8 @@ impl E2eManager {
                 // we thread the KEYREQ's pubkey into the notice so that
                 // `/e2e reverify <nick>` can install the new identity
                 // directly after the user has compared SAS out-of-band.
-                let new_pubkey = matches!(change, TrustChange::FingerprintChanged { .. })
-                    .then_some(req.pubkey);
+                let new_pubkey =
+                    matches!(change, TrustChange::FingerprintChanged { .. }).then_some(req.pubkey);
                 self.record_trust_change(PendingTrustNotice {
                     handle: sender_handle.to_string(),
                     channel: req.channel.clone(),
@@ -969,6 +1041,7 @@ impl E2eManager {
     fn cache_pending_inbound_normal_mode(
         &self,
         sender_handle: &str,
+        sender_nick: Option<&str>,
         req: &KeyReq,
         fp: &Fingerprint,
     ) {
@@ -998,12 +1071,22 @@ impl E2eManager {
             .lock()
             .expect("e2e pending accept mutex poisoned")
             .push(PendingAcceptRequest {
+                nick: sender_nick.map(ToOwned::to_owned),
                 handle: sender_handle.to_string(),
                 channel: req.channel.clone(),
             });
     }
 
     pub fn handle_keyreq(&self, sender_handle: &str, req: &KeyReq) -> Result<Option<KeyRsp>> {
+        self.handle_keyreq_with_nick(sender_handle, None, req)
+    }
+
+    pub fn handle_keyreq_with_nick(
+        &self,
+        sender_handle: &str,
+        sender_nick: Option<&str>,
+        req: &KeyReq,
+    ) -> Result<Option<KeyRsp>> {
         // Rate-limit gate (spec §5.4). Must come BEFORE any crypto work so
         // a signature-flood from one peer is cheap to reject — we don't
         // even want to do the Ed25519 verify on traffic beyond the limit.
@@ -1022,15 +1105,14 @@ impl E2eManager {
         sig::verify(&req.pubkey, &sig_payload, &req.sig)?;
 
         // Channel config + autotrust mode promotion.
-        let Some(effective_mode) = self.effective_channel_mode(sender_handle, &req.channel)?
-        else {
+        let Some(effective_mode) = self.effective_channel_mode(sender_handle, &req.channel)? else {
             return Ok(None);
         };
 
         // TOFU classification: only safe outcomes (New / Known) proceed to
         // the upsert; warning outcomes record a PendingTrustNotice and bail.
         let fp = fingerprint(&req.pubkey);
-        self.tofu_upsert_on_keyreq(sender_handle, req, &fp)?;
+        self.tofu_upsert_on_keyreq(sender_handle, sender_nick, req, &fp)?;
 
         // Policy gate (spec §5.2). Normal-mode unknown peers are cached
         // for later `/e2e accept`; Quiet-mode unknown peers are dropped.
@@ -1044,7 +1126,7 @@ impl E2eManager {
                 if already_trusted {
                     true
                 } else {
-                    self.cache_pending_inbound_normal_mode(sender_handle, req, &fp);
+                    self.cache_pending_inbound_normal_mode(sender_handle, sender_nick, req, &fp);
                     return Ok(None);
                 }
             }
@@ -1234,6 +1316,12 @@ impl E2eManager {
         // separate manual handshake. This is especially important for
         // Normal-mode `/e2e accept`, where the cached incoming-session row is
         // still only a pending placeholder until the reciprocal completes.
+        //
+        // `build_keyreq` allows multiple pending handshakes per channel,
+        // and `handle_keyrsp` disambiguates by trying each ephemeral
+        // secret until one unwraps the wrap_ct. That means a stale
+        // pending entry (e.g. from an earlier auto-KEYREQ that never
+        // got a response) does not block this reciprocal.
         let already_incoming = self
             .keyring
             .get_incoming_session(sender_handle, &req.channel)?
@@ -1290,6 +1378,61 @@ impl E2eManager {
 
     // ---------- handshake initiator (KEYRSP consumer) ----------
 
+    /// Find the pending handshake whose stored ephemeral secret unwraps
+    /// `rsp.wrap_ct` against `rsp.ephemeral_pub`, consume it, and return
+    /// the derived session key.
+    ///
+    /// Multiple pending handshakes per channel are allowed (see
+    /// `build_keyreq`), so we iterate over every candidate for
+    /// `rsp.channel` and try each one. The AEAD tag on `rsp.wrap_ct`
+    /// discriminates the match — a wrong secret produces a
+    /// tag-verification failure in `aead::decrypt` and we move on.
+    /// Unrelated entries for the same channel stay in the map; they
+    /// are still awaiting their own KEYRSPs.
+    fn consume_matching_pending_for_keyrsp(&self, rsp: &KeyRsp) -> Result<[u8; 32]> {
+        let info = wrap_info(&rsp.channel);
+        let candidate_keys: Vec<(String, [u8; 16])> = {
+            let pending = self.pending.lock().expect("e2e pending mutex poisoned");
+            pending
+                .iter()
+                .filter(|(k, _)| k.0 == rsp.channel)
+                .map(|(k, _)| k.clone())
+                .collect()
+        };
+        if candidate_keys.is_empty() {
+            return Err(E2eError::Handshake(
+                "no pending handshake for channel".into(),
+            ));
+        }
+
+        let matched = candidate_keys.iter().find_map(|key| {
+            let eph_secret = {
+                let pending = self.pending.lock().expect("e2e pending mutex poisoned");
+                pending.get(key).map(|ph| ph.eph_x25519_secret)?
+            };
+            let our_sec = StaticSecret::from(eph_secret);
+            let wrap_key = derive_wrap_key(&our_sec, &rsp.ephemeral_pub, info.as_bytes());
+            let sk_bytes =
+                aead::decrypt(&wrap_key, &rsp.wrap_nonce, info.as_bytes(), &rsp.wrap_ct).ok()?;
+            if sk_bytes.len() != 32 {
+                return None;
+            }
+            let mut sk_arr = [0u8; 32];
+            sk_arr.copy_from_slice(&sk_bytes);
+            Some((sk_arr, key.clone()))
+        });
+        let Some((sk, matched_key)) = matched else {
+            return Err(E2eError::Crypto(
+                "KEYRSP did not match any pending handshake for channel".into(),
+            ));
+        };
+        {
+            let mut pending = self.pending.lock().expect("e2e pending mutex poisoned");
+            pending.remove(&matched_key);
+        }
+        Ok(sk)
+    }
+
     /// Consume an incoming KEYRSP. The responder's long-term Ed25519 public
     /// key is carried on the wire inside `rsp.pubkey`; we verify the
     /// signature against it and simultaneously TOFU-pin that pubkey in the
@@ -1315,38 +1458,8 @@ impl E2eManager {
         );
         sig::verify(&sender_pubkey, &sig_payload, &rsp.sig)?;
 
-        // Find matching pending handshake by channel. v1 allows at most one
-        // in-flight handshake per channel at a time — this is fine in
-        // practice given the 30-second per-peer rate limit.
-        let mut pending = self.pending.lock().expect("e2e pending mutex poisoned");
-        let key_to_remove = pending
-            .iter()
-            .find(|(k, _)| k.0 == rsp.channel)
-            .map(|(k, _)| k.clone());
-        let key = key_to_remove
-            .ok_or_else(|| E2eError::Handshake("no pending handshake for channel".into()))?;
-        let ph = pending
-            .remove(&key)
-            .expect("just found the key above, cannot be absent");
-        drop(pending);
-
-        // Derive wrap key from our stored ephemeral secret + peer's
-        // ephemeral public. `info` must match exactly what the responder
-        // used — see `handle_keyreq` for the rationale on handle omission.
-        let info = wrap_info(&rsp.channel);
-        let our_sec = StaticSecret::from(ph.eph_x25519_secret);
-        let wrap_key = derive_wrap_key(&our_sec, &rsp.ephemeral_pub, info.as_bytes());
-
-        // Unwrap the session key.
-        let sk_bytes = aead::decrypt(&wrap_key, &rsp.wrap_nonce, info.as_bytes(), &rsp.wrap_ct)?;
-        if sk_bytes.len() != 32 {
-            return Err(E2eError::Crypto(format!(
-                "unwrapped sk has unexpected length {}",
-                sk_bytes.len()
-            )));
-        }
-        let mut sk = [0u8; 32];
-        sk.copy_from_slice(&sk_bytes);
+        // Find and consume the matching pending handshake.
+        let sk = self.consume_matching_pending_for_keyrsp(rsp)?;
 
         // TOFU classification on the responder's long-term pubkey. Only
         // New / Known outcomes auto-install a trusted session. Every other
@@ -1439,7 +1552,10 @@ fn handle_mismatch_for(change: &TrustChange, got_handle: &str) -> E2eError {
         TrustChange::FingerprintChanged { handle, old_fp, .. } => {
             format!("{handle} (fp={})", hex::encode(old_fp))
         }
-        TrustChange::Revoked { handle, fingerprint } => {
+        TrustChange::Revoked {
+            handle,
+            fingerprint,
+        } => {
             format!("{handle} (revoked, fp={})", hex::encode(fingerprint))
         }
         TrustChange::New | TrustChange::Known => String::new(),
@@ -1547,13 +1663,25 @@ mod tests {
     }
 
     #[test]
+    fn build_keyreq_allows_multiple_in_flight_per_channel() {
+        // Multiple pending handshakes per channel are intentionally
+        // allowed — `handle_keyrsp` disambiguates by trying each
+        // stored ephemeral secret against the incoming wrap_ct. A
+        // strict single-pending guard would break legitimate
+        // re-handshake flows and block reciprocals in `/e2e accept`
+        // when a stale self-targeted auto-KEYREQ is lingering.
+        let mgr = make_manager();
+        let req1 = mgr.build_keyreq("#x").unwrap();
+        let req2 = mgr.build_keyreq("#x").unwrap();
+        assert_ne!(req1.nonce, req2.nonce, "each build should fresh-nonce");
+        assert!(mgr.has_pending_keyreq("#x"));
+    }
+
+    #[test]
     fn encrypt_decrypt_requires_session() {
         let mgr = make_manager();
         // No incoming session installed → decrypt_incoming returns MissingKey.
-        let wire = mgr
-            .encrypt_outgoing("#x", "hi")
-            .unwrap()
-            .remove(0);
+        let wire = mgr.encrypt_outgoing("#x", "hi").unwrap().remove(0);
         let outcome = mgr.decrypt_incoming("~alice@host", "#x", &wire).unwrap();
         match outcome {
             DecryptOutcome::MissingKey { .. } => {}

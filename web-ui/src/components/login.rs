@@ -78,10 +78,7 @@ async fn do_login(password: &str) -> Result<String, String> {
         return Err("Rate limited — try again later".to_string());
     }
 
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("parse error: {e}"))?;
+    let json: serde_json::Value = resp.json().await.map_err(|e| format!("parse error: {e}"))?;
 
     if resp.ok() {
         json["token"]
@@ -89,9 +86,6 @@ async fn do_login(password: &str) -> Result<String, String> {
             .map(String::from)
             .ok_or_else(|| "no token in response".to_string())
     } else {
-        Err(json["error"]
-            .as_str()
-            .unwrap_or("login failed")
-            .to_string())
+        Err(json["error"].as_str().unwrap_or("login failed").to_string())
     }
 }

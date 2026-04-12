@@ -306,11 +306,13 @@ mod tests {
         let mut theme = default_theme();
         // Use a format that creates a separate nick span (like real themes do).
         // %Z7aa2f7 applies a color to the nick, producing its own StyledSpan.
-        theme.abstracts.insert("pubnick".into(), "%Z7aa2f7$*%N".into());
-        theme.formats.messages.insert(
-            "pubmsg".into(),
-            "{msgnick $2 {pubnick $0}}$1".into(),
-        );
+        theme
+            .abstracts
+            .insert("pubnick".into(), "%Z7aa2f7$*%N".into());
+        theme
+            .formats
+            .messages
+            .insert("pubmsg".into(), "{msgnick $2 {pubnick $0}}$1".into());
         let config = default_config();
         let override_color = Color::Rgb(255, 0, 0);
         let line = render_message(&msg, false, &theme, &config, Some(override_color));
