@@ -73,6 +73,7 @@ impl App {
             mode_params: None,
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
+            peer_handle: None,
         });
         self.state.set_active_buffer(&server_buf_id);
 
@@ -100,7 +101,10 @@ impl App {
 
     /// Connect to a server defined in config by its key (e.g. "libera").
     /// Used for autoconnect at startup.
-    pub(crate) async fn connect_server_async(&mut self, server_id: &str) -> color_eyre::eyre::Result<()> {
+    pub(crate) async fn connect_server_async(
+        &mut self,
+        server_id: &str,
+    ) -> color_eyre::eyre::Result<()> {
         let server_config = match self.config.servers.get(server_id) {
             Some(cfg) => cfg.clone(),
             None => {
@@ -228,12 +232,14 @@ impl App {
             tokio::spawn(async move {
                 match crate::irc::connect_server(&id, &cfg, &general).await {
                     Ok((handle, mut rx)) => {
-                        let _ = tx.send(IrcEvent::HandleReady(
-                            handle.conn_id.clone(),
-                            handle.sender,
-                            handle.local_ip,
-                            handle.outgoing_handle,
-                        )).await;
+                        let _ = tx
+                            .send(IrcEvent::HandleReady(
+                                handle.conn_id.clone(),
+                                handle.sender,
+                                handle.local_ip,
+                                handle.outgoing_handle,
+                            ))
+                            .await;
                         while let Some(event) = rx.recv().await {
                             if tx.send(event).await.is_err() {
                                 break;
@@ -241,7 +247,9 @@ impl App {
                         }
                     }
                     Err(e) => {
-                        let _ = tx.send(IrcEvent::Disconnected(id, Some(e.to_string()))).await;
+                        let _ = tx
+                            .send(IrcEvent::Disconnected(id, Some(e.to_string())))
+                            .await;
                     }
                 }
             });
@@ -415,6 +423,7 @@ impl App {
                             mode_params: None,
                             list_modes: HashMap::new(),
                             last_speakers: Vec::new(),
+                            peer_handle: None,
                         });
                     }
                 }
@@ -752,6 +761,9 @@ impl App {
 
                     // Drain pending web events and broadcast + auto-record mentions.
                     self.drain_pending_web_events();
+                    // Drain queued RPE2E NOTICE sends (handshake replies,
+                    // auto-KEYREQ on MissingKey) produced by the handlers.
+                    self.drain_pending_e2e_sends();
 
                     // Load backlog for any buffers created by handle_irc_message
                     // (e.g. query buffer on first PRIVMSG from a new nick)

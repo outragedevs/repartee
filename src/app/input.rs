@@ -9,7 +9,7 @@ use crate::state::buffer::{
 };
 use crate::ui::layout::UiRegions;
 
-use super::{App, MAX_PASTE_LINES, MAX_ALIAS_DEPTH, expand_alias_template};
+use super::{App, MAX_ALIAS_DEPTH, MAX_PASTE_LINES, expand_alias_template};
 
 impl App {
     pub(crate) fn handle_event(&mut self, event: Event) {
@@ -295,8 +295,10 @@ impl App {
             && let Some(buf) = self.state.active_buffer()
         {
             let buf_id = buf.id.clone();
-            if let Some(shell_id) =
-                self.shell_mgr.session_id_for_buffer(&buf_id).map(ToString::to_string)
+            if let Some(shell_id) = self
+                .shell_mgr
+                .session_id_for_buffer(&buf_id)
+                .map(ToString::to_string)
             {
                 // Check if shell enabled bracketed paste mode.
                 let bracketed = self
@@ -354,9 +356,7 @@ impl App {
         if self.paste_queue.len() > MAX_PASTE_LINES {
             let dropped = self.paste_queue.len() - MAX_PASTE_LINES;
             self.paste_queue.truncate(MAX_PASTE_LINES);
-            tracing::warn!(
-                "paste truncated to {MAX_PASTE_LINES} lines ({dropped} dropped)"
-            );
+            tracing::warn!("paste truncated to {MAX_PASTE_LINES} lines ({dropped} dropped)");
         }
     }
 
@@ -375,9 +375,7 @@ impl App {
 
         // Forward mouse events to the shell PTY when in shell input mode
         // and the mouse is within the chat (shell render) area.
-        if self.shell_input_active
-            && regions.chat_area.is_some_and(|r| r.contains(pos))
-        {
+        if self.shell_input_active && regions.chat_area.is_some_and(|r| r.contains(pos)) {
             self.forward_mouse_to_shell(mouse, &regions);
             return;
         }
@@ -530,6 +528,7 @@ impl App {
                 mode_params: None,
                 list_modes: HashMap::new(),
                 last_speakers: Vec::new(),
+                peer_handle: None,
             });
         }
         self.state.set_active_buffer(&query_buf_id);
@@ -666,8 +665,7 @@ impl App {
             self.state.active_buffer().map_or_else(
                 || (Vec::new(), Vec::new()),
                 |buf| {
-                    let nicks: Vec<String> =
-                        buf.users.values().map(|e| e.nick.clone()).collect();
+                    let nicks: Vec<String> = buf.users.values().map(|e| e.nick.clone()).collect();
                     // Filter last_speakers to only nicks still on the channel.
                     // Speakers who PARTed/QUITed stay in last_speakers for
                     // history but should not appear in tab completion.
@@ -719,9 +717,7 @@ impl App {
         if depth > MAX_ALIAS_DEPTH {
             crate::commands::helpers::add_local_event(
                 self,
-                &format!(
-                    "Alias recursion limit reached (max {MAX_ALIAS_DEPTH})"
-                ),
+                &format!("Alias recursion limit reached (max {MAX_ALIAS_DEPTH})"),
             );
             return;
         }
@@ -865,29 +861,86 @@ impl App {
             return;
         }
 
-        // Split long messages at word boundaries to stay within IRC byte limits.
-        let chunks = crate::irc::split_irc_message(text, crate::irc::MESSAGE_MAX_BYTES);
+        // E2E: if enabled for this channel, encrypt the full text into a
+        // list of RPE2E01 wire-format lines (one per chunk). Each wire line
+        // already fits inside the IRC byte budget, so we skip
+        // `split_irc_message`. The plaintext is still displayed locally as
+        // the original (unencrypted) text — the user reads what they typed.
+        //
+        // For PMs the context key is `@<peer_handle>` (spec §6), so we
+        // pass the buffer type through — the helper derives the
+        // pseudochannel from the Query buffer's cached `peer_handle`.
+        // When E2E is configured for a Query buffer but the peer's
+        // `ident@host` has not been captured yet (the user has never
+        // received a message from them), the helper returns `None` and
+        // we surface a themed refusal rather than leaking cleartext
+        // under a weak key.
+        let Some((wire_lines, plain_echo)) =
+            self.e2e_encrypt_or_passthrough(&buffer_name, &buf_type, text)
+        else {
+            crate::commands::helpers::add_local_event(
+                self,
+                &format!(
+                    "{err}[E2E] cannot encrypt PM without peer handle \
+                     — wait for a message from them first{rst}",
+                    err = crate::commands::types::C_ERR,
+                    rst = crate::commands::types::C_RST,
+                ),
+            );
+            return;
+        };
 
         // When echo-message is enabled, the server will echo our message back
         // with authoritative server-time — skip local display and wait for echo.
+        //
+        // E2E is the exception: the server echo is the ciphertext wire,
+        // and `try_decrypt_e2e` cannot decrypt our own outgoing key
+        // (there is no incoming session keyed on our own handle). We
+        // therefore do the local echo immediately for E2E messages
+        // regardless of the cap state, and `handle_privmsg` swallows the
+        // matching server echo in `is_own && starts_with "+RPE2E01"`.
         let echo_message_enabled = self
             .state
             .connections
             .get(&conn_id)
             .is_some_and(|c| c.enabled_caps.contains("echo-message"));
+        let is_e2e_encrypted = wire_lines
+            .first()
+            .is_some_and(|w| w.starts_with("+RPE2E01"));
 
         let own_mode = self.state.nick_prefix(&active_id, &nick);
 
-        for chunk in chunks {
+        for wire in wire_lines {
             // Try to send via IRC if connected
             if let Some(handle) = self.irc_handles.get(&conn_id)
-                && handle.sender.send_privmsg(&buffer_name, &chunk).is_err()
+                && handle.sender.send_privmsg(&buffer_name, &wire).is_err()
             {
                 crate::commands::helpers::add_local_event(self, "Failed to send message");
                 return;
             }
+        }
 
-            if !echo_message_enabled {
+        // If lazy-rotate produced REKEY sends we must ship them as NOTICEs
+        // to each remaining trusted peer on this channel (spec §5.3).
+        // `e2e_encrypt_or_passthrough` already pushed entries into
+        // `state.pending_e2e_sends`; drain them now on the same tick so
+        // the fresh session key reaches the peers before their next
+        // decrypt attempt.
+        if !self.state.pending_e2e_sends.is_empty() {
+            self.drain_pending_e2e_sends();
+        }
+
+        if !echo_message_enabled || is_e2e_encrypted {
+            // Local echo: show the user what they typed (plaintext), not the
+            // wire format. For non-E2E messages we split at word boundaries
+            // so very long lines wrap in the local buffer the same way they
+            // used to.
+            let local_chunks = if plain_echo.len() <= crate::irc::MESSAGE_MAX_BYTES {
+                vec![plain_echo]
+            } else {
+                crate::irc::split_irc_message(&plain_echo, crate::irc::MESSAGE_MAX_BYTES)
+            };
+            for chunk in local_chunks {
                 let id = self.state.next_message_id();
                 self.state.add_message(
                     &active_id,
@@ -906,6 +959,144 @@ impl App {
                         tags: None,
                     },
                 );
+            }
+        }
+    }
+
+    /// Return `Some((wire_lines, local_plain))` where `wire_lines` is what
+    /// goes out on IRC (encrypted when e2e is enabled on the conversation,
+    /// otherwise the plain text split at IRC byte boundaries) and
+    /// `local_plain` is what is echoed into the local buffer for the user.
+    ///
+    /// Returns `None` to signal a hard refusal: the conversation is a PM
+    /// with an E2E config enabled under the `@<peer_handle>` pseudochannel
+    /// (spec §6), but the peer's `ident@host` has not been captured yet
+    /// (the user has never received a message from this peer in this
+    /// buffer). The caller must surface a themed error and drop the
+    /// message. This prevents silently encrypting under a nick-keyed row
+    /// that would collide with other peers sharing the same nick.
+    ///
+    /// For real IRC channels (`#&!+`) the context is the channel name,
+    /// unchanged. For Query buffers the context is `@<peer_handle>`
+    /// derived from the buffer's cached handle.
+    fn e2e_encrypt_or_passthrough(
+        &mut self,
+        buffer_name: &str,
+        buffer_type: &BufferType,
+        text: &str,
+    ) -> Option<(Vec<String>, String)> {
+        let plain_passthrough = || {
+            Some((
+                crate::irc::split_irc_message(text, crate::irc::MESSAGE_MAX_BYTES),
+                text.to_string(),
+            ))
+        };
+
+        if text.starts_with(['.', '!']) {
+            return plain_passthrough();
+        }
+
+        let Some(mgr) = self.state.e2e_manager.clone() else {
+            return plain_passthrough();
+        };
+
+        // Derive the keyring context from the conversation. Channels pass
+        // through unchanged; PMs require a server-stamped peer handle we
+        // cached on the Query buffer at the first incoming PRIVMSG.
+        let context: String = match buffer_type {
+            BufferType::Channel => buffer_name.to_string(),
+            BufferType::Query => {
+                let active_buf = self.state.active_buffer();
+                let Some(peer_handle) = active_buf.and_then(|b| b.peer_handle.as_deref()) else {
+                    // No peer handle yet. Check whether E2E was
+                    // (mis)configured under the bare-nick key from an
+                    // earlier version — if a legacy enabled row exists,
+                    // refuse rather than falling back to it. Otherwise
+                    // there is no E2E state at all, so plain passthrough
+                    // is safe.
+                    let legacy_enabled = mgr
+                        .keyring()
+                        .get_channel_config(buffer_name)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|c| c.enabled);
+                    if legacy_enabled {
+                        return None;
+                    }
+                    return plain_passthrough();
+                };
+                crate::e2e::context_key(buffer_name, peer_handle)
+            }
+            // Server/Status/DccChat/Shell/Mentions/Special: E2E does not
+            // apply. handle_plain_message already gates messaging on
+            // Channel|Query|DccChat, so we only reach this arm if a new
+            // sendable type is added in the future — passthrough is the
+            // safe default.
+            _ => return plain_passthrough(),
+        };
+
+        let enabled = mgr
+            .keyring()
+            .get_channel_config(&context)
+            .ok()
+            .flatten()
+            .is_some_and(|c| c.enabled);
+        if !enabled {
+            return plain_passthrough();
+        }
+        let result = mgr.encrypt_outgoing(&context, text);
+
+        // Drain any REKEY CTCPs produced by a lazy rotate that happened
+        // inside `encrypt_outgoing`. These must go out as NOTICEs to the
+        // remaining trusted peers on this channel. We resolve peer handle
+        // → nick via the active buffer's user list; if the nick can't be
+        // resolved (peer left the channel between handshake and rotation)
+        // the distribution entry is dropped with a warning — the peer
+        // will re-handshake on next ciphertext if they come back.
+        let rekey_sends = mgr.take_pending_rekey_sends();
+        if !rekey_sends.is_empty() {
+            let conn_id_opt = self.state.active_buffer().map(|b| b.connection_id.clone());
+            if let Some(conn_id) = conn_id_opt {
+                let buf_id = crate::state::buffer::make_buffer_id(&conn_id, &context);
+                for rk in rekey_sends {
+                    let nick = self.state.buffers.get(&buf_id).and_then(|b| {
+                        b.users.values().find_map(|u| {
+                            let ident = u.ident.as_deref().unwrap_or("");
+                            let host = u.host.as_deref().unwrap_or("");
+                            let handle = format!("{ident}@{host}");
+                            if handle == rk.target_handle {
+                                Some(u.nick.clone())
+                            } else {
+                                None
+                            }
+                        })
+                    });
+                    let Some(nick) = nick else {
+                        tracing::warn!(
+                            target_handle = %rk.target_handle,
+                            channel = %context,
+                            "rekey drop: no nick resolved for handle on current channel"
+                        );
+                        continue;
+                    };
+                    self.state
+                        .pending_e2e_sends
+                        .push(crate::state::PendingE2eSend {
+                            connection_id: conn_id.clone(),
+                            target: nick,
+                            notice_text: rk.notice_text,
+                        });
+                }
+            } else {
+                tracing::warn!("rekey drop: no active buffer to resolve connection");
+            }
+        }
+
+        match result {
+            Ok(wires) => Some((wires, text.to_string())),
+            Err(e) => {
+                tracing::warn!("e2e encrypt failed on {context}: {e}; sending cleartext");
+                plain_passthrough()
             }
         }
     }
@@ -961,11 +1152,7 @@ impl App {
 
     /// Forward a mouse event to the active shell PTY using SGR (mode 1006) encoding.
     /// Coordinates are translated to be relative to the shell render area.
-    pub(crate) fn forward_mouse_to_shell(
-        &mut self,
-        mouse: event::MouseEvent,
-        regions: &UiRegions,
-    ) {
+    pub(crate) fn forward_mouse_to_shell(&mut self, mouse: event::MouseEvent, regions: &UiRegions) {
         let Some(chat_area) = regions.chat_area else {
             return;
         };
@@ -985,10 +1172,7 @@ impl App {
         let Some(screen) = self.shell_mgr.screen(&shell_id) else {
             return;
         };
-        if matches!(
-            screen.mouse_protocol_mode(),
-            vt100::MouseProtocolMode::None
-        ) {
+        if matches!(screen.mouse_protocol_mode(), vt100::MouseProtocolMode::None) {
             return;
         }
 
@@ -1033,10 +1217,7 @@ impl App {
                     };
                     ev_fn(
                         self,
-                        &format!(
-                            "  {C_CMD}{:<8}{C_RST} {}{status}",
-                            entry.code, entry.name
-                        ),
+                        &format!("  {C_CMD}{:<8}{C_RST} {}{status}", entry.code, entry.name),
                     );
                 }
                 ev_fn(
@@ -1080,12 +1261,10 @@ fn key_event_to_bytes(key: &event::KeyEvent, app_cursor: bool) -> Vec<u8> {
     match key.code {
         KeyCode::Char(c) if ctrl => {
             // Ctrl+letter → control character (0x01..0x1A).
-            let byte = (c.to_ascii_lowercase() as u8).wrapping_sub(b'a').wrapping_add(1);
-            if alt {
-                vec![0x1b, byte]
-            } else {
-                vec![byte]
-            }
+            let byte = (c.to_ascii_lowercase() as u8)
+                .wrapping_sub(b'a')
+                .wrapping_add(1);
+            if alt { vec![0x1b, byte] } else { vec![byte] }
         }
         KeyCode::Char(c) => {
             // Alt+char → ESC prefix (standard terminal encoding for meta key).
@@ -1172,15 +1351,13 @@ mod tests {
 
     #[test]
     fn alias_context_variables() {
-        let result =
-            expand_alias_template("/topic $C", &[], "#rust", "ferris", "libera");
+        let result = expand_alias_template("/topic $C", &[], "#rust", "ferris", "libera");
         assert_eq!(result, "/topic #rust");
     }
 
     #[test]
     fn alias_context_braced_syntax() {
-        let result =
-            expand_alias_template("/msg ${N} hello from ${S}", &[], "#ch", "me", "srv");
+        let result = expand_alias_template("/msg ${N} hello from ${S}", &[], "#ch", "me", "srv");
         assert_eq!(result, "/msg me hello from srv");
     }
 
@@ -1204,13 +1381,8 @@ mod tests {
 
     #[test]
     fn alias_chaining_template() {
-        let result = expand_alias_template(
-            "/join $0; /msg $0 hello",
-            &args(&["#test"]),
-            "",
-            "",
-            "",
-        );
+        let result =
+            expand_alias_template("/join $0; /msg $0 hello", &args(&["#test"]), "", "", "");
         assert_eq!(result, "/join #test; /msg #test hello");
     }
 
@@ -1228,25 +1400,13 @@ mod tests {
 
     #[test]
     fn alias_range_args_out_of_bounds_returns_empty() {
-        let result = expand_alias_template(
-            "/msg $0 $3-",
-            &args(&["nick", "hello"]),
-            "",
-            "",
-            "",
-        );
+        let result = expand_alias_template("/msg $0 $3-", &args(&["nick", "hello"]), "", "", "");
         assert_eq!(result, "/msg nick");
     }
 
     #[test]
     fn alias_range_args_at_boundary() {
-        let result = expand_alias_template(
-            "/msg $0 $2-",
-            &args(&["nick", "hello"]),
-            "",
-            "",
-            "",
-        );
+        let result = expand_alias_template("/msg $0 $2-", &args(&["nick", "hello"]), "", "", "");
         assert_eq!(result, "/msg nick");
     }
 

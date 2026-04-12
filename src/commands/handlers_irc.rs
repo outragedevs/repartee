@@ -154,12 +154,14 @@ fn spawn_connection(app: &mut App, conn_id: &str, server_config: &crate::config:
     tokio::spawn(async move {
         match crate::irc::connect_server(&id, &cfg, &general).await {
             Ok((handle, mut rx)) => {
-                let _ = tx.send(crate::irc::IrcEvent::HandleReady(
-                    handle.conn_id.clone(),
-                    handle.sender,
-                    handle.local_ip,
-                    handle.outgoing_handle,
-                )).await;
+                let _ = tx
+                    .send(crate::irc::IrcEvent::HandleReady(
+                        handle.conn_id.clone(),
+                        handle.sender,
+                        handle.local_ip,
+                        handle.outgoing_handle,
+                    ))
+                    .await;
                 while let Some(event) = rx.recv().await {
                     if tx.send(event).await.is_err() {
                         break;
@@ -167,7 +169,9 @@ fn spawn_connection(app: &mut App, conn_id: &str, server_config: &crate::config:
                 }
             }
             Err(e) => {
-                let _ = tx.send(crate::irc::IrcEvent::Disconnected(id, Some(e.to_string()))).await;
+                let _ = tx
+                    .send(crate::irc::IrcEvent::Disconnected(id, Some(e.to_string())))
+                    .await;
             }
         }
     });
@@ -320,15 +324,14 @@ pub(crate) fn cmd_topic(app: &mut App, args: &[String]) {
     // /topic #channel        → query topic for #channel
     // /topic #channel text…  → set topic on #channel
     // /topic text…           → set topic on current buffer's channel
-    let (channel, topic_args) =
-        if crate::irc::formatting::is_channel(&args[0]) {
-            (args[0].clone(), &args[1..])
-        } else {
-            let Some(buf) = app.state.active_buffer() else {
-                return;
-            };
-            (buf.name.clone(), args)
+    let (channel, topic_args) = if crate::irc::formatting::is_channel(&args[0]) {
+        (args[0].clone(), &args[1..])
+    } else {
+        let Some(buf) = app.state.active_buffer() else {
+            return;
         };
+        (buf.name.clone(), args)
+    };
 
     if topic_args.is_empty() {
         // Query only — no topic body means "show me the topic".
@@ -354,15 +357,14 @@ pub(crate) fn cmd_kick(app: &mut App, args: &[String]) {
     };
 
     // If first arg is a channel, use it; otherwise use current buffer's channel.
-    let (channel, remaining) =
-        if crate::irc::formatting::is_channel(&args[0]) && args.len() >= 2 {
-            (args[0].clone(), &args[1..])
-        } else {
-            let Some(buf) = app.state.active_buffer() else {
-                return;
-            };
-            (buf.name.clone(), args)
+    let (channel, remaining) = if crate::irc::formatting::is_channel(&args[0]) && args.len() >= 2 {
+        (args[0].clone(), &args[1..])
+    } else {
+        let Some(buf) = app.state.active_buffer() else {
+            return;
         };
+        (buf.name.clone(), args)
+    };
 
     let nick = remaining[0].clone();
     let reason = if remaining.len() > 1 {
@@ -574,20 +576,19 @@ pub(crate) fn cmd_kickban(app: &mut App, args: &[String]) {
         return;
     };
 
-    let (channel, remaining) =
-        if crate::irc::formatting::is_channel(&args[0]) && args.len() >= 2 {
-            (args[0].clone(), &args[1..])
-        } else {
-            let Some(buf) = app.state.active_buffer() else {
-                add_local_event(app, "Not in a channel");
-                return;
-            };
-            if buf.buffer_type != crate::state::buffer::BufferType::Channel {
-                add_local_event(app, "Not in a channel");
-                return;
-            }
-            (buf.name.clone(), args)
+    let (channel, remaining) = if crate::irc::formatting::is_channel(&args[0]) && args.len() >= 2 {
+        (args[0].clone(), &args[1..])
+    } else {
+        let Some(buf) = app.state.active_buffer() else {
+            add_local_event(app, "Not in a channel");
+            return;
         };
+        if buf.buffer_type != crate::state::buffer::BufferType::Channel {
+            add_local_event(app, "Not in a channel");
+            return;
+        }
+        (buf.name.clone(), args)
+    };
 
     let nick = remaining[0].clone();
     let reason = if remaining.len() > 1 {
@@ -835,6 +836,7 @@ fn ensure_query_buffer(app: &mut App, conn_id: &str, target: &str, skip_channels
             mode_params: None,
             list_modes: std::collections::HashMap::new(),
             last_speakers: Vec::new(),
+            peer_handle: None,
         });
     }
     buffer_id

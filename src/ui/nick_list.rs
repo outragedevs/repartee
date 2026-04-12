@@ -80,7 +80,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, scroll_offset: usize) ->
 
         // Apply per-nick color when enabled, but respect the separate nicklist toggle.
         // Away nicks keep their dimmed theme colors (overriding would make them look active).
-        if app.config.display.nick_colors && app.config.display.nick_colors_in_nicklist && !entry.away {
+        if app.config.display.nick_colors
+            && app.config.display.nick_colors_in_nicklist
+            && !entry.away
+        {
             let nick_fg = crate::nick_color::nick_color(
                 &entry.nick,
                 app.color_support,

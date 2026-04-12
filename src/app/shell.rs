@@ -2,9 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
 use crate::config;
-use crate::state::buffer::{
-    ActivityLevel, Buffer, BufferType, make_buffer_id,
-};
+use crate::state::buffer::{ActivityLevel, Buffer, BufferType, make_buffer_id};
 use crate::state::connection::{Connection, ConnectionStatus};
 
 use super::App;
@@ -130,6 +128,7 @@ impl App {
             mode_params: None,
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
+            peer_handle: None,
         });
     }
 
@@ -169,17 +168,17 @@ impl App {
     }
 
     /// TUI shell screen broadcast — no-op now that web has its own PTY.
-    #[expect(clippy::unused_self, clippy::missing_const_for_fn, reason = "stub — will gain a body when TUI shell broadcast is implemented")]
+    #[expect(
+        clippy::unused_self,
+        clippy::missing_const_for_fn,
+        reason = "stub — will gain a body when TUI shell broadcast is implemented"
+    )]
     pub(crate) fn maybe_broadcast_shell_screen(&self, _shell_id: &str) {}
 
     /// TUI shell screen broadcast — used as initial fallback when web client
     /// switches to a shell buffer before the web PTY is created.
     pub(crate) fn force_broadcast_shell_screen(&self, shell_id: &str) {
-        let Some(buffer_id) = self
-            .shell_mgr
-            .buffer_id(shell_id)
-            .map(ToString::to_string)
-        else {
+        let Some(buffer_id) = self.shell_mgr.buffer_id(shell_id).map(ToString::to_string) else {
             return;
         };
         let Some((rows, cursor_row, cursor_col, cursor_visible)) =
@@ -201,7 +200,11 @@ impl App {
     /// Broadcast web shell screen (throttled).
     pub(crate) fn maybe_broadcast_web_shell_screen(&mut self, web_id: &str) {
         let now = Instant::now();
-        if now.duration_since(self.last_shell_web_broadcast).as_millis() < 100 {
+        if now
+            .duration_since(self.last_shell_web_broadcast)
+            .as_millis()
+            < 100
+        {
             self.shell_broadcast_pending = Some(web_id.to_string());
             return;
         }

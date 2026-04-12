@@ -13,10 +13,44 @@ use connection::Connection;
 use connection::ConnectionStatus;
 
 use crate::config::IgnoreEntry;
+use crate::e2e::E2eManager;
 use crate::irc::flood::FloodState;
 use crate::irc::netsplit::NetsplitState;
 use crate::scripting::engine::{BufferInfo, ConnectionInfo, NickInfo, ScriptStateSnapshot};
 use crate::storage::LogRow;
+
+/// A queued outbound IRC NOTICE produced by the E2E event handlers.
+/// Drained by `App::drain_pending_e2e_sends` after each
+/// `handle_irc_message`, mirroring the `pending_web_events` pattern so
+/// event handlers can produce outbound traffic without holding a mutable
+/// borrow of `App`.
+#[derive(Debug, Clone)]
+pub struct PendingE2eSend {
+    /// Connection the NOTICE must be shipped over.
+    pub connection_id: String,
+    /// NOTICE target — peer nick for handshake replies.
+    pub target: String,
+    /// Full CTCP-framed body ready to hand to `send_notice` — i.e.
+    /// already wrapped in `\x01RPEE2E ...\x01`.
+    pub notice_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingUserhostAction {
+    E2eForget {
+        buffer_id: String,
+        target: String,
+        channel: Option<String>,
+        all: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingUserhostRequest {
+    pub connection_id: String,
+    pub nick: String,
+    pub action: PendingUserhostAction,
+}
 
 pub struct AppState {
     pub connections: HashMap<String, Connection>,
@@ -41,10 +75,18 @@ pub struct AppState {
     /// Pending web events to broadcast after IRC event processing.
     /// Drained by `App` after each `handle_irc_message` call.
     pub pending_web_events: Vec<crate::web::protocol::WebEvent>,
+    /// Pending E2E CTCP NOTICE sends produced by the event handlers.
+    /// Drained by `App::drain_pending_e2e_sends` right after
+    /// `drain_pending_web_events`. Same pattern as `pending_web_events`.
+    pub pending_e2e_sends: Vec<PendingE2eSend>,
+    pub pending_userhost_requests: Vec<PendingUserhostRequest>,
     /// Nick color HSL saturation (synced from config for mention line formatting).
     pub nick_color_sat: f32,
     /// Nick color HSL lightness (synced from config for mention line formatting).
     pub nick_color_lit: f32,
+    /// RPE2E manager, initialized once storage is up. `None` when the
+    /// `[e2e] enabled = false` config switch disables E2E entirely.
+    pub e2e_manager: Option<std::sync::Arc<E2eManager>>,
 }
 
 impl AppState {

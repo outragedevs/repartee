@@ -42,7 +42,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, scroll_offset: usize) ->
         let is_active = active_id == Some(id.as_str());
         let is_server = buf.buffer_type == crate::state::buffer::BufferType::Server;
         let format_key = if is_active {
-            if is_server { "item_server_selected" } else { "item_selected" }.to_string()
+            if is_server {
+                "item_server_selected"
+            } else {
+                "item_selected"
+            }
+            .to_string()
         } else if is_server {
             "item_server".to_string()
         } else {

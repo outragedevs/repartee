@@ -16,11 +16,7 @@ const MAX_WRAPPED_LINES_PER_MSG: usize = 16;
 // Capped at `buffer_len * MAX_WRAPPED_LINES_PER_MSG` so the caller's break
 // condition `visual_lines.len() > needed` fires in O(buffer_len) regardless
 // of `scroll_offset`. Empty buffers fall back to `visible_height`.
-fn compute_render_budget(
-    buffer_len: usize,
-    visible_height: usize,
-    scroll_offset: usize,
-) -> usize {
+fn compute_render_budget(buffer_len: usize, visible_height: usize, scroll_offset: usize) -> usize {
     let cap = buffer_len
         .saturating_mul(MAX_WRAPPED_LINES_PER_MSG)
         .max(visible_height);
@@ -82,7 +78,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 None
             };
-            let line = super::message_line::render_message(msg, is_own, &app.theme, &app.config, nick_fg);
+            let line =
+                super::message_line::render_message(msg, is_own, &app.theme, &app.config, nick_fg);
             let wrapped = super::wrap_line(line, total_width, indent);
 
             // Push in reverse so the final deque is in chronological order.
@@ -126,8 +123,7 @@ mod tests {
             // Typical case: user scrolled a bit, offset small vs buffer cap.
             let got = compute_render_budget(2000, 78, 50);
             assert_eq!(
-                got,
-                128,
+                got, 128,
                 "2000-msg buffer with scroll_offset=50 should return visible_height+offset (78+50=128), got {got}"
             );
         }
@@ -152,7 +148,8 @@ mod tests {
             let got = compute_render_budget(buffer_len, 78, usize::MAX / 2);
             let expected = buffer_len * MAX_WRAPPED_LINES_PER_MSG;
             assert_eq!(
-                got, expected,
+                got,
+                expected,
                 "pathological scroll_offset={} with buffer_len={buffer_len} must cap at buffer_len*MAX_WRAPPED_LINES_PER_MSG={expected}, got {got}",
                 usize::MAX / 2
             );

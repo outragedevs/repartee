@@ -429,9 +429,12 @@ pub struct App {
     pub(crate) web_cmd_rx: mpsc::Receiver<(crate::web::protocol::WebCommand, String)>,
     pub(crate) web_cmd_tx: mpsc::Sender<(crate::web::protocol::WebCommand, String)>,
     pub(crate) web_server_handle: Option<tokio::task::JoinHandle<()>>,
-    pub(crate) web_sessions: Option<std::sync::Arc<tokio::sync::Mutex<crate::web::auth::SessionStore>>>,
-    pub(crate) web_rate_limiter: Option<std::sync::Arc<tokio::sync::Mutex<crate::web::auth::RateLimiter>>>,
-    pub(crate) web_state_snapshot: Option<std::sync::Arc<std::sync::RwLock<crate::web::server::WebStateSnapshot>>>,
+    pub(crate) web_sessions:
+        Option<std::sync::Arc<tokio::sync::Mutex<crate::web::auth::SessionStore>>>,
+    pub(crate) web_rate_limiter:
+        Option<std::sync::Arc<tokio::sync::Mutex<crate::web::auth::RateLimiter>>>,
+    pub(crate) web_state_snapshot:
+        Option<std::sync::Arc<std::sync::RwLock<crate::web::server::WebStateSnapshot>>>,
     pub web_restart_pending: bool,
     /// Tracks the current local date for emitting "day changed" markers.
     pub(crate) last_day: chrono::NaiveDate,
@@ -477,6 +480,25 @@ impl App {
         } else {
             None
         };
+
+        // RPE2E manager — needs storage to be up. The keyring shares the
+        // same SQLite connection owned by Storage.
+        if config.e2e.enabled
+            && let Some(storage_ref) = storage.as_ref()
+        {
+            let keyring = crate::e2e::keyring::Keyring::new(storage_ref.db.clone());
+            match crate::e2e::E2eManager::load_or_init_with_config(keyring, &config.e2e) {
+                Ok(mgr) => {
+                    let fp = mgr.fingerprint();
+                    tracing::info!(
+                        "e2e: manager initialized, fingerprint={}",
+                        crate::e2e::crypto::fingerprint::fingerprint_hex(&fp)
+                    );
+                    state.e2e_manager = Some(std::sync::Arc::new(mgr));
+                }
+                Err(e) => tracing::error!("e2e: manager init failed: {e}"),
+            }
+        }
 
         let (preview_tx, preview_rx) = mpsc::channel(64);
 
@@ -827,6 +849,7 @@ impl App {
             mode_params: None,
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
+            peer_handle: None,
         });
         state.set_active_buffer(&buf_id);
 

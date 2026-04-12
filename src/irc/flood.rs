@@ -57,11 +57,11 @@ pub struct FloodState {
     ctcp_blocked_until: Option<Instant>,
 
     // Per-nick tilde rate limit — only blocks the flooding nick
-    tilde_nick_times: HashMap<u64, Vec<Instant>>,   // nick_hash -> timestamps
-    tilde_nick_blocked: HashMap<u64, Instant>,       // nick_hash -> blocked_until
+    tilde_nick_times: HashMap<u64, Vec<Instant>>, // nick_hash -> timestamps
+    tilde_nick_blocked: HashMap<u64, Instant>,    // nick_hash -> blocked_until
 
     // PM tilde storm — tracks unique ~ nicks PMing us
-    pm_storm_nicks: Vec<(u64, Instant)>,             // (nick_hash, timestamp)
+    pm_storm_nicks: Vec<(u64, Instant)>, // (nick_hash, timestamp)
     pm_storm_blocked_until: Option<Instant>,
 
     // Duplicate text flood — per-text-hash
@@ -120,7 +120,8 @@ impl FloodState {
         // Already blocked for this nick?
         if let Some(&until) = self.tilde_nick_blocked.get(&nick_hash) {
             if now < until {
-                self.tilde_nick_blocked.insert(nick_hash, now + TILDE_NICK_BLOCK);
+                self.tilde_nick_blocked
+                    .insert(nick_hash, now + TILDE_NICK_BLOCK);
                 return FloodResult::Blocked;
             }
             self.tilde_nick_blocked.remove(&nick_hash);
@@ -131,7 +132,8 @@ impl FloodState {
         let count = prune_window(times, now, TILDE_NICK_WINDOW);
 
         if count >= TILDE_NICK_THRESHOLD {
-            self.tilde_nick_blocked.insert(nick_hash, now + TILDE_NICK_BLOCK);
+            self.tilde_nick_blocked
+                .insert(nick_hash, now + TILDE_NICK_BLOCK);
             times.clear();
             return FloodResult::Triggered;
         }
@@ -445,10 +447,7 @@ mod tests {
         // Spread 5 messages over 10 seconds (window is 5s)
         for i in 0..5 {
             let t = now + Duration::from_secs(i * 3);
-            assert_eq!(
-                state.check_tilde_nick_flood("jim", t),
-                FloodResult::Allow
-            );
+            assert_eq!(state.check_tilde_nick_flood("jim", t), FloodResult::Allow);
         }
     }
 
@@ -460,10 +459,8 @@ mod tests {
         let now = Instant::now();
         for i in 0..5 {
             assert_eq!(
-                state.check_pm_tilde_storm(
-                    &format!("bot{i}"),
-                    now + Duration::from_millis(i * 100)
-                ),
+                state
+                    .check_pm_tilde_storm(&format!("bot{i}"), now + Duration::from_millis(i * 100)),
                 FloodResult::Allow,
                 "PM from bot{i} should pass"
             );
@@ -477,10 +474,8 @@ mod tests {
         // 5 unique nicks PM us — still under threshold (6)
         for i in 0..5 {
             assert_eq!(
-                state.check_pm_tilde_storm(
-                    &format!("bot{i}"),
-                    now + Duration::from_millis(i * 100)
-                ),
+                state
+                    .check_pm_tilde_storm(&format!("bot{i}"), now + Duration::from_millis(i * 100)),
                 FloodResult::Allow,
             );
         }
@@ -511,10 +506,7 @@ mod tests {
         let now = Instant::now();
         // Trigger storm block
         for i in 0..6 {
-            state.check_pm_tilde_storm(
-                &format!("bot{i}"),
-                now + Duration::from_millis(i * 100),
-            );
+            state.check_pm_tilde_storm(&format!("bot{i}"), now + Duration::from_millis(i * 100));
         }
         // Still blocked at 30s (extends block to 30s + 60s = 90s)
         assert_eq!(
@@ -540,10 +532,7 @@ mod tests {
         // 6 unique nicks but spread over 12 seconds (window is 5s)
         for i in 0..6 {
             assert_eq!(
-                state.check_pm_tilde_storm(
-                    &format!("user{i}"),
-                    now + Duration::from_secs(i * 3)
-                ),
+                state.check_pm_tilde_storm(&format!("user{i}"), now + Duration::from_secs(i * 3)),
                 FloodResult::Allow,
                 "user{i} at {i}*3s should pass"
             );
@@ -593,7 +582,10 @@ mod tests {
     fn duplicate_at_threshold_triggers() {
         let mut state = FloodState::new();
         let now = Instant::now();
-        assert_eq!(state.check_duplicate_flood("spam", true, now), FloodResult::Allow);
+        assert_eq!(
+            state.check_duplicate_flood("spam", true, now),
+            FloodResult::Allow
+        );
         assert_eq!(
             state.check_duplicate_flood("other1", true, now + Duration::from_millis(100)),
             FloodResult::Allow
@@ -616,7 +608,10 @@ mod tests {
     fn duplicate_blocked_text_stays_blocked() {
         let mut state = FloodState::new();
         let now = Instant::now();
-        assert_eq!(state.check_duplicate_flood("spam", true, now), FloodResult::Allow);
+        assert_eq!(
+            state.check_duplicate_flood("spam", true, now),
+            FloodResult::Allow
+        );
         assert_eq!(
             state.check_duplicate_flood("a", true, now + Duration::from_millis(100)),
             FloodResult::Allow
@@ -663,7 +658,8 @@ mod tests {
         let now = Instant::now();
         for i in 0..4 {
             assert!(
-                !state.should_suppress_nick_flood("conn/chan", now + Duration::from_millis(i * 100))
+                !state
+                    .should_suppress_nick_flood("conn/chan", now + Duration::from_millis(i * 100))
             );
         }
     }

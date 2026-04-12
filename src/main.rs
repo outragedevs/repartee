@@ -3,8 +3,10 @@ mod commands;
 mod config;
 mod constants;
 mod dcc;
+mod e2e;
 mod image_preview;
 mod irc;
+mod nick_color;
 mod scripting;
 mod session;
 mod shell;
@@ -14,7 +16,6 @@ mod storage;
 mod theme;
 mod ui;
 mod web;
-mod nick_color;
 
 // Swap glibc ptmalloc2 for jemalloc on Linux. glibc fragments its arena under
 // bursty allocation patterns in long-running processes — we observed 3 GB RSS

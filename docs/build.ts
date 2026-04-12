@@ -31,6 +31,7 @@ const siteMap: SiteEntry[] = [
   { slug: "first-connection", title: "First Connection", section: "Getting Started" },
   { slug: "configuration", title: "Configuration", section: "Getting Started" },
   { slug: "commands", title: "Commands", section: "Reference" },
+  { slug: "e2e", title: "End-to-End Encryption", section: "Reference" },
   { slug: "scripting-getting-started", title: "Getting Started", section: "Scripting" },
   { slug: "scripting-api", title: "API Reference", section: "Scripting" },
   { slug: "scripting-examples", title: "Examples", section: "Scripting" },

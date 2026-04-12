@@ -523,7 +523,9 @@ impl App {
                 let tx = self.script_action_tx.clone();
                 let handle = tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    let _ = tx.send(crate::scripting::ScriptAction::TimerFired { id }).await;
+                    let _ = tx
+                        .send(crate::scripting::ScriptAction::TimerFired { id })
+                        .await;
                 });
                 self.active_timers.insert(id, handle);
             }
@@ -536,8 +538,7 @@ impl App {
                 if let Some(manager) = self.script_manager.as_ref() {
                     manager.fire_timer(id);
                 }
-                self.active_timers
-                    .retain(|_, handle| !handle.is_finished());
+                self.active_timers.retain(|_, handle| !handle.is_finished());
             }
             ScriptAction::SetScriptConfig { script, key, value } => {
                 self.script_config.insert((script, key), value);

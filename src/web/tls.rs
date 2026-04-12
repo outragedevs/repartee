@@ -41,10 +41,8 @@ pub fn generate_self_signed_to(dir: &Path) -> Result<(PathBuf, PathBuf)> {
         return Ok((cert_path, key_path));
     }
 
-    let mut params = rcgen::CertificateParams::new(vec![
-        "localhost".to_string(),
-        "127.0.0.1".to_string(),
-    ])?;
+    let mut params =
+        rcgen::CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()])?;
     params
         .subject_alt_names
         .push(rcgen::SanType::IpAddress(std::net::IpAddr::V4(
@@ -124,10 +122,8 @@ mod tests {
         let cert_path = dir.path().join("self-signed.pem");
         let key_path = dir.path().join("self-signed-key.pem");
 
-        let config = load_or_generate_tls_config(
-            cert_path.to_str().unwrap(),
-            key_path.to_str().unwrap(),
-        );
+        let config =
+            load_or_generate_tls_config(cert_path.to_str().unwrap(), key_path.to_str().unwrap());
         assert!(config.is_ok());
     }
 }

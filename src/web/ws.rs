@@ -22,7 +22,12 @@ pub async fn ws_handler(
     ws: axum::extract::WebSocketUpgrade,
 ) -> impl IntoResponse {
     // Validate session token.
-    let valid = state.session_store.lock().await.validate(&query.token).is_some();
+    let valid = state
+        .session_store
+        .lock()
+        .await
+        .validate(&query.token)
+        .is_some();
     if !valid {
         return StatusCode::UNAUTHORIZED.into_response();
     }
@@ -42,7 +47,11 @@ pub async fn ws_handler(
 /// - Forwards broadcast events to client as JSON
 /// - Parses incoming JSON as `WebCommand`, sends through `web_cmd_tx`
 /// - Ping/pong heartbeat (30s interval)
-async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppHandle>, session_id: String) {
+async fn handle_socket(
+    socket: axum::extract::ws::WebSocket,
+    state: Arc<AppHandle>,
+    session_id: String,
+) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let mut broadcast_rx = state.broadcaster.subscribe();
 
@@ -121,10 +130,13 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppHandl
     }
 
     // Clean up web-specific shell PTY.
-    let _ = state.web_cmd_tx.send((
-        crate::web::protocol::WebCommand::WebDisconnect,
-        session_id.clone(),
-    )).await;
+    let _ = state
+        .web_cmd_tx
+        .send((
+            crate::web::protocol::WebCommand::WebDisconnect,
+            session_id.clone(),
+        ))
+        .await;
 
     tracing::info!(session_id = %session_id, "web client disconnected");
 }
@@ -135,12 +147,12 @@ fn build_sync_init_from_snapshot(state: &AppHandle) -> WebEvent {
         && let Ok(snap) = snapshot.read()
     {
         return WebEvent::SyncInit {
-                buffers: snap.buffers.clone(),
-                connections: snap.connections.clone(),
-                mention_count: snap.mention_count,
-                active_buffer_id: snap.active_buffer_id.clone(),
-                timestamp_format: snap.timestamp_format.clone(),
-            };
+            buffers: snap.buffers.clone(),
+            connections: snap.connections.clone(),
+            mention_count: snap.mention_count,
+            active_buffer_id: snap.active_buffer_id.clone(),
+            timestamp_format: snap.timestamp_format.clone(),
+        };
     }
     // Fallback: empty init.
     WebEvent::SyncInit {

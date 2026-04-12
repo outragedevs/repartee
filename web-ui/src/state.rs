@@ -119,20 +119,12 @@ impl AppState {
                 // Bump sync_version to force Layout Effect re-fetch.
                 self.sync_version.update(|v| *v += 1);
             }
-            WebEvent::NewMessage {
-                buffer_id,
-                message,
-            } => {
+            WebEvent::NewMessage { buffer_id, message } => {
                 self.messages.update(|msgs| {
-                    msgs.entry(buffer_id.clone())
-                        .or_default()
-                        .push(message);
+                    msgs.entry(buffer_id.clone()).or_default().push(message);
                 });
                 // Update unread count if not the active buffer.
-                let is_active = self
-                    .active_buffer
-                    .get_untracked()
-                    .as_deref() == Some(&buffer_id);
+                let is_active = self.active_buffer.get_untracked().as_deref() == Some(&buffer_id);
                 if !is_active {
                     self.buffers.update(|bufs| {
                         if let Some(b) = bufs.iter_mut().find(|b| b.id == buffer_id) {
@@ -173,15 +165,23 @@ impl AppState {
                 // If the closed buffer was active, switch to first available.
                 if self.active_buffer.get_untracked().as_deref() == Some(&buffer_id) {
                     let bufs = self.buffers.get_untracked();
-                    let fallback = bufs.iter()
+                    let fallback = bufs
+                        .iter()
                         .find(|b| b.id != buffer_id)
                         .map(|b| b.id.clone());
                     self.active_buffer.set(fallback);
                 }
-                self.buffers.update(|bufs| bufs.retain(|b| b.id != buffer_id));
-                self.messages.update(|msgs| { msgs.remove(&buffer_id); });
-                self.nick_lists.update(|lists| { lists.remove(&buffer_id); });
-                self.backlog_loaded.update(|set| { set.remove(&buffer_id); });
+                self.buffers
+                    .update(|bufs| bufs.retain(|b| b.id != buffer_id));
+                self.messages.update(|msgs| {
+                    msgs.remove(&buffer_id);
+                });
+                self.nick_lists.update(|lists| {
+                    lists.remove(&buffer_id);
+                });
+                self.backlog_loaded.update(|set| {
+                    set.remove(&buffer_id);
+                });
             }
             WebEvent::ConnectionStatus {
                 conn_id,
@@ -221,9 +221,13 @@ impl AppState {
                 });
                 // Mark this buffer's DB backlog as loaded so the Layout Effect
                 // won't re-fetch on subsequent switches to this buffer.
-                self.backlog_loaded.update(|set| { set.insert(buffer_id); });
+                self.backlog_loaded.update(|set| {
+                    set.insert(buffer_id);
+                });
             }
-            WebEvent::NickList { buffer_id, nicks, .. } => {
+            WebEvent::NickList {
+                buffer_id, nicks, ..
+            } => {
                 self.nick_lists.update(|lists| {
                     let mut sorted = nicks;
                     sort_nicks(&mut sorted);
@@ -367,13 +371,14 @@ impl AppState {
             } => {
                 // Only update if this shell buffer is currently active.
                 if self.active_buffer.get_untracked().as_deref() == Some(buffer_id.as_str()) {
-                    self.shell_screen.set(Some(crate::protocol::ShellScreenData {
-                        cols,
-                        rows,
-                        cursor_row,
-                        cursor_col,
-                        cursor_visible,
-                    }));
+                    self.shell_screen
+                        .set(Some(crate::protocol::ShellScreenData {
+                            cols,
+                            rows,
+                            cursor_row,
+                            cursor_col,
+                            cursor_visible,
+                        }));
                 }
             }
         }
@@ -389,15 +394,28 @@ impl AppState {
                 // Mentions always sorts first, regardless of connection label.
                 let a_mentions = a.buffer_type == "mentions";
                 let b_mentions = b.buffer_type == "mentions";
-                b_mentions.cmp(&a_mentions)
+                b_mentions
+                    .cmp(&a_mentions)
                     .then_with(|| {
-                        let label_a = connections.iter().find(|c| c.id == a.connection_id)
-                            .map_or_else(|| a.connection_id.to_lowercase(), |c| c.label.to_lowercase());
-                        let label_b = connections.iter().find(|c| c.id == b.connection_id)
-                            .map_or_else(|| b.connection_id.to_lowercase(), |c| c.label.to_lowercase());
+                        let label_a = connections
+                            .iter()
+                            .find(|c| c.id == a.connection_id)
+                            .map_or_else(
+                                || a.connection_id.to_lowercase(),
+                                |c| c.label.to_lowercase(),
+                            );
+                        let label_b = connections
+                            .iter()
+                            .find(|c| c.id == b.connection_id)
+                            .map_or_else(
+                                || b.connection_id.to_lowercase(),
+                                |c| c.label.to_lowercase(),
+                            );
                         label_a.cmp(&label_b)
                     })
-                    .then_with(|| buf_type_order(&a.buffer_type).cmp(&buf_type_order(&b.buffer_type)))
+                    .then_with(|| {
+                        buf_type_order(&a.buffer_type).cmp(&buf_type_order(&b.buffer_type))
+                    })
                     .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
             });
         });
@@ -420,14 +438,17 @@ fn buf_type_order(t: &str) -> u8 {
 /// Sort nicks by prefix rank (~&@%+ order), then alphabetically.
 fn sort_nicks(nicks: &mut [WireNick]) {
     nicks.sort_by(|a, b| {
-        prefix_rank(&a.prefix).cmp(&prefix_rank(&b.prefix))
+        prefix_rank(&a.prefix)
+            .cmp(&prefix_rank(&b.prefix))
             .then_with(|| a.nick.to_lowercase().cmp(&b.nick.to_lowercase()))
     });
 }
 
 fn prefix_rank(prefix: &str) -> u8 {
     const ORDER: &str = "~&@%+";
-    prefix.chars().next()
+    prefix
+        .chars()
+        .next()
         .and_then(|c| ORDER.find(c))
         .map_or(ORDER.len() as u8, |i| i as u8)
 }
@@ -445,11 +466,12 @@ fn insert_date_separators(messages: Vec<WireMessage>) -> Vec<WireMessage> {
     let mut last_date: Option<chrono::NaiveDate> = None;
 
     for msg in messages {
-        let local_date = chrono::DateTime::from_timestamp(msg.timestamp, 0)
-            .map(|dt| {
-                use chrono::TimeZone;
-                chrono::Local.from_utc_datetime(&dt.naive_utc()).date_naive()
-            });
+        let local_date = chrono::DateTime::from_timestamp(msg.timestamp, 0).map(|dt| {
+            use chrono::TimeZone;
+            chrono::Local
+                .from_utc_datetime(&dt.naive_utc())
+                .date_naive()
+        });
 
         if let Some(date) = local_date {
             if last_date.is_some_and(|d| d != date) || last_date.is_none() {

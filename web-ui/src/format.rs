@@ -189,7 +189,11 @@ pub fn parse_format(text: &str) -> Vec<StyledSpan> {
                     fg = None;
                     bg = None;
                 } else {
-                    fg = fg_str.parse::<u8>().ok().and_then(mirc_color).map(String::from);
+                    fg = fg_str
+                        .parse::<u8>()
+                        .ok()
+                        .and_then(mirc_color)
+                        .map(String::from);
                     if i < len && chars[i] == ',' {
                         i += 1;
                         let mut bg_str = String::new();
@@ -197,7 +201,11 @@ pub fn parse_format(text: &str) -> Vec<StyledSpan> {
                             bg_str.push(chars[i]);
                             i += 1;
                         }
-                        bg = bg_str.parse::<u8>().ok().and_then(mirc_color).map(String::from);
+                        bg = bg_str
+                            .parse::<u8>()
+                            .ok()
+                            .and_then(mirc_color)
+                            .map(String::from);
                     }
                 }
             }

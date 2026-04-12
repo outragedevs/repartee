@@ -392,8 +392,9 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
             "tls_key" => config.web.tls_key = raw.to_string(),
             "timestamp_format" => config.web.timestamp_format = raw.to_string(),
             "line_height" => {
-                config.web.line_height =
-                    raw.parse().map_err(|_| "Expected a decimal number".to_string())?;
+                config.web.line_height = raw
+                    .parse()
+                    .map_err(|_| "Expected a decimal number".to_string())?;
             }
             "nick_column_width" => {
                 config.web.nick_column_width =
@@ -405,8 +406,9 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
             }
             "theme" => config.web.theme = raw.to_string(),
             "session_hours" => {
-                config.web.session_hours =
-                    raw.parse().map_err(|_| "Expected a positive integer (hours)".to_string())?;
+                config.web.session_hours = raw
+                    .parse()
+                    .map_err(|_| "Expected a positive integer (hours)".to_string())?;
             }
             "cloudflare_tunnel_name" => config.web.cloudflare_tunnel_name = raw.to_string(),
             "password" => config.web.password = raw.to_string(),
@@ -562,7 +564,10 @@ pub fn get_setting_paths(config: &AppConfig) -> Vec<String> {
 
 // === Command handler ===
 
-#[expect(clippy::too_many_lines, reason = "flat dispatcher with per-section side-effects")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "flat dispatcher with per-section side-effects"
+)]
 pub fn cmd_set(app: &mut App, args: &[String]) {
     let ev = super::helpers::add_local_event;
 
@@ -601,7 +606,13 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
     match set_config_value(&mut app.config, path, raw) {
         Ok(()) => {
             app.cached_config_toml = None;
-            ev(app, &format!("{C_OK}{path}{C_RST} = {C_CMD}{}{C_RST}", raw.replace('%', "%%")));
+            ev(
+                app,
+                &format!(
+                    "{C_OK}{path}{C_RST} = {C_CMD}{}{C_RST}",
+                    raw.replace('%', "%%")
+                ),
+            );
 
             // Save config (web.password is #[serde(skip)] — saved to .env instead).
             let cfg_path = crate::constants::config_path();
@@ -620,9 +631,15 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
             }
 
             // Hot restart web server when lifecycle settings change.
-            if matches!(path.as_str(),
-                "web.enabled" | "web.port" | "web.bind_address" | "web.password"
-                | "web.tls_cert" | "web.tls_key" | "web.session_hours"
+            if matches!(
+                path.as_str(),
+                "web.enabled"
+                    | "web.port"
+                    | "web.bind_address"
+                    | "web.password"
+                    | "web.tls_cert"
+                    | "web.tls_key"
+                    | "web.session_hours"
             ) {
                 app.web_restart_pending = true;
                 if path.as_str() != "web.enabled" || raw == "true" {
@@ -764,7 +781,10 @@ fn search_settings(app: &mut App, needle: &str) {
                 };
                 ev(
                     app,
-                    &format!("  {C_HEADER}{matched_path}{C_RST} = {C_CMD}{}{C_RST}", val.replace('%', "%%")),
+                    &format!(
+                        "  {C_HEADER}{matched_path}{C_RST} = {C_CMD}{}{C_RST}",
+                        val.replace('%', "%%")
+                    ),
                 );
             }
         }
@@ -829,7 +849,10 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
                 } else {
                     resolved.value
                 };
-                lines.push(format!("    {C_HEADER}{path}{C_RST} = {C_CMD}{}{C_RST}", val.replace('%', "%%")));
+                lines.push(format!(
+                    "    {C_HEADER}{path}{C_RST} = {C_CMD}{}{C_RST}",
+                    val.replace('%', "%%")
+                ));
             }
         }
     }
@@ -905,7 +928,13 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
 
     // Spellcheck
     lines.push(format!("  {C_DIM}[spellcheck]{C_RST}"));
-    for field in &["enabled", "computing", "mode", "languages", "dictionary_dir"] {
+    for field in &[
+        "enabled",
+        "computing",
+        "mode",
+        "languages",
+        "dictionary_dir",
+    ] {
         let path = format!("spellcheck.{field}");
         if let Some(resolved) = get_config_value(config, &path) {
             lines.push(format!(
@@ -926,7 +955,10 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
                 } else {
                     resolved.value
                 };
-                lines.push(format!("    {C_HEADER}{path}{C_RST} = {C_CMD}{}{C_RST}", val.replace('%', "%%")));
+                lines.push(format!(
+                    "    {C_HEADER}{path}{C_RST} = {C_CMD}{}{C_RST}",
+                    val.replace('%', "%%")
+                ));
             }
         }
     }

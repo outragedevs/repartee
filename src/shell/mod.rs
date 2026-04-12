@@ -232,26 +232,19 @@ impl ShellManager {
     pub fn screen_to_web(
         &self,
         id: &str,
-    ) -> Option<(
-        Vec<crate::web::protocol::ShellScreenRow>,
-        u16,
-        u16,
-        bool,
-    )> {
+    ) -> Option<(Vec<crate::web::protocol::ShellScreenRow>, u16, u16, bool)> {
         let screen = self.sessions.get(id)?.parser.screen();
         Some(Self::serialize_screen(screen))
     }
 
     /// Convert a vt100 screen to styled rows for web transport.
-    #[expect(clippy::similar_names, reason = "fg/bg are standard terminal color abbreviations")]
+    #[expect(
+        clippy::similar_names,
+        reason = "fg/bg are standard terminal color abbreviations"
+    )]
     fn serialize_screen(
         screen: &vt100::Screen,
-    ) -> (
-        Vec<crate::web::protocol::ShellScreenRow>,
-        u16,
-        u16,
-        bool,
-    ) {
+    ) -> (Vec<crate::web::protocol::ShellScreenRow>, u16, u16, bool) {
         let (screen_rows, screen_cols) = screen.size();
         let (cursor_row, cursor_col) = screen.cursor_position();
         let cursor_visible = !screen.hide_cursor();
@@ -568,12 +561,7 @@ impl ShellManager {
     pub fn screen_to_web_session(
         &self,
         id: &str,
-    ) -> Option<(
-        Vec<crate::web::protocol::ShellScreenRow>,
-        u16,
-        u16,
-        bool,
-    )> {
+    ) -> Option<(Vec<crate::web::protocol::ShellScreenRow>, u16, u16, bool)> {
         let session = self.web_sessions.get(id)?;
         let screen = session.parser.screen();
         Some(Self::serialize_screen(screen))
@@ -587,7 +575,10 @@ impl ShellManager {
     }
 
     /// Check if a shell event ID belongs to a web session.
-    #[expect(clippy::unused_self, reason = "method semantically belongs on ShellManager — may use self in the future")]
+    #[expect(
+        clippy::unused_self,
+        reason = "method semantically belongs on ShellManager — may use self in the future"
+    )]
     pub fn is_web_session(&self, id: &str) -> bool {
         id.starts_with("web-")
     }
@@ -850,4 +841,3 @@ mod tests {
         mgr.kill_all();
     }
 }
-

@@ -142,6 +142,11 @@ chghost = "%Z64748b···%N %Z94a3b8$0%N %Z64748bchanged host to $1@$2%N"
 # erssi: channel_created = "%Z10B981✓%N Channel {channelhilight $0} created $1"
 channel_created = "%Z10b981✓%N Channel {channel $0} created %Z64748b$1%N"
 
+# e2e_* — RPE2E end-to-end encryption status messages
+e2e_info = "%Z10b981[E2E]%N $*"
+e2e_warning = "%Zf59e0b[E2E]%N $*"
+e2e_error = "%Zef4444[E2E]%N $*"
+
 # ── Side Panel ───────────────────────────────────────────────────────────────
 # Mapped from erssi sidepanel activity hierarchy
 

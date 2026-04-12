@@ -381,7 +381,9 @@ pub async fn connect_server(
     tokio::spawn(async move {
         // Send negotiation diagnostics immediately so they're visible even if
         // registration fails (e.g. server requires SASL but auth didn't complete).
-        let _ = tx.send(IrcEvent::NegotiationInfo(id.clone(), neg.diagnostics)).await;
+        let _ = tx
+            .send(IrcEvent::NegotiationInfo(id.clone(), neg.diagnostics))
+            .await;
 
         let mut sent_connected = false;
         let mut error = None;
@@ -393,7 +395,9 @@ pub async fn connect_server(
             if !sent_connected && let Command::Response(Response::RPL_WELCOME, _) = &message.command
             {
                 sent_connected = true;
-                let _ = tx.send(IrcEvent::Connected(id.clone(), neg.enabled_caps.clone())).await;
+                let _ = tx
+                    .send(IrcEvent::Connected(id.clone(), neg.enabled_caps.clone()))
+                    .await;
             }
             if tx
                 .send(IrcEvent::Message(id.clone(), Box::new(message)))
@@ -412,7 +416,9 @@ pub async fn connect_server(
                         && let Command::Response(Response::RPL_WELCOME, _) = &message.command
                     {
                         sent_connected = true;
-                        let _ = tx.send(IrcEvent::Connected(id.clone(), neg.enabled_caps.clone())).await;
+                        let _ = tx
+                            .send(IrcEvent::Connected(id.clone(), neg.enabled_caps.clone()))
+                            .await;
                     }
                     if tx
                         .send(IrcEvent::Message(id.clone(), Box::new(message)))

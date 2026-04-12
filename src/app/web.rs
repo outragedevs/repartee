@@ -1,6 +1,55 @@
 use super::App;
 
 impl App {
+    fn e2e_debug_enabled() -> bool {
+        std::env::var("REPARTEE_E2E_DEBUG_BUFFER").is_ok_and(|v| {
+            let v = v.trim();
+            !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+        })
+    }
+
+    fn emit_e2e_debug(&mut self, conn_id: &str, channel: Option<&str>, text: impl Into<String>) {
+        if !Self::e2e_debug_enabled() {
+            return;
+        }
+        let text = text.into();
+        let buffer_id = channel
+            .map(|channel| crate::state::buffer::make_buffer_id(conn_id, channel))
+            .filter(|id| self.state.buffers.contains_key(id))
+            .or_else(|| {
+                self.state
+                    .active_buffer()
+                    .filter(|buf| buf.connection_id == conn_id)
+                    .map(|buf| buf.id.clone())
+            })
+            .or_else(|| {
+                self.state
+                    .connections
+                    .get(conn_id)
+                    .map(|conn| crate::state::buffer::make_buffer_id(conn_id, &conn.label))
+            });
+        let Some(buffer_id) = buffer_id else { return };
+        let id = self.state.next_message_id();
+        let event_param = text.clone();
+        self.state.add_message(
+            &buffer_id,
+            crate::state::buffer::Message {
+                id,
+                timestamp: chrono::Utc::now(),
+                message_type: crate::state::buffer::MessageType::Event,
+                nick: None,
+                nick_mode: None,
+                text,
+                highlight: false,
+                event_key: Some("e2e_info".to_string()),
+                event_params: Some(vec![event_param]),
+                log_msg_id: None,
+                log_ref_id: None,
+                tags: None,
+            },
+        );
+    }
+
     /// Broadcast a `WebEvent` to all connected web clients.
     pub(crate) fn broadcast_web(&self, event: crate::web::protocol::WebEvent) {
         let _ = self.web_broadcaster.send(event);
@@ -42,9 +91,8 @@ impl App {
         let sessions = std::sync::Arc::new(tokio::sync::Mutex::new(
             crate::web::auth::SessionStore::with_hours(self.config.web.session_hours),
         ));
-        let limiter = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::web::auth::RateLimiter::new(),
-        ));
+        let limiter =
+            std::sync::Arc::new(tokio::sync::Mutex::new(crate::web::auth::RateLimiter::new()));
         self.web_sessions = Some(std::sync::Arc::clone(&sessions));
         self.web_rate_limiter = Some(std::sync::Arc::clone(&limiter));
 
@@ -131,6 +179,79 @@ impl App {
         }
     }
 
+    /// Drain any queued RPE2E CTCP NOTICE sends produced by the E2E
+    /// event handlers and ship them via the appropriate connection's IRC
+    /// sender. Mirrors `drain_pending_web_events` and runs right after it
+    /// inside the IRC event loop so handshake traffic reaches the wire
+    /// in the same dispatch turn.
+    pub(crate) fn drain_pending_e2e_sends(&mut self) {
+        let pending: Vec<crate::state::PendingE2eSend> =
+            std::mem::take(&mut self.state.pending_e2e_sends);
+        for send in pending {
+            let parsed = {
+                let trimmed = send
+                    .notice_text
+                    .strip_prefix('\x01')
+                    .unwrap_or(&send.notice_text);
+                let inner = trimmed.strip_suffix('\x01').unwrap_or(trimmed);
+                crate::e2e::handshake::parse(inner).ok().flatten()
+            };
+            let debug_line = parsed.as_ref().map(|msg| match msg {
+                crate::e2e::handshake::HandshakeMsg::Req(req) => (
+                    req.channel.as_str(),
+                    format!(
+                        "[E2E debug] TX KEYREQ to {} for {}",
+                        send.target, req.channel
+                    ),
+                ),
+                crate::e2e::handshake::HandshakeMsg::Rsp(rsp) => (
+                    rsp.channel.as_str(),
+                    format!(
+                        "[E2E debug] TX KEYRSP to {} for {}",
+                        send.target, rsp.channel
+                    ),
+                ),
+                crate::e2e::handshake::HandshakeMsg::Rekey(rekey) => (
+                    rekey.channel.as_str(),
+                    format!(
+                        "[E2E debug] TX REKEY to {} for {}",
+                        send.target, rekey.channel
+                    ),
+                ),
+            });
+            let Some(handle) = self.irc_handles.get(&send.connection_id) else {
+                tracing::warn!(
+                    connection_id = %send.connection_id,
+                    "e2e send dropped: no IRC handle for connection"
+                );
+                if let Some((channel, line)) = debug_line.as_ref() {
+                    self.emit_e2e_debug(
+                        &send.connection_id,
+                        Some(channel),
+                        format!("{line} failed: no IRC handle for connection"),
+                    );
+                }
+                continue;
+            };
+            if let Err(e) = handle.sender.send_notice(&send.target, &send.notice_text) {
+                tracing::warn!(
+                    target = %send.target,
+                    error = %e,
+                    "e2e send_notice failed"
+                );
+                if let Some((channel, line)) = debug_line.as_ref() {
+                    self.emit_e2e_debug(
+                        &send.connection_id,
+                        Some(channel),
+                        format!("{line} failed: {e}"),
+                    );
+                }
+            } else if let Some((channel, line)) = debug_line {
+                self.emit_e2e_debug(&send.connection_id, Some(channel), line);
+            }
+        }
+    }
+
     /// Insert a mention into the `SQLite` mentions table.
     pub(crate) fn record_mention(&self, buffer_id: &str, msg: &crate::web::protocol::WireMessage) {
         let Some(ref storage) = self.storage else {
@@ -158,7 +279,11 @@ impl App {
     }
 
     /// Dispatch a command received from a web client.
-    pub(crate) fn handle_web_command(&mut self, cmd: crate::web::protocol::WebCommand, session_id: &str) {
+    pub(crate) fn handle_web_command(
+        &mut self,
+        cmd: crate::web::protocol::WebCommand,
+        session_id: &str,
+    ) {
         use crate::web::protocol::WebCommand;
         use crate::web::snapshot;
 
@@ -212,10 +337,9 @@ impl App {
             }
             WebCommand::ShellInput { buffer_id: _, data } => {
                 let web_id = format!("web-{session_id}");
-                if let Ok(bytes) = base64::Engine::decode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &data,
-                ) {
+                if let Ok(bytes) =
+                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &data)
+                {
                     self.shell_mgr.write_web(&web_id, &bytes);
                 }
             }
@@ -268,7 +392,13 @@ impl App {
     }
 
     /// Fetch messages for a web client.
-    fn web_fetch_messages(&self, buffer_id: &str, limit: u32, before: Option<i64>, session_id: &str) {
+    fn web_fetch_messages(
+        &self,
+        buffer_id: &str,
+        limit: u32,
+        before: Option<i64>,
+        session_id: &str,
+    ) {
         if buffer_id == Self::MENTIONS_BUFFER_ID {
             if let Some(buf) = self.state.buffers.get(buffer_id) {
                 let capped = limit.min(500) as usize;
@@ -337,7 +467,10 @@ impl App {
         };
         let capped_limit = limit.min(500) as usize;
         let (conn_id, buffer) = crate::web::snapshot::split_buffer_id(buffer_id);
-        let network = self.state.connections.get(conn_id)
+        let network = self
+            .state
+            .connections
+            .get(conn_id)
             .map_or_else(|| conn_id.to_string(), |c| c.label.clone());
         let messages = crate::storage::query::get_messages(
             &db,

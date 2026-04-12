@@ -64,7 +64,9 @@ impl App {
             let has_fts = !encrypt;
             let removed = crate::storage::db::purge_old_events(&conn, hours, has_fts);
             if removed > 0 {
-                tracing::info!("periodic purge: removed {removed} event messages older than {hours}h");
+                tracing::info!(
+                    "periodic purge: removed {removed} event messages older than {hours}h"
+                );
             }
         });
     }
@@ -82,7 +84,8 @@ impl App {
             let db = Arc::clone(&storage.db);
             tokio::task::spawn_blocking(move || {
                 let Ok(conn) = db.lock() else { return };
-                if let Ok(removed) = crate::storage::query::purge_old_mentions(&conn, seven_days_ago)
+                if let Ok(removed) =
+                    crate::storage::query::purge_old_mentions(&conn, seven_days_ago)
                     && removed > 0
                 {
                     tracing::info!("periodic purge: removed {removed} mentions older than 7 days");
@@ -91,8 +94,8 @@ impl App {
         }
 
         if let Some(buf) = self.state.buffers.get_mut(Self::MENTIONS_BUFFER_ID) {
-            let cutoff = chrono::DateTime::from_timestamp(seven_days_ago, 0)
-                .unwrap_or_else(Utc::now);
+            let cutoff =
+                chrono::DateTime::from_timestamp(seven_days_ago, 0).unwrap_or_else(Utc::now);
             let before = buf.messages.len();
             buf.messages.retain(|m| m.timestamp >= cutoff);
             while buf.messages.len() > 1000 {
@@ -121,7 +124,10 @@ impl App {
             .filter(|(_, buf)| {
                 matches!(
                     buf.buffer_type,
-                    BufferType::Channel | BufferType::Query | BufferType::DccChat | BufferType::Server
+                    BufferType::Channel
+                        | BufferType::Query
+                        | BufferType::DccChat
+                        | BufferType::Server
                 )
             })
             .map(|(id, _)| id.clone())
@@ -129,6 +135,7 @@ impl App {
 
         for buf_id in buffer_ids {
             let id = self.state.next_message_id();
+            let event_param = separator_text.clone();
             self.state.add_local_message(
                 &buf_id,
                 Message {
@@ -140,7 +147,7 @@ impl App {
                     text: separator_text.clone(),
                     highlight: false,
                     event_key: Some("date_separator".to_string()),
-                    event_params: None,
+                    event_params: Some(vec![event_param]),
                     log_msg_id: None,
                     log_ref_id: None,
                     tags: None,
@@ -154,11 +161,10 @@ impl App {
         let now = Instant::now();
         let conn_ids: Vec<String> = self.irc_handles.keys().cloned().collect();
         for conn_id in conn_ids {
-            let is_connected = self
-                .state
-                .connections
-                .get(&conn_id)
-                .is_some_and(|c| c.status == crate::state::connection::ConnectionStatus::Connected);
+            let is_connected =
+                self.state.connections.get(&conn_id).is_some_and(|c| {
+                    c.status == crate::state::connection::ConnectionStatus::Connected
+                });
             if !is_connected {
                 continue;
             }

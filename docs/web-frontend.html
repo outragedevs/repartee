@@ -49,6 +49,7 @@
     <span class="nav-section-title">Reference</span>
     <ul>
       <li><a href="commands.html">Commands</a></li>
+      <li><a href="e2e.html">End-to-End Encryption</a></li>
     </ul>
   </div>
   <div class="nav-section">
@@ -86,7 +87,7 @@
       <div class="sidebar-footer">
         Built with <a href="https://www.rust-lang.org">Rust</a>
         &middot;
-        <a href="https://repart.ee/">repart.ee</a>
+        <a href="https://repart.ee/">GitHub</a>
       </div>
     </aside>
 
@@ -233,6 +234,8 @@ port = 8443
 <li><strong>Theme picker</strong> — switch themes live (5 built-in themes)</li>
 <li><strong>Multiline input</strong> — paste multiline text, each line sent separately</li>
 <li><strong>Persistent sessions</strong> — page refresh reconnects automatically (session stored in browser)</li>
+<li><strong>Auto-reconnect</strong> — WebSocket automatically reconnects with exponential backoff (2s–30s) on connection loss</li>
+<li><strong>Date separators</strong> — visual separators between messages from different days for easier history reading</li>
 <li><strong>Embedded shell</strong> — full terminal in the browser via beamterm WebGL2 renderer. Separate PTY per web session (no resize fighting with TUI). FiraCode Nerd Font, mouse selection with clipboard, Ctrl+/- font resize, Ctrl+C (SIGINT), clipboard paste with bracketed paste mode</li>
 </ul>
 <h2>Desktop Layout</h2>
@@ -312,7 +315,7 @@ port = 8443
 
         <footer class="site-footer">
           Built with <a href="https://www.rust-lang.org">Rust</a> &middot;
-          <a href="https://repart.ee/">repart.ee</a> &middot;
+          <a href="https://repart.ee/">GitHub</a> &middot;
           MIT License
         </footer>
       </main>

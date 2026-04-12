@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="repartee — A modern terminal IRC client built with Ratatui, Tokio, and Rust. Scripting, theming, encrypted logging, and more.">
+  <meta name="keywords" content="irc, terminal, tui, client, chat, repartee, ratatui, tokio, rust">
+  <meta name="author" content="outragedevs">
+  <meta property="og:title" content="End-to-End Encryption — repartee">
+  <meta property="og:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by irssi, designed for the future.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://outragedevs.github.io/repartee/">
+  <meta property="og:image" content="https://outragedevs.github.io/repartee/images/chat.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{title}} — repartee">
+  <meta name="twitter:description" content="A modern terminal IRC client built with Ratatui, Tokio, and Rust.">
+  <meta name="twitter:image" content="https://outragedevs.github.io/repartee/images/chat.png">
+  <title>{{title}} — repartee</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- Mobile hamburger toggle -->
+  <button class="hamburger" aria-label="Toggle navigation">
+    <span></span>
+    <span></span>
+    <span></span>
+  </button>
+
+  <div class="page-wrapper">
+    <!-- Sidebar navigation -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <a href="index.html" class="brand">repartee</a>
+        <span class="brand-tagline">Documentation</span>
+      </div>
+      <nav class="sidebar-nav">
+          <ul>
+    <li><a href="index.html">Home</a></li>
+  </ul>
+  <div class="nav-section">
+    <span class="nav-section-title">Getting Started</span>
+    <ul>
+      <li><a href="installation.html">Installation</a></li>
+      <li><a href="first-connection.html">First Connection</a></li>
+      <li><a href="configuration.html">Configuration</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Reference</span>
+    <ul>
+      <li><a href="commands.html">Commands</a></li>
+      <li><a href="e2e.html" class="active">End-to-End Encryption</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Scripting</span>
+    <ul>
+      <li><a href="scripting-getting-started.html">Getting Started</a></li>
+      <li><a href="scripting-api.html">API Reference</a></li>
+      <li><a href="scripting-examples.html">Examples</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Customization</span>
+    <ul>
+      <li><a href="theming.html">Theming</a></li>
+      <li><a href="theming-format-strings.html">Format Strings</a></li>
+      <li><a href="logging.html">Logging & Search</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Usage</span>
+    <ul>
+      <li><a href="web-frontend.html">Web Frontend</a></li>
+      <li><a href="sessions.html">Sessions & Detach</a></li>
+    </ul>
+  </div>
+  <div class="nav-section">
+    <span class="nav-section-title">Project</span>
+    <ul>
+      <li><a href="architecture.html">Architecture</a></li>
+      <li><a href="faq.html">FAQ</a></li>
+    </ul>
+  </div>
+
+      </nav>
+      <div class="sidebar-footer">
+        Built with <a href="https://www.rust-lang.org">Rust</a>
+        &middot;
+        <a href="https://repart.ee/">GitHub</a>
+      </div>
+    </aside>
+
+    <!-- Overlay for mobile sidebar -->
+    <div class="sidebar-overlay"></div>
+
+    <!-- Main content -->
+    <div class="content-wrapper">
+      <main class="content">
+        <h1>End-to-End Encryption</h1>
+<p>repartee includes built-in end-to-end encryption for IRC channels and private conversations. The IRC server still routes messages, but the plaintext stays on the participating clients.</p>
+<p>This is designed to protect message content from passive network capture, server-side logging, and operators who can inspect IRC traffic but do not control the endpoints.</p>
+<h2>What E2E protects</h2>
+<p>When E2E is enabled for a conversation:</p>
+<ul>
+<li>message bodies are encrypted before they leave your client</li>
+<li>the IRC server relays ciphertext, not plaintext</li>
+<li>peers decrypt messages locally after a key exchange</li>
+</ul>
+<p>The server still sees metadata such as:</p>
+<ul>
+<li>nicknames and <code>ident@host</code></li>
+<li>channel names or query targets</li>
+<li>timing and approximate message sizes</li>
+<li>the fact that an E2E handshake took place</li>
+</ul>
+<h2>Trust model</h2>
+<p>repartee uses a trust-on-first-use model by default.</p>
+<p>The first time a peer wants to exchange encrypted messages, repartee stores their E2E identity and asks for confirmation unless auto-accept is enabled. After that, future sessions for the same peer can be resumed automatically.</p>
+<p>This means:</p>
+<ul>
+<li>passive observers cannot read message content</li>
+<li>active attackers are still relevant until you verify fingerprints out of band</li>
+</ul>
+<p>If you want strong identity guarantees, verify the peer fingerprint using a second channel you trust.</p>
+<h2>Basic flow</h2>
+<p>With E2E mode set to <code>normal</code>, the first encrypted message triggers a key exchange:</p>
+<ol>
+<li>one client sends an encrypted message</li>
+<li>the receiving client notices it cannot decrypt yet and requests a key exchange</li>
+<li>repartee shows a pending request</li>
+<li>you accept it with <code>/e2e accept &lt;nick&gt;</code></li>
+<li>both sides exchange keys and future messages decrypt automatically</li>
+</ol>
+<p>Once both directions are established, both clients can send encrypted messages without repeating the setup.</p>
+<h2>Common commands</h2>
+<p>Enable E2E in the current buffer:</p>
+<pre><code class="language-text">/e2e on
+</code></pre>
+<p>Disable E2E in the current buffer:</p>
+<pre><code class="language-text">/e2e off
+</code></pre>
+<p>Set the current buffer to normal trust mode:</p>
+<pre><code class="language-text">/e2e mode normal
+</code></pre>
+<p>Accept a pending key exchange:</p>
+<pre><code class="language-text">/e2e accept &lt;nick&gt;
+</code></pre>
+<p>Show trusted peers for the current channel or query:</p>
+<pre><code class="language-text">/e2e list
+</code></pre>
+<p>Show all remembered E2E state:</p>
+<pre><code class="language-text">/e2e list -all
+</code></pre>
+<p>Forget a remembered peer everywhere:</p>
+<pre><code class="language-text">/e2e forget -all &lt;nick|ident@host&gt;
+</code></pre>
+<p>For the full command reference, see <a href="commands.html">Commands</a>.</p>
+<h2>Modes</h2>
+<h3><code>normal</code></h3>
+<p><code>normal</code> is the safest everyday mode. Incoming key requests stay pending until you accept them. Use this when you want an explicit prompt before trusting a peer for the first time.</p>
+<h3><code>autoaccept</code></h3>
+<p><code>autoaccept</code> skips the manual approval step and accepts new requests automatically. This is more convenient, but it lowers protection against an active attacker during first contact.</p>
+<p>Use it only if you understand that convenience is replacing explicit trust confirmation.</p>
+<h2>Fingerprints and verification</h2>
+<p>Every peer has a fingerprint derived from their E2E identity key. This fingerprint is what you should compare out of band if you want protection against active impersonation or man-in-the-middle attacks.</p>
+<p>Useful commands:</p>
+<pre><code class="language-text">/e2e fingerprint
+/e2e verify &lt;nick&gt;
+/e2e reverify &lt;nick&gt;
+</code></pre>
+<p>If a peer changes identity or appears under a different <code>ident@host</code>, repartee can warn and require you to decide whether to trust the new state.</p>
+<h2>Resetting state</h2>
+<p><code>/e2e list</code> only shows trusted peers in the current conversation. It does not show every remembered identity.</p>
+<p>If you want a true clean slate, inspect the full keyring first:</p>
+<pre><code class="language-text">/e2e list -all
+</code></pre>
+<p>Then remove the remembered peer globally:</p>
+<pre><code class="language-text">/e2e forget -all &lt;nick|ident@host&gt;
+</code></pre>
+<p>If you pass a nick, repartee resolves it to <code>ident@host</code> first and removes the stored peer state using that handle.</p>
+<h2>Notes for channel use</h2>
+<p>E2E in IRC channels is negotiated per peer. In practice this means:</p>
+<ul>
+<li>you may trust some channel members and not others</li>
+<li>one peer may decrypt your messages before another does</li>
+<li>the first encrypted message can trigger the setup flow</li>
+</ul>
+<p>That is expected. The channel remains an IRC channel, but the encrypted relationship is still established client to client.</p>
+<h2>Limitations</h2>
+<p>E2E does not hide:</p>
+<ul>
+<li>who is talking to whom</li>
+<li>which channel is used</li>
+<li>when messages are sent</li>
+<li>approximate message size and frequency</li>
+</ul>
+<p>It also does not protect against a compromised endpoint. If someone controls your client machine, your keys, or the running process, E2E cannot help.</p>
+<h2>See also</h2>
+<ul>
+<li><a href="first-connection.html">First Connection</a></li>
+<li><a href="configuration.html">Configuration</a></li>
+<li><a href="commands.html">Commands</a></li>
+<li><a href="faq.html">FAQ</a></li>
+</ul>
+
+
+        <!-- Prev / Next navigation -->
+        <nav class="page-nav">
+          <a href="commands.html" class="page-nav-link prev">
+  <span class="page-nav-label">&larr; Previous</span>
+  <span class="page-nav-title">Commands</span>
+</a>
+          <a href="scripting-getting-started.html" class="page-nav-link next">
+  <span class="page-nav-label">Next &rarr;</span>
+  <span class="page-nav-title">Getting Started</span>
+</a>
+        </nav>
+
+        <footer class="site-footer">
+          Built with <a href="https://www.rust-lang.org">Rust</a> &middot;
+          <a href="https://repart.ee/">GitHub</a> &middot;
+          MIT License
+        </footer>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    // Mobile sidebar toggle
+    (function() {
+      const hamburger = document.querySelector('.hamburger');
+      const sidebar = document.querySelector('.sidebar');
+      const overlay = document.querySelector('.sidebar-overlay');
+
+      function toggleSidebar() {
+        hamburger.classList.toggle('active');
+        sidebar.classList.toggle('open');
+        overlay.classList.toggle('visible');
+        document.body.style.overflow = sidebar.classList.contains('open') ? 'hidden' : '';
+      }
+
+      function closeSidebar() {
+        hamburger.classList.remove('active');
+        sidebar.classList.remove('open');
+        overlay.classList.remove('visible');
+        document.body.style.overflow = '';
+      }
+
+      hamburger.addEventListener('click', toggleSidebar);
+      overlay.addEventListener('click', closeSidebar);
+
+      // Close sidebar on Escape key
+      document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && sidebar.classList.contains('open')) {
+          closeSidebar();
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

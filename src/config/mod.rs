@@ -71,6 +71,7 @@ pub struct AppConfig {
     pub dcc: DccConfig,
     pub spellcheck: SpellcheckConfig,
     pub web: WebConfig,
+    pub e2e: E2eConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,7 +103,10 @@ impl Default for GeneralConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-#[expect(clippy::struct_excessive_bools, reason = "config struct — each bool is an independent user setting")]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "config struct — each bool is an independent user setting"
+)]
 pub struct DisplayConfig {
     pub nick_column_width: u16,
     pub nick_max_length: u16,
@@ -408,6 +412,30 @@ impl Default for SpellcheckConfig {
             mode: "replace".to_string(),
             languages: vec!["en_US".to_string()],
             dictionary_dir: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct E2eConfig {
+    /// Master switch — when false, the `E2eManager` is not initialized at
+    /// startup and the `/e2e` commands become no-ops.
+    pub enabled: bool,
+    /// Default mode applied to a channel when `/e2e on` is issued without
+    /// an explicit mode. One of `auto-accept`, `normal`, `quiet`.
+    pub default_mode: String,
+    /// Replay-protection tolerance window for the `ts` field on incoming
+    /// encrypted messages, in seconds.
+    pub ts_tolerance_secs: i64,
+}
+
+impl Default for E2eConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            default_mode: "normal".to_string(),
+            ts_tolerance_secs: 300,
         }
     }
 }

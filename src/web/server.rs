@@ -53,7 +53,7 @@ async fn login_handler(
     State(state): State<Arc<AppHandle>>,
     Json(body): Json<LoginRequest>,
 ) -> impl IntoResponse {
-    let ip = peer.map_or_else(|| "unknown".to_string(), |p| p.0 .0.ip().to_string());
+    let ip = peer.map_or_else(|| "unknown".to_string(), |p| p.0.0.ip().to_string());
 
     {
         let limiter = state.rate_limiter.lock().await;
@@ -70,10 +70,7 @@ async fn login_handler(
     if verify_password(&body.password, &state.password) {
         let token = state.session_store.lock().await.create(&ip);
         state.rate_limiter.lock().await.record_success(&ip);
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({ "token": token })),
-        )
+        (StatusCode::OK, Json(serde_json::json!({ "token": token })))
     } else {
         state.rate_limiter.lock().await.record_failure(&ip);
         (

@@ -69,8 +69,7 @@ impl Storage {
 
         // Purge old event messages (join/part/quit/nick/kick/mode) on startup
         if config.event_retention_hours > 0 {
-            let removed =
-                db::purge_old_events(&conn, config.event_retention_hours, has_fts);
+            let removed = db::purge_old_events(&conn, config.event_retention_hours, has_fts);
             if removed > 0 {
                 tracing::info!(
                     "purged {removed} event messages older than {}h",
