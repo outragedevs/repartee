@@ -7,6 +7,7 @@ use crate::protocol::*;
 /// Client-side application state, stored as Leptos signals.
 #[derive(Clone, Copy)]
 pub struct AppState {
+    pub authenticated: RwSignal<bool>,
     pub connected: RwSignal<bool>,
     pub buffers: RwSignal<Vec<BufferMeta>>,
     pub connections: RwSignal<Vec<ConnectionMeta>>,
@@ -14,7 +15,7 @@ pub struct AppState {
     pub messages: RwSignal<HashMap<String, Vec<WireMessage>>>,
     pub nick_lists: RwSignal<HashMap<String, Vec<WireNick>>>,
     pub mention_count: RwSignal<u32>,
-    pub token: RwSignal<Option<String>>,
+    pub session_hint: RwSignal<bool>,
     pub theme: RwSignal<String>,
     pub error: RwSignal<Option<String>>,
     pub timestamp_format: RwSignal<String>,
@@ -49,6 +50,7 @@ impl AppState {
             .unwrap_or_else(|| "nightfall".to_string());
 
         Self {
+            authenticated: RwSignal::new(false),
             connected: RwSignal::new(false),
             buffers: RwSignal::new(Vec::new()),
             connections: RwSignal::new(Vec::new()),
@@ -56,7 +58,7 @@ impl AppState {
             messages: RwSignal::new(HashMap::new()),
             nick_lists: RwSignal::new(HashMap::new()),
             mention_count: RwSignal::new(0),
-            token: RwSignal::new(None),
+            session_hint: RwSignal::new(false),
             theme: RwSignal::new(saved_theme),
             error: RwSignal::new(None),
             timestamp_format: RwSignal::new("%H:%M".to_string()),
@@ -93,6 +95,7 @@ impl AppState {
                 self.buffers.set(buffers);
                 self.connections.set(connections);
                 self.mention_count.set(mention_count);
+                self.authenticated.set(true);
                 self.connected.set(true);
                 if let Some(fmt) = timestamp_format
                     && !fmt.is_empty()
@@ -368,6 +371,7 @@ impl AppState {
                 cursor_row,
                 cursor_col,
                 cursor_visible,
+                ..
             } => {
                 // Only update if this shell buffer is currently active.
                 if self.active_buffer.get_untracked().as_deref() == Some(buffer_id.as_str()) {

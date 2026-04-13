@@ -68,6 +68,7 @@ impl App {
         self.web_sessions = None;
         self.web_rate_limiter = None;
         self.web_state_snapshot = None;
+        self.web_active_buffers.clear();
     }
 
     /// Start the web server (HTTPS + WebSocket). Creates fresh session
@@ -156,16 +157,7 @@ impl App {
                 crate::web::protocol::WebEvent::BufferClosed { buffer_id } => {
                     tracing::debug!(%buffer_id, "broadcasting BufferClosed");
                 }
-                crate::web::protocol::WebEvent::ActiveBufferChanged { buffer_id } => {
-                    tracing::debug!(%buffer_id, "broadcasting ActiveBufferChanged");
-                    if let Some(shell_id) = self
-                        .shell_mgr
-                        .session_id_for_buffer(buffer_id)
-                        .map(ToString::to_string)
-                    {
-                        self.force_broadcast_shell_screen(&shell_id);
-                    }
-                }
+                crate::web::protocol::WebEvent::ActiveBufferChanged { .. } => continue,
                 _ => {}
             }
             if let crate::web::protocol::WebEvent::MentionAlert {
@@ -279,6 +271,10 @@ impl App {
     }
 
     /// Dispatch a command received from a web client.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "web command dispatch is intentionally flat and security checks are local"
+    )]
     pub(crate) fn handle_web_command(
         &mut self,
         cmd: crate::web::protocol::WebCommand,
@@ -288,12 +284,18 @@ impl App {
         use crate::web::snapshot;
 
         match cmd {
+            WebCommand::WebConnect { initial_buffer_id } => {
+                if let Some(buffer_id) = initial_buffer_id {
+                    self.web_active_buffers
+                        .insert(session_id.to_string(), buffer_id);
+                }
+            }
             WebCommand::SendMessage { buffer_id, text } => {
                 self.web_send_message(&buffer_id, &text);
             }
             WebCommand::SwitchBuffer { buffer_id } => {
-                self.state.set_active_buffer(&buffer_id);
-                self.update_shell_input_state();
+                self.web_active_buffers
+                    .insert(session_id.to_string(), buffer_id.clone());
                 let web_id = format!("web-{session_id}");
                 if self.shell_mgr.has_web_session(&web_id) {
                     self.force_broadcast_web_shell_screen(&web_id);
@@ -335,7 +337,20 @@ impl App {
             WebCommand::RunCommand { buffer_id, text } => {
                 self.web_run_command(&buffer_id, &text);
             }
-            WebCommand::ShellInput { buffer_id: _, data } => {
+            WebCommand::ShellInput { buffer_id, data } => {
+                if self.web_active_buffers.get(session_id) != Some(&buffer_id) {
+                    tracing::debug!(%session_id, %buffer_id, "ignoring shell input for inactive web buffer");
+                    return;
+                }
+                if !self
+                    .state
+                    .buffers
+                    .get(&buffer_id)
+                    .is_some_and(|b| b.buffer_type == crate::state::buffer::BufferType::Shell)
+                {
+                    tracing::debug!(%session_id, %buffer_id, "ignoring shell input for non-shell buffer");
+                    return;
+                }
                 let web_id = format!("web-{session_id}");
                 if let Ok(bytes) =
                     base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &data)
@@ -344,13 +359,27 @@ impl App {
                 }
             }
             WebCommand::WebDisconnect => {
+                self.web_active_buffers.remove(session_id);
                 self.shell_mgr.close_web_by_session(session_id);
             }
             WebCommand::ShellResize {
-                buffer_id: _,
+                buffer_id,
                 cols,
                 rows,
             } => {
+                if self.web_active_buffers.get(session_id) != Some(&buffer_id) {
+                    tracing::debug!(%session_id, %buffer_id, "ignoring shell resize for inactive web buffer");
+                    return;
+                }
+                if !self
+                    .state
+                    .buffers
+                    .get(&buffer_id)
+                    .is_some_and(|b| b.buffer_type == crate::state::buffer::BufferType::Shell)
+                {
+                    tracing::debug!(%session_id, %buffer_id, "ignoring shell resize for non-shell buffer");
+                    return;
+                }
                 let web_id = format!("web-{session_id}");
                 if self.shell_mgr.has_web_session(&web_id) {
                     self.shell_mgr.resize_web(&web_id, cols, rows);
@@ -366,10 +395,23 @@ impl App {
     /// Execute a command from a web client in the context of a buffer.
     fn web_run_command(&mut self, buffer_id: &str, text: &str) {
         let prior = self.state.active_buffer_id.clone();
-        self.state.set_active_buffer(buffer_id);
+        self.set_active_buffer_silent(buffer_id);
         self.handle_submit(text);
         if let Some(id) = prior {
-            self.state.set_active_buffer(&id);
+            self.set_active_buffer_silent(&id);
+        } else {
+            self.state.active_buffer_id = None;
+        }
+    }
+
+    fn set_active_buffer_silent(&mut self, buffer_id: &str) {
+        if !self.state.buffers.contains_key(buffer_id) {
+            return;
+        }
+        self.state.active_buffer_id = Some(buffer_id.to_string());
+        if let Some(buf) = self.state.buffers.get_mut(buffer_id) {
+            buf.activity = crate::state::buffer::ActivityLevel::None;
+            buf.unread_count = 0;
         }
     }
 

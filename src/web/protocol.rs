@@ -102,6 +102,8 @@ pub enum WebEvent {
         cursor_row: u16,
         cursor_col: u16,
         cursor_visible: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
     },
 }
 
@@ -138,6 +140,9 @@ pub enum WebCommand {
     /// Clean up web-specific resources on disconnect (sent internally).
     #[serde(skip)]
     WebDisconnect,
+    /// Register a newly connected web session with its initial active buffer.
+    #[serde(skip)]
+    WebConnect { initial_buffer_id: Option<String> },
 }
 
 /// Buffer metadata sent in `SyncInit` and `BufferCreated`.

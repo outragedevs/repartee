@@ -30,13 +30,15 @@ pub fn load_or_generate_tls_config(cert_path: &str, key_path: &str) -> Result<Ar
 /// Generate a self-signed certificate and key in the given directory.
 /// Returns `(cert_path, key_path)`.
 pub fn generate_self_signed_to(dir: &Path) -> Result<(PathBuf, PathBuf)> {
-    std::fs::create_dir_all(dir)?;
+    crate::fs_secure::create_dir_all(dir, 0o700)?;
 
     let cert_path = dir.join("self-signed.pem");
     let key_path = dir.join("self-signed-key.pem");
 
     // Skip regeneration if both files already exist.
     if cert_path.exists() && key_path.exists() {
+        crate::fs_secure::restrict_path(&cert_path, 0o600)?;
+        crate::fs_secure::restrict_path(&key_path, 0o600)?;
         tracing::info!("using existing self-signed cert at {}", cert_path.display());
         return Ok((cert_path, key_path));
     }
@@ -52,8 +54,8 @@ pub fn generate_self_signed_to(dir: &Path) -> Result<(PathBuf, PathBuf)> {
     let key_pair = rcgen::KeyPair::generate()?;
     let cert = params.self_signed(&key_pair)?;
 
-    std::fs::write(&cert_path, cert.pem())?;
-    std::fs::write(&key_path, key_pair.serialize_pem())?;
+    crate::fs_secure::write_file(&cert_path, cert.pem(), 0o600)?;
+    crate::fs_secure::write_file(&key_path, key_pair.serialize_pem(), 0o600)?;
 
     tracing::info!("generated self-signed TLS cert at {}", cert_path.display());
     Ok((cert_path, key_path))

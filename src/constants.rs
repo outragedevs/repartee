@@ -80,20 +80,26 @@ pub fn certs_dir() -> PathBuf {
 
 /// Create config directory and write default files on first run.
 pub fn ensure_config_dir() {
-    if let Err(e) = std::fs::create_dir_all(theme_dir()) {
+    if let Err(e) = crate::fs_secure::create_dir_all(&home_dir(), 0o700) {
+        tracing::warn!("failed to create app dir: {e}");
+    }
+    if let Err(e) = crate::fs_secure::create_dir_all(&theme_dir(), 0o700) {
         tracing::warn!("failed to create theme dir: {e}");
     }
-    if let Err(e) = std::fs::create_dir_all(log_dir()) {
+    if let Err(e) = crate::fs_secure::create_dir_all(&log_dir(), 0o700) {
         tracing::warn!("failed to create log dir: {e}");
     }
-    if let Err(e) = std::fs::create_dir_all(scripts_dir()) {
+    if let Err(e) = crate::fs_secure::create_dir_all(&scripts_dir(), 0o700) {
         tracing::warn!("failed to create scripts dir: {e}");
     }
-    if let Err(e) = std::fs::create_dir_all(sessions_dir()) {
+    if let Err(e) = crate::fs_secure::create_dir_all(&sessions_dir(), 0o700) {
         tracing::warn!("failed to create sessions dir: {e}");
     }
-    if let Err(e) = std::fs::create_dir_all(dicts_dir()) {
+    if let Err(e) = crate::fs_secure::create_dir_all(&dicts_dir(), 0o700) {
         tracing::warn!("failed to create dicts dir: {e}");
+    }
+    if let Err(e) = crate::fs_secure::create_dir_all(&certs_dir(), 0o700) {
+        tracing::warn!("failed to create certs dir: {e}");
     }
 
     // Write default config if missing
@@ -105,6 +111,15 @@ pub fn ensure_config_dir() {
         } else {
             tracing::info!("Created default config at {}", cfg.display());
         }
+    } else if let Err(e) = crate::fs_secure::restrict_path(&cfg, 0o600) {
+        tracing::warn!("failed to secure config file: {e}");
+    }
+
+    let env = env_path();
+    if env.exists()
+        && let Err(e) = crate::fs_secure::restrict_path(&env, 0o600)
+    {
+        tracing::warn!("failed to secure env file: {e}");
     }
 
     // Sync bundled themes to the user's theme directory (creates missing

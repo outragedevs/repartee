@@ -10,6 +10,9 @@ pub fn load_env(path: &Path) -> Result<HashMap<String, String>> {
     if !path.exists() {
         return Ok(vars);
     }
+    if let Err(e) = crate::fs_secure::restrict_path(path, 0o600) {
+        tracing::warn!("failed to secure env file {}: {e}", path.display());
+    }
     let content = std::fs::read_to_string(path)?;
     for line in content.lines() {
         let trimmed = line.trim();
@@ -62,7 +65,7 @@ pub fn set_env_value(path: &Path, key: &str, value: &str) -> Result<()> {
         lines.push(new_line);
     }
 
-    std::fs::write(path, lines.join("\n") + "\n")?;
+    crate::fs_secure::write_file(path, lines.join("\n") + "\n", 0o600)?;
     Ok(())
 }
 

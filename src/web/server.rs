@@ -6,12 +6,13 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
+use axum_extra::extract::cookie::{Cookie, SameSite};
 use color_eyre::eyre::Result;
 use rust_embed::Embed;
 use serde::Deserialize;
 use tokio::sync::{Mutex, mpsc};
 
-use super::auth::{RateLimiter, SessionStore, verify_password};
+use super::auth::{RateLimiter, SessionStore, session_cookie_name, verify_password};
 use super::broadcast::WebBroadcaster;
 use super::protocol::WebCommand;
 
@@ -45,14 +46,14 @@ struct LoginRequest {
 
 /// Peer address injected via Extension by the TLS accept loop.
 #[derive(Debug, Clone)]
-struct PeerAddr(SocketAddr);
+pub struct PeerAddr(pub SocketAddr);
 
-/// POST /api/login — authenticate and return a session token.
+/// POST /api/login — authenticate and set the session cookie.
 async fn login_handler(
     peer: Option<axum::Extension<PeerAddr>>,
     State(state): State<Arc<AppHandle>>,
     Json(body): Json<LoginRequest>,
-) -> impl IntoResponse {
+) -> Response {
     let ip = peer.map_or_else(|| "unknown".to_string(), |p| p.0.0.ip().to_string());
 
     {
@@ -63,20 +64,33 @@ async fn login_handler(
                 Json(serde_json::json!({
                     "error": format!("rate limited, retry in {}s", remaining.as_secs())
                 })),
-            );
+            )
+                .into_response();
         }
     }
 
     if verify_password(&body.password, &state.password) {
         let token = state.session_store.lock().await.create(&ip);
         state.rate_limiter.lock().await.record_success(&ip);
-        (StatusCode::OK, Json(serde_json::json!({ "token": token })))
+        let cookie = Cookie::build((session_cookie_name(), token))
+            .http_only(true)
+            .secure(true)
+            .same_site(SameSite::Strict)
+            .path("/")
+            .build();
+        (
+            StatusCode::OK,
+            [(axum::http::header::SET_COOKIE, cookie.to_string())],
+            Json(serde_json::json!({ "ok": true })),
+        )
+            .into_response()
     } else {
         state.rate_limiter.lock().await.record_failure(&ip);
         (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "invalid password" })),
         )
+            .into_response()
     }
 }
 
@@ -312,6 +326,13 @@ mod tests {
 
         let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        let set_cookie = response
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap();
+        assert!(set_cookie.contains("HttpOnly"));
+        assert!(set_cookie.contains("SameSite=Strict"));
     }
 
     #[tokio::test]

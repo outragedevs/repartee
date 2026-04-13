@@ -24,10 +24,11 @@ const RECONNECT_MAX_MS: u32 = 30_000;
 /// Connect to the WebSocket server and spawn the message loop.
 ///
 /// Automatically reconnects on connection drop with exponential backoff.
-/// Gives up only if the token is cleared (auth failure or user logout).
+/// Gives up only if the session hint is cleared (auth failure or logout).
 pub fn connect(state: &AppState) {
-    let token = state.token.get_untracked();
-    let Some(token) = token else { return };
+    if !state.session_hint.get_untracked() {
+        return;
+    }
 
     let Some(window) = web_sys::window() else {
         web_sys::console::warn_1(&"no window object".into());
@@ -37,7 +38,7 @@ pub fn connect(state: &AppState) {
     let host = location.host().unwrap_or_default();
     let proto = location.protocol().unwrap_or_default();
     let ws_scheme = if proto == "https:" { "wss" } else { "ws" };
-    let url = format!("{ws_scheme}://{host}/ws?token={token}");
+    let url = format!("{ws_scheme}://{host}/ws");
 
     let state = *state;
 
@@ -59,8 +60,8 @@ pub fn connect(state: &AppState) {
                     state.connected.set(false);
 
                     if !was_connected {
-                        // Never received SyncInit → server rejected (401/expired token).
-                        state.token.set(None);
+                        state.authenticated.set(false);
+                        state.session_hint.set(false);
                         break;
                     }
                     // Was connected but dropped — will retry below.
@@ -69,11 +70,14 @@ pub fn connect(state: &AppState) {
                     let msg = format!("{e}");
                     state.error.set(Some(format!("Connection error: {msg}")));
                     state.connected.set(false);
+                    if !state.authenticated.get_untracked() {
+                        state.session_hint.set(false);
+                        break;
+                    }
                 }
             }
 
-            // Stop retrying if token was cleared (user logged out or auth rejected).
-            if state.token.get_untracked().is_none() {
+            if !state.session_hint.get_untracked() {
                 break;
             }
 

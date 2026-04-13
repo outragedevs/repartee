@@ -238,6 +238,12 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v0.9.1
+
+- **Web session isolation and auth hardening** — web shell snapshots and active-buffer state are now isolated per session, WebSocket auth no longer sends bearer tokens in the URL, and session validation enforces client IP continuity.
+- **Secret storage hardening** — E2E private material stored in SQLite is now encrypted at rest, with compatibility for existing databases during migration.
+- **Local runtime hardening** — `~/.repartee` runtime files now use owner-only permissions where required, TLS/private env material is written securely, and local attach rejects peers from a different Unix UID.
+
 ### v0.9.0
 
 - **RPE2E end-to-end encryption** — native E2E for repartee with per-peer trust, pending accept/decline flow, reciprocal key exchange, key export/import, revoke/reverify, and channel/query support.

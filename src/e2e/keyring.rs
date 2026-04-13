@@ -10,6 +10,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use aes_gcm::{Aes256Gcm, Key};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::e2e::crypto::aead::SessionKey;
@@ -127,13 +128,55 @@ pub struct ChannelConfig {
 #[derive(Debug, Clone)]
 pub struct Keyring {
     db: Arc<Mutex<Connection>>,
+    secret_key: Option<Key<Aes256Gcm>>,
 }
 
 impl Keyring {
     /// Construct a keyring that shares the given SQLite connection.
     #[must_use]
     pub fn new(db: Arc<Mutex<Connection>>) -> Self {
-        Self { db }
+        Self {
+            db,
+            secret_key: None,
+        }
+    }
+
+    pub fn new_encrypted(db: Arc<Mutex<Connection>>) -> Result<Self> {
+        let key_hex = crate::storage::crypto::load_or_create_keyring_key()
+            .map_err(crate::e2e::error::E2eError::Keyring)?;
+        let secret_key = crate::storage::crypto::import_key(&key_hex)
+            .map_err(crate::e2e::error::E2eError::Keyring)?;
+        Ok(Self {
+            db,
+            secret_key: Some(secret_key),
+        })
+    }
+
+    fn encode_secret(&self, bytes: &[u8]) -> Result<Vec<u8>> {
+        self.secret_key.as_ref().map_or_else(
+            || Ok(bytes.to_vec()),
+            |key| {
+                crate::storage::crypto::encrypt_bytes(bytes, key)
+                    .map_err(crate::e2e::error::E2eError::Keyring)
+            },
+        )
+    }
+
+    fn decode_secret<const N: usize>(&self, bytes: &[u8], field: &str) -> Result<[u8; N]> {
+        let decoded = match self.secret_key.as_ref() {
+            Some(key) if bytes.len() != N => crate::storage::crypto::decrypt_bytes(bytes, key)
+                .map_err(crate::e2e::error::E2eError::Keyring)?,
+            _ => bytes.to_vec(),
+        };
+        if decoded.len() != N {
+            return Err(crate::e2e::error::E2eError::Keyring(format!(
+                "{field} has unexpected length {}",
+                decoded.len()
+            )));
+        }
+        let mut out = [0u8; N];
+        out.copy_from_slice(&decoded);
+        Ok(out)
     }
 
     pub fn replace_all_for_import(
@@ -156,12 +199,13 @@ impl Keyring {
         tx.execute("DELETE FROM e2e_identity", [])?;
 
         let (pubkey, privkey, fingerprint, created_at) = identity;
+        let enc_privkey = self.encode_secret(privkey)?;
         tx.execute(
             "INSERT INTO e2e_identity (id, pubkey, privkey, fingerprint, created_at)
              VALUES (1, ?1, ?2, ?3, ?4)",
             params![
                 pubkey.as_slice(),
-                privkey.as_slice(),
+                enc_privkey,
                 fingerprint.as_slice(),
                 created_at
             ],
@@ -185,6 +229,7 @@ impl Keyring {
         }
 
         for sess in incoming {
+            let enc_sk = self.encode_secret(&sess.sk)?;
             tx.execute(
                 "INSERT INTO e2e_incoming_sessions
                     (handle, channel, fingerprint, sk, status, created_at)
@@ -193,7 +238,7 @@ impl Keyring {
                     sess.handle,
                     sess.channel,
                     sess.fingerprint.as_slice(),
-                    sess.sk.as_slice(),
+                    enc_sk,
                     sess.status.as_str(),
                     sess.created_at,
                 ],
@@ -201,13 +246,14 @@ impl Keyring {
         }
 
         for sess in outgoing {
+            let enc_sk = self.encode_secret(&sess.sk)?;
             tx.execute(
                 "INSERT INTO e2e_outgoing_sessions
                     (channel, sk, created_at, pending_rotation)
                  VALUES (?1, ?2, ?3, ?4)",
                 params![
                     sess.channel,
-                    sess.sk.as_slice(),
+                    enc_sk,
                     sess.created_at,
                     i64::from(sess.pending_rotation),
                 ],
@@ -246,13 +292,14 @@ impl Keyring {
         fingerprint: &Fingerprint,
         created_at: i64,
     ) -> Result<()> {
+        let enc_privkey = self.encode_secret(privkey)?;
         let conn = self.db.lock().expect("keyring mutex poisoned");
         conn.execute(
             "INSERT OR REPLACE INTO e2e_identity (id, pubkey, privkey, fingerprint, created_at)
              VALUES (1, ?1, ?2, ?3, ?4)",
             params![
                 pubkey.as_slice(),
-                privkey.as_slice(),
+                enc_privkey,
                 fingerprint.as_slice(),
                 created_at
             ],
@@ -273,22 +320,18 @@ impl Keyring {
         let Some((pk, sk, fp, ts)) = row else {
             return Ok(None);
         };
-        // We stored fixed-length blobs — length-mismatch here means the DB
-        // was hand-tampered. Treat as a hard error to avoid silent corruption.
-        if pk.len() != 32 || sk.len() != 32 || fp.len() != 16 {
+        if pk.len() != 32 || fp.len() != 16 {
             return Err(crate::e2e::error::E2eError::Keyring(format!(
-                "e2e_identity row has unexpected blob lengths (pk={}, sk={}, fp={})",
+                "e2e_identity row has unexpected blob lengths (pk={}, fp={})",
                 pk.len(),
-                sk.len(),
                 fp.len()
             )));
         }
         let mut pk_arr = [0u8; 32];
-        let mut sk_arr = [0u8; 32];
         let mut fp_arr = [0u8; 16];
         pk_arr.copy_from_slice(&pk);
-        sk_arr.copy_from_slice(&sk);
         fp_arr.copy_from_slice(&fp);
+        let sk_arr = self.decode_secret::<32>(&sk, "e2e_identity privkey")?;
         Ok(Some((pk_arr, sk_arr, fp_arr, ts)))
     }
 
@@ -424,12 +467,13 @@ impl Keyring {
         sk: &SessionKey,
         created_at: i64,
     ) -> Result<()> {
+        let enc_sk = self.encode_secret(sk)?;
         let conn = self.db.lock().expect("keyring mutex poisoned");
         conn.execute(
             "INSERT OR REPLACE INTO e2e_outgoing_sessions
                 (channel, sk, created_at, pending_rotation)
              VALUES (?1, ?2, ?3, 0)",
-            params![channel, sk.as_slice(), created_at],
+            params![channel, enc_sk, created_at],
         )?;
         Ok(())
     }
@@ -447,14 +491,7 @@ impl Keyring {
         let Some((sk, ts, pr)) = row else {
             return Ok(None);
         };
-        if sk.len() != 32 {
-            return Err(crate::e2e::error::E2eError::Keyring(format!(
-                "e2e_outgoing_sessions row sk has unexpected length {}",
-                sk.len()
-            )));
-        }
-        let mut k = [0u8; 32];
-        k.copy_from_slice(&sk);
+        let k = self.decode_secret::<32>(&sk, "e2e_outgoing_sessions sk")?;
         Ok(Some(OutgoingSession {
             channel: channel.to_string(),
             sk: k,
@@ -484,6 +521,7 @@ impl Keyring {
     // ---------- incoming sessions ----------
 
     pub fn set_incoming_session(&self, s: &IncomingSession) -> Result<()> {
+        let enc_sk = self.encode_secret(&s.sk)?;
         let conn = self.db.lock().expect("keyring mutex poisoned");
         conn.execute(
             "INSERT OR REPLACE INTO e2e_incoming_sessions
@@ -493,7 +531,7 @@ impl Keyring {
                 s.handle,
                 s.channel,
                 s.fingerprint.as_slice(),
-                s.sk.as_slice(),
+                enc_sk,
                 s.status.as_str(),
                 s.created_at,
             ],
@@ -514,6 +552,7 @@ impl Keyring {
     /// `set_incoming_session` remains for explicit-override paths
     /// (`/e2e reverify`, import, tests).
     pub fn install_incoming_session_strict(&self, s: &IncomingSession) -> Result<()> {
+        let enc_sk = self.encode_secret(&s.sk)?;
         let conn = self.db.lock().expect("keyring mutex poisoned");
         let existing: Option<Vec<u8>> = conn
             .query_row(
@@ -539,7 +578,7 @@ impl Keyring {
                 s.handle,
                 s.channel,
                 s.fingerprint.as_slice(),
-                s.sk.as_slice(),
+                enc_sk,
                 s.status.as_str(),
                 s.created_at,
             ],
@@ -564,17 +603,15 @@ impl Keyring {
         let Some((fp, sk, st, ts)) = row else {
             return Ok(None);
         };
-        if fp.len() != 16 || sk.len() != 32 {
+        if fp.len() != 16 {
             return Err(crate::e2e::error::E2eError::Keyring(format!(
-                "e2e_incoming_sessions row has unexpected blob lengths (fp={}, sk={})",
+                "e2e_incoming_sessions row has unexpected blob lengths (fp={})",
                 fp.len(),
-                sk.len()
             )));
         }
         let mut fp_arr = [0u8; 16];
-        let mut sk_arr = [0u8; 32];
         fp_arr.copy_from_slice(&fp);
-        sk_arr.copy_from_slice(&sk);
+        let sk_arr = self.decode_secret::<32>(&sk, "e2e_incoming_sessions sk")?;
         Ok(Some(IncomingSession {
             handle: handle.to_string(),
             channel: channel.to_string(),
@@ -672,17 +709,15 @@ impl Keyring {
         let mut out = Vec::new();
         for row in rows {
             let (handle, fp, sk, st, ts) = row?;
-            if fp.len() != 16 || sk.len() != 32 {
+            if fp.len() != 16 {
                 return Err(crate::e2e::error::E2eError::Keyring(format!(
-                    "e2e_incoming_sessions row has unexpected blob lengths (fp={}, sk={})",
+                    "e2e_incoming_sessions row has unexpected blob lengths (fp={})",
                     fp.len(),
-                    sk.len()
                 )));
             }
             let mut fp_arr = [0u8; 16];
-            let mut sk_arr = [0u8; 32];
             fp_arr.copy_from_slice(&fp);
-            sk_arr.copy_from_slice(&sk);
+            let sk_arr = self.decode_secret::<32>(&sk, "e2e_incoming_sessions sk")?;
             out.push(IncomingSession {
                 handle,
                 channel: channel.to_string(),
@@ -924,17 +959,15 @@ impl Keyring {
         let mut out = Vec::new();
         for row in rows {
             let (handle, channel, fp, sk, st, ts) = row?;
-            if fp.len() != 16 || sk.len() != 32 {
+            if fp.len() != 16 {
                 return Err(crate::e2e::error::E2eError::Keyring(format!(
-                    "e2e_incoming_sessions row has unexpected blob lengths (fp={}, sk={})",
+                    "e2e_incoming_sessions row has unexpected blob lengths (fp={})",
                     fp.len(),
-                    sk.len()
                 )));
             }
             let mut fp_arr = [0u8; 16];
-            let mut sk_arr = [0u8; 32];
             fp_arr.copy_from_slice(&fp);
-            sk_arr.copy_from_slice(&sk);
+            let sk_arr = self.decode_secret::<32>(&sk, "e2e_incoming_sessions sk")?;
             out.push(IncomingSession {
                 handle,
                 channel,
@@ -964,14 +997,7 @@ impl Keyring {
         let mut out = Vec::new();
         for row in rows {
             let (channel, sk, ts, pr) = row?;
-            if sk.len() != 32 {
-                return Err(crate::e2e::error::E2eError::Keyring(format!(
-                    "e2e_outgoing_sessions row sk has unexpected length {}",
-                    sk.len()
-                )));
-            }
-            let mut sk_arr = [0u8; 32];
-            sk_arr.copy_from_slice(&sk);
+            let sk_arr = self.decode_secret::<32>(&sk, "e2e_outgoing_sessions sk")?;
             out.push(OutgoingSession {
                 channel,
                 sk: sk_arr,
@@ -1134,6 +1160,17 @@ mod tests {
         Keyring::new(Arc::new(Mutex::new(conn)))
     }
 
+    fn open_mem_encrypted() -> Keyring {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        let key_hex = crate::storage::crypto::generate_key_hex();
+        let secret_key = crate::storage::crypto::import_key(&key_hex).unwrap();
+        Keyring {
+            db: Arc::new(Mutex::new(conn)),
+            secret_key: Some(secret_key),
+        }
+    }
+
     #[test]
     fn identity_roundtrip() {
         let kr = open_mem();
@@ -1141,6 +1178,31 @@ mod tests {
         let sk = [2u8; 32];
         let fp = [3u8; 16];
         kr.save_identity(&pk, &sk, &fp, 1000).unwrap();
+        let (lpk, lsk, lfp, lts) = kr.load_identity().unwrap().unwrap();
+        assert_eq!(lpk, pk);
+        assert_eq!(lsk, sk);
+        assert_eq!(lfp, fp);
+        assert_eq!(lts, 1000);
+    }
+
+    #[test]
+    fn identity_roundtrip_encrypted_at_rest() {
+        let kr = open_mem_encrypted();
+        let pk = [1u8; 32];
+        let sk = [2u8; 32];
+        let fp = [3u8; 16];
+        kr.save_identity(&pk, &sk, &fp, 1000).unwrap();
+
+        let stored_privkey: Vec<u8> = kr
+            .db
+            .lock()
+            .unwrap()
+            .query_row("SELECT privkey FROM e2e_identity WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_ne!(stored_privkey.len(), 32);
+
         let (lpk, lsk, lfp, lts) = kr.load_identity().unwrap().unwrap();
         assert_eq!(lpk, pk);
         assert_eq!(lsk, sk);

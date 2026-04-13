@@ -14,11 +14,12 @@ impl App {
             return Ok(());
         }
         let dir = crate::constants::sessions_dir();
-        std::fs::create_dir_all(&dir)?;
+        crate::fs_secure::create_dir_all(&dir, 0o700)?;
         let path = crate::session::socket_path(std::process::id());
         // Remove stale socket from a previous run.
         let _ = std::fs::remove_file(&path);
         let listener = tokio::net::UnixListener::bind(&path)?;
+        crate::fs_secure::restrict_path(&path, 0o600)?;
         tracing::info!("session socket listening at {}", path.display());
         self.socket_listener = Some(listener);
         Ok(())
@@ -42,6 +43,11 @@ impl App {
         use crate::session::protocol::{self, MainMessage, ShimMessage};
         use crate::session::writer::SocketWriter;
         use tokio::sync::mpsc;
+
+        if !same_user_peer(&stream)? {
+            tracing::warn!("rejecting shim connection from different local user");
+            return Ok(());
+        }
 
         // If a shim is already connected, disconnect it first.
         if self.is_socket_attached {
@@ -208,5 +214,32 @@ impl App {
     /// Send Quit to the connected shim before shutdown.
     pub(crate) fn notify_shim_quit(&self) {
         self.send_shim_control(crate::session::protocol::MainMessage::Quit);
+    }
+}
+
+fn same_user_peer(stream: &tokio::net::UnixStream) -> Result<bool> {
+    #[cfg(unix)]
+    {
+        let peer = stream.peer_cred()?;
+        let uid = peer.uid();
+        let expected = unsafe { libc::geteuid() };
+        Ok(uid == expected)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = stream;
+        Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_user_peer;
+
+    #[tokio::test]
+    async fn same_user_peer_accepts_current_uid() {
+        let (left, _right) = tokio::net::UnixStream::pair().unwrap();
+        assert!(same_user_peer(&left).unwrap());
     }
 }

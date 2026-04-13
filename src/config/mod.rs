@@ -510,10 +510,10 @@ pub fn load_config(path: &Path) -> Result<AppConfig> {
 /// Save config to TOML file.
 pub fn save_config(path: &Path, config: &AppConfig) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        crate::fs_secure::create_dir_all(parent, 0o700)?;
     }
     let content = toml::to_string_pretty(config)?;
-    std::fs::write(path, content)?;
+    crate::fs_secure::write_file(path, content, 0o600)?;
     Ok(())
 }
 

@@ -194,6 +194,7 @@ impl App {
             cursor_row,
             cursor_col,
             cursor_visible,
+            session_id: None,
         });
     }
 
@@ -222,11 +223,20 @@ impl App {
             return;
         };
         let cols = self.shell_mgr.screen_cols_web(web_id);
-        let buffer_id = self
+        let Some(session_id) = web_id.strip_prefix("web-") else {
+            return;
+        };
+        let Some(buffer_id) = self.web_active_buffers.get(session_id).cloned() else {
+            return;
+        };
+        if !self
             .state
-            .active_buffer()
-            .map(|b| b.id.clone())
-            .unwrap_or_default();
+            .buffers
+            .get(&buffer_id)
+            .is_some_and(|b| b.buffer_type == BufferType::Shell)
+        {
+            return;
+        }
         self.broadcast_web(crate::web::protocol::WebEvent::ShellScreen {
             buffer_id,
             cols,
@@ -234,6 +244,7 @@ impl App {
             cursor_row,
             cursor_col,
             cursor_visible,
+            session_id: Some(session_id.to_string()),
         });
     }
 }

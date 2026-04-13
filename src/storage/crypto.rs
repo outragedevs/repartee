@@ -7,9 +7,10 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 
 use crate::constants::APP_NAME;
 
-/// Key name stored in the .env file (`APP_NAME` uppercased + `_LOG_KEY`).
-fn env_key_name() -> String {
-    format!("{}_LOG_KEY", APP_NAME.to_uppercase())
+const SECRET_BLOB_VERSION: u8 = 1;
+
+fn env_key_name_with_suffix(suffix: &str) -> String {
+    format!("{}_{}", APP_NAME.to_uppercase(), suffix)
 }
 
 /// Encrypted payload: base64-encoded ciphertext and the 12-byte IV used.
@@ -72,7 +73,12 @@ pub fn decrypt(ciphertext_b64: &str, iv: &[u8], key: &Key<Aes256Gcm>) -> Result<
 /// Load or create the encryption key from the default .env path.
 pub fn load_or_create_key() -> Result<String, String> {
     let path = crate::constants::env_path();
-    load_or_create_key_at(&path)
+    load_or_create_named_key_at(&path, "LOG_KEY")
+}
+
+pub fn load_or_create_keyring_key() -> Result<String, String> {
+    let path = crate::constants::env_path();
+    load_or_create_named_key_at(&path, "KEYRING_KEY")
 }
 
 /// Load the encryption key from `path`, or generate one and append it.
@@ -81,10 +87,17 @@ pub fn load_or_create_key() -> Result<String, String> {
 /// If the key line is missing, a new key is generated and appended.
 /// On Unix, the file is chmod 0o600.
 pub fn load_or_create_key_at(path: &Path) -> Result<String, String> {
-    let key_name = env_key_name();
+    load_or_create_named_key_at(path, "LOG_KEY")
+}
+
+fn load_or_create_named_key_at(path: &Path, suffix: &str) -> Result<String, String> {
+    let key_name = env_key_name_with_suffix(suffix);
 
     // Try to read existing key from file
     if path.exists() {
+        #[cfg(unix)]
+        crate::fs_secure::restrict_path(path, 0o600)
+            .map_err(|e| format!("failed to set permissions on {}: {e}", path.display()))?;
         let file = std::fs::File::open(path)
             .map_err(|e| format!("failed to open {}: {e}", path.display()))?;
         let reader = std::io::BufReader::new(file);
@@ -105,7 +118,7 @@ pub fn load_or_create_key_at(path: &Path) -> Result<String, String> {
 
     // Ensure parent directory exists
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
+        crate::fs_secure::create_dir_all(parent, 0o700)
             .map_err(|e| format!("failed to create directory {}: {e}", parent.display()))?;
     }
 
@@ -118,15 +131,40 @@ pub fn load_or_create_key_at(path: &Path) -> Result<String, String> {
     writeln!(file, "{key_name}={new_key}").map_err(|e| format!("failed to write key: {e}"))?;
 
     // Set file permissions to 0600 on Unix
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(path, perms)
-            .map_err(|e| format!("failed to set permissions: {e}"))?;
-    }
+    crate::fs_secure::restrict_path(path, 0o600)
+        .map_err(|e| format!("failed to set permissions: {e}"))?;
 
     Ok(new_key)
+}
+
+pub fn encrypt_bytes(plaintext: &[u8], key: &Key<Aes256Gcm>) -> Result<Vec<u8>, String> {
+    let cipher = Aes256Gcm::new(key);
+    let mut iv_bytes = [0u8; 12];
+    rand::fill(&mut iv_bytes);
+    let nonce = Nonce::from_slice(&iv_bytes);
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext)
+        .map_err(|e| format!("encryption failed: {e}"))?;
+
+    let mut out = Vec::with_capacity(1 + iv_bytes.len() + ciphertext.len());
+    out.push(SECRET_BLOB_VERSION);
+    out.extend_from_slice(&iv_bytes);
+    out.extend_from_slice(&ciphertext);
+    Ok(out)
+}
+
+pub fn decrypt_bytes(ciphertext: &[u8], key: &Key<Aes256Gcm>) -> Result<Vec<u8>, String> {
+    if ciphertext.len() < 13 {
+        return Err("ciphertext too short".to_string());
+    }
+    if ciphertext[0] != SECRET_BLOB_VERSION {
+        return Err(format!("unsupported secret blob version {}", ciphertext[0]));
+    }
+    let nonce = Nonce::from_slice(&ciphertext[1..13]);
+    let cipher = Aes256Gcm::new(key);
+    cipher
+        .decrypt(nonce, &ciphertext[13..])
+        .map_err(|e| format!("decryption failed: {e}"))
 }
 
 #[cfg(test)]
@@ -199,5 +237,14 @@ mod tests {
 
         // Cleanup
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn encrypt_decrypt_bytes_roundtrip() {
+        let key = import_key(&generate_key_hex()).unwrap();
+        let plaintext = b"super secret key material";
+        let encrypted = encrypt_bytes(plaintext, &key).unwrap();
+        let decrypted = decrypt_bytes(&encrypted, &key).unwrap();
+        assert_eq!(decrypted, plaintext);
     }
 }

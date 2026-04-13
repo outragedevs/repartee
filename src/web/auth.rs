@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use crate::constants::APP_NAME;
+
 /// Rate limiter that tracks failed login attempts per IP with exponential backoff.
 pub struct RateLimiter {
     attempts: HashMap<String, AttemptState>,
@@ -77,7 +79,6 @@ pub struct SessionStore {
 
 pub struct Session {
     pub created_at: Instant,
-    #[expect(dead_code, reason = "used by web::server for session validation")]
     pub ip: String,
 }
 
@@ -104,9 +105,12 @@ impl SessionStore {
     }
 
     /// Validate a session token. Returns the session if valid and not expired.
-    pub fn validate(&self, token: &str) -> Option<&Session> {
+    pub fn validate(&self, token: &str, ip: &str) -> Option<&Session> {
         let session = self.sessions.get(token)?;
         if session.created_at.elapsed() > self.max_age {
+            return None;
+        }
+        if session.ip != ip {
             return None;
         }
         Some(session)
@@ -118,6 +122,10 @@ impl SessionStore {
         self.sessions
             .retain(|_, s| s.created_at.elapsed() < max_age);
     }
+}
+
+pub fn session_cookie_name() -> String {
+    format!("{}_web_session", APP_NAME.to_lowercase())
 }
 
 /// Generate a cryptographically random 32-byte hex session token.
@@ -195,8 +203,9 @@ mod tests {
         let mut store = SessionStore::with_hours(24);
         let token = store.create("1.2.3.4");
         assert_eq!(token.len(), 64); // 32 bytes = 64 hex chars
-        assert!(store.validate(&token).is_some());
-        assert!(store.validate("invalid-token").is_none());
+        assert!(store.validate(&token, "1.2.3.4").is_some());
+        assert!(store.validate(&token, "5.6.7.8").is_none());
+        assert!(store.validate("invalid-token", "1.2.3.4").is_none());
     }
 
     #[test]

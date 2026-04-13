@@ -19,8 +19,8 @@ pub fn Login() -> impl IntoView {
 
         leptos::task::spawn_local(async move {
             match do_login(&pw).await {
-                Ok(token) => {
-                    state.token.set(Some(token));
+                Ok(()) => {
+                    state.session_hint.set(true);
                     crate::ws::connect(&state);
                 }
                 Err(e) => {
@@ -58,7 +58,7 @@ pub fn Login() -> impl IntoView {
     }
 }
 
-async fn do_login(password: &str) -> Result<String, String> {
+async fn do_login(password: &str) -> Result<(), String> {
     let window = web_sys::window().ok_or("no window object")?;
     let location = window.location();
     let origin = location.origin().map_err(|_| "failed to get origin")?;
@@ -81,10 +81,7 @@ async fn do_login(password: &str) -> Result<String, String> {
     let json: serde_json::Value = resp.json().await.map_err(|e| format!("parse error: {e}"))?;
 
     if resp.ok() {
-        json["token"]
-            .as_str()
-            .map(String::from)
-            .ok_or_else(|| "no token in response".to_string())
+        Ok(())
     } else {
         Err(json["error"].as_str().unwrap_or("login failed").to_string())
     }

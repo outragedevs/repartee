@@ -1,32 +1,36 @@
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use axum_extra::extract::cookie::CookieJar;
 use futures::{SinkExt, StreamExt};
 use tokio::time::{Duration, interval};
 
 use super::protocol::{WebCommand, WebEvent};
 use super::server::AppHandle;
+use super::{auth, server::PeerAddr};
 
-/// Query parameter for WebSocket auth.
-#[derive(serde::Deserialize)]
-pub struct WsQuery {
-    token: String,
-}
-
-/// GET /ws?token=xxx — WebSocket upgrade with token authentication.
+/// GET /ws — WebSocket upgrade with cookie-based session authentication.
 pub async fn ws_handler(
-    Query(query): Query<WsQuery>,
+    jar: CookieJar,
     State(state): State<Arc<AppHandle>>,
+    peer: Option<axum::Extension<PeerAddr>>,
     ws: axum::extract::WebSocketUpgrade,
 ) -> impl IntoResponse {
-    // Validate session token.
+    let ip = peer.map_or_else(|| "unknown".to_string(), |p| p.0.0.ip().to_string());
+    let Some(token) = jar
+        .get(&auth::session_cookie_name())
+        .map(|cookie| cookie.value().to_string())
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+
     let valid = state
         .session_store
         .lock()
         .await
-        .validate(&query.token)
+        .validate(&token, &ip)
         .is_some();
     if !valid {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -36,7 +40,17 @@ pub async fn ws_handler(
     tracing::info!(session_id = %session_id, "web client connecting");
 
     ws.on_upgrade(move |socket| async move {
-        handle_socket(socket, state, session_id).await;
+        let initial_buffer_id = initial_active_buffer_from_snapshot(&state);
+        let _ = state
+            .web_cmd_tx
+            .send((
+                WebCommand::WebConnect {
+                    initial_buffer_id: initial_buffer_id.clone(),
+                },
+                session_id.clone(),
+            ))
+            .await;
+        handle_socket(socket, state, session_id, initial_buffer_id).await;
     })
     .into_response()
 }
@@ -51,12 +65,14 @@ async fn handle_socket(
     socket: axum::extract::ws::WebSocket,
     state: Arc<AppHandle>,
     session_id: String,
+    initial_buffer_id: Option<String>,
 ) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let mut broadcast_rx = state.broadcaster.subscribe();
+    let mut active_buffer_id = initial_buffer_id;
 
     // Send SyncInit.
-    let sync_init = build_sync_init_from_snapshot(&state);
+    let sync_init = build_sync_init_from_snapshot(&state, active_buffer_id.clone());
     tracing::info!(session_id = %session_id, "sending SyncInit");
     if send_json(&mut ws_tx, &sync_init).await.is_err() {
         tracing::warn!(session_id = %session_id, "failed to send SyncInit");
@@ -84,7 +100,7 @@ async fn handle_socket(
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!(session_id = %session_id, lagged = n, "web client lagged — sending resync");
                         // Re-send SyncInit so the client can recover missed state.
-                        let resync = build_sync_init_from_snapshot(&state);
+                        let resync = build_sync_init_from_snapshot(&state, active_buffer_id.clone());
                         if send_json(&mut ws_tx, &resync).await.is_err() {
                             break;
                         }
@@ -99,6 +115,9 @@ async fn handle_socket(
                     Some(Ok(axum::extract::ws::Message::Text(text))) => {
                         match serde_json::from_str::<WebCommand>(&text) {
                             Ok(cmd) => {
+                                if let WebCommand::SwitchBuffer { ref buffer_id } = cmd {
+                                    active_buffer_id = Some(buffer_id.clone());
+                                }
                                 if state.web_cmd_tx.send((cmd, session_id.clone())).await.is_err() {
                                     tracing::warn!(session_id = %session_id, "web_cmd channel closed");
                                     break;
@@ -142,7 +161,7 @@ async fn handle_socket(
 }
 
 /// Build a `SyncInit` from the shared state snapshot.
-fn build_sync_init_from_snapshot(state: &AppHandle) -> WebEvent {
+fn build_sync_init_from_snapshot(state: &AppHandle, active_buffer_id: Option<String>) -> WebEvent {
     if let Some(ref snapshot) = state.web_state_snapshot
         && let Ok(snap) = snapshot.read()
     {
@@ -150,7 +169,7 @@ fn build_sync_init_from_snapshot(state: &AppHandle) -> WebEvent {
             buffers: snap.buffers.clone(),
             connections: snap.connections.clone(),
             mention_count: snap.mention_count,
-            active_buffer_id: snap.active_buffer_id.clone(),
+            active_buffer_id,
             timestamp_format: snap.timestamp_format.clone(),
         };
     }
@@ -159,7 +178,7 @@ fn build_sync_init_from_snapshot(state: &AppHandle) -> WebEvent {
         buffers: Vec::new(),
         connections: Vec::new(),
         mention_count: 0,
-        active_buffer_id: None,
+        active_buffer_id,
         timestamp_format: crate::config::WebConfig::default().timestamp_format,
     }
 }
@@ -172,11 +191,24 @@ fn is_targeted_to_other(event: &WebEvent, session_id: &str) -> bool {
     let target = match event {
         WebEvent::Messages { session_id, .. }
         | WebEvent::NickList { session_id, .. }
-        | WebEvent::MentionsList { session_id, .. } => session_id.as_deref(),
+        | WebEvent::MentionsList { session_id, .. }
+        | WebEvent::ShellScreen { session_id, .. } => session_id.as_deref(),
         _ => None,
     };
     // If target is Some and doesn't match, skip this event.
     target.is_some_and(|t| t != session_id)
+}
+
+fn initial_active_buffer_from_snapshot(state: &AppHandle) -> Option<String> {
+    let snapshot = state.web_state_snapshot.as_ref()?;
+    let snap = snapshot.read().ok()?;
+    snap.active_buffer_id.clone().or_else(|| {
+        snap.buffers
+            .iter()
+            .find(|buffer| buffer.buffer_type == "channel")
+            .map(|buffer| buffer.id.clone())
+            .or_else(|| snap.buffers.first().map(|buffer| buffer.id.clone()))
+    })
 }
 
 /// Send a `WebEvent` as JSON text through the WebSocket.
@@ -193,5 +225,25 @@ async fn send_json(
             tracing::warn!("failed to serialize WebEvent: {e}");
             Err(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_screen_is_filtered_for_other_sessions() {
+        let event = WebEvent::ShellScreen {
+            buffer_id: "shell/zsh".into(),
+            cols: 80,
+            rows: Vec::new(),
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_visible: true,
+            session_id: Some("session-a".into()),
+        };
+        assert!(is_targeted_to_other(&event, "session-b"));
+        assert!(!is_targeted_to_other(&event, "session-a"));
     }
 }

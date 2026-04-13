@@ -102,6 +102,8 @@ pub enum WebEvent {
         cursor_row: u16,
         cursor_col: u16,
         cursor_visible: bool,
+        #[serde(default)]
+        session_id: Option<String>,
     },
 }
 

@@ -435,6 +435,7 @@ pub struct App {
         Option<std::sync::Arc<tokio::sync::Mutex<crate::web::auth::RateLimiter>>>,
     pub(crate) web_state_snapshot:
         Option<std::sync::Arc<std::sync::RwLock<crate::web::server::WebStateSnapshot>>>,
+    pub(crate) web_active_buffers: HashMap<String, String>,
     pub web_restart_pending: bool,
     /// Tracks the current local date for emitting "day changed" markers.
     pub(crate) last_day: chrono::NaiveDate,
@@ -486,7 +487,7 @@ impl App {
         if config.e2e.enabled
             && let Some(storage_ref) = storage.as_ref()
         {
-            let keyring = crate::e2e::keyring::Keyring::new(storage_ref.db.clone());
+            let keyring = crate::e2e::keyring::Keyring::new_encrypted(storage_ref.db.clone())?;
             match crate::e2e::E2eManager::load_or_init_with_config(keyring, &config.e2e) {
                 Ok(mgr) => {
                     let fp = mgr.fingerprint();
@@ -665,6 +666,7 @@ impl App {
             web_sessions: None,
             web_rate_limiter: None,
             web_state_snapshot: None,
+            web_active_buffers: HashMap::new(),
             web_restart_pending: false,
             last_day: chrono::Local::now().date_naive(),
         };
