@@ -59,12 +59,10 @@ jobs:
             runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             artifact: repartee-linux-amd64
-            deps: sudo apt-get update && sudo apt-get install -y libchafa-dev libglib2.0-dev pkg-config
           - name: Linux ARM64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             artifact: repartee-linux-arm64
-            deps: sudo apt-get update && sudo apt-get install -y libchafa-dev libglib2.0-dev pkg-config
     steps:
       - uses: actions/checkout@v6
 
@@ -74,20 +72,10 @@ jobs:
           name: wasm-assets
           path: static/web/
 
-      - name: Install system dependencies (Linux)
-        if: contains(matrix.runner, 'ubuntu')
-        run: ${{ matrix.deps }}
-
-      - name: Install system dependencies (macOS)
-        if: contains(matrix.runner, 'macos')
-        run: brew install chafa
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build release binary
-        env:
-          PKG_CONFIG_PATH: /usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/aarch64-linux-gnu/pkgconfig
         run: cargo build --release --locked
 
       - name: Strip binary
@@ -126,7 +114,7 @@ jobs:
           mem: 8192
           cpu: 4
           prepare: |
-            pkg install -y rust chafa pkgconf
+            pkg install -y rust
           run: |
             cargo build --release --locked
             strip target/release/repartee

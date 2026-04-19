@@ -40,7 +40,7 @@ Terminal, mobile web, and desktop web — all in real-time sync:
 - **Embedded shell** — full PTY terminal inside Repartee (`/shell`) — run vim, btop, irssi without leaving the client. Also available in the web frontend via beamterm WebGL2 renderer with Nerd Font, mouse selection, Ctrl+/- font resize, and clipboard paste
 - **Detach & reattach** — detach from your terminal and reattach later; IRC connections stay alive
 - **Extban** — `$a:account` ban type with `/ban -a` shorthand
-- **Single binary** — ~20MB (SQLite, Lua, and WASM frontend bundled). Runtime dependency: `libchafa` (image rendering)
+- **Single binary** — ~20MB (SQLite, Lua, and WASM frontend bundled). No external C libraries required for image preview
 
 ---
 
@@ -68,13 +68,12 @@ cargo install repartee
 ```bash
 git clone https://github.com/outragedevs/repartee.git
 cd repartee
-cargo build --release
+make release
 ./target/release/repartee
 ```
 
 ### Requirements
 
-- **Runtime**: `libchafa` >= 1.8.0 (image rendering) — `brew install chafa` / `apt install libchafa-dev` / `pkg install chafa`
 - **Build**: Rust 1.85+ (2024 edition) — install via [rustup](https://rustup.rs)
 - A terminal with 256-color or truecolor support (iTerm2, Alacritty, kitty, WezTerm, Ghostty, Subterm, etc.)
 - A modern web browser for the web frontend (optional)

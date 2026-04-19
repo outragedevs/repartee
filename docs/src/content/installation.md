@@ -21,7 +21,7 @@ If you want to hack on repartee or run the latest unreleased code:
 ```bash
 git clone https://github.com/outragedevs/repartee.git
 cd repartee
-cargo build --release
+make release
 ./target/release/repartee
 ```
 

@@ -60,7 +60,7 @@ hkdf = "0.12"
 bip39 = "2"
 zeroize = { version = "1", features = ["derive"] }
 mlua = { version = "0.11.6", features = ["lua54", "vendored", "send"] }
-ratatui-image = "10.0"
+ratatui-image = { version = "10.0", default-features = false, features = ["image-defaults", "crossterm"] }
 spellbook = "0.4"
 image = "0.25"
 reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
