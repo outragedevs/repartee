@@ -405,7 +405,7 @@ pub struct App {
     pub should_detach: bool,
     pub(crate) socket_listener: Option<tokio::net::UnixListener>,
     pub(crate) socket_output_tx:
-        Option<tokio::sync::mpsc::Sender<crate::session::protocol::MainMessage>>,
+        Option<tokio::sync::mpsc::UnboundedSender<crate::session::protocol::MainMessage>>,
     pub(crate) shim_event_rx:
         Option<tokio::sync::mpsc::Receiver<crate::session::protocol::ShimMessage>>,
     pub is_socket_attached: bool,

@@ -71,7 +71,7 @@ impl App {
         let rows = term_env.rows;
 
         // Set up output channel: SocketWriter → mpsc → write_half.
-        let (output_tx, mut output_rx) = mpsc::channel::<MainMessage>(1024);
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<MainMessage>();
         let output_handle = tokio::spawn(async move {
             let mut write_half = write_half;
             while let Some(msg) = output_rx.recv().await {
@@ -172,7 +172,7 @@ impl App {
     /// Send a control `MainMessage` through the shim output channel.
     pub(crate) fn send_shim_control(&self, msg: crate::session::protocol::MainMessage) {
         if let Some(ref tx) = self.socket_output_tx
-            && let Err(e) = tx.try_send(msg)
+            && let Err(e) = tx.send(msg)
         {
             tracing::warn!("shim control channel full or closed: {e}");
         }
