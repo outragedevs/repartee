@@ -9,6 +9,7 @@ node_modules/
 /.claude/skills
 skills-lock.json
 memory.db*
+memory_optimization_2026-04-24.md
 # Brainstorm artifacts
 .superpowers/
 # Python bytecode cache

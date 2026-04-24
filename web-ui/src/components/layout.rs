@@ -46,7 +46,9 @@ pub fn Layout() -> impl IntoView {
 
     let active_buf = move || {
         let active_id = state.active_buffer.get()?;
-        state.buffers.get().into_iter().find(|b| b.id == active_id)
+        state
+            .buffers
+            .with(|bufs| bufs.iter().find(|b| b.id == active_id).cloned())
     };
 
     // Hide nick list for shell buffers (shells have no users to list).

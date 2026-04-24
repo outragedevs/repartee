@@ -41,7 +41,9 @@ impl App {
         stream: tokio::net::UnixStream,
     ) -> Result<()> {
         use crate::session::protocol::{self, MainMessage, ShimMessage};
-        use crate::session::writer::SocketWriter;
+        use crate::session::writer::{MAX_SOCKET_OUTPUT_QUEUE_BYTES, SocketWriter};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio::sync::mpsc;
 
         if !same_user_peer(&stream)? {
@@ -72,13 +74,20 @@ impl App {
 
         // Set up output channel: SocketWriter → mpsc → write_half.
         let (output_tx, mut output_rx) = mpsc::unbounded_channel::<MainMessage>();
+        let queued_output_bytes = Arc::new(AtomicUsize::new(0));
+        let output_queued_bytes = Arc::clone(&queued_output_bytes);
         let output_handle = tokio::spawn(async move {
             let mut write_half = write_half;
             while let Some(msg) = output_rx.recv().await {
-                if protocol::write_message(&mut write_half, &msg)
-                    .await
-                    .is_err()
-                {
+                let output_len = match &msg {
+                    MainMessage::Output(data) => data.len(),
+                    MainMessage::Detached | MainMessage::Quit => 0,
+                };
+                let result = protocol::write_message(&mut write_half, &msg).await;
+                if output_len > 0 {
+                    output_queued_bytes.fetch_sub(output_len, Ordering::AcqRel);
+                }
+                if result.is_err() {
                     tracing::warn!("shim output write failed, closing output task");
                     break;
                 }
@@ -87,7 +96,11 @@ impl App {
         });
 
         // Create socket-backed terminal.
-        let socket_writer = SocketWriter::new(output_tx.clone());
+        let socket_writer = SocketWriter::new(
+            output_tx.clone(),
+            queued_output_bytes,
+            MAX_SOCKET_OUTPUT_QUEUE_BYTES,
+        );
         let terminal = ui::setup_socket_terminal(Box::new(socket_writer), cols, rows)?;
 
         // Set up input reader: read ShimMessages from socket → mpsc.

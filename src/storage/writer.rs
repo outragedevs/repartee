@@ -10,6 +10,7 @@ use super::types::LogRow;
 
 const BATCH_SIZE: usize = 50;
 const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+const MAX_PENDING_ROWS: usize = 4096;
 
 /// Handle to the background writer task.
 pub struct LogWriterHandle {
@@ -56,6 +57,7 @@ async fn writer_loop(
         tokio::select! {
             Some(row) = row_rx.recv() => {
                 queue.push(row);
+                cap_pending_rows(&mut queue);
                 if queue.len() >= BATCH_SIZE {
                     queue = flush_blocking(&db, queue, crypto_key).await;
                 }
@@ -68,6 +70,7 @@ async fn writer_loop(
             _ = shutdown_rx.recv() => {
                 while let Ok(row) = row_rx.try_recv() {
                     queue.push(row);
+                    cap_pending_rows(&mut queue);
                 }
                 if !queue.is_empty() {
                     flush_blocking(&db, queue, crypto_key).await;
@@ -76,6 +79,19 @@ async fn writer_loop(
             }
         }
     }
+}
+
+fn cap_pending_rows(queue: &mut Vec<LogRow>) {
+    if queue.len() <= MAX_PENDING_ROWS {
+        return;
+    }
+    let dropped = queue.len() - MAX_PENDING_ROWS;
+    queue.drain(..dropped);
+    tracing::warn!(
+        dropped,
+        max = MAX_PENDING_ROWS,
+        "log writer queue exceeded memory cap; dropped oldest pending rows"
+    );
 }
 
 async fn flush_blocking(
@@ -190,6 +206,18 @@ mod tests {
     fn msg_count(conn: &Connection) -> i64 {
         conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
             .unwrap()
+    }
+
+    #[test]
+    fn cap_pending_rows_drops_oldest_rows() {
+        let mut queue: Vec<LogRow> = (0..=MAX_PENDING_ROWS)
+            .map(|i| make_row(&format!("row-{i}")))
+            .collect();
+
+        cap_pending_rows(&mut queue);
+
+        assert_eq!(queue.len(), MAX_PENDING_ROWS);
+        assert_eq!(queue.first().unwrap().text, "row-1");
     }
 
     #[tokio::test]

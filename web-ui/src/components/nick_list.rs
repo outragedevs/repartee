@@ -9,8 +9,7 @@ pub fn NickList() -> impl IntoView {
 
     let nicks = move || {
         let active_id = state.active_buffer.get()?;
-        let lists = state.nick_lists.get();
-        lists.get(&active_id).cloned()
+        state.nick_lists.with(|lists| lists.get(&active_id).cloned())
     };
 
     let grouped = move || {

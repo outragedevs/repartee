@@ -25,8 +25,7 @@ pub fn ChatView() -> impl IntoView {
 
     let messages = move || {
         let active_id = state.active_buffer.get()?;
-        let msgs = state.messages.get();
-        msgs.get(&active_id).cloned()
+        state.messages.with(|msgs| msgs.get(&active_id).cloned())
     };
 
     let our_nick = move || -> Option<String> {

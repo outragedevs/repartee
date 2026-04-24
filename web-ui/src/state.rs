@@ -4,6 +4,8 @@ use leptos::prelude::*;
 
 use crate::protocol::*;
 
+const MAX_BUFFER_MESSAGES: usize = 2000;
+
 /// Client-side application state, stored as Leptos signals.
 #[derive(Clone, Copy)]
 pub struct AppState {
@@ -124,7 +126,9 @@ impl AppState {
             }
             WebEvent::NewMessage { buffer_id, message } => {
                 self.messages.update(|msgs| {
-                    msgs.entry(buffer_id.clone()).or_default().push(message);
+                    let entry = msgs.entry(buffer_id.clone()).or_default();
+                    entry.push(message);
+                    cap_messages(entry);
                 });
                 // Update unread count if not the active buffer.
                 let is_active = self.active_buffer.get_untracked().as_deref() == Some(&buffer_id);
@@ -220,6 +224,7 @@ impl AppState {
                     // Prepend older messages (they come from scroll-back).
                     let mut combined = with_separators;
                     combined.append(entry);
+                    cap_messages(&mut combined);
                     *entry = combined;
                 });
                 // Mark this buffer's DB backlog as loaded so the Layout Effect
@@ -424,6 +429,15 @@ impl AppState {
             });
         });
     }
+}
+
+fn cap_messages(messages: &mut Vec<WireMessage>) {
+    if messages.len() <= MAX_BUFFER_MESSAGES {
+        return;
+    }
+    let drop_count = messages.len() - MAX_BUFFER_MESSAGES;
+    messages.drain(..drop_count);
+    messages.shrink_to(MAX_BUFFER_MESSAGES);
 }
 
 fn buf_type_order(t: &str) -> u8 {

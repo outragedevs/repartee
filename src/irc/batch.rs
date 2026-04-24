@@ -23,6 +23,8 @@ const MAX_NICKS_DISPLAY: usize = 15;
 /// Maximum time a batch can remain open before being discarded (60 seconds).
 const BATCH_TIMEOUT_SECS: u64 = 60;
 
+const MAX_BATCH_MESSAGES: usize = 4096;
+
 /// Information about an in-progress batch.
 #[derive(Debug, Clone)]
 pub struct BatchInfo {
@@ -32,6 +34,7 @@ pub struct BatchInfo {
     pub params: Vec<String>,
     /// Messages collected while the batch was open.
     pub messages: Vec<IrcMessage>,
+    pub dropped_messages: usize,
     /// When this batch was opened.
     pub started_at: Instant,
 }
@@ -52,6 +55,7 @@ impl BatchTracker {
                 batch_type: batch_type.to_uppercase(),
                 params,
                 messages: Vec::new(),
+                dropped_messages: 0,
                 started_at: Instant::now(),
             },
         );
@@ -93,6 +97,18 @@ impl BatchTracker {
             return false;
         };
         if let Some(info) = self.open.get_mut(&tag) {
+            if info.messages.len() >= MAX_BATCH_MESSAGES {
+                info.dropped_messages += 1;
+                if info.dropped_messages == 1 {
+                    tracing::warn!(
+                        tag,
+                        batch_type = %info.batch_type,
+                        max = MAX_BATCH_MESSAGES,
+                        "discarding excess IRCv3 batch messages"
+                    );
+                }
+                return true;
+            }
             info.messages.push(msg);
             true
         } else {
@@ -414,6 +430,21 @@ mod tests {
     }
 
     #[test]
+    fn batch_message_cap_discards_excess() {
+        let mut tracker = BatchTracker::default();
+        tracker.start_batch("abc", "NETSPLIT", vec![]);
+
+        for _ in 0..MAX_BATCH_MESSAGES + 2 {
+            let msg = make_batched_message("abc", Command::QUIT(Some("split".to_string())));
+            assert!(tracker.add_message(msg));
+        }
+
+        let batch = tracker.end_batch("abc").expect("batch should exist");
+        assert_eq!(batch.messages.len(), MAX_BATCH_MESSAGES);
+        assert_eq!(batch.dropped_messages, 2);
+    }
+
+    #[test]
     fn is_batched_detects_batch_tag() {
         let mut tracker = BatchTracker::default();
         tracker.start_batch("ref1", "NETSPLIT", vec![]);
@@ -527,6 +558,7 @@ mod tests {
             batch_type: "NETSPLIT".to_string(),
             params: vec!["hub.net".to_string(), "leaf.net".to_string()],
             started_at: Instant::now(),
+            dropped_messages: 0,
             messages: vec![
                 make_quit_msg("alice", "hub.net leaf.net", "ref1"),
                 make_quit_msg("bob", "hub.net leaf.net", "ref1"),
@@ -620,6 +652,7 @@ mod tests {
                 batch_type: "NETSPLIT".to_string(),
                 params: vec![],
                 messages: vec![],
+                dropped_messages: 0,
                 started_at: Instant::now()
                     .checked_sub(std::time::Duration::from_secs(120))
                     .unwrap(),
@@ -724,6 +757,7 @@ mod tests {
             batch_type: "NETSPLIT".to_string(),
             params: vec!["hub.net".to_string(), "leaf.net".to_string()],
             started_at: Instant::now(),
+            dropped_messages: 0,
             messages: vec![
                 make_quit_msg("Alice", "hub.net leaf.net", "ref1"),
                 make_quit_msg("BOB", "hub.net leaf.net", "ref1"),

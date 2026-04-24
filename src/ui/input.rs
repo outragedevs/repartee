@@ -7,6 +7,7 @@ use crate::app::App;
 use crate::theme::hex_to_color;
 
 const MAX_HISTORY: usize = 100;
+const MAX_HISTORY_ENTRY_BYTES: usize = 4096;
 
 /// Active inline spell correction state.
 pub struct SpellCorrection {
@@ -168,7 +169,7 @@ impl InputState {
 
     pub fn submit(&mut self) -> String {
         let val = self.clear();
-        if !val.is_empty() {
+        if !val.is_empty() && val.len() <= MAX_HISTORY_ENTRY_BYTES {
             self.history.push_back(val.clone());
             if self.history.len() > MAX_HISTORY {
                 self.history.pop_front();
@@ -188,13 +189,13 @@ impl InputState {
                 self.saved_input = Some(self.value.clone());
                 let idx = self.history.len() - 1;
                 self.history_index = Some(idx);
-                self.value.clone_from(&self.history[idx]);
+                self.value = self.history[idx].clone();
                 self.cursor_pos = self.value.len();
             }
             Some(idx) if idx > 0 => {
                 let new_idx = idx - 1;
                 self.history_index = Some(new_idx);
-                self.value.clone_from(&self.history[new_idx]);
+                self.value = self.history[new_idx].clone();
                 self.cursor_pos = self.value.len();
             }
             _ => {}
@@ -207,7 +208,7 @@ impl InputState {
             Some(idx) if idx + 1 < self.history.len() => {
                 let new_idx = idx + 1;
                 self.history_index = Some(new_idx);
-                self.value.clone_from(&self.history[new_idx]);
+                self.value = self.history[new_idx].clone();
                 self.cursor_pos = self.value.len();
             }
             Some(_) => {
@@ -516,6 +517,12 @@ fn detect_subcommand_context(text_before: &str) -> Option<SubcommandContext> {
     None
 }
 
+fn byte_at_char(text: &str, char_idx: usize) -> usize {
+    text.char_indices()
+        .nth(char_idx)
+        .map_or(text.len(), |(idx, _)| idx)
+}
+
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let colors = &app.theme.colors;
     let fg_muted = hex_to_color(&colors.fg_muted).unwrap_or(Color::DarkGray);
@@ -550,23 +557,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         0
     };
 
-    // Build byte-index lookup for char positions (Vec<usize> — no char data copied)
-    let byte_indices: Vec<usize> = app.input.value.char_indices().map(|(i, _)| i).collect();
-    let total_chars = byte_indices.len();
     let string_len = app.input.value.len();
-    let visible_end = (scroll_offset + available_width).min(total_chars);
 
-    let byte_at = |char_idx: usize| -> usize {
-        if char_idx >= total_chars {
-            string_len
-        } else {
-            byte_indices[char_idx]
-        }
-    };
-
-    let visible_start_byte = byte_at(scroll_offset);
-    let cursor_byte = byte_at(cursor_char_pos);
-    let visible_end_byte = byte_at(visible_end);
+    let visible_start_byte = byte_at_char(&app.input.value, scroll_offset);
+    let cursor_byte = app.input.cursor_pos.min(string_len);
+    let visible_end_byte = byte_at_char(
+        &app.input.value,
+        scroll_offset.saturating_add(available_width),
+    );
 
     let cursor_char = app.input.value[cursor_byte..].chars().next().unwrap_or(' ');
     let cursor_end_byte = cursor_byte + cursor_char.len_utf8().min(string_len - cursor_byte);
@@ -925,6 +923,29 @@ mod tests {
         let mut input = InputState::new();
         input.submit();
         assert!(input.history.is_empty());
+    }
+
+    #[test]
+    fn history_oversized_entry_not_pushed() {
+        let mut input = InputState::new();
+        input.value = "x".repeat(MAX_HISTORY_ENTRY_BYTES + 1);
+        input.cursor_pos = input.value.len();
+
+        let submitted = input.submit();
+
+        assert_eq!(submitted.len(), MAX_HISTORY_ENTRY_BYTES + 1);
+        assert!(input.history.is_empty());
+    }
+
+    #[test]
+    fn byte_at_char_handles_multibyte_text() {
+        let text = "aé日";
+
+        assert_eq!(byte_at_char(text, 0), 0);
+        assert_eq!(byte_at_char(text, 1), 1);
+        assert_eq!(byte_at_char(text, 2), 3);
+        assert_eq!(byte_at_char(text, 3), text.len());
+        assert_eq!(byte_at_char(text, 99), text.len());
     }
 
     #[test]
