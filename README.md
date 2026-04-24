@@ -237,6 +237,12 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v0.9.2
+
+- **Memory bounds and long-session hardening** — capped oversized input history entries, bounded socket output buffering, capped storage writer pending rows, and limited IRCv3 batch retention to prevent unbounded memory growth under bursty or degraded conditions.
+- **Web UI memory discipline** — capped client-side messages per buffer and reduced broad signal cloning in the chat, layout, and nick-list components.
+- **Web build refresh** — regenerated bundled web frontend assets for the release.
+
 ### v0.9.1
 
 - **Web session isolation and auth hardening** — web shell snapshots and active-buffer state are now isolated per session, WebSocket auth no longer sends bearer tokens in the URL, and session validation enforces client IP continuity.
