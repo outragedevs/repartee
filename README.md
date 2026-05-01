@@ -237,6 +237,12 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v0.9.3
+
+- **IRCnet reop mode handling** — updated to `irc-proto-repartee` 1.2.2 so channel mode `+R/-R` is parsed as the reop list mode with masks, while registered-only remains lowercase `+r`.
+- **Batched list modes** — `/reop`, `/except`, `/invex`, and their removal commands now batch multiple masks as `+RRR/-RRR`, `+eee/-eee`, and `+III/-III` according to the server `MODES` limit.
+- **Mode display regression tests** — added coverage for `r/R` rendering and multi-mask list-mode display.
+
 ### v0.9.2
 
 - **Memory bounds and long-session hardening** — capped oversized input history entries, bounded socket output buffering, capped storage writer pending rows, and limited IRCv3 batch retention to prevent unbounded memory growth under bursty or degraded conditions.

@@ -2179,7 +2179,10 @@ fn apply_channel_mode(
     let ch = channel_mode_letter(mode_enum);
     let is_list_mode = matches!(
         mode_enum,
-        ChannelMode::Ban | ChannelMode::Exception | ChannelMode::InviteException
+        ChannelMode::Ban
+            | ChannelMode::Exception
+            | ChannelMode::InviteException
+            | ChannelMode::Reop
     );
     if is_list_mode || nick_mode_char.is_some() {
         return;
@@ -2271,7 +2274,8 @@ const fn channel_mode_letter(m: &irc::proto::ChannelMode) -> char {
         ChannelMode::InviteException => 'I',
         ChannelMode::Key => 'k',
         ChannelMode::Moderated => 'm',
-        ChannelMode::RegisteredOnly => 'R',
+        ChannelMode::RegisteredOnly => 'r',
+        ChannelMode::Reop => 'R',
         ChannelMode::Secret => 's',
         ChannelMode::ProtectedTopic => 't',
         ChannelMode::NoExternalMessages => 'n',
@@ -4241,6 +4245,68 @@ mod tests {
         let buf = state.buffers.get("test/#test").unwrap();
         assert_eq!(buf.topic.as_deref(), Some("new topic"));
         assert_eq!(buf.topic_set_by.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn registered_only_and_reop_render_distinct_mode_letters() {
+        let registered = [irc::proto::Mode::Plus(
+            irc::proto::ChannelMode::RegisteredOnly,
+            None,
+        )];
+        let reop = [irc::proto::Mode::Plus(
+            irc::proto::ChannelMode::Reop,
+            Some("*!*@ops".to_string()),
+        )];
+
+        assert_eq!(build_channel_mode_string(&registered), "+r");
+        assert_eq!(build_channel_mode_string(&reop), "+R *!*@ops");
+    }
+
+    #[test]
+    fn reop_mode_is_list_mode_not_channel_mode() {
+        let mut state = make_test_state();
+        let msg = IrcMessage::new(
+            Some("oper!user@host"),
+            "MODE",
+            vec!["#test", "+R", "*!*@ops"],
+        )
+        .unwrap();
+
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        assert!(buf.modes.as_deref().is_none_or(str::is_empty));
+        assert_eq!(
+            buf.messages.back().unwrap().text,
+            "oper sets mode +R *!*@ops on #test"
+        );
+    }
+
+    #[test]
+    fn list_mode_batches_preserve_parameters_in_display() {
+        let cases = [
+            ("+RRR", "oper sets mode +RRR a b c on #test"),
+            ("-RRR", "oper sets mode -RRR a b c on #test"),
+            ("+eee", "oper sets mode +eee a b c on #test"),
+            ("-eee", "oper sets mode -eee a b c on #test"),
+            ("+III", "oper sets mode +III a b c on #test"),
+            ("-III", "oper sets mode -III a b c on #test"),
+        ];
+
+        for (mode, expected) in cases {
+            let mut state = make_test_state();
+            let msg = IrcMessage::new(
+                Some("oper!user@host"),
+                "MODE",
+                vec!["#test", mode, "a", "b", "c"],
+            )
+            .unwrap();
+
+            handle_irc_message(&mut state, "test", &msg);
+
+            let buf = state.buffers.get("test/#test").unwrap();
+            assert_eq!(buf.messages.back().unwrap().text, expected);
+        }
     }
 
     // === handle_response (numerics) tests ===

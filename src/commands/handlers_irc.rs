@@ -621,6 +621,38 @@ pub(crate) fn cmd_kickban(app: &mut App, args: &[String]) {
     ));
 }
 
+fn max_modes_per_command(app: &App) -> usize {
+    app.active_conn_id()
+        .and_then(|conn_id| app.state.connections.get(conn_id))
+        .map(|conn| conn.isupport_parsed.max_modes())
+        .filter(|max| *max > 0)
+        .unwrap_or(3)
+}
+
+fn list_mode_command_args(
+    channel: &str,
+    sign: char,
+    mode_char: char,
+    masks: &[String],
+    max_modes: usize,
+) -> Vec<Vec<String>> {
+    if masks.is_empty() {
+        return vec![vec![channel.to_string(), format!("{sign}{mode_char}")]];
+    }
+
+    masks
+        .chunks(max_modes.max(1))
+        .map(|chunk| {
+            let modes: String = std::iter::repeat_n(mode_char, chunk.len()).collect();
+            let mut args = Vec::with_capacity(chunk.len() + 2);
+            args.push(channel.to_string());
+            args.push(format!("{sign}{modes}"));
+            args.extend(chunk.iter().cloned());
+            args
+        })
+        .collect()
+}
+
 // Generic list mode helper: request list or set/unset mode
 fn list_mode_set(app: &mut App, args: &[String], mode_char: char) {
     let Some(sender) = app.active_irc_sender().cloned() else {
@@ -634,20 +666,17 @@ fn list_mode_set(app: &mut App, args: &[String], mode_char: char) {
             return;
         }
     };
-    if args.is_empty() {
-        // Clear stored list before requesting fresh one from server
+    let command_args = if args.is_empty() {
         if let Some(buf) = app.state.active_buffer_mut() {
             buf.list_modes.remove(&mode_char.to_string());
         }
-        let _ = sender.send(irc::proto::Command::Raw(
-            "MODE".to_string(),
-            vec![channel, format!("+{mode_char}")],
-        ));
+        list_mode_command_args(&channel, '+', mode_char, &[], max_modes_per_command(app))
     } else {
-        let _ = sender.send(irc::proto::Command::Raw(
-            "MODE".to_string(),
-            vec![channel, format!("+{mode_char}"), args[0].clone()],
-        ));
+        list_mode_command_args(&channel, '+', mode_char, args, max_modes_per_command(app))
+    };
+
+    for args in command_args {
+        let _ = sender.send(irc::proto::Command::Raw("MODE".to_string(), args));
     }
 }
 
@@ -715,11 +744,9 @@ fn list_mode_unset_smart(app: &mut App, args: &[String], mode_char: char, cmd_na
         }
     }
 
-    for mask in &masks {
-        let _ = sender.send(irc::proto::Command::Raw(
-            "MODE".to_string(),
-            vec![channel.clone(), format!("-{mode_char}"), mask.clone()],
-        ));
+    for args in list_mode_command_args(&channel, '-', mode_char, &masks, max_modes_per_command(app))
+    {
+        let _ = sender.send(irc::proto::Command::Raw("MODE".to_string(), args));
     }
 }
 
@@ -1426,5 +1453,76 @@ pub(crate) fn cmd_links(app: &mut App, args: &[String]) {
     let mask = args.get(1).cloned();
     if let Err(e) = sender.send(irc::proto::Command::LINKS(remote, mask)) {
         add_local_event(app, &format!("Failed to send LINKS: {e}"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::list_mode_command_args;
+
+    #[test]
+    fn list_mode_command_args_batches_reop_except_and_invex_adds() {
+        let masks = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+
+        let reop = list_mode_command_args("#chan", '+', 'R', &masks, 3);
+        let except = list_mode_command_args("#chan", '+', 'e', &masks, 3);
+        let invex = list_mode_command_args("#chan", '+', 'I', &masks, 3);
+
+        assert_eq!(
+            reop,
+            vec![vec![
+                "#chan".to_string(),
+                "+RRR".to_string(),
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+            ]]
+        );
+        assert_eq!(except[0][1], "+eee");
+        assert_eq!(invex[0][1], "+III");
+    }
+
+    #[test]
+    fn list_mode_command_args_batches_reop_removes() {
+        let masks = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+
+        let commands = list_mode_command_args("#chan", '-', 'R', &masks, 3);
+
+        assert_eq!(
+            commands,
+            vec![vec![
+                "#chan".to_string(),
+                "-RRR".to_string(),
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+            ]]
+        );
+    }
+
+    #[test]
+    fn list_mode_command_args_splits_at_server_limit() {
+        let masks = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
+
+        let commands = list_mode_command_args("#chan", '-', 'e', &masks, 3);
+
+        assert_eq!(
+            commands,
+            vec![
+                vec![
+                    "#chan".to_string(),
+                    "-eee".to_string(),
+                    "a".to_string(),
+                    "b".to_string(),
+                    "c".to_string(),
+                ],
+                vec!["#chan".to_string(), "-e".to_string(), "d".to_string()],
+            ]
+        );
     }
 }
