@@ -193,6 +193,12 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
         Command::Raw(cmd, args) if cmd == "354" => {
             handle_whox_reply(state, conn_id, args);
         }
+        Command::Raw(cmd, args) if cmd == "330" => {
+            handle_whois_account(state, conn_id, args);
+        }
+        Command::Raw(cmd, args) if cmd == "671" => {
+            handle_whois_secure(state, conn_id, args);
+        }
         // Catch-all for unknown numerics that irc-proto doesn't define
         // (e.g. IRCnet's 344/345 for reop list). Display them like the
         // Response catch-all does — errors to active window, info to server.
@@ -2505,15 +2511,31 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
         Response::RPL_WHOISUSER => {
             if args.len() >= 6 {
                 let target_buf = whois_buffer(state, conn_id);
-                emit(state, &target_buf, &format!(
-                    "%Z7aa2f7───── WHOIS {} ──────────────────────────%N", args[1]
-                ));
-                emit(state, &target_buf, &format!(
-                    "%Zc0caf5{}%Z565f89 ({}@{})%N", args[1], args[2], args[3]
-                ));
-                if args.len() >= 6 && !args[5].is_empty() {
-                    emit(state, &target_buf, &format!("  %Za9b1d6{}%N", args[5]));
-                }
+                emit_event(
+                    state,
+                    &target_buf,
+                    "whois_header",
+                    format!(
+                        "%Z7aa2f7───── WHOIS {} ──────────────────────────%N",
+                        args[1]
+                    ),
+                    vec![args[1].clone()],
+                );
+                emit_event(
+                    state,
+                    &target_buf,
+                    "whois",
+                    format!(
+                        "%Zc0caf5{}%Z565f89 ({}@{})%N %Za9b1d6{}%N",
+                        args[1], args[2], args[3], args[5]
+                    ),
+                    vec![
+                        args[1].clone(),
+                        args[2].clone(),
+                        args[3].clone(),
+                        args[5].clone(),
+                    ],
+                );
             }
         }
         // RPL_WHOISSERVER: args = [our_nick, nick, server, server_info]
@@ -2525,16 +2547,26 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
                 } else {
                     format!(" ({})", args[3])
                 };
-                emit(state, &target_buf, &format!(
-                    "%Z565f89  server: %Za9b1d6{}{info}%N", args[2]
-                ));
+                emit_event(
+                    state,
+                    &target_buf,
+                    "whois_server",
+                    format!("%Z565f89  server: %Za9b1d6{}{info}%N", args[2]),
+                    vec![args[1].clone(), args[2].clone(), args[3].clone(), info],
+                );
             }
         }
         // RPL_WHOISOPERATOR: args = [our_nick, nick, "is an IRC operator"]
         Response::RPL_WHOISOPERATOR => {
             if args.len() >= 3 {
                 let target_buf = whois_buffer(state, conn_id);
-                emit(state, &target_buf, &format!("  %Zbb9af7{}%N", args[2]));
+                emit_event(
+                    state,
+                    &target_buf,
+                    "whois_oper",
+                    format!("  %Zbb9af7{}%N", args[2]),
+                    vec![args[1].clone(), args[2].clone()],
+                );
             }
         }
         // RPL_WHOISIDLE: args = [our_nick, nick, idle_secs, signon_time, ...]
@@ -2542,42 +2574,102 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
             if args.len() >= 3 {
                 let target_buf = whois_buffer(state, conn_id);
                 let idle = args[2].parse::<u64>().unwrap_or(0);
-                let mut line = format!("%Z565f89  idle: %Za9b1d6{}", format_duration(idle));
+                let idle_display = format_duration(idle);
                 if args.len() >= 4
                     && let Ok(ts) = args[3].parse::<i64>()
                 {
                     let dt = chrono::DateTime::from_timestamp(ts, 0)
                         .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
                         .unwrap_or_default();
-                    let _ = write!(line, "%Z565f89, signon: %Za9b1d6{dt}");
+                    emit_event(
+                        state,
+                        &target_buf,
+                        "whois_idle_signon",
+                        format!(
+                            "%Z565f89  idle: %Za9b1d6{idle_display}%Z565f89, signon: %Za9b1d6{dt}%N"
+                        ),
+                        vec![args[1].clone(), idle_display, dt],
+                    );
+                } else {
+                    emit_event(
+                        state,
+                        &target_buf,
+                        "whois_idle",
+                        format!("%Z565f89  idle: %Za9b1d6{idle_display}%N"),
+                        vec![args[1].clone(), idle_display],
+                    );
                 }
-                line.push_str("%N");
-                emit(state, &target_buf, &line);
             }
         }
         // RPL_WHOISCHANNELS: args = [our_nick, nick, channels]
         Response::RPL_WHOISCHANNELS => {
             if args.len() >= 3 {
                 let target_buf = whois_buffer(state, conn_id);
-                emit(state, &target_buf, &format!(
-                    "%Z565f89  channels: %Za9b1d6{}%N", args[2]
-                ));
+                emit_event(
+                    state,
+                    &target_buf,
+                    "whois_channels",
+                    format!("%Z565f89  channels: %Za9b1d6{}%N", args[2]),
+                    vec![args[1].clone(), args[2].clone()],
+                );
+            }
+        }
+        // RPL_WHOISCERTFP: args = [our_nick, nick, fingerprint]
+        Response::RPL_WHOISCERTFP => {
+            if args.len() >= 3 {
+                let target_buf = whois_buffer(state, conn_id);
+                emit_event(
+                    state,
+                    &target_buf,
+                    "whois_certfp",
+                    format!("%Z565f89  certfp: %Za9b1d6{}%N", args[2]),
+                    vec![args[1].clone(), args[2].clone()],
+                );
+            }
+        }
+        // RPL_WHOISKEYVALUE: args = [our_nick, target, key, visibility, value]
+        Response::RPL_WHOISKEYVALUE => {
+            if args.len() >= 5 {
+                let target_buf = whois_buffer(state, conn_id);
+                emit_event(
+                    state,
+                    &target_buf,
+                    "whois_keyvalue",
+                    format!("%Z565f89  {}: %Za9b1d6{}%N", args[2], args[4]),
+                    vec![
+                        args[1].clone(),
+                        args[2].clone(),
+                        args[3].clone(),
+                        args[4].clone(),
+                    ],
+                );
             }
         }
         // RPL_ENDOFWHOIS: args = [our_nick, nick, "End of WHOIS list"]
         Response::RPL_ENDOFWHOIS => {
             let target_buf = whois_buffer(state, conn_id);
-            emit(state, &target_buf,
-                "%Z7aa2f7─────────────────────────────────────────────%N");
+            let nick = args.get(1).cloned().unwrap_or_default();
+            let text = args.get(2).cloned().unwrap_or_default();
+            emit_event(
+                state,
+                &target_buf,
+                "end_of_whois",
+                "%Z7aa2f7─────────────────────────────────────────────%N",
+                vec![nick, text],
+            );
         }
 
         // RPL_AWAY: args = [our_nick, nick, away_message]
         Response::RPL_AWAY => {
             if args.len() >= 3 {
                 let target_buf = whois_buffer(state, conn_id);
-                emit(state, &target_buf, &format!(
-                    "%Z565f89  away: %Ze0af68{}%N", args[2]
-                ));
+                emit_event(
+                    state,
+                    &target_buf,
+                    "whois_away",
+                    format!("%Z565f89  away: %Ze0af68{}%N", args[2]),
+                    vec![args[1].clone(), args[2].clone()],
+                );
             }
         }
 
@@ -2950,6 +3042,33 @@ pub fn emit(state: &mut AppState, buffer_id: &str, text: &str) {
     );
 }
 
+fn emit_event(
+    state: &mut AppState,
+    buffer_id: &str,
+    event_key: &str,
+    text: impl Into<String>,
+    event_params: Vec<String>,
+) {
+    let id = state.next_message_id();
+    state.add_message(
+        buffer_id,
+        Message {
+            id,
+            timestamp: Utc::now(),
+            message_type: MessageType::Event,
+            nick: None,
+            nick_mode: None,
+            text: text.into(),
+            highlight: false,
+            event_key: Some(event_key.to_string()),
+            event_params: Some(event_params),
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: None,
+        },
+    );
+}
+
 /// Get the server's status buffer ID.
 fn server_buffer(state: &AppState, conn_id: &str) -> String {
     let label = state
@@ -2980,6 +3099,37 @@ fn active_or_server_buffer(state: &AppState, conn_id: &str) -> String {
 /// Get the buffer where WHOIS output should go.
 fn whois_buffer(state: &AppState, conn_id: &str) -> String {
     active_or_server_buffer(state, conn_id)
+}
+
+fn handle_whois_account(state: &mut AppState, conn_id: &str, args: &[String]) {
+    if args.len() >= 3 {
+        let target_buf = whois_buffer(state, conn_id);
+        let text = args.get(3).cloned().unwrap_or_default();
+        emit_event(
+            state,
+            &target_buf,
+            "whois_account",
+            format!("%Z565f89  account: %Za9b1d6{}%N", args[2]),
+            vec![args[1].clone(), args[2].clone(), text],
+        );
+    }
+}
+
+fn handle_whois_secure(state: &mut AppState, conn_id: &str, args: &[String]) {
+    if args.len() >= 2 {
+        let target_buf = whois_buffer(state, conn_id);
+        let text = args
+            .get(2)
+            .cloned()
+            .unwrap_or_else(|| "is using a secure connection".to_string());
+        emit_event(
+            state,
+            &target_buf,
+            "whois_secure",
+            "%Z565f89  secure: %Z9ece6aTLS%N",
+            vec![args[1].clone(), "TLS".to_string(), text],
+        );
+    }
 }
 
 /// Format a duration in seconds to a human-readable string.
@@ -5771,6 +5921,223 @@ mod tests {
         let buf = state.buffers.get("test/testserver").unwrap();
         assert_eq!(buf.messages.len(), 1);
         assert!(buf.messages[0].text.contains("alice"));
+    }
+
+    #[test]
+    fn whois_user_and_server_emit_theme_params() {
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+
+        for command in [
+            Command::Response(
+                Response::RPL_WHOISUSER,
+                vec![
+                    "me".to_string(),
+                    "alice".to_string(),
+                    "user".to_string(),
+                    "host.example".to_string(),
+                    "*".to_string(),
+                    "Alice Example".to_string(),
+                ],
+            ),
+            Command::Response(
+                Response::RPL_WHOISSERVER,
+                vec![
+                    "me".to_string(),
+                    "alice".to_string(),
+                    "irc.example".to_string(),
+                    "Example IRCd".to_string(),
+                ],
+            ),
+        ] {
+            let msg = make_irc_msg(None, command);
+            handle_irc_message(&mut state, "test", &msg);
+        }
+
+        let buf = state.buffers.get("test/testserver").unwrap();
+        let keys: Vec<&str> = buf
+            .messages
+            .iter()
+            .filter_map(|msg| msg.event_key.as_deref())
+            .collect();
+
+        assert_eq!(keys, vec!["whois_header", "whois", "whois_server"]);
+        assert_eq!(
+            buf.messages[1].event_params.as_deref(),
+            Some(
+                &[
+                    "alice".to_string(),
+                    "user".to_string(),
+                    "host.example".to_string(),
+                    "Alice Example".to_string(),
+                ][..]
+            )
+        );
+        assert_eq!(
+            buf.messages[2].event_params.as_deref(),
+            Some(
+                &[
+                    "alice".to_string(),
+                    "irc.example".to_string(),
+                    "Example IRCd".to_string(),
+                    " (Example IRCd)".to_string(),
+                ][..]
+            )
+        );
+    }
+
+    #[test]
+    fn whois_detail_responses_emit_theme_keys() {
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+
+        for command in [
+            Command::Response(
+                Response::RPL_WHOISOPERATOR,
+                vec![
+                    "me".to_string(),
+                    "alice".to_string(),
+                    "is an IRC operator".to_string(),
+                ],
+            ),
+            Command::Response(
+                Response::RPL_WHOISIDLE,
+                vec![
+                    "me".to_string(),
+                    "alice".to_string(),
+                    "65".to_string(),
+                    "1700000000".to_string(),
+                ],
+            ),
+            Command::Response(
+                Response::RPL_WHOISCHANNELS,
+                vec![
+                    "me".to_string(),
+                    "alice".to_string(),
+                    "@#ops +#chat".to_string(),
+                ],
+            ),
+            Command::Response(
+                Response::RPL_WHOISCERTFP,
+                vec![
+                    "me".to_string(),
+                    "alice".to_string(),
+                    "0123456789abcdef".to_string(),
+                ],
+            ),
+            Command::Response(
+                Response::RPL_WHOISKEYVALUE,
+                vec![
+                    "me".to_string(),
+                    "alice".to_string(),
+                    "metadata".to_string(),
+                    "public".to_string(),
+                    "value".to_string(),
+                ],
+            ),
+            Command::Response(
+                Response::RPL_AWAY,
+                vec![
+                    "me".to_string(),
+                    "alice".to_string(),
+                    "gone for lunch".to_string(),
+                ],
+            ),
+            Command::Response(
+                Response::RPL_ENDOFWHOIS,
+                vec![
+                    "me".to_string(),
+                    "alice".to_string(),
+                    "End of WHOIS".to_string(),
+                ],
+            ),
+        ] {
+            let msg = make_irc_msg(None, command);
+            handle_irc_message(&mut state, "test", &msg);
+        }
+
+        let buf = state.buffers.get("test/testserver").unwrap();
+        let keys: Vec<&str> = buf
+            .messages
+            .iter()
+            .filter_map(|msg| msg.event_key.as_deref())
+            .collect();
+
+        assert_eq!(
+            keys,
+            vec![
+                "whois_oper",
+                "whois_idle_signon",
+                "whois_channels",
+                "whois_certfp",
+                "whois_keyvalue",
+                "whois_away",
+                "end_of_whois"
+            ]
+        );
+    }
+
+    #[test]
+    fn whois_raw_account_and_secure_are_themeable() {
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+
+        for command in [
+            Command::Raw(
+                "330".to_string(),
+                vec![
+                    "me".to_string(),
+                    "alice".to_string(),
+                    "alice_account".to_string(),
+                    "is logged in as".to_string(),
+                ],
+            ),
+            Command::Raw(
+                "671".to_string(),
+                vec![
+                    "me".to_string(),
+                    "alice".to_string(),
+                    "is using a secure connection".to_string(),
+                ],
+            ),
+        ] {
+            let msg = make_irc_msg(None, command);
+            handle_irc_message(&mut state, "test", &msg);
+        }
+
+        let buf = state.buffers.get("test/testserver").unwrap();
+
+        assert_eq!(buf.messages[0].event_key.as_deref(), Some("whois_account"));
+        assert_eq!(buf.messages[1].event_key.as_deref(), Some("whois_secure"));
+        assert_eq!(
+            buf.messages[1].event_params.as_deref(),
+            Some(
+                &[
+                    "alice".to_string(),
+                    "TLS".to_string(),
+                    "is using a secure connection".to_string(),
+                ][..]
+            )
+        );
+    }
+
+    #[test]
+    fn whois_idle_without_signon_uses_idle_theme_key() {
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+
+        let msg = make_irc_msg(
+            None,
+            Command::Response(
+                Response::RPL_WHOISIDLE,
+                vec!["me".to_string(), "alice".to_string(), "65".to_string()],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/testserver").unwrap();
+
+        assert_eq!(buf.messages[0].event_key.as_deref(), Some("whois_idle"));
     }
 
     #[test]

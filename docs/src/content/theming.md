@@ -58,6 +58,29 @@ Abstracts are named format string templates that can reference each other. They 
 
 See [Format Strings](theming-format-strings.html) for the full format string syntax.
 
+## Event formats
+
+System IRC lines use `[formats.events]`. Each entry receives positional
+arguments from the IRC event. For example, WHOIS replies can be themed with:
+
+```toml
+[formats.events]
+whois = "%Zc0caf5$0%Z565f89 ($1@$2)%N %Za9b1d6$3%N"
+whois_server = "%Z565f89  server: %Za9b1d6$1%N%Z565f89$3%N"
+whois_channels = "%Z565f89  channels: %Za9b1d6$1%N"
+end_of_whois = "%Z7aa2f7─────────────────────────────────────────────%N"
+```
+
+WHOIS event keys are `whois_header`, `whois`, `whois_server`, `whois_oper`,
+`whois_idle`, `whois_idle_signon`, `whois_channels`, `whois_away`,
+`whois_account`, `whois_secure`, `whois_certfp`, `whois_keyvalue`, and
+`end_of_whois`.
+
+WHOIS parameters follow IRC reply structure. Common examples: `whois` receives
+nick, user, host, realname; `whois_server` receives nick, server, server info,
+formatted server info; `whois_idle_signon` receives nick, idle duration, signon
+time; `whois_secure` receives nick, display value, server text.
+
 ## Default theme
 
 If no theme is set, repartee uses built-in defaults with a dark color scheme inspired by Tokyo Night.
