@@ -7,6 +7,8 @@ use crate::storage;
 
 // === Configuration ===
 
+const SERVER_ADD_USAGE: &str = "Usage: /server add <id> <address>[:<port>] [port] [-tls] [-notls] [-tlsverify] [-notlsverify] [-auto] [-noauto] [-label=<name>] [-nick=<nick>] [-username=<user>] [-realname=<name>] [-password=<pass>] [-sasl=<user>:<pass>] [-sasl-user=<user>] [-sasl-pass=<pass>] [-sasl-mechanism=<mechanism>] [-channels=<ch1,ch2>] [-bind=<ip>] [-encoding=<codec>] [-autoreconnect=<bool>] [-reconnect-delay=<secs>] [-reconnect-max-retries=<n>] [-autosendcmd=<cmds>] [-client-cert=<path>]";
+
 pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
     // Reload config
     match crate::config::load_config(&crate::constants::config_path()) {
@@ -214,89 +216,20 @@ pub(crate) fn cmd_server(app: &mut App, args: &[String]) {
     match args[0].as_str() {
         "add" => {
             if args.len() < 3 {
-                add_local_event(
-                    app,
-                    "Usage: /server add <id> <address> [port] [-tls] [-notlsverify] [-noauto] [-label=<name>] [-nick=<nick>] [-password=<pass>] [-sasl=<user>:<pass>] [-bind=<ip>] [-autosendcmd=<cmds>]",
-                );
+                add_local_event(app, SERVER_ADD_USAGE);
                 return;
             }
             let id = args[1].to_lowercase();
-            let address = args[2].clone();
-            let mut port: u16 = 6667;
-            let mut tls = false;
-            let mut tls_verify = true;
-            let mut label = address.clone();
-            let mut autoconnect = true;
-            let mut nick: Option<String> = None;
-            let mut password: Option<String> = None;
-            let mut sasl_user: Option<String> = None;
-            let mut sasl_pass: Option<String> = None;
-            let mut bind_ip: Option<String> = None;
-            let mut autosendcmd: Option<String> = None;
-
-            for arg in args.iter().skip(3) {
-                if arg == "-tls" {
-                    tls = true;
-                } else if arg == "-notlsverify" {
-                    tls_verify = false;
-                } else if arg == "-noauto" {
-                    autoconnect = false;
-                } else if let Some(l) = arg.strip_prefix("-label=") {
-                    label = l.to_string();
-                } else if let Some(n) = arg.strip_prefix("-nick=") {
-                    nick = Some(n.to_string());
-                } else if let Some(p) = arg.strip_prefix("-password=") {
-                    password = Some(p.to_string());
-                } else if let Some(s) = arg.strip_prefix("-sasl=") {
-                    if let Some((user, pass)) = s.split_once(':') {
-                        sasl_user = Some(user.to_string());
-                        sasl_pass = Some(pass.to_string());
-                    } else {
-                        add_local_event(
-                            app,
-                            &format!("{C_ERR}SASL format: -sasl=user:pass{C_RST}"),
-                        );
-                        return;
-                    }
-                } else if let Some(ip) = arg.strip_prefix("-bind=") {
-                    bind_ip = Some(ip.to_string());
-                } else if let Some(cmd) = arg.strip_prefix("-autosendcmd=") {
-                    autosendcmd = Some(cmd.to_string());
-                } else if let Ok(p) = arg.parse::<u16>() {
-                    port = p;
+            let server_config = match parse_server_add_config(&args[2..]) {
+                Ok(config) => config,
+                Err(e) => {
+                    add_local_event(app, &format!("{C_ERR}{e}{C_RST}"));
+                    add_local_event(app, SERVER_ADD_USAGE);
+                    return;
                 }
-            }
+            };
 
-            if tls && port == 6667 {
-                port = 6697;
-            }
-
-            app.config.servers.insert(
-                id.clone(),
-                crate::config::ServerConfig {
-                    label,
-                    address,
-                    port,
-                    tls,
-                    tls_verify,
-                    autoconnect,
-                    channels: vec![],
-                    nick,
-                    username: None,
-                    realname: None,
-                    password,
-                    sasl_user,
-                    sasl_pass,
-                    bind_ip,
-                    encoding: None,
-                    auto_reconnect: None,
-                    reconnect_delay: None,
-                    reconnect_max_retries: None,
-                    autosendcmd,
-                    sasl_mechanism: None,
-                    client_cert_path: None,
-                },
-            );
+            app.config.servers.insert(id.clone(), server_config);
             app.cached_config_toml = None;
             let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
             add_local_event(app, &format!("{C_OK}Server '{id}' added{C_RST}"));
@@ -319,6 +252,153 @@ pub(crate) fn cmd_server(app: &mut App, args: &[String]) {
             add_local_event(app, "Usage: /server [list|add|remove] [args...]");
         }
     }
+}
+
+fn parse_server_add_config(args: &[String]) -> Result<crate::config::ServerConfig, String> {
+    let raw_address = args
+        .first()
+        .ok_or_else(|| "Missing server address".to_string())?;
+    let (address, parsed_port) = parse_address_port(raw_address)?;
+    let mut explicit_port = parsed_port.is_some();
+    let mut config = crate::config::ServerConfig {
+        label: address.clone(),
+        address,
+        port: parsed_port.unwrap_or(6667),
+        tls: false,
+        tls_verify: true,
+        autoconnect: true,
+        channels: vec![],
+        nick: None,
+        username: None,
+        realname: None,
+        password: None,
+        sasl_user: None,
+        sasl_pass: None,
+        bind_ip: None,
+        encoding: None,
+        auto_reconnect: None,
+        reconnect_delay: None,
+        reconnect_max_retries: None,
+        autosendcmd: None,
+        sasl_mechanism: None,
+        client_cert_path: None,
+    };
+
+    for arg in args.iter().skip(1) {
+        if let Ok(port) = arg.parse::<u16>() {
+            if explicit_port {
+                return Err("Port specified more than once".to_string());
+            }
+            config.port = port;
+            explicit_port = true;
+        } else if arg == "-tls" {
+            config.tls = true;
+        } else if arg == "-notls" {
+            config.tls = false;
+        } else if arg == "-tlsverify" {
+            config.tls_verify = true;
+        } else if arg == "-notlsverify" {
+            config.tls_verify = false;
+        } else if arg == "-auto" {
+            config.autoconnect = true;
+        } else if arg == "-noauto" {
+            config.autoconnect = false;
+        } else if let Some(value) = arg.strip_prefix("-label=") {
+            config.label = value.to_string();
+        } else if let Some(value) = arg.strip_prefix("-nick=") {
+            config.nick = Some(value.to_string());
+        } else if let Some(value) = arg.strip_prefix("-username=") {
+            config.username = Some(value.to_string());
+        } else if let Some(value) = arg.strip_prefix("-realname=") {
+            config.realname = Some(value.to_string());
+        } else if let Some(value) = arg.strip_prefix("-password=") {
+            config.password = Some(value.to_string());
+        } else if let Some(value) = arg.strip_prefix("-sasl=") {
+            let (user, pass) = value
+                .split_once(':')
+                .ok_or_else(|| "SASL format: -sasl=user:pass".to_string())?;
+            config.sasl_user = Some(user.to_string());
+            config.sasl_pass = Some(pass.to_string());
+        } else if let Some(value) = arg.strip_prefix("-sasl-user=") {
+            config.sasl_user = Some(value.to_string());
+        } else if let Some(value) = arg.strip_prefix("-sasl-pass=") {
+            config.sasl_pass = Some(value.to_string());
+        } else if let Some(value) = arg.strip_prefix("-sasl-mechanism=") {
+            config.sasl_mechanism = Some(value.to_string());
+        } else if let Some(value) = arg.strip_prefix("-channels=") {
+            config.channels = parse_csv(value);
+        } else if let Some(value) = arg.strip_prefix("-bind=") {
+            config.bind_ip = Some(value.to_string());
+        } else if let Some(value) = arg.strip_prefix("-encoding=") {
+            config.encoding = Some(value.to_string());
+        } else if let Some(value) = arg.strip_prefix("-autoreconnect=") {
+            config.auto_reconnect = Some(parse_server_add_bool(value)?);
+        } else if let Some(value) = arg.strip_prefix("-reconnect-delay=") {
+            config.reconnect_delay = Some(parse_u64_arg(value, "-reconnect-delay")?);
+        } else if let Some(value) = arg.strip_prefix("-reconnect-max-retries=") {
+            config.reconnect_max_retries = Some(parse_u32_arg(value, "-reconnect-max-retries")?);
+        } else if let Some(value) = arg.strip_prefix("-autosendcmd=") {
+            config.autosendcmd = Some(value.to_string());
+        } else if let Some(value) = arg.strip_prefix("-client-cert=") {
+            config.client_cert_path = Some(value.to_string());
+        } else if arg.starts_with('-') {
+            return Err(format!("Unknown /server add flag: {arg}"));
+        } else {
+            return Err(format!("Unexpected /server add argument: {arg}"));
+        }
+    }
+
+    if config.tls && config.port == 6667 {
+        config.port = 6697;
+    }
+
+    Ok(config)
+}
+
+fn parse_address_port(raw: &str) -> Result<(String, Option<u16>), String> {
+    if let Some(rest) = raw.strip_prefix('[')
+        && let Some((address, port)) = rest.split_once("]:")
+    {
+        return Ok((address.to_string(), Some(parse_port_arg(port)?)));
+    }
+
+    if let Some((address, port)) = raw.rsplit_once(':')
+        && !address.contains(':')
+    {
+        return Ok((address.to_string(), Some(parse_port_arg(port)?)));
+    }
+
+    Ok((raw.to_string(), None))
+}
+
+fn parse_port_arg(raw: &str) -> Result<u16, String> {
+    raw.parse().map_err(|_| format!("Invalid port: {raw}"))
+}
+
+fn parse_u64_arg(raw: &str, flag: &str) -> Result<u64, String> {
+    raw.parse()
+        .map_err(|_| format!("Expected positive integer for {flag}"))
+}
+
+fn parse_u32_arg(raw: &str, flag: &str) -> Result<u32, String> {
+    raw.parse()
+        .map_err(|_| format!("Expected positive integer for {flag}"))
+}
+
+fn parse_server_add_bool(raw: &str) -> Result<bool, String> {
+    match raw {
+        "true" | "yes" | "on" | "1" => Ok(true),
+        "false" | "no" | "off" | "0" => Ok(false),
+        _ => Err(format!("Expected boolean, got: {raw}")),
+    }
+}
+
+fn parse_csv(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 pub(crate) fn cmd_autoconnect(app: &mut App, args: &[String]) {
@@ -1106,4 +1186,78 @@ pub(crate) fn cmd_mentions(app: &mut App, _args: &[String]) {
     }
     app.state.set_active_buffer(App::MENTIONS_BUFFER_ID);
     app.scroll_offset = 0;
+}
+
+#[cfg(test)]
+mod server_add_tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn parses_all_server_config_fields() {
+        let config = parse_server_add_config(&args(&[
+            "irc.example.net:6697",
+            "-tls",
+            "-notlsverify",
+            "-noauto",
+            "-label=Example",
+            "-nick=nick",
+            "-username=user",
+            "-realname=real",
+            "-password=serverpass",
+            "-sasl=sasluser:saslpass",
+            "-sasl-mechanism=SCRAM-SHA-256",
+            "-channels=#one,#two",
+            "-bind=192.0.2.10",
+            "-encoding=UTF-8",
+            "-autoreconnect=false",
+            "-reconnect-delay=45",
+            "-reconnect-max-retries=3",
+            "-autosendcmd=/msg NickServ identify",
+            "-client-cert=/tmp/client.pem",
+        ]))
+        .unwrap();
+
+        assert_eq!(config.label, "Example");
+        assert_eq!(config.address, "irc.example.net");
+        assert_eq!(config.port, 6697);
+        assert!(config.tls);
+        assert!(!config.tls_verify);
+        assert!(!config.autoconnect);
+        assert_eq!(config.channels, vec!["#one", "#two"]);
+        assert_eq!(config.nick.as_deref(), Some("nick"));
+        assert_eq!(config.username.as_deref(), Some("user"));
+        assert_eq!(config.realname.as_deref(), Some("real"));
+        assert_eq!(config.password.as_deref(), Some("serverpass"));
+        assert_eq!(config.sasl_user.as_deref(), Some("sasluser"));
+        assert_eq!(config.sasl_pass.as_deref(), Some("saslpass"));
+        assert_eq!(config.bind_ip.as_deref(), Some("192.0.2.10"));
+        assert_eq!(config.encoding.as_deref(), Some("UTF-8"));
+        assert_eq!(config.auto_reconnect, Some(false));
+        assert_eq!(config.reconnect_delay, Some(45));
+        assert_eq!(config.reconnect_max_retries, Some(3));
+        assert_eq!(
+            config.autosendcmd.as_deref(),
+            Some("/msg NickServ identify")
+        );
+        assert_eq!(config.sasl_mechanism.as_deref(), Some("SCRAM-SHA-256"));
+        assert_eq!(config.client_cert_path.as_deref(), Some("/tmp/client.pem"));
+    }
+
+    #[test]
+    fn tls_default_port_becomes_6697() {
+        let config = parse_server_add_config(&args(&["irc.example.net", "-tls"])).unwrap();
+
+        assert_eq!(config.port, 6697);
+    }
+
+    #[test]
+    fn rejects_unknown_flags() {
+        let err = parse_server_add_config(&args(&["irc.example.net", "-bogus"])).unwrap_err();
+
+        assert!(err.contains("Unknown /server add flag"));
+    }
 }

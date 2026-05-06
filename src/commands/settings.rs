@@ -196,6 +196,20 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 "password" => server.password.clone().unwrap_or_default(),
                 "sasl_user" => server.sasl_user.clone().unwrap_or_default(),
                 "sasl_pass" => server.sasl_pass.clone().unwrap_or_default(),
+                "bind_ip" => server.bind_ip.clone().unwrap_or_default(),
+                "encoding" => server.encoding.clone().unwrap_or_default(),
+                "auto_reconnect" => server
+                    .auto_reconnect
+                    .map_or_else(String::new, |v| v.to_string()),
+                "reconnect_delay" => server
+                    .reconnect_delay
+                    .map_or_else(String::new, |v| v.to_string()),
+                "reconnect_max_retries" => server
+                    .reconnect_max_retries
+                    .map_or_else(String::new, |v| v.to_string()),
+                "autosendcmd" => server.autosendcmd.clone().unwrap_or_default(),
+                "sasl_mechanism" => server.sasl_mechanism.clone().unwrap_or_default(),
+                "client_cert_path" => server.client_cert_path.clone().unwrap_or_default(),
                 _ => return None,
             };
             Some(Resolved {
@@ -435,6 +449,24 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
                 "password" => server.password = Some(raw.to_string()),
                 "sasl_user" => server.sasl_user = Some(raw.to_string()),
                 "sasl_pass" => server.sasl_pass = Some(raw.to_string()),
+                "bind_ip" => server.bind_ip = Some(raw.to_string()),
+                "encoding" => server.encoding = Some(raw.to_string()),
+                "auto_reconnect" => server.auto_reconnect = Some(parse_bool(raw)?),
+                "reconnect_delay" => {
+                    server.reconnect_delay = Some(
+                        raw.parse()
+                            .map_err(|_| "Expected a positive integer".to_string())?,
+                    );
+                }
+                "reconnect_max_retries" => {
+                    server.reconnect_max_retries = Some(
+                        raw.parse()
+                            .map_err(|_| "Expected a positive integer".to_string())?,
+                    );
+                }
+                "autosendcmd" => server.autosendcmd = Some(raw.to_string()),
+                "sasl_mechanism" => server.sasl_mechanism = Some(raw.to_string()),
+                "client_cert_path" => server.client_cert_path = Some(raw.to_string()),
                 _ => return Err(format!("Unknown field: {path}")),
             }
         }
@@ -545,6 +577,14 @@ const SERVER_FIELDS: &[&str] = &[
     "password",
     "sasl_user",
     "sasl_pass",
+    "bind_ip",
+    "encoding",
+    "auto_reconnect",
+    "reconnect_delay",
+    "reconnect_max_retries",
+    "autosendcmd",
+    "sasl_mechanism",
+    "client_cert_path",
 ];
 
 /// Get all valid setting paths for tab completion.
