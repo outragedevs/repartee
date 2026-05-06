@@ -237,6 +237,12 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v0.9.4
+
+- **Live ban-list tracking** — channel `+b/-b` mode changes now keep the local ban list current, and joined channels silently sync `MODE #channel b` so `/unban` numeric references and wildcard removals work without repeatedly refreshing `/ban`.
+- **Themeable WHOIS replies** — WHOIS numerics now carry event keys and structured parameters for `[formats.events]`, with default and Spring theme entries for the common WHOIS lines.
+- **Complete server-add configuration** — `/server add` now exposes the practical connection parameters in command parsing and help, including TLS verification, reconnect behavior, SASL, autosend commands, bind IP, encoding, password, and client certificate path.
+
 ### v0.9.3
 
 - **IRCnet reop mode handling** — updated to `irc-proto-repartee` 1.2.2 so channel mode `+R/-R` is parsed as the reop list mode with masks, while registered-only remains lowercase `+r`.
