@@ -52,4 +52,8 @@ pub struct Connection {
     /// WHO/WHOX replies for these channels update state silently
     /// without display. Removed on `RPL_ENDOFWHO` (315).
     pub silent_who_channels: HashSet<String>,
+    /// Channels with a pending auto ban-list sync (e.g. on join).
+    /// `367/368` replies for these channels update state silently
+    /// without display. Removed on `RPL_ENDOFBANLIST` (368).
+    pub silent_banlist_channels: HashSet<String>,
 }

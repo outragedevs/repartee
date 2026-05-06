@@ -109,6 +109,7 @@ impl App {
             enabled_caps: HashSet::new(),
             who_token_counter: 0,
             silent_who_channels: HashSet::new(),
+            silent_banlist_channels: HashSet::new(),
         });
         // Add a Server-type buffer so the sidebar header renders.
         let header_id = make_buffer_id(Self::SHELL_CONN_ID, "Shell");

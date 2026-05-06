@@ -667,6 +667,12 @@ fn list_mode_set(app: &mut App, args: &[String], mode_char: char) {
         }
     };
     let command_args = if args.is_empty() {
+        if mode_char == 'b'
+            && let Some(conn_id) = app.active_conn_id().map(str::to_string)
+            && let Some(conn) = app.state.connections.get_mut(&conn_id)
+        {
+            conn.silent_banlist_channels.remove(channel.as_str());
+        }
         if let Some(buf) = app.state.active_buffer_mut() {
             buf.list_modes.remove(&mode_char.to_string());
         }

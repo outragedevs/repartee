@@ -54,6 +54,7 @@ impl App {
             enabled_caps: HashSet::new(),
             who_token_counter: 0,
             silent_who_channels: HashSet::new(),
+            silent_banlist_channels: HashSet::new(),
         });
 
         let server_buf_id = make_buffer_id(conn_id, &server_config.label);

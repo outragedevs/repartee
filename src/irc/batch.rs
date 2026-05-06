@@ -505,6 +505,7 @@ mod tests {
             who_token_counter: 0,
             local_ip: None,
             silent_who_channels: std::collections::HashSet::new(),
+            silent_banlist_channels: std::collections::HashSet::new(),
         });
 
         let buf_id = make_buffer_id(conn_id, "#test");
@@ -704,6 +705,7 @@ mod tests {
             who_token_counter: 0,
             local_ip: None,
             silent_who_channels: std::collections::HashSet::new(),
+            silent_banlist_channels: std::collections::HashSet::new(),
         });
 
         let buf_id = make_buffer_id(conn_id, "#test");

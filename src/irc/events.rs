@@ -13,12 +13,13 @@ use crate::irc::formatting::{
 use crate::irc::ignore::should_ignore;
 use crate::state::AppState;
 use crate::state::buffer::{
-    ActivityLevel, Buffer, BufferType, Message, MessageType, NickEntry, make_buffer_id,
+    ActivityLevel, Buffer, BufferType, ListEntry, Message, MessageType, NickEntry, make_buffer_id,
 };
 use crate::state::connection::ConnectionStatus;
 
 /// Maximum number of entries stored per list mode type (bans, excepts, etc.).
 const MAX_LIST_MODE_ENTRIES: usize = 500;
+const BAN_MODE_KEY: &str = "b";
 
 /// Route an incoming IRC protocol message to the appropriate handler,
 /// mutating `AppState` as needed.
@@ -251,6 +252,7 @@ pub fn handle_connected(state: &mut AppState, conn_id: &str) {
         conn.error = None;
         conn.isupport_parsed = crate::irc::isupport::Isupport::default();
         conn.silent_who_channels.clear();
+        conn.silent_banlist_channels.clear();
     }
 
     let label = state
@@ -2053,7 +2055,7 @@ fn handle_mode(
             let buffer_id = make_buffer_id(conn_id, target);
             // Apply nick prefix changes
             for mode in modes {
-                apply_channel_mode(state, &buffer_id, mode);
+                apply_channel_mode(state, &buffer_id, mode, &nick);
             }
             build_channel_mode_string(modes)
         }
@@ -2133,6 +2135,7 @@ fn apply_channel_mode(
     state: &mut AppState,
     buffer_id: &str,
     mode: &irc::proto::Mode<irc::proto::ChannelMode>,
+    set_by: &str,
 ) {
     use irc::proto::ChannelMode;
 
@@ -2180,15 +2183,31 @@ fn apply_channel_mode(
         return;
     }
 
+    if matches!(mode_enum, ChannelMode::Ban) {
+        if let Some(mask) = param
+            && let Some(buf) = state.buffers.get_mut(buffer_id)
+        {
+            if adding {
+                upsert_list_mode_entry(
+                    buf,
+                    BAN_MODE_KEY,
+                    mask.to_string(),
+                    set_by.to_string(),
+                    Utc::now().timestamp(),
+                );
+            } else {
+                remove_list_mode_entry(buf, BAN_MODE_KEY, mask);
+            }
+        }
+        return;
+    }
+
     // Channel modes (not nick prefix, not list modes) — update buf.modes
-    // Skip list modes (b, e, I) and nick prefix modes (already handled above)
+    // Skip list modes (e, I, R) and nick prefix modes (already handled above)
     let ch = channel_mode_letter(mode_enum);
     let is_list_mode = matches!(
         mode_enum,
-        ChannelMode::Ban
-            | ChannelMode::Exception
-            | ChannelMode::InviteException
-            | ChannelMode::Reop
+        ChannelMode::Exception | ChannelMode::InviteException | ChannelMode::Reop
     );
     if is_list_mode || nick_mode_char.is_some() {
         return;
@@ -2219,6 +2238,48 @@ fn apply_channel_mode(
             *modes = modes[1..].to_string();
         }
     }
+}
+
+fn upsert_list_mode_entry(
+    buf: &mut Buffer,
+    mode_key: &str,
+    mask: String,
+    set_by: String,
+    set_at: i64,
+) -> usize {
+    let entries = buf.list_modes.entry(mode_key.to_string()).or_default();
+    if let Some(pos) = entries
+        .iter()
+        .position(|entry| entry.mask.eq_ignore_ascii_case(&mask))
+    {
+        entries[pos].set_by = set_by;
+        entries[pos].set_at = set_at;
+        return pos + 1;
+    }
+
+    entries.push(ListEntry {
+        mask,
+        set_by,
+        set_at,
+    });
+    if entries.len() > MAX_LIST_MODE_ENTRIES {
+        entries.drain(..entries.len() - MAX_LIST_MODE_ENTRIES);
+    }
+    entries.len()
+}
+
+fn remove_list_mode_entry(buf: &mut Buffer, mode_key: &str, mask: &str) -> bool {
+    let Some(entries) = buf.list_modes.get_mut(mode_key) else {
+        return false;
+    };
+
+    let original_len = entries.len();
+    entries.retain(|entry| !entry.mask.eq_ignore_ascii_case(mask));
+    let new_len = entries.len();
+    if new_len == 0 {
+        buf.list_modes.remove(mode_key);
+    }
+    new_len != original_len
 }
 
 /// Build a displayable mode string from channel modes.
@@ -2682,25 +2743,26 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
                 let mask = &args[2];
                 let set_by = args.get(3).cloned().unwrap_or_default();
                 let set_at = args.get(4).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+                let silent = state
+                    .connections
+                    .get(conn_id)
+                    .is_some_and(|c| c.silent_banlist_channels.contains(channel.as_str()));
 
-                // Store in buffer's list_modes for /unban numeric refs.
                 let buf_id = crate::state::buffer::make_buffer_id(conn_id, channel);
-                if let Some(buf) = state.buffers.get_mut(&buf_id) {
-                    let entries = buf.list_modes.entry("b".to_string()).or_default();
-                    entries.push(crate::state::buffer::ListEntry {
-                        mask: mask.clone(),
-                        set_by: set_by.clone(),
+                let index = state.buffers.get_mut(&buf_id).map_or(0, |buf| {
+                    upsert_list_mode_entry(
+                        buf,
+                        BAN_MODE_KEY,
+                        mask.clone(),
+                        set_by.clone(),
                         set_at,
-                    });
-                    if entries.len() > MAX_LIST_MODE_ENTRIES {
-                        entries.drain(..entries.len() - MAX_LIST_MODE_ENTRIES);
-                    }
+                    )
+                });
+
+                if silent {
+                    return;
                 }
 
-                // Display numbered entry
-                let index = state.buffers.get(&buf_id)
-                    .and_then(|b| b.list_modes.get("b"))
-                    .map_or(0, Vec::len);
                 let target_buf = active_or_server_buffer(state, conn_id);
                 let set_info = if set_by.is_empty() {
                     String::new()
@@ -2718,6 +2780,14 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
         }
         // RPL_ENDOFBANLIST
         Response::RPL_ENDOFBANLIST => {
+            let channel = args.get(1).map_or("", String::as_str);
+            let was_silent = state
+                .connections
+                .get_mut(conn_id)
+                .is_some_and(|conn| conn.silent_banlist_channels.remove(channel));
+            if was_silent {
+                return;
+            }
             let target_buf = active_or_server_buffer(state, conn_id);
             emit(state, &target_buf, "%Z565f89  End of ban list%N");
         }
@@ -2952,6 +3022,19 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
         Response::RPL_ENDOFNAMES => {}
 
         _ => {
+            if matches!(
+                response,
+                Response::ERR_CHANOPRIVSNEEDED
+                    | Response::ERR_NOSUCHCHANNEL
+                    | Response::ERR_NOTONCHANNEL
+            ) && let Some(channel) = args.get(1)
+                && state
+                    .connections
+                    .get_mut(conn_id)
+                    .is_some_and(|conn| conn.silent_banlist_channels.remove(channel))
+            {
+                return;
+            }
             // Error numerics (4xx) go to the active window — they are responses
             // to user commands (e.g. "No such nick/channel"). Informational
             // numerics still go to the server buffer.
@@ -3990,6 +4073,7 @@ mod tests {
             enabled_caps: std::collections::HashSet::new(),
             who_token_counter: 0,
             silent_who_channels: std::collections::HashSet::new(),
+            silent_banlist_channels: std::collections::HashSet::new(),
         });
         // Server buffer
         state.add_buffer(Buffer {
@@ -4430,6 +4514,40 @@ mod tests {
             buf.messages.back().unwrap().text,
             "oper sets mode +R *!*@ops on #test"
         );
+    }
+
+    #[test]
+    fn ban_mode_adds_cached_ban_entry() {
+        let mut state = make_test_state();
+        let msg = IrcMessage::new(
+            Some("oper!user@host"),
+            "MODE",
+            vec!["#test", "+b", "*!*@bad.example"],
+        )
+        .unwrap();
+
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        let bans = buf.list_modes.get(BAN_MODE_KEY).unwrap();
+        assert_eq!(bans.len(), 1);
+        assert_eq!(bans[0].mask, "*!*@bad.example");
+        assert_eq!(bans[0].set_by, "oper");
+        assert!(bans[0].set_at > 0);
+    }
+
+    #[test]
+    fn unban_mode_removes_cached_ban_entry_case_insensitively() {
+        let mut state = make_test_state();
+
+        for (mode, mask) in [("+b", "*!*@Bad.Example"), ("-b", "*!*@bad.example")] {
+            let msg =
+                IrcMessage::new(Some("oper!user@host"), "MODE", vec!["#test", mode, mask]).unwrap();
+            handle_irc_message(&mut state, "test", &msg);
+        }
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        assert!(buf.list_modes.get(BAN_MODE_KEY).is_none_or(Vec::is_empty));
     }
 
     #[test]
@@ -6138,6 +6256,94 @@ mod tests {
         let buf = state.buffers.get("test/testserver").unwrap();
 
         assert_eq!(buf.messages[0].event_key.as_deref(), Some("whois_idle"));
+    }
+
+    #[test]
+    fn banlist_response_upserts_cached_ban_entry() {
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+
+        for (set_by, timestamp) in [("alice", "1700000000"), ("bob", "1700000100")] {
+            let msg = make_irc_msg(
+                None,
+                Command::Response(
+                    Response::RPL_BANLIST,
+                    vec![
+                        "me".to_string(),
+                        "#test".to_string(),
+                        "*!*@bad.example".to_string(),
+                        set_by.to_string(),
+                        timestamp.to_string(),
+                    ],
+                ),
+            );
+            handle_irc_message(&mut state, "test", &msg);
+        }
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        let bans = buf.list_modes.get(BAN_MODE_KEY).unwrap();
+        assert_eq!(bans.len(), 1);
+        assert_eq!(bans[0].set_by, "bob");
+        assert_eq!(bans[0].set_at, 1_700_000_100);
+    }
+
+    #[test]
+    fn silent_banlist_sync_updates_state_without_display() {
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+        if let Some(conn) = state.connections.get_mut("test") {
+            conn.silent_banlist_channels.insert("#test".to_string());
+        }
+
+        let list_msg = make_irc_msg(
+            None,
+            Command::Response(
+                Response::RPL_BANLIST,
+                vec![
+                    "me".to_string(),
+                    "#test".to_string(),
+                    "*!*@bad.example".to_string(),
+                    "oper".to_string(),
+                    "1700000000".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &list_msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        assert_eq!(buf.list_modes.get(BAN_MODE_KEY).unwrap().len(), 1);
+        assert!(
+            state
+                .buffers
+                .get("test/testserver")
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+
+        let end_msg = make_irc_msg(
+            None,
+            Command::Response(
+                Response::RPL_ENDOFBANLIST,
+                vec![
+                    "me".to_string(),
+                    "#test".to_string(),
+                    "End of channel ban list".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &end_msg);
+
+        let conn = state.connections.get("test").unwrap();
+        assert!(!conn.silent_banlist_channels.contains("#test"));
+        assert!(
+            state
+                .buffers
+                .get("test/testserver")
+                .unwrap()
+                .messages
+                .is_empty()
+        );
     }
 
     #[test]

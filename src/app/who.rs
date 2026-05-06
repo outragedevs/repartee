@@ -90,6 +90,13 @@ impl App {
         if let Some(conn) = self.state.connections.get_mut(conn_id) {
             for ch in &batch {
                 conn.silent_who_channels.insert(ch.clone());
+                conn.silent_banlist_channels.insert(ch.clone());
+            }
+        }
+        for ch in &batch {
+            let buffer_id = crate::state::buffer::make_buffer_id(conn_id, ch);
+            if let Some(buf) = self.state.buffers.get_mut(&buffer_id) {
+                buf.list_modes.remove("b");
             }
         }
 
@@ -129,6 +136,12 @@ impl App {
                     vec![ch.clone()],
                 ));
             }
+        }
+        for ch in &batch {
+            let _ = handle.sender.send(::irc::proto::Command::Raw(
+                "MODE".to_string(),
+                vec![ch.clone(), "b".to_string()],
+            ));
         }
     }
 
@@ -185,6 +198,7 @@ impl App {
                 if let Some(conn) = self.state.connections.get_mut(&conn_id) {
                     for ch in &stale {
                         conn.silent_who_channels.remove(ch.as_str());
+                        conn.silent_banlist_channels.remove(ch.as_str());
                     }
                 }
             }

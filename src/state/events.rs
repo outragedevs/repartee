@@ -497,6 +497,7 @@ mod tests {
             enabled_caps: std::collections::HashSet::new(),
             who_token_counter: 0,
             silent_who_channels: std::collections::HashSet::new(),
+            silent_banlist_channels: std::collections::HashSet::new(),
         }
     }
 
