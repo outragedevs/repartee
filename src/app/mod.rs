@@ -902,6 +902,10 @@ impl App {
             self.run_splash().await?;
         }
 
+        if let Err(e) = self.start_socket_listener() {
+            tracing::warn!("failed to start session socket: {e}");
+        }
+
         let autoconnect_ids: Vec<String> = self
             .config
             .servers
@@ -926,10 +930,6 @@ impl App {
 
         if self.terminal.is_some() && !self.is_socket_attached {
             self.start_term_reader();
-        }
-
-        if let Err(e) = self.start_socket_listener() {
-            tracing::warn!("failed to start session socket: {e}");
         }
 
         self.start_web_server().await;
