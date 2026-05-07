@@ -10,7 +10,7 @@ use crate::irc::formatting::{
     extract_nick, extract_nick_userhost, is_channel, is_server_prefix, modes_to_prefix,
     strip_irc_formatting,
 };
-use crate::irc::ignore::should_ignore;
+use crate::irc::ignore::{matches_mask_patterns, should_ignore};
 use crate::state::AppState;
 use crate::state::buffer::{
     ActivityLevel, Buffer, BufferType, ListEntry, Message, MessageType, NickEntry, make_buffer_id,
@@ -697,6 +697,8 @@ fn handle_privmsg(
     let (nick, ident, host) = extract_nick_userhost(prefix);
     let target_is_channel = is_channel(target);
     let is_own = nick == our_nick;
+    let flood_exempt =
+        !is_own && matches_mask_patterns(&state.flood_exemptions, &nick, Some(&ident), Some(&host));
 
     // For channels and echo-message echoes (is_own), the buffer is the
     // target.  For incoming PMs the buffer is the sender's nick.  This
@@ -911,7 +913,7 @@ fn handle_privmsg(
         }
 
         // Other CTCP — flood check
-        if state.flood_protection {
+        if state.flood_protection && !flood_exempt {
             let now = Instant::now();
             let result = state.flood_state.check_ctcp_flood(now);
             if result.suppressed() {
@@ -934,7 +936,7 @@ fn handle_privmsg(
     }
 
     // --- Flood checks for regular messages ---
-    if state.flood_protection && nick != our_nick {
+    if state.flood_protection && nick != our_nick && !flood_exempt {
         let now = Instant::now();
 
         if ident.starts_with('~') {
@@ -4250,6 +4252,23 @@ mod tests {
         assert_eq!(buf.messages[0].message_type, MessageType::Action);
         assert!(buf.messages[0].highlight);
         assert_eq!(buf.activity, ActivityLevel::Mention);
+    }
+
+    #[test]
+    fn privmsg_flood_exemption_bypasses_duplicate_flood() {
+        let mut state = make_test_state();
+        state.flood_exemptions.push("*!*@trusted.host".to_string());
+        for text in ["spam", "a", "spam", "b", "spam"] {
+            let msg = make_irc_msg(
+                Some("alice!~user@trusted.host"),
+                Command::PRIVMSG("#test".into(), text.into()),
+            );
+            handle_irc_message(&mut state, "test", &msg);
+        }
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        let spam_count = buf.messages.iter().filter(|msg| msg.text == "spam").count();
+        assert_eq!(spam_count, 3);
     }
 
     // === handle_join tests ===

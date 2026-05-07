@@ -15,6 +15,7 @@ impl AppState {
             flood_state: crate::irc::flood::FloodState::new(),
             netsplit_state: crate::irc::netsplit::NetsplitState::new(),
             flood_protection: true,
+            flood_exemptions: Vec::new(),
             ignores: Vec::new(),
             log_tx: None,
             log_exclude_types: Vec::new(),

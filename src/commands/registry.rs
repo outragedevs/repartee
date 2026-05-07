@@ -1,8 +1,9 @@
 use std::sync::LazyLock;
 
 use super::handlers_admin::{
-    cmd_autoconnect, cmd_ignore, cmd_image, cmd_kill, cmd_log, cmd_mentions, cmd_oper, cmd_preview,
-    cmd_reload, cmd_script, cmd_server, cmd_spellcheck, cmd_stats, cmd_unignore, cmd_wallops,
+    cmd_autoconnect, cmd_flood, cmd_ignore, cmd_image, cmd_kill, cmd_log, cmd_mentions, cmd_oper,
+    cmd_preview, cmd_reload, cmd_script, cmd_server, cmd_spellcheck, cmd_stats, cmd_unignore,
+    cmd_wallops,
 };
 use super::handlers_dcc::cmd_dcc;
 use super::handlers_e2e::cmd_e2e;
@@ -483,6 +484,15 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
                 handler: cmd_ignore,
                 description: "Add or list ignore rules",
                 aliases: &[],
+                category: CommandCategory::Configuration,
+            },
+        ),
+        (
+            "flood",
+            CommandDef {
+                handler: cmd_flood,
+                description: "Manage flood protection and PRIVMSG exemptions",
+                aliases: &["antiflood"],
                 category: CommandCategory::Configuration,
             },
         ),

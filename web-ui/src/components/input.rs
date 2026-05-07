@@ -81,6 +81,7 @@ const SETTING_PATHS: &[&str] = &[
     "display.scrollback_lines",
     "display.show_timestamps",
     "general.ctcp_version",
+    "general.flood_exemptions",
     "general.flood_protection",
     "general.nick",
     "general.realname",

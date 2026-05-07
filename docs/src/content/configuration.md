@@ -28,6 +28,7 @@ realname = "repartee user"
 theme = "default"
 timestamp_format = "%H:%M:%S"
 flood_protection = true
+flood_exemptions = []  # nick or nick!user@host wildcard masks exempt from PRIVMSG flood checks
 ctcp_version = "repartee"
 
 [display]
@@ -134,7 +135,7 @@ levels = ["ALL"]
 
 ### `[general]`
 
-Global identity and behavior. The `nick`, `username`, and `realname` are used as defaults for all servers unless overridden per-server. Set `theme` to the name of a theme file in `~/.repartee/themes/` (without the `.theme` extension).
+Global identity and behavior. The `nick`, `username`, and `realname` are used as defaults for all servers unless overridden per-server. Set `theme` to the name of a theme file in `~/.repartee/themes/` (without the `.theme` extension). `flood_exemptions` accepts bare nick patterns or full `nick!user@host` wildcard masks that bypass local incoming `PRIVMSG` flood checks.
 
 ### `[display]`
 

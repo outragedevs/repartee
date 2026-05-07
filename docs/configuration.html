@@ -119,6 +119,7 @@ realname = &quot;repartee user&quot;
 theme = &quot;default&quot;
 timestamp_format = &quot;%H:%M:%S&quot;
 flood_protection = true
+flood_exemptions = []  # nick or nick!user@host wildcard masks exempt from PRIVMSG flood checks
 ctcp_version = &quot;repartee&quot;
 
 [display]
@@ -222,7 +223,7 @@ levels = [&quot;ALL&quot;]
 </code></pre>
 <h2>Sections explained</h2>
 <h3><code>[general]</code></h3>
-<p>Global identity and behavior. The <code>nick</code>, <code>username</code>, and <code>realname</code> are used as defaults for all servers unless overridden per-server. Set <code>theme</code> to the name of a theme file in <code>~/.repartee/themes/</code> (without the <code>.theme</code> extension).</p>
+<p>Global identity and behavior. The <code>nick</code>, <code>username</code>, and <code>realname</code> are used as defaults for all servers unless overridden per-server. Set <code>theme</code> to the name of a theme file in <code>~/.repartee/themes/</code> (without the <code>.theme</code> extension). <code>flood_exemptions</code> accepts bare nick patterns or full <code>nick!user@host</code> wildcard masks that bypass local incoming <code>PRIVMSG</code> flood checks.</p>
 <h3><code>[display]</code></h3>
 <p>Controls how messages are rendered. <code>nick_column_width</code> sets the fixed-width column for nicks in chat view. <code>scrollback_lines</code> is the number of messages kept in memory per buffer. <code>backlog_lines</code> sets how many historical messages to load from the log database when a channel, query, or DCC buffer is first opened (0 to disable).</p>
 <p><strong>Mentions buffer:</strong> <code>mentions_buffer = true</code> (default) shows a persistent Mentions buffer pinned at the top of the sidebar. It aggregates all highlight mentions from all networks in a scrollable chat view. Scrollback is capped at 7 days or 1000 messages. Use <code>/clear</code> in the mentions buffer to wipe all stored mentions. Set to <code>false</code> to hide the buffer (mentions are still stored in the database and will reappear when re-enabled).</p>

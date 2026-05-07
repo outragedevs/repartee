@@ -135,6 +135,27 @@ pub fn should_ignore(
     false
 }
 
+pub fn matches_mask_patterns(
+    patterns: &[String],
+    nick: &str,
+    ident: Option<&str>,
+    hostname: Option<&str>,
+) -> bool {
+    if patterns.is_empty() {
+        return false;
+    }
+
+    let full_mask = build_mask(nick, ident, hostname);
+    patterns.iter().any(|pattern| {
+        let re = cached_wildcard_regex(pattern);
+        if pattern.contains('!') {
+            re.is_match(&full_mask)
+        } else {
+            re.is_match(nick)
+        }
+    })
+}
+
 // === Tests ===
 
 #[cfg(test)]
@@ -218,6 +239,39 @@ mod tests {
     #[test]
     fn build_mask_missing_both() {
         assert_eq!(build_mask("nick", None, None), "nick!*@*");
+    }
+
+    #[test]
+    fn mask_patterns_match_bare_nick() {
+        let patterns = vec!["trusted*".to_string()];
+        assert!(matches_mask_patterns(
+            &patterns,
+            "TrustedNick",
+            Some("user"),
+            Some("host.net")
+        ));
+    }
+
+    #[test]
+    fn mask_patterns_match_full_hostmask() {
+        let patterns = vec!["*!*@trusted.host".to_string()];
+        assert!(matches_mask_patterns(
+            &patterns,
+            "nick",
+            Some("~user"),
+            Some("trusted.host")
+        ));
+    }
+
+    #[test]
+    fn mask_patterns_do_not_match_full_mask_against_bare_nick() {
+        let patterns = vec!["trusted".to_string()];
+        assert!(!matches_mask_patterns(
+            &patterns,
+            "other",
+            Some("trusted"),
+            Some("trusted")
+        ));
     }
 
     // --- should_ignore tests ---

@@ -83,6 +83,7 @@ pub struct GeneralConfig {
     pub theme: String,
     pub timestamp_format: String,
     pub flood_protection: bool,
+    pub flood_exemptions: Vec<String>,
     pub ctcp_version: String,
 }
 
@@ -96,6 +97,7 @@ impl Default for GeneralConfig {
             theme: "default".to_string(),
             timestamp_format: "%H:%M:%S".to_string(),
             flood_protection: true,
+            flood_exemptions: Vec::new(),
             ctcp_version: format!("{APP_NAME} {APP_VERSION}"),
         }
     }

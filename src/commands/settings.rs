@@ -33,6 +33,7 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 "theme" => config.general.theme.clone(),
                 "timestamp_format" => config.general.timestamp_format.clone(),
                 "flood_protection" => config.general.flood_protection.to_string(),
+                "flood_exemptions" => config.general.flood_exemptions.join(", "),
                 "ctcp_version" => config.general.ctcp_version.clone(),
                 _ => return None,
             };
@@ -238,6 +239,9 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
             "timestamp_format" => config.general.timestamp_format = raw.to_string(),
             "flood_protection" => {
                 config.general.flood_protection = parse_bool(raw)?;
+            }
+            "flood_exemptions" => {
+                config.general.flood_exemptions = split_list(raw);
             }
             "ctcp_version" => config.general.ctcp_version = raw.to_string(),
             _ => return Err(format!("Unknown field: {path}")),
@@ -488,6 +492,14 @@ fn parse_u16(raw: &str) -> Result<u16, String> {
     raw.parse().map_err(|_| "Expected a number".to_string())
 }
 
+fn split_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 // === Available setting paths for tab completion ===
 
 /// Base setting paths (without server-specific ones).
@@ -498,6 +510,7 @@ const BASE_PATHS: &[&str] = &[
     "general.theme",
     "general.timestamp_format",
     "general.flood_protection",
+    "general.flood_exemptions",
     "general.ctcp_version",
     "display.nick_column_width",
     "display.nick_max_length",
@@ -688,6 +701,14 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
             }
 
             // Sync runtime state from config
+            if path == "general.flood_protection" {
+                app.state.flood_protection = app.config.general.flood_protection;
+            }
+            if path == "general.flood_exemptions" {
+                app.state
+                    .flood_exemptions
+                    .clone_from(&app.config.general.flood_exemptions);
+            }
             if path == "display.scrollback_lines" {
                 app.state.scrollback_limit = app.config.display.scrollback_lines;
             }
@@ -858,6 +879,7 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
                 "theme",
                 "timestamp_format",
                 "flood_protection",
+                "flood_exemptions",
                 "ctcp_version",
             ],
         ),

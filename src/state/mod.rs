@@ -64,6 +64,7 @@ pub struct AppState {
     pub netsplit_state: NetsplitState,
     /// Whether flood protection is enabled (from config).
     pub flood_protection: bool,
+    pub flood_exemptions: Vec<String>,
     /// Ignore rules (from config).
     pub ignores: Vec<IgnoreEntry>,
     /// Sender for the storage writer. When `Some`, messages are logged to `SQLite`.

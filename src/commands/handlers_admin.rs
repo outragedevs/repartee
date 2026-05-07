@@ -18,6 +18,9 @@ pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
             // Sync derived state from new config
             app.state.scrollback_limit = app.config.display.scrollback_lines;
             app.state.flood_protection = app.config.general.flood_protection;
+            app.state
+                .flood_exemptions
+                .clone_from(&app.config.general.flood_exemptions);
             app.state.ignores.clone_from(&app.config.ignores);
             app.state.nick_color_sat = app.config.display.nick_color_saturation;
             app.state.nick_color_lit = app.config.display.nick_color_lightness;
@@ -44,6 +47,142 @@ pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
 
     // Recompute cached wrap-indent (depends on config + theme).
     app.recompute_wrap_indent();
+}
+
+pub(crate) fn cmd_flood(app: &mut App, args: &[String]) {
+    let Some(subcmd) = args.first().map(String::as_str) else {
+        list_flood_settings(app);
+        return;
+    };
+
+    if subcmd.eq_ignore_ascii_case("list") {
+        list_flood_settings(app);
+        return;
+    }
+
+    if subcmd.eq_ignore_ascii_case("on") || subcmd.eq_ignore_ascii_case("enable") {
+        app.config.general.flood_protection = true;
+        app.state.flood_protection = true;
+        save_flood_settings(app);
+        add_local_event(app, &format!("{C_OK}Flood protection enabled{C_RST}"));
+        return;
+    }
+
+    if subcmd.eq_ignore_ascii_case("off") || subcmd.eq_ignore_ascii_case("disable") {
+        app.config.general.flood_protection = false;
+        app.state.flood_protection = false;
+        save_flood_settings(app);
+        add_local_event(app, &format!("{C_OK}Flood protection disabled{C_RST}"));
+        return;
+    }
+
+    if subcmd_is(subcmd, &["add", "except", "exempt", "allow", "trust"]) {
+        let Some(mask) = args.get(1) else {
+            add_local_event(app, "Usage: /flood add <nick|mask>");
+            return;
+        };
+        if app
+            .config
+            .general
+            .flood_exemptions
+            .iter()
+            .any(|entry| entry.eq_ignore_ascii_case(mask))
+        {
+            add_local_event(
+                app,
+                &format!("{C_DIM}Flood exemption already exists: {mask}{C_RST}"),
+            );
+            return;
+        }
+        app.config.general.flood_exemptions.push(mask.clone());
+        app.state
+            .flood_exemptions
+            .clone_from(&app.config.general.flood_exemptions);
+        save_flood_settings(app);
+        add_local_event(app, &format!("{C_OK}Added flood exemption: {mask}{C_RST}"));
+        return;
+    }
+
+    if subcmd_is(
+        subcmd,
+        &["remove", "rm", "del", "delete", "unexcept", "unexempt"],
+    ) {
+        let Some(target) = args.get(1) else {
+            add_local_event(app, "Usage: /flood remove <number|mask>");
+            return;
+        };
+        remove_flood_exemption(app, target);
+        return;
+    }
+
+    add_local_event(
+        app,
+        "Usage: /flood [list|on|off|add <nick|mask>|remove <number|mask>]",
+    );
+}
+
+fn list_flood_settings(app: &mut App) {
+    let mut lines = vec![divider("Flood Protection")];
+    let status = if app.config.general.flood_protection {
+        format!("{C_OK}enabled{C_RST}")
+    } else {
+        format!("{C_ERR}disabled{C_RST}")
+    };
+    lines.push(format!("  status: {status}"));
+    if app.config.general.flood_exemptions.is_empty() {
+        lines.push(format!("  {C_DIM}No PRIVMSG exemptions configured{C_RST}"));
+    } else {
+        for (i, mask) in app.config.general.flood_exemptions.iter().enumerate() {
+            lines.push(format!("  {C_CMD}{}. {}{C_RST}", i + 1, mask));
+        }
+    }
+    lines.push(divider(""));
+    for line in &lines {
+        add_local_event(app, line);
+    }
+}
+
+fn remove_flood_exemption(app: &mut App, target: &str) {
+    let removed = if let Ok(n) = target.parse::<usize>()
+        && n >= 1
+        && n <= app.config.general.flood_exemptions.len()
+    {
+        Some(app.config.general.flood_exemptions.remove(n - 1))
+    } else {
+        app.config
+            .general
+            .flood_exemptions
+            .iter()
+            .position(|entry| entry.eq_ignore_ascii_case(target))
+            .map(|pos| app.config.general.flood_exemptions.remove(pos))
+    };
+
+    if let Some(mask) = removed {
+        app.state
+            .flood_exemptions
+            .clone_from(&app.config.general.flood_exemptions);
+        save_flood_settings(app);
+        add_local_event(
+            app,
+            &format!("{C_OK}Removed flood exemption: {mask}{C_RST}"),
+        );
+    } else {
+        add_local_event(
+            app,
+            &format!("{C_ERR}No flood exemption matching: {target}{C_RST}"),
+        );
+    }
+}
+
+fn save_flood_settings(app: &mut App) {
+    app.cached_config_toml = None;
+    let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
+}
+
+fn subcmd_is(subcmd: &str, choices: &[&str]) -> bool {
+    choices
+        .iter()
+        .any(|choice| subcmd.eq_ignore_ascii_case(choice))
 }
 
 pub(crate) fn cmd_ignore(app: &mut App, args: &[String]) {

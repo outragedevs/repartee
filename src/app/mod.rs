@@ -458,6 +458,9 @@ impl App {
 
         let mut state = AppState::new();
         state.flood_protection = config.general.flood_protection;
+        state
+            .flood_exemptions
+            .clone_from(&config.general.flood_exemptions);
         state.ignores.clone_from(&config.ignores);
         state.scrollback_limit = config.display.scrollback_lines;
         state.nick_color_sat = config.display.nick_color_saturation;

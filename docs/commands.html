@@ -699,20 +699,36 @@ Server credentials (passwords, SASL) are stored in <code>.env</code>.</p>
 <p>This is the default when no subcommand is given.</p>
 <h3>add</h3>
 <p>Add a new server to the configuration.</p>
-<pre><code>/server add &lt;id&gt; &lt;address&gt;[:&lt;port&gt;] [flags...]
+<pre><code>/server add &lt;id&gt; &lt;address&gt;[:&lt;port&gt;] [port] [flags...]
 </code></pre>
 <p><strong>Flags:</strong></p>
 <ul>
 <li><code>-tls</code> — Enable TLS (auto-sets port to 6697)</li>
+<li><code>-notls</code> — Disable TLS</li>
+<li><code>-tlsverify</code> — Enable TLS certificate verification</li>
 <li><code>-notlsverify</code> — Skip TLS certificate verification</li>
+<li><code>-auto</code> — Auto-connect on startup</li>
 <li><code>-noauto</code> — Don&#39;t auto-connect on startup</li>
 <li><code>-label=&lt;name&gt;</code> — Display name</li>
 <li><code>-nick=&lt;nick&gt;</code> — Use a different nick for this server</li>
+<li><code>-username=&lt;user&gt;</code> — Use a different username for this server</li>
+<li><code>-realname=&lt;name&gt;</code> — Use a different real name for this server</li>
 <li><code>-password=&lt;pass&gt;</code> — Server password (PASS command)</li>
 <li><code>-sasl=&lt;user&gt;:&lt;pass&gt;</code> — SASL PLAIN authentication credentials</li>
+<li><code>-sasl-user=&lt;user&gt;</code> — SASL username</li>
+<li><code>-sasl-pass=&lt;pass&gt;</code> — SASL password</li>
+<li><code>-sasl-mechanism=&lt;mechanism&gt;</code> — SASL mechanism (<code>PLAIN</code>, <code>SCRAM-SHA-256</code>, <code>EXTERNAL</code>)</li>
+<li><code>-channels=&lt;ch1,ch2&gt;</code> — Channels to join after registration</li>
 <li><code>-bind=&lt;ip&gt;</code> — Bind to a specific local IP address</li>
+<li><code>-encoding=&lt;codec&gt;</code> — IRC text encoding label</li>
+<li><code>-autoreconnect=&lt;bool&gt;</code> — Enable or disable reconnects (<code>true</code>, <code>false</code>)</li>
+<li><code>-reconnect-delay=&lt;secs&gt;</code> — Base reconnect delay in seconds</li>
+<li><code>-reconnect-max-retries=&lt;n&gt;</code> — Maximum reconnect attempts</li>
 <li><code>-autosendcmd=&lt;cmds&gt;</code> — Commands to run on connect (semicolon-separated)</li>
+<li><code>-client-cert=&lt;path&gt;</code> — Client TLS certificate path for SASL EXTERNAL / CertFP</li>
 </ul>
+<p>Flag values are parsed as single command arguments, so values with spaces should
+be edited in <code>config.toml</code> or with <code>/set</code>.</p>
 <h3>remove</h3>
 <p>Remove a server and disconnect if connected.</p>
 <pre><code>/server remove &lt;id&gt;
@@ -721,9 +737,11 @@ Server credentials (passwords, SASL) are stored in <code>.env</code>.</p>
 <h2>Examples</h2>
 <pre><code>/server list
 /server add libera irc.libera.chat 6697 -tls
+/server add kakao kakao.ajalo.com 6697 -tls -notlsverify -noauto
 /server add local 127.0.0.1 6667 -noauto -label=dev
-/server add ircnet irc.ircnet.net 6697 -tls -nick=mynick -sasl=user:pass
+/server add ircnet irc.ircnet.net:6697 -tls -nick=mynick -sasl=user:pass
 /server add bouncer bnc.example.com 6697 -tls -password=secret -bind=192.168.1.10
+/server add certfp irc.example.net:6697 -tls -sasl-mechanism=EXTERNAL -client-cert=/path/to/cert.pem
 /server remove libera
 </code></pre>
 <h2>See Also</h2>
@@ -1282,6 +1300,34 @@ You must be a channel operator to use this command.</p>
 </code></pre>
 <h2>See Also</h2>
 <p>/voice, /deop, /mode</p>
+</div>
+<div class="command-entry" data-command="flood" data-category="Moderation">
+<h1>/flood</h1>
+<h2>Syntax</h2>
+<pre><code>/flood
+/flood on
+/flood off
+/flood add &lt;nick|mask&gt;
+/flood remove &lt;number|mask&gt;
+</code></pre>
+<h2>Description</h2>
+<p>Manage local flood protection and <code>PRIVMSG</code> exemptions. Without
+arguments, lists the current status and exemption rules.</p>
+<p>Exemptions use the same wildcard matching as <code>/ignore</code>. A bare nick
+pattern matches the nick only. A pattern containing <code>!</code> matches the
+full <code>nick!user@host</code> mask.</p>
+<p>Exemptions only bypass local incoming <code>PRIVMSG</code> flood checks. They do
+not affect <code>/ignore</code>, nick-change flood suppression, or the IRC
+crate&#39;s outgoing send throttle.</p>
+<h2>Examples</h2>
+<pre><code>/flood
+/flood add trustednick
+/flood add *!*@trusted.host
+/flood remove 1
+/flood off
+</code></pre>
+<h2>See Also</h2>
+<p>/ignore, /set</p>
 </div>
 <div class="command-entry" data-command="ignore" data-category="Moderation">
 <h1>/ignore</h1>
