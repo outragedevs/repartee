@@ -153,11 +153,11 @@ impl App {
             return;
         };
 
-        in_flight.remove(target);
+        remove_case_insensitive(in_flight, target);
 
         if target.contains(',') {
             for ch in target.split(',') {
-                in_flight.remove(ch);
+                remove_case_insensitive(in_flight, ch);
             }
         }
 
@@ -197,8 +197,8 @@ impl App {
                 );
                 if let Some(conn) = self.state.connections.get_mut(&conn_id) {
                     for ch in &stale {
-                        conn.silent_who_channels.remove(ch.as_str());
-                        conn.silent_banlist_channels.remove(ch.as_str());
+                        remove_case_insensitive(&mut conn.silent_who_channels, ch);
+                        remove_case_insensitive(&mut conn.silent_banlist_channels, ch);
                     }
                 }
             }
@@ -206,4 +206,18 @@ impl App {
             self.send_channel_query_batch(&conn_id);
         }
     }
+}
+
+fn remove_case_insensitive(set: &mut HashSet<String>, value: &str) -> bool {
+    if set.remove(value) {
+        return true;
+    }
+    let Some(existing) = set
+        .iter()
+        .find(|entry| entry.eq_ignore_ascii_case(value))
+        .cloned()
+    else {
+        return false;
+    };
+    set.remove(&existing)
 }

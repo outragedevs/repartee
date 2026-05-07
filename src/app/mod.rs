@@ -914,10 +914,6 @@ impl App {
             .map(|(id, _)| id.clone())
             .collect();
 
-        for server_id in &autoconnect_ids {
-            let _ = self.connect_server_async(server_id).await;
-        }
-
         if self.state.buffers.is_empty() {
             Self::create_default_status(&mut self.state);
         }
@@ -933,6 +929,8 @@ impl App {
         }
 
         self.start_web_server().await;
+
+        let mut pending_autoconnect_ids = (!autoconnect_ids.is_empty()).then_some(autoconnect_ids);
 
         let mut sigterm =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -1112,6 +1110,9 @@ impl App {
                     shell_broadcast_sleep.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_secs(86400));
                 },
                 _ = tick.tick() => {
+                    if let Some(server_ids) = pending_autoconnect_ids.take() {
+                        self.start_autoconnects(&server_ids);
+                    }
                     self.handle_netsplit_tick();
                     self.purge_expired_batches();
                     self.check_reconnects();

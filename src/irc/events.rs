@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::time::Instant;
 
@@ -20,6 +20,24 @@ use crate::state::connection::ConnectionStatus;
 /// Maximum number of entries stored per list mode type (bans, excepts, etc.).
 const MAX_LIST_MODE_ENTRIES: usize = 500;
 const BAN_MODE_KEY: &str = "b";
+
+fn contains_case_insensitive(set: &HashSet<String>, value: &str) -> bool {
+    set.contains(value) || set.iter().any(|entry| entry.eq_ignore_ascii_case(value))
+}
+
+fn remove_case_insensitive(set: &mut HashSet<String>, value: &str) -> bool {
+    if set.remove(value) {
+        return true;
+    }
+    let Some(existing) = set
+        .iter()
+        .find(|entry| entry.eq_ignore_ascii_case(value))
+        .cloned()
+    else {
+        return false;
+    };
+    set.remove(&existing)
+}
 
 /// Route an incoming IRC protocol message to the appropriate handler,
 /// mutating `AppState` as needed.
@@ -160,6 +178,12 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
         Command::Raw(cmd, args) if cmd == "329" => {
             if args.len() >= 3 {
                 let channel = &args[1];
+                let silent = state.connections.get(conn_id).is_some_and(|conn| {
+                    contains_case_insensitive(&conn.silent_banlist_channels, channel)
+                });
+                if silent {
+                    return;
+                }
                 let buffer_id = make_buffer_id(conn_id, channel);
                 if let Ok(ts) = args[2].parse::<i64>() {
                     let created = chrono::DateTime::from_timestamp(ts, 0).unwrap_or_else(Utc::now);
@@ -1542,7 +1566,8 @@ fn handle_part(
         state.remove_buffer(&buffer_id);
         // Clean up any pending silent WHO for this channel.
         if let Some(conn) = state.connections.get_mut(conn_id) {
-            conn.silent_who_channels.remove(channel);
+            remove_case_insensitive(&mut conn.silent_who_channels, channel);
+            remove_case_insensitive(&mut conn.silent_banlist_channels, channel);
         }
     } else {
         // Always update nick list regardless of ignore
@@ -1969,7 +1994,8 @@ fn handle_kick(
 
         // Clean up any pending silent WHO for this channel.
         if let Some(conn) = state.connections.get_mut(conn_id) {
-            conn.silent_who_channels.remove(channel);
+            remove_case_insensitive(&mut conn.silent_who_channels, channel);
+            remove_case_insensitive(&mut conn.silent_banlist_channels, channel);
         }
     } else {
         state.remove_nick(&buffer_id, kicked_user);
@@ -2748,7 +2774,9 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
                 let silent = state
                     .connections
                     .get(conn_id)
-                    .is_some_and(|c| c.silent_banlist_channels.contains(channel.as_str()));
+                    .is_some_and(|c| {
+                        contains_case_insensitive(&c.silent_banlist_channels, channel)
+                    });
 
                 let buf_id = crate::state::buffer::make_buffer_id(conn_id, channel);
                 let index = state.buffers.get_mut(&buf_id).map_or(0, |buf| {
@@ -2786,7 +2814,9 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
             let was_silent = state
                 .connections
                 .get_mut(conn_id)
-                .is_some_and(|conn| conn.silent_banlist_channels.remove(channel));
+                .is_some_and(|conn| {
+                    remove_case_insensitive(&mut conn.silent_banlist_channels, channel)
+                });
             if was_silent {
                 return;
             }
@@ -2959,7 +2989,7 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
                 let silent = state
                     .connections
                     .get(conn_id)
-                    .is_some_and(|c| c.silent_who_channels.contains(channel.as_str()));
+                    .is_some_and(|c| contains_case_insensitive(&c.silent_who_channels, channel));
                 if !silent {
                     let user = &args[2];
                     let host = &args[3];
@@ -2982,11 +3012,11 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
                     // Batched WHO — remove each channel individually.
                     let mut any_silent = false;
                     for ch in target.split(',') {
-                        any_silent |= conn.silent_who_channels.remove(ch);
+                        any_silent |= remove_case_insensitive(&mut conn.silent_who_channels, ch);
                     }
                     any_silent
                 } else {
-                    conn.silent_who_channels.remove(target)
+                    remove_case_insensitive(&mut conn.silent_who_channels, target)
                 }
             } else {
                 false
@@ -3033,7 +3063,9 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
                 && state
                     .connections
                     .get_mut(conn_id)
-                    .is_some_and(|conn| conn.silent_banlist_channels.remove(channel))
+                    .is_some_and(|conn| {
+                        remove_case_insensitive(&mut conn.silent_banlist_channels, channel)
+                    })
             {
                 return;
             }
@@ -3382,7 +3414,7 @@ fn handle_whox_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
     let silent = state
         .connections
         .get(conn_id)
-        .is_some_and(|c| c.silent_who_channels.contains(channel.as_str()));
+        .is_some_and(|c| contains_case_insensitive(&c.silent_who_channels, channel));
 
     // Parse away status from flags: H = here, G = gone
     let away = flags.starts_with('G');
@@ -6366,6 +6398,90 @@ mod tests {
     }
 
     #[test]
+    fn silent_banlist_sync_suppresses_case_variant_channel() {
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+        if let Some(conn) = state.connections.get_mut("test") {
+            conn.silent_banlist_channels.insert("#Test".to_string());
+        }
+
+        let list_msg = make_irc_msg(
+            None,
+            Command::Response(
+                Response::RPL_BANLIST,
+                vec![
+                    "me".to_string(),
+                    "#test".to_string(),
+                    "*!*@bad.example".to_string(),
+                    "oper".to_string(),
+                    "1700000000".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &list_msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        assert_eq!(buf.list_modes.get(BAN_MODE_KEY).unwrap().len(), 1);
+        assert!(
+            state
+                .buffers
+                .get("test/testserver")
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+
+        let end_msg = make_irc_msg(
+            None,
+            Command::Response(
+                Response::RPL_ENDOFBANLIST,
+                vec![
+                    "me".to_string(),
+                    "#TEST".to_string(),
+                    "End of channel ban list".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &end_msg);
+
+        let conn = state.connections.get("test").unwrap();
+        assert!(conn.silent_banlist_channels.is_empty());
+        assert!(
+            state
+                .buffers
+                .get("test/testserver")
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn silent_mode_sync_suppresses_channel_creation_notice() {
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+        if let Some(conn) = state.connections.get_mut("test") {
+            conn.silent_banlist_channels.insert("#Test".to_string());
+        }
+
+        let msg = make_irc_msg(
+            None,
+            Command::Raw(
+                "329".to_string(),
+                vec![
+                    "me".to_string(),
+                    "#test".to_string(),
+                    "1700000000".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let channel_buf = state.buffers.get("test/#test").unwrap();
+        assert!(channel_buf.messages.is_empty());
+    }
+
+    #[test]
     fn next_who_token_increments() {
         let mut state = make_test_state();
         let t1 = next_who_token(&mut state, "test");
@@ -6454,6 +6570,39 @@ mod tests {
     }
 
     #[test]
+    fn silent_whox_reply_suppresses_case_variant_channel() {
+        let mut state = make_whox_state();
+        state.set_active_buffer("test/testserver");
+
+        if let Some(conn) = state.connections.get_mut("test") {
+            conn.silent_who_channels.insert("#Test".to_string());
+        }
+
+        let msg = make_irc_msg(
+            None,
+            Command::Raw(
+                "354".to_string(),
+                vec![
+                    "me".to_string(),
+                    "1".to_string(),
+                    "#test".to_string(),
+                    "~alice".to_string(),
+                    "1.2.3.4".to_string(),
+                    "host.example.com".to_string(),
+                    "alice".to_string(),
+                    "H".to_string(),
+                    "alice_acct".to_string(),
+                    "Alice Smith".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let server_buf = state.buffers.get("test/testserver").unwrap();
+        assert!(server_buf.messages.is_empty());
+    }
+
+    #[test]
     fn silent_who_end_cleans_up_and_suppresses_display() {
         let mut state = make_whox_state();
         state.set_active_buffer("test/testserver");
@@ -6481,6 +6630,35 @@ mod tests {
         assert!(!conn.silent_who_channels.contains("#test"));
 
         // No display output
+        let server_buf = state.buffers.get("test/testserver").unwrap();
+        assert!(server_buf.messages.is_empty());
+    }
+
+    #[test]
+    fn silent_who_end_cleans_up_case_variant_channel() {
+        let mut state = make_whox_state();
+        state.set_active_buffer("test/testserver");
+
+        if let Some(conn) = state.connections.get_mut("test") {
+            conn.silent_who_channels.insert("#Test".to_string());
+        }
+
+        let msg = make_irc_msg(
+            None,
+            Command::Response(
+                Response::RPL_ENDOFWHO,
+                vec![
+                    "me".to_string(),
+                    "#TEST".to_string(),
+                    "End of WHO list".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let conn = state.connections.get("test").unwrap();
+        assert!(conn.silent_who_channels.is_empty());
+
         let server_buf = state.buffers.get("test/testserver").unwrap();
         assert!(server_buf.messages.is_empty());
     }

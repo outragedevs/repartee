@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use chrono::Utc;
 
 use crate::config;
-use crate::irc::{self, IrcEvent, IrcHandle};
+use crate::irc::{IrcEvent, IrcHandle};
 use crate::state::buffer::{
     ActivityLevel, Buffer, BufferType, Message, MessageType, make_buffer_id,
 };
@@ -100,52 +100,15 @@ impl App {
         server_buf_id
     }
 
-    /// Connect to a server defined in config by its key (e.g. "libera").
-    /// Used for autoconnect at startup.
-    pub(crate) async fn connect_server_async(
-        &mut self,
-        server_id: &str,
-    ) -> color_eyre::eyre::Result<()> {
-        let server_config = match self.config.servers.get(server_id) {
-            Some(cfg) => cfg.clone(),
-            None => {
-                return Ok(());
-            }
-        };
-
-        let conn_id = server_id.to_string();
-        self.setup_connection(&conn_id, &server_config);
-
-        let general = self.config.general.clone();
-        match irc::connect_server(&conn_id, &server_config, &general).await {
-            Ok((handle, mut rx)) => {
-                let tx = self.irc_tx.clone();
-                // Store local IP on Connection state (for DCC own-IP fallback)
-                if let Some(conn) = self.state.connections.get_mut(&conn_id) {
-                    conn.local_ip = handle.local_ip;
-                }
-                self.irc_handles.insert(conn_id.clone(), handle);
-
-                // Spawn task to forward events from per-connection receiver to shared channel
-                let fwd_handle = tokio::spawn(async move {
-                    while let Some(event) = rx.recv().await {
-                        if tx.send(event).await.is_err() {
-                            break;
-                        }
-                    }
-                });
-                self.forwarder_handles.insert(conn_id.clone(), fwd_handle);
-            }
-            Err(e) => {
-                crate::irc::events::handle_disconnected(
-                    &mut self.state,
-                    &conn_id,
-                    Some(&e.to_string()),
-                );
-            }
+    pub(crate) fn start_autoconnects(&mut self, server_ids: &[String]) {
+        for server_id in server_ids {
+            let Some(server_config) = self.config.servers.get(server_id).cloned() else {
+                continue;
+            };
+            let label = server_config.label.clone();
+            let buffer_id = self.setup_connection(server_id, &server_config);
+            self.spawn_reconnect(server_id, Some(server_config), &buffer_id, &label);
         }
-
-        Ok(())
     }
 
     /// Add an event message to the specified buffer.
@@ -219,7 +182,7 @@ impl App {
     }
 
     /// Spawn a reconnect task or log failure if no config is available.
-    fn spawn_reconnect(
+    pub(crate) fn spawn_reconnect(
         &mut self,
         conn_id: &str,
         server_config: Option<config::ServerConfig>,
