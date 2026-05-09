@@ -677,7 +677,7 @@ impl App {
             terminal: None,
             detached: false,
             should_detach: false,
-            log_browser_mode: false,
+            log_browser_mode: log_browser,
             log_db: None,
             socket_listener: None,
             socket_output_tx: None,

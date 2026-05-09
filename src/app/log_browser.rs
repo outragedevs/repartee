@@ -27,7 +27,7 @@ impl App {
     /// a sidebar built from the message log.
     pub fn new_log_browser() -> Result<Self> {
         let mut app = Self::new_with_mode(true)?;
-        app.log_browser_mode = true;
+        // `new_with_mode(true)` already sets `log_browser_mode = true`.
 
         let log_db = crate::storage::load_log_db(&app.config.logging)
             .map_err(|e| eyre!("{e}"))?;
@@ -292,22 +292,35 @@ impl App {
         if buffer.history_exhausted {
             return;
         }
-        let Some(oldest_msg) = buffer.messages.front() else {
+        // Skip synthetic rows — day separators (`event_key =
+        // "date_separator"`) carry `log_msg_id: None` because they
+        // aren't real DB rows. Using one as the pagination anchor
+        // would collapse the cursor to `None`, fetching the *newest*
+        // page again and producing duplicate prepends. Walk forward
+        // until we find a row that came from `stored_to_message`.
+        let Some(oldest_msg) = buffer
+            .messages
+            .iter()
+            .find(|m| m.log_msg_id.is_some())
+        else {
             self.load_initial_messages(buffer_id);
             return;
         };
         let oldest_ts = oldest_msg.timestamp.timestamp();
         // `log_msg_id` is the SQLite row id (set in `stored_to_message`).
         // Composite cursor `(timestamp, id)` lets us page through rows
-        // that share a second without losing any. If the id is missing
-        // for some reason (shouldn't happen for log-mode rows) we fall
-        // back to a strict timestamp cursor — one second of duplicates
-        // may be lost but the page still advances.
-        let oldest_id = oldest_msg
+        // that share a second without losing any.
+        let Some(oldest_id) = oldest_msg
             .log_msg_id
             .as_ref()
-            .and_then(|s| s.parse::<i64>().ok());
-        let cursor = oldest_id.map(|id| (oldest_ts, id));
+            .and_then(|s| s.parse::<i64>().ok())
+        else {
+            // Defensive: every `stored_to_message` row sets a numeric
+            // `log_msg_id`. If parsing fails we'd fetch the newest page
+            // again, so bail.
+            return;
+        };
+        let cursor = Some((oldest_ts, oldest_id));
         let Some((net, buf)) = self.split_log_buffer_id(buffer_id) else {
             return;
         };
