@@ -286,6 +286,32 @@ impl App {
             .to_string();
         Some((net, buffer.name.clone()))
     }
+
+    /// Trigger `load_older_messages` for the active log buffer if the
+    /// user has scrolled close enough to the top to want more history.
+    /// Called from the scroll-up code paths (PageUp, mouse wheel) so the
+    /// log paginates incrementally without an explicit "fetch more"
+    /// gesture.
+    ///
+    /// Threshold: trigger when `scroll_offset` is within 50 lines of the
+    /// loaded top — i.e. the next handful of PageUps would otherwise hit
+    /// the boundary. Idempotent: `load_older_messages` already early-
+    /// returns when `history_exhausted` is set.
+    pub(crate) fn maybe_paginate_log_buffer(&mut self) {
+        let Some(active_id) = self.state.active_buffer_id.clone() else {
+            return;
+        };
+        let Some(buf) = self.state.buffers.get(&active_id) else {
+            return;
+        };
+        if buf.buffer_type != BufferType::Log || buf.history_exhausted {
+            return;
+        }
+        let messages_len = buf.messages.len();
+        if self.scroll_offset.saturating_add(50) >= messages_len {
+            self.load_older_messages(&active_id);
+        }
+    }
 }
 
 /// Convert a row read from `messages` into the in-memory `Message`

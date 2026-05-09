@@ -221,6 +221,9 @@ impl App {
             (_, KeyCode::Down) => self.input.history_down(),
             (_, KeyCode::PageUp) => {
                 self.scroll_offset = self.scroll_offset.saturating_add(10);
+                if self.log_browser_mode {
+                    self.maybe_paginate_log_buffer();
+                }
             }
             (_, KeyCode::PageDown) => {
                 self.scroll_offset = self.scroll_offset.saturating_sub(10);
@@ -241,6 +244,18 @@ impl App {
                 } else {
                     self.handle_tab();
                 }
+            }
+            // Log-browser hotkey: bare `q` / `Q` with no modifiers (other than
+            // Shift) quits the browser when the input line is empty. Mirrors
+            // weechat's `q` shortcut in `/buffer history`-style read-only views.
+            // The empty-buffer guard means typing `quit` or any text that
+            // starts with `q` still works as a normal slash command sequence.
+            (mods, KeyCode::Char('q' | 'Q'))
+                if self.log_browser_mode
+                    && self.input.value.is_empty()
+                    && (mods.is_empty() || mods == KeyModifiers::SHIFT) =>
+            {
+                self.should_quit = true;
             }
             (mods, KeyCode::Char(c)) if mods.is_empty() || mods == KeyModifiers::SHIFT => {
                 let is_highlight = self
@@ -384,6 +399,9 @@ impl App {
             MouseEventKind::ScrollUp => {
                 if regions.chat_area.is_some_and(|r| r.contains(pos)) {
                     self.scroll_offset = self.scroll_offset.saturating_add(3);
+                    if self.log_browser_mode {
+                        self.maybe_paginate_log_buffer();
+                    }
                 } else if regions.buffer_list_area.is_some_and(|r| r.contains(pos)) {
                     self.buffer_list_scroll = self.buffer_list_scroll.saturating_sub(1);
                 } else if regions.nick_list_area.is_some_and(|r| r.contains(pos)) {
