@@ -917,41 +917,53 @@ impl App {
             self.run_splash().await?;
         }
 
-        // In detached mode the shim has nothing to attach to without the
-        // session socket — fail loud so main()'s parent waitpid surfaces
-        // it instead of leaving a zombie-running headless backend that
-        // the user can never reach. In direct mode (terminal already
-        // owned by this process) the socket is a nice-to-have.
-        if let Err(e) = self.start_socket_listener() {
-            if self.detached {
-                return Err(e.wrap_err("failed to start session socket"));
+        // Log-browser mode owns the terminal directly, has no IRC at all,
+        // and intentionally has no shim — every chat-mode subsystem below
+        // is short-circuited by the `log_browser_mode` flag.
+        if !self.log_browser_mode {
+            // In detached mode the shim has nothing to attach to without the
+            // session socket — fail loud so main()'s parent waitpid surfaces
+            // it instead of leaving a zombie-running headless backend that
+            // the user can never reach. In direct mode (terminal already
+            // owned by this process) the socket is a nice-to-have.
+            if let Err(e) = self.start_socket_listener() {
+                if self.detached {
+                    return Err(e.wrap_err("failed to start session socket"));
+                }
+                tracing::warn!("session socket unavailable: {e}");
             }
-            tracing::warn!("session socket unavailable: {e}");
         }
 
-        let autoconnect_ids: Vec<String> = self
-            .config
-            .servers
-            .iter()
-            .filter(|(_, cfg)| cfg.autoconnect)
-            .map(|(id, _)| id.clone())
-            .collect();
+        let autoconnect_ids: Vec<String> = if self.log_browser_mode {
+            Vec::new()
+        } else {
+            self.config
+                .servers
+                .iter()
+                .filter(|(_, cfg)| cfg.autoconnect)
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
 
-        if self.state.buffers.is_empty() {
+        if !self.log_browser_mode && self.state.buffers.is_empty() {
             Self::create_default_status(&mut self.state);
         }
 
-        self.autoload_scripts();
+        if !self.log_browser_mode {
+            self.autoload_scripts();
 
-        if self.config.display.mentions_buffer {
-            self.create_mentions_buffer();
+            if self.config.display.mentions_buffer {
+                self.create_mentions_buffer();
+            }
         }
 
         if self.terminal.is_some() && !self.is_socket_attached {
             self.start_term_reader();
         }
 
-        self.start_web_server().await;
+        if !self.log_browser_mode {
+            self.start_web_server().await;
+        }
 
         let mut pending_autoconnect_ids = (!autoconnect_ids.is_empty()).then_some(autoconnect_ids);
 
