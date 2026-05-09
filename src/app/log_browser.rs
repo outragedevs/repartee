@@ -22,7 +22,7 @@ impl App {
 
     /// Build an `App` instance configured for the read-only log browser.
     /// No IRC, no scripts, no web server, no socket listener — just a
-    /// SQLite connection backing a sidebar built from the message log.
+    /// `SQLite` connection backing a sidebar built from the message log.
     pub fn new_log_browser() -> Result<Self> {
         let mut app = Self::new()?;
         app.log_browser_mode = true;
@@ -48,6 +48,10 @@ impl App {
     /// becomes a synthetic `Connection`, each buffer a `BufferType::Log`
     /// placeholder with empty `messages` (filled lazily when first
     /// activated).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "flat sidebar bootstrap; splitting helps no one"
+    )]
     pub fn build_log_catalog(&mut self) -> Result<()> {
         let log_db = self
             .log_db
@@ -277,7 +281,7 @@ impl App {
 
     /// Split a `BufferType::Log` buffer id (`_log_<network>/<buffer>`)
     /// into `(network, buffer_name)`. Returns `None` for non-log
-    /// buffers — the connection_id prefix is the discriminator.
+    /// buffers — the `connection_id` prefix is the discriminator.
     pub(crate) fn split_log_buffer_id(&self, buffer_id: &str) -> Option<(String, String)> {
         let buffer = self.state.buffers.get(buffer_id)?;
         let net = buffer
@@ -289,14 +293,14 @@ impl App {
 
     /// Trigger `load_older_messages` for the active log buffer if the
     /// user has scrolled close enough to the top to want more history.
-    /// Called from the scroll-up code paths (PageUp, mouse wheel) so the
-    /// log paginates incrementally without an explicit "fetch more"
+    /// Called from the scroll-up code paths (`PageUp`, mouse wheel) so
+    /// the log paginates incrementally without an explicit "fetch more"
     /// gesture.
     ///
-    /// Threshold: trigger when `scroll_offset` is within 50 lines of the
-    /// loaded top — i.e. the next handful of PageUps would otherwise hit
-    /// the boundary. Idempotent: `load_older_messages` already early-
-    /// returns when `history_exhausted` is set.
+    /// Threshold: trigger when `scroll_offset` is within 50 lines of
+    /// the loaded top — i.e. the next handful of `PageUp`s would
+    /// otherwise hit the boundary. Idempotent: `load_older_messages`
+    /// already early-returns when `history_exhausted` is set.
     pub(crate) fn maybe_paginate_log_buffer(&mut self) {
         let Some(active_id) = self.state.active_buffer_id.clone() else {
             return;

@@ -8,6 +8,12 @@
 //!
 //! V1 surface: `/search`, `/quit`, `/help`. Future: `/jump`, `/grep`.
 
+#![allow(clippy::redundant_pub_crate)]
+#![allow(
+    clippy::missing_const_for_fn,
+    reason = "consistent with other command handlers"
+)]
+
 use crate::app::App;
 use crate::commands::helpers::add_local_event;
 

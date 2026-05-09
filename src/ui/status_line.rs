@@ -205,24 +205,22 @@ fn render_log_status(
     fg_muted: Color,
     accent: Color,
 ) {
-    let active = app.state.active_buffer();
-    let (id_text, loaded, total, from) = match active {
-        Some(buf) => {
+    let (id_text, loaded, total, from) = app.state.active_buffer().map_or_else(
+        || (String::from("(no buffer)"), 0, 0, String::from("(empty)")),
+        |buf| {
             let id = buf
                 .connection_id
                 .strip_prefix(crate::app::App::LOG_CONN_PREFIX)
                 .map_or_else(|| buf.id.clone(), |net| format!("{net}/{}", buf.name));
             let total = buf.log_total_lines.unwrap_or(0);
             let loaded = buf.messages.len();
-            let from = buf
-                .messages
-                .front()
-                .map(|m| m.timestamp.format("%Y-%m-%d %H:%M").to_string())
-                .unwrap_or_else(|| String::from("(empty)"));
+            let from = buf.messages.front().map_or_else(
+                || String::from("(empty)"),
+                |m| m.timestamp.format("%Y-%m-%d %H:%M").to_string(),
+            );
             (id, loaded, total, from)
-        }
-        None => (String::from("(no buffer)"), 0, 0, String::from("(empty)")),
-    };
+        },
+    );
     let sep = Span::styled("  \u{2022}  ", Style::default().fg(fg_muted));
     let line = Line::from(vec![
         Span::styled("log mode", Style::default().fg(accent).add_modifier(Modifier::BOLD)),
