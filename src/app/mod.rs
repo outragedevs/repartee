@@ -403,6 +403,14 @@ pub struct App {
     pub terminal: Option<ui::Tui>,
     pub detached: bool,
     pub should_detach: bool,
+    /// `true` when the process was started via `repartee l`. Disables IRC
+    /// connections, the session socket listener, web server, scripts and
+    /// autoconnect; sidebar source is rebuilt from the read-only `log_db`.
+    pub log_browser_mode: bool,
+    /// Present when `log_browser_mode == true`. Bundles the read-only
+    /// SQLite handle plus the optional crypto key used to decrypt rows
+    /// when `[storage] encrypt = true`.
+    pub log_db: Option<crate::storage::LogDb>,
     pub(crate) socket_listener: Option<tokio::net::UnixListener>,
     pub(crate) socket_output_tx:
         Option<tokio::sync::mpsc::UnboundedSender<crate::session::protocol::MainMessage>>,
@@ -642,6 +650,8 @@ impl App {
             terminal: None,
             detached: false,
             should_detach: false,
+            log_browser_mode: false,
+            log_db: None,
             socket_listener: None,
             socket_output_tx: None,
             shim_event_rx: None,
