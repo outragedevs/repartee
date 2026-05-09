@@ -153,6 +153,7 @@ mod tests {
                 log_oldest_ts: None,
                 log_newest_ts: None,
                 history_exhausted: false,
+                log_initial_loaded: false,
             },
         );
         state

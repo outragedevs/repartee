@@ -454,8 +454,26 @@ impl App {
     /// Connection ID for the app-level default Status buffer.
     pub const DEFAULT_CONN_ID: &'static str = "_default";
 
-    #[allow(clippy::too_many_lines)]
     pub fn new() -> Result<Self> {
+        Self::new_with_mode(false)
+    }
+
+    /// Construct an `App` with chat-mode services optionally suppressed.
+    ///
+    /// `log_browser = true` skips the heavy IO that has no place in a
+    /// read-only history viewer:
+    /// * `Storage::init` (would open the DB write-mode, run retention
+    ///   purge, and spawn the LogWriter task — all wrong for a viewer).
+    /// * The RPE2E keyring init (depends on storage write access).
+    /// * The Lua scripting engine (no IRC events to react to).
+    ///
+    /// The remaining managers (DCC, Shell, web channels, image preview)
+    /// stay default-initialised — they have no side effects until used,
+    /// and keeping the field set non-`Option` keeps the struct readable.
+    /// `App::new_log_browser` then attaches a read-only `LogDb`
+    /// separately and rebuilds the sidebar from the message catalog.
+    #[allow(clippy::too_many_lines)]
+    pub fn new_with_mode(log_browser: bool) -> Result<Self> {
         constants::ensure_config_dir();
         let mut config = config::load_config(&constants::config_path())?;
 
@@ -476,7 +494,12 @@ impl App {
         state.nick_color_lit = config.display.nick_color_lightness;
         let (irc_tx, irc_rx) = mpsc::channel(4096);
 
-        let storage = if config.logging.enabled {
+        let storage = if log_browser {
+            // Log browser opens its own read-only handle later via
+            // `load_log_db` — skipping `Storage::init` here is the
+            // whole point of the read-only mode.
+            None
+        } else if config.logging.enabled {
             match crate::storage::Storage::init(&config.logging) {
                 Ok(s) => {
                     state.log_tx = Some(s.log_tx.clone());
@@ -583,13 +606,15 @@ impl App {
         );
         let mut script_manager =
             crate::scripting::engine::ScriptManager::new(constants::scripts_dir());
-        match crate::scripting::lua::LuaEngine::new() {
-            Ok(lua_engine) => {
-                script_manager.register_engine(Box::new(lua_engine));
-                tracing::info!("Lua scripting engine registered");
-            }
-            Err(e) => {
-                tracing::error!("failed to initialize Lua engine: {e}");
+        if !log_browser {
+            match crate::scripting::lua::LuaEngine::new() {
+                Ok(lua_engine) => {
+                    script_manager.register_engine(Box::new(lua_engine));
+                    tracing::info!("Lua scripting engine registered");
+                }
+                Err(e) => {
+                    tracing::error!("failed to initialize Lua engine: {e}");
+                }
             }
         }
 
@@ -871,6 +896,7 @@ impl App {
             log_oldest_ts: None,
             log_newest_ts: None,
             history_exhausted: false,
+            log_initial_loaded: false,
         });
         state.set_active_buffer(&buf_id);
 

@@ -874,6 +874,7 @@ fn ensure_query_buffer(app: &mut App, conn_id: &str, target: &str, skip_channels
             log_oldest_ts: None,
             log_newest_ts: None,
             history_exhausted: false,
+            log_initial_loaded: false,
         });
     }
     buffer_id

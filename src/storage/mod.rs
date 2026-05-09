@@ -125,8 +125,13 @@ pub fn load_log_db(config: &LoggingConfig) -> Result<LogDb, String> {
     let conn = db::open_readonly_at(path_str)
         .map_err(|e| format!("failed to open log database: {e}"))?;
 
+    // Important: `load_existing_key`, NOT `load_or_create_key`. If the
+    // user's LOG_KEY went missing for any reason (deleted .env, copied
+    // DB onto a fresh machine), generating a fresh key would produce a
+    // bad cipher and a silent empty UI. We surface a clear error
+    // instead.
     let crypto_key = if config.encrypt {
-        let hex_key = crypto::load_or_create_key()?;
+        let hex_key = crypto::load_existing_key()?;
         Some(crypto::import_key(&hex_key)?)
     } else {
         None

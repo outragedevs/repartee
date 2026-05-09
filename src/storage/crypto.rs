@@ -81,6 +81,43 @@ pub fn load_or_create_keyring_key() -> Result<String, String> {
     load_or_create_named_key_at(&path, "KEYRING_KEY")
 }
 
+/// Load the existing encryption key from the default `.env`. Errors
+/// (instead of silently generating a fresh key) when `LOG_KEY` is
+/// missing or empty. Used by the log browser, where creating a new key
+/// would produce a wrong cipher and an unreadable history.
+pub fn load_existing_key() -> Result<String, String> {
+    load_existing_named_key_at(&crate::constants::env_path(), "LOG_KEY")
+}
+
+fn load_existing_named_key_at(path: &Path, suffix: &str) -> Result<String, String> {
+    let key_name = env_key_name_with_suffix(suffix);
+    if !path.exists() {
+        return Err(format!(
+            "encrypted log requested but no {} found at {} \
+             (was the daemon ever started with [storage] encrypt = true?)",
+            key_name,
+            path.display()
+        ));
+    }
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("failed to open {}: {e}", path.display()))?;
+    let reader = std::io::BufReader::new(file);
+    for line in reader.lines() {
+        let line = line.map_err(|e| format!("failed to read line: {e}"))?;
+        if let Some(value) = line.trim().strip_prefix(&format!("{key_name}=")) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Ok(value.to_string());
+            }
+        }
+    }
+    Err(format!(
+        "{} not found in {} — cannot decrypt log without the key",
+        key_name,
+        path.display()
+    ))
+}
+
 /// Load the encryption key from `path`, or generate one and append it.
 ///
 /// The .env file is expected to contain lines like `KEY=value`.

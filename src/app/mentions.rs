@@ -34,6 +34,7 @@ impl App {
             log_oldest_ts: None,
             log_newest_ts: None,
             history_exhausted: false,
+            log_initial_loaded: false,
         };
         self.state
             .buffers

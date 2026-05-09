@@ -177,6 +177,13 @@ pub struct Buffer {
     /// `BufferType::Log` only — set `true` once a paginated `load_older`
     /// returns fewer rows than requested (we've hit the start of the log).
     pub history_exhausted: bool,
+    /// `BufferType::Log` only — flips `true` after the first
+    /// `load_initial_messages` call returns from the database. We can't
+    /// gate on `messages.is_empty()` because slash-command errors and
+    /// the `/help` listing add `MessageType::Event` rows to the buffer
+    /// before the first lazy load fires; without an explicit flag the
+    /// real history would never load.
+    pub log_initial_loaded: bool,
 }
 
 impl Buffer {
@@ -227,6 +234,7 @@ mod tests {
             log_oldest_ts: None,
             log_newest_ts: None,
             history_exhausted: false,
+            log_initial_loaded: false,
         };
 
         buf.touch_speaker("alice");
@@ -262,6 +270,7 @@ mod tests {
             log_oldest_ts: None,
             log_newest_ts: None,
             history_exhausted: false,
+            log_initial_loaded: false,
         };
 
         buf.touch_speaker("Alice");
@@ -293,6 +302,7 @@ mod tests {
             log_oldest_ts: None,
             log_newest_ts: None,
             history_exhausted: false,
+            log_initial_loaded: false,
         };
 
         for i in 0..60 {

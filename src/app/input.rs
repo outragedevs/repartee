@@ -551,6 +551,7 @@ impl App {
                 log_oldest_ts: None,
                 log_newest_ts: None,
                 history_exhausted: false,
+                log_initial_loaded: false,
             });
         }
         self.state.set_active_buffer(&query_buf_id);
@@ -718,6 +719,15 @@ impl App {
     pub(crate) fn handle_submit(&mut self, text: &str) {
         if let Some(parsed) = crate::commands::parser::parse_command(text) {
             self.execute_command_with_depth(&parsed, 0);
+        } else if self.log_browser_mode {
+            // Spec: log mode rejects plain text — there is no IRC
+            // connection to send to, and routing through
+            // `handle_plain_message` would produce the unrelated
+            // "Cannot send messages to this buffer" line.
+            crate::commands::helpers::add_local_event(
+                self,
+                "log mode: only slash commands. /help",
+            );
         } else {
             self.handle_plain_message(text);
         }

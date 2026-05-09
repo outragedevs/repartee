@@ -836,6 +836,7 @@ fn handle_privmsg(
             log_oldest_ts: None,
             log_newest_ts: None,
             history_exhausted: false,
+            log_initial_loaded: false,
         });
     }
 
@@ -1301,6 +1302,7 @@ fn handle_join(
                 log_oldest_ts: None,
                 log_newest_ts: None,
                 history_exhausted: false,
+                log_initial_loaded: false,
             });
         }
         state.set_active_buffer(&buffer_id);
@@ -4174,6 +4176,7 @@ mod tests {
             log_oldest_ts: None,
             log_newest_ts: None,
             history_exhausted: false,
+            log_initial_loaded: false,
         });
         // Channel buffer
         let chan_id = make_buffer_id("test", "#test");
@@ -4198,6 +4201,7 @@ mod tests {
             log_oldest_ts: None,
             log_newest_ts: None,
             history_exhausted: false,
+            log_initial_loaded: false,
         });
         // Add ourselves to the channel
         state.add_nick(
@@ -4237,6 +4241,7 @@ mod tests {
             log_oldest_ts: None,
             log_newest_ts: None,
             history_exhausted: false,
+            log_initial_loaded: false,
         }
     }
 
@@ -5089,6 +5094,7 @@ mod tests {
             log_oldest_ts: None,
             log_newest_ts: None,
             history_exhausted: false,
+            log_initial_loaded: false,
         });
 
         // Add alice to both channels
@@ -5228,6 +5234,7 @@ mod tests {
             log_oldest_ts: None,
             log_newest_ts: None,
             history_exhausted: false,
+            log_initial_loaded: false,
         });
 
         // Add alice to both channels
@@ -5360,6 +5367,7 @@ mod tests {
             log_oldest_ts: None,
             log_newest_ts: None,
             history_exhausted: false,
+            log_initial_loaded: false,
         });
 
         // Add alice to both channels
@@ -5903,6 +5911,7 @@ mod tests {
             log_oldest_ts: None,
             log_newest_ts: None,
             history_exhausted: false,
+            log_initial_loaded: false,
         });
 
         // Server echoes our NOTICE to "bob"

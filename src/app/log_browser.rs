@@ -21,19 +21,22 @@ impl App {
     pub const LOG_CONN_PREFIX: &'static str = "_log_";
 
     /// Build an `App` instance configured for the read-only log browser.
-    /// No IRC, no scripts, no web server, no socket listener — just a
-    /// `SQLite` connection backing a sidebar built from the message log.
+    /// No IRC, no scripts, no web server, no socket listener, no
+    /// `Storage::init` (which would open the DB writeable and run
+    /// retention purge) — just a read-only `SQLite` connection backing
+    /// a sidebar built from the message log.
     pub fn new_log_browser() -> Result<Self> {
-        let mut app = Self::new()?;
+        let mut app = Self::new_with_mode(true)?;
         app.log_browser_mode = true;
 
         let log_db = crate::storage::load_log_db(&app.config.logging)
             .map_err(|e| eyre!("{e}"))?;
         app.log_db = Some(log_db);
 
-        // Wipe state populated by the chat-mode `App::new` (default
-        // Status buffer, any state derived from `[servers]`) so
-        // `build_log_catalog` sees a clean sidebar.
+        // `new_with_mode(true)` does not create any default buffers,
+        // but `state.connections` may still contain whatever the
+        // chat-mode default-init leaves behind. Clear before catalog
+        // build so the sidebar reflects the SQLite history only.
         app.state.connections.clear();
         app.state.buffers.clear();
         app.state.active_buffer_id = None;
@@ -154,6 +157,7 @@ impl App {
                     log_oldest_ts: None,
                     log_newest_ts: None,
                     history_exhausted: false,
+                    log_initial_loaded: false,
                 });
             }
         }
@@ -165,9 +169,11 @@ impl App {
     }
 
     /// Load the most recent messages for `buffer_id` into its in-memory
-    /// `messages` deque. Idempotent: a buffer that already has messages
-    /// is skipped, so this can be called every tick from the main loop
-    /// while a log buffer is active.
+    /// `messages` deque. Idempotent: gated on the explicit
+    /// `log_initial_loaded` flag (NOT on `messages.is_empty()`) — the
+    /// buffer may already contain `add_local_event` rows from `/help`,
+    /// `/search` errors, or the slash-command rejection hint, which
+    /// would otherwise hide the real history forever.
     ///
     /// Also caches `(line_count, oldest_ts, newest_ts)` on the buffer so
     /// the topic-bar render doesn't requery on every frame.
@@ -177,7 +183,7 @@ impl App {
             .state
             .buffers
             .get(buffer_id)
-            .is_some_and(|b| !b.messages.is_empty());
+            .is_some_and(|b| b.log_initial_loaded);
         if already_loaded {
             return;
         }
@@ -215,14 +221,28 @@ impl App {
         match rows_result {
             Ok(rows) => {
                 let exhausted = rows.len() < INITIAL_LIMIT;
+                // Allocate fresh message ids first (mutable state borrow),
+                // then push into the buffer (separate mutable borrow).
+                let messages: Vec<_> = rows
+                    .iter()
+                    .map(|stored| stored_to_message(&mut self.state, stored))
+                    .collect();
                 if let Some(buffer) = self.state.buffers.get_mut(buffer_id) {
-                    for stored in rows {
-                        buffer.messages.push_back(stored_to_message(&stored));
+                    for msg in messages {
+                        buffer.messages.push_back(msg);
                     }
                     buffer.history_exhausted = exhausted;
+                    buffer.log_initial_loaded = true;
                 }
             }
-            Err(e) => tracing::warn!(%buffer_id, "log load_initial failed: {e}"),
+            Err(e) => {
+                tracing::warn!(%buffer_id, "log load_initial failed: {e}");
+                // Mark loaded anyway — retrying on every tick would
+                // hammer the DB with the same broken query.
+                if let Some(buffer) = self.state.buffers.get_mut(buffer_id) {
+                    buffer.log_initial_loaded = true;
+                }
+            }
         }
     }
 
@@ -274,12 +294,18 @@ impl App {
         match rows_result {
             Ok(rows) => {
                 let exhausted = rows.len() < PAGE_LIMIT;
+                // Build messages first to avoid holding two mutable
+                // borrows on `self.state` simultaneously. Reverse the
+                // chronological-ascending result so we can `push_front`
+                // them in order — the buffer stays sorted.
+                let messages: Vec<_> = rows
+                    .iter()
+                    .rev()
+                    .map(|stored| stored_to_message(&mut self.state, stored))
+                    .collect();
                 if let Some(buffer) = self.state.buffers.get_mut(buffer_id) {
-                    // get_messages returns chronological ascending — push
-                    // them onto the front in reverse order so the buffer
-                    // stays sorted.
-                    for stored in rows.into_iter().rev() {
-                        buffer.messages.push_front(stored_to_message(&stored));
+                    for msg in messages {
+                        buffer.messages.push_front(msg);
                     }
                     if exhausted {
                         buffer.history_exhausted = true;
@@ -334,10 +360,15 @@ impl App {
 /// conversion but lives here because the log browser doesn't share
 /// `App.storage` (which is `None` in log mode).
 ///
-/// `log_msg_id` carries the `SQLite` row id as a decimal string so
-/// `load_older_messages` can build a `(timestamp, id)` composite
-/// cursor and not lose rows that share a second.
-fn stored_to_message(stored: &crate::storage::StoredMessage) -> crate::state::buffer::Message {
+/// `id` is taken from the live `state.message_counter` — never `0`,
+/// which would collide with web-snapshot / session diffing on the
+/// next message. `log_msg_id` carries the `SQLite` row id as a
+/// decimal string so `load_older_messages` can build a `(timestamp,
+/// id)` composite cursor without losing same-second rows.
+fn stored_to_message(
+    state: &mut crate::state::AppState,
+    stored: &crate::storage::StoredMessage,
+) -> crate::state::buffer::Message {
     use crate::state::buffer::{Message, MessageType};
     let ts = chrono::DateTime::<Utc>::from_timestamp(stored.timestamp, 0).unwrap_or_else(Utc::now);
     let msg_type = match stored.msg_type.as_str() {
@@ -348,7 +379,7 @@ fn stored_to_message(stored: &crate::storage::StoredMessage) -> crate::state::bu
         _ => MessageType::Message,
     };
     Message {
-        id: 0,
+        id: state.next_message_id(),
         timestamp: ts,
         message_type: msg_type,
         nick: stored.nick.clone(),
