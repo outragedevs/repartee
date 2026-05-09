@@ -19,6 +19,8 @@ use tokio::sync::mpsc;
 
 use crate::irc::cap::{DESIRED_CAPS, ServerCaps};
 
+const IRC_PING_TIMEOUT_SECS: u32 = 60;
+
 /// An IRC event forwarded from the reader task to the main loop.
 #[derive(Debug)]
 pub enum IrcEvent {
@@ -343,6 +345,7 @@ pub async fn connect_server(
         version: Some(general.ctcp_version.clone()),
         client_cert_path: server_config.client_cert_path.clone(),
         bind_address: server_config.bind_ip.clone(),
+        ping_timeout: Some(IRC_PING_TIMEOUT_SECS),
         flood_penalty_threshold: Some(if general.flood_protection {
             10_000 // default: 10s, matches IRCd excess flood limit
         } else {

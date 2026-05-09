@@ -68,6 +68,20 @@ Show logging status, database size, and message count.
 
 Search across all logged messages.
 
+## Read-only log browser
+
+Start repartee in log browser mode to inspect history without connecting to IRC:
+
+```bash
+repartee l
+repartee logs
+```
+
+This mode opens the log database read-only, disables IRC connections, web services,
+scripts, and autoconnect, then renders stored buffers with the normal TUI. Scroll up
+to page older messages, press `Q` or use `/quit` to exit, and use `/search <query>`
+for full-text search when logs are not encrypted.
+
 ## Chat history backlog
 
 When you open a channel, query, or DCC chat buffer, repartee automatically loads the most recent messages from the log database — so you immediately see recent context without scrolling.

@@ -32,6 +32,7 @@ repartee                  # normal start (fork + terminal)
 repartee -d / --detach    # start headless (no terminal)
 repartee a [pid]          # attach to a running session
 repartee attach [pid]     # same as above
+repartee l / logs         # open read-only log browser
 repartee -v / --version   # print version
 ```
 

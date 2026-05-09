@@ -237,6 +237,12 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v1.0.0
+
+- **Read-only log browser** — `repartee l` / `repartee logs` opens the SQLite history directly, without connecting to IRC or starting scripts/web services. It supports network headers, day separators, paged scrollback loading, `/search`, and encrypted-log fallback behavior.
+- **Paste-burst connection hardening** — updated to `irc-repartee` 1.5.1 so internal IRC PING/PONG traffic uses a priority lane and cannot be starved behind flood-throttled paste backlogs.
+- **More tolerant local ping timeout** — repartee now sets the IRC client ping response timeout to 60 seconds instead of inheriting the upstream 20-second default.
+
 ### v0.9.4
 
 - **Live ban-list tracking** — channel `+b/-b` mode changes now keep the local ban list current, and joined channels silently sync `MODE #channel b` so `/unban` numeric references and wildcard removals work without repeatedly refreshing `/ban`.

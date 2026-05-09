@@ -93,6 +93,12 @@ log rows. Adding `"event"` to `exclude_types` prevents this bloat.
     /log status
     /log search ssl certificate
 
+## Read-only Browser
+
+From the shell, use `repartee l` or `repartee logs` to open the stored history
+without connecting to IRC. In log browser mode, `/search <query>` searches the
+read-only database, `Q` and `/quit` exit, and scrolling up pages older messages.
+
 ## See Also
 
 /set, /ignore

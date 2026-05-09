@@ -36,7 +36,7 @@ A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by ir
   </div>
   <div class="card">
     <div class="card-title">Persistent Logging</div>
-    <div class="card-body">SQLite with optional AES-256-GCM encryption and FTS5 full-text search across all logs.</div>
+    <div class="card-body">SQLite with optional AES-256-GCM encryption, FTS5 full-text search, and a read-only TUI log browser.</div>
   </div>
   <div class="card">
     <div class="card-title">Nick Coloring</div>

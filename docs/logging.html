@@ -183,6 +183,15 @@ REPARTEE_LOG_KEY=your-secret-passphrase
 <p>Show logging status, database size, and message count.</p>
 <h3><code>/log search &lt;query&gt;</code></h3>
 <p>Search across all logged messages.</p>
+<h2>Read-only log browser</h2>
+<p>Start repartee in log browser mode to inspect history without connecting to IRC:</p>
+<pre><code class="language-bash">repartee l
+repartee logs
+</code></pre>
+<p>This mode opens the log database read-only, disables IRC connections, web services,
+scripts, and autoconnect, then renders stored buffers with the normal TUI. Scroll up
+to page older messages, press <code>Q</code> or use <code>/quit</code> to exit, and use <code>/search &lt;query&gt;</code>
+for full-text search when logs are not encrypted.</p>
 <h2>Chat history backlog</h2>
 <p>When you open a channel, query, or DCC chat buffer, repartee automatically loads the most recent messages from the log database — so you immediately see recent context without scrolling.</p>
 <pre><code>/set display.backlog_lines 20    # default — load last 20 messages
