@@ -258,8 +258,9 @@ impl App {
                 // then push into the buffer (separate mutable borrow).
                 // Inject day-change separators between consecutive rows
                 // whose local-time date differs — same UX as `app::backlog`
-                // and weechat/irssi log files.
-                let messages = rows_to_buffer_messages(&mut self.state, &rows);
+                // and weechat/irssi log files. `None` for the initial
+                // load: the buffer is empty so no separator can collide.
+                let messages = rows_to_buffer_messages(&mut self.state, &rows, None);
                 if let Some(buffer) = self.state.buffers.get_mut(buffer_id) {
                     for msg in messages {
                         buffer.messages.push_back(msg);
@@ -340,10 +341,30 @@ impl App {
         match rows_result {
             Ok(rows) => {
                 let exhausted = rows.len() < PAGE_LIMIT;
-                // Build the chronologically-ordered batch with day
-                // separators interleaved, then prepend in reverse order
-                // so the buffer stays sorted (oldest at front).
-                let messages = rows_to_buffer_messages(&mut self.state, &rows);
+                // Look up the local date of the existing oldest real
+                // message in the buffer (skipping synthetic separators
+                // again — they don't count as a "real" date marker).
+                // Pass it to `rows_to_buffer_messages` so the helper
+                // suppresses a separator for that date when it appears
+                // at the boundary, avoiding the `[sep_Aug12, … ,
+                // sep_Aug12, …]` duplicate after prepend.
+                let existing_first_date = self
+                    .state
+                    .buffers
+                    .get(buffer_id)
+                    .and_then(|b| {
+                        b.messages
+                            .iter()
+                            .find(|m| m.log_msg_id.is_some())
+                            .map(|m| {
+                                use chrono::TimeZone as _;
+                                chrono::Local
+                                    .from_utc_datetime(&m.timestamp.naive_utc())
+                                    .date_naive()
+                            })
+                    });
+                let messages =
+                    rows_to_buffer_messages(&mut self.state, &rows, existing_first_date);
                 if let Some(buffer) = self.state.buffers.get_mut(buffer_id) {
                     for msg in messages.into_iter().rev() {
                         buffer.messages.push_front(msg);
@@ -412,9 +433,18 @@ impl App {
 /// fall on different local-time dates, a `MessageType::Event` row
 /// styled like irssi/weechat day separators (`─── Mon, 12 Aug 2024
 /// ───`) is inserted between them. Ids come from `state.message_counter`.
+///
+/// `existing_first_date` is the local date of the first real (non-
+/// synthetic) message already in the buffer when prepending. Pass
+/// `None` for the initial load. When the rightmost rows in `rows`
+/// share that date, the separator that would otherwise be emitted
+/// for that date is skipped — the buffer already has one, and
+/// emitting another would produce a duplicate `─── Aug 12 ───`
+/// pair after a `load_older_messages` prepend.
 fn rows_to_buffer_messages(
     state: &mut crate::state::AppState,
     rows: &[crate::storage::StoredMessage],
+    existing_first_date: Option<chrono::NaiveDate>,
 ) -> Vec<crate::state::buffer::Message> {
     use crate::state::buffer::{Message, MessageType};
     use chrono::{Local, TimeZone};
@@ -424,7 +454,9 @@ fn rows_to_buffer_messages(
         let ts = chrono::DateTime::<Utc>::from_timestamp(stored.timestamp, 0)
             .unwrap_or_else(Utc::now);
         let local_date = Local.from_utc_datetime(&ts.naive_utc()).date_naive();
-        if last_date.is_none_or(|d| d != local_date) {
+        let day_changed = last_date.is_none_or(|d| d != local_date);
+        let would_duplicate = existing_first_date == Some(local_date);
+        if day_changed && !would_duplicate {
             let sep_text = crate::app::backlog::format_date_separator(local_date);
             out.push(Message {
                 id: state.next_message_id(),
