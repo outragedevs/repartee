@@ -57,6 +57,23 @@ fn map_row(
     })
 }
 
+/// Columns selected by every chat/log read path.
+///
+/// Fan-out reference rows (e.g. a single QUIT broadcast across N channels)
+/// are stored with `text = ''` and `ref_id = <primary msg_id>` to save
+/// space — only the primary row carries the actual message text and IV.
+/// Without a JOIN to that primary row, every reference row would render
+/// as a blank event line in backlog or in the log browser. The aliases
+/// below transparently substitute the primary's `text` + `iv` whenever
+/// a reference exists; `map_row` is unchanged.
+const SELECT_MESSAGE_COLUMNS: &str = "
+    m.id, m.msg_id, m.network, m.buffer, m.timestamp, m.type, m.nick,
+    COALESCE(p.text, m.text) AS text,
+    m.highlight,
+    COALESCE(p.iv,   m.iv)   AS iv,
+    m.ref_id, m.tags, m.event_key
+";
+
 /// Fetch messages for a buffer with cursor-based pagination.
 ///
 /// Returns messages in chronological (ascending timestamp) order.
@@ -71,12 +88,15 @@ pub fn get_messages(
     crypto_key: Option<&Key<Aes256Gcm>>,
 ) -> rusqlite::Result<Vec<StoredMessage>> {
     let mut messages = if let Some(before_ts) = before {
-        let mut stmt = db.prepare(
-            "SELECT * FROM messages
-             WHERE network = ?1 AND buffer = ?2 AND timestamp < ?3
-             ORDER BY timestamp DESC
-             LIMIT ?4",
-        )?;
+        let sql = format!(
+            "SELECT {SELECT_MESSAGE_COLUMNS}
+             FROM messages m
+             LEFT JOIN messages p ON p.msg_id = m.ref_id
+             WHERE m.network = ?1 AND m.buffer = ?2 AND m.timestamp < ?3
+             ORDER BY m.timestamp DESC
+             LIMIT ?4"
+        );
+        let mut stmt = db.prepare(&sql)?;
         #[expect(
             clippy::cast_possible_wrap,
             reason = "limit will never exceed i64::MAX in practice"
@@ -86,12 +106,15 @@ pub fn get_messages(
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     } else {
-        let mut stmt = db.prepare(
-            "SELECT * FROM messages
-             WHERE network = ?1 AND buffer = ?2
-             ORDER BY timestamp DESC
-             LIMIT ?3",
-        )?;
+        let sql = format!(
+            "SELECT {SELECT_MESSAGE_COLUMNS}
+             FROM messages m
+             LEFT JOIN messages p ON p.msg_id = m.ref_id
+             WHERE m.network = ?1 AND m.buffer = ?2
+             ORDER BY m.timestamp DESC
+             LIMIT ?3"
+        );
+        let mut stmt = db.prepare(&sql)?;
         #[expect(
             clippy::cast_possible_wrap,
             reason = "limit will never exceed i64::MAX in practice"
@@ -130,13 +153,16 @@ pub fn get_messages_paginated(
     crypto_key: Option<&Key<Aes256Gcm>>,
 ) -> rusqlite::Result<Vec<StoredMessage>> {
     let mut messages = if let Some((ts, id)) = before {
-        let mut stmt = db.prepare(
-            "SELECT * FROM messages
-             WHERE network = ?1 AND buffer = ?2
-               AND (timestamp < ?3 OR (timestamp = ?3 AND id < ?4))
-             ORDER BY timestamp DESC, id DESC
-             LIMIT ?5",
-        )?;
+        let sql = format!(
+            "SELECT {SELECT_MESSAGE_COLUMNS}
+             FROM messages m
+             LEFT JOIN messages p ON p.msg_id = m.ref_id
+             WHERE m.network = ?1 AND m.buffer = ?2
+               AND (m.timestamp < ?3 OR (m.timestamp = ?3 AND m.id < ?4))
+             ORDER BY m.timestamp DESC, m.id DESC
+             LIMIT ?5"
+        );
+        let mut stmt = db.prepare(&sql)?;
         #[expect(
             clippy::cast_possible_wrap,
             reason = "limit will never exceed i64::MAX in practice"
@@ -146,12 +172,15 @@ pub fn get_messages_paginated(
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     } else {
-        let mut stmt = db.prepare(
-            "SELECT * FROM messages
-             WHERE network = ?1 AND buffer = ?2
-             ORDER BY timestamp DESC, id DESC
-             LIMIT ?3",
-        )?;
+        let sql = format!(
+            "SELECT {SELECT_MESSAGE_COLUMNS}
+             FROM messages m
+             LEFT JOIN messages p ON p.msg_id = m.ref_id
+             WHERE m.network = ?1 AND m.buffer = ?2
+             ORDER BY m.timestamp DESC, m.id DESC
+             LIMIT ?3"
+        );
+        let mut stmt = db.prepare(&sql)?;
         #[expect(
             clippy::cast_possible_wrap,
             reason = "limit will never exceed i64::MAX in practice"
@@ -836,5 +865,57 @@ mod tests {
         let stats = buffer_stats(&db, "libera", "#rust").unwrap();
         assert_eq!(stats, Some((3, 50, 200)));
         assert_eq!(buffer_stats(&db, "libera", "#unknown").unwrap(), None);
+    }
+
+    #[test]
+    fn fanout_reference_rows_resolve_text_from_primary() {
+        // Regression: fan-out QUIT/NICK rows are written with `text=''`
+        // and `ref_id=<primary msg_id>` (state/events.rs:308). Both
+        // `get_messages` and `get_messages_paginated` must JOIN to
+        // the primary so the reference row renders with the actual
+        // text instead of producing a blank event line.
+        let db = setup_test_db();
+        // Primary: full text on #rust.
+        db.execute(
+            "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight) \
+             VALUES ('p1', 'libera', '#rust', 100, 'event', 'alice', 'alice has quit (Bye)', 0)",
+            [],
+        )
+        .unwrap();
+        // Reference on #polska: empty text, ref_id pointing at primary.
+        db.execute(
+            "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight, ref_id) \
+             VALUES ('r1', 'libera', '#polska', 100, 'event', 'alice', '', 0, 'p1')",
+            [],
+        )
+        .unwrap();
+
+        let on_polska = get_messages(&db, "libera", "#polska", None, 10, false, None).unwrap();
+        assert_eq!(on_polska.len(), 1);
+        assert_eq!(on_polska[0].text, "alice has quit (Bye)");
+        assert_eq!(on_polska[0].ref_id.as_deref(), Some("p1"));
+
+        let on_polska_paged =
+            get_messages_paginated(&db, "libera", "#polska", None, 10, false, None).unwrap();
+        assert_eq!(on_polska_paged.len(), 1);
+        assert_eq!(on_polska_paged[0].text, "alice has quit (Bye)");
+    }
+
+    #[test]
+    fn orphan_reference_row_keeps_empty_text() {
+        // Defensive: if the primary row is missing (purged / never
+        // written), the reference row falls back to its own (empty)
+        // text rather than crashing. Bug surfacing as an empty event
+        // line is acceptable in this edge case.
+        let db = setup_test_db();
+        db.execute(
+            "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight, ref_id) \
+             VALUES ('orphan', 'libera', '#polska', 100, 'event', 'alice', '', 0, 'gone')",
+            [],
+        )
+        .unwrap();
+        let rows = get_messages(&db, "libera", "#polska", None, 10, false, None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "");
     }
 }
