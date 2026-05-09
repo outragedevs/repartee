@@ -255,6 +255,49 @@ mod tests {
     }
 
     #[test]
+    fn load_existing_key_errors_when_env_missing() {
+        // No .env file at the test path → must error, not auto-create.
+        let dir = std::env::temp_dir().join("repartee_loadexisting_no_env");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".env");
+        let err = load_existing_named_key_at(&path, "LOG_KEY").unwrap_err();
+        assert!(
+            err.contains("encrypted log requested"),
+            "should mention the missing key: {err}"
+        );
+        assert!(!path.exists(), "must not auto-create .env");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_existing_key_errors_when_key_line_missing() {
+        let dir = std::env::temp_dir().join("repartee_loadexisting_no_line");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".env");
+        std::fs::write(&path, "OTHER=value\n").unwrap();
+        let err = load_existing_named_key_at(&path, "LOG_KEY").unwrap_err();
+        assert!(
+            err.contains("not found in"),
+            "should mention the missing key line: {err}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_existing_key_returns_value_when_present() {
+        let dir = std::env::temp_dir().join("repartee_loadexisting_present");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".env");
+        std::fs::write(&path, "REPARTEE_LOG_KEY=cafe1234\n").unwrap();
+        let key = load_existing_named_key_at(&path, "LOG_KEY").unwrap();
+        assert_eq!(key, "cafe1234");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn load_or_create_key_roundtrip() {
         let dir = std::env::temp_dir().join(format!("repartee_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

@@ -30,6 +30,7 @@ pub(crate) fn cmd_log_help(app: &mut App, _args: &[String]) {
 }
 
 pub(crate) fn cmd_log_search(app: &mut App, args: &[String]) {
+    const SEARCH_LIMIT: usize = 1000;
     if args.is_empty() {
         add_local_event(app, "Usage: /search <text>");
         return;
@@ -47,37 +48,78 @@ pub(crate) fn cmd_log_search(app: &mut App, args: &[String]) {
         add_local_event(app, "Log DB unavailable");
         return;
     };
-    if !log_db.has_fts {
-        // search_messages requires FTS. With an encrypted DB we'd need a
-        // LIKE fallback; defer that to V1.1.
-        add_local_event(
-            app,
-            "/search requires plain-text logs; enable [storage] encrypt = false to use it",
-        );
-        return;
-    }
 
-    let hits = {
+    // FTS5 is gated on the schema being plain-text — encrypted logs
+    // store ciphertext, so the FTS index is never built. Two query
+    // paths:
+    //
+    //   plain DB     → `search_messages` (FTS5) — fast, ranks by
+    //                  match relevance, supports phrase queries.
+    //   encrypted DB → fetch the buffer through `get_messages` so
+    //                  rows are decrypted in-process, then filter
+    //                  in Rust with `text.contains(query)`. Slower
+    //                  (whole buffer scan) but correctness over
+    //                  performance — encrypted users still get
+    //                  /search instead of a useless error.
+    let rows = if log_db.has_fts {
         let Ok(db) = log_db.db.lock() else {
             add_local_event(app, "Log DB lock poisoned");
             return;
         };
-        crate::storage::query::search_messages(&db, &query, Some(&net), Some(&buf), 100)
-    };
-    match hits {
-        Ok(rows) => {
-            add_local_event(
-                app,
-                &format!("[{} matches for \"{}\" in {}/{}]", rows.len(), query, net, buf),
-            );
-            for hit in rows {
-                let when = chrono::DateTime::<chrono::Utc>::from_timestamp(hit.timestamp, 0)
-                    .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
-                    .unwrap_or_default();
-                let nick = hit.nick.as_deref().unwrap_or("*");
-                add_local_event(app, &format!("{when}  <{nick}> {}", hit.text));
+        match crate::storage::query::search_messages(
+            &db,
+            &query,
+            Some(&net),
+            Some(&buf),
+            SEARCH_LIMIT,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                drop(db);
+                add_local_event(app, &format!("Search failed: {e}"));
+                return;
             }
         }
-        Err(e) => add_local_event(app, &format!("Search failed: {e}")),
+    } else {
+        // Encrypted path: pull every row in this buffer (decrypted by
+        // `get_messages`) then filter case-insensitively in memory.
+        let Ok(db) = log_db.db.lock() else {
+            add_local_event(app, "Log DB lock poisoned");
+            return;
+        };
+        let all = match crate::storage::query::get_messages(
+            &db,
+            &net,
+            &buf,
+            None,
+            usize::MAX,
+            true,
+            log_db.crypto_key.as_ref(),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                drop(db);
+                add_local_event(app, &format!("Search failed: {e}"));
+                return;
+            }
+        };
+        drop(db);
+        let needle = query.to_lowercase();
+        all.into_iter()
+            .filter(|m| m.text.to_lowercase().contains(&needle))
+            .take(SEARCH_LIMIT)
+            .collect()
+    };
+
+    add_local_event(
+        app,
+        &format!("[{} matches for \"{}\" in {}/{}]", rows.len(), query, net, buf),
+    );
+    for hit in rows {
+        let when = chrono::DateTime::<chrono::Utc>::from_timestamp(hit.timestamp, 0)
+            .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_default();
+        let nick = hit.nick.as_deref().unwrap_or("*");
+        add_local_event(app, &format!("{when}  <{nick}> {}", hit.text));
     }
 }

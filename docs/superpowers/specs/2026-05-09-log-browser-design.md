@@ -163,7 +163,7 @@ In log mode the input bar accepts only `/`-prefixed input. Anything else flashes
 
 | Command | Behaviour |
 |---------|-----------|
-| `/search <text>` | `storage::search_messages(db, query, Some(network), Some(buffer), 1000)` (FTS5 if plain DB; LIKE fallback if encrypted). Highlights matches in the visible buffer; `n` / `N` jump to next/previous match. |
+| `/search <text>` | FTS5 on plain DBs; on encrypted DBs falls back to fetching the active buffer through `get_messages` (decrypted in-process) and filtering case-insensitively in memory. Returns up to 1000 hits printed inline as `[N matches] timestamp <nick> text`. |
 | `/quit` | Exit log browser process. Also bound to `q` / `Q` outside input. |
 | `/help` | List of available commands in the active buffer. |
 
@@ -171,6 +171,7 @@ In log mode the input bar accepts only `/`-prefixed input. Anything else flashes
 
 | Command | Behaviour |
 |---------|-----------|
+| `/search` highlighting + `n`/`N` nav | Visible-buffer match highlighting and `n`/`N` cursor jumping. Requires per-buffer match-cursor state, scroll-to-message logic, and conditional rendering tweaks in `chat_view` — out of scope for V1; the inline match listing covers the same functional need. |
 | `/jump <YYYY-MM-DD[ HH:MM[:SS]]>` | Loads ±100 messages bracketing the closest timestamp; replaces visible window. |
 | `/grep <regex>` | In-memory filter on the visible buffer. `/grep` with no argument clears. |
 

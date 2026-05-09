@@ -1,4 +1,5 @@
-mod backlog;
+#[allow(clippy::redundant_pub_crate, reason = "log_browser reuses format_date_separator")]
+pub(crate) mod backlog;
 mod dcc;
 mod image;
 mod input;
@@ -409,7 +410,7 @@ pub struct App {
     /// autoconnect; sidebar source is rebuilt from the read-only `log_db`.
     pub log_browser_mode: bool,
     /// Present when `log_browser_mode == true`. Bundles the read-only
-    /// SQLite handle plus the optional crypto key used to decrypt rows
+    /// `SQLite` handle plus the optional crypto key used to decrypt rows
     /// when `[storage] encrypt = true`.
     pub log_db: Option<crate::storage::LogDb>,
     pub(crate) socket_listener: Option<tokio::net::UnixListener>,
@@ -463,7 +464,7 @@ impl App {
     /// `log_browser = true` skips the heavy IO that has no place in a
     /// read-only history viewer:
     /// * `Storage::init` (would open the DB write-mode, run retention
-    ///   purge, and spawn the LogWriter task — all wrong for a viewer).
+    ///   purge, and spawn the `LogWriter` task — all wrong for a viewer).
     /// * The RPE2E keyring init (depends on storage write access).
     /// * The Lua scripting engine (no IRC events to react to).
     ///

@@ -80,9 +80,10 @@ impl App {
 
         for net in &networks {
             let conn_id = format!("{}{net}", Self::LOG_CONN_PREFIX);
+            let net_label = label_for(net);
             self.state.add_connection(Connection {
                 id: conn_id.clone(),
-                label: label_for(net),
+                label: net_label.clone(),
                 status: ConnectionStatus::Connected,
                 nick: String::new(),
                 user_modes: String::new(),
@@ -124,6 +125,38 @@ impl App {
                 who_token_counter: 0,
                 silent_who_channels: HashSet::new(),
                 silent_banlist_channels: HashSet::new(),
+            });
+
+            // Server-type header buffer for the pseudo-network. Buffer-list
+            // rendering treats `BufferType::Server` specially — it shows
+            // the connection label and applies the `item_server` theme
+            // format, which is what makes the "libera" / "ircnet" / "oftc"
+            // headers visually pop in the sidebar instead of blending
+            // into the channel list. Mirrors the Shell synthetic
+            // connection pattern in `app::shell::ensure_shell_connection`.
+            let header_id = make_buffer_id(&conn_id, &net_label);
+            self.state.add_buffer(Buffer {
+                id: header_id,
+                connection_id: conn_id.clone(),
+                buffer_type: BufferType::Server,
+                name: net_label.clone(),
+                messages: VecDeque::new(),
+                activity: ActivityLevel::None,
+                unread_count: 0,
+                last_read: Utc::now(),
+                topic: None,
+                topic_set_by: None,
+                users: HashMap::new(),
+                modes: None,
+                mode_params: None,
+                list_modes: HashMap::new(),
+                last_speakers: Vec::new(),
+                peer_handle: None,
+                log_total_lines: None,
+                log_oldest_ts: None,
+                log_newest_ts: None,
+                history_exhausted: false,
+                log_initial_loaded: false,
             });
 
             let buffers = {
@@ -223,10 +256,10 @@ impl App {
                 let exhausted = rows.len() < INITIAL_LIMIT;
                 // Allocate fresh message ids first (mutable state borrow),
                 // then push into the buffer (separate mutable borrow).
-                let messages: Vec<_> = rows
-                    .iter()
-                    .map(|stored| stored_to_message(&mut self.state, stored))
-                    .collect();
+                // Inject day-change separators between consecutive rows
+                // whose local-time date differs — same UX as `app::backlog`
+                // and weechat/irssi log files.
+                let messages = rows_to_buffer_messages(&mut self.state, &rows);
                 if let Some(buffer) = self.state.buffers.get_mut(buffer_id) {
                     for msg in messages {
                         buffer.messages.push_back(msg);
@@ -294,17 +327,12 @@ impl App {
         match rows_result {
             Ok(rows) => {
                 let exhausted = rows.len() < PAGE_LIMIT;
-                // Build messages first to avoid holding two mutable
-                // borrows on `self.state` simultaneously. Reverse the
-                // chronological-ascending result so we can `push_front`
-                // them in order — the buffer stays sorted.
-                let messages: Vec<_> = rows
-                    .iter()
-                    .rev()
-                    .map(|stored| stored_to_message(&mut self.state, stored))
-                    .collect();
+                // Build the chronologically-ordered batch with day
+                // separators interleaved, then prepend in reverse order
+                // so the buffer stays sorted (oldest at front).
+                let messages = rows_to_buffer_messages(&mut self.state, &rows);
                 if let Some(buffer) = self.state.buffers.get_mut(buffer_id) {
-                    for msg in messages {
+                    for msg in messages.into_iter().rev() {
                         buffer.messages.push_front(msg);
                     }
                     if exhausted {
@@ -365,6 +393,47 @@ impl App {
 /// next message. `log_msg_id` carries the `SQLite` row id as a
 /// decimal string so `load_older_messages` can build a `(timestamp,
 /// id)` composite cursor without losing same-second rows.
+/// Convert a chronological slice of stored rows into in-memory
+/// `Message`s with day-change separators interleaved. Mirrors the UX
+/// of `app::backlog::build_backlog_messages`: when consecutive rows
+/// fall on different local-time dates, a `MessageType::Event` row
+/// styled like irssi/weechat day separators (`─── Mon, 12 Aug 2024
+/// ───`) is inserted between them. Ids come from `state.message_counter`.
+fn rows_to_buffer_messages(
+    state: &mut crate::state::AppState,
+    rows: &[crate::storage::StoredMessage],
+) -> Vec<crate::state::buffer::Message> {
+    use crate::state::buffer::{Message, MessageType};
+    use chrono::{Local, TimeZone};
+    let mut out: Vec<Message> = Vec::with_capacity(rows.len() + 4);
+    let mut last_date: Option<chrono::NaiveDate> = None;
+    for stored in rows {
+        let ts = chrono::DateTime::<Utc>::from_timestamp(stored.timestamp, 0)
+            .unwrap_or_else(Utc::now);
+        let local_date = Local.from_utc_datetime(&ts.naive_utc()).date_naive();
+        if last_date.is_none_or(|d| d != local_date) {
+            let sep_text = crate::app::backlog::format_date_separator(local_date);
+            out.push(Message {
+                id: state.next_message_id(),
+                timestamp: ts,
+                message_type: MessageType::Event,
+                nick: None,
+                nick_mode: None,
+                text: sep_text.clone(),
+                highlight: false,
+                event_key: Some("date_separator".to_string()),
+                event_params: Some(vec![sep_text]),
+                log_msg_id: None,
+                log_ref_id: None,
+                tags: None,
+            });
+        }
+        last_date = Some(local_date);
+        out.push(stored_to_message(state, stored));
+    }
+    out
+}
+
 fn stored_to_message(
     state: &mut crate::state::AppState,
     stored: &crate::storage::StoredMessage,

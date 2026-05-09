@@ -166,7 +166,7 @@ pub struct Buffer {
     /// refuses to send E2E traffic in that state rather than falling back
     /// to a nick-keyed row.
     pub peer_handle: Option<String>,
-    /// `BufferType::Log` only — total messages in the underlying SQLite
+    /// `BufferType::Log` only — total messages in the underlying `SQLite`
     /// for this `(network, buffer)`, cached at activation so the topic-bar
     /// render doesn't requery on every frame. `None` for non-log buffers.
     pub log_total_lines: Option<u64>,

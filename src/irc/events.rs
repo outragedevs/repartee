@@ -4107,6 +4107,10 @@ mod tests {
     use irc::proto::Prefix;
     use std::collections::HashMap;
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "flat fixture used by every test in this module"
+    )]
     fn make_test_state() -> AppState {
         let mut state = AppState::new();
         state.add_connection(Connection {
