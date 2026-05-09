@@ -94,3 +94,47 @@ impl Storage {
         self.writer.shutdown().await;
     }
 }
+
+/// Read-only handle bundle used by the `repartee l` log browser. Same
+/// crypto-key derivation as `Storage::init`, but no writer task — we
+/// only ever read from this handle.
+#[allow(dead_code)]
+pub struct LogDb {
+    pub db: Arc<Mutex<Connection>>,
+    pub crypto_key: Option<aes_gcm::Key<aes_gcm::Aes256Gcm>>,
+    /// `false` when `[storage] encrypt = true` (FTS triggers can't index
+    /// ciphertext), `true` for plain logs. Drives the `/search` fallback
+    /// from FTS to `LIKE`.
+    pub has_fts: bool,
+}
+
+/// Open the message database read-only and (when `[storage] encrypt =
+/// true`) load the same AES-256-GCM key the daemon uses. Returns a
+/// human-readable error so `repartee l` can print it on the user's TTY
+/// directly.
+pub fn load_log_db(config: &LoggingConfig) -> Result<LogDb, String> {
+    let db_dir = constants::log_dir();
+    let db_path = db_dir.join("messages.db");
+    if !db_path.exists() {
+        return Err(format!(
+            "no message log at {} — start `repartee` and chat first",
+            db_path.display()
+        ));
+    }
+    let path_str = db_path.to_str().ok_or("invalid log dir path")?;
+    let conn = db::open_readonly_at(path_str)
+        .map_err(|e| format!("failed to open log database: {e}"))?;
+
+    let crypto_key = if config.encrypt {
+        let hex_key = crypto::load_or_create_key()?;
+        Some(crypto::import_key(&hex_key)?)
+    } else {
+        None
+    };
+
+    Ok(LogDb {
+        db: Arc::new(Mutex::new(conn)),
+        crypto_key,
+        has_fts: !config.encrypt,
+    })
+}
