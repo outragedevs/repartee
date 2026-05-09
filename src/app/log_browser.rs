@@ -43,6 +43,13 @@ impl App {
         app.state.previous_buffer_id = None;
 
         app.build_log_catalog()?;
+        // Eager-load the initial buffer's history so the user sees logs
+        // even if they type a slash command before the first 1-Hz tick.
+        // The tick still calls this — `log_initial_loaded` makes it a
+        // no-op the second time around.
+        if let Some(active_id) = app.state.active_buffer_id.clone() {
+            app.load_initial_messages(&active_id);
+        }
         Ok(app)
     }
 
@@ -254,16 +261,24 @@ impl App {
         match rows_result {
             Ok(rows) => {
                 let exhausted = rows.len() < INITIAL_LIMIT;
-                // Allocate fresh message ids first (mutable state borrow),
-                // then push into the buffer (separate mutable borrow).
-                // Inject day-change separators between consecutive rows
-                // whose local-time date differs — same UX as `app::backlog`
-                // and weechat/irssi log files. `None` for the initial
-                // load: the buffer is empty so no separator can collide.
+                // Build messages first (mutable state borrow), then
+                // push into the buffer (separate mutable borrow).
                 let messages = rows_to_buffer_messages(&mut self.state, &rows, None);
                 if let Some(buffer) = self.state.buffers.get_mut(buffer_id) {
-                    for msg in messages {
-                        buffer.messages.push_back(msg);
+                    if buffer.messages.is_empty() {
+                        for msg in messages {
+                            buffer.messages.push_back(msg);
+                        }
+                    } else {
+                        // Buffer already contains local events — `/help`
+                        // output, `/search` errors, or the slash-only
+                        // hint were emitted before this first lazy
+                        // load fired. Prepend the actual log so
+                        // history reads chronologically and the
+                        // command output stays at the bottom.
+                        for msg in messages.into_iter().rev() {
+                            buffer.messages.push_front(msg);
+                        }
                     }
                     buffer.history_exhausted = exhausted;
                     buffer.log_initial_loaded = true;
@@ -341,30 +356,35 @@ impl App {
         match rows_result {
             Ok(rows) => {
                 let exhausted = rows.len() < PAGE_LIMIT;
-                // Look up the local date of the existing oldest real
-                // message in the buffer (skipping synthetic separators
-                // again — they don't count as a "real" date marker).
-                // Pass it to `rows_to_buffer_messages` so the helper
-                // suppresses a separator for that date when it appears
-                // at the boundary, avoiding the `[sep_Aug12, … ,
-                // sep_Aug12, …]` duplicate after prepend.
-                let existing_first_date = self
-                    .state
-                    .buffers
-                    .get(buffer_id)
-                    .and_then(|b| {
-                        b.messages
-                            .iter()
-                            .find(|m| m.log_msg_id.is_some())
-                            .map(|m| {
-                                use chrono::TimeZone as _;
-                                chrono::Local
-                                    .from_utc_datetime(&m.timestamp.naive_utc())
-                                    .date_naive()
-                            })
-                    });
-                let messages =
-                    rows_to_buffer_messages(&mut self.state, &rows, existing_first_date);
+                // If the newest row in this batch shares its local date
+                // with the existing buffer head separator, drop that
+                // separator before prepending. The new batch will emit
+                // its own separator for that date in the correct
+                // position (above the new oldest message), avoiding the
+                // earlier mistake of leaving messages above their
+                // separator.
+                let last_new_date = rows.last().map(|r| {
+                    use chrono::TimeZone as _;
+                    let ts = chrono::DateTime::<Utc>::from_timestamp(r.timestamp, 0)
+                        .unwrap_or_else(Utc::now);
+                    chrono::Local
+                        .from_utc_datetime(&ts.naive_utc())
+                        .date_naive()
+                });
+                if let Some(date) = last_new_date
+                    && let Some(buffer) = self.state.buffers.get_mut(buffer_id)
+                    && let Some(first) = buffer.messages.front()
+                    && first.event_key.as_deref() == Some("date_separator")
+                {
+                    use chrono::TimeZone as _;
+                    let first_date = chrono::Local
+                        .from_utc_datetime(&first.timestamp.naive_utc())
+                        .date_naive();
+                    if first_date == date {
+                        buffer.messages.pop_front();
+                    }
+                }
+                let messages = rows_to_buffer_messages(&mut self.state, &rows, None);
                 if let Some(buffer) = self.state.buffers.get_mut(buffer_id) {
                     for msg in messages.into_iter().rev() {
                         buffer.messages.push_front(msg);
@@ -379,10 +399,18 @@ impl App {
     }
 
     /// Split a `BufferType::Log` buffer id (`_log_<network>/<buffer>`)
-    /// into `(network, buffer_name)`. Returns `None` for non-log
-    /// buffers — the `connection_id` prefix is the discriminator.
+    /// into `(network, buffer_name)`. Returns `None` for any buffer
+    /// that isn't a log — the pseudo-network header rendered as a
+    /// `BufferType::Server` row shares the `_log_` `connection_id`
+    /// prefix but isn't a real log buffer; treating it as one would
+    /// fire `/search` against a buffer name that's actually the
+    /// network's friendly label and return zero hits, plus tip the
+    /// status line into "0/0 lines" instead of leaving it alone.
     pub(crate) fn split_log_buffer_id(&self, buffer_id: &str) -> Option<(String, String)> {
         let buffer = self.state.buffers.get(buffer_id)?;
+        if buffer.buffer_type != BufferType::Log {
+            return None;
+        }
         let net = buffer
             .connection_id
             .strip_prefix(Self::LOG_CONN_PREFIX)?
@@ -434,17 +462,13 @@ impl App {
 /// styled like irssi/weechat day separators (`─── Mon, 12 Aug 2024
 /// ───`) is inserted between them. Ids come from `state.message_counter`.
 ///
-/// `existing_first_date` is the local date of the first real (non-
-/// synthetic) message already in the buffer when prepending. Pass
-/// `None` for the initial load. When the rightmost rows in `rows`
-/// share that date, the separator that would otherwise be emitted
-/// for that date is skipped — the buffer already has one, and
-/// emitting another would produce a duplicate `─── Aug 12 ───`
-/// pair after a `load_older_messages` prepend.
+/// The caller is responsible for stripping any leading separator from
+/// the existing buffer that would duplicate the first separator
+/// produced here — see `load_older_messages` for the prepend dance.
 fn rows_to_buffer_messages(
     state: &mut crate::state::AppState,
     rows: &[crate::storage::StoredMessage],
-    existing_first_date: Option<chrono::NaiveDate>,
+    _unused: Option<chrono::NaiveDate>,
 ) -> Vec<crate::state::buffer::Message> {
     use crate::state::buffer::{Message, MessageType};
     use chrono::{Local, TimeZone};
@@ -454,9 +478,7 @@ fn rows_to_buffer_messages(
         let ts = chrono::DateTime::<Utc>::from_timestamp(stored.timestamp, 0)
             .unwrap_or_else(Utc::now);
         let local_date = Local.from_utc_datetime(&ts.naive_utc()).date_naive();
-        let day_changed = last_date.is_none_or(|d| d != local_date);
-        let would_duplicate = existing_first_date == Some(local_date);
-        if day_changed && !would_duplicate {
+        if last_date.is_none_or(|d| d != local_date) {
             let sep_text = crate::app::backlog::format_date_separator(local_date);
             out.push(Message {
                 id: state.next_message_id(),

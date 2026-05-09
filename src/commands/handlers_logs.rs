@@ -81,18 +81,23 @@ pub(crate) fn cmd_log_search(app: &mut App, args: &[String]) {
             }
         }
     } else {
-        // Encrypted path: pull every row in this buffer (decrypted by
-        // `get_messages`) then filter case-insensitively in memory.
+        // Encrypted path: pull a bounded slice of recent rows
+        // (decrypted by `get_messages`) and filter case-insensitively
+        // in memory. The cap exists so a 100k-row encrypted log
+        // doesn't freeze the TUI on a single `/search` — better to
+        // tell the user we scanned the most recent N and offer
+        // narrowing the query than to block the runtime.
+        const MAX_ENCRYPTED_SCAN: usize = 10_000;
         let Ok(db) = log_db.db.lock() else {
             add_local_event(app, "Log DB lock poisoned");
             return;
         };
-        let all = match crate::storage::query::get_messages(
+        let scanned = match crate::storage::query::get_messages(
             &db,
             &net,
             &buf,
             None,
-            usize::MAX,
+            MAX_ENCRYPTED_SCAN,
             true,
             log_db.crypto_key.as_ref(),
         ) {
@@ -104,11 +109,23 @@ pub(crate) fn cmd_log_search(app: &mut App, args: &[String]) {
             }
         };
         drop(db);
+        let scan_capped = scanned.len() == MAX_ENCRYPTED_SCAN;
         let needle = query.to_lowercase();
-        all.into_iter()
+        let hits: Vec<_> = scanned
+            .into_iter()
             .filter(|m| m.text.to_lowercase().contains(&needle))
             .take(SEARCH_LIMIT)
-            .collect()
+            .collect();
+        if scan_capped {
+            add_local_event(
+                app,
+                &format!(
+                    "[encrypted /search scanned the most recent {MAX_ENCRYPTED_SCAN} rows; \
+                     narrow the query or use /jump to anchor older]"
+                ),
+            );
+        }
+        hits
     };
 
     add_local_event(
