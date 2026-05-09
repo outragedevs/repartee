@@ -34,23 +34,59 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use color_eyre::eyre::Result;
 use tracing_subscriber::EnvFilter;
 
-fn setup_logging() -> Result<()> {
-    if std::env::var("RUST_LOG").is_ok() {
-        let log_dir = constants::home_dir();
-        std::fs::create_dir_all(&log_dir)?;
-        let log_file = std::fs::File::options()
-            .create(true)
-            .append(true)
-            .open(log_dir.join("repartee.log"))?;
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-            )
-            .with_writer(log_file)
-            .with_ansi(false)
-            .init();
+fn setup_logging() {
+    let log_dir = constants::home_dir();
+    if std::fs::create_dir_all(&log_dir).is_err() {
+        // Without a writable home dir there's nowhere to log; subscribers
+        // never get installed, but startup must still continue.
+        return;
     }
-    Ok(())
+    let Ok(log_file) = std::fs::File::options()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("repartee.log"))
+    else {
+        return;
+    };
+    // Default to WARN so the log file always carries enough breadcrumbs to
+    // diagnose silent post-fork crashes ("No session found for PID X")
+    // without forcing the user to remember `RUST_LOG=info` first. Users can
+    // still raise/lower the level via `RUST_LOG`.
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(log_file)
+        .with_ansi(false)
+        .init();
+}
+
+/// Reap a child process if it has already exited (non-blocking).
+///
+/// Returns `Some(human_status)` when the child is gone — covers both
+/// normal exit and signal termination — so the parent's pre-attach wait
+/// loop can fail fast with the actual reason instead of timing out 5s
+/// later with "No session found for PID X". `is_pid_alive` (kill(0))
+/// cannot do this on its own: a child that exited but hasn't been
+/// `wait`ed for is a zombie and `kill(0)` reports it as alive.
+fn try_reap(child_pid: u32) -> Option<String> {
+    let Ok(pid) = libc::pid_t::try_from(child_pid) else {
+        return Some("invalid PID".into());
+    };
+    let mut status: libc::c_int = 0;
+    // SAFETY: WNOHANG makes waitpid non-blocking; passing a valid pointer
+    // to an i32 is sound. Returns 0 if child still running, pid if reaped,
+    // -1 on ECHILD/EINTR (treat as "still around" — be conservative).
+    let result = unsafe { libc::waitpid(pid, std::ptr::from_mut::<libc::c_int>(&mut status), libc::WNOHANG) };
+    if result != pid {
+        return None;
+    }
+    if libc::WIFEXITED(status) {
+        Some(format!("exit code {}", libc::WEXITSTATUS(status)))
+    } else if libc::WIFSIGNALED(status) {
+        Some(format!("killed by signal {}", libc::WTERMSIG(status)))
+    } else {
+        Some("unknown termination".into())
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -69,7 +105,7 @@ fn main() -> Result<()> {
         || args.get(1).map(String::as_str) == Some("attach")
     {
         color_eyre::install()?;
-        setup_logging()?;
+        setup_logging();
         let target_pid = args.get(2).and_then(|s| s.parse::<u32>().ok());
         return tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -80,7 +116,7 @@ fn main() -> Result<()> {
     // Handle -d / --detach: start headless (no fork, no terminal).
     if args.iter().any(|a| a == "--detach" || a == "-d") {
         color_eyre::install()?;
-        setup_logging()?;
+        setup_logging();
         return tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?
@@ -102,6 +138,24 @@ fn main() -> Result<()> {
     // Child becomes the headless backend (IRC, state, socket listener).
     // Parent becomes the shim (bridges terminal ↔ socket).
     // On detach, the parent/shim exits → shell gets prompt back.
+    //
+    // Validate config + theme on the parent's TTY *before* forking. The
+    // child runs with stderr redirected to /dev/null, so any `App::new`
+    // failure (e.g. a TOML typo like `autoconnect = fals`) would otherwise
+    // disappear into the void and surface as a generic "No session found
+    // for PID X" 5 seconds later. Failing fast here puts the actual
+    // toml-error line/column on the user's screen.
+    constants::ensure_config_dir();
+    if let Err(e) = config::validate_startup_files(
+        &constants::config_path(),
+        &constants::theme_dir(),
+    ) {
+        // `{e:#}` formats the eyre chain without color_eyre's source-location
+        // footer — the toml parser already prints line/column inside the
+        // message, anything more would just clutter the user's terminal.
+        eprintln!("repartee: {e:#}");
+        std::process::exit(1);
+    }
 
     // Fork BEFORE any tokio runtime or threads exist.
     let fork_result = unsafe { libc::fork() };
@@ -110,7 +164,7 @@ fn main() -> Result<()> {
         -1 => {
             // Fork failed — fall back to direct mode (no detach support).
             color_eyre::install()?;
-            setup_logging()?;
+            setup_logging();
             ui::install_panic_hook();
             let mut app = app::App::new()?;
             if let Ok((cols, rows)) = crossterm::terminal::size() {
@@ -140,7 +194,7 @@ fn main() -> Result<()> {
                 }
             }
             color_eyre::install()?;
-            setup_logging()?;
+            setup_logging();
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?
@@ -158,7 +212,7 @@ fn main() -> Result<()> {
             let child_pid = u32::try_from(child_pid)
                 .map_err(|_| color_eyre::eyre::eyre!("fork returned invalid PID: {child_pid}"))?;
             color_eyre::install()?;
-            setup_logging()?;
+            setup_logging();
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?
@@ -169,18 +223,34 @@ fn main() -> Result<()> {
                     // appears during this time (splash takes ~1.5-2.5s).
                     session::shim::run_splash(Some(&sock_path)).await?;
 
-                    // Ensure the socket is ready after the splash.
+                    // Wait for the socket OR for the child to die. `waitpid`
+                    // (non-blocking) reaps a dead child so we can report its
+                    // actual exit status instead of staring 5 s at a zombie
+                    // PID that `kill(0)` insists is alive. The log file we
+                    // unconditionally maintain in `setup_logging` carries
+                    // any backtrace the user needs.
+                    let mut socket_ready = false;
                     for _ in 0..100 {
                         if sock_path.exists() {
                             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                            socket_ready = true;
                             break;
                         }
-                        if !session::is_pid_alive(child_pid) {
+                        if let Some(reason) = try_reap(child_pid) {
                             return Err(color_eyre::eyre::eyre!(
-                                "Backend process exited unexpectedly. Check ~/.repartee/repartee.log"
+                                "Backend exited during startup ({reason}). \
+                                 See ~/.repartee/repartee.log for details."
                             ));
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                    if !socket_ready {
+                        return Err(color_eyre::eyre::eyre!(
+                            "Backend (PID {child_pid}) is alive but never opened its session \
+                             socket within 5 s — likely failed to bind {}. \
+                             See ~/.repartee/repartee.log for details.",
+                            sock_path.display()
+                        ));
                     }
                     session::shim::run_shim(Some(child_pid), false).await
                 })

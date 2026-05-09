@@ -519,6 +519,53 @@ pub fn save_config(path: &Path, config: &AppConfig) -> Result<()> {
     Ok(())
 }
 
+/// Validate config + selected theme **before** the fork-detach split, so
+/// TOML parse errors (typos like `autoconnect = fals`, malformed strings,
+/// truncated themes) surface on the parent's TTY instead of vanishing
+/// into the daemon's `/dev/null` stderr.
+///
+/// Returns the parsed `AppConfig` so the caller can reuse the theme name
+/// and validate the matching `*.theme` file in one pass. Missing config
+/// resolves to `default_config()` (first run). Missing theme is fine —
+/// `theme::load_theme` returns the built-in fallback.
+///
+/// The child process re-parses the same files via `App::new`; this
+/// validation is a fast pre-check, not a substitute. The narrow race
+/// where the user edits between this call and `App::new` is harmless —
+/// `waitpid` will surface the child's parse error then.
+pub fn validate_startup_files(
+    config_path: &Path,
+    theme_dir: &Path,
+) -> Result<AppConfig> {
+    let config = match std::fs::read_to_string(config_path) {
+        Ok(content) => toml::from_str::<AppConfig>(&content).map_err(|e| {
+            color_eyre::eyre::eyre!(
+                "Invalid TOML in {}\n{e}",
+                config_path.display()
+            )
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => default_config(),
+        Err(e) => {
+            return Err(color_eyre::eyre::eyre!(
+                "Could not read config {}: {e}",
+                config_path.display()
+            ));
+        }
+    };
+
+    let theme_path = theme_dir.join(format!("{}.theme", config.general.theme));
+    if theme_path.exists() {
+        let content = std::fs::read_to_string(&theme_path).map_err(|e| {
+            color_eyre::eyre::eyre!("Could not read theme {}: {e}", theme_path.display())
+        })?;
+        toml::from_str::<toml::Value>(&content).map_err(|e| {
+            color_eyre::eyre::eyre!("Invalid TOML in theme {}\n{e}", theme_path.display())
+        })?;
+    }
+
+    Ok(config)
+}
+
 // === Tests ===
 
 #[cfg(test)]
@@ -708,5 +755,78 @@ channels = ["#general"]
         let path = std::env::temp_dir().join("repartee_test_nonexistent/config.toml");
         let config = load_config(&path).unwrap();
         assert_eq!(config.general.nick, crate::constants::APP_NAME);
+    }
+
+    #[test]
+    fn validate_startup_files_typo_returns_clear_error() {
+        // Regression for the silent-fork-death bug: a typo like
+        //   autoconnect = fals
+        // makes the daemon child crash with /dev/null stderr, leaving the
+        // user staring at "No session found for PID X" 5 seconds later.
+        // The pre-fork validator must surface the underlying TOML error
+        // verbatim so the parent's TTY shows it before any fork happens.
+        let dir = std::env::temp_dir().join("repartee_validate_typo");
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.toml");
+        std::fs::write(
+            &cfg,
+            "[general]\nnick = \"x\"\n\
+             [servers.libera]\nlabel = \"L\"\naddress = \"a\"\nport = 6697\n\
+             tls = true\nautoconnect = fals\n",
+        )
+        .unwrap();
+
+        let theme_dir = dir.join("themes");
+        std::fs::create_dir_all(&theme_dir).unwrap();
+
+        let err = validate_startup_files(&cfg, &theme_dir).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Invalid TOML"),
+            "expected 'Invalid TOML' prefix in {msg}"
+        );
+        assert!(
+            msg.contains("autoconnect") || msg.contains("fals") || msg.contains("boolean"),
+            "error must point at the typo, got: {msg}"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn validate_startup_files_missing_config_uses_defaults() {
+        let dir = std::env::temp_dir().join("repartee_validate_missing");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.toml"); // does not exist
+        let theme_dir = dir.join("themes");
+        std::fs::create_dir_all(&theme_dir).unwrap();
+
+        let config = validate_startup_files(&cfg, &theme_dir).unwrap();
+        assert_eq!(config.general.nick, crate::constants::APP_NAME);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn validate_startup_files_broken_theme_returns_clear_error() {
+        let dir = std::env::temp_dir().join("repartee_validate_theme");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.toml");
+        std::fs::write(&cfg, "[general]\ntheme = \"broken\"\n").unwrap();
+        let theme_dir = dir.join("themes");
+        std::fs::create_dir_all(&theme_dir).unwrap();
+        // Truly malformed TOML in the selected theme.
+        std::fs::write(theme_dir.join("broken.theme"), "[meta\nname = \"x\"").unwrap();
+
+        let err = validate_startup_files(&cfg, &theme_dir).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Invalid TOML in theme"),
+            "expected theme error, got: {msg}"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

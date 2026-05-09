@@ -902,8 +902,16 @@ impl App {
             self.run_splash().await?;
         }
 
+        // In detached mode the shim has nothing to attach to without the
+        // session socket — fail loud so main()'s parent waitpid surfaces
+        // it instead of leaving a zombie-running headless backend that
+        // the user can never reach. In direct mode (terminal already
+        // owned by this process) the socket is a nice-to-have.
         if let Err(e) = self.start_socket_listener() {
-            tracing::warn!("failed to start session socket: {e}");
+            if self.detached {
+                return Err(e.wrap_err("failed to start session socket"));
+            }
+            tracing::warn!("session socket unavailable: {e}");
         }
 
         let autoconnect_ids: Vec<String> = self
