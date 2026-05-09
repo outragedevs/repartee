@@ -34,6 +34,10 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use color_eyre::eyre::Result;
 use tracing_subscriber::EnvFilter;
 
+fn log_path() -> std::path::PathBuf {
+    constants::home_dir().join(format!("{}.log", constants::APP_NAME))
+}
+
 fn setup_logging() {
     let log_dir = constants::home_dir();
     if std::fs::create_dir_all(&log_dir).is_err() {
@@ -44,7 +48,7 @@ fn setup_logging() {
     let Ok(log_file) = std::fs::File::options()
         .create(true)
         .append(true)
-        .open(log_dir.join("repartee.log"))
+        .open(log_path())
     else {
         return;
     };
@@ -76,7 +80,13 @@ fn try_reap(child_pid: u32) -> Option<String> {
     // SAFETY: WNOHANG makes waitpid non-blocking; passing a valid pointer
     // to an i32 is sound. Returns 0 if child still running, pid if reaped,
     // -1 on ECHILD/EINTR (treat as "still around" — be conservative).
-    let result = unsafe { libc::waitpid(pid, std::ptr::from_mut::<libc::c_int>(&mut status), libc::WNOHANG) };
+    let result = unsafe {
+        libc::waitpid(
+            pid,
+            std::ptr::from_mut::<libc::c_int>(&mut status),
+            libc::WNOHANG,
+        )
+    };
     if result != pid {
         return None;
     }
@@ -127,7 +137,7 @@ fn main() -> Result<()> {
                 let sock_path = session::socket_path(pid);
                 eprintln!("Starting detached. PID={pid}");
                 eprintln!("Socket: {}", sock_path.display());
-                eprintln!("Attach with: repartee a");
+                eprintln!("Attach with: {} a", constants::APP_NAME);
                 let result = app.run().await;
                 app::App::remove_own_socket();
                 result
@@ -153,7 +163,7 @@ fn main() -> Result<()> {
         // `{e:#}` formats the eyre chain without color_eyre's source-location
         // footer — the toml parser already prints line/column inside the
         // message, anything more would just clutter the user's terminal.
-        eprintln!("repartee: {e:#}");
+        eprintln!("{}: {e:#}", constants::APP_NAME);
         std::process::exit(1);
     }
 
@@ -237,19 +247,23 @@ fn main() -> Result<()> {
                             break;
                         }
                         if let Some(reason) = try_reap(child_pid) {
+                            let log_path = log_path();
                             return Err(color_eyre::eyre::eyre!(
                                 "Backend exited during startup ({reason}). \
-                                 See ~/.repartee/repartee.log for details."
+                                 See {} for details.",
+                                log_path.display()
                             ));
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     }
                     if !socket_ready {
+                        let log_path = log_path();
                         return Err(color_eyre::eyre::eyre!(
                             "Backend (PID {child_pid}) is alive but never opened its session \
                              socket within 5 s — likely failed to bind {}. \
-                             See ~/.repartee/repartee.log for details.",
-                            sock_path.display()
+                             See {} for details.",
+                            sock_path.display(),
+                            log_path.display()
                         ));
                     }
                     session::shim::run_shim(Some(child_pid), false).await
