@@ -2468,9 +2468,9 @@ dependencies = [
 
 [[package]]
 name = "irc-repartee"
-version = "1.5.0"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2472c84e34afd71b7f720eaa9f9b5af3a681725c4628015cad854d84be1116ea"
+checksum = "0adabadf45fdd21ce2d4b6fe24c7975b7e81c0d7d7346dcb117394a78939dbeb"
 dependencies = [
  "chrono",
  "encoding",
