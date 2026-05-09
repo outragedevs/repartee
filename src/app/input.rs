@@ -221,6 +221,9 @@ impl App {
             (_, KeyCode::Down) => self.input.history_down(),
             (_, KeyCode::PageUp) => {
                 self.scroll_offset = self.scroll_offset.saturating_add(10);
+                if self.log_browser_mode {
+                    self.maybe_paginate_log_buffer();
+                }
             }
             (_, KeyCode::PageDown) => {
                 self.scroll_offset = self.scroll_offset.saturating_sub(10);
@@ -241,6 +244,18 @@ impl App {
                 } else {
                     self.handle_tab();
                 }
+            }
+            // Log-browser hotkey: bare `q` / `Q` with no modifiers (other than
+            // Shift) quits the browser when the input line is empty. Mirrors
+            // weechat's `q` shortcut in `/buffer history`-style read-only views.
+            // The empty-buffer guard means typing `quit` or any text that
+            // starts with `q` still works as a normal slash command sequence.
+            (mods, KeyCode::Char('q' | 'Q'))
+                if self.log_browser_mode
+                    && self.input.value.is_empty()
+                    && (mods.is_empty() || mods == KeyModifiers::SHIFT) =>
+            {
+                self.should_quit = true;
             }
             (mods, KeyCode::Char(c)) if mods.is_empty() || mods == KeyModifiers::SHIFT => {
                 let is_highlight = self
@@ -384,6 +399,9 @@ impl App {
             MouseEventKind::ScrollUp => {
                 if regions.chat_area.is_some_and(|r| r.contains(pos)) {
                     self.scroll_offset = self.scroll_offset.saturating_add(3);
+                    if self.log_browser_mode {
+                        self.maybe_paginate_log_buffer();
+                    }
                 } else if regions.buffer_list_area.is_some_and(|r| r.contains(pos)) {
                     self.buffer_list_scroll = self.buffer_list_scroll.saturating_sub(1);
                 } else if regions.nick_list_area.is_some_and(|r| r.contains(pos)) {
@@ -529,6 +547,11 @@ impl App {
                 list_modes: HashMap::new(),
                 last_speakers: Vec::new(),
                 peer_handle: None,
+                log_total_lines: None,
+                log_oldest_ts: None,
+                log_newest_ts: None,
+                history_exhausted: false,
+                log_initial_loaded: false,
             });
         }
         self.state.set_active_buffer(&query_buf_id);
@@ -696,6 +719,15 @@ impl App {
     pub(crate) fn handle_submit(&mut self, text: &str) {
         if let Some(parsed) = crate::commands::parser::parse_command(text) {
             self.execute_command_with_depth(&parsed, 0);
+        } else if self.log_browser_mode {
+            // Spec: log mode rejects plain text — there is no IRC
+            // connection to send to, and routing through
+            // `handle_plain_message` would produce the unrelated
+            // "Cannot send messages to this buffer" line.
+            crate::commands::helpers::add_local_event(
+                self,
+                "log mode: only slash commands. /help",
+            );
         } else {
             self.handle_plain_message(text);
         }
@@ -719,6 +751,25 @@ impl App {
                 self,
                 &format!("Alias recursion limit reached (max {MAX_ALIAS_DEPTH})"),
             );
+            return;
+        }
+
+        // Log-browser mode short-circuits the registry: the only valid
+        // verbs are `/search`, `/quit`, `/help` (plus their aliases). Any
+        // other command echoes a hint and returns. Scripts are unloaded
+        // in log mode so we skip the script emit too.
+        if self.log_browser_mode {
+            match parsed.name.as_str() {
+                "search" => crate::commands::handlers_logs::cmd_log_search(self, &parsed.args),
+                "quit" | "exit" => {
+                    crate::commands::handlers_logs::cmd_log_quit(self, &parsed.args);
+                }
+                "help" => crate::commands::handlers_logs::cmd_log_help(self, &parsed.args),
+                other => crate::commands::helpers::add_local_event(
+                    self,
+                    &format!("log mode: only /search, /quit, /help (got /{other})"),
+                ),
+            }
             return;
         }
 

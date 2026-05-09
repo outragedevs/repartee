@@ -21,6 +21,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let fg_dim = hex_to_color(&colors.fg_dim).unwrap_or(Color::DarkGray);
     let accent = hex_to_color(&colors.accent).unwrap_or(Color::Cyan);
 
+    if app.log_browser_mode {
+        render_log_status(frame, area, app, fg, fg_muted, accent);
+        return;
+    }
+
     let separator = &app.config.statusbar.separator;
 
     // Get active buffer's connection
@@ -188,4 +193,66 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let line = Line::from(spans);
     let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, area);
+}
+
+/// Status line in log-browser mode. Layout:
+/// `log mode • <net>/<buf> • showing X/Y from <ts>  •  ↑/↓ scroll • / search • Q quit`
+fn render_log_status(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    fg: Color,
+    fg_muted: Color,
+    accent: Color,
+) {
+    let (id_text, loaded, total, from) = app.state.active_buffer().map_or_else(
+        || (String::from("(no buffer)"), 0, 0, String::from("(empty)")),
+        |buf| {
+            let id = buf
+                .connection_id
+                .strip_prefix(crate::app::App::LOG_CONN_PREFIX)
+                .map_or_else(|| buf.id.clone(), |net| format!("{net}/{}", buf.name));
+            let total = buf.log_total_lines.unwrap_or(0);
+            // Count real DB rows only — `log_msg_id.is_some()` excludes
+            // synthetic day separators and the local-event lines that
+            // `/help`, `/search` results, and the slash-only hint emit.
+            let loaded = buf
+                .messages
+                .iter()
+                .filter(|m| m.log_msg_id.is_some())
+                .count();
+            // `from` is the timestamp of the oldest real message we've
+            // loaded — that's what the user actually wants to see ("how
+            // far back am I?"), not the timestamp of a synthetic
+            // separator that happens to share the same date.
+            let from = buf
+                .messages
+                .iter()
+                .find(|m| m.log_msg_id.is_some())
+                .map_or_else(
+                    || String::from("(empty)"),
+                    |m| m.timestamp.format("%Y-%m-%d %H:%M").to_string(),
+                );
+            (id, loaded, total, from)
+        },
+    );
+    let sep = Span::styled("  \u{2022}  ", Style::default().fg(fg_muted));
+    let line = Line::from(vec![
+        Span::styled("log mode", Style::default().fg(accent).add_modifier(Modifier::BOLD)),
+        sep.clone(),
+        Span::styled(id_text, Style::default().fg(accent)),
+        sep.clone(),
+        Span::styled(
+            format!("showing {loaded}/{total}"),
+            Style::default().fg(fg),
+        ),
+        Span::styled(" from ", Style::default().fg(fg_muted)),
+        Span::styled(from, Style::default().fg(fg)),
+        sep,
+        Span::styled(
+            "↑/↓ scroll • / search • Q quit",
+            Style::default().fg(fg_muted),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
 }

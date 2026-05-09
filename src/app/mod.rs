@@ -1,8 +1,10 @@
-mod backlog;
+#[allow(clippy::redundant_pub_crate, reason = "log_browser reuses format_date_separator")]
+pub(crate) mod backlog;
 mod dcc;
 mod image;
 mod input;
 mod irc;
+mod log_browser;
 mod maintenance;
 mod mentions;
 mod scripting;
@@ -403,6 +405,14 @@ pub struct App {
     pub terminal: Option<ui::Tui>,
     pub detached: bool,
     pub should_detach: bool,
+    /// `true` when the process was started via `repartee l`. Disables IRC
+    /// connections, the session socket listener, web server, scripts and
+    /// autoconnect; sidebar source is rebuilt from the read-only `log_db`.
+    pub log_browser_mode: bool,
+    /// Present when `log_browser_mode == true`. Bundles the read-only
+    /// `SQLite` handle plus the optional crypto key used to decrypt rows
+    /// when `[storage] encrypt = true`.
+    pub log_db: Option<crate::storage::LogDb>,
     pub(crate) socket_listener: Option<tokio::net::UnixListener>,
     pub(crate) socket_output_tx:
         Option<tokio::sync::mpsc::UnboundedSender<crate::session::protocol::MainMessage>>,
@@ -445,8 +455,26 @@ impl App {
     /// Connection ID for the app-level default Status buffer.
     pub const DEFAULT_CONN_ID: &'static str = "_default";
 
-    #[allow(clippy::too_many_lines)]
     pub fn new() -> Result<Self> {
+        Self::new_with_mode(false)
+    }
+
+    /// Construct an `App` with chat-mode services optionally suppressed.
+    ///
+    /// `log_browser = true` skips the heavy IO that has no place in a
+    /// read-only history viewer:
+    /// * `Storage::init` (would open the DB write-mode, run retention
+    ///   purge, and spawn the `LogWriter` task — all wrong for a viewer).
+    /// * The RPE2E keyring init (depends on storage write access).
+    /// * The Lua scripting engine (no IRC events to react to).
+    ///
+    /// The remaining managers (DCC, Shell, web channels, image preview)
+    /// stay default-initialised — they have no side effects until used,
+    /// and keeping the field set non-`Option` keeps the struct readable.
+    /// `App::new_log_browser` then attaches a read-only `LogDb`
+    /// separately and rebuilds the sidebar from the message catalog.
+    #[allow(clippy::too_many_lines)]
+    pub fn new_with_mode(log_browser: bool) -> Result<Self> {
         constants::ensure_config_dir();
         let mut config = config::load_config(&constants::config_path())?;
 
@@ -467,7 +495,12 @@ impl App {
         state.nick_color_lit = config.display.nick_color_lightness;
         let (irc_tx, irc_rx) = mpsc::channel(4096);
 
-        let storage = if config.logging.enabled {
+        let storage = if log_browser {
+            // Log browser opens its own read-only handle later via
+            // `load_log_db` — skipping `Storage::init` here is the
+            // whole point of the read-only mode.
+            None
+        } else if config.logging.enabled {
             match crate::storage::Storage::init(&config.logging) {
                 Ok(s) => {
                     state.log_tx = Some(s.log_tx.clone());
@@ -574,13 +607,15 @@ impl App {
         );
         let mut script_manager =
             crate::scripting::engine::ScriptManager::new(constants::scripts_dir());
-        match crate::scripting::lua::LuaEngine::new() {
-            Ok(lua_engine) => {
-                script_manager.register_engine(Box::new(lua_engine));
-                tracing::info!("Lua scripting engine registered");
-            }
-            Err(e) => {
-                tracing::error!("failed to initialize Lua engine: {e}");
+        if !log_browser {
+            match crate::scripting::lua::LuaEngine::new() {
+                Ok(lua_engine) => {
+                    script_manager.register_engine(Box::new(lua_engine));
+                    tracing::info!("Lua scripting engine registered");
+                }
+                Err(e) => {
+                    tracing::error!("failed to initialize Lua engine: {e}");
+                }
             }
         }
 
@@ -642,6 +677,8 @@ impl App {
             terminal: None,
             detached: false,
             should_detach: false,
+            log_browser_mode: log_browser,
+            log_db: None,
             socket_listener: None,
             socket_output_tx: None,
             shim_event_rx: None,
@@ -856,6 +893,11 @@ impl App {
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
             peer_handle: None,
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
+            log_initial_loaded: false,
         });
         state.set_active_buffer(&buf_id);
 
@@ -902,41 +944,53 @@ impl App {
             self.run_splash().await?;
         }
 
-        // In detached mode the shim has nothing to attach to without the
-        // session socket — fail loud so main()'s parent waitpid surfaces
-        // it instead of leaving a zombie-running headless backend that
-        // the user can never reach. In direct mode (terminal already
-        // owned by this process) the socket is a nice-to-have.
-        if let Err(e) = self.start_socket_listener() {
-            if self.detached {
-                return Err(e.wrap_err("failed to start session socket"));
+        // Log-browser mode owns the terminal directly, has no IRC at all,
+        // and intentionally has no shim — every chat-mode subsystem below
+        // is short-circuited by the `log_browser_mode` flag.
+        if !self.log_browser_mode {
+            // In detached mode the shim has nothing to attach to without the
+            // session socket — fail loud so main()'s parent waitpid surfaces
+            // it instead of leaving a zombie-running headless backend that
+            // the user can never reach. In direct mode (terminal already
+            // owned by this process) the socket is a nice-to-have.
+            if let Err(e) = self.start_socket_listener() {
+                if self.detached {
+                    return Err(e.wrap_err("failed to start session socket"));
+                }
+                tracing::warn!("session socket unavailable: {e}");
             }
-            tracing::warn!("session socket unavailable: {e}");
         }
 
-        let autoconnect_ids: Vec<String> = self
-            .config
-            .servers
-            .iter()
-            .filter(|(_, cfg)| cfg.autoconnect)
-            .map(|(id, _)| id.clone())
-            .collect();
+        let autoconnect_ids: Vec<String> = if self.log_browser_mode {
+            Vec::new()
+        } else {
+            self.config
+                .servers
+                .iter()
+                .filter(|(_, cfg)| cfg.autoconnect)
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
 
-        if self.state.buffers.is_empty() {
+        if !self.log_browser_mode && self.state.buffers.is_empty() {
             Self::create_default_status(&mut self.state);
         }
 
-        self.autoload_scripts();
+        if !self.log_browser_mode {
+            self.autoload_scripts();
 
-        if self.config.display.mentions_buffer {
-            self.create_mentions_buffer();
+            if self.config.display.mentions_buffer {
+                self.create_mentions_buffer();
+            }
         }
 
         if self.terminal.is_some() && !self.is_socket_attached {
             self.start_term_reader();
         }
 
-        self.start_web_server().await;
+        if !self.log_browser_mode {
+            self.start_web_server().await;
+        }
 
         let mut pending_autoconnect_ids = (!autoconnect_ids.is_empty()).then_some(autoconnect_ids);
 
@@ -1120,6 +1174,16 @@ impl App {
                 _ = tick.tick() => {
                     if let Some(server_ids) = pending_autoconnect_ids.take() {
                         self.start_autoconnects(&server_ids);
+                    }
+                    // Log mode lazy-loads the active buffer's history on
+                    // first activation. `load_initial_messages` is
+                    // idempotent (early-return if already loaded), so a
+                    // tick-time poll keeps the implementation trivial —
+                    // no extra signal plumbing needed.
+                    if self.log_browser_mode
+                        && let Some(active_id) = self.state.active_buffer_id.clone()
+                    {
+                        self.load_initial_messages(&active_id);
                     }
                     self.handle_netsplit_tick();
                     self.purge_expired_batches();

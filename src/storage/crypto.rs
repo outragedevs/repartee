@@ -81,6 +81,43 @@ pub fn load_or_create_keyring_key() -> Result<String, String> {
     load_or_create_named_key_at(&path, "KEYRING_KEY")
 }
 
+/// Load the existing encryption key from the default `.env`. Errors
+/// (instead of silently generating a fresh key) when `LOG_KEY` is
+/// missing or empty. Used by the log browser, where creating a new key
+/// would produce a wrong cipher and an unreadable history.
+pub fn load_existing_key() -> Result<String, String> {
+    load_existing_named_key_at(&crate::constants::env_path(), "LOG_KEY")
+}
+
+fn load_existing_named_key_at(path: &Path, suffix: &str) -> Result<String, String> {
+    let key_name = env_key_name_with_suffix(suffix);
+    if !path.exists() {
+        return Err(format!(
+            "encrypted log requested but no {} found at {} \
+             (was the daemon ever started with [storage] encrypt = true?)",
+            key_name,
+            path.display()
+        ));
+    }
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("failed to open {}: {e}", path.display()))?;
+    let reader = std::io::BufReader::new(file);
+    for line in reader.lines() {
+        let line = line.map_err(|e| format!("failed to read line: {e}"))?;
+        if let Some(value) = line.trim().strip_prefix(&format!("{key_name}=")) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Ok(value.to_string());
+            }
+        }
+    }
+    Err(format!(
+        "{} not found in {} — cannot decrypt log without the key",
+        key_name,
+        path.display()
+    ))
+}
+
 /// Load the encryption key from `path`, or generate one and append it.
 ///
 /// The .env file is expected to contain lines like `KEY=value`.
@@ -215,6 +252,49 @@ mod tests {
         let result = decrypt(&encrypted.ciphertext, &encrypted.iv, &key2);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_existing_key_errors_when_env_missing() {
+        // No .env file at the test path → must error, not auto-create.
+        let dir = std::env::temp_dir().join("repartee_loadexisting_no_env");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".env");
+        let err = load_existing_named_key_at(&path, "LOG_KEY").unwrap_err();
+        assert!(
+            err.contains("encrypted log requested"),
+            "should mention the missing key: {err}"
+        );
+        assert!(!path.exists(), "must not auto-create .env");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_existing_key_errors_when_key_line_missing() {
+        let dir = std::env::temp_dir().join("repartee_loadexisting_no_line");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".env");
+        std::fs::write(&path, "OTHER=value\n").unwrap();
+        let err = load_existing_named_key_at(&path, "LOG_KEY").unwrap_err();
+        assert!(
+            err.contains("not found in"),
+            "should mention the missing key line: {err}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_existing_key_returns_value_when_present() {
+        let dir = std::env::temp_dir().join("repartee_loadexisting_present");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".env");
+        std::fs::write(&path, "REPARTEE_LOG_KEY=cafe1234\n").unwrap();
+        let key = load_existing_named_key_at(&path, "LOG_KEY").unwrap();
+        assert_eq!(key, "cafe1234");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

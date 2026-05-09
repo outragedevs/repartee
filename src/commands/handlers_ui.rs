@@ -217,6 +217,11 @@ pub(crate) fn cmd_close(app: &mut App, args: &[String]) {
             // DCC chat buffers close like query buffers — just remove locally.
             app.state.remove_buffer(&buf_id);
         }
+        crate::state::buffer::BufferType::Log => {
+            // Log buffers are read-only — `/close` just removes them from the
+            // sidebar; the underlying SQLite rows are untouched.
+            app.state.remove_buffer(&buf_id);
+        }
         crate::state::buffer::BufferType::Shell => {
             // Shell close is handled by App::close_shell_buffer() — wired in Task 5.
             app.close_shell_buffer(&buf_id);
@@ -709,6 +714,11 @@ fn shell_open(app: &mut App, command: Option<&str>) {
                 list_modes: HashMap::new(),
                 last_speakers: Vec::new(),
                 peer_handle: None,
+                log_total_lines: None,
+                log_oldest_ts: None,
+                log_newest_ts: None,
+                history_exhausted: false,
+                log_initial_loaded: false,
             });
             app.state.set_active_buffer(&buf_id);
             app.shell_input_active = true;

@@ -17,6 +17,11 @@ pub enum BufferType {
     Special,
     /// Embedded PTY-backed shell terminal.
     Shell,
+    /// Read-only historical view of a logged channel/query opened by the
+    /// `repartee l` log browser. Same render path as `Channel`, but the
+    /// distinct variant lets predicates (e.g. `show_nicklist`) treat it
+    /// differently without extra plumbing.
+    Log,
 }
 
 impl BufferType {
@@ -24,7 +29,10 @@ impl BufferType {
         match self {
             Self::Mentions => 0,
             Self::Server => 1,
-            Self::Channel => 2,
+            // Log shares Channel's sort group: log buffers always sit under a
+            // pseudo-network whose connection_id starts with `_log_`, so they
+            // never mix with live channels in the sidebar.
+            Self::Channel | Self::Log => 2,
             Self::Query => 3,
             Self::DccChat => 4,
             Self::Special => 5,
@@ -158,6 +166,24 @@ pub struct Buffer {
     /// refuses to send E2E traffic in that state rather than falling back
     /// to a nick-keyed row.
     pub peer_handle: Option<String>,
+    /// `BufferType::Log` only — total messages in the underlying `SQLite`
+    /// for this `(network, buffer)`, cached at activation so the topic-bar
+    /// render doesn't requery on every frame. `None` for non-log buffers.
+    pub log_total_lines: Option<u64>,
+    /// `BufferType::Log` only — oldest timestamp in the log range.
+    pub log_oldest_ts: Option<i64>,
+    /// `BufferType::Log` only — newest timestamp in the log range.
+    pub log_newest_ts: Option<i64>,
+    /// `BufferType::Log` only — set `true` once a paginated `load_older`
+    /// returns fewer rows than requested (we've hit the start of the log).
+    pub history_exhausted: bool,
+    /// `BufferType::Log` only — flips `true` after the first
+    /// `load_initial_messages` call returns from the database. We can't
+    /// gate on `messages.is_empty()` because slash-command errors and
+    /// the `/help` listing add `MessageType::Event` rows to the buffer
+    /// before the first lazy load fires; without an explicit flag the
+    /// real history would never load.
+    pub log_initial_loaded: bool,
 }
 
 impl Buffer {
@@ -204,6 +230,11 @@ mod tests {
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
             peer_handle: None,
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
+            log_initial_loaded: false,
         };
 
         buf.touch_speaker("alice");
@@ -235,6 +266,11 @@ mod tests {
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
             peer_handle: None,
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
+            log_initial_loaded: false,
         };
 
         buf.touch_speaker("Alice");
@@ -262,6 +298,11 @@ mod tests {
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
             peer_handle: None,
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
+            log_initial_loaded: false,
         };
 
         for i in 0..60 {
@@ -292,5 +333,12 @@ mod tests {
         assert!(BufferType::Query.sort_group() < BufferType::DccChat.sort_group());
         assert!(BufferType::DccChat.sort_group() < BufferType::Special.sort_group());
         assert!(BufferType::Special.sort_group() < BufferType::Shell.sort_group());
+    }
+
+    #[test]
+    fn log_buffer_sorts_with_channels() {
+        // Log buffers live under pseudo-networks (different connection_id from
+        // any real channel), so the shared sort group is fine.
+        assert_eq!(BufferType::Log.sort_group(), BufferType::Channel.sort_group());
     }
 }

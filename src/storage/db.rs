@@ -219,6 +219,51 @@ pub fn open_database_at(path: &str, encrypt: bool) -> rusqlite::Result<Connectio
     Ok(db)
 }
 
+/// Open the message database read-only.
+///
+/// Used by the `repartee l` log browser. The `mode=ro` URI flag rejects
+/// all writes at the `SQLite` layer, so the daemon (running concurrently
+/// against the same WAL) is never blocked. No pragmas are applied —
+/// `journal_mode=WAL` is a write operation and the file already carries
+/// the WAL setting from when the daemon created it. No schema creation:
+/// the database must already exist (we error out otherwise).
+///
+/// Path is percent-encoded for the URI form before being concatenated
+/// — a home directory like `/Users/Foo Bar/.repartee/...` would
+/// otherwise produce a malformed `file:` URI.
+pub fn open_readonly_at(path: &str) -> rusqlite::Result<Connection> {
+    let uri = format!("file:{}?mode=ro", encode_sqlite_uri_path(path));
+    Connection::open_with_flags(
+        &uri,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+}
+
+/// Percent-encode characters that have special meaning inside a
+/// `SQLite` `file:` URI. Conservative encoder — only escapes the specific
+/// characters that break URI parsing (`?`, `#`, `%`, whitespace) and
+/// the byte range outside printable ASCII. `/` and `:` are preserved
+/// so `/tmp/x.db` stays readable. Per `SQLite` docs any character may
+/// be percent-encoded; we deliberately keep the encoded set narrow to
+/// keep error messages readable when the path appears in diagnostics.
+fn encode_sqlite_uri_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for byte in path.as_bytes() {
+        match byte {
+            b'?' | b'#' | b'%' | b' ' | b'\t' | b'\n' | b'\r' => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "%{byte:02X}");
+            }
+            b if b.is_ascii() && !b.is_ascii_control() => out.push(*b as char),
+            b => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "%{b:02X}");
+            }
+        }
+    }
+    out
+}
+
 pub fn purge_old_messages(db: &Connection, retention_days: u32, has_fts: bool) -> usize {
     let cutoff = chrono::Utc::now().timestamp() - i64::from(retention_days) * 86400;
 
@@ -490,5 +535,80 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn encode_sqlite_uri_path_handles_special_chars() {
+        // Plain path: untouched.
+        assert_eq!(encode_sqlite_uri_path("/tmp/x.db"), "/tmp/x.db");
+        // Spaces: encoded so `?mode=ro` parses correctly.
+        assert_eq!(
+            encode_sqlite_uri_path("/Users/Foo Bar/.repartee/messages.db"),
+            "/Users/Foo%20Bar/.repartee/messages.db"
+        );
+        // Question mark, hash, percent: all encoded.
+        assert_eq!(encode_sqlite_uri_path("/a?b#c%d"), "/a%3Fb%23c%25d");
+    }
+
+    #[test]
+    fn open_readonly_handles_path_with_spaces() {
+        let dir = std::env::temp_dir().join("repartee logbrowser ro space");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("messages.db");
+        let path_str = path.to_str().unwrap();
+
+        // Seed via the writable opener.
+        let rw = open_database_at(path_str, false).unwrap();
+        rw.execute(
+            "INSERT INTO messages (timestamp, network, buffer, type, nick, text) \
+             VALUES (?1, 'libera', '#test', 'message', 'ada', 'hello')",
+            params![100],
+        )
+        .unwrap();
+        drop(rw);
+
+        let ro = open_readonly_at(path_str).unwrap();
+        let count: i64 = ro
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn open_readonly_rejects_writes() {
+        // Need a real file (URI mode=ro doesn't apply to in-memory).
+        let dir = std::env::temp_dir().join("repartee_logbrowser_ro_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("messages.db");
+        let path_str = path.to_str().unwrap();
+
+        // Seed via the writable opener.
+        let rw = open_database_at(path_str, false).unwrap();
+        rw.execute(
+            "INSERT INTO messages (timestamp, network, buffer, type, nick, text) \
+             VALUES (?1, 'libera', '#test', 'message', 'ada', 'hello')",
+            params![100],
+        )
+        .unwrap();
+        drop(rw);
+
+        let ro = open_readonly_at(path_str).unwrap();
+        let count: i64 = ro
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let write_err = ro.execute(
+            "INSERT INTO messages (timestamp, network, buffer, type, nick, text) \
+             VALUES (1, 'a', 'b', 'message', 'c', 'd')",
+            [],
+        );
+        assert!(write_err.is_err(), "read-only handle must reject writes");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

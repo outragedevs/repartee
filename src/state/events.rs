@@ -531,6 +531,11 @@ mod tests {
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
             peer_handle: None,
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
+            log_initial_loaded: false,
         }
     }
 
