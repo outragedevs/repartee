@@ -514,6 +514,16 @@ fn stored_to_message(
         "mention_log" => MessageType::MentionLog,
         _ => MessageType::Message,
     };
+    // Suppress `event_key` for log rows. The theme's event templates
+    // expand `$0..$N` from `event_params`, but `event_params` is not
+    // persisted to SQLite — only the rendered `text` is. If we passed
+    // `event_key` through, `render_event` would pick the template,
+    // substitute `$0..$N` against an empty params slice, and produce
+    // stripped lines like `(@) has joined`, `sets mode on`, or
+    // `is now known as` (with the actual nicks/channels missing).
+    // Setting `event_key = None` makes the renderer fall through to
+    // `parse_format_string(&msg.text, &[])`, which prints the
+    // original text that was logged at write time.
     Message {
         id: state.next_message_id(),
         timestamp: ts,
@@ -522,7 +532,7 @@ fn stored_to_message(
         nick_mode: None,
         text: stored.text.clone(),
         highlight: stored.highlight,
-        event_key: stored.event_key.clone(),
+        event_key: None,
         event_params: None,
         log_msg_id: Some(stored.id.to_string()),
         log_ref_id: None,
