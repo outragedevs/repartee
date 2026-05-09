@@ -123,6 +123,36 @@ fn main() -> Result<()> {
             .block_on(session::shim::run_shim(target_pid, false));
     }
 
+    // Handle log browser subcommand: `repartee l` or `repartee logs`.
+    // Direct mode like `attach` — no fork, no IRC, no socket listener.
+    // Pre-fork validation isn't needed here (we never fork) but config
+    // parse errors still surface inside `App::new` and reach the user's
+    // TTY directly.
+    if args.get(1).map(String::as_str) == Some("l")
+        || args.get(1).map(String::as_str) == Some("logs")
+    {
+        color_eyre::install()?;
+        setup_logging();
+        ui::install_panic_hook();
+        constants::ensure_config_dir();
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(async {
+                let mut app = app::App::new_log_browser()?;
+                if let Ok((cols, rows)) = crossterm::terminal::size() {
+                    app.cached_term_cols = cols;
+                    app.cached_term_rows = rows;
+                }
+                app.terminal = Some(ui::setup_terminal()?);
+                let result = app.run().await;
+                if let Some(ref mut terminal) = app.terminal {
+                    let _ = ui::restore_terminal(terminal);
+                }
+                result
+            });
+    }
+
     // Handle -d / --detach: start headless (no fork, no terminal).
     if args.iter().any(|a| a == "--detach" || a == "-d") {
         color_eyre::install()?;
