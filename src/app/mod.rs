@@ -1148,6 +1148,16 @@ impl App {
                     if let Some(server_ids) = pending_autoconnect_ids.take() {
                         self.start_autoconnects(&server_ids);
                     }
+                    // Log mode lazy-loads the active buffer's history on
+                    // first activation. `load_initial_messages` is
+                    // idempotent (early-return if already loaded), so a
+                    // tick-time poll keeps the implementation trivial —
+                    // no extra signal plumbing needed.
+                    if self.log_browser_mode
+                        && let Some(active_id) = self.state.active_buffer_id.clone()
+                    {
+                        self.load_initial_messages(&active_id);
+                    }
                     self.handle_netsplit_tick();
                     self.purge_expired_batches();
                     self.check_reconnects();
