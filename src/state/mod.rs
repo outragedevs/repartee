@@ -122,6 +122,7 @@ impl AppState {
                     buffer::BufferType::DccChat => "dcc_chat",
                     buffer::BufferType::Special => "special",
                     buffer::BufferType::Shell => "shell",
+                    buffer::BufferType::Log => "log",
                 };
                 BufferInfo {
                     id: b.id.clone(),

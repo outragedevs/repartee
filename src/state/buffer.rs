@@ -17,6 +17,11 @@ pub enum BufferType {
     Special,
     /// Embedded PTY-backed shell terminal.
     Shell,
+    /// Read-only historical view of a logged channel/query opened by the
+    /// `repartee l` log browser. Same render path as `Channel`, but the
+    /// distinct variant lets predicates (e.g. `show_nicklist`) treat it
+    /// differently without extra plumbing.
+    Log,
 }
 
 impl BufferType {
@@ -24,7 +29,10 @@ impl BufferType {
         match self {
             Self::Mentions => 0,
             Self::Server => 1,
-            Self::Channel => 2,
+            // Log shares Channel's sort group: log buffers always sit under a
+            // pseudo-network whose connection_id starts with `_log_`, so they
+            // never mix with live channels in the sidebar.
+            Self::Channel | Self::Log => 2,
             Self::Query => 3,
             Self::DccChat => 4,
             Self::Special => 5,
@@ -292,5 +300,12 @@ mod tests {
         assert!(BufferType::Query.sort_group() < BufferType::DccChat.sort_group());
         assert!(BufferType::DccChat.sort_group() < BufferType::Special.sort_group());
         assert!(BufferType::Special.sort_group() < BufferType::Shell.sort_group());
+    }
+
+    #[test]
+    fn log_buffer_sorts_with_channels() {
+        // Log buffers live under pseudo-networks (different connection_id from
+        // any real channel), so the shared sort group is fine.
+        assert_eq!(BufferType::Log.sort_group(), BufferType::Channel.sort_group());
     }
 }
