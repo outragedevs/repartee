@@ -377,6 +377,59 @@ pub fn truncate_mentions(db: &Connection) -> rusqlite::Result<usize> {
     db.execute("DELETE FROM mentions", [])
 }
 
+// === Log-browser catalog queries ===
+
+/// Distinct networks present in the message log, sorted ascending.
+/// Used by the log browser to populate sidebar headers.
+pub fn list_networks(db: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = db.prepare("SELECT DISTINCT network FROM messages ORDER BY network")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    rows.collect()
+}
+
+/// Distinct buffers logged for a given network, sorted ascending.
+pub fn list_buffers_for_network(
+    db: &Connection,
+    network: &str,
+) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = db.prepare(
+        "SELECT DISTINCT buffer FROM messages WHERE network = ?1 ORDER BY buffer",
+    )?;
+    let rows = stmt.query_map(params![network], |r| r.get::<_, String>(0))?;
+    rows.collect()
+}
+
+/// `(line_count, oldest_ts, newest_ts)` for a given network/buffer pair.
+/// Returns `None` if no messages exist there. Cached on the `Buffer` at
+/// activation so the topic-bar render doesn't requery on every frame.
+pub fn buffer_stats(
+    db: &Connection,
+    network: &str,
+    buffer: &str,
+) -> rusqlite::Result<Option<(u64, i64, i64)>> {
+    let row = db.query_row(
+        "SELECT COUNT(*), MIN(timestamp), MAX(timestamp) \
+         FROM messages WHERE network = ?1 AND buffer = ?2",
+        params![network, buffer],
+        |r| {
+            let count: i64 = r.get(0)?;
+            // MIN/MAX are NULL when the count is 0.
+            let oldest: Option<i64> = r.get(1)?;
+            let newest: Option<i64> = r.get(2)?;
+            #[expect(
+                clippy::cast_sign_loss,
+                reason = "COUNT(*) is non-negative by SQL semantics"
+            )]
+            Ok((count as u64, oldest, newest))
+        },
+    )?;
+    Ok(match row {
+        (0, _, _) => None,
+        (n, Some(o), Some(x)) => Some((n, o, x)),
+        _ => None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -638,5 +691,51 @@ mod tests {
         truncate_mentions(&db).unwrap();
         let remaining = load_recent_mentions(&db, 0, 1000).unwrap();
         assert!(remaining.is_empty());
+    }
+
+    // === Log-browser catalog queries ===
+
+    #[test]
+    fn list_networks_returns_distinct_sorted() {
+        let db = setup_test_db();
+        insert_msg(&db, "libera", "#rust", 1, "a");
+        insert_msg(&db, "libera", "#polska", 2, "b");
+        insert_msg(&db, "oftc", "#debian", 3, "c");
+        insert_msg(&db, "libera", "#rust", 4, "d");
+        insert_msg(&db, "ircnet", "#pl", 5, "e");
+
+        assert_eq!(list_networks(&db).unwrap(), vec!["ircnet", "libera", "oftc"]);
+    }
+
+    #[test]
+    fn list_buffers_for_network_filters_correctly() {
+        let db = setup_test_db();
+        insert_msg(&db, "libera", "#rust", 1, "x");
+        insert_msg(&db, "libera", "#polska", 2, "x");
+        insert_msg(&db, "oftc", "#debian", 3, "x");
+        insert_msg(&db, "libera", "#rust", 4, "y");
+
+        assert_eq!(
+            list_buffers_for_network(&db, "libera").unwrap(),
+            vec!["#polska", "#rust"]
+        );
+        assert_eq!(
+            list_buffers_for_network(&db, "oftc").unwrap(),
+            vec!["#debian"]
+        );
+        assert!(list_buffers_for_network(&db, "missing").unwrap().is_empty());
+    }
+
+    #[test]
+    fn buffer_stats_returns_count_and_range() {
+        let db = setup_test_db();
+        insert_msg(&db, "libera", "#rust", 100, "x");
+        insert_msg(&db, "libera", "#rust", 200, "y");
+        insert_msg(&db, "libera", "#rust", 50, "z");
+        insert_msg(&db, "libera", "#other", 9999, "q");
+
+        let stats = buffer_stats(&db, "libera", "#rust").unwrap();
+        assert_eq!(stats, Some((3, 50, 200)));
+        assert_eq!(buffer_stats(&db, "libera", "#unknown").unwrap(), None);
     }
 }
