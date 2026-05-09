@@ -3,6 +3,7 @@ mod dcc;
 mod image;
 mod input;
 mod irc;
+mod log_browser;
 mod maintenance;
 mod mentions;
 mod scripting;
