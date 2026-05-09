@@ -213,11 +213,26 @@ fn render_log_status(
                 .strip_prefix(crate::app::App::LOG_CONN_PREFIX)
                 .map_or_else(|| buf.id.clone(), |net| format!("{net}/{}", buf.name));
             let total = buf.log_total_lines.unwrap_or(0);
-            let loaded = buf.messages.len();
-            let from = buf.messages.front().map_or_else(
-                || String::from("(empty)"),
-                |m| m.timestamp.format("%Y-%m-%d %H:%M").to_string(),
-            );
+            // Count real DB rows only — `log_msg_id.is_some()` excludes
+            // synthetic day separators and the local-event lines that
+            // `/help`, `/search` results, and the slash-only hint emit.
+            let loaded = buf
+                .messages
+                .iter()
+                .filter(|m| m.log_msg_id.is_some())
+                .count();
+            // `from` is the timestamp of the oldest real message we've
+            // loaded — that's what the user actually wants to see ("how
+            // far back am I?"), not the timestamp of a synthetic
+            // separator that happens to share the same date.
+            let from = buf
+                .messages
+                .iter()
+                .find(|m| m.log_msg_id.is_some())
+                .map_or_else(
+                    || String::from("(empty)"),
+                    |m| m.timestamp.format("%Y-%m-%d %H:%M").to_string(),
+                );
             (id, loaded, total, from)
         },
     );
