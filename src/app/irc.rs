@@ -610,14 +610,20 @@ impl App {
                         conn.nick.clone_from(confirmed_nick);
                     }
 
-                    // Emit to scripts before default handling. Script suppress
-                    // (Suppress return) is honored only for non-state-mutating
-                    // commands — JOIN/PART/QUIT/KICK/NICK/MODE/TOPIC/ACCOUNT/
-                    // AWAY/CHGHOST always reach `handle_irc_message` so the
-                    // nicklist, modes, topic and similar invariants stay in
-                    // sync with the server. This mirrors weechat: scripts
-                    // returning WEECHAT_RC_OK_EAT only hide display, the core
-                    // protocol handler runs regardless.
+                    // Emit to scripts before default handling. Suppress semantics:
+                    //
+                    //   non-state-mutating (PRIVMSG, NOTICE, INVITE, ...)
+                    //     → early return; nothing displayed, nothing mutated
+                    //   state-mutating (JOIN/PART/QUIT/KICK/NICK/MODE/TOPIC/
+                    //                   ACCOUNT/AWAY/CHGHOST)
+                    //     → handler always runs so the nicklist/topic/modes
+                    //       stay in sync with the server, but the event line
+                    //       (MessageType::Event) is hidden via
+                    //       state.suppress_event_display so the script's
+                    //       "hide JOIN spam" intent is preserved.
+                    //
+                    // Mirrors weechat: WEECHAT_RC_OK_EAT only hides display,
+                    // the core protocol handler still mutates state.
                     let state_mutating = matches!(
                         msg.command,
                         ::irc::proto::Command::JOIN(..)
@@ -643,6 +649,7 @@ impl App {
                         }
                         return;
                     }
+                    let suppress_display = script_suppressed && state_mutating;
 
                     // Intercept DCC CTCP before normal IRC handling.
                     // DCC messages arrive as CTCP inside PRIVMSG; events.rs ignores
@@ -743,7 +750,13 @@ impl App {
                     // and feed them with chat history from the log database.
                     let buffers_before = self.state.buffers.len();
 
+                    if suppress_display {
+                        self.state.suppress_event_display = true;
+                    }
                     crate::irc::events::handle_irc_message(&mut self.state, &conn_id, &msg);
+                    if suppress_display {
+                        self.state.suppress_event_display = false;
+                    }
 
                     // Drain pending web events and broadcast + auto-record mentions.
                     self.drain_pending_web_events();

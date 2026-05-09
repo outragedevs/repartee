@@ -180,14 +180,14 @@ impl App {
     }
 
     /// Detect stale WHO batches where the server silently dropped some targets
-    /// or is rate-limiting replies (Solanum throttles RPL_WHOSPCRPL on large
+    /// or is rate-limiting replies (Solanum throttles `RPL_WHOSPCRPL` on large
     /// channels, so a batch may not finish within 30s).
     ///
     /// Drop tracking state for the stale batch so the next batch can be sent,
     /// but keep `silent_who_channels` / `silent_banlist_channels` intact —
-    /// late RPL_ENDOFWHO / RPL_BANLIST / RPL_ENDOFBANLIST replies must still
-    /// be suppressed when they finally arrive. Those flags are cleared by the
-    /// normal reply handlers (or by PART/KICK / manual /who / /banlist).
+    /// late `RPL_ENDOFWHO` / `RPL_BANLIST` / `RPL_ENDOFBANLIST` replies must
+    /// still be suppressed when they finally arrive. Those flags are cleared
+    /// by the normal reply handlers (or by PART/KICK / manual /who / /banlist).
     pub(crate) fn check_stale_who_batches(&mut self) {
         let stale_conns: Vec<String> = self
             .channel_query_sent_at

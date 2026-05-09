@@ -26,6 +26,7 @@ impl AppState {
             nick_color_sat: 0.65,
             nick_color_lit: 0.65,
             e2e_manager: None,
+            suppress_event_display: false,
         }
     }
 
@@ -128,6 +129,16 @@ impl AppState {
     // === Messages ===
 
     pub fn add_message(&mut self, buffer_id: &str, message: Message) {
+        // Honour script-driven event display suppression. State mutation runs
+        // up the call chain before this point; this gate only hides the JOIN/
+        // PART/QUIT/etc. event line so scripts that returned Suppress for a
+        // state-mutating command keep their "hide noise" behaviour without
+        // leaving the nicklist out of sync. Non-Event messages (PRIVMSG, etc.)
+        // are not affected — those scripts use the early-return path in
+        // App::handle_irc_event.
+        if self.suppress_event_display && message.message_type == MessageType::Event {
+            return;
+        }
         self.maybe_log(buffer_id, &message);
         // Queue web event for broadcast.
         let wire = crate::web::snapshot::message_to_wire(&message);
@@ -567,6 +578,74 @@ mod tests {
         let buf = state.buffers.get("libera/#rust").unwrap();
         assert_eq!(buf.messages.len(), 1);
         assert_eq!(buf.messages[0].text, "hello world");
+    }
+
+    #[test]
+    fn suppress_event_display_drops_event_messages_only() {
+        // Script suppress for state-mutating commands sets
+        // suppress_event_display before handle_irc_message runs and clears
+        // it after. While set, MessageType::Event lines (the JOIN/PART/QUIT
+        // event display) are dropped from the buffer — but PRIVMSG/Action
+        // lines pass through unchanged because those go through the
+        // non-state-mutating early-return path in app/irc.rs and never
+        // reach add_message with the flag set.
+        let mut state = make_test_state();
+        state.suppress_event_display = true;
+
+        let event_msg = Message {
+            id: state.next_message_id(),
+            timestamp: Utc::now(),
+            message_type: MessageType::Event,
+            nick: None,
+            nick_mode: None,
+            text: "alice has joined #rust".to_string(),
+            highlight: false,
+            event_key: Some("join".to_string()),
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: None,
+        };
+        state.add_message("libera/#rust", event_msg);
+        assert!(
+            state
+                .buffers
+                .get("libera/#rust")
+                .unwrap()
+                .messages
+                .is_empty(),
+            "Event display must be dropped while suppress_event_display is set"
+        );
+
+        let chat_msg = make_test_message(&mut state, "regular chat");
+        state.add_message("libera/#rust", chat_msg);
+        assert_eq!(
+            state.buffers.get("libera/#rust").unwrap().messages.len(),
+            1,
+            "MessageType::Message must NOT be suppressed by the event-only gate"
+        );
+
+        state.suppress_event_display = false;
+        let event_msg2 = Message {
+            id: state.next_message_id(),
+            timestamp: Utc::now(),
+            message_type: MessageType::Event,
+            nick: None,
+            nick_mode: None,
+            text: "bob has parted".to_string(),
+            highlight: false,
+            event_key: Some("part".to_string()),
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: None,
+        };
+        state.add_message("libera/#rust", event_msg2);
+        assert_eq!(
+            state.buffers.get("libera/#rust").unwrap().messages.len(),
+            2,
+            "Event display must resume after the flag is cleared"
+        );
     }
 
     #[test]

@@ -6699,6 +6699,68 @@ mod tests {
     }
 
     #[test]
+    fn stale_cleanup_contract_silent_flags_suppress_late_replies() {
+        // Regression for the autoconnect leak on Solanum: the 30s stale-batch
+        // cleanup in App::check_stale_who_batches drops `channel_query_in_flight`
+        // and `channel_query_sent_at` so the next WHO batch can start, but it
+        // MUST leave `silent_who_channels` and `silent_banlist_channels`
+        // populated. Solanum rate-limits RPL_WHOSPCRPL on large channels so
+        // the corresponding RPL_ENDOFWHO / RPL_BANLIST / RPL_ENDOFBANLIST can
+        // arrive past the cleanup window — if the silent flags were stripped
+        // alongside the in-flight tracking they would leak to the active
+        // buffer ("End of WHO list" / ban entries / "End of ban list").
+        //
+        // This test exercises the exact post-cleanup state at the AppState
+        // layer (in_flight lives on App and is irrelevant to suppression —
+        // only the silent flags gate the reply handlers).
+        let mut state = make_whox_state();
+        state.set_active_buffer("test/testserver");
+        if let Some(conn) = state.connections.get_mut("test") {
+            conn.silent_who_channels.insert("#big".to_string());
+            conn.silent_banlist_channels.insert("#big".to_string());
+        }
+
+        let endwho = make_irc_msg(
+            None,
+            Command::Response(
+                Response::RPL_ENDOFWHO,
+                vec!["me".into(), "#big".into(), "End of WHO list".into()],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &endwho);
+
+        let banlist = make_irc_msg(
+            None,
+            Command::Response(
+                Response::RPL_BANLIST,
+                vec![
+                    "me".into(),
+                    "#big".into(),
+                    "*!*@spammer.example".into(),
+                    "oper".into(),
+                    "1700000000".into(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &banlist);
+
+        let endban = make_irc_msg(
+            None,
+            Command::Response(
+                Response::RPL_ENDOFBANLIST,
+                vec!["me".into(), "#big".into(), "End of channel ban list".into()],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &endban);
+
+        let server_buf = state.buffers.get("test/testserver").unwrap();
+        assert!(
+            server_buf.messages.is_empty(),
+            "late WHO/banlist replies must stay suppressed after stale cleanup"
+        );
+    }
+
+    #[test]
     fn manual_who_end_displays_message() {
         let mut state = make_whox_state();
         state.set_active_buffer("test/testserver");

@@ -88,6 +88,11 @@ pub struct AppState {
     /// RPE2E manager, initialized once storage is up. `None` when the
     /// `[e2e] enabled = false` config switch disables E2E entirely.
     pub e2e_manager: Option<std::sync::Arc<E2eManager>>,
+    /// When set, `add_message` skips `MessageType::Event` lines so script
+    /// suppress hides the JOIN/PART/QUIT/MODE/etc. event display while the
+    /// underlying state mutation still runs. Set/cleared around a single
+    /// `handle_irc_message` call by the IRC dispatcher.
+    pub suppress_event_display: bool,
 }
 
 impl AppState {
