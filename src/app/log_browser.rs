@@ -202,7 +202,7 @@ impl App {
         let Some(log_db) = &self.log_db else { return };
         let rows_result = {
             let Ok(db) = log_db.db.lock() else { return };
-            crate::storage::query::get_messages(
+            crate::storage::query::get_messages_paginated(
                 &db,
                 &net,
                 &buf,
@@ -244,17 +244,28 @@ impl App {
             return;
         };
         let oldest_ts = oldest_msg.timestamp.timestamp();
+        // `log_msg_id` is the SQLite row id (set in `stored_to_message`).
+        // Composite cursor `(timestamp, id)` lets us page through rows
+        // that share a second without losing any. If the id is missing
+        // for some reason (shouldn't happen for log-mode rows) we fall
+        // back to a strict timestamp cursor — one second of duplicates
+        // may be lost but the page still advances.
+        let oldest_id = oldest_msg
+            .log_msg_id
+            .as_ref()
+            .and_then(|s| s.parse::<i64>().ok());
+        let cursor = oldest_id.map(|id| (oldest_ts, id));
         let Some((net, buf)) = self.split_log_buffer_id(buffer_id) else {
             return;
         };
         let Some(log_db) = &self.log_db else { return };
         let rows_result = {
             let Ok(db) = log_db.db.lock() else { return };
-            crate::storage::query::get_messages(
+            crate::storage::query::get_messages_paginated(
                 &db,
                 &net,
                 &buf,
-                Some(oldest_ts),
+                cursor,
                 PAGE_LIMIT,
                 log_db.crypto_key.is_some(),
                 log_db.crypto_key.as_ref(),
@@ -322,6 +333,10 @@ impl App {
 /// struct used by the buffer pipeline. Mirrors `app::backlog`'s
 /// conversion but lives here because the log browser doesn't share
 /// `App.storage` (which is `None` in log mode).
+///
+/// `log_msg_id` carries the `SQLite` row id as a decimal string so
+/// `load_older_messages` can build a `(timestamp, id)` composite
+/// cursor and not lose rows that share a second.
 fn stored_to_message(stored: &crate::storage::StoredMessage) -> crate::state::buffer::Message {
     use crate::state::buffer::{Message, MessageType};
     let ts = chrono::DateTime::<Utc>::from_timestamp(stored.timestamp, 0).unwrap_or_else(Utc::now);
@@ -329,6 +344,7 @@ fn stored_to_message(stored: &crate::storage::StoredMessage) -> crate::state::bu
         "action" => MessageType::Action,
         "notice" => MessageType::Notice,
         "event" => MessageType::Event,
+        "mention_log" => MessageType::MentionLog,
         _ => MessageType::Message,
     };
     Message {
@@ -341,7 +357,7 @@ fn stored_to_message(stored: &crate::storage::StoredMessage) -> crate::state::bu
         highlight: stored.highlight,
         event_key: stored.event_key.clone(),
         event_params: None,
-        log_msg_id: None,
+        log_msg_id: Some(stored.id.to_string()),
         log_ref_id: None,
         tags: None,
     }

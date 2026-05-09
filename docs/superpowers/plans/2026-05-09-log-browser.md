@@ -6,7 +6,7 @@
 
 **Architecture:** Standalone process (no fork, no IRC, no daemon link) that opens the message DB read-only via SQLite WAL, builds a sidebar of pseudo-`Connection`s + `BufferType::Log` buffers from `SELECT DISTINCT (network, buffer) FROM messages`, and lazy-paginates content via the existing `query::get_messages` API. The whole thing is gated by a single `App::log_browser_mode: bool` flag — every chat-mode entry point in `App::run` either branches on this flag or is short-circuited.
 
-**Tech Stack:** Rust 2024, ratatui 0.30, tokio (current_thread), rusqlite (existing dependency, used in read-only `mode=ro&immutable=1` URI), no new crates.
+**Tech Stack:** Rust 2024, ratatui 0.30, tokio (current_thread), rusqlite (existing dependency, used in read-only `mode=ro` URI — NOT `immutable=1`, which would block reading new WAL writes from the daemon), no new crates.
 
 **Reference spec:** `docs/superpowers/specs/2026-05-09-log-browser-design.md`.
 

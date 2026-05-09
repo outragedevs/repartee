@@ -107,6 +107,64 @@ pub fn get_messages(
     Ok(messages)
 }
 
+/// Cursor-paginated fetch using a `(timestamp, id)` tuple as the cursor.
+///
+/// `get_messages` alone uses `WHERE timestamp < ?` which silently drops
+/// rows that share a timestamp with the cursor — a real problem when
+/// many messages land in the same second on a busy channel. This
+/// variant uses the strict ordering `(timestamp DESC, id DESC)` and
+/// `WHERE timestamp < ?ts OR (timestamp = ?ts AND id < ?id)`, so paging
+/// is lossless even at second-precision timestamps.
+///
+/// Pass `before = None` for the initial page (latest messages). Used by
+/// the log browser; chat-mode `load_backlog` keeps using the simpler
+/// timestamp-only `get_messages` because backlog is one-shot, not
+/// paginated.
+pub fn get_messages_paginated(
+    db: &Connection,
+    network: &str,
+    buffer: &str,
+    before: Option<(i64, i64)>,
+    limit: usize,
+    encrypt: bool,
+    crypto_key: Option<&Key<Aes256Gcm>>,
+) -> rusqlite::Result<Vec<StoredMessage>> {
+    let mut messages = if let Some((ts, id)) = before {
+        let mut stmt = db.prepare(
+            "SELECT * FROM messages
+             WHERE network = ?1 AND buffer = ?2
+               AND (timestamp < ?3 OR (timestamp = ?3 AND id < ?4))
+             ORDER BY timestamp DESC, id DESC
+             LIMIT ?5",
+        )?;
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "limit will never exceed i64::MAX in practice"
+        )]
+        let rows = stmt.query_map(params![network, buffer, ts, id, limit as i64], |row| {
+            map_row(row, encrypt, crypto_key)
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    } else {
+        let mut stmt = db.prepare(
+            "SELECT * FROM messages
+             WHERE network = ?1 AND buffer = ?2
+             ORDER BY timestamp DESC, id DESC
+             LIMIT ?3",
+        )?;
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "limit will never exceed i64::MAX in practice"
+        )]
+        let rows = stmt.query_map(params![network, buffer, limit as i64], |row| {
+            map_row(row, encrypt, crypto_key)
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    messages.reverse();
+    Ok(messages)
+}
+
 /// Full-text search across messages (plain mode only, no encryption).
 ///
 /// The query string is wrapped in double quotes for phrase matching.
@@ -724,6 +782,47 @@ mod tests {
             vec!["#debian"]
         );
         assert!(list_buffers_for_network(&db, "missing").unwrap().is_empty());
+    }
+
+    #[test]
+    fn get_messages_paginated_does_not_lose_same_timestamp_rows() {
+        // Regression: timestamp-only pagination drops rows when many
+        // messages share the same second. Composite (timestamp, id)
+        // cursor pages through them losslessly.
+        let db = setup_test_db();
+        // Insert 5 rows with the same timestamp but distinct msg_ids
+        // (UNIQUE constraint), distinct text so we can verify identity.
+        for i in 0..5 {
+            db.execute(
+                "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight) \
+                 VALUES (?1, 'libera', '#rust', 100, 'message', 'ada', ?2, 0)",
+                params![format!("dup-{i}"), format!("text-{i}")],
+            )
+            .unwrap();
+        }
+        // Sanity: 5 rows at ts=100, distinct ids assigned by SQLite.
+        let all =
+            get_messages_paginated(&db, "libera", "#rust", None, 1000, false, None).unwrap();
+        assert_eq!(all.len(), 5);
+
+        // Page 1: limit 2 → 2 newest at ts=100.
+        let page1 =
+            get_messages_paginated(&db, "libera", "#rust", None, 2, false, None).unwrap();
+        assert_eq!(page1.len(), 2);
+        let oldest = page1.first().unwrap();
+        // Page 2: cursor on (ts=100, id=oldest.id) → must yield the
+        // remaining 3 rows that share timestamp 100, *not* return empty.
+        let page2 = get_messages_paginated(
+            &db,
+            "libera",
+            "#rust",
+            Some((oldest.timestamp, oldest.id)),
+            10,
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(page2.len(), 3, "all same-timestamp rows must paginate");
     }
 
     #[test]
