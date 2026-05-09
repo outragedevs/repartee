@@ -726,6 +726,25 @@ impl App {
             return;
         }
 
+        // Log-browser mode short-circuits the registry: the only valid
+        // verbs are `/search`, `/quit`, `/help` (plus their aliases). Any
+        // other command echoes a hint and returns. Scripts are unloaded
+        // in log mode so we skip the script emit too.
+        if self.log_browser_mode {
+            match parsed.name.as_str() {
+                "search" => crate::commands::handlers_logs::cmd_log_search(self, &parsed.args),
+                "quit" | "exit" => {
+                    crate::commands::handlers_logs::cmd_log_quit(self, &parsed.args);
+                }
+                "help" => crate::commands::handlers_logs::cmd_log_help(self, &parsed.args),
+                other => crate::commands::helpers::add_local_event(
+                    self,
+                    &format!("log mode: only /search, /quit, /help (got /{other})"),
+                ),
+            }
+            return;
+        }
+
         // Emit to scripts — they can suppress commands
         {
             use crate::scripting::api::events;
