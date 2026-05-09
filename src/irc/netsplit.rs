@@ -114,7 +114,7 @@ impl NetsplitState {
             channels: affected_buffer_ids.to_vec(),
         });
         self.groups[idx].last_quit = now;
-        self.nick_index.insert(nick.to_string(), idx);
+        self.nick_index.insert(nick.to_lowercase(), idx);
 
         true
     }
@@ -122,13 +122,14 @@ impl NetsplitState {
     /// Process a JOIN to check if it's from a user who was in a netsplit.
     /// Returns `true` if handled as a netjoin (suppress normal join display).
     pub fn handle_join(&mut self, nick: &str, buffer_id: &str) -> bool {
-        let Some(&group_idx) = self.nick_index.get(nick) else {
+        let nick_key = nick.to_lowercase();
+        let Some(&group_idx) = self.nick_index.get(&nick_key) else {
             return false;
         };
 
         // Bounds check (group may have been removed during expiry)
         if group_idx >= self.groups.len() {
-            self.nick_index.remove(nick);
+            self.nick_index.remove(&nick_key);
             return false;
         }
 
@@ -156,7 +157,11 @@ impl NetsplitState {
         };
 
         if let Some(nj) = self.netjoins.get_mut(nj_index) {
-            if let Some(rec) = nj.records.iter_mut().find(|r| r.nick == nick) {
+            if let Some(rec) = nj
+                .records
+                .iter_mut()
+                .find(|r| r.nick.eq_ignore_ascii_case(nick))
+            {
                 rec.channels.insert(buffer_id.to_string());
             } else {
                 nj.records.push(NetjoinRecord {
@@ -168,7 +173,7 @@ impl NetsplitState {
         }
 
         // Remove from split index
-        self.nick_index.remove(nick);
+        self.nick_index.remove(&nick_key);
 
         true
     }
@@ -205,7 +210,7 @@ impl NetsplitState {
         self.nick_index.clear();
         for (idx, group) in self.groups.iter().enumerate() {
             for rec in &group.nicks {
-                self.nick_index.insert(rec.nick.clone(), idx);
+                self.nick_index.insert(rec.nick.to_lowercase(), idx);
             }
         }
 
@@ -216,7 +221,7 @@ impl NetsplitState {
     /// Used for nick list cleanup when a split nick never rejoins.
     #[allow(dead_code)] // Will be used when nick list stale-entry cleanup is wired
     pub fn is_expired_split_nick(&self, nick: &str) -> bool {
-        if let Some(&idx) = self.nick_index.get(nick)
+        if let Some(&idx) = self.nick_index.get(&nick.to_lowercase())
             && idx < self.groups.len()
         {
             let elapsed = Instant::now().duration_since(self.groups[idx].last_quit);
@@ -509,6 +514,17 @@ mod tests {
         assert!(state.nick_index.contains_key("alice"));
         state.handle_join("alice", "conn/#chan");
         assert!(!state.nick_index.contains_key("alice"));
+    }
+
+    #[test]
+    fn handle_join_matches_quit_with_different_case() {
+        // Server may broadcast QUIT with one case and rejoin JOIN with another
+        // (IRC nicks are ASCII case-insensitive). The split→join correlation
+        // must survive the case change or the netjoin won't be detected.
+        let mut state = NetsplitState::new();
+        state.handle_quit("Alice", "hub.net leaf.net", &["conn/#chan".to_string()]);
+        assert!(state.handle_join("ALICE", "conn/#chan"));
+        assert_eq!(state.netjoins.len(), 1);
     }
 
     #[test]

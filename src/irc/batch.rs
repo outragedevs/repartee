@@ -61,25 +61,28 @@ impl BatchTracker {
         );
     }
 
-    /// Remove batches that have been open longer than `BATCH_TIMEOUT_SECS`.
+    /// Remove batches that have been open longer than `BATCH_TIMEOUT_SECS`
+    /// and return them so the caller can replay their collected messages.
     ///
-    /// Returns the number of expired batches discarded. Should be called
+    /// A timed-out batch usually means the server crashed mid-batch or its
+    /// `BATCH -tag` line never arrived. Replaying the buffered messages
+    /// through the normal handler keeps `Buffer.users` and other state in
+    /// sync — silently dropping them would leave stale nicks behind for QUIT
+    /// batches and miss new nicks for JOIN batches. Should be called
     /// periodically (e.g. once per second from the main tick).
-    pub fn purge_expired(&mut self) -> usize {
+    pub fn purge_expired(&mut self) -> Vec<BatchInfo> {
         let timeout = std::time::Duration::from_secs(BATCH_TIMEOUT_SECS);
-        let before = self.open.len();
-        self.open.retain(|tag, info| {
-            let expired = info.started_at.elapsed() >= timeout;
-            if expired {
+        self.open
+            .extract_if(|_, info| info.started_at.elapsed() >= timeout)
+            .map(|(tag, info)| {
                 tracing::warn!(
-                    "discarding expired batch tag={tag} type={} msgs={}",
+                    "expired batch tag={tag} type={} msgs={} — replaying through normal handler",
                     info.batch_type,
                     info.messages.len()
                 );
-            }
-            !expired
-        });
-        before - self.open.len()
+                info
+            })
+            .collect()
     }
 
     /// Check whether a message belongs to an open batch via its `@batch` tag.
@@ -663,7 +666,8 @@ mod tests {
         tracker.start_batch("fresh", "NETJOIN", vec![]);
 
         let purged = tracker.purge_expired();
-        assert_eq!(purged, 1);
+        assert_eq!(purged.len(), 1);
+        assert_eq!(purged[0].batch_type, "NETSPLIT");
         assert!(tracker.end_batch("old").is_none());
         assert!(tracker.end_batch("fresh").is_some());
     }
@@ -675,8 +679,41 @@ mod tests {
         tracker.start_batch("b", "NETJOIN", vec![]);
 
         let purged = tracker.purge_expired();
-        assert_eq!(purged, 0);
+        assert!(purged.is_empty());
         assert_eq!(tracker.open.len(), 2);
+    }
+
+    #[test]
+    fn purge_expired_returns_messages_for_replay() {
+        // An expired batch must surface its buffered messages so the caller
+        // can replay them through the normal handler — otherwise QUITs hidden
+        // inside an unterminated netsplit batch leak as stale nicks.
+        let mut tracker = BatchTracker::default();
+        tracker.open.insert(
+            "old".to_string(),
+            BatchInfo {
+                batch_type: "NETSPLIT".to_string(),
+                params: vec!["hub.example".to_string(), "leaf.example".to_string()],
+                messages: vec![IrcMessage {
+                    tags: None,
+                    prefix: Some(irc::proto::Prefix::Nickname(
+                        "alice".to_string(),
+                        "ali".to_string(),
+                        "h.example".to_string(),
+                    )),
+                    command: Command::QUIT(Some("hub.example leaf.example".to_string())),
+                }],
+                dropped_messages: 0,
+                started_at: Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(120))
+                    .unwrap(),
+            },
+        );
+
+        let purged = tracker.purge_expired();
+        assert_eq!(purged.len(), 1);
+        assert_eq!(purged[0].messages.len(), 1);
+        assert_eq!(purged[0].params.len(), 2);
     }
 
     #[test]

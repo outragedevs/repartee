@@ -610,9 +610,31 @@ impl App {
                         conn.nick.clone_from(confirmed_nick);
                     }
 
-                    // Emit to scripts before default handling. If suppressed, skip.
-                    if self.emit_irc_to_scripts(&conn_id, &msg) {
-                        // Script suppressed — still process channel queries.
+                    // Emit to scripts before default handling. Script suppress
+                    // (Suppress return) is honored only for non-state-mutating
+                    // commands — JOIN/PART/QUIT/KICK/NICK/MODE/TOPIC/ACCOUNT/
+                    // AWAY/CHGHOST always reach `handle_irc_message` so the
+                    // nicklist, modes, topic and similar invariants stay in
+                    // sync with the server. This mirrors weechat: scripts
+                    // returning WEECHAT_RC_OK_EAT only hide display, the core
+                    // protocol handler runs regardless.
+                    let state_mutating = matches!(
+                        msg.command,
+                        ::irc::proto::Command::JOIN(..)
+                            | ::irc::proto::Command::PART(..)
+                            | ::irc::proto::Command::QUIT(..)
+                            | ::irc::proto::Command::KICK(..)
+                            | ::irc::proto::Command::NICK(..)
+                            | ::irc::proto::Command::ChannelMODE(..)
+                            | ::irc::proto::Command::UserMODE(..)
+                            | ::irc::proto::Command::TOPIC(..)
+                            | ::irc::proto::Command::ACCOUNT(..)
+                            | ::irc::proto::Command::AWAY(..)
+                            | ::irc::proto::Command::CHGHOST(..)
+                    );
+                    let script_suppressed = self.emit_irc_to_scripts(&conn_id, &msg);
+                    if script_suppressed && !state_mutating {
+                        // Display suppressed — still keep auxiliary tracking in sync.
                         if let Some(channel) = endofnames_channel {
                             self.queue_channel_query(&conn_id, channel);
                         }

@@ -331,16 +331,26 @@ pub fn channels_to_rejoin(state: &AppState, conn_id: &str) -> Vec<String> {
 
 /// Update connection status to Disconnected and log to the status buffer.
 /// Also sets up reconnect timing if `should_reconnect` is true.
+///
+/// Channel nicklists are wiped here so they don't survive into a reconnect:
+/// when the server's auto-JOIN replays after reconnection, we receive a fresh
+/// `RPL_NAMREPLY` that rebuilds the list. Without this wipe, departed users
+/// from the previous session linger in `Buffer.users` forever (mirrors
+/// weechat's `irc_server.c:irc_nick_free_all` per-channel disconnect cleanup).
 pub fn handle_disconnected(state: &mut AppState, conn_id: &str, error: Option<&str>) {
-    // Save list of joined channels before we update state
-    let current_channels: Vec<String> = state
-        .buffers
-        .values()
-        .filter(|b| {
-            b.connection_id == conn_id && b.buffer_type == crate::state::buffer::BufferType::Channel
-        })
-        .map(|b| b.name.clone())
-        .collect();
+    // Save channel names AND wipe nicklists in one pass — channels survive the
+    // disconnect (we want to reuse the buffer + history on rejoin), but their
+    // user state is no longer authoritative.
+    let mut current_channels: Vec<String> = Vec::new();
+    for buf in state.buffers.values_mut() {
+        if buf.connection_id == conn_id
+            && buf.buffer_type == crate::state::buffer::BufferType::Channel
+        {
+            current_channels.push(buf.name.clone());
+            buf.users.clear();
+            buf.last_speakers.clear();
+        }
+    }
 
     if let Some(err) = error {
         if let Some(conn) = state.connections.get_mut(conn_id) {
@@ -1239,8 +1249,33 @@ fn handle_join(
     }
 
     if nick == our_nick {
-        // We joined — create buffer if not exists
-        if !state.buffers.contains_key(&buffer_id) {
+        // Defense-in-depth nicklist reset (mirrors weechat irc-protocol.c:1755-1802):
+        // a buffer that already has users means this is a duplicate self-JOIN
+        // (ZNC bouncer replays JOIN without an intervening disconnect, /sajoin
+        // when already on the channel) — skip it. Otherwise the buffer is
+        // either fresh or was wiped by `handle_disconnected`; reset any stale
+        // topic/modes/list-modes so the upcoming RPL_TOPIC / RPL_CHANNELMODEIS
+        // / RPL_BANLIST replies repopulate from authoritative server state.
+        let exists = state.buffers.contains_key(&buffer_id);
+        let has_users = exists
+            && state
+                .buffers
+                .get(&buffer_id)
+                .is_some_and(|b| !b.users.is_empty());
+        if exists && has_users {
+            return;
+        }
+        if exists {
+            if let Some(buf) = state.buffers.get_mut(&buffer_id) {
+                buf.users.clear();
+                buf.last_speakers.clear();
+                buf.topic = None;
+                buf.topic_set_by = None;
+                buf.modes = None;
+                buf.mode_params = None;
+                buf.list_modes.clear();
+            }
+        } else {
             state.add_buffer(Buffer {
                 id: buffer_id.clone(),
                 connection_id: conn_id.to_string(),
@@ -6839,5 +6874,161 @@ mod tests {
         handle_irc_message(&mut state, "test", &msg);
 
         assert!(!state.buffers.contains_key("test/#keyed"));
+    }
+
+    // === Disconnect / rejoin nicklist lifecycle ===
+
+    #[test]
+    fn disconnect_wipes_channel_nicklists_for_connection() {
+        let mut state = make_test_state();
+        let chan_id = make_buffer_id("test", "#test");
+        state.add_nick(
+            &chan_id,
+            NickEntry {
+                nick: "alice".into(),
+                prefix: String::new(),
+                modes: String::new(),
+                away: false,
+                account: None,
+                ident: None,
+                host: None,
+            },
+        );
+        state
+            .buffers
+            .get_mut(&chan_id)
+            .unwrap()
+            .last_speakers
+            .push("alice".into());
+
+        handle_disconnected(&mut state, "test", None);
+
+        let buf = state.buffers.get(&chan_id).unwrap();
+        assert!(buf.users.is_empty(), "users should be wiped on disconnect");
+        assert!(buf.last_speakers.is_empty());
+        // Channel name still recorded for rejoin
+        let conn = state.connections.get("test").unwrap();
+        assert!(conn.joined_channels.iter().any(|c| c == "#test"));
+    }
+
+    #[test]
+    fn disconnect_does_not_touch_other_connections() {
+        let mut state = make_test_state();
+        // Second connection with its own channel
+        state.add_connection(Connection {
+            id: "other".into(),
+            label: "Other".into(),
+            status: ConnectionStatus::Connected,
+            nick: "me".into(),
+            user_modes: String::new(),
+            isupport: HashMap::new(),
+            isupport_parsed: crate::irc::isupport::Isupport::new(),
+            error: None,
+            lag: None,
+            lag_pending: false,
+            reconnect_attempts: 0,
+            reconnect_delay_secs: 30,
+            next_reconnect: None,
+            should_reconnect: true,
+            joined_channels: Vec::new(),
+            origin_config: state
+                .connections
+                .get("test")
+                .unwrap()
+                .origin_config
+                .clone(),
+            local_ip: None,
+            enabled_caps: std::collections::HashSet::new(),
+            who_token_counter: 0,
+            silent_who_channels: std::collections::HashSet::new(),
+            silent_banlist_channels: std::collections::HashSet::new(),
+        });
+        let other_chan = make_buffer_id("other", "#other");
+        state.add_buffer(make_channel_buffer("other", "#other"));
+        state.add_nick(
+            &other_chan,
+            NickEntry {
+                nick: "bob".into(),
+                prefix: String::new(),
+                modes: String::new(),
+                away: false,
+                account: None,
+                ident: None,
+                host: None,
+            },
+        );
+
+        handle_disconnected(&mut state, "test", None);
+
+        // "other" connection's nicklist must not be wiped
+        assert_eq!(state.buffers.get(&other_chan).unwrap().users.len(), 1);
+    }
+
+    #[test]
+    fn self_join_to_existing_buffer_with_users_is_ignored() {
+        // Defense against ZNC bouncer replays / stray double-JOINs: if the
+        // nicklist is already populated, treat the JOIN as a duplicate.
+        let mut state = make_test_state();
+        let chan_id = make_buffer_id("test", "#test");
+        // Pre-populate with a stale message we expect NOT to repeat.
+        let initial_msgs = state.buffers.get(&chan_id).unwrap().messages.len();
+
+        let msg = make_irc_msg(
+            Some("me!ident@host"),
+            Command::JOIN("#test".into(), None, None),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get(&chan_id).unwrap();
+        // No new join message added (we returned early).
+        assert_eq!(buf.messages.len(), initial_msgs);
+        // Existing nicks preserved.
+        assert!(buf.users.contains_key("me"));
+    }
+
+    #[test]
+    fn self_join_to_empty_existing_buffer_resets_stale_state() {
+        // After disconnect → reconnect rejoin: buffer exists but users were
+        // wiped by handle_disconnected. The JOIN must reset stale topic/modes
+        // so the fresh RPL_TOPIC / RPL_CHANNELMODEIS rebuild from scratch.
+        let mut state = make_test_state();
+        let chan_id = make_buffer_id("test", "#test");
+        {
+            let buf = state.buffers.get_mut(&chan_id).unwrap();
+            buf.users.clear();
+            buf.topic = Some("stale topic".into());
+            buf.topic_set_by = Some("stale_setter".into());
+            buf.modes = Some("nt".into());
+            buf.list_modes
+                .insert("b".into(), vec![]);
+        }
+
+        let msg = make_irc_msg(
+            Some("me!ident@host"),
+            Command::JOIN("#test".into(), None, None),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get(&chan_id).unwrap();
+        assert!(buf.topic.is_none(), "topic should be cleared on rejoin");
+        assert!(buf.topic_set_by.is_none());
+        assert!(buf.modes.is_none());
+        assert!(buf.list_modes.is_empty());
+    }
+
+    #[test]
+    fn self_join_creates_buffer_when_missing() {
+        let mut state = make_test_state();
+        let chan_id = make_buffer_id("test", "#fresh");
+        assert!(!state.buffers.contains_key(&chan_id));
+
+        let msg = make_irc_msg(
+            Some("me!ident@host"),
+            Command::JOIN("#fresh".into(), None, None),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        assert!(state.buffers.contains_key(&chan_id));
+        assert_eq!(state.active_buffer_id.as_deref(), Some(chan_id.as_str()));
     }
 }

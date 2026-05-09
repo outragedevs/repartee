@@ -36,10 +36,21 @@ impl App {
         }
     }
 
-    /// Discard any batches that have been open too long (e.g. dropped `-BATCH`).
+    /// Process any batches that have been open too long (e.g. dropped `-BATCH`).
+    ///
+    /// Expired batches are passed through `process_completed_batch` so their
+    /// buffered JOIN/PART/QUIT/NICK messages still mutate `Buffer.users`. If
+    /// we silently dropped them, channels would carry stale nicks for users
+    /// who quit inside a netsplit batch that never closed.
     pub(crate) fn purge_expired_batches(&mut self) {
-        for tracker in self.batch_trackers.values_mut() {
-            tracker.purge_expired();
+        let mut to_replay: Vec<(String, crate::irc::batch::BatchInfo)> = Vec::new();
+        for (conn_id, tracker) in &mut self.batch_trackers {
+            for batch in tracker.purge_expired() {
+                to_replay.push((conn_id.clone(), batch));
+            }
+        }
+        for (conn_id, batch) in to_replay {
+            crate::irc::batch::process_completed_batch(&mut self.state, &conn_id, &batch);
         }
     }
 
