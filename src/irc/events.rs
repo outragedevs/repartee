@@ -832,6 +832,10 @@ fn handle_privmsg(
             } else {
                 Some(format!("{ident}@{host}"))
             },
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
         });
     }
 
@@ -1293,6 +1297,10 @@ fn handle_join(
                 list_modes: std::collections::HashMap::new(),
                 last_speakers: Vec::new(),
                 peer_handle: None,
+                log_total_lines: None,
+                log_oldest_ts: None,
+                log_newest_ts: None,
+                history_exhausted: false,
             });
         }
         state.set_active_buffer(&buffer_id);
@@ -4162,6 +4170,10 @@ mod tests {
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
             peer_handle: None,
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
         });
         // Channel buffer
         let chan_id = make_buffer_id("test", "#test");
@@ -4182,6 +4194,10 @@ mod tests {
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
             peer_handle: None,
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
         });
         // Add ourselves to the channel
         state.add_nick(
@@ -4217,6 +4233,10 @@ mod tests {
             list_modes: std::collections::HashMap::new(),
             last_speakers: Vec::new(),
             peer_handle: None,
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
         }
     }
 
@@ -5065,6 +5085,10 @@ mod tests {
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
             peer_handle: None,
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
         });
 
         // Add alice to both channels
@@ -5200,6 +5224,10 @@ mod tests {
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
             peer_handle: None,
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
         });
 
         // Add alice to both channels
@@ -5328,6 +5356,10 @@ mod tests {
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
             peer_handle: None,
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
         });
 
         // Add alice to both channels
@@ -5867,6 +5899,10 @@ mod tests {
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
             peer_handle: None,
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
         });
 
         // Server echoes our NOTICE to "bob"

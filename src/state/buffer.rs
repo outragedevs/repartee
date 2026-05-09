@@ -166,6 +166,17 @@ pub struct Buffer {
     /// refuses to send E2E traffic in that state rather than falling back
     /// to a nick-keyed row.
     pub peer_handle: Option<String>,
+    /// `BufferType::Log` only — total messages in the underlying SQLite
+    /// for this `(network, buffer)`, cached at activation so the topic-bar
+    /// render doesn't requery on every frame. `None` for non-log buffers.
+    pub log_total_lines: Option<u64>,
+    /// `BufferType::Log` only — oldest timestamp in the log range.
+    pub log_oldest_ts: Option<i64>,
+    /// `BufferType::Log` only — newest timestamp in the log range.
+    pub log_newest_ts: Option<i64>,
+    /// `BufferType::Log` only — set `true` once a paginated `load_older`
+    /// returns fewer rows than requested (we've hit the start of the log).
+    pub history_exhausted: bool,
 }
 
 impl Buffer {
@@ -212,6 +223,10 @@ mod tests {
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
             peer_handle: None,
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
         };
 
         buf.touch_speaker("alice");
@@ -243,6 +258,10 @@ mod tests {
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
             peer_handle: None,
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
         };
 
         buf.touch_speaker("Alice");
@@ -270,6 +289,10 @@ mod tests {
             list_modes: HashMap::new(),
             last_speakers: Vec::new(),
             peer_handle: None,
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
         };
 
         for i in 0..60 {
