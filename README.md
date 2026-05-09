@@ -237,6 +237,11 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v1.0.1
+
+- **Log browser event rendering fix** — `repartee l` now renders persisted event text directly, so JOIN/PART/MODE/KICK/NICK/QUIT lines keep their original nick/channel/mode details instead of expanding empty event templates.
+- **Fan-out event reference resolution** — secondary-channel QUIT/NICK log rows now resolve their `ref_id` primary row when reading history, preventing blank timestamp-only lines in multi-channel event history.
+
 ### v1.0.0
 
 - **Read-only log browser** — `repartee l` / `repartee logs` opens the SQLite history directly, without connecting to IRC or starting scripts/web services. It supports network headers, day separators, paged scrollback loading, `/search`, and encrypted-log fallback behavior.
