@@ -159,4 +159,160 @@ impl App {
         }
         Ok(())
     }
+
+    /// Load the most recent messages for `buffer_id` into its in-memory
+    /// `messages` deque. Idempotent: a buffer that already has messages
+    /// is skipped, so this can be called every tick from the main loop
+    /// while a log buffer is active.
+    ///
+    /// Also caches `(line_count, oldest_ts, newest_ts)` on the buffer so
+    /// the topic-bar render doesn't requery on every frame.
+    pub fn load_initial_messages(&mut self, buffer_id: &str) {
+        const INITIAL_LIMIT: usize = 200;
+        let already_loaded = self
+            .state
+            .buffers
+            .get(buffer_id)
+            .is_some_and(|b| !b.messages.is_empty());
+        if already_loaded {
+            return;
+        }
+        let Some((net, buf)) = self.split_log_buffer_id(buffer_id) else {
+            return;
+        };
+
+        // Cache stats first, even when there are zero messages — the
+        // topic bar should show 0/range= empty for an empty buffer.
+        let stats_result = self
+            .log_db
+            .as_ref()
+            .and_then(|d| d.db.lock().ok().map(|db| crate::storage::query::buffer_stats(&db, &net, &buf)));
+        if let Some(Ok(Some((count, oldest, newest)))) = stats_result
+            && let Some(buffer) = self.state.buffers.get_mut(buffer_id)
+        {
+            buffer.log_total_lines = Some(count);
+            buffer.log_oldest_ts = Some(oldest);
+            buffer.log_newest_ts = Some(newest);
+        }
+
+        let Some(log_db) = &self.log_db else { return };
+        let rows_result = {
+            let Ok(db) = log_db.db.lock() else { return };
+            crate::storage::query::get_messages(
+                &db,
+                &net,
+                &buf,
+                None,
+                INITIAL_LIMIT,
+                log_db.crypto_key.is_some(),
+                log_db.crypto_key.as_ref(),
+            )
+        };
+        match rows_result {
+            Ok(rows) => {
+                let exhausted = rows.len() < INITIAL_LIMIT;
+                if let Some(buffer) = self.state.buffers.get_mut(buffer_id) {
+                    for stored in rows {
+                        buffer.messages.push_back(stored_to_message(&stored));
+                    }
+                    buffer.history_exhausted = exhausted;
+                }
+            }
+            Err(e) => tracing::warn!(%buffer_id, "log load_initial failed: {e}"),
+        }
+    }
+
+    /// Prepend up to `PAGE_LIMIT` messages older than the oldest currently
+    /// loaded message. Sets `history_exhausted` when fewer rows are
+    /// returned than requested. No-op when the buffer is already
+    /// exhausted; falls back to `load_initial_messages` when called on
+    /// an empty buffer.
+    pub fn load_older_messages(&mut self, buffer_id: &str) {
+        const PAGE_LIMIT: usize = 200;
+        let Some(buffer) = self.state.buffers.get(buffer_id) else {
+            return;
+        };
+        if buffer.history_exhausted {
+            return;
+        }
+        let Some(oldest_msg) = buffer.messages.front() else {
+            self.load_initial_messages(buffer_id);
+            return;
+        };
+        let oldest_ts = oldest_msg.timestamp.timestamp();
+        let Some((net, buf)) = self.split_log_buffer_id(buffer_id) else {
+            return;
+        };
+        let Some(log_db) = &self.log_db else { return };
+        let rows_result = {
+            let Ok(db) = log_db.db.lock() else { return };
+            crate::storage::query::get_messages(
+                &db,
+                &net,
+                &buf,
+                Some(oldest_ts),
+                PAGE_LIMIT,
+                log_db.crypto_key.is_some(),
+                log_db.crypto_key.as_ref(),
+            )
+        };
+        match rows_result {
+            Ok(rows) => {
+                let exhausted = rows.len() < PAGE_LIMIT;
+                if let Some(buffer) = self.state.buffers.get_mut(buffer_id) {
+                    // get_messages returns chronological ascending — push
+                    // them onto the front in reverse order so the buffer
+                    // stays sorted.
+                    for stored in rows.into_iter().rev() {
+                        buffer.messages.push_front(stored_to_message(&stored));
+                    }
+                    if exhausted {
+                        buffer.history_exhausted = true;
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(%buffer_id, "log load_older failed: {e}"),
+        }
+    }
+
+    /// Split a `BufferType::Log` buffer id (`_log_<network>/<buffer>`)
+    /// into `(network, buffer_name)`. Returns `None` for non-log
+    /// buffers — the connection_id prefix is the discriminator.
+    pub(crate) fn split_log_buffer_id(&self, buffer_id: &str) -> Option<(String, String)> {
+        let buffer = self.state.buffers.get(buffer_id)?;
+        let net = buffer
+            .connection_id
+            .strip_prefix(Self::LOG_CONN_PREFIX)?
+            .to_string();
+        Some((net, buffer.name.clone()))
+    }
+}
+
+/// Convert a row read from `messages` into the in-memory `Message`
+/// struct used by the buffer pipeline. Mirrors `app::backlog`'s
+/// conversion but lives here because the log browser doesn't share
+/// `App.storage` (which is `None` in log mode).
+fn stored_to_message(stored: &crate::storage::StoredMessage) -> crate::state::buffer::Message {
+    use crate::state::buffer::{Message, MessageType};
+    let ts = chrono::DateTime::<Utc>::from_timestamp(stored.timestamp, 0).unwrap_or_else(Utc::now);
+    let msg_type = match stored.msg_type.as_str() {
+        "action" => MessageType::Action,
+        "notice" => MessageType::Notice,
+        "event" => MessageType::Event,
+        _ => MessageType::Message,
+    };
+    Message {
+        id: 0,
+        timestamp: ts,
+        message_type: msg_type,
+        nick: stored.nick.clone(),
+        nick_mode: None,
+        text: stored.text.clone(),
+        highlight: stored.highlight,
+        event_key: stored.event_key.clone(),
+        event_params: None,
+        log_msg_id: None,
+        log_ref_id: None,
+        tags: None,
+    }
 }
