@@ -716,6 +716,7 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                     | "web.username"
                     | "web.image_previews"
                     | "web.image_previews_max_per_msg"
+                    | "web.thumbnail_cache_mb"
             ) {
                 app.web_restart_pending = true;
                 if path.as_str() != "web.enabled" || raw == "true" {
