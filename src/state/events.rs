@@ -27,6 +27,7 @@ impl AppState {
             nick_color_lit: 0.65,
             e2e_manager: None,
             suppress_event_display: false,
+            web_preview_extractor: None,
         }
     }
 
@@ -141,7 +142,7 @@ impl AppState {
         }
         self.maybe_log(buffer_id, &message);
         // Queue web event for broadcast.
-        let wire = crate::web::snapshot::message_to_wire(&message);
+        let wire = crate::web::snapshot::message_to_wire(&message, self.web_preview_extractor.as_deref());
         if message.highlight {
             self.pending_web_events
                 .push(crate::web::protocol::WebEvent::MentionAlert {
@@ -169,7 +170,7 @@ impl AppState {
         self.pending_web_events
             .push(crate::web::protocol::WebEvent::NewMessage {
                 buffer_id: buffer_id.to_string(),
-                message: crate::web::snapshot::message_to_wire(&message),
+                message: crate::web::snapshot::message_to_wire(&message, self.web_preview_extractor.as_deref()),
             });
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
             buf.messages.push_back(message);
@@ -192,7 +193,7 @@ impl AppState {
         if !self.buffers.contains_key(buffer_id) {
             return;
         }
-        let wire = crate::web::snapshot::message_to_wire(&message);
+        let wire = crate::web::snapshot::message_to_wire(&message, self.web_preview_extractor.as_deref());
         self.pending_web_events
             .push(crate::web::protocol::WebEvent::NewMessage {
                 buffer_id: buffer_id.to_string(),
@@ -233,7 +234,7 @@ impl AppState {
     ) {
         self.maybe_log(buffer_id, &message);
         // Queue web events for broadcast.
-        let wire = crate::web::snapshot::message_to_wire(&message);
+        let wire = crate::web::snapshot::message_to_wire(&message, self.web_preview_extractor.as_deref());
         if message.highlight {
             self.pending_web_events
                 .push(crate::web::protocol::WebEvent::MentionAlert {

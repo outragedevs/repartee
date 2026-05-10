@@ -70,11 +70,39 @@ pub fn set_env_value(path: &Path, key: &str, value: &str) -> Result<()> {
 }
 
 /// Apply .env credentials to the web config.
-/// Reads `WEB_PASSWORD` from the env map.
+///
+/// Reads `WEB_PASSWORD` and `WEB_SESSION_SECRET` from the env map.
+/// `WEB_SESSION_SECRET` is hex-encoded (64 chars = 32 bytes); invalid or
+/// missing values are treated as "no secret yet" — the caller is
+/// responsible for generating one and persisting it.
 pub fn apply_web_credentials(web: &mut super::WebConfig, env: &HashMap<String, String>) {
     if let Some(val) = env.get("WEB_PASSWORD") {
         web.password.clone_from(val);
     }
+    if let Some(val) = env.get("WEB_SESSION_SECRET")
+        && let Ok(bytes) = hex::decode(val.trim())
+        && bytes.len() == 32
+    {
+        web.session_secret = bytes;
+    }
+}
+
+/// Ensure `web.session_secret` is set, generating and persisting a fresh
+/// 32-byte secret to `.env` on first run.
+///
+/// This is intentionally separated from [`apply_web_credentials`] so callers
+/// can decide whether to materialise a secret (server start) or not (config
+/// validation, dry runs).
+pub fn ensure_session_secret(web: &mut super::WebConfig, env_path: &Path) -> Result<()> {
+    use rand::RngExt;
+    if web.session_secret.len() == 32 {
+        return Ok(());
+    }
+    let mut bytes = [0u8; 32];
+    rand::rng().fill(&mut bytes);
+    set_env_value(env_path, "WEB_SESSION_SECRET", &hex::encode(bytes))?;
+    web.session_secret = bytes.to_vec();
+    Ok(())
 }
 
 /// Apply .env credentials to server configs.

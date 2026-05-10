@@ -69,6 +69,10 @@ impl App {
         self.web_rate_limiter = None;
         self.web_state_snapshot = None;
         self.web_active_buffers.clear();
+        // Detach the preview extractor from AppState too — otherwise
+        // message_to_wire keeps populating `previews` for messages that
+        // no client can render.
+        self.state.web_preview_extractor = None;
     }
 
     /// Start the web server (HTTPS + WebSocket). Creates fresh session
@@ -76,6 +80,10 @@ impl App {
     /// `web_broadcaster` and `web_cmd_tx` channel.
     ///
     /// Does nothing if `web.enabled` is false or `web.password` is empty.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "linear startup sequence; splitting would obscure ordering"
+    )]
     pub(crate) async fn start_web_server(&mut self) {
         if !self.config.web.enabled {
             return;
@@ -89,9 +97,32 @@ impl App {
             return;
         }
 
-        let sessions = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::web::auth::SessionStore::with_hours(self.config.web.session_hours),
-        ));
+        // Make sure the session secret exists before constructing the store
+        // (the store HMACs raw tokens with this secret; rotating it is what
+        // logs everyone out).
+        let env_path = crate::constants::env_path();
+        if let Err(e) =
+            crate::config::ensure_session_secret(&mut self.config.web, &env_path)
+        {
+            tracing::warn!("could not initialise WEB_SESSION_SECRET: {e}");
+        }
+
+        let session_path = crate::constants::home_dir().join("web_sessions.bin");
+        let session_store = match crate::web::auth::SessionStore::load(
+            &session_path,
+            self.config.web.session_secret.clone(),
+            self.config.web.session_days,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("session store load failed ({e}), starting empty");
+                crate::web::auth::SessionStore::with_days(
+                    self.config.web.session_secret.clone(),
+                    self.config.web.session_days,
+                )
+            }
+        };
+        let sessions = std::sync::Arc::new(tokio::sync::Mutex::new(session_store));
         let limiter =
             std::sync::Arc::new(tokio::sync::Mutex::new(crate::web::auth::RateLimiter::new()));
         self.web_sessions = Some(std::sync::Arc::clone(&sessions));
@@ -108,12 +139,38 @@ impl App {
         ));
         self.web_state_snapshot = Some(std::sync::Arc::clone(&snapshot));
 
+        // Build the preview extractor (if enabled). Both AppState and
+        // AppHandle share the same Arc so registry lookups in the handler
+        // see what extraction wrote.
+        let preview_extractor = if self.config.web.image_previews {
+            let secret = if self.config.web.session_secret.is_empty() {
+                vec![0u8; 32]
+            } else {
+                self.config.web.session_secret.clone()
+            };
+            Some(std::sync::Arc::new(
+                crate::web::preview::WebPreviewExtractor::new(
+                    secret,
+                    self.config.web.image_previews_max_per_msg as usize,
+                    self.config.web.thumbnail_cache_mb,
+                ),
+            ))
+        } else {
+            None
+        };
+        self.state
+            .web_preview_extractor
+            .clone_from(&preview_extractor);
+
         let handle = std::sync::Arc::new(crate::web::server::AppHandle {
             broadcaster: std::sync::Arc::clone(&self.web_broadcaster),
             web_cmd_tx: self.web_cmd_tx.clone(),
             password: self.config.web.password.clone(),
+            username: self.config.web.username.clone(),
             session_store: sessions,
             rate_limiter: limiter,
+            session_cookie_max_age: i64::from(self.config.web.session_days) * 86_400,
+            preview_extractor,
             web_state_snapshot: Some(snapshot),
         });
 
@@ -434,6 +491,10 @@ impl App {
     }
 
     /// Fetch messages for a web client.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "linear pagination/cache fallthrough; splitting would obscure flow"
+    )]
     fn web_fetch_messages(
         &self,
         buffer_id: &str,
@@ -444,13 +505,14 @@ impl App {
         if buffer_id == Self::MENTIONS_BUFFER_ID {
             if let Some(buf) = self.state.buffers.get(buffer_id) {
                 let capped = limit.min(500) as usize;
+                let extractor = self.state.web_preview_extractor.as_deref();
                 let msgs: Vec<_> = buf
                     .messages
                     .iter()
                     .rev()
                     .take(capped)
                     .rev()
-                    .map(crate::web::snapshot::message_to_wire)
+                    .map(|m| crate::web::snapshot::message_to_wire(m, extractor))
                     .collect();
                 tracing::debug!(
                     %buffer_id, count = msgs.len(),
@@ -473,13 +535,14 @@ impl App {
             && let Some(buf) = self.state.buffers.get(buffer_id)
         {
             let capped = limit.min(500) as usize;
+            let extractor = self.state.web_preview_extractor.as_deref();
             let msgs: Vec<_> = buf
                 .messages
                 .iter()
                 .rev()
                 .take(capped)
                 .rev()
-                .map(crate::web::snapshot::message_to_wire)
+                .map(|m| crate::web::snapshot::message_to_wire(m, extractor))
                 .collect();
             if !msgs.is_empty() {
                 let has_more = buf.messages.len() > capped;
@@ -531,9 +594,10 @@ impl App {
                     %buffer_id, count = msgs.len(), %has_more,
                     "web FetchMessages: sending {} messages", msgs.len()
                 );
+                let extractor = self.state.web_preview_extractor.as_deref();
                 let wire: Vec<_> = msgs
                     .iter()
-                    .map(crate::web::snapshot::stored_to_wire)
+                    .map(|m| crate::web::snapshot::stored_to_wire(m, extractor))
                     .collect();
                 self.broadcast_web(crate::web::protocol::WebEvent::Messages {
                     buffer_id: buffer_id.to_string(),

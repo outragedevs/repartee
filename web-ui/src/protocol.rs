@@ -182,6 +182,28 @@ pub struct WireMessage {
     pub highlight: bool,
     #[serde(default)]
     pub event_key: Option<String>,
+    /// Server-extracted link previews. Empty when image previews are
+    /// disabled or the message contains no eligible URLs.
+    #[serde(default)]
+    pub previews: Vec<LinkPreview>,
+}
+
+/// Mirror of `src/web/preview::LinkPreview`. Kept in sync manually because
+/// the WASM crate cannot depend on the main crate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LinkPreview {
+    pub link: String,
+    pub kind: LinkPreviewKind,
+    pub thumb_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkPreviewKind {
+    /// Browser fetches `thumb_url` straight from the third-party host.
+    ClientDirect,
+    /// Browser fetches `thumb_url` from `/api/preview` on our server.
+    ServerProxy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

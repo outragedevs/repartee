@@ -8,7 +8,9 @@ use color_eyre::eyre::Result;
 use serde::{Deserialize, Serialize};
 
 pub use defaults::default_config;
-pub use env::{apply_credentials, apply_web_credentials, load_env, set_env_value};
+pub use env::{
+    apply_credentials, apply_web_credentials, ensure_session_secret, load_env, set_env_value,
+};
 
 // === Helper for serde defaults ===
 
@@ -465,13 +467,30 @@ pub struct WebConfig {
     pub nick_max_length: u32,
     /// Web theme name.
     pub theme: String,
-    /// Session duration in hours (default 24).
-    pub session_hours: u32,
+    /// Session lifetime in days (default 90).
+    /// Sessions persist to disk; cookie carries `Max-Age=session_days*86400`.
+    pub session_days: u32,
+    /// Username pre-filled in the login form (default `"repartee"`).
+    /// The server only validates the password — the username exists so password
+    /// managers (1Password, iCloud Keychain, Bitwarden) recognise the form.
+    pub username: String,
+    /// Enable server-side image previews under chat messages (default false).
+    pub image_previews: bool,
+    /// Maximum number of preview thumbnails per message (default 4).
+    pub image_previews_max_per_msg: u32,
+    /// Maximum total size of the thumbnail cache in megabytes (default 200).
+    pub thumbnail_cache_mb: u32,
     /// Cloudflare tunnel name (future use).
     pub cloudflare_tunnel_name: String,
     /// Login password — loaded from `.env` (`WEB_PASSWORD`), not serialized to TOML.
     #[serde(skip)]
     pub password: String,
+    /// 32-byte HMAC key for hashing session tokens at rest. Loaded from
+    /// `.env` (`WEB_SESSION_SECRET`); auto-generated on first start if absent.
+    /// Rotating this value invalidates every persisted session (deliberate
+    /// "log everyone out" knob).
+    #[serde(skip)]
+    pub session_secret: Vec<u8>,
 }
 
 impl Default for WebConfig {
@@ -487,9 +506,14 @@ impl Default for WebConfig {
             nick_column_width: 12,
             nick_max_length: 9,
             theme: "nightfall".to_string(),
-            session_hours: 24,
+            session_days: 90,
+            username: "repartee".to_string(),
+            image_previews: false,
+            image_previews_max_per_msg: 4,
+            thumbnail_cache_mb: 200,
             cloudflare_tunnel_name: String::new(),
             password: String::new(),
+            session_secret: Vec::new(),
         }
     }
 }

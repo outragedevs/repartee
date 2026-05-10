@@ -5,20 +5,33 @@ use crate::state::AppState;
 #[component]
 pub fn Login() -> impl IntoView {
     let state = use_context::<AppState>().unwrap();
+    let (username, set_username) = signal(String::from("repartee"));
     let (password, set_password) = signal(String::new());
     let (error, set_error) = signal(Option::<String>::None);
     let (loading, set_loading) = signal(false);
+
+    // Pre-fill the username from the server's configured value (so users
+    // who set `web.username` see their preferred login appear in
+    // password-manager prompts).
+    Effect::new(move |_| {
+        leptos::task::spawn_local(async move {
+            if let Some(name) = fetch_login_info().await {
+                set_username.set(name);
+            }
+        });
+    });
 
     let do_submit = Callback::new(move |_: ()| {
         let pw = password.get();
         if pw.is_empty() {
             return;
         }
+        let u = username.get();
         set_loading.set(true);
         set_error.set(None);
 
         leptos::task::spawn_local(async move {
-            match do_login(&pw).await {
+            match do_login(&u, &pw).await {
                 Ok(()) => {
                     state.session_hint.set(true);
                     crate::ws::connect(&state);
@@ -35,36 +48,45 @@ pub fn Login() -> impl IntoView {
         <div class="login-page">
             <h1 style="color: var(--accent); font-size: 24px;">"repartee"</h1>
             <p style="color: var(--fg-muted); font-size: 14px;">"web frontend"</p>
-            <div class="login-box">
+            <form
+                class="login-box"
+                on:submit=move |ev| {
+                    ev.prevent_default();
+                    do_submit.run(());
+                }
+            >
+                <input
+                    type="text"
+                    name="username"
+                    placeholder="Username"
+                    autocomplete="username"
+                    prop:value=username
+                    on:input=move |ev| set_username.set(event_target_value(&ev))
+                />
                 <input
                     type="password"
+                    name="password"
                     placeholder="Password"
                     autocomplete="current-password"
                     prop:value=password
                     on:input=move |ev| set_password.set(event_target_value(&ev))
-                    on:keydown=move |ev| {
-                        if ev.key() == "Enter" { do_submit.run(()) }
-                    }
                 />
-                <button
-                    on:click=move |_| do_submit.run(())
-                    disabled=loading
-                >
+                <button type="submit" disabled=loading>
                     {move || if loading.get() { "Connecting..." } else { "Login" }}
                 </button>
                 {move || error.get().map(|e| view! { <p class="error">{e}</p> })}
-            </div>
+            </form>
         </div>
     }
 }
 
-async fn do_login(password: &str) -> Result<(), String> {
+async fn do_login(username: &str, password: &str) -> Result<(), String> {
     let window = web_sys::window().ok_or("no window object")?;
     let location = window.location();
     let origin = location.origin().map_err(|_| "failed to get origin")?;
     let url = format!("{origin}/api/login");
 
-    let body = serde_json::json!({ "password": password });
+    let body = serde_json::json!({ "username": username, "password": password });
 
     let resp = gloo_net::http::Request::post(&url)
         .header("Content-Type", "application/json")
@@ -86,3 +108,19 @@ async fn do_login(password: &str) -> Result<(), String> {
         Err(json["error"].as_str().unwrap_or("login failed").to_string())
     }
 }
+
+/// Best-effort fetch of `/api/login_info` to pre-fill the username field.
+/// Returns `None` if the server is unreachable or the response is malformed —
+/// the form keeps its hard-coded "repartee" default in that case.
+async fn fetch_login_info() -> Option<String> {
+    let window = web_sys::window()?;
+    let origin = window.location().origin().ok()?;
+    let url = format!("{origin}/api/login_info");
+    let resp = gloo_net::http::Request::get(&url).send().await.ok()?;
+    if !resp.ok() {
+        return None;
+    }
+    let json: serde_json::Value = resp.json().await.ok()?;
+    json["username"].as_str().map(str::to_owned)
+}
+
