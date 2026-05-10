@@ -33,14 +33,24 @@ pub struct AppHandle {
     pub broadcaster: Arc<WebBroadcaster>,
     pub web_cmd_tx: mpsc::Sender<(WebCommand, String)>,
     pub password: String,
+    pub username: String,
     pub session_store: Arc<Mutex<SessionStore>>,
     pub rate_limiter: Arc<Mutex<RateLimiter>>,
+    /// `Max-Age` for the session cookie, in seconds.
+    pub session_cookie_max_age: i64,
+    /// Server-side preview/thumbnail extractor (`None` when `image_previews` disabled).
+    pub preview_extractor: Option<Arc<super::preview::WebPreviewExtractor>>,
     /// Periodic snapshot of `AppState` for `SyncInit` / `FetchNickList`.
     pub web_state_snapshot: Option<Arc<std::sync::RwLock<WebStateSnapshot>>>,
 }
 
 #[derive(Deserialize)]
 struct LoginRequest {
+    /// Sent by the client; the server only validates the password.
+    /// Exists so password managers see a complete credential pair.
+    #[serde(default)]
+    #[expect(dead_code, reason = "field is part of wire format but intentionally ignored")]
+    username: Option<String>,
     password: String,
 }
 
@@ -51,10 +61,18 @@ pub struct PeerAddr(pub SocketAddr);
 /// POST /api/login — authenticate and set the session cookie.
 async fn login_handler(
     peer: Option<axum::Extension<PeerAddr>>,
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppHandle>>,
     Json(body): Json<LoginRequest>,
 ) -> Response {
     let ip = peer.map_or_else(|| "unknown".to_string(), |p| p.0.0.ip().to_string());
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .chars()
+        .take(256)
+        .collect::<String>();
 
     {
         let limiter = state.rate_limiter.lock().await;
@@ -70,13 +88,14 @@ async fn login_handler(
     }
 
     if verify_password(&body.password, &state.password) {
-        let token = state.session_store.lock().await.create(&ip);
+        let token = state.session_store.lock().await.create(&user_agent);
         state.rate_limiter.lock().await.record_success(&ip);
         let cookie = Cookie::build((session_cookie_name(), token))
             .http_only(true)
             .secure(true)
             .same_site(SameSite::Strict)
             .path("/")
+            .max_age(time::Duration::seconds(state.session_cookie_max_age))
             .build();
         (
             StatusCode::OK,
@@ -92,6 +111,37 @@ async fn login_handler(
         )
             .into_response()
     }
+}
+
+/// `GET /api/login_info` — return the username the login form should pre-fill.
+///
+/// Unauthenticated by design: it leaks only what the user has set as the
+/// "label" for password-manager autofill, never the password.
+async fn login_info_handler(State(state): State<Arc<AppHandle>>) -> Response {
+    Json(serde_json::json!({ "username": state.username })).into_response()
+}
+
+/// POST /api/logout — revoke the current session and clear the cookie.
+async fn logout_handler(
+    jar: axum_extra::extract::cookie::CookieJar,
+    State(state): State<Arc<AppHandle>>,
+) -> Response {
+    if let Some(token) = jar.get(&session_cookie_name()) {
+        state.session_store.lock().await.revoke(token.value());
+    }
+    let clear = Cookie::build((session_cookie_name(), ""))
+        .http_only(true)
+        .secure(true)
+        .same_site(SameSite::Strict)
+        .path("/")
+        .max_age(time::Duration::seconds(0))
+        .build();
+    (
+        StatusCode::OK,
+        [(axum::http::header::SET_COOKIE, clear.to_string())],
+        Json(serde_json::json!({ "ok": true })),
+    )
+        .into_response()
 }
 
 /// GET /api/health — simple health check.
@@ -170,7 +220,10 @@ async fn favicon_handler() -> impl IntoResponse {
 pub fn build_router(handle: Arc<AppHandle>) -> Router {
     Router::new()
         .route("/api/login", post(login_handler))
+        .route("/api/login_info", get(login_info_handler))
+        .route("/api/logout", post(logout_handler))
         .route("/api/health", get(health_handler))
+        .route("/api/preview", get(super::preview::preview_handler))
         .route("/ws", get(super::ws::ws_handler))
         .route("/favicon.ico", get(favicon_handler))
         .route("/", get(index_handler))
@@ -245,8 +298,11 @@ mod tests {
             broadcaster: Arc::new(WebBroadcaster::new(16)),
             web_cmd_tx: tx,
             password: "testpass".to_string(),
-            session_store: Arc::new(Mutex::new(SessionStore::with_hours(24))),
+            username: "repartee".to_string(),
+            session_store: Arc::new(Mutex::new(SessionStore::with_days(vec![0u8; 32], 90))),
             rate_limiter: Arc::new(Mutex::new(RateLimiter::new())),
+            session_cookie_max_age: 90 * 86_400,
+            preview_extractor: None,
             web_state_snapshot: None,
         })
     }
@@ -316,7 +372,7 @@ mod tests {
     async fn login_accepts_correct_password() {
         let app = test_app(make_test_handle());
 
-        let body = serde_json::json!({"password": "testpass"});
+        let body = serde_json::json!({"username": "anything", "password": "testpass"});
         let request = axum::http::Request::builder()
             .method("POST")
             .uri("/api/login")
@@ -333,6 +389,54 @@ mod tests {
             .unwrap();
         assert!(set_cookie.contains("HttpOnly"));
         assert!(set_cookie.contains("SameSite=Strict"));
+        assert!(
+            set_cookie.contains("Max-Age="),
+            "session cookie must carry Max-Age so it survives browser restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn login_ignores_username_field() {
+        // Server only checks password — any username is accepted.
+        let app = test_app(make_test_handle());
+        let body = serde_json::json!({"username": "wrong-user", "password": "testpass"});
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/login")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn login_works_without_username_field() {
+        // Backward-compat: missing username field still accepted.
+        let app = test_app(make_test_handle());
+        let body = serde_json::json!({"password": "testpass"});
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/login")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn login_info_returns_configured_username() {
+        let app = test_app(make_test_handle());
+        let req = axum::http::Request::builder()
+            .uri("/api/login_info")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(json["username"].as_str(), Some("repartee"));
     }
 
     #[tokio::test]

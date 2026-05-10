@@ -93,6 +93,11 @@ pub struct AppState {
     /// underlying state mutation still runs. Set/cleared around a single
     /// `handle_irc_message` call by the IRC dispatcher.
     pub suppress_event_display: bool,
+    /// When `Some`, every `WireMessage` constructed for the web frontend has
+    /// its `previews` populated by this extractor. `None` = web image
+    /// previews disabled.
+    pub web_preview_extractor:
+        Option<std::sync::Arc<crate::web::preview::WebPreviewExtractor>>,
 }
 
 impl AppState {

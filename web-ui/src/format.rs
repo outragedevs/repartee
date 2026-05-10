@@ -1,5 +1,5 @@
 /// A styled text segment for rendering in the web UI.
-#[derive(Clone)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StyledSpan {
     pub text: String,
     pub fg: Option<String>,
@@ -8,6 +8,11 @@ pub struct StyledSpan {
     pub italic: bool,
     pub underline: bool,
     pub dim: bool,
+    /// When `Some`, this span is a clickable link. `chat_view` wraps the
+    /// span text in `<a href={link} target="_blank" rel=...>`; left-click
+    /// opens in a new tab and right-click yields the browser's native
+    /// "open in new window" context menu.
+    pub link: Option<String>,
 }
 
 impl StyledSpan {
@@ -93,6 +98,7 @@ pub fn parse_format(text: &str) -> Vec<StyledSpan> {
                     italic,
                     underline,
                     dim,
+                    link: None,
                 });
             }
         };
@@ -265,6 +271,135 @@ pub fn parse_format(text: &str) -> Vec<StyledSpan> {
     spans
 }
 
+/// Walk every span and split plain-text fragments around URL matches.
+///
+/// Spans that already carry a `link` (or have `text` with no URL) are
+/// returned unchanged. URL fragments inherit the original span's styling
+/// and gain `link = Some(url)`.
+///
+/// The regex matches the same shapes as `src/image_preview/detect::URL_RE`
+/// — `https?://` followed by characters up to the first whitespace or a
+/// common closing delimiter — so server-side preview extraction and
+/// client-side linkification stay in sync without sharing a crate.
+#[must_use]
+pub fn linkify_spans(spans: Vec<StyledSpan>) -> Vec<StyledSpan> {
+    let mut out: Vec<StyledSpan> = Vec::with_capacity(spans.len());
+    for span in spans {
+        if span.link.is_some() {
+            out.push(span);
+            continue;
+        }
+        if !span.text.contains("http") {
+            out.push(span);
+            continue;
+        }
+        split_one(&span, &mut out);
+    }
+    out
+}
+
+fn split_one(span: &StyledSpan, out: &mut Vec<StyledSpan>) {
+    let text = span.text.as_str();
+    let mut cursor = 0usize;
+    let mut found_any = false;
+    for m in find_url_matches(text) {
+        let (start, end) = m;
+        if start > cursor {
+            out.push(child_span(span, &text[cursor..start], None));
+        }
+        let url = text[start..end].to_owned();
+        out.push(child_span(span, &text[start..end], Some(url)));
+        cursor = end;
+        found_any = true;
+    }
+    if found_any {
+        if cursor < text.len() {
+            out.push(child_span(span, &text[cursor..], None));
+        }
+    } else {
+        out.push(span.clone());
+    }
+}
+
+fn child_span(parent: &StyledSpan, text: &str, link: Option<String>) -> StyledSpan {
+    StyledSpan {
+        text: text.to_owned(),
+        fg: parent.fg.clone(),
+        bg: parent.bg.clone(),
+        bold: parent.bold,
+        italic: parent.italic,
+        underline: parent.underline,
+        dim: parent.dim,
+        link,
+    }
+}
+
+/// Hand-rolled URL scanner. We avoid pulling the `regex` crate into the
+/// WASM bundle (≈300 KB after gzip) for what amounts to a single linear
+/// pass over the text.
+fn find_url_matches(text: &str) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if let Some(end) = match_url(bytes, i) {
+            out.push((i, end));
+            i = end;
+        } else {
+            // Advance by one character, not one byte, so we don't split a
+            // multi-byte UTF-8 codepoint and corrupt downstream slicing.
+            i += utf8_char_len(bytes, i);
+        }
+    }
+    out
+}
+
+fn match_url(b: &[u8], i: usize) -> Option<usize> {
+    let rem = &b[i..];
+    let scheme_len = if rem.starts_with(b"https://") {
+        8
+    } else if rem.starts_with(b"http://") {
+        7
+    } else {
+        return None;
+    };
+    // Require at least one host character after the scheme. Otherwise a
+    // bare "https://" anywhere in chat would match.
+    let mut j = i + scheme_len;
+    let start_body = j;
+    while j < b.len() && !is_url_terminator(b[j]) {
+        j += 1;
+    }
+    if j == start_body {
+        return None;
+    }
+    Some(j)
+}
+
+const fn is_url_terminator(c: u8) -> bool {
+    matches!(
+        c,
+        b' ' | b'\t' | b'\n' | b'\r' | b'<' | b'>' | b'"' | b'\'' | b')' | b']' | b'}'
+    )
+}
+
+const fn utf8_char_len(b: &[u8], i: usize) -> usize {
+    let c = b[i];
+    if c < 0x80 {
+        1
+    } else if c < 0xC0 {
+        // Continuation byte — shouldn't happen at scan position. Skip 1
+        // to make forward progress.
+        1
+    } else if c < 0xE0 {
+        2
+    } else if c < 0xF0 {
+        3
+    } else {
+        4
+    }
+}
+
 /// irssi single-letter color codes (%k %r %g %m etc).
 fn irssi_color(code: char) -> Option<&'static str> {
     match code {
@@ -308,5 +443,144 @@ fn mirc_color(code: u8) -> Option<&'static str> {
         14 => Some("#7f7f7f"),
         15 => Some("#d2d2d2"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plain(text: &str) -> StyledSpan {
+        StyledSpan {
+            text: text.to_owned(),
+            ..StyledSpan::default()
+        }
+    }
+
+    fn styled(text: &str) -> StyledSpan {
+        StyledSpan {
+            text: text.to_owned(),
+            fg: Some("#ff0000".to_owned()),
+            bold: true,
+            ..StyledSpan::default()
+        }
+    }
+
+    #[test]
+    fn linkify_no_url_returns_unchanged() {
+        let spans = vec![plain("just a normal message")];
+        let out = linkify_spans(spans.clone());
+        assert_eq!(out, spans);
+    }
+
+    #[test]
+    fn linkify_single_url_in_middle() {
+        let out = linkify_spans(vec![plain("see https://example.com/x.png please")]);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].text, "see ");
+        assert!(out[0].link.is_none());
+        assert_eq!(out[1].text, "https://example.com/x.png");
+        assert_eq!(out[1].link.as_deref(), Some("https://example.com/x.png"));
+        assert_eq!(out[2].text, " please");
+        assert!(out[2].link.is_none());
+    }
+
+    #[test]
+    fn linkify_url_at_start() {
+        let out = linkify_spans(vec![plain("https://a.example/x more text")]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].text, "https://a.example/x");
+        assert_eq!(out[0].link.as_deref(), Some("https://a.example/x"));
+        assert_eq!(out[1].text, " more text");
+    }
+
+    #[test]
+    fn linkify_url_at_end() {
+        let out = linkify_spans(vec![plain("text then https://a.example/x")]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].text, "text then ");
+        assert_eq!(out[1].link.as_deref(), Some("https://a.example/x"));
+    }
+
+    #[test]
+    fn linkify_two_urls_with_text_between() {
+        let out = linkify_spans(vec![plain(
+            "a https://a.example/x b https://b.example/y c",
+        )]);
+        let urls: Vec<_> = out.iter().filter_map(|s| s.link.clone()).collect();
+        assert_eq!(
+            urls,
+            vec![
+                "https://a.example/x".to_owned(),
+                "https://b.example/y".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn linkify_preserves_styling_on_each_fragment() {
+        let out = linkify_spans(vec![styled("see https://x.example/p ok")]);
+        // Every fragment must inherit fg + bold from the styled parent.
+        for span in &out {
+            assert_eq!(span.fg.as_deref(), Some("#ff0000"));
+            assert!(span.bold);
+        }
+    }
+
+    #[test]
+    fn linkify_strips_trailing_paren() {
+        // The detector regex stops URLs at ')'. In real chat, "(see https://x.example/p)"
+        // should produce "https://x.example/p" without the closing paren.
+        let out = linkify_spans(vec![plain("(https://x.example/p)")]);
+        let url = out.iter().find_map(|s| s.link.clone()).unwrap();
+        assert_eq!(url, "https://x.example/p");
+    }
+
+    #[test]
+    fn linkify_skips_bare_scheme() {
+        // "https://" with nothing after must not match — would be confusing
+        // to render an empty <a>.
+        let out = linkify_spans(vec![plain("the prefix https:// alone")]);
+        assert!(out.iter().all(|s| s.link.is_none()));
+    }
+
+    #[test]
+    fn linkify_ignores_already_linked_span() {
+        let already = StyledSpan {
+            text: "click me".to_owned(),
+            link: Some("https://x.example/p".to_owned()),
+            ..StyledSpan::default()
+        };
+        let out = linkify_spans(vec![already.clone()]);
+        assert_eq!(out, vec![already]);
+    }
+
+    #[test]
+    fn linkify_handles_multibyte_text_around_url() {
+        // Cyrillic text around URL — must not panic on UTF-8 boundary.
+        let out = linkify_spans(vec![plain("привет https://a.example/x мир")]);
+        let url = out.iter().find_map(|s| s.link.clone()).unwrap();
+        assert_eq!(url, "https://a.example/x");
+        // Reconstructed text must equal input (no bytes lost or duplicated).
+        let reassembled: String = out.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(reassembled, "привет https://a.example/x мир");
+    }
+
+    #[test]
+    fn linkify_handles_http_scheme_too() {
+        let out = linkify_spans(vec![plain("http://insecure.example/x")]);
+        assert_eq!(out[0].link.as_deref(), Some("http://insecure.example/x"));
+    }
+
+    #[test]
+    fn linkify_does_not_match_ftp_or_other_schemes() {
+        let out = linkify_spans(vec![plain("ftp://example.com/x")]);
+        assert!(out.iter().all(|s| s.link.is_none()));
+    }
+
+    #[test]
+    fn parse_format_default_link_is_none() {
+        let spans = parse_format("plain text");
+        assert!(spans.iter().all(|s| s.link.is_none()));
     }
 }

@@ -76,7 +76,14 @@ pub fn build_nick_list(state: &AppState, buffer_id: &str) -> Option<WebEvent> {
 }
 
 /// Convert a state `Message` to a `WireMessage` for transport.
-pub fn message_to_wire(msg: &Message) -> WireMessage {
+///
+/// `extractor` populates [`WireMessage::previews`] when web image previews
+/// are enabled; pass `None` to leave it empty (the field is also skipped
+/// from JSON when empty so old/disabled clients see no change).
+pub fn message_to_wire(
+    msg: &Message,
+    extractor: Option<&crate::web::preview::WebPreviewExtractor>,
+) -> WireMessage {
     WireMessage {
         id: msg.id,
         timestamp: msg.timestamp.timestamp(),
@@ -86,11 +93,15 @@ pub fn message_to_wire(msg: &Message) -> WireMessage {
         text: msg.text.clone(),
         highlight: msg.highlight,
         event_key: msg.event_key.clone(),
+        previews: extractor.map(|e| e.extract(&msg.text)).unwrap_or_default(),
     }
 }
 
 /// Convert a `StoredMessage` (from `SQLite`) to a `WireMessage`.
-pub fn stored_to_wire(msg: &crate::storage::types::StoredMessage) -> WireMessage {
+pub fn stored_to_wire(
+    msg: &crate::storage::types::StoredMessage,
+    extractor: Option<&crate::web::preview::WebPreviewExtractor>,
+) -> WireMessage {
     WireMessage {
         id: u64::try_from(msg.id).unwrap_or(0),
         timestamp: msg.timestamp,
@@ -100,6 +111,7 @@ pub fn stored_to_wire(msg: &crate::storage::types::StoredMessage) -> WireMessage
         text: msg.text.clone(),
         highlight: msg.highlight,
         event_key: msg.event_key.clone(),
+        previews: extractor.map(|e| e.extract(&msg.text)).unwrap_or_default(),
     }
 }
 
@@ -201,12 +213,13 @@ mod tests {
             log_ref_id: None,
             tags: None,
         };
-        let wire = message_to_wire(&msg);
+        let wire = message_to_wire(&msg, None);
         assert_eq!(wire.id, 42);
         assert_eq!(wire.nick.as_deref(), Some("ferris"));
         assert_eq!(wire.nick_mode.as_deref(), Some("@"));
         assert!(wire.highlight);
         assert!(wire.event_key.is_none());
+        assert!(wire.previews.is_empty(), "no extractor → no previews");
     }
 
     #[test]
@@ -225,8 +238,34 @@ mod tests {
             log_ref_id: None,
             tags: None,
         };
-        let wire = message_to_wire(&msg);
+        let wire = message_to_wire(&msg, None);
         assert_eq!(wire.event_key.as_deref(), Some("join"));
+    }
+
+    #[test]
+    fn message_to_wire_populates_previews_when_extractor_provided() {
+        let extractor =
+            crate::web::preview::WebPreviewExtractor::new(vec![0u8; 32], 4, 200);
+        let msg = crate::state::buffer::Message {
+            id: 1,
+            timestamp: Utc::now(),
+            message_type: MessageType::Message,
+            nick: Some("alice".into()),
+            nick_mode: None,
+            text: "look at https://example.com/photo.jpg please".into(),
+            highlight: false,
+            event_key: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: None,
+        };
+        let wire = message_to_wire(&msg, Some(&extractor));
+        assert_eq!(wire.previews.len(), 1);
+        assert_eq!(
+            wire.previews[0].kind,
+            crate::web::preview::LinkPreviewKind::ServerProxy
+        );
     }
 
     #[test]
@@ -251,7 +290,7 @@ mod tests {
             tags: None,
             event_key: Some("kicked".to_string()),
         };
-        let wire = stored_to_wire(&stored);
+        let wire = stored_to_wire(&stored, None);
         assert_eq!(wire.event_key.as_deref(), Some("kicked"));
         assert!(wire.highlight);
     }

@@ -15,10 +15,9 @@ use super::{auth, server::PeerAddr};
 pub async fn ws_handler(
     jar: CookieJar,
     State(state): State<Arc<AppHandle>>,
-    peer: Option<axum::Extension<PeerAddr>>,
+    _peer: Option<axum::Extension<PeerAddr>>,
     ws: axum::extract::WebSocketUpgrade,
 ) -> impl IntoResponse {
-    let ip = peer.map_or_else(|| "unknown".to_string(), |p| p.0.0.ip().to_string());
     let Some(token) = jar
         .get(&auth::session_cookie_name())
         .map(|cookie| cookie.value().to_string())
@@ -26,12 +25,7 @@ pub async fn ws_handler(
         return StatusCode::UNAUTHORIZED.into_response();
     };
 
-    let valid = state
-        .session_store
-        .lock()
-        .await
-        .validate(&token, &ip)
-        .is_some();
+    let valid = state.session_store.lock().await.validate(&token).is_some();
     if !valid {
         return StatusCode::UNAUTHORIZED.into_response();
     }

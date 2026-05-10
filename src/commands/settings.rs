@@ -170,7 +170,13 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 "nick_column_width" => config.web.nick_column_width.to_string(),
                 "nick_max_length" => config.web.nick_max_length.to_string(),
                 "theme" => config.web.theme.clone(),
-                "session_hours" => config.web.session_hours.to_string(),
+                "session_days" => config.web.session_days.to_string(),
+                "username" => config.web.username.clone(),
+                "image_previews" => config.web.image_previews.to_string(),
+                "image_previews_max_per_msg" => {
+                    config.web.image_previews_max_per_msg.to_string()
+                }
+                "thumbnail_cache_mb" => config.web.thumbnail_cache_mb.to_string(),
                 "cloudflare_tunnel_name" => config.web.cloudflare_tunnel_name.clone(),
                 "password" => config.web.password.clone(),
                 _ => return None,
@@ -423,10 +429,20 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
                     raw.parse().map_err(|_| "Expected a number".to_string())?;
             }
             "theme" => config.web.theme = raw.to_string(),
-            "session_hours" => {
-                config.web.session_hours = raw
+            "session_days" => {
+                config.web.session_days = raw
                     .parse()
-                    .map_err(|_| "Expected a positive integer (hours)".to_string())?;
+                    .map_err(|_| "Expected a positive integer (days)".to_string())?;
+            }
+            "username" => config.web.username = raw.to_string(),
+            "image_previews" => config.web.image_previews = parse_bool(raw)?,
+            "image_previews_max_per_msg" => {
+                config.web.image_previews_max_per_msg =
+                    raw.parse().map_err(|_| "Expected a number".to_string())?;
+            }
+            "thumbnail_cache_mb" => {
+                config.web.thumbnail_cache_mb =
+                    raw.parse().map_err(|_| "Expected a number".to_string())?;
             }
             "cloudflare_tunnel_name" => config.web.cloudflare_tunnel_name = raw.to_string(),
             "password" => config.web.password = raw.to_string(),
@@ -571,7 +587,11 @@ const BASE_PATHS: &[&str] = &[
     "web.nick_column_width",
     "web.nick_max_length",
     "web.theme",
-    "web.session_hours",
+    "web.session_days",
+    "web.username",
+    "web.image_previews",
+    "web.image_previews_max_per_msg",
+    "web.thumbnail_cache_mb",
     "web.cloudflare_tunnel_name",
     "web.password",
 ];
@@ -692,7 +712,11 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                     | "web.password"
                     | "web.tls_cert"
                     | "web.tls_key"
-                    | "web.session_hours"
+                    | "web.session_days"
+                    | "web.username"
+                    | "web.image_previews"
+                    | "web.image_previews_max_per_msg"
+                    | "web.thumbnail_cache_mb"
             ) {
                 app.web_restart_pending = true;
                 if path.as_str() != "web.enabled" || raw == "true" {

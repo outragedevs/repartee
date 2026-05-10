@@ -41,6 +41,9 @@ pub struct AppState {
     /// When true, new messages auto-scroll. When false, the user is reading
     /// backlog and the view stays put.
     pub is_at_bottom: RwSignal<bool>,
+    /// Per-message preview dismissals: `(message_id, link)` pairs. Persisted
+    /// to localStorage so a "hide this thumbnail" decision survives reload.
+    pub dismissed_previews: RwSignal<HashSet<(u64, String)>>,
 }
 
 impl AppState {
@@ -75,6 +78,7 @@ impl AppState {
             sync_version: RwSignal::new(0),
             backlog_loaded: RwSignal::new(HashSet::new()),
             is_at_bottom: RwSignal::new(true),
+            dismissed_previews: RwSignal::new(load_dismissed_previews()),
         }
     }
 
@@ -503,6 +507,7 @@ fn insert_date_separators(messages: Vec<WireMessage>) -> Vec<WireMessage> {
                     text: format!("\u{2500}\u{2500}\u{2500} {formatted} \u{2500}\u{2500}\u{2500}"),
                     highlight: false,
                     event_key: Some("date_separator".to_string()),
+                    previews: Vec::new(),
                 });
             }
             last_date = Some(date);
@@ -512,4 +517,50 @@ fn insert_date_separators(messages: Vec<WireMessage>) -> Vec<WireMessage> {
     }
 
     result
+}
+
+const DISMISSED_PREVIEWS_KEY: &str = "repartee-dismissed-previews";
+const MAX_DISMISSED_ENTRIES: usize = 1000;
+
+/// Read the dismiss list from localStorage. Each entry is `<msg_id>\t<link>`,
+/// one per line. Malformed entries are silently dropped.
+fn load_dismissed_previews() -> HashSet<(u64, String)> {
+    let mut out = HashSet::new();
+    let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) else {
+        return out;
+    };
+    let Ok(Some(raw)) = storage.get_item(DISMISSED_PREVIEWS_KEY) else {
+        return out;
+    };
+    for line in raw.lines() {
+        if let Some((id_s, link)) = line.split_once('\t')
+            && let Ok(id) = id_s.parse::<u64>()
+        {
+            out.insert((id, link.to_string()));
+        }
+    }
+    out
+}
+
+/// Persist the dismiss list to localStorage. Capped at
+/// [`MAX_DISMISSED_ENTRIES`] (oldest by hash order) so a long-running
+/// session doesn't grow the key indefinitely.
+pub fn save_dismissed_previews(dismissed: &HashSet<(u64, String)>) {
+    let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) else {
+        return;
+    };
+    let mut entries: Vec<&(u64, String)> = dismissed.iter().collect();
+    if entries.len() > MAX_DISMISSED_ENTRIES {
+        // Keep the highest message ids — those are the most recent dismissals.
+        entries.sort_by(|a, b| b.0.cmp(&a.0));
+        entries.truncate(MAX_DISMISSED_ENTRIES);
+    }
+    let mut serialised = String::new();
+    for (id, link) in entries {
+        serialised.push_str(&id.to_string());
+        serialised.push('\t');
+        serialised.push_str(link);
+        serialised.push('\n');
+    }
+    let _ = storage.set_item(DISMISSED_PREVIEWS_KEY, &serialised);
 }

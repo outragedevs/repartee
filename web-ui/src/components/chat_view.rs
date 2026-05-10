@@ -153,12 +153,18 @@ pub fn ChatView() -> impl IntoView {
                                 }.into_any();
                             }
 
+                            let previews_view =
+                                render_previews(state, msg.id, msg.previews.clone());
+
                             if is_mention_log {
                                 let styled = render_styled_text(&msg.text);
                                 return view! {
-                                    <div class=line_class>
-                                        <span class="mention-log-text">{styled}</span>
-                                    </div>
+                                    <>
+                                        <div class=line_class>
+                                            <span class="mention-log-text">{styled}</span>
+                                        </div>
+                                        {previews_view}
+                                    </>
                                 }.into_any();
                             }
 
@@ -174,30 +180,36 @@ pub fn ChatView() -> impl IntoView {
                                 };
                                 let styled = render_styled_text(&msg.text);
                                 view! {
-                                    <div class=line_class>
-                                        <span class="ts">{ts}</span>
-                                        <span class="action-body">
-                                            "* "
-                                            <span class="action-nick" style=nick_color_style>{nick_text}</span>
-                                            " "
-                                            {styled}
-                                        </span>
-                                    </div>
+                                    <>
+                                        <div class=line_class>
+                                            <span class="ts">{ts}</span>
+                                            <span class="action-body">
+                                                "* "
+                                                <span class="action-nick" style=nick_color_style>{nick_text}</span>
+                                                " "
+                                                {styled}
+                                            </span>
+                                        </div>
+                                        {previews_view}
+                                    </>
                                 }.into_any()
                             } else if is_notice {
                                 // Notice: -nick- text
                                 let nick_text = msg.nick.unwrap_or_default();
                                 let styled = render_styled_text(&msg.text);
                                 view! {
-                                    <div class=line_class>
-                                        <span class="ts">{ts}</span>
-                                        <span class="notice-body">
-                                            "-"
-                                            <span class="notice-nick">{nick_text}</span>
-                                            "- "
-                                            {styled}
-                                        </span>
-                                    </div>
+                                    <>
+                                        <div class=line_class>
+                                            <span class="ts">{ts}</span>
+                                            <span class="notice-body">
+                                                "-"
+                                                <span class="notice-nick">{nick_text}</span>
+                                                "- "
+                                                {styled}
+                                            </span>
+                                        </div>
+                                        {previews_view}
+                                    </>
                                 }.into_any()
                             } else if is_event {
                                 let arrow = event_icon(msg.event_key.as_deref(), &msg.text);
@@ -234,15 +246,18 @@ pub fn ChatView() -> impl IntoView {
 
                                 let nick_style = format!("width: {col_width}ch;");
                                 view! {
-                                    <div class=line_class>
-                                        <span class="ts">{ts}</span>
-                                        <span class="nick" style=nick_style>
-                                            <span class="mode">{mode}</span>
-                                            <span class="name" style=nick_color_style>{nick}</span>
-                                            <span class="sep">"❯"</span>
-                                        </span>
-                                        <span class="text">{styled}</span>
-                                    </div>
+                                    <>
+                                        <div class=line_class>
+                                            <span class="ts">{ts}</span>
+                                            <span class="nick" style=nick_style>
+                                                <span class="mode">{mode}</span>
+                                                <span class="name" style=nick_color_style>{nick}</span>
+                                                <span class="sep">"❯"</span>
+                                            </span>
+                                            <span class="text">{styled}</span>
+                                        </div>
+                                        {previews_view}
+                                    </>
                                 }.into_any()
                             }
                         }).collect::<Vec<_>>()
@@ -264,14 +279,103 @@ pub fn ChatView() -> impl IntoView {
     }
 }
 
+/// Render the per-message preview block, if there are previews to show.
+///
+/// Returns `None` (which leptos renders as nothing) when:
+/// - the message has no server-extracted previews,
+/// - every preview is in the dismissed-previews localStorage set, or
+/// - the user has previews disabled in their browser localStorage (future
+///   toggle hook — currently always enabled when the server enables them).
+fn render_previews(
+    state: AppState,
+    msg_id: u64,
+    previews: Vec<crate::protocol::LinkPreview>,
+) -> Option<leptos::prelude::AnyView> {
+    if previews.is_empty() {
+        return None;
+    }
+    let dismissed = state.dismissed_previews.get();
+    let visible: Vec<_> = previews
+        .into_iter()
+        .filter(|p| !dismissed.contains(&(msg_id, p.link.clone())))
+        .filter(|p| p.thumb_url.is_some())
+        .collect();
+    if visible.is_empty() {
+        return None;
+    }
+    let nodes: Vec<leptos::prelude::AnyView> = visible
+        .into_iter()
+        .map(|preview| {
+            let link = preview.link.clone();
+            let thumb = preview.thumb_url.unwrap_or_default();
+            let dismiss_link = preview.link.clone();
+            let on_dismiss = move |_| {
+                state.dismissed_previews.update(|set| {
+                    set.insert((msg_id, dismiss_link.clone()));
+                });
+                crate::state::save_dismissed_previews(&state.dismissed_previews.get());
+            };
+            // Hide the entire preview card when the thumbnail fails to load
+            // (server returned 502, image was deleted upstream, etc.). Using
+            // an inline HTML attribute avoids a per-thumbnail Leptos closure.
+            const ON_IMG_ERROR: &str =
+                "this.closest('.msg-preview-card').style.display='none'";
+            view! {
+                <span class="msg-preview-card">
+                    <a
+                        href=link
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="msg-preview-link"
+                    >
+                        <img
+                            src=thumb
+                            class="msg-preview-thumb"
+                            loading="lazy"
+                            alt="link preview"
+                            onerror=ON_IMG_ERROR
+                        />
+                    </a>
+                    <button
+                        class="msg-preview-dismiss"
+                        type="button"
+                        title="Hide this preview"
+                        on:click=on_dismiss
+                    >"\u{00D7}"</button>
+                </span>
+            }
+            .into_any()
+        })
+        .collect();
+    Some(view! { <div class="msg-previews">{nodes}</div> }.into_any())
+}
+
 /// Render text with irssi/mIRC format codes as styled HTML spans.
+///
+/// `parse_format` produces colour/bold spans; `linkify_spans` then carves
+/// URLs out of plain-text fragments. Spans with `link = Some(url)` are
+/// wrapped in `<a target="_blank" rel="noopener noreferrer">` so a left
+/// click opens a new tab and a right click yields the browser's standard
+/// "Open in New Window" context menu.
 fn render_styled_text(text: &str) -> Vec<leptos::prelude::AnyView> {
-    let spans = format::parse_format(text);
+    let spans = format::linkify_spans(format::parse_format(text));
     spans
         .into_iter()
         .map(|span| {
-            if span.has_style() {
-                let css = span.css();
+            let css = span.css();
+            if let Some(url) = span.link {
+                let style = if css.is_empty() { String::new() } else { css };
+                view! {
+                    <a
+                        href=url
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="msg-link"
+                        style=style
+                    >{span.text}</a>
+                }
+                .into_any()
+            } else if span.has_style() {
                 view! { <span style=css>{span.text}</span> }.into_any()
             } else {
                 view! { <span>{span.text}</span> }.into_any()

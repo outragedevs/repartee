@@ -188,6 +188,10 @@ pub struct WireMessage {
     /// `None` for backlog messages that predate this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_key: Option<String>,
+    /// Server-extracted link previews. Empty when image previews are
+    /// disabled or when the message contains no preview-eligible URLs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previews: Vec<super::preview::LinkPreview>,
 }
 
 /// Wire-format nick entry for transport over WebSocket.
@@ -291,6 +295,7 @@ mod tests {
             text: "hello 🚀".into(),
             highlight: false,
             event_key: None,
+            previews: Vec::new(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: WireMessage = serde_json::from_str(&json).unwrap();

@@ -4399,6 +4399,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tikv-jemallocator",
+ "time",
  "tokio",
  "tokio-rustls",
  "toml 1.1.2+spec-1.1.0",
