@@ -23,6 +23,7 @@
 
 use std::collections::HashMap;
 use std::io::Cursor;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -34,6 +35,7 @@ use axum_extra::extract::cookie::CookieJar;
 use image::ImageReader;
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use serde::{Deserialize, Serialize};
 
 use crate::image_preview::detect::{UrlClassification, UrlType, extract_urls};
@@ -102,8 +104,17 @@ impl WebPreviewExtractor {
     #[must_use]
     pub fn new(secret: Vec<u8>, max_per_msg: usize, cache_max_mb: u32) -> Self {
         let cache_dir = crate::constants::home_dir().join("web_thumbnails");
+        // SSRF guard: a public IRC URL must not let the server hit
+        // localhost / LAN / link-local / cloud metadata. We plug a custom
+        // resolver into reqwest that drops every non-public address
+        // returned by DNS, and we cap redirects so a malicious site can't
+        // stack rebinds. `PublicOnlyResolver` is invoked for every host —
+        // initial URL *and* each redirect — so the guard travels with the
+        // request.
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .dns_resolver(Arc::new(PublicOnlyResolver))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self {
@@ -228,6 +239,16 @@ pub async fn preview_handler(
     let Some(url) = extractor.lookup(&q.h) else {
         return StatusCode::NOT_FOUND.into_response();
     };
+
+    // 3a. SSRF pre-check on the original URL. The DNS resolver inside
+    //     reqwest already filters non-public addresses on connection,
+    //     but doing a sync check up-front catches obvious cases
+    //     (`http://127.0.0.1/...`) before we burn a worker on them and
+    //     gives a cleaner 400 instead of a generic connect failure.
+    if let Err(reason) = url_is_publicly_resolvable(&url) {
+        tracing::debug!(url = %url, %reason, "preview blocked by SSRF guard");
+        return StatusCode::BAD_REQUEST.into_response();
+    }
 
     // 4. Try the on-disk cache first.
     let cache_path = extractor.cache_dir.join(format!("{}.jpg", &q.h));
@@ -372,6 +393,139 @@ fn host_of(url: &str) -> Option<String> {
         .rsplit_once(':')
         .map_or(host_with_port, |(h, _)| h);
     Some(host.to_ascii_lowercase())
+}
+
+// ---------------------------------------------------------------------------
+// SSRF guard
+// ---------------------------------------------------------------------------
+//
+// IRC chat is untrusted input. Without this guard, a public channel
+// member could paste `http://127.0.0.1:8443/admin/...`,
+// `http://192.168.1.1/router-config`, or `http://169.254.169.254/...`
+// (cloud metadata) and the server would happily fetch it on behalf of
+// the user. The guard rejects every address that isn't a *publicly*
+// routable unicast IP.
+//
+// Defense in depth:
+// - `url_is_publicly_resolvable` runs synchronously before the request
+//   so obvious cases never reach reqwest.
+// - `PublicOnlyResolver` is wired into the reqwest client and rejects
+//   the same set of addresses for the initial URL *and* every redirect.
+//   This prevents DNS-rebinding (where a domain resolves to a public IP
+//   the first time and a private IP on the next lookup).
+
+/// Validate a URL up-front, before spinning up a fetch task. Performs a
+/// blocking DNS resolution — acceptable here because the handler that
+/// calls this is already on a tokio worker that's about to spawn more
+/// blocking work for image decoding. Returns the failing reason on
+/// rejection.
+fn url_is_publicly_resolvable(raw: &str) -> Result<(), &'static str> {
+    let parsed = reqwest::Url::parse(raw).map_err(|_| "invalid url")?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("scheme must be http or https");
+    }
+    let host = parsed.host_str().ok_or("missing host")?;
+    // If the host is already an IP literal, validate it directly. (Skips
+    // the DNS step and prevents `http://[::1]/` from sneaking through.)
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return if is_disallowed_ip(&ip) {
+            Err("address is not a public unicast ip")
+        } else {
+            Ok(())
+        };
+    }
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let addrs: Vec<SocketAddr> = (host, port)
+        .to_socket_addrs()
+        .map_err(|_| "dns resolution failed")?
+        .collect();
+    if addrs.is_empty() {
+        return Err("no addresses resolved");
+    }
+    if addrs.iter().any(|sa| is_disallowed_ip(&sa.ip())) {
+        return Err("address resolves to a non-public ip");
+    }
+    Ok(())
+}
+
+/// Reject loopback, RFC1918 private, link-local, multicast, broadcast,
+/// unspecified (`0.0.0.0` / `::`), CGNAT, documentation, and IPv6
+/// unique-local / IPv4-mapped-IPv6 of any of the above. Anything left is
+/// a publicly routable unicast address — the only thing we let the
+/// server proxy fetch.
+fn is_disallowed_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            if v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+                || v4.is_documentation()
+            {
+                return true;
+            }
+            // CGNAT (RFC 6598): 100.64.0.0/10
+            let o = v4.octets();
+            o[0] == 100 && (64..=127).contains(&o[1])
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() || v6.is_multicast() || v6.is_unspecified() {
+                return true;
+            }
+            let seg = v6.segments();
+            // Unique local fc00::/7
+            if seg[0] & 0xfe00 == 0xfc00 {
+                return true;
+            }
+            // Link-local fe80::/10
+            if seg[0] & 0xffc0 == 0xfe80 {
+                return true;
+            }
+            // IPv4-mapped IPv6 (::ffff:a.b.c.d) — re-check the v4 part.
+            if let Some(v4) = v6.to_ipv4_mapped()
+                && is_disallowed_ip(&IpAddr::V4(v4))
+            {
+                return true;
+            }
+            false
+        }
+    }
+}
+
+/// Reqwest DNS resolver that drops any non-public address. Plugs into
+/// `reqwest::Client::builder().dns_resolver(...)` so every request
+/// (initial URL *and* redirects) is gated.
+struct PublicOnlyResolver;
+
+impl Resolve for PublicOnlyResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        Box::pin(async move {
+            let host = name.as_str().to_owned();
+            let addrs = tokio::task::spawn_blocking(move || {
+                (host.as_str(), 0u16)
+                    .to_socket_addrs()
+                    .map(Iterator::collect::<Vec<_>>)
+            })
+            .await
+            .map_err(|e| {
+                Box::new(std::io::Error::other(e)) as Box<dyn std::error::Error + Send + Sync>
+            })?
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+            let filtered: Vec<SocketAddr> = addrs
+                .into_iter()
+                .filter(|sa| !is_disallowed_ip(&sa.ip()))
+                .collect();
+            if filtered.is_empty() {
+                return Err(Box::new(std::io::Error::other(
+                    "no public unicast addresses for host",
+                )) as Box<dyn std::error::Error + Send + Sync>);
+            }
+            let iter: Addrs = Box::new(filtered.into_iter());
+            Ok(iter)
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -565,5 +719,100 @@ mod tests {
             .unwrap();
         assert_eq!(decoded.width(), 50);
         assert_eq!(decoded.height(), 40);
+    }
+
+    // -- SSRF guard ---------------------------------------------------------
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn ssrf_blocks_ipv4_loopback() {
+        assert!(is_disallowed_ip(&ip("127.0.0.1")));
+        assert!(is_disallowed_ip(&ip("127.255.255.254")));
+    }
+
+    #[test]
+    fn ssrf_blocks_ipv4_rfc1918() {
+        assert!(is_disallowed_ip(&ip("10.0.0.1")));
+        assert!(is_disallowed_ip(&ip("172.16.0.1")));
+        assert!(is_disallowed_ip(&ip("192.168.1.1")));
+    }
+
+    #[test]
+    fn ssrf_blocks_ipv4_link_local_and_metadata() {
+        // 169.254.0.0/16 covers both IPv4 link-local and the cloud
+        // metadata endpoint (169.254.169.254). Must be blocked.
+        assert!(is_disallowed_ip(&ip("169.254.169.254")));
+        assert!(is_disallowed_ip(&ip("169.254.0.1")));
+    }
+
+    #[test]
+    fn ssrf_blocks_ipv4_cgnat() {
+        assert!(is_disallowed_ip(&ip("100.64.0.1")));
+        assert!(is_disallowed_ip(&ip("100.127.255.254")));
+    }
+
+    #[test]
+    fn ssrf_blocks_ipv4_unspecified_and_broadcast() {
+        assert!(is_disallowed_ip(&ip("0.0.0.0")));
+        assert!(is_disallowed_ip(&ip("255.255.255.255")));
+    }
+
+    #[test]
+    fn ssrf_blocks_ipv4_multicast_and_documentation() {
+        assert!(is_disallowed_ip(&ip("224.0.0.1")));
+        assert!(is_disallowed_ip(&ip("192.0.2.1")));
+    }
+
+    #[test]
+    fn ssrf_allows_public_ipv4() {
+        assert!(!is_disallowed_ip(&ip("8.8.8.8")));
+        assert!(!is_disallowed_ip(&ip("1.1.1.1")));
+        assert!(!is_disallowed_ip(&ip("142.250.78.46"))); // example public IP
+    }
+
+    #[test]
+    fn ssrf_blocks_ipv6_loopback_link_local_ula() {
+        assert!(is_disallowed_ip(&ip("::1")));
+        assert!(is_disallowed_ip(&ip("fe80::1")));
+        assert!(is_disallowed_ip(&ip("fd00::1")));
+        assert!(is_disallowed_ip(&ip("fc00::abcd")));
+    }
+
+    #[test]
+    fn ssrf_blocks_ipv4_mapped_loopback() {
+        // ::ffff:127.0.0.1 must be blocked just like 127.0.0.1.
+        assert!(is_disallowed_ip(&ip("::ffff:127.0.0.1")));
+        assert!(is_disallowed_ip(&ip("::ffff:192.168.0.1")));
+    }
+
+    #[test]
+    fn ssrf_allows_public_ipv6() {
+        assert!(!is_disallowed_ip(&ip("2606:4700:4700::1111"))); // Cloudflare
+    }
+
+    #[test]
+    fn ssrf_rejects_non_http_scheme() {
+        assert!(url_is_publicly_resolvable("file:///etc/passwd").is_err());
+        assert!(url_is_publicly_resolvable("ftp://example.com/").is_err());
+        assert!(url_is_publicly_resolvable("gopher://example.com/").is_err());
+    }
+
+    #[test]
+    fn ssrf_rejects_literal_loopback_ip_in_url() {
+        // Catches `http://127.0.0.1/...` and `http://[::1]/...` without
+        // even touching DNS.
+        assert!(url_is_publicly_resolvable("http://127.0.0.1/admin").is_err());
+        assert!(url_is_publicly_resolvable("http://192.168.1.1/").is_err());
+        assert!(url_is_publicly_resolvable("http://[::1]/").is_err());
+        assert!(url_is_publicly_resolvable("http://169.254.169.254/latest").is_err());
+    }
+
+    #[test]
+    fn ssrf_rejects_malformed_url() {
+        assert!(url_is_publicly_resolvable("not a url").is_err());
+        assert!(url_is_publicly_resolvable("https://").is_err());
     }
 }

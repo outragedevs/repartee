@@ -41,12 +41,16 @@ All web settings live under the `[web]` section in `config.toml` and can be chan
 | `web.tls_cert` | *(auto)* | Path to TLS certificate (PEM). Empty = self-signed |
 | `web.tls_key` | *(auto)* | Path to TLS private key (PEM). Empty = self-signed |
 | `web.password` | *(from .env)* | Login password (set via `WEB_PASSWORD` in `.env`) |
-| `web.session_hours` | `24` | Session duration before re-login required |
+| `web.username` | `repartee` | Username pre-filled in the login form (only password is validated; the field exists so password managers recognise the form) |
+| `web.session_days` | `90` | Session lifetime in days. Sessions persist to `~/.repartee/web_sessions.bin` and survive process restart. |
 | `web.theme` | `nightfall` | Default theme (`nightfall`, `catppuccin-mocha`, `tokyo-storm`, `gruvbox-light`, `catppuccin-latte`) |
 | `web.timestamp_format` | `%H:%M` | Timestamp format (chrono strftime syntax) |
 | `web.line_height` | `1.35` | CSS line-height for chat messages |
 | `web.nick_column_width` | `12` | Nick column width in characters |
 | `web.nick_max_length` | `9` | Max nick display length before truncation |
+| `web.image_previews` | `false` | Show thumbnails under chat messages that contain image URLs. Server fetches + thumbnails on `/api/preview`; `i.imgur.com` direct images load client-side. |
+| `web.image_previews_max_per_msg` | `4` | Cap on previews shown per message |
+| `web.thumbnail_cache_mb` | `200` | Maximum size of the thumbnail cache on disk |
 
 Nick coloring settings live under `[display]` but are also synced to web clients:
 
