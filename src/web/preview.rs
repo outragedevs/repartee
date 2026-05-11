@@ -111,12 +111,19 @@ impl WebPreviewExtractor {
         // stack rebinds. `PublicOnlyResolver` is invoked for every host —
         // initial URL *and* each redirect — so the guard travels with the
         // request.
+        //
+        // **Panic if the builder fails.** A silent fall-through to
+        // `Client::new()` would create a default client *without* the
+        // resolver and redirect limit, completely defeating the SSRF
+        // guard. Better to refuse to start the preview proxy than serve
+        // it unprotected — the only failure modes here are TLS backend
+        // init issues that the user needs to see anyway.
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::limited(5))
             .dns_resolver(Arc::new(PublicOnlyResolver))
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+            .expect("failed to build SSRF-protected HTTP client for /api/preview");
         Self {
             secret,
             max_per_msg,
@@ -483,6 +490,11 @@ fn is_disallowed_ip(ip: &IpAddr) -> bool {
             if seg[0] & 0xffc0 == 0xfe80 {
                 return true;
             }
+            // Documentation 2001:db8::/32 (RFC 3849). `Ipv6Addr::is_documentation`
+            // is unstable on stable Rust, so test the prefix inline.
+            if seg[0] == 0x2001 && seg[1] == 0x0db8 {
+                return true;
+            }
             // IPv4-mapped IPv6 (::ffff:a.b.c.d) — re-check the v4 part.
             if let Some(v4) = v6.to_ipv4_mapped()
                 && is_disallowed_ip(&IpAddr::V4(v4))
@@ -779,6 +791,17 @@ mod tests {
         assert!(is_disallowed_ip(&ip("fe80::1")));
         assert!(is_disallowed_ip(&ip("fd00::1")));
         assert!(is_disallowed_ip(&ip("fc00::abcd")));
+    }
+
+    #[test]
+    fn ssrf_blocks_ipv6_documentation() {
+        // RFC 3849: 2001:db8::/32. Was previously a regression — the
+        // doc comment claimed documentation addresses were blocked but
+        // only IPv4 doc was actually checked.
+        assert!(is_disallowed_ip(&ip("2001:db8::1")));
+        assert!(is_disallowed_ip(&ip("2001:db8:ffff:ffff::1")));
+        // Adjacent prefix must still be allowed.
+        assert!(!is_disallowed_ip(&ip("2001:db9::1")));
     }
 
     #[test]
