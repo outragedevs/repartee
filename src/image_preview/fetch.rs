@@ -31,6 +31,9 @@ static OG_IMAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
 // Configuration
 // ---------------------------------------------------------------------------
 
+/// Validator function pointer signature for [`FetchConfig::url_validator`].
+pub type UrlValidator = fn(&str) -> Result<(), &'static str>;
+
 /// Parameters that govern how image fetching behaves.
 #[derive(Debug, Clone)]
 pub struct FetchConfig {
@@ -38,6 +41,20 @@ pub struct FetchConfig {
     pub timeout_secs: u32,
     /// Maximum response body size in bytes.
     pub max_file_size: u64,
+    /// Optional URL validator invoked **before every `client.get(url)`**.
+    /// Errors here short-circuit the fetch with [`FetchError::BlockedUrl`].
+    ///
+    /// Set by the web preview pipeline to enforce the SSRF guard against
+    /// both the initial URL **and** any `og:image` URL scraped from a
+    /// page body. The custom redirect policy on the reqwest client gates
+    /// redirect targets; the URL validator gates new requests started
+    /// from inside this module (`fetch_image` does a second request for
+    /// the og:image after parsing the page HTML).
+    ///
+    /// `None` (the default) preserves backwards-compatible behaviour for
+    /// the TUI image preview, where the user types URLs themselves and
+    /// the threat model is different.
+    pub url_validator: Option<UrlValidator>,
 }
 
 impl Default for FetchConfig {
@@ -45,6 +62,7 @@ impl Default for FetchConfig {
         Self {
             timeout_secs: 30,
             max_file_size: 10_485_760, // 10 MiB
+            url_validator: None,
         }
     }
 }
@@ -82,6 +100,9 @@ pub enum FetchError {
 
     #[error("invalid URL: {0}")]
     InvalidUrl(String),
+
+    #[error("blocked URL: {0}")]
+    BlockedUrl(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +173,17 @@ async fn fetch_url(
     config: &FetchConfig,
     client: &Client,
 ) -> Result<(Vec<u8>, String, String), FetchError> {
+    // SSRF guard: runs before every reqwest `get()` so a phase-2 og:image
+    // URL — which is *not* a redirect target and therefore not gated by
+    // the reqwest redirect policy — gets the same check. Hyper bypasses
+    // the DNS resolver for IP literals, so the validator is the only
+    // thing stopping `<meta property="og:image" content="http://127.0.0.1/...">`.
+    if let Some(validator) = config.url_validator
+        && let Err(reason) = validator(url)
+    {
+        return Err(FetchError::BlockedUrl(reason.to_owned()));
+    }
+
     let response = client
         .get(url)
         .header(reqwest::header::USER_AGENT, USER_AGENT)
@@ -411,6 +443,47 @@ mod tests {
         let config = FetchConfig::default();
         assert_eq!(config.timeout_secs, 30);
         assert_eq!(config.max_file_size, 10_485_760);
+        assert!(
+            config.url_validator.is_none(),
+            "default validator stays off so TUI image preview keeps working"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_url_short_circuits_on_validator_reject() {
+        // Validator rejects every URL → fetch_url returns BlockedUrl
+        // without making any HTTP request.
+        fn reject_all(_url: &str) -> Result<(), &'static str> {
+            Err("nope")
+        }
+        let cfg = FetchConfig {
+            url_validator: Some(reject_all),
+            ..FetchConfig::default()
+        };
+        let client = Client::new();
+        let err = fetch_url("https://example.invalid/", &cfg, &client)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FetchError::BlockedUrl(_)));
+    }
+
+    #[tokio::test]
+    async fn fetch_url_runs_validator_with_actual_url() {
+        // Validator should see the URL it was passed.
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static SEEN: AtomicBool = AtomicBool::new(false);
+        fn check(url: &str) -> Result<(), &'static str> {
+            if url == "http://127.0.0.1/sneaky" {
+                SEEN.store(true, Ordering::SeqCst);
+            }
+            Err("blocked")
+        }
+        let cfg = FetchConfig {
+            url_validator: Some(check),
+            ..FetchConfig::default()
+        };
+        let _ = fetch_url("http://127.0.0.1/sneaky", &cfg, &Client::new()).await;
+        assert!(SEEN.load(Ordering::SeqCst));
     }
 
     // -- FetchError display -------------------------------------------------

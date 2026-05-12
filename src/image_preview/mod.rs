@@ -176,6 +176,7 @@ async fn fetch_image_data(
     let fetch_config = fetch::FetchConfig {
         timeout_secs: config.fetch_timeout,
         max_file_size: config.max_file_size,
+        url_validator: None,
     };
     let result = fetch::fetch_image(url, &fetch_config, client).await?;
 

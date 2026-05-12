@@ -275,7 +275,17 @@ pub async fn preview_handler(
 
     // 5. Cache miss — fetch + thumbnail. Run the CPU-bound decode/encode
     //    on a blocking thread so the runtime stays responsive.
-    let fetch_cfg = FetchConfig::default();
+    //
+    //    `url_validator` is set so the og:image phase inside
+    //    `fetch_image` re-runs the same shape check on the URL it
+    //    scrapes out of the page HTML. Without that, an attacker page
+    //    could embed `<meta property="og:image" content="http://127.0.0.1/...">`
+    //    and reach localhost (the redirect policy doesn't fire because
+    //    the og:image fetch is a fresh request, not a redirect).
+    let fetch_cfg = FetchConfig {
+        url_validator: Some(validate_url_shape_str),
+        ..FetchConfig::default()
+    };
     let result = match fetch_image(&url, &fetch_cfg, &extractor.http).await {
         Ok(r) => r,
         Err(e) => {
@@ -462,6 +472,14 @@ fn url_is_publicly_resolvable(raw: &str) -> Result<(), &'static str> {
         return Err("address resolves to a non-public ip");
     }
     Ok(())
+}
+
+/// String wrapper around [`validate_url_shape`] suitable for use as the
+/// `url_validator` function pointer on [`FetchConfig`]. Parses the URL
+/// and delegates to the typed function.
+fn validate_url_shape_str(url: &str) -> Result<(), &'static str> {
+    let parsed = reqwest::Url::parse(url).map_err(|_| "invalid url")?;
+    validate_url_shape(&parsed)
 }
 
 /// DNS-free URL validation: scheme is http/https and, when the host is
@@ -965,6 +983,21 @@ mod tests {
         // Hostnames pass the shape check; the DNS resolver does the
         // real work when the connection opens.
         assert!(validate_url_shape(&parse("https://example.com/x")).is_ok());
+    }
+
+    #[test]
+    fn validate_url_shape_str_wraps_typed_validator() {
+        // The string-form wrapper is what FetchConfig.url_validator
+        // calls inside fetch_url. Must accept good URLs and reject the
+        // same things the typed version does.
+        assert!(validate_url_shape_str("https://example.com/x.png").is_ok());
+        assert!(validate_url_shape_str("https://8.8.8.8/x").is_ok());
+        assert!(validate_url_shape_str("http://127.0.0.1/admin").is_err());
+        assert!(validate_url_shape_str("http://[::1]/").is_err());
+        assert!(validate_url_shape_str("http://169.254.169.254/latest").is_err());
+        assert!(validate_url_shape_str("http://192.168.1.1/").is_err());
+        assert!(validate_url_shape_str("file:///etc/passwd").is_err());
+        assert!(validate_url_shape_str("not a url").is_err());
     }
 
     #[test]
