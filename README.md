@@ -237,6 +237,11 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v1.1.0
+
+- **Web frontend improvements** — added persistent web sessions, a login form, clickable chat links, and server-generated image previews.
+- **Image preview SSRF hardening** — `/api/preview` now blocks private, loopback, link-local, cloud metadata, and other non-public targets across direct URLs, redirects, and `og:image` follow-up fetches.
+
 ### v1.0.1
 
 - **Log browser event rendering fix** — `repartee l` now renders persisted event text directly, so JOIN/PART/MODE/KICK/NICK/QUIT lines keep their original nick/channel/mode details instead of expanding empty event templates.
