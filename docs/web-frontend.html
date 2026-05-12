@@ -158,9 +158,14 @@ port = 8443
 <td>Login password (set via <code>WEB_PASSWORD</code> in <code>.env</code>)</td>
 </tr>
 <tr>
-<td><code>web.session_hours</code></td>
-<td><code>24</code></td>
-<td>Session duration before re-login required</td>
+<td><code>web.username</code></td>
+<td><code>repartee</code></td>
+<td>Username pre-filled in the login form (only password is validated; the field exists so password managers recognise the form)</td>
+</tr>
+<tr>
+<td><code>web.session_days</code></td>
+<td><code>90</code></td>
+<td>Session lifetime in days. Sessions persist to <code>~/.repartee/web_sessions.bin</code> and survive process restart.</td>
 </tr>
 <tr>
 <td><code>web.theme</code></td>
@@ -186,6 +191,21 @@ port = 8443
 <td><code>web.nick_max_length</code></td>
 <td><code>9</code></td>
 <td>Max nick display length before truncation</td>
+</tr>
+<tr>
+<td><code>web.image_previews</code></td>
+<td><code>false</code></td>
+<td>Show thumbnails under chat messages that contain image URLs. Server fetches + thumbnails on <code>/api/preview</code>; <code>i.imgur.com</code> direct images load client-side.</td>
+</tr>
+<tr>
+<td><code>web.image_previews_max_per_msg</code></td>
+<td><code>4</code></td>
+<td>Cap on previews shown per message</td>
+</tr>
+<tr>
+<td><code>web.thumbnail_cache_mb</code></td>
+<td><code>200</code></td>
+<td>Maximum size of the thumbnail cache on disk</td>
 </tr>
 </tbody></table>
 <p>Nick coloring settings live under <code>[display]</code> but are also synced to web clients:</p>

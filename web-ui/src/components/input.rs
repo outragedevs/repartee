@@ -120,16 +120,20 @@ const SETTING_PATHS: &[&str] = &[
     "web.bind_address",
     "web.cloudflare_tunnel_name",
     "web.enabled",
+    "web.image_previews",
+    "web.image_previews_max_per_msg",
     "web.line_height",
     "web.nick_column_width",
     "web.nick_max_length",
     "web.password",
     "web.port",
-    "web.session_hours",
+    "web.session_days",
     "web.theme",
+    "web.thumbnail_cache_mb",
     "web.timestamp_format",
     "web.tls_cert",
     "web.tls_key",
+    "web.username",
 ];
 
 #[component]

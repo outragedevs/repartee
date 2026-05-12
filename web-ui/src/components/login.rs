@@ -123,4 +123,3 @@ async fn fetch_login_info() -> Option<String> {
     let json: serde_json::Value = resp.json().await.ok()?;
     json["username"].as_str().map(str::to_owned)
 }
-

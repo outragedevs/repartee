@@ -279,19 +279,38 @@ pub fn ChatView() -> impl IntoView {
     }
 }
 
+/// LocalStorage key that mirrors the server's `web.image_previews` setting
+/// for individual browsers. When set to `"false"`, this client suppresses
+/// previews even if the server has them enabled. Any other value (missing,
+/// `"true"`, etc.) means "show them". No UI toggle yet — power users flip
+/// it from devtools; a Settings panel toggle is the obvious follow-up.
+const IMAGE_PREVIEWS_TOGGLE_KEY: &str = "web_image_previews_enabled";
+
+/// Read the per-browser image-previews override. Returns `true` (show) when
+/// the key is absent or any value other than the literal `"false"`.
+fn previews_enabled_in_browser() -> bool {
+    let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) else {
+        return true;
+    };
+    !matches!(
+        storage.get_item(IMAGE_PREVIEWS_TOGGLE_KEY),
+        Ok(Some(ref v)) if v == "false"
+    )
+}
+
 /// Render the per-message preview block, if there are previews to show.
 ///
 /// Returns `None` (which leptos renders as nothing) when:
 /// - the message has no server-extracted previews,
 /// - every preview is in the dismissed-previews localStorage set, or
-/// - the user has previews disabled in their browser localStorage (future
-///   toggle hook — currently always enabled when the server enables them).
+/// - the user has previews disabled in their browser via the
+///   `web_image_previews_enabled = "false"` localStorage key.
 fn render_previews(
     state: AppState,
     msg_id: u64,
     previews: Vec<crate::protocol::LinkPreview>,
 ) -> Option<leptos::prelude::AnyView> {
-    if previews.is_empty() {
+    if previews.is_empty() || !previews_enabled_in_browser() {
         return None;
     }
     let dismissed = state.dismissed_previews.get();
