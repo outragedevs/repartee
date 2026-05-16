@@ -607,3 +607,70 @@ html, body {
 .shell-terminal:focus {
     box-shadow: inset 0 0 0 1px var(--accent);
 }
+
+/* === Clickable links === */
+
+.msg-link {
+    color: var(--link, #87cefa);
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    cursor: pointer;
+    word-break: break-all;
+}
+
+.msg-link:hover {
+    text-decoration-thickness: 2px;
+}
+
+/* === Link image previews === */
+
+.msg-previews {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 4px 0 2px 56px; /* indent under the message text column */
+}
+
+.msg-preview-card {
+    position: relative;
+    display: inline-block;
+}
+
+.msg-preview-thumb {
+    display: block;
+    max-width: 320px;
+    max-height: 200px;
+    border: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+    border-radius: 4px;
+    background: var(--bg-alt, #111);
+    object-fit: contain;
+}
+
+.msg-preview-dismiss {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 18px;
+    height: 18px;
+    border: none;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    font-size: 14px;
+    line-height: 16px;
+    text-align: center;
+    cursor: pointer;
+    padding: 0;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+}
+
+.msg-preview-card:hover .msg-preview-dismiss {
+    opacity: 1;
+}
+
+@media (max-width: 720px) {
+    .msg-previews { margin-left: 0; }
+    .msg-preview-thumb { max-width: 100%; }
+    .msg-preview-dismiss { opacity: 1; } /* always visible on touch */
+}
