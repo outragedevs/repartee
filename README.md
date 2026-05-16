@@ -237,6 +237,10 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v1.1.1
+
+- **Refreshed bundled web UI** — `cargo install repartee@1.1.0` shipped the v1.0.x WASM bundle because `static/web/` in the published source predated the web-improvements work. This release re-bundles the actual v1.1.0 frontend (login form with username field, clickable links, image preview rendering) so `cargo install` users get the working UI without having to clone the repo and run `make wasm` themselves.
+
 ### v1.1.0
 
 - **Web frontend improvements** — added persistent web sessions, a login form, clickable chat links, and server-generated image previews.
