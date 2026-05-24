@@ -901,7 +901,6 @@ impl App {
                         log_msg_id: None,
                         log_ref_id: None,
                         tags: None,
-                        shortenings: Vec::new(),
                     },
                 );
             } else {
@@ -909,6 +908,40 @@ impl App {
                     self,
                     "No active DCC CHAT session for this buffer",
                 );
+            }
+            return;
+        }
+
+        // Outgoing shrink is the FIRST step for any message that
+        // qualifies — by the time we reach E2E encrypt / IRC send /
+        // local echo, the text is already shortened (or the original
+        // on timeout). Worker handles the shrink async and posts
+        // back to the main loop where `apply_shrink_deliver` runs
+        // the rest of the pipeline with the substituted text.
+        //
+        // Pre-check: features off, no client, no long URLs → fall
+        // through to the synchronous path below.
+        if self.config.shrink.enabled
+            && self.config.shrink.outgoing_enabled
+            && self.shrink_client.is_some()
+            && !crate::shrink::find_long_urls(
+                text,
+                self.config.shrink.min_url_length as usize,
+            )
+            .is_empty()
+        {
+            let pending = crate::app::shrink::PendingOutgoing {
+                conn_id,
+                buffer_id: active_id,
+                buffer_name,
+                buffer_type: buf_type,
+                original_text: text.to_string(),
+            };
+            // `try_send` rather than blocking — the queue is sized
+            // for bursts; backpressure (queue full) is exceptional
+            // and we'd rather log + drop than freeze input.
+            if let Err(e) = self.shrink_outgoing_tx.try_send(pending) {
+                tracing::warn!(error = %e, "shrink: outgoing dispatch queue full");
             }
             return;
         }
@@ -962,64 +995,6 @@ impl App {
 
         let own_mode = self.state.nick_prefix(&active_id, &nick);
 
-        // Outgoing shrink: if the plaintext fits in a single IRC line
-        // (multi-chunk needs per-chunk shortenings tracking — leave
-        // for v2) and contains URLs over the threshold, hand the
-        // whole message off to the async shrink pipeline. The task
-        // will send the substituted text to IRC and post a
-        // `MessageShortened` event to update the local buffer. We
-        // local-echo the original immediately so the user has
-        // feedback; the shortened form swaps in via render-time
-        // substitution once the API call returns.
-        //
-        // E2E is skipped (the wire is opaque ciphertext, which can't
-        // be shortened without breaking the per-message MAC).
-        //
-        // Known limitation: when the IRCv3 `echo-message` cap is
-        // enabled, the server echoes the substituted text back to us
-        // as a fresh PRIVMSG, producing a duplicate in the buffer.
-        // Disable `echo-message` (or outgoing shrink) to avoid this
-        // — documented in `docs/commands/shrink.md`.
-        if !is_e2e_encrypted
-            && plain_echo.len() <= crate::irc::MESSAGE_MAX_BYTES
-            && self.config.shrink.enabled
-            && self.config.shrink.outgoing_enabled
-            && self.shrink_client.is_some()
-            && !crate::shrink::find_long_urls(
-                &plain_echo,
-                self.config.shrink.min_url_length as usize,
-            )
-            .is_empty()
-        {
-            let id = self.state.next_message_id();
-            self.state.add_message(
-                &active_id,
-                Message {
-                    id,
-                    timestamp: chrono::Utc::now(),
-                    message_type: MessageType::Message,
-                    nick: Some(nick),
-                    nick_mode: own_mode.map(|c| c.to_string()),
-                    text: plain_echo.clone(),
-                    highlight: false,
-                    event_key: None,
-                    event_params: None,
-                    log_msg_id: None,
-                    log_ref_id: None,
-                    tags: None,
-                    shortenings: Vec::new(),
-                },
-            );
-            self.dispatch_shrink_for_outgoing(
-                active_id,
-                id,
-                conn_id,
-                buffer_name,
-                &plain_echo,
-            );
-            return;
-        }
-
         for wire in wire_lines {
             // Try to send via IRC if connected
             if let Some(handle) = self.irc_handles.get(&conn_id)
@@ -1067,7 +1042,6 @@ impl App {
                         log_msg_id: None,
                         log_ref_id: None,
                         tags: None,
-                        shortenings: Vec::new(),
                     },
                 );
             }
@@ -1090,7 +1064,7 @@ impl App {
     /// For real IRC channels (`#&!+`) the context is the channel name,
     /// unchanged. For Query buffers the context is `@<peer_handle>`
     /// derived from the buffer's cached handle.
-    fn e2e_encrypt_or_passthrough(
+    pub(crate) fn e2e_encrypt_or_passthrough(
         &mut self,
         buffer_name: &str,
         buffer_type: &BufferType,

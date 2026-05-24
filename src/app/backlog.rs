@@ -132,7 +132,6 @@ fn build_backlog_messages(
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            shortenings: Vec::new(),
         });
     }
 
@@ -160,7 +159,6 @@ fn make_separator(
         log_msg_id: None,
         log_ref_id: None,
         tags: None,
-        shortenings: Vec::new(),
     }
 }
 

@@ -14,8 +14,6 @@ pub(crate) mod shrink;
 mod web;
 mod who;
 
-pub(crate) use shrink::ShrinkResult;
-
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -459,13 +457,23 @@ pub struct App {
     /// Shared LRU cache for shortenings. Wrapped in
     /// `parking_lot::Mutex` so background shrink tasks can read/write
     /// from any tokio worker without contending on a tokio mutex.
+    /// `Arc` because both the dispatch path (App side) and the
+    /// shrink workers (spawned tasks) read/write through it.
     pub(crate) shrink_cache:
         std::sync::Arc<parking_lot::Mutex<crate::shrink::ShrinkCache>>,
-    /// Channel for shrink-task results landing back in the main
-    /// loop. Receiver is drained by the loop arm; sender is cloned
-    /// into each spawned task.
-    pub(crate) shrink_rx: mpsc::Receiver<ShrinkResult>,
-    pub(crate) shrink_tx: mpsc::Sender<ShrinkResult>,
+    /// Pre-display queue for outgoing messages that need shrink.
+    /// `handle_plain_message` enqueues here; a dedicated worker
+    /// drains, awaits shrink, and posts an `OutgoingDeliver` back
+    /// via `shrink_deliver_rx`.
+    pub(crate) shrink_outgoing_tx: mpsc::Sender<shrink::PendingOutgoing>,
+    /// Same shape as `shrink_outgoing_tx` for incoming PRIVMSG /
+    /// ACTION / NOTICE that pass through `add_message_with_activity`.
+    pub(crate) shrink_incoming_tx: mpsc::Sender<shrink::PendingIncoming>,
+    /// `/shrink` command + the workers all post their final actions
+    /// here; the main loop drains and routes them to
+    /// `apply_shrink_deliver`.
+    pub(crate) shrink_deliver_tx: mpsc::Sender<shrink::ShrinkDeliver>,
+    pub(crate) shrink_deliver_rx: mpsc::Receiver<shrink::ShrinkDeliver>,
     /// Runtime bind-IP override from the `repartee -h <ip>` CLI flag.
     /// Sits between per-server `bind_ip` (highest) and
     /// `general.default_bind_ip` (lowest) in the precedence chain.
@@ -609,8 +617,22 @@ impl App {
 
         let (dict_tx, dict_rx) = mpsc::channel(64);
         let (web_tx, web_rx) = mpsc::channel(256);
-        let (shrink_client, shrink_cache, (shrink_tx, shrink_rx)) =
-            shrink::build_runtime(&config.shrink);
+        let shrink::ShrinkRuntime {
+            client: shrink_client,
+            cache: shrink_cache,
+            outgoing_tx: shrink_outgoing_tx,
+            incoming_tx: shrink_incoming_tx,
+            deliver_tx: shrink_deliver_tx,
+            deliver_rx: shrink_deliver_rx,
+        } = shrink::ShrinkRuntime::build(&config.shrink);
+        // Mirror shrink-incoming wiring into state so the synchronous
+        // `add_message_with_activity` path can decide between
+        // immediate add vs deferred shrink without reaching into App.
+        state.shrink_incoming_active = config.shrink.enabled
+            && config.shrink.incoming_enabled
+            && shrink_client.is_some();
+        state.shrink_min_url_length = config.shrink.min_url_length;
+        state.shrink_incoming_tx = Some(shrink_incoming_tx.clone());
 
         let (mut dcc, dcc_rx) = crate::dcc::DccManager::new();
         dcc.timeout_secs = config.dcc.timeout;
@@ -738,8 +760,10 @@ impl App {
             last_day: chrono::Local::now().date_naive(),
             shrink_client,
             shrink_cache,
-            shrink_rx,
-            shrink_tx,
+            shrink_outgoing_tx,
+            shrink_incoming_tx,
+            shrink_deliver_tx,
+            shrink_deliver_rx,
             cli_bind_override: None,
         };
         app.recompute_wrap_indent();
@@ -952,7 +976,6 @@ impl App {
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: None,
-                shortenings: Vec::new(),
             },
         );
     }
@@ -1085,7 +1108,6 @@ impl App {
                         }
                         self.update_script_snapshot();
                         self.drain_pending_web_events();
-                        self.drain_pending_shrink_dispatch();
                     }
                     None => {
                         self.term_rx = None;
@@ -1109,7 +1131,6 @@ impl App {
                         }
                         self.update_script_snapshot();
                         self.drain_pending_web_events();
-                        self.drain_pending_shrink_dispatch();
                     }
                     Some(crate::session::protocol::ShimMessage::Resize { cols, rows }) => {
                         self.cached_term_cols = cols;
@@ -1161,7 +1182,6 @@ impl App {
                         self.script_snapshot_dirty = true;
                         self.update_script_snapshot();
                         self.drain_pending_web_events();
-                        self.drain_pending_shrink_dispatch();
                     }
                 },
                 preview_ev = self.preview_rx.recv() => {
@@ -1173,7 +1193,6 @@ impl App {
                     if let Some(ev) = dcc_ev {
                         self.handle_dcc_event(ev);
                         self.drain_pending_web_events();
-                        self.drain_pending_shrink_dispatch();
                     }
                 },
                 shell_ev = self.shell_rx.recv() => {
@@ -1196,7 +1215,6 @@ impl App {
                         tracing::debug!(?cmd, %session_id, "web command received");
                         self.handle_web_command(cmd, &session_id);
                         self.drain_pending_web_events();
-                        self.drain_pending_shrink_dispatch();
                     }
                 },
                 () = &mut shell_broadcast_sleep, if self.shell_broadcast_pending.is_some() => {
@@ -1247,12 +1265,10 @@ impl App {
                     self.maybe_purge_old_events();
                     self.maybe_purge_old_mentions();
                     self.drain_pending_web_events();
-                    self.drain_pending_shrink_dispatch();
                 },
                 _ = paste_tick.tick() => {
                     self.drain_paste_queue();
                     self.drain_pending_web_events();
-                    self.drain_pending_shrink_dispatch();
                 },
                 action = self.script_action_rx.recv() => {
                     if let Some(action) = action {
@@ -1263,20 +1279,18 @@ impl App {
                         self.script_snapshot_dirty = true;
                         self.update_script_snapshot();
                         self.drain_pending_web_events();
-                        self.drain_pending_shrink_dispatch();
                     }
                 },
-                shrink_res = self.shrink_rx.recv() => {
-                    if let Some(result) = shrink_res {
-                        self.apply_shrink_result(result);
-                        // Drain any sibling results sitting in the
-                        // channel so a burst doesn't take many loop
-                        // iterations to absorb.
-                        while let Ok(extra) = self.shrink_rx.try_recv() {
-                            self.apply_shrink_result(extra);
+                shrink_res = self.shrink_deliver_rx.recv() => {
+                    if let Some(deliver) = shrink_res {
+                        self.apply_shrink_deliver(deliver);
+                        // Drain sibling deliveries in the same tick
+                        // so a burst doesn't take many loop iterations
+                        // to absorb.
+                        while let Ok(extra) = self.shrink_deliver_rx.try_recv() {
+                            self.apply_shrink_deliver(extra);
                         }
                         self.drain_pending_web_events();
-                        self.drain_pending_shrink_dispatch();
                     }
                 },
                 _ = sigterm.recv() => {

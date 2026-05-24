@@ -101,19 +101,6 @@ pub struct Message {
     /// `IRCv3` message tags extracted from the incoming IRC message.
     /// `None` when no tags are present (the common case), avoiding a `HashMap` allocation per message.
     pub tags: Option<HashMap<String, String>>,
-    /// Render-time URL substitutions populated by the shrink pipeline
-    /// after the message was first added. Empty on construction and
-    /// for every backlog / outgoing path — outgoing messages have the
-    /// short URL substituted directly in `text` before send, so the
-    /// renderer never needs to consult this field for them. Only the
-    /// incoming-live path populates this asynchronously, and the TUI /
-    /// web render layers walk it to swap `original` for `shortened`
-    /// at display time (canonical `text` is preserved for search/log).
-    #[expect(
-        clippy::struct_field_names,
-        reason = "shortenings is the precise term for the wire/render concept"
-    )]
-    pub shortenings: Vec<crate::shrink::UrlShortening>,
 }
 
 // === NickEntry ===

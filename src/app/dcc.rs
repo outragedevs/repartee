@@ -166,7 +166,6 @@ impl App {
                         log_msg_id: None,
                         log_ref_id: None,
                         tags: None,
-                        shortenings: Vec::new(),
                     },
                 );
 
@@ -217,7 +216,6 @@ impl App {
                             log_msg_id: None,
                             log_ref_id: None,
                             tags: None,
-                            shortenings: Vec::new(),
                         },
                         ActivityLevel::Mention,
                     );
@@ -252,7 +250,6 @@ impl App {
                         log_msg_id: None,
                         log_ref_id: None,
                         tags: None,
-                        shortenings: Vec::new(),
                     },
                     ActivityLevel::Mention,
                 );
@@ -296,7 +293,6 @@ impl App {
                             log_msg_id: None,
                             log_ref_id: None,
                             tags: None,
-                            shortenings: Vec::new(),
                         },
                     );
                 }

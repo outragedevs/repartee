@@ -208,7 +208,6 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
                             log_msg_id: None,
                             log_ref_id: None,
                             tags: None,
-                            shortenings: Vec::new(),
                         },
                     );
                 }
@@ -253,7 +252,6 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
                     log_msg_id: None,
                     log_ref_id: None,
                     tags: None,
-                    shortenings: Vec::new(),
                 },
             );
         }
@@ -303,7 +301,6 @@ pub fn handle_connected(state: &mut AppState, conn_id: &str) {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            shortenings: Vec::new(),
         },
     );
 }
@@ -412,7 +409,6 @@ pub fn handle_disconnected(state: &mut AppState, conn_id: &str, error: Option<&s
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            shortenings: Vec::new(),
         },
     );
 }
@@ -521,7 +517,6 @@ pub fn handle_cap_new(
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            shortenings: Vec::new(),
         },
     );
 
@@ -588,7 +583,6 @@ pub fn handle_cap_del(
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            shortenings: Vec::new(),
         },
     );
 }
@@ -642,7 +636,6 @@ pub fn handle_cap_ack(
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            shortenings: Vec::new(),
         },
     );
 }
@@ -688,7 +681,6 @@ pub fn handle_cap_nak(
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            shortenings: Vec::new(),
         },
     );
 }
@@ -914,7 +906,6 @@ fn handle_privmsg(
                     log_msg_id: None,
                     log_ref_id: None,
                     tags,
-                    shortenings: Vec::new(),
                 },
                 activity,
             );
@@ -953,7 +944,6 @@ fn handle_privmsg(
                     log_msg_id: None,
                     log_ref_id: None,
                     tags: None,
-                    shortenings: Vec::new(),
                 };
                 state.add_mention_to_buffer(mention_msg);
             }
@@ -1067,7 +1057,6 @@ fn handle_privmsg(
             log_msg_id: None,
             log_ref_id: None,
             tags,
-            shortenings: Vec::new(),
         },
         activity,
     );
@@ -1105,7 +1094,6 @@ fn handle_privmsg(
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            shortenings: Vec::new(),
         };
         state.add_mention_to_buffer(mention_msg);
     }
@@ -1204,7 +1192,6 @@ fn handle_notice(
             log_msg_id: None,
             log_ref_id: None,
             tags,
-            shortenings: Vec::new(),
         },
     );
 }
@@ -1389,7 +1376,6 @@ fn handle_join(
             log_msg_id: None,
             log_ref_id: None,
             tags,
-            shortenings: Vec::new(),
         },
     );
 }
@@ -1482,7 +1468,6 @@ fn handle_account(
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: tags.clone(),
-                shortenings: Vec::new(),
             },
         );
     }
@@ -1605,7 +1590,6 @@ fn handle_chghost(
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: tags.clone(),
-                shortenings: Vec::new(),
             },
         );
     }
@@ -1681,7 +1665,6 @@ fn handle_part(
                 log_msg_id: None,
                 log_ref_id: None,
                 tags,
-                shortenings: Vec::new(),
             },
         );
     }
@@ -1785,7 +1768,6 @@ fn handle_quit(
                     Some(primary_msg_id.clone())
                 },
                 tags: tags.clone(),
-                shortenings: Vec::new(),
             },
         );
     }
@@ -1956,7 +1938,6 @@ fn handle_nick_change(
                     Some(primary_msg_id.clone())
                 },
                 tags: tags.clone(),
-                shortenings: Vec::new(),
             },
         );
     }
@@ -2031,7 +2012,6 @@ fn handle_kick(
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: tg,
-                shortenings: Vec::new(),
             }
         };
 
@@ -2085,7 +2065,6 @@ fn handle_kick(
                 log_msg_id: None,
                 log_ref_id: None,
                 tags,
-                shortenings: Vec::new(),
             },
         );
     }
@@ -2128,7 +2107,6 @@ fn handle_topic(
                 log_msg_id: None,
                 log_ref_id: None,
                 tags,
-                shortenings: Vec::new(),
             },
         );
     }
@@ -2196,7 +2174,6 @@ fn handle_mode(
                 log_msg_id: None,
                 log_ref_id: None,
                 tags,
-                shortenings: Vec::new(),
             },
         );
     } else {
@@ -2221,7 +2198,6 @@ fn handle_mode(
                 log_msg_id: None,
                 log_ref_id: None,
                 tags,
-                shortenings: Vec::new(),
             },
         );
     }
@@ -2505,7 +2481,6 @@ fn handle_invite(
                 log_msg_id: None,
                 log_ref_id: None,
                 tags,
-                shortenings: Vec::new(),
             },
         );
     } else {
@@ -2528,7 +2503,6 @@ fn handle_invite(
                     log_msg_id: None,
                     log_ref_id: None,
                     tags,
-                    shortenings: Vec::new(),
                 },
             );
         }
@@ -3168,7 +3142,6 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
                     event_key: None,
                     event_params: None, log_msg_id: None, log_ref_id: None,
                     tags: None,
-                    shortenings: Vec::new(),
                 },
             );
         }
@@ -3227,7 +3200,6 @@ pub fn emit(state: &mut AppState, buffer_id: &str, text: &str) {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            shortenings: Vec::new(),
         },
     );
 }
@@ -3255,7 +3227,6 @@ fn emit_event(
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            shortenings: Vec::new(),
         },
     );
 }
@@ -3848,7 +3819,6 @@ fn emit_e2e_debug(
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            shortenings: Vec::new(),
         },
     );
 }
@@ -3876,7 +3846,6 @@ fn emit_e2e_message(
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            shortenings: Vec::new(),
         },
     );
 }
@@ -4070,7 +4039,6 @@ fn surface_pending_trust_changes(
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: None,
-                shortenings: Vec::new(),
             },
         );
     }
@@ -4126,7 +4094,6 @@ fn surface_pending_accept_requests(
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: None,
-                shortenings: Vec::new(),
             },
         );
     }

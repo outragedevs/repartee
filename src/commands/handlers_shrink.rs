@@ -3,22 +3,21 @@
 //! Output lands in the current buffer as a local event line:
 //!
 //!   • success: `Shortened: <original> → https://shr.al/<slug>`
+//!   • cached:  `Shortened: <original> → https://shr.al/<slug> (cached)`
 //!   • failure: `Shrink failed: <reason>`
 //!
-//! Asynchronous: the slash-command handler kicks off a tokio task and
-//! returns immediately; the result is delivered back through the
-//! shared `shrink_tx` channel and handled by `App::apply_shrink_result`
-//! (manual variant). Same pipeline incoming/outgoing flows use, so
-//! shutdown ordering / channel sizing only have to be thought about
-//! in one place.
+//! The handler is synchronous (returns immediately); the result
+//! reaches the buffer via the shared `shrink_deliver_tx` channel,
+//! which the main loop drains and routes through
+//! `App::apply_shrink_deliver` (`Manual` variant).
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use super::helpers::add_local_event;
 use super::types::{C_ERR, C_RST};
-use crate::app::{App, ShrinkResult};
-use crate::app::shrink::ManualShrinkOutput;
+use crate::app::App;
+use crate::app::shrink::ShrinkDeliver;
 
 pub(crate) fn cmd_shrink(app: &mut App, args: &[String]) {
     if args.is_empty() {
@@ -50,17 +49,15 @@ pub(crate) fn cmd_shrink(app: &mut App, args: &[String]) {
         return;
     };
 
-    // Use the outgoing timeout — `/shrink` is a manual outgoing
-    // action, same UX expectation as typing a URL in a message.
     let timeout = Duration::from_millis(app.config.shrink.outgoing_timeout_ms);
     let cache = Arc::clone(&app.shrink_cache);
-    let tx = app.shrink_tx.clone();
+    let tx = app.shrink_deliver_tx.clone();
 
     add_local_event(app, &format!("Shortening {url}…"));
 
     tokio::spawn(async move {
-        // Check cache first — `/shrink` of a recently-seen URL should
-        // return instantly without an API round-trip.
+        // Cache hit returns instantly without an API round-trip;
+        // marker `(cached)` so the user can tell at a glance.
         let cached = cache.lock().get(&url);
         let display = match cached {
             Some(sh) => format!("Shortened: {} → {} (cached)", sh.original, sh.shortened),
@@ -73,12 +70,9 @@ pub(crate) fn cmd_shrink(app: &mut App, args: &[String]) {
             },
         };
         let _ = tx
-            .send(ShrinkResult {
+            .send(ShrinkDeliver::Manual {
                 buffer_id: active_id,
-                message_id: 0,
-                shortenings: Vec::new(),
-                outgoing_send: None,
-                manual: Some(ManualShrinkOutput { display }),
+                display,
             })
             .await;
     });

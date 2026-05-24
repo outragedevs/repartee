@@ -820,6 +820,24 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                 }
             }
 
+            // Sync shrink-incoming flags into state so the
+            // `add_message_with_activity` decision matches the
+            // freshly-set config without restart. The shrink_client
+            // and worker queue are bound at startup — flipping
+            // `shrink.enabled` from off to on at runtime won't
+            // materialise a client; users get a restart-required
+            // notice from /set already if they hit that case.
+            if path == "shrink.enabled"
+                || path == "shrink.incoming_enabled"
+            {
+                app.state.shrink_incoming_active = app.config.shrink.enabled
+                    && app.config.shrink.incoming_enabled
+                    && app.shrink_client.is_some();
+            }
+            if path == "shrink.min_url_length" {
+                app.state.shrink_min_url_length = app.config.shrink.min_url_length;
+            }
+
             // Sync DCC runtime state from config
             if path.starts_with("dcc.") {
                 match path.as_str() {

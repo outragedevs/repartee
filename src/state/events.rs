@@ -18,12 +18,14 @@ impl AppState {
             flood_exemptions: Vec::new(),
             ignores: Vec::new(),
             log_tx: None,
+            shrink_incoming_tx: None,
+            shrink_incoming_active: false,
+            shrink_min_url_length: 50,
             log_exclude_types: Vec::new(),
             scrollback_limit: 2000,
             pending_web_events: Vec::new(),
             pending_e2e_sends: Vec::new(),
             pending_userhost_requests: Vec::new(),
-            pending_shrink_dispatch: Vec::new(),
             nick_color_sat: 0.65,
             nick_color_lit: 0.65,
             e2e_manager: None,
@@ -233,24 +235,49 @@ impl AppState {
         message: Message,
         level: ActivityLevel,
     ) {
-        // Only the live incoming-chat path reaches here (handle_privmsg
-        // / handle_action / handle_notice in irc/events.rs); backlog
-        // loaders and outgoing echo bypass it. Enqueue regardless of
-        // text content — App filters on enabled flags and URL length
-        // before spawning, and the queue is drained on every loop tick.
-        if let Some(ref nick) = message.nick
-            && !nick.is_empty()
-            && (message.message_type == MessageType::Message
-                || message.message_type == MessageType::Action
-                || message.message_type == MessageType::Notice)
+        // Incoming shrink: if the message text has URL(s) above the
+        // configured threshold and shrink-incoming is wired up, hand
+        // the message off to the background worker. The worker
+        // substitutes the URLs (with `[host]` hint), then posts a
+        // `ShrinkDeliver::Incoming` back to the main loop which
+        // re-calls this same method (with `shrink_incoming_tx` set
+        // to `None` on the substituted-message Message in the
+        // deliver path) so we don't loop forever.
+        if self.shrink_incoming_active
+            && let Some(ref tx) = self.shrink_incoming_tx
+            && !crate::shrink::find_long_urls(
+                &message.text,
+                self.shrink_min_url_length as usize,
+            )
+            .is_empty()
         {
-            self.pending_shrink_dispatch
-                .push(crate::state::PendingShrinkDispatch {
-                    buffer_id: buffer_id.to_string(),
-                    message_id: message.id,
-                    text: message.text.clone(),
-                });
+            let pending = crate::app::shrink::PendingIncoming {
+                buffer_id: buffer_id.to_string(),
+                message,
+                activity_level: level,
+                // `push_to_mentions` is unused on the deferred path
+                // — the mentions buffer push is run inline by the
+                // call site (handle_privmsg) with original text;
+                // chat-buffer text uses the shortened form.
+                push_to_mentions: false,
+            };
+            if let Err(e) = tx.try_send(pending) {
+                tracing::warn!(error = %e, "shrink: incoming dispatch queue full");
+            }
+            return;
         }
+        self.add_message_with_activity_unshrunk(buffer_id, message, level);
+    }
+
+    /// Same as `add_message_with_activity`, but bypasses the shrink
+    /// dispatch. Used by the deferred deliver path which has already
+    /// substituted URLs and would otherwise loop forever.
+    pub fn add_message_with_activity_unshrunk(
+        &mut self,
+        buffer_id: &str,
+        message: Message,
+        level: ActivityLevel,
+    ) {
         self.maybe_log(buffer_id, &message);
         // Queue web events for broadcast.
         let wire = crate::web::snapshot::message_to_wire(&message, self.web_preview_extractor.as_deref());
@@ -573,7 +600,6 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            shortenings: Vec::new(),
         }
     }
 
@@ -631,7 +657,6 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            shortenings: Vec::new(),
         };
         state.add_message("libera/#rust", event_msg);
         assert!(
@@ -666,7 +691,6 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            shortenings: Vec::new(),
         };
         state.add_message("libera/#rust", event_msg2);
         assert_eq!(
@@ -845,7 +869,6 @@ mod tests {
             log_msg_id: Some(primary_id.clone()),
             log_ref_id: None,
             tags: None,
-            shortenings: Vec::new(),
         };
         state.add_message("libera/#rust", msg1);
 
@@ -863,7 +886,6 @@ mod tests {
             log_msg_id: None,
             log_ref_id: Some(primary_id.clone()),
             tags: None,
-            shortenings: Vec::new(),
         };
         state.add_message("libera/#linux", msg2);
 

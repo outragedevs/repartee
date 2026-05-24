@@ -231,7 +231,6 @@ fn process_netsplit_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: None,
-                shortenings: Vec::new(),
             },
         );
     }
@@ -308,7 +307,6 @@ fn process_netjoin_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo)
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: None,
-                shortenings: Vec::new(),
             },
         );
     }

@@ -1,23 +1,44 @@
 //! Glue between the shrink module (`src/shrink/`) and the `App` event
-//! loop. Two responsibilities:
+//! loop.
 //!
-//! 1. `App::dispatch_shrink_for_incoming` — kick off background shrink
-//!    tasks for newly-arrived chat messages whose text contains URLs
-//!    above the threshold. Cache hits short-circuit; misses spawn an
-//!    HTTP call.
-//! 2. `App::dispatch_shrink_for_outgoing` — same idea for outgoing
-//!    messages, but the task also writes the substituted text to the
-//!    IRC sender so other clients see the short URL.
-//! 3. `App::apply_shrink_result` — main-loop arm handler that merges
-//!    the result into `Message.shortenings` and broadcasts a
-//!    `WebEvent::MessageShortened` to web clients.
+//! Design contract (matches the user-facing model in
+//! `docs/commands/shrink.md`):
 //!
-//! Out-of-order send risk: outgoing tasks complete in shrink-latency
-//! order, not user-submission order. Back-to-back outgoing messages
-//! containing URLs of wildly different shrink latencies CAN arrive
-//! out of order on the IRC wire. In practice this is rare (most
-//! messages have ≤1 URL, most URLs hit cache after the first), so
-//! we trade strict ordering for the simplicity of spawn-per-send.
+//! - **Outgoing**: when the user presses Enter on a message that
+//!   contains URLs over the threshold, the entire downstream pipeline
+//!   (E2E encrypt, IRC send, local echo, log) waits for shrink to
+//!   complete or time out — **shrink is the FIRST step**, not an
+//!   after-the-fact decoration. By the time anyone (us, server, peers)
+//!   sees the bytes, they're already the shortened form (or the
+//!   original if shrink errored / timed out).
+//!
+//! - **Incoming**: shrink intercepts AFTER everything else in the
+//!   PRIVMSG handler (decrypt, ignore checks, mention detection,
+//!   highlight flagging) and BEFORE the message is added to the
+//!   buffer. Display, web broadcast, and SQLite log all see the
+//!   shortened text. This makes echo-message and E2E free of any
+//!   special-casing: their wire/cipher already carries shortened
+//!   plaintext for outgoing, and incoming shrinks the plaintext we
+//!   already extracted via the normal pipeline.
+//!
+//! The user-perceived latency budget is `shrink.{outgoing,incoming}_timeout_ms`
+//! (default 2 s each). Cache hits short-circuit synchronously inside
+//! the worker; misses are HTTP round-trips.
+//!
+//! Two channels drive this:
+//!
+//! - `shrink_outgoing_tx` — `handle_plain_message` enqueues
+//!   `PendingOutgoing`. A dedicated tokio task pulls, awaits shrink,
+//!   then posts a `ShrinkDeliver::Outgoing` back into
+//!   `shrink_deliver_rx`. Sequential per worker (one outgoing
+//!   message at a time) so user-perceived order is preserved.
+//! - `shrink_incoming_tx` — same shape for `PendingIncoming` from
+//!   `handle_privmsg` / `handle_notice` / etc. Separate worker so a
+//!   busy channel can't starve our outgoing.
+//!
+//! `apply_shrink_deliver` runs in the main loop and is the only path
+//! that mutates `App` state (state.add_message_with_activity, IRC
+//! sender, e2e encrypt). Workers stay pure-async.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,245 +47,248 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
 use super::App;
-use crate::shrink::{ShrinkCache, ShrinkClient, UrlShortening, find_long_urls};
-use crate::web::protocol::WebEvent;
+use crate::shrink::{ShrinkCache, ShrinkClient, UrlShortening, find_long_urls, host_of};
+use crate::state::buffer::{ActivityLevel, BufferType, Message};
 
-/// Posted by a background shrink task; consumed by the main event loop.
-/// Two flavours share the type so the loop only has one arm to drain:
-///
-/// - `shortenings` non-empty + `message_id != 0` → merge into the
-///   already-buffered Message (incoming live / outgoing). For outgoing
-///   the `outgoing_send` field carries the IRC sender info needed to
-///   push the substituted text on the wire after shrinking completes.
-/// - `manual` set → add a `Shortened: …` / `Shrink failed: …` event
-///   line to `buffer_id`. The `/shrink` slash command takes this path
-///   because it just wants user-visible output, not a substitution
-///   into someone else's chat message.
+/// Posted by either shrink worker (outgoing / incoming) and consumed
+/// by the main event loop. Carries the final substituted text plus
+/// whatever the loop needs to deliver it to the user / server / etc.
 #[derive(Debug)]
-pub struct ShrinkResult {
-    pub buffer_id: String,
-    pub message_id: u64,
-    pub shortenings: Vec<UrlShortening>,
-    pub outgoing_send: Option<OutgoingSend>,
-    pub manual: Option<ManualShrinkOutput>,
+pub enum ShrinkDeliver {
+    /// User-pressed-Enter outgoing message that has finished its
+    /// shrink pass. The loop now runs the full
+    /// "e2e encrypt → IRC send → local echo" pipeline with
+    /// `substituted_text`.
+    Outgoing(OutgoingDeliver),
+    /// Live incoming PRIVMSG / ACTION / NOTICE that has finished its
+    /// shrink pass. The loop calls
+    /// `state.add_message_with_activity(buffer_id, message,
+    /// activity_level)` (with `message.text` already substituted) and
+    /// runs the secondary side-effects (mention buffer push).
+    Incoming(IncomingDeliver),
+    /// `/shrink <url>` manual output line. The loop just appends a
+    /// local event with `display` to the buffer.
+    Manual {
+        buffer_id: String,
+        display: String,
+    },
 }
 
 #[derive(Debug)]
-pub struct OutgoingSend {
+pub struct OutgoingDeliver {
     pub conn_id: String,
-    pub target: String,
+    pub buffer_id: String,
+    pub buffer_name: String,
+    pub buffer_type: BufferType,
+    /// Post-substitution text (or the original on timeout / error).
     pub substituted_text: String,
 }
 
 #[derive(Debug)]
-pub struct ManualShrinkOutput {
-    /// Already-formatted line to add as a local event in `buffer_id`.
-    pub display: String,
+pub struct IncomingDeliver {
+    pub buffer_id: String,
+    /// Message with `text` already substituted (or original on
+    /// timeout / error).
+    pub message: Message,
+    pub activity_level: ActivityLevel,
+    /// `true` when the original `handle_privmsg` would have pushed
+    /// the message into the `_mentions` buffer. We carry the flag so
+    /// the deferred deliver can replicate that side-effect with the
+    /// shortened text intact.
+    pub push_to_mentions: bool,
 }
 
-impl App {
-    /// Drain `state.pending_shrink_dispatch`, kicking off background
-    /// shortenings for each enqueued live chat message. Called from
-    /// the main event loop right after the IRC dispatcher runs (same
-    /// rhythm as `drain_pending_web_events`).
-    pub(crate) fn drain_pending_shrink_dispatch(&mut self) {
-        let pending = std::mem::take(&mut self.state.pending_shrink_dispatch);
-        for d in pending {
-            self.dispatch_shrink_for_incoming(d.buffer_id, d.message_id, &d.text);
-        }
-    }
+/// `handle_plain_message` posts this when the message qualifies for
+/// outgoing shrink. The worker takes ownership, awaits shrink,
+/// substitutes, then posts an `OutgoingDeliver` to the main loop.
+#[derive(Debug)]
+pub struct PendingOutgoing {
+    pub conn_id: String,
+    pub buffer_id: String,
+    pub buffer_name: String,
+    pub buffer_type: BufferType,
+    pub original_text: String,
+}
 
-    /// Kick off background shrinking for an incoming live chat message.
-    /// No-op if the feature is disabled, no client is configured, or
-    /// the text has no URLs above the threshold.
-    pub(crate) fn dispatch_shrink_for_incoming(
-        &self,
-        buffer_id: String,
-        message_id: u64,
-        text: &str,
-    ) {
-        let cfg = &self.config.shrink;
-        if !cfg.enabled || !cfg.incoming_enabled {
-            return;
-        }
-        let Some(ref client) = self.shrink_client else { return };
-        self.spawn_shrink(
-            buffer_id,
-            message_id,
-            text,
-            cfg.min_url_length as usize,
-            Duration::from_millis(cfg.incoming_timeout_ms),
-            client.clone(),
-            None,
-        );
-    }
+/// `handle_privmsg` / `handle_action` / `handle_notice` posts this
+/// when the message qualifies for incoming shrink. The worker takes
+/// ownership, awaits shrink, substitutes (with `[host]` hint), then
+/// posts an `IncomingDeliver` to the main loop.
+#[derive(Debug)]
+pub struct PendingIncoming {
+    pub buffer_id: String,
+    pub message: Message,
+    pub activity_level: ActivityLevel,
+    pub push_to_mentions: bool,
+}
 
-    /// Kick off background shrinking for an outgoing message; the
-    /// spawned task additionally calls `irc::Sender::send_privmsg`
-    /// with the substituted text once shrinking completes (or with
-    /// the original text on timeout).
-    pub(crate) fn dispatch_shrink_for_outgoing(
-        &self,
-        buffer_id: String,
-        message_id: u64,
-        conn_id: String,
-        target: String,
-        text: &str,
-    ) -> bool {
-        let cfg = &self.config.shrink;
-        if !cfg.enabled || !cfg.outgoing_enabled {
-            return false;
-        }
-        let Some(ref client) = self.shrink_client else { return false };
-        let urls = find_long_urls(text, cfg.min_url_length as usize);
-        if urls.is_empty() {
-            return false;
-        }
-        self.spawn_shrink(
-            buffer_id,
-            message_id,
-            text,
-            cfg.min_url_length as usize,
-            Duration::from_millis(cfg.outgoing_timeout_ms),
-            client.clone(),
-            Some((conn_id, target, text.to_string())),
-        );
-        true
-    }
+/// All the channels + shared state the shrink workers need. Built
+/// once in `App::new` and kept alive for the App lifetime.
+pub(crate) struct ShrinkRuntime {
+    pub client: Option<ShrinkClient>,
+    pub cache: Arc<Mutex<ShrinkCache>>,
+    pub outgoing_tx: mpsc::Sender<PendingOutgoing>,
+    pub incoming_tx: mpsc::Sender<PendingIncoming>,
+    pub deliver_tx: mpsc::Sender<ShrinkDeliver>,
+    pub deliver_rx: mpsc::Receiver<ShrinkDeliver>,
+}
 
-    fn spawn_shrink(
-        &self,
-        buffer_id: String,
-        message_id: u64,
-        text: &str,
-        min_length: usize,
-        timeout: Duration,
-        client: ShrinkClient,
-        outgoing: Option<(String, String, String)>,
-    ) {
-        let urls = find_long_urls(text, min_length);
-        if urls.is_empty() {
-            // Outgoing callers already filtered; this path only
-            // matters for incoming, where a no-URL message just
-            // skips the spawn entirely.
-            return;
-        }
-        let tx = self.shrink_tx.clone();
-        let cache = Arc::clone(&self.shrink_cache);
-        tokio::spawn(async move {
-            let shortenings = resolve_shortenings(&client, &cache, urls, timeout).await;
-            let outgoing_send = outgoing.map(|(conn_id, target, original_text)| {
-                let substituted_text = apply_substitutions(&original_text, &shortenings);
-                OutgoingSend {
-                    conn_id,
-                    target,
-                    substituted_text,
-                }
-            });
-            if shortenings.is_empty() && outgoing_send.is_none() {
-                return;
-            }
-            let _ = tx
-                .send(ShrinkResult {
-                    buffer_id,
-                    message_id,
-                    shortenings,
-                    outgoing_send,
-                    manual: None,
-                })
-                .await;
-        });
-    }
+impl ShrinkRuntime {
+    /// Build the runtime and spawn the two worker tasks. Returns the
+    /// pieces App needs to store, plus the deliver receiver to wire
+    /// into the main `tokio::select!`.
+    pub fn build(cfg: &crate::config::ShrinkConfig) -> Self {
+        let client = if cfg.enabled && !cfg.api_key.is_empty() {
+            Some(ShrinkClient::new(cfg.api_url.clone(), cfg.api_key.clone()))
+        } else {
+            None
+        };
+        let cache = Arc::new(Mutex::new(ShrinkCache::new(cfg.cache_max_entries as usize)));
 
-    /// Drain one shrink result from the main-loop arm: update the
-    /// in-memory message, broadcast to web clients, and (for the
-    /// outgoing variant) hand the substituted text to the IRC sender.
-    pub(crate) fn apply_shrink_result(&mut self, result: ShrinkResult) {
-        // Manual `/shrink` output path: bypass everything below and
-        // just print the result as a local event in the target buffer.
-        if let Some(manual) = result.manual {
-            // The buffer might have been closed while the request was
-            // in flight; silently drop the output rather than crash.
-            if !self.state.buffers.contains_key(&result.buffer_id) {
-                return;
-            }
-            let prior = self.state.active_buffer_id.clone();
-            self.state.active_buffer_id = Some(result.buffer_id.clone());
-            crate::commands::helpers::add_local_event(self, &manual.display);
-            self.state.active_buffer_id = prior;
-            return;
-        }
+        let (outgoing_tx, outgoing_rx) = mpsc::channel::<PendingOutgoing>(256);
+        let (incoming_tx, incoming_rx) = mpsc::channel::<PendingIncoming>(1024);
+        let (deliver_tx, deliver_rx) = mpsc::channel::<ShrinkDeliver>(1024);
 
-        // Send to IRC FIRST so other clients see the short URL with
-        // the smallest possible additional delay; only on send failure
-        // do we leave the local copy untouched (the user already sees
-        // their original message in the buffer).
-        if let Some(ref out) = result.outgoing_send
-            && let Some(handle) = self.irc_handles.get(&out.conn_id)
-            && handle
-                .sender
-                .send_privmsg(&out.target, &out.substituted_text)
-                .is_err()
-        {
-            tracing::warn!(
-                conn_id = %out.conn_id,
-                target = %out.target,
-                "shrink: IRC send failed for substituted text"
+        // Spawn workers. Each owns its own clone of the client (Arc
+        // internally) + cache (Arc<Mutex<>>) + deliver sender.
+        if let Some(ref c) = client {
+            spawn_outgoing_worker(
+                outgoing_rx,
+                c.clone(),
+                Arc::clone(&cache),
+                deliver_tx.clone(),
+                Duration::from_millis(cfg.outgoing_timeout_ms),
+                cfg.min_url_length as usize,
             );
+            spawn_incoming_worker(
+                incoming_rx,
+                c.clone(),
+                Arc::clone(&cache),
+                deliver_tx.clone(),
+                Duration::from_millis(cfg.incoming_timeout_ms),
+                cfg.min_url_length as usize,
+            );
+        } else {
+            // Shrink disabled: drain the queues to /dev/null so
+            // `try_send` from the IRC / input paths doesn't backpressure.
+            spawn_drain(outgoing_rx);
+            spawn_drain(incoming_rx);
         }
 
-        // Merge into the in-memory message. Order-preserving so the
-        // renderer applies substitutions in the same sequence as the
-        // URLs appeared in `text`.
-        let Some(buf) = self.state.buffers.get_mut(&result.buffer_id) else {
-            return;
-        };
-        let Some(msg) = buf
-            .messages
-            .iter_mut()
-            .find(|m| m.id == result.message_id)
-        else {
-            return;
-        };
-        for sh in &result.shortenings {
-            if let Some(existing) = msg
-                .shortenings
-                .iter_mut()
-                .find(|s| s.original == sh.original)
-            {
-                existing.shortened = sh.shortened.clone();
-            } else {
-                msg.shortenings.push(sh.clone());
-            }
+        Self {
+            client,
+            cache,
+            outgoing_tx,
+            incoming_tx,
+            deliver_tx,
+            deliver_rx,
         }
-
-        // Broadcast to web clients. Wire form mirrors the in-memory
-        // shortening 1:1; the renderer recomputes host hints client-
-        // side from `original`.
-        let wire = msg
-            .shortenings
-            .iter()
-            .map(crate::web::snapshot::shortening_to_wire)
-            .collect();
-        self.broadcast_web(WebEvent::MessageShortened {
-            buffer_id: result.buffer_id,
-            message_id: result.message_id,
-            shortenings: wire,
-        });
     }
+}
+
+fn spawn_drain<T: Send + 'static>(mut rx: mpsc::Receiver<T>) {
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+}
+
+fn spawn_outgoing_worker(
+    mut rx: mpsc::Receiver<PendingOutgoing>,
+    client: ShrinkClient,
+    cache: Arc<Mutex<ShrinkCache>>,
+    deliver: mpsc::Sender<ShrinkDeliver>,
+    timeout: Duration,
+    min_length: usize,
+) {
+    tokio::spawn(async move {
+        // Process one at a time so outgoing IRC sends keep their
+        // user-submitted order. Cache hits keep this from being slow.
+        while let Some(pending) = rx.recv().await {
+            let substituted_text = shrink_and_substitute(
+                &client,
+                &cache,
+                &pending.original_text,
+                timeout,
+                min_length,
+                false, // outgoing: no [host] hint
+            )
+            .await;
+            let _ = deliver
+                .send(ShrinkDeliver::Outgoing(OutgoingDeliver {
+                    conn_id: pending.conn_id,
+                    buffer_id: pending.buffer_id,
+                    buffer_name: pending.buffer_name,
+                    buffer_type: pending.buffer_type,
+                    substituted_text,
+                }))
+                .await;
+        }
+    });
+}
+
+fn spawn_incoming_worker(
+    mut rx: mpsc::Receiver<PendingIncoming>,
+    client: ShrinkClient,
+    cache: Arc<Mutex<ShrinkCache>>,
+    deliver: mpsc::Sender<ShrinkDeliver>,
+    timeout: Duration,
+    min_length: usize,
+) {
+    tokio::spawn(async move {
+        // Sequential within the worker — keeps per-channel order
+        // intact for the typical case. A pathological busy channel
+        // with many unique long URLs and a slow API would queue up
+        // behind the slowest shortenings; that's an acceptable
+        // trade-off (and `min_url_length` keeps the candidate set
+        // small).
+        while let Some(mut pending) = rx.recv().await {
+            let substituted_text = shrink_and_substitute(
+                &client,
+                &cache,
+                &pending.message.text,
+                timeout,
+                min_length,
+                true, // incoming: add [host] hint
+            )
+            .await;
+            pending.message.text = substituted_text;
+            let _ = deliver
+                .send(ShrinkDeliver::Incoming(IncomingDeliver {
+                    buffer_id: pending.buffer_id,
+                    message: pending.message,
+                    activity_level: pending.activity_level,
+                    push_to_mentions: pending.push_to_mentions,
+                }))
+                .await;
+        }
+    });
+}
+
+async fn shrink_and_substitute(
+    client: &ShrinkClient,
+    cache: &Mutex<ShrinkCache>,
+    text: &str,
+    timeout: Duration,
+    min_length: usize,
+    add_host_hint: bool,
+) -> String {
+    let urls = find_long_urls(text, min_length);
+    if urls.is_empty() {
+        return text.to_string();
+    }
+    let shortenings = resolve_shortenings(client, cache, urls, timeout).await;
+    if shortenings.is_empty() {
+        return text.to_string();
+    }
+    apply_substitutions(text, &shortenings, add_host_hint)
 }
 
 /// Resolve every URL: cache hit returns the stored shortening; miss
-/// kicks off a parallel `client.shorten` call. Cache hits + misses
-/// are returned in input order so callers can rebuild substituted
-/// text deterministically.
+/// fires a parallel HTTP call. Returns shortenings in input order.
 async fn resolve_shortenings(
     client: &ShrinkClient,
     cache: &Mutex<ShrinkCache>,
     urls: Vec<String>,
     timeout: Duration,
 ) -> Vec<UrlShortening> {
-    // Partition into hits (resolved immediately) and misses (need HTTP).
     let mut hits: Vec<(usize, UrlShortening)> = Vec::new();
     let mut misses: Vec<(usize, String)> = Vec::new();
     {
@@ -278,11 +302,7 @@ async fn resolve_shortenings(
         }
     }
 
-    // Fire all misses in parallel — `join_all` runs concurrently
-    // because each `shorten` future is independent.
-    let miss_futures = misses
-        .iter()
-        .map(|(_, url)| client.shorten(url, timeout));
+    let miss_futures = misses.iter().map(|(_, url)| client.shorten(url, timeout));
     let miss_results = futures::future::join_all(miss_futures).await;
 
     let mut resolved: Vec<(usize, UrlShortening)> = hits;
@@ -299,45 +319,177 @@ async fn resolve_shortenings(
     resolved.into_iter().map(|(_, sh)| sh).collect()
 }
 
-/// Replace every shortening's `original` with `shortened` in `text`.
-/// Single-pass per URL via `str::replace` — fine for the typical
-/// 1–5-URL message; if a hot path ever appears, switch to a single
-/// regex pass.
-fn apply_substitutions(text: &str, shortenings: &[UrlShortening]) -> String {
+/// Substitute every `original` with `shortened` in `text`. Incoming
+/// messages (`add_host_hint = true`) append `[host]` after each
+/// shortened URL so the reader still sees the destination. Outgoing
+/// messages skip the hint per spec (the sender already knew it).
+fn apply_substitutions(text: &str, shortenings: &[UrlShortening], add_host_hint: bool) -> String {
     let mut out = text.to_string();
     for sh in shortenings {
-        out = out.replace(&sh.original, &sh.shortened);
+        let replacement = if add_host_hint {
+            let host = host_of(&sh.original).unwrap_or_default();
+            if host.is_empty() {
+                sh.shortened.clone()
+            } else {
+                format!("{} [{}]", sh.shortened, host)
+            }
+        } else {
+            sh.shortened.clone()
+        };
+        out = out.replace(&sh.original, &replacement);
     }
     out
 }
 
-/// Build a `(ShrinkClient option, cache Arc, channel pair)` for
-/// `App::new`. Splitting this out keeps the constructor concise and
-/// makes the disabled-feature path trivial to spot.
-pub(crate) fn build_runtime(
-    cfg: &crate::config::ShrinkConfig,
-) -> (
-    Option<ShrinkClient>,
-    Arc<Mutex<ShrinkCache>>,
-    (mpsc::Sender<ShrinkResult>, mpsc::Receiver<ShrinkResult>),
-) {
-    let client = if cfg.enabled && !cfg.api_key.is_empty() {
-        Some(ShrinkClient::new(cfg.api_url.clone(), cfg.api_key.clone()))
-    } else {
-        None
-    };
-    let cache = Arc::new(Mutex::new(ShrinkCache::new(cfg.cache_max_entries as usize)));
-    let channel = mpsc::channel(256);
-    (client, cache, channel)
+impl App {
+    /// Drain one shrink-deliver action from the main-loop arm.
+    pub(crate) fn apply_shrink_deliver(&mut self, deliver: ShrinkDeliver) {
+        match deliver {
+            ShrinkDeliver::Manual { buffer_id, display } => {
+                if !self.state.buffers.contains_key(&buffer_id) {
+                    return;
+                }
+                let prior = self.state.active_buffer_id.clone();
+                self.state.active_buffer_id = Some(buffer_id);
+                crate::commands::helpers::add_local_event(self, &display);
+                self.state.active_buffer_id = prior;
+            }
+            ShrinkDeliver::Outgoing(out) => {
+                self.send_outgoing_substituted(&out);
+            }
+            ShrinkDeliver::Incoming(inc) => {
+                // Use the `_unshrunk` variant — text is already
+                // substituted, taking the shrink path again would
+                // loop forever (worker would push back to the
+                // worker queue).
+                self.state.add_message_with_activity_unshrunk(
+                    &inc.buffer_id,
+                    inc.message,
+                    inc.activity_level,
+                );
+                // `push_to_mentions` intentionally unused on the
+                // deferred path — the caller (handle_privmsg) ran
+                // the inline mention-buffer push with the original
+                // text. Documented trade-off: mentions buffer shows
+                // the original URL; chat buffer shows shortened.
+            }
+        }
+    }
+
+    /// Final stage of the outgoing pipeline once shrink has returned.
+    /// E2E re-encrypts the (possibly substituted) plaintext so peers
+    /// receive the shortened form inside the ciphertext, and the
+    /// local echo / IRC send mirror `handle_plain_message`'s
+    /// non-shrink path with the now-shrunken text.
+    fn send_outgoing_substituted(&mut self, out: &OutgoingDeliver) {
+        if !self.irc_handles.contains_key(&out.conn_id) {
+            return;
+        }
+        let Some((wire_lines, plain_echo)) = self.e2e_encrypt_or_passthrough(
+            &out.buffer_name,
+            &out.buffer_type,
+            &out.substituted_text,
+        ) else {
+            return;
+        };
+        let echo_message_enabled = self
+            .state
+            .connections
+            .get(&out.conn_id)
+            .is_some_and(|c| c.enabled_caps.contains("echo-message"));
+        let is_e2e_encrypted = wire_lines
+            .first()
+            .is_some_and(|w| w.starts_with("+RPE2E01"));
+        // Re-borrow the sender for each wire — `send_privmsg` takes
+        // `&self`, so this avoids any clone/ownership friction on
+        // `IrcHandle`.
+        for wire in wire_lines {
+            let Some(handle) = self.irc_handles.get(&out.conn_id) else {
+                return;
+            };
+            if handle.sender.send_privmsg(&out.buffer_name, &wire).is_err() {
+                tracing::warn!(
+                    conn_id = %out.conn_id,
+                    target = %out.buffer_name,
+                    "shrink: deferred outgoing send failed"
+                );
+                return;
+            }
+        }
+        if !self.state.pending_e2e_sends.is_empty() {
+            self.drain_pending_e2e_sends();
+        }
+        if !echo_message_enabled || is_e2e_encrypted {
+            let nick = self
+                .state
+                .connections
+                .get(&out.conn_id)
+                .map(|c| c.nick.clone())
+                .unwrap_or_default();
+            let own_mode = self.state.nick_prefix(&out.buffer_id, &nick);
+            let local_chunks = if plain_echo.len() <= crate::irc::MESSAGE_MAX_BYTES {
+                vec![plain_echo]
+            } else {
+                crate::irc::split_irc_message(&plain_echo, crate::irc::MESSAGE_MAX_BYTES)
+            };
+            for chunk in local_chunks {
+                let id = self.state.next_message_id();
+                self.state.add_message(
+                    &out.buffer_id,
+                    Message {
+                        id,
+                        timestamp: chrono::Utc::now(),
+                        message_type: crate::state::buffer::MessageType::Message,
+                        nick: Some(nick.clone()),
+                        nick_mode: own_mode.map(|c| c.to_string()),
+                        text: chunk,
+                        highlight: false,
+                        event_key: None,
+                        event_params: None,
+                        log_msg_id: None,
+                        log_ref_id: None,
+                        tags: None,
+                    },
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shrink::UrlShortening;
 
     #[test]
-    fn apply_substitutions_replaces_each() {
-        let text = "see https://a.com/long and https://b.com/long";
+    fn apply_substitutions_outgoing_no_host() {
+        let text = "see https://a.com/long-url";
+        let shorts = vec![UrlShortening {
+            original: "https://a.com/long-url".into(),
+            shortened: "https://shr.al/1".into(),
+        }];
+        assert_eq!(
+            apply_substitutions(text, &shorts, false),
+            "see https://shr.al/1"
+        );
+    }
+
+    #[test]
+    fn apply_substitutions_incoming_with_host() {
+        let text = "see https://sklepinsekt.pl/p/foo for prusaki";
+        let shorts = vec![UrlShortening {
+            original: "https://sklepinsekt.pl/p/foo".into(),
+            shortened: "https://shr.al/1".into(),
+        }];
+        assert_eq!(
+            apply_substitutions(text, &shorts, true),
+            "see https://shr.al/1 [sklepinsekt.pl] for prusaki"
+        );
+    }
+
+    #[test]
+    fn apply_substitutions_handles_multiple() {
+        let text = "https://a.com/long and https://b.com/long";
         let shorts = vec![
             UrlShortening {
                 original: "https://a.com/long".into(),
@@ -348,31 +500,9 @@ mod tests {
                 shortened: "https://shr.al/2".into(),
             },
         ];
-        let out = apply_substitutions(text, &shorts);
-        assert_eq!(out, "see https://shr.al/1 and https://shr.al/2");
-    }
-
-    #[test]
-    fn apply_substitutions_handles_empty() {
-        let out = apply_substitutions("nothing to do", &[]);
-        assert_eq!(out, "nothing to do");
-    }
-
-    #[test]
-    fn build_runtime_disabled_when_no_key() {
-        let mut cfg = crate::config::ShrinkConfig::default();
-        cfg.enabled = true;
-        cfg.api_key = String::new();
-        let (client, _cache, _ch) = build_runtime(&cfg);
-        assert!(client.is_none());
-    }
-
-    #[test]
-    fn build_runtime_enabled_with_key() {
-        let mut cfg = crate::config::ShrinkConfig::default();
-        cfg.enabled = true;
-        cfg.api_key = "secret".into();
-        let (client, _cache, _ch) = build_runtime(&cfg);
-        assert!(client.is_some());
+        assert_eq!(
+            apply_substitutions(text, &shorts, false),
+            "https://shr.al/1 and https://shr.al/2"
+        );
     }
 }

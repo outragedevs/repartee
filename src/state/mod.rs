@@ -52,17 +52,6 @@ pub struct PendingUserhostRequest {
     pub action: PendingUserhostAction,
 }
 
-/// Reference to an incoming live chat message that should be handed
-/// to the shrink pipeline. State enqueues; `App` dequeues after IRC
-/// event processing and calls `dispatch_shrink_for_incoming`.
-/// Decoupling lets the IRC event handlers stay agnostic of the
-/// ShrinkClient / tokio::spawn machinery that lives on `App`.
-#[derive(Debug, Clone)]
-pub struct PendingShrinkDispatch {
-    pub buffer_id: String,
-    pub message_id: u64,
-    pub text: String,
-}
 
 pub struct AppState {
     pub connections: HashMap<String, Connection>,
@@ -81,6 +70,22 @@ pub struct AppState {
     pub ignores: Vec<IgnoreEntry>,
     /// Sender for the storage writer. When `Some`, messages are logged to `SQLite`.
     pub log_tx: Option<mpsc::Sender<LogRow>>,
+    /// Worker-queue sender for incoming-message shrink dispatch.
+    /// `None` when the feature is disabled (no API key, master switch
+    /// off, etc.). Pushed to from `add_message_with_activity` when
+    /// `shrink_incoming_active` is true and the message text has at
+    /// least one URL of length ≥ `shrink_min_url_length`. The worker
+    /// substitutes, then forwards a `ShrinkDeliver::Incoming` back to
+    /// the main loop which calls `state.add_message_with_activity`.
+    pub shrink_incoming_tx: Option<mpsc::Sender<crate::app::shrink::PendingIncoming>>,
+    /// True when shrink incoming substitution should be applied to
+    /// live PRIVMSG/ACTION/NOTICE messages. Mirror of
+    /// `(config.shrink.enabled && config.shrink.incoming_enabled &&
+    /// SHRINK_API_KEY is configured)`. Synced from `/set` so a
+    /// runtime flip takes effect without restart.
+    pub shrink_incoming_active: bool,
+    /// URL length threshold mirrored from `config.shrink.min_url_length`.
+    pub shrink_min_url_length: u32,
     /// Message types excluded from logging (e.g. "event" to skip quit/join/nick fan-out).
     pub log_exclude_types: Vec<String>,
     /// Maximum messages per buffer (FIFO eviction). 0 = unlimited.
@@ -93,14 +98,6 @@ pub struct AppState {
     /// `drain_pending_web_events`. Same pattern as `pending_web_events`.
     pub pending_e2e_sends: Vec<PendingE2eSend>,
     pub pending_userhost_requests: Vec<PendingUserhostRequest>,
-    /// Incoming chat messages whose text contains URL(s) above the
-    /// shrink threshold and that should be dispatched to the
-    /// background shrink pipeline. Populated only by the
-    /// `add_message_with_activity` path (live incoming PRIVMSG/ACTION);
-    /// backlog loaders and outgoing/event paths bypass it. Drained
-    /// by `App::drain_pending_shrink_dispatch` after each
-    /// `handle_irc_message` call.
-    pub pending_shrink_dispatch: Vec<PendingShrinkDispatch>,
     /// Nick color HSL saturation (synced from config for mention line formatting).
     pub nick_color_sat: f32,
     /// Nick color HSL lightness (synced from config for mention line formatting).

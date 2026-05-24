@@ -92,16 +92,6 @@ pub enum WebEvent {
         nick_color_saturation: f32,
         nick_color_lightness: f32,
     },
-    /// In-place update of a message's shortenings list. Emitted by
-    /// the shrink pipeline after a background shortening completes
-    /// for a live incoming message. Frontend looks up the message by
-    /// `(buffer_id, message_id)` and replaces its `shortenings`
-    /// field; the keyed `<For>` then re-renders only that one row.
-    MessageShortened {
-        buffer_id: String,
-        message_id: u64,
-        shortenings: Vec<WireUrlShortening>,
-    },
     /// Server-side error.
     Error { message: String },
     /// Shell buffer screen update (full screen as styled rows).
@@ -202,25 +192,6 @@ pub struct WireMessage {
     /// disabled or when the message contains no preview-eligible URLs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub previews: Vec<super::preview::LinkPreview>,
-    /// URL shortenings to apply at render time. Populated by the
-    /// shrink pipeline for incoming live messages whose long URLs
-    /// were successfully shortened post-arrival. Always empty for
-    /// outgoing messages (which substitute directly in `text` before
-    /// send) and for backlog. Frontend walks the text, replaces each
-    /// `original` with `shortened` followed by `[host_of(original)]`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub shortenings: Vec<WireUrlShortening>,
-}
-
-/// Wire form of a single URL shortening (mirror of
-/// `crate::shrink::UrlShortening`). Kept structurally identical so
-/// the host hint can be derived client-side without a third field on
-/// the wire — the renderer recomputes it from `original` at display
-/// time, matching the backend's `crate::shrink::host_of` helper.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WireUrlShortening {
-    pub original: String,
-    pub shortened: String,
 }
 
 /// Wire-format nick entry for transport over WebSocket.
@@ -325,7 +296,6 @@ mod tests {
             highlight: false,
             event_key: None,
             previews: Vec::new(),
-            shortenings: Vec::new(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: WireMessage = serde_json::from_str(&json).unwrap();

@@ -99,7 +99,6 @@ impl App {
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: None,
-                shortenings: Vec::new(),
             },
         );
 
@@ -135,7 +134,6 @@ impl App {
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: None,
-                shortenings: Vec::new(),
             },
         );
     }
@@ -781,7 +779,6 @@ impl App {
 
                     // Drain pending web events and broadcast + auto-record mentions.
                     self.drain_pending_web_events();
-                    self.drain_pending_shrink_dispatch();
                     // Drain queued RPE2E NOTICE sends (handshake replies,
                     // auto-KEYREQ on MissingKey) produced by the handlers.
                     self.drain_pending_e2e_sends();

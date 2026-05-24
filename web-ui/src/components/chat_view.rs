@@ -277,12 +277,6 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
         .into_any();
     }
 
-    // Render-time URL substitution: when the shrink pipeline has
-    // recorded shortenings for this message, swap each original URL
-    // for the shortened form (with a `[host]` hint on incoming
-    // messages — own messages skip the hint per spec).
-    let display_text = apply_shortenings(&msg.text, &msg.shortenings, is_own);
-
     // Reactive timestamp: re-runs only when `timestamp_format` changes.
     let timestamp = msg.timestamp;
     let ts_fn = move || {
@@ -298,7 +292,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
     let previews_view = move || render_previews(state, msg_id, preview_data.clone());
 
     if is_mention_log {
-        let styled = render_styled_text(&display_text);
+        let styled = render_styled_text(&msg.text);
         return view! {
             <>
                 <div class=line_class>
@@ -312,7 +306,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
 
     if is_action {
         let nick_text = msg.nick.unwrap_or_default();
-        let styled = render_styled_text(&display_text);
+        let styled = render_styled_text(&msg.text);
         let nick_color_style = {
             let nick = nick_text.clone();
             move || nick_color_or_empty(state, &nick, !is_own)
@@ -334,7 +328,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
         .into_any()
     } else if is_notice {
         let nick_text = msg.nick.unwrap_or_default();
-        let styled = render_styled_text(&display_text);
+        let styled = render_styled_text(&msg.text);
         view! {
             <>
                 <div class=line_class>
@@ -352,7 +346,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
         .into_any()
     } else if is_event {
         let arrow = event_icon(msg.event_key.as_deref(), &msg.text);
-        let styled = render_styled_text(&display_text);
+        let styled = render_styled_text(&msg.text);
         view! {
             <div class=line_class>
                 <span class="ts">{ts_fn}</span>
@@ -368,7 +362,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
     } else {
         let nick_text = msg.nick.unwrap_or_default();
         let mode = msg.nick_mode.unwrap_or_default();
-        let styled = render_styled_text(&display_text);
+        let styled = render_styled_text(&msg.text);
         let highlight = msg.highlight;
 
         let nick_truncated = {
@@ -528,52 +522,6 @@ fn render_previews(
         })
         .collect();
     Some(view! { <div class="msg-previews">{nodes}</div> }.into_any())
-}
-
-/// Apply URL shortenings as a substring rewrite. Incoming messages
-/// (is_own = false) render `<shortened> [host]` so readers see the
-/// destination; outgoing self-echoes (is_own = true) render just
-/// `<shortened>` because the user knew what they typed.
-///
-/// Mirrors `crate::ui::message_line::render_display_text` on the
-/// backend; the WASM crate can't depend on the main crate so the
-/// helper is duplicated here. Same applies to `host_of`.
-fn apply_shortenings(
-    text: &str,
-    shortenings: &[crate::protocol::WireUrlShortening],
-    is_own: bool,
-) -> String {
-    if shortenings.is_empty() {
-        return text.to_string();
-    }
-    let mut out = text.to_string();
-    for sh in shortenings {
-        let replacement = if is_own {
-            sh.shortened.clone()
-        } else {
-            let host = host_of(&sh.original).unwrap_or_default();
-            if host.is_empty() {
-                sh.shortened.clone()
-            } else {
-                format!("{} [{}]", sh.shortened, host)
-            }
-        };
-        out = out.replace(&sh.original, &replacement);
-    }
-    out
-}
-
-fn host_of(url: &str) -> Option<String> {
-    let without_scheme = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))?;
-    let host = without_scheme.split(['/', '?', '#']).next()?;
-    if host.is_empty() {
-        return None;
-    }
-    let host = host.rsplit_once(':').map_or(host, |(h, _)| h);
-    let host = host.strip_prefix("www.").unwrap_or(host);
-    Some(host.to_ascii_lowercase())
 }
 
 /// Render text with irssi/mIRC format codes as styled HTML spans.
