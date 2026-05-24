@@ -638,8 +638,12 @@ html, body {
 
 .msg-preview-thumb {
     display: block;
-    max-width: 320px;
-    max-height: 200px;
+    /* Fixed box reserves layout space BEFORE the image loads, so async
+       loads don't reflow the chat (which is anchored to bottom — every
+       reflow visibly jumps the scroll position). `object-fit: contain`
+       letterboxes images smaller than the box. */
+    width: 320px;
+    height: 200px;
     border: 1px solid var(--border, rgba(128, 128, 128, 0.25));
     border-radius: 4px;
     background: var(--bg-alt, #111);
@@ -671,6 +675,12 @@ html, body {
 
 @media (max-width: 720px) {
     .msg-previews { margin-left: 0; }
-    .msg-preview-thumb { max-width: 100%; }
+    .msg-preview-thumb {
+        /* Full-width on mobile; `aspect-ratio` reserves vertical space
+           proportionally so the layout doesn't jump when the image loads. */
+        width: 100%;
+        height: auto;
+        aspect-ratio: 16 / 10;
+    }
     .msg-preview-dismiss { opacity: 1; } /* always visible on touch */
 }
