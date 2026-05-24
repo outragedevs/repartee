@@ -154,6 +154,13 @@ html, body {
     line-height: var(--line-height, 1.35);
     max-width: 100%;
     overflow: hidden;
+    /* Browser-native virtualization: skip layout/paint for off-screen
+       lines. `contain-intrinsic-size: auto <h>` gives the browser a
+       fallback height so the scrollbar is the right size before the
+       line is ever rendered. This is what lets us keep a 1000-line
+       cap in DOM without scroll jank on weaker hardware. */
+    content-visibility: auto;
+    contain-intrinsic-size: auto 22px;
 }
 
 .chat-line .ts {
@@ -634,6 +641,10 @@ html, body {
 .msg-preview-card {
     position: relative;
     display: inline-block;
+    /* See `.chat-line` comment — same browser-native virtualization,
+       intrinsic ~220px to match the fixed 200px thumb plus padding. */
+    content-visibility: auto;
+    contain-intrinsic-size: auto 220px;
 }
 
 .msg-preview-thumb {
