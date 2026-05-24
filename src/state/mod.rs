@@ -52,6 +52,18 @@ pub struct PendingUserhostRequest {
     pub action: PendingUserhostAction,
 }
 
+/// Reference to an incoming live chat message that should be handed
+/// to the shrink pipeline. State enqueues; `App` dequeues after IRC
+/// event processing and calls `dispatch_shrink_for_incoming`.
+/// Decoupling lets the IRC event handlers stay agnostic of the
+/// ShrinkClient / tokio::spawn machinery that lives on `App`.
+#[derive(Debug, Clone)]
+pub struct PendingShrinkDispatch {
+    pub buffer_id: String,
+    pub message_id: u64,
+    pub text: String,
+}
+
 pub struct AppState {
     pub connections: HashMap<String, Connection>,
     pub buffers: IndexMap<String, Buffer>,
@@ -81,6 +93,14 @@ pub struct AppState {
     /// `drain_pending_web_events`. Same pattern as `pending_web_events`.
     pub pending_e2e_sends: Vec<PendingE2eSend>,
     pub pending_userhost_requests: Vec<PendingUserhostRequest>,
+    /// Incoming chat messages whose text contains URL(s) above the
+    /// shrink threshold and that should be dispatched to the
+    /// background shrink pipeline. Populated only by the
+    /// `add_message_with_activity` path (live incoming PRIVMSG/ACTION);
+    /// backlog loaders and outgoing/event paths bypass it. Drained
+    /// by `App::drain_pending_shrink_dispatch` after each
+    /// `handle_irc_message` call.
+    pub pending_shrink_dispatch: Vec<PendingShrinkDispatch>,
     /// Nick color HSL saturation (synced from config for mention line formatting).
     pub nick_color_sat: f32,
     /// Nick color HSL lightness (synced from config for mention line formatting).

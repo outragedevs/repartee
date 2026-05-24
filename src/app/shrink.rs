@@ -63,6 +63,17 @@ pub struct ManualShrinkOutput {
 }
 
 impl App {
+    /// Drain `state.pending_shrink_dispatch`, kicking off background
+    /// shortenings for each enqueued live chat message. Called from
+    /// the main event loop right after the IRC dispatcher runs (same
+    /// rhythm as `drain_pending_web_events`).
+    pub(crate) fn drain_pending_shrink_dispatch(&mut self) {
+        let pending = std::mem::take(&mut self.state.pending_shrink_dispatch);
+        for d in pending {
+            self.dispatch_shrink_for_incoming(d.buffer_id, d.message_id, &d.text);
+        }
+    }
+
     /// Kick off background shrinking for an incoming live chat message.
     /// No-op if the feature is disabled, no client is configured, or
     /// the text has no URLs above the threshold.

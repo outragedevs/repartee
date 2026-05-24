@@ -95,6 +95,11 @@ pub enum WebEvent {
     Error {
         message: String,
     },
+    MessageShortened {
+        buffer_id: String,
+        message_id: u64,
+        shortenings: Vec<WireUrlShortening>,
+    },
     ShellScreen {
         buffer_id: String,
         cols: u16,
@@ -186,6 +191,20 @@ pub struct WireMessage {
     /// disabled or the message contains no eligible URLs.
     #[serde(default)]
     pub previews: Vec<LinkPreview>,
+    /// URL shortenings to substitute at render time. Mirror of the
+    /// backend's `WireMessage.shortenings` — populated by the shrink
+    /// pipeline for live incoming messages (and outgoing
+    /// self-echoes), empty otherwise.
+    #[serde(default)]
+    pub shortenings: Vec<WireUrlShortening>,
+}
+
+/// Mirror of `src/web/protocol::WireUrlShortening`. Kept in sync
+/// manually because the WASM crate cannot depend on the main crate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WireUrlShortening {
+    pub original: String,
+    pub shortened: String,
 }
 
 /// Mirror of `src/web/preview::LinkPreview`. Kept in sync manually because

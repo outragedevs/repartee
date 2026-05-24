@@ -962,6 +962,64 @@ impl App {
 
         let own_mode = self.state.nick_prefix(&active_id, &nick);
 
+        // Outgoing shrink: if the plaintext fits in a single IRC line
+        // (multi-chunk needs per-chunk shortenings tracking — leave
+        // for v2) and contains URLs over the threshold, hand the
+        // whole message off to the async shrink pipeline. The task
+        // will send the substituted text to IRC and post a
+        // `MessageShortened` event to update the local buffer. We
+        // local-echo the original immediately so the user has
+        // feedback; the shortened form swaps in via render-time
+        // substitution once the API call returns.
+        //
+        // E2E is skipped (the wire is opaque ciphertext, which can't
+        // be shortened without breaking the per-message MAC).
+        //
+        // Known limitation: when the IRCv3 `echo-message` cap is
+        // enabled, the server echoes the substituted text back to us
+        // as a fresh PRIVMSG, producing a duplicate in the buffer.
+        // Disable `echo-message` (or outgoing shrink) to avoid this
+        // — documented in `docs/commands/shrink.md`.
+        if !is_e2e_encrypted
+            && plain_echo.len() <= crate::irc::MESSAGE_MAX_BYTES
+            && self.config.shrink.enabled
+            && self.config.shrink.outgoing_enabled
+            && self.shrink_client.is_some()
+            && !crate::shrink::find_long_urls(
+                &plain_echo,
+                self.config.shrink.min_url_length as usize,
+            )
+            .is_empty()
+        {
+            let id = self.state.next_message_id();
+            self.state.add_message(
+                &active_id,
+                Message {
+                    id,
+                    timestamp: chrono::Utc::now(),
+                    message_type: MessageType::Message,
+                    nick: Some(nick),
+                    nick_mode: own_mode.map(|c| c.to_string()),
+                    text: plain_echo.clone(),
+                    highlight: false,
+                    event_key: None,
+                    event_params: None,
+                    log_msg_id: None,
+                    log_ref_id: None,
+                    tags: None,
+                    shortenings: Vec::new(),
+                },
+            );
+            self.dispatch_shrink_for_outgoing(
+                active_id,
+                id,
+                conn_id,
+                buffer_name,
+                &plain_echo,
+            );
+            return;
+        }
+
         for wire in wire_lines {
             // Try to send via IRC if connected
             if let Some(handle) = self.irc_handles.get(&conn_id)

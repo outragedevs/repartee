@@ -1,11 +1,42 @@
 use unicode_width::UnicodeWidthStr;
 
 use crate::config::AppConfig;
+use crate::shrink::{UrlShortening, host_of};
 use crate::state::buffer::{Message, MessageType};
 use crate::theme::{StyledSpan, parse_format_string, resolve_abstractions};
 use crate::ui::styled_text::styled_spans_to_line;
 use ratatui::style::Color;
 use ratatui::text::Line;
+
+/// Substitute shortened URLs into display text. Incoming messages
+/// get `<shortened> [host]` so readers can still see the destination;
+/// outgoing (`is_own`) just shows the shortened form because the
+/// user already knew the destination when they typed it.
+///
+/// Returns a borrowed `Cow::Borrowed(&msg.text)` semantically — but
+/// allocates an owned `String` whenever there's at least one
+/// substitution to apply. The hot path (no shortenings) does not
+/// allocate.
+fn render_display_text(text: &str, shortenings: &[UrlShortening], is_own: bool) -> String {
+    if shortenings.is_empty() {
+        return text.to_string();
+    }
+    let mut out = text.to_string();
+    for sh in shortenings {
+        let replacement = if is_own {
+            sh.shortened.clone()
+        } else {
+            let host = host_of(&sh.original).unwrap_or_default();
+            if host.is_empty() {
+                sh.shortened.clone()
+            } else {
+                format!("{} [{}]", sh.shortened, host)
+            }
+        };
+        out = out.replace(&sh.original, &replacement);
+    }
+    out
+}
 
 /// Render a single message into a themed ratatui Line.
 pub fn render_message(
@@ -19,7 +50,8 @@ pub fn render_message(
 
     // MentionLog: pre-formatted line — render text as-is, no timestamp/nick column.
     if msg.message_type == MessageType::MentionLog {
-        let spans = parse_format_string(&msg.text, &[]);
+        let display_text = render_display_text(&msg.text, &msg.shortenings, is_own);
+        let spans = parse_format_string(&display_text, &[]);
         return styled_spans_to_line(&spans);
     }
 
@@ -76,8 +108,13 @@ fn render_event(msg: &Message, theme: &crate::theme::ThemeFile) -> Vec<StyledSpa
             .unwrap_or_default();
         return parse_format_string(&resolved, &params);
     }
-    // Fallback: parse text directly (may contain inline format codes)
-    parse_format_string(&msg.text, &[])
+    // Fallback: parse text directly (may contain inline format codes).
+    // Events are never marked is_own — they come from the server, so
+    // we render with the incoming `[host]` form when a shortening
+    // happens to land on an event line (rare, but possible for
+    // NOTICE-as-event flows).
+    let display_text = render_display_text(&msg.text, &msg.shortenings, false);
+    parse_format_string(&display_text, &[])
 }
 
 fn render_chat_message(
@@ -139,7 +176,8 @@ fn render_chat_message(
         .unwrap_or_else(|| "$0 $1".to_string());
     let resolved = resolve_abstractions(&msg_format, abstracts, 0);
     // params: $0=displayNick, $1=text, $2=paddedNickMode
-    let mut spans = parse_format_string(&resolved, &[&display_nick, &msg.text, &padded_nick_mode]);
+    let display_text = render_display_text(&msg.text, &msg.shortenings, is_own);
+    let mut spans = parse_format_string(&resolved, &[&display_nick, &display_text, &padded_nick_mode]);
 
     // Apply nick color override: recolor spans containing the nick text.
     // Only applies to pubmsg (not own, mention, highlight, action, notice).

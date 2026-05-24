@@ -1085,6 +1085,7 @@ impl App {
                         }
                         self.update_script_snapshot();
                         self.drain_pending_web_events();
+                        self.drain_pending_shrink_dispatch();
                     }
                     None => {
                         self.term_rx = None;
@@ -1108,6 +1109,7 @@ impl App {
                         }
                         self.update_script_snapshot();
                         self.drain_pending_web_events();
+                        self.drain_pending_shrink_dispatch();
                     }
                     Some(crate::session::protocol::ShimMessage::Resize { cols, rows }) => {
                         self.cached_term_cols = cols;
@@ -1159,6 +1161,7 @@ impl App {
                         self.script_snapshot_dirty = true;
                         self.update_script_snapshot();
                         self.drain_pending_web_events();
+                        self.drain_pending_shrink_dispatch();
                     }
                 },
                 preview_ev = self.preview_rx.recv() => {
@@ -1170,6 +1173,7 @@ impl App {
                     if let Some(ev) = dcc_ev {
                         self.handle_dcc_event(ev);
                         self.drain_pending_web_events();
+                        self.drain_pending_shrink_dispatch();
                     }
                 },
                 shell_ev = self.shell_rx.recv() => {
@@ -1192,6 +1196,7 @@ impl App {
                         tracing::debug!(?cmd, %session_id, "web command received");
                         self.handle_web_command(cmd, &session_id);
                         self.drain_pending_web_events();
+                        self.drain_pending_shrink_dispatch();
                     }
                 },
                 () = &mut shell_broadcast_sleep, if self.shell_broadcast_pending.is_some() => {
@@ -1242,10 +1247,12 @@ impl App {
                     self.maybe_purge_old_events();
                     self.maybe_purge_old_mentions();
                     self.drain_pending_web_events();
+                    self.drain_pending_shrink_dispatch();
                 },
                 _ = paste_tick.tick() => {
                     self.drain_paste_queue();
                     self.drain_pending_web_events();
+                    self.drain_pending_shrink_dispatch();
                 },
                 action = self.script_action_rx.recv() => {
                     if let Some(action) = action {
@@ -1256,6 +1263,7 @@ impl App {
                         self.script_snapshot_dirty = true;
                         self.update_script_snapshot();
                         self.drain_pending_web_events();
+                        self.drain_pending_shrink_dispatch();
                     }
                 },
                 shrink_res = self.shrink_rx.recv() => {
@@ -1268,6 +1276,7 @@ impl App {
                             self.apply_shrink_result(extra);
                         }
                         self.drain_pending_web_events();
+                        self.drain_pending_shrink_dispatch();
                     }
                 },
                 _ = sigterm.recv() => {

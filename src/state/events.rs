@@ -23,6 +23,7 @@ impl AppState {
             pending_web_events: Vec::new(),
             pending_e2e_sends: Vec::new(),
             pending_userhost_requests: Vec::new(),
+            pending_shrink_dispatch: Vec::new(),
             nick_color_sat: 0.65,
             nick_color_lit: 0.65,
             e2e_manager: None,
@@ -232,6 +233,24 @@ impl AppState {
         message: Message,
         level: ActivityLevel,
     ) {
+        // Only the live incoming-chat path reaches here (handle_privmsg
+        // / handle_action / handle_notice in irc/events.rs); backlog
+        // loaders and outgoing echo bypass it. Enqueue regardless of
+        // text content — App filters on enabled flags and URL length
+        // before spawning, and the queue is drained on every loop tick.
+        if let Some(ref nick) = message.nick
+            && !nick.is_empty()
+            && (message.message_type == MessageType::Message
+                || message.message_type == MessageType::Action
+                || message.message_type == MessageType::Notice)
+        {
+            self.pending_shrink_dispatch
+                .push(crate::state::PendingShrinkDispatch {
+                    buffer_id: buffer_id.to_string(),
+                    message_id: message.id,
+                    text: message.text.clone(),
+                });
+        }
         self.maybe_log(buffer_id, &message);
         // Queue web events for broadcast.
         let wire = crate::web::snapshot::message_to_wire(&message, self.web_preview_extractor.as_deref());

@@ -435,6 +435,26 @@ impl AppState {
                 self.nick_color_saturation.set(nick_color_saturation);
                 self.nick_color_lightness.set(nick_color_lightness);
             }
+            WebEvent::MessageShortened {
+                buffer_id,
+                message_id,
+                shortenings,
+            } => {
+                // Find the target message inside the per-buffer Vec
+                // and replace its `shortenings`. The keyed `<For>`
+                // re-renders only this row because messages.update
+                // notifies subscribers (one of which is the For),
+                // and the `move ||` wrappers in render_message that
+                // produce the substituted text re-read from this
+                // signal on each pass.
+                self.messages.update(|msgs| {
+                    if let Some(entry) = msgs.get_mut(&buffer_id)
+                        && let Some(m) = entry.iter_mut().find(|m| m.id == message_id)
+                    {
+                        m.shortenings = shortenings;
+                    }
+                });
+            }
             WebEvent::Error { message } => {
                 self.error.set(Some(message));
             }
@@ -573,6 +593,7 @@ fn insert_date_separators(messages: Vec<WireMessage>) -> Vec<WireMessage> {
                     highlight: false,
                     event_key: Some("date_separator".to_string()),
                     previews: Vec::new(),
+                    shortenings: Vec::new(),
                 });
             }
             last_date = Some(date);
