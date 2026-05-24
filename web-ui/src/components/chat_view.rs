@@ -28,15 +28,6 @@ pub fn ChatView() -> impl IntoView {
         state.messages.with(|msgs| msgs.get(&active_id).cloned())
     };
 
-    let our_nick = move || -> Option<String> {
-        let active_id = state.active_buffer.get()?;
-        let bufs = state.buffers.get();
-        let buf = bufs.iter().find(|b| b.id == active_id)?;
-        let conns = state.connections.get();
-        let conn = conns.iter().find(|c| c.id == buf.connection_id)?;
-        Some(conn.nick.clone())
-    };
-
     let chat_ref = NodeRef::<leptos::html::Div>::new();
 
     // Track previous buffer ID to detect buffer switches.
@@ -62,8 +53,16 @@ pub fn ChatView() -> impl IntoView {
         }
     });
 
-    // Scroll to bottom on resize only if user was at bottom.
+    // Scroll to bottom on resize only if user was at bottom. The
+    // listener is removed on unmount via on_cleanup, so component
+    // remounts (e.g. login→logout→login) don't leak forgotten Closures.
+    // wasm_bindgen Closure and js_sys::Function are !Send, so the
+    // cleanup handle has to use LocalStorage rather than the default
+    // SyncStorage of StoredValue::new.
     let resize_registered = StoredValue::new(false);
+    type ResizeHandle = Option<(wasm_bindgen::prelude::Closure<dyn Fn()>, js_sys::Function)>;
+    let resize_cleanup: StoredValue<ResizeHandle, leptos::prelude::LocalStorage> =
+        StoredValue::new_local(None);
     Effect::new(move || {
         let Some(el) = chat_ref.get() else { return };
         if resize_registered.get_value() {
@@ -78,18 +77,30 @@ pub fn ChatView() -> impl IntoView {
             }
         });
         if let Some(window) = web_sys::window() {
-            let _ = window.add_event_listener_with_callback("resize", cb.as_ref().unchecked_ref());
-            cb.forget();
+            let cb_fn: js_sys::Function = cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
+            let _ = window.add_event_listener_with_callback("resize", &cb_fn);
+            resize_cleanup.set_value(Some((cb, cb_fn)));
         }
     });
+    on_cleanup(move || {
+        let handle = resize_cleanup.try_update_value(Option::take).flatten();
+        let Some((cb, cb_fn)) = handle else { return };
+        if let Some(window) = web_sys::window() {
+            let _ = window.remove_event_listener_with_callback("resize", &cb_fn);
+        }
+        drop(cb);
+    });
 
-    // Update is_at_bottom on every scroll event.
-    let on_scroll = {
-        let state = state;
-        move |ev: web_sys::Event| {
-            let target = ev.target().unwrap();
-            let el: &web_sys::Element = target.unchecked_ref();
-            state.is_at_bottom.set(is_near_bottom(el));
+    // Update is_at_bottom on every scroll event. Equality-guard the
+    // write: Leptos 0.7 fires subscribers regardless of value equality,
+    // so an unguarded set on every scroll tick was retriggering the
+    // auto-scroll Effect and contributing to the visible jitter.
+    let on_scroll = move |ev: web_sys::Event| {
+        let target = ev.target().unwrap();
+        let el: &web_sys::Element = target.unchecked_ref();
+        let next = is_near_bottom(el);
+        if state.is_at_bottom.get_untracked() != next {
+            state.is_at_bottom.set(next);
         }
     };
 
@@ -102,166 +113,11 @@ pub fn ChatView() -> impl IntoView {
                 view! {
             <div class="chat-messages-outer">
                 <div class="chat-messages" node_ref=chat_ref on:scroll=on_scroll>
-                    {move || {
-                        let nick_self = our_nick();
-                        let ts_fmt = state.timestamp_format.get();
-                        messages().unwrap_or_default().into_iter().map(|msg| {
-                            let is_mention_log = msg.msg_type == "mention_log";
-                            let is_event = msg.msg_type == "event";
-                            let is_action = msg.msg_type == "action";
-                            let is_notice = msg.msg_type == "notice";
-                            let is_separator = is_event && msg.nick.is_none() && msg.text.starts_with('\u{2500}');
-
-                            let is_own = nick_self.as_ref().is_some_and(|our| {
-                                msg.nick.as_deref() == Some(our.as_str())
-                            });
-
-                            let line_class = if is_separator {
-                                "chat-line date-separator"
-                            } else if is_mention_log {
-                                "chat-line mention-log"
-                            } else if msg.highlight && msg.nick.is_some() {
-                                if is_own { "chat-line mention own" } else { "chat-line mention" }
-                            } else if is_event {
-                                match msg.event_key.as_deref() {
-                                    Some("join") | Some("connected") => "chat-line event join-event",
-                                    Some("part") | Some("quit") | Some("disconnected") => "chat-line event part-event",
-                                    Some("kick") => "chat-line event kick-event",
-                                    Some("kicked") => "chat-line event kicked-event",
-                                    Some("nick_change") | Some("chghost") | Some("account") => "chat-line event nick-event",
-                                    Some("topic_changed") => "chat-line event topic-event",
-                                    Some("mode") => "chat-line event mode-event",
-                                    _ => "chat-line event",
-                                }
-                            } else if is_notice {
-                                "chat-line notice"
-                            } else if is_action {
-                                "chat-line event action"
-                            } else if is_own {
-                                "chat-line own"
-                            } else {
-                                "chat-line"
-                            };
-
-                            let ts = format_timestamp(msg.timestamp, &ts_fmt);
-
-                            if is_separator {
-                                return view! {
-                                    <div class=line_class>
-                                        <span class="separator-text">{msg.text}</span>
-                                    </div>
-                                }.into_any();
-                            }
-
-                            let previews_view =
-                                render_previews(state, msg.id, msg.previews.clone());
-
-                            if is_mention_log {
-                                let styled = render_styled_text(&msg.text);
-                                return view! {
-                                    <>
-                                        <div class=line_class>
-                                            <span class="mention-log-text">{styled}</span>
-                                        </div>
-                                        {previews_view}
-                                    </>
-                                }.into_any();
-                            }
-
-                            if is_action {
-                                let nick_text = msg.nick.unwrap_or_default();
-                                let nick_color_style = if state.nick_colors_enabled.get() && !is_own {
-                                    let sat = state.nick_color_saturation.get();
-                                    let lit = state.nick_color_lightness.get();
-                                    let css_color = crate::nick_color::nick_color_css(&nick_text, sat, lit);
-                                    format!("color: {css_color};")
-                                } else {
-                                    String::new()
-                                };
-                                let styled = render_styled_text(&msg.text);
-                                view! {
-                                    <>
-                                        <div class=line_class>
-                                            <span class="ts">{ts}</span>
-                                            <span class="action-body">
-                                                "* "
-                                                <span class="action-nick" style=nick_color_style>{nick_text}</span>
-                                                " "
-                                                {styled}
-                                            </span>
-                                        </div>
-                                        {previews_view}
-                                    </>
-                                }.into_any()
-                            } else if is_notice {
-                                // Notice: -nick- text
-                                let nick_text = msg.nick.unwrap_or_default();
-                                let styled = render_styled_text(&msg.text);
-                                view! {
-                                    <>
-                                        <div class=line_class>
-                                            <span class="ts">{ts}</span>
-                                            <span class="notice-body">
-                                                "-"
-                                                <span class="notice-nick">{nick_text}</span>
-                                                "- "
-                                                {styled}
-                                            </span>
-                                        </div>
-                                        {previews_view}
-                                    </>
-                                }.into_any()
-                            } else if is_event {
-                                let arrow = event_icon(msg.event_key.as_deref(), &msg.text);
-                                let styled = render_styled_text(&msg.text);
-                                view! {
-                                    <div class=line_class>
-                                        <span class="ts">{ts}</span>
-                                        <span>
-                                            {arrow.map(|(symbol, css_class)| view! {
-                                                <span class=css_class>{symbol}</span>
-                                            })}
-                                            {styled}
-                                        </span>
-                                    </div>
-                                }.into_any()
-                            } else {
-                                // Regular message: timestamp | right-aligned nick❯ | text
-                                let max_len = state.nick_max_length.get() as usize;
-                                let col_width = state.nick_column_width.get();
-                                let nick_text = msg.nick.unwrap_or_default();
-                                let mode = msg.nick_mode.unwrap_or_default();
-                                let nick = truncate_nick(&nick_text, max_len, &mode);
-                                let styled = render_styled_text(&msg.text);
-
-                                // Per-nick color: skip for own messages (use --green via CSS) and highlights/mentions
-                                let nick_color_style = if state.nick_colors_enabled.get() && !is_own && !msg.highlight {
-                                    let sat = state.nick_color_saturation.get();
-                                    let lit = state.nick_color_lightness.get();
-                                    let css_color = crate::nick_color::nick_color_css(&nick_text, sat, lit);
-                                    format!("color: {css_color};")
-                                } else {
-                                    String::new()
-                                };
-
-                                let nick_style = format!("width: {col_width}ch;");
-                                view! {
-                                    <>
-                                        <div class=line_class>
-                                            <span class="ts">{ts}</span>
-                                            <span class="nick" style=nick_style>
-                                                <span class="mode">{mode}</span>
-                                                <span class="name" style=nick_color_style>{nick}</span>
-                                                <span class="sep">"❯"</span>
-                                            </span>
-                                            <span class="text">{styled}</span>
-                                        </div>
-                                        {previews_view}
-                                    </>
-                                }.into_any()
-                            }
-                        }).collect::<Vec<_>>()
-                    }}
+                    <For
+                        each=move || messages().unwrap_or_default()
+                        key=|msg| (msg.id, msg.timestamp)
+                        children=move |msg| render_message(state, msg)
+                    />
                 </div>
                 <div class="scroll-bottom-btn"
                     class:hidden=move || state.is_at_bottom.get()
@@ -276,6 +132,200 @@ pub fn ChatView() -> impl IntoView {
                 }.into_any()
             }}
         </div>
+    }
+}
+
+/// Look up the local user's nick for the currently active buffer.
+/// Reads signals untracked — called from inside the `<For>` children
+/// closure where re-running on connection-meta changes would defeat the
+/// keyed render. Buffer switches/SyncInits already recreate everything.
+fn current_nick(state: AppState) -> Option<String> {
+    let active_id = state.active_buffer.get_untracked()?;
+    let bufs = state.buffers.get_untracked();
+    let buf = bufs.iter().find(|b| b.id == active_id)?;
+    let conns = state.connections.get_untracked();
+    let conn = conns.iter().find(|c| c.id == buf.connection_id)?;
+    Some(conn.nick.clone())
+}
+
+/// Render one chat line. All settings reads are untracked snapshots
+/// taken when the `<For>` first creates the child for this message id;
+/// existing rendered lines won't update on subsequent settings changes.
+/// That's an acceptable trade-off — settings change rarely, and any
+/// SyncInit (reconnect, lag recovery, manual reload) recreates all
+/// children with current settings. The win is that appending a new
+/// message no longer rebuilds the full 2000-line DOM tree.
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear per-message branch dispatch; splitting per branch would obscure the shared layout"
+)]
+fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView {
+    let nick_self = current_nick(state);
+    let ts_fmt = state.timestamp_format.get_untracked();
+
+    let is_mention_log = msg.msg_type == "mention_log";
+    let is_event = msg.msg_type == "event";
+    let is_action = msg.msg_type == "action";
+    let is_notice = msg.msg_type == "notice";
+    let is_separator =
+        is_event && msg.nick.is_none() && msg.text.starts_with('\u{2500}');
+
+    let is_own = nick_self
+        .as_ref()
+        .is_some_and(|our| msg.nick.as_deref() == Some(our.as_str()));
+
+    let line_class = if is_separator {
+        "chat-line date-separator"
+    } else if is_mention_log {
+        "chat-line mention-log"
+    } else if msg.highlight && msg.nick.is_some() {
+        if is_own {
+            "chat-line mention own"
+        } else {
+            "chat-line mention"
+        }
+    } else if is_event {
+        match msg.event_key.as_deref() {
+            Some("join" | "connected") => "chat-line event join-event",
+            Some("part" | "quit" | "disconnected") => "chat-line event part-event",
+            Some("kick") => "chat-line event kick-event",
+            Some("kicked") => "chat-line event kicked-event",
+            Some("nick_change" | "chghost" | "account") => "chat-line event nick-event",
+            Some("topic_changed") => "chat-line event topic-event",
+            Some("mode") => "chat-line event mode-event",
+            _ => "chat-line event",
+        }
+    } else if is_notice {
+        "chat-line notice"
+    } else if is_action {
+        "chat-line event action"
+    } else if is_own {
+        "chat-line own"
+    } else {
+        "chat-line"
+    };
+
+    let ts = format_timestamp(msg.timestamp, &ts_fmt);
+
+    if is_separator {
+        return view! {
+            <div class=line_class>
+                <span class="separator-text">{msg.text}</span>
+            </div>
+        }
+        .into_any();
+    }
+
+    let previews_view = render_previews(state, msg.id, msg.previews.clone());
+
+    if is_mention_log {
+        let styled = render_styled_text(&msg.text);
+        return view! {
+            <>
+                <div class=line_class>
+                    <span class="mention-log-text">{styled}</span>
+                </div>
+                {previews_view}
+            </>
+        }
+        .into_any();
+    }
+
+    if is_action {
+        let nick_text = msg.nick.unwrap_or_default();
+        let nick_color_style = if state.nick_colors_enabled.get_untracked() && !is_own {
+            let sat = state.nick_color_saturation.get_untracked();
+            let lit = state.nick_color_lightness.get_untracked();
+            let css_color = crate::nick_color::nick_color_css(&nick_text, sat, lit);
+            format!("color: {css_color};")
+        } else {
+            String::new()
+        };
+        let styled = render_styled_text(&msg.text);
+        view! {
+            <>
+                <div class=line_class>
+                    <span class="ts">{ts}</span>
+                    <span class="action-body">
+                        "* "
+                        <span class="action-nick" style=nick_color_style>{nick_text}</span>
+                        " "
+                        {styled}
+                    </span>
+                </div>
+                {previews_view}
+            </>
+        }
+        .into_any()
+    } else if is_notice {
+        let nick_text = msg.nick.unwrap_or_default();
+        let styled = render_styled_text(&msg.text);
+        view! {
+            <>
+                <div class=line_class>
+                    <span class="ts">{ts}</span>
+                    <span class="notice-body">
+                        "-"
+                        <span class="notice-nick">{nick_text}</span>
+                        "- "
+                        {styled}
+                    </span>
+                </div>
+                {previews_view}
+            </>
+        }
+        .into_any()
+    } else if is_event {
+        let arrow = event_icon(msg.event_key.as_deref(), &msg.text);
+        let styled = render_styled_text(&msg.text);
+        view! {
+            <div class=line_class>
+                <span class="ts">{ts}</span>
+                <span>
+                    {arrow.map(|(symbol, css_class)| view! {
+                        <span class=css_class>{symbol}</span>
+                    })}
+                    {styled}
+                </span>
+            </div>
+        }
+        .into_any()
+    } else {
+        let max_len = state.nick_max_length.get_untracked() as usize;
+        let col_width = state.nick_column_width.get_untracked();
+        let nick_text = msg.nick.unwrap_or_default();
+        let mode = msg.nick_mode.unwrap_or_default();
+        let nick = truncate_nick(&nick_text, max_len, &mode);
+        let styled = render_styled_text(&msg.text);
+
+        let nick_color_style = if state.nick_colors_enabled.get_untracked()
+            && !is_own
+            && !msg.highlight
+        {
+            let sat = state.nick_color_saturation.get_untracked();
+            let lit = state.nick_color_lightness.get_untracked();
+            let css_color = crate::nick_color::nick_color_css(&nick_text, sat, lit);
+            format!("color: {css_color};")
+        } else {
+            String::new()
+        };
+
+        let nick_style = format!("width: {col_width}ch;");
+        view! {
+            <>
+                <div class=line_class>
+                    <span class="ts">{ts}</span>
+                    <span class="nick" style=nick_style>
+                        <span class="mode">{mode}</span>
+                        <span class="name" style=nick_color_style>{nick}</span>
+                        <span class="sep">"❯"</span>
+                    </span>
+                    <span class="text">{styled}</span>
+                </div>
+                {previews_view}
+            </>
+        }
+        .into_any()
     }
 }
 

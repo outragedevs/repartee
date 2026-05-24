@@ -21,6 +21,13 @@ thread_local! {
 const RECONNECT_INITIAL_MS: u32 = 2_000;
 const RECONNECT_MAX_MS: u32 = 30_000;
 
+/// Give up auto-reconnect after this many consecutive failures with no
+/// successful authentication. A transient first-connect error (server
+/// not yet ready, brief network blip on page load) no longer kicks the
+/// user back to the login form; only repeated failures do — which is
+/// the genuine "cookie is bad" signal.
+const MAX_RECONNECT_FAILURES_WITHOUT_AUTH: u32 = 5;
+
 /// Connect to the WebSocket server and spawn the message loop.
 ///
 /// Automatically reconnects on connection drop with exponential backoff.
@@ -44,6 +51,7 @@ pub fn connect(state: &AppState) {
 
     leptos::task::spawn_local(async move {
         let mut backoff_ms = RECONNECT_INITIAL_MS;
+        let mut consecutive_failures: u32 = 0;
 
         loop {
             // Fresh command channel for each connection attempt.
@@ -59,25 +67,42 @@ pub fn connect(state: &AppState) {
                     let was_connected = state.connected.get_untracked();
                     state.connected.set(false);
 
-                    if !was_connected {
-                        state.authenticated.set(false);
-                        state.session_hint.set(false);
-                        break;
+                    if was_connected {
+                        // Got at least one SyncInit before the drop —
+                        // any reconnect-worthy disconnect (server
+                        // restart, sleep/wake, network blip) lives
+                        // here. Reset the failure counter and retry.
+                        consecutive_failures = 0;
+                    } else {
+                        // Connection opened but closed before we ever
+                        // received SyncInit. Could be a transient
+                        // server-side hiccup; count it but keep trying.
+                        consecutive_failures += 1;
                     }
-                    // Was connected but dropped — will retry below.
                 }
                 Err(e) => {
                     let msg = format!("{e}");
                     state.error.set(Some(format!("Connection error: {msg}")));
                     state.connected.set(false);
-                    if !state.authenticated.get_untracked() {
-                        state.session_hint.set(false);
-                        break;
-                    }
+                    consecutive_failures += 1;
                 }
             }
 
             if !state.session_hint.get_untracked() {
+                // Explicit logout cleared the hint.
+                break;
+            }
+
+            if !state.authenticated.get_untracked()
+                && consecutive_failures >= MAX_RECONNECT_FAILURES_WITHOUT_AUTH
+            {
+                // Repeated failures with no successful SyncInit ever —
+                // the cookie is probably stale or revoked. Force a
+                // fresh login instead of looping indefinitely.
+                state.session_hint.set(false);
+                state.error.set(Some(
+                    "Could not connect after several attempts. Please log in again.".into(),
+                ));
                 break;
             }
 

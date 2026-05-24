@@ -162,6 +162,20 @@ async fn static_handler(Path(path): Path<String>) -> Response {
     serve_embedded(&path)
 }
 
+/// Trunk emits content-hashed filenames like `name-abcdef0123456789.ext`
+/// (8+ lowercase hex chars before the final extension). Those are
+/// immutable: rebuilds produce new filenames, so old ones can be cached
+/// forever without staleness risk.
+fn is_hashed_asset(path: &str) -> bool {
+    let Some(stem) = path.rsplit_once('.').map(|(s, _)| s) else {
+        return false;
+    };
+    let Some(hash) = stem.rsplit_once('-').map(|(_, h)| h) else {
+        return false;
+    };
+    hash.len() >= 8 && hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+}
+
 /// Serve the index.html for the root path (no-cache to pick up new hashed assets).
 async fn index_handler() -> Response {
     match WebAssets::get("index.html") {
@@ -183,9 +197,20 @@ fn serve_embedded(path: &str) -> Response {
     match WebAssets::get(path) {
         Some(content) => {
             let mime = mime_from_path(path);
+            // Trunk-generated hashed filenames are content-addressed and
+            // safe to cache aggressively; unhashed paths (fonts/, etc.)
+            // get a short-lived cache so updates propagate within an hour.
+            let cache_control = if is_hashed_asset(path) {
+                "public, max-age=31536000, immutable"
+            } else {
+                "public, max-age=3600"
+            };
             (
                 StatusCode::OK,
-                [(axum::http::header::CONTENT_TYPE, mime)],
+                [
+                    (axum::http::header::CONTENT_TYPE, mime),
+                    (axum::http::header::CACHE_CONTROL, cache_control),
+                ],
                 content.data.to_vec(),
             )
                 .into_response()
@@ -353,6 +378,23 @@ mod tests {
 
         let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn is_hashed_asset_recognises_trunk_filenames() {
+        assert!(is_hashed_asset("repartee-web-8f9307fa1b2d7376.js"));
+        assert!(is_hashed_asset("base-4afd40405f2555f2.css"));
+        assert!(is_hashed_asset("themes-4956c8e94e9a32e3.css"));
+    }
+
+    #[test]
+    fn is_hashed_asset_rejects_unhashed_paths() {
+        assert!(!is_hashed_asset("index.html"));
+        assert!(!is_hashed_asset("favicon.ico"));
+        assert!(!is_hashed_asset("fonts/FiraCodeNerdFontMono-Regular.ttf"));
+        // Short suffixes or uppercase hex are treated as not-hashed.
+        assert!(!is_hashed_asset("foo-abc.js"));
+        assert!(!is_hashed_asset("foo-ABCDEF12.js"));
     }
 
     #[tokio::test]

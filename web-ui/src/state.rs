@@ -30,8 +30,11 @@ pub struct AppState {
     pub nick_color_lightness: RwSignal<f32>,
     /// Shell screen content for the active shell buffer.
     pub shell_screen: RwSignal<Option<crate::protocol::ShellScreenData>>,
-    /// Bumped on every SyncInit (initial connect or lag recovery) to force
-    /// the Layout Effect to re-fetch messages for the active buffer.
+    /// Bumped on every SyncInit (initial connect or lag recovery).
+    /// Read with `get_untracked()` only — the Layout Effect uses it as
+    /// part of its in-flight FetchMessages dedup key, NOT as a reactive
+    /// trigger. The reactive trigger is `active_buffer` (Leptos 0.7
+    /// `.set()` fires subscribers regardless of value equality).
     pub sync_version: RwSignal<u32>,
     /// Tracks which buffers have had their DB backlog fetched via FetchMessages.
     /// Prevents the Layout Effect from skipping the fetch when only live
@@ -111,10 +114,18 @@ impl AppState {
 
                 self.sort_buffers();
 
-                // Sync to the TUI's active buffer.
-                // Clear first so the set always triggers the Layout Effect
-                // (even if the buffer ID is the same as before the resync).
-                self.active_buffer.set(None);
+                // Bump sync_version FIRST so the Layout Effect's
+                // pending-fetch dedup (keyed by (buffer_id, sync_version))
+                // admits a new fetch for the active buffer under the new
+                // epoch — even if the buffer ID is the same as before.
+                self.sync_version.update(|v| *v += 1);
+
+                // Sync to the TUI's active buffer. A single `.set()` is
+                // enough to re-fire the Layout Effect (Leptos 0.7 fires
+                // subscribers regardless of value equality), so we don't
+                // need the old `set(None) + set(Some)` dance — that
+                // dance was the cause of the double-FetchMessages /
+                // duplicate-line bug.
                 if let Some(ref id) = active_buffer_id {
                     self.active_buffer.set(Some(id.clone()));
                 } else {
@@ -122,17 +133,30 @@ impl AppState {
                     let bufs = self.buffers.get_untracked();
                     if let Some(first) = bufs.iter().find(|b| b.buffer_type == "channel") {
                         self.active_buffer.set(Some(first.id.clone()));
+                    } else {
+                        // No channel — retrigger current value so the
+                        // Effect fires under the new epoch even though
+                        // the buffer ID didn't change.
+                        let current = self.active_buffer.get_untracked();
+                        if current.is_some() {
+                            self.active_buffer.set(current);
+                        }
                     }
                 }
-
-                // Bump sync_version to force Layout Effect re-fetch.
-                self.sync_version.update(|v| *v += 1);
             }
             WebEvent::NewMessage { buffer_id, message } => {
                 self.messages.update(|msgs| {
                     let entry = msgs.entry(buffer_id.clone()).or_default();
-                    entry.push(message);
-                    cap_messages(entry);
+                    // Dedup by id — guards against the SyncInit →
+                    // FetchMessages round-trip race where the same
+                    // message arrives as both a live NewMessage and
+                    // inside the fetched backlog snapshot. id=0 is
+                    // reserved for date separators and is not unique,
+                    // so always admit those.
+                    if message.id == 0 || !entry.iter().any(|m| m.id == message.id) {
+                        entry.push(message);
+                        cap_messages(entry);
+                    }
                 });
                 // Update unread count if not the active buffer.
                 let is_active = self.active_buffer.get_untracked().as_deref() == Some(&buffer_id);
@@ -223,8 +247,23 @@ impl AppState {
             } => {
                 self.messages.update(|msgs| {
                     let entry = msgs.entry(buffer_id.clone()).or_default();
-                    // Insert date separators between messages from different days.
-                    let with_separators = insert_date_separators(messages);
+                    // Drop incoming messages whose id is already present
+                    // in the cache — happens when NewMessage events
+                    // arrive between sending FetchMessages and receiving
+                    // the response (the server serves the in-memory
+                    // buffer for `before=None`, which includes messages
+                    // the client already received live). id=0 is the
+                    // date-separator sentinel and is admitted unfiltered.
+                    let existing_ids: HashSet<u64> = entry
+                        .iter()
+                        .filter(|m| m.id != 0)
+                        .map(|m| m.id)
+                        .collect();
+                    let filtered: Vec<_> = messages
+                        .into_iter()
+                        .filter(|m| m.id == 0 || !existing_ids.contains(&m.id))
+                        .collect();
+                    let with_separators = insert_date_separators(filtered);
                     // Prepend older messages (they come from scroll-back).
                     let mut combined = with_separators;
                     combined.append(entry);

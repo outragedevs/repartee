@@ -23,19 +23,31 @@ pub fn Layout() -> impl IntoView {
     // a buffer may have live NewMessage events cached without ever having
     // its DB backlog loaded — checking messages.is_empty() would skip the
     // fetch and show an incomplete buffer.
+    //
+    // In-flight FetchMessages dedup keyed by (buffer_id, sync_version):
+    // without it, rapid signal writes during SyncInit (or rapid clicks on
+    // the same buffer within one connection epoch) re-fire this Effect
+    // before backlog_loaded is updated, sending duplicate Fetch requests
+    // whose responses are then both prepended → duplicated lines on screen.
+    // sync_version is read untracked — it's a dedup key, not a trigger.
+    let pending = StoredValue::new(std::collections::HashSet::<(String, u32)>::new());
     Effect::new(move || {
-        let _sync = state.sync_version.get(); // subscribe to resync events
-        if let Some(buf_id) = state.active_buffer.get() {
-            let already_loaded = state.backlog_loaded.get_untracked().contains(&buf_id);
-            if !already_loaded {
-                crate::ws::send_command(&WebCommand::FetchMessages {
-                    buffer_id: buf_id.clone(),
-                    limit: 100,
-                    before: None,
-                });
-            }
-            crate::ws::send_command(&WebCommand::FetchNickList { buffer_id: buf_id });
+        let Some(buf_id) = state.active_buffer.get() else { return };
+        let epoch = state.sync_version.get_untracked();
+        let key = (buf_id.clone(), epoch);
+        let already_loaded = state.backlog_loaded.get_untracked().contains(&buf_id);
+        let already_pending = pending.with_value(|s| s.contains(&key));
+        if !already_loaded && !already_pending {
+            pending.update_value(|s| {
+                s.insert(key);
+            });
+            crate::ws::send_command(&WebCommand::FetchMessages {
+                buffer_id: buf_id.clone(),
+                limit: 100,
+                before: None,
+            });
         }
+        crate::ws::send_command(&WebCommand::FetchNickList { buffer_id: buf_id });
     });
 
     // Auto-close left panel when active buffer changes.
