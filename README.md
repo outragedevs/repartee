@@ -158,6 +158,29 @@ Everything survives detach — IRC connections, scrollback, scripts, and channel
 
 ---
 
+## Bind address (multi-homed hosts)
+
+On a host with multiple local IPs, repartee picks the outgoing IRC source address using this precedence:
+
+1. **`servers.<id>.bind_ip`** in `config.toml` (or set inline with `/server add ... -bind=<ip>` / `/connect -bind=<ip>`)
+2. **`repartee -h <ip>`** — runtime override (modelled after `irssi -h`)
+3. **`general.default_bind_ip`** in `config.toml` (or `/set general.default_bind_ip <ip>`)
+4. OS default (kernel routing table)
+
+```bash
+# One-off connection from a specific source IP (doesn't touch config):
+repartee -h 192.0.2.10
+repartee --bind=2001:db8::1
+repartee -h 192.0.2.10 -d   # combine with --detach
+
+# Make 192.0.2.10 the default for every server lacking its own bind_ip:
+/set general.default_bind_ip 192.0.2.10
+```
+
+The CLI flag only applies for that session — it never writes back to `config.toml`. A server entry with its own `bind_ip` is always honoured first, so per-server overrides are stable across CLI invocations.
+
+---
+
 ## Scripting
 
 Scripts are Lua 5.4 files placed in `~/.repartee/scripts/`:

@@ -449,6 +449,13 @@ pub struct App {
     pub web_restart_pending: bool,
     /// Tracks the current local date for emitting "day changed" markers.
     pub(crate) last_day: chrono::NaiveDate,
+    /// Runtime bind-IP override from the `repartee -h <ip>` CLI flag.
+    /// Sits between per-server `bind_ip` (highest) and
+    /// `general.default_bind_ip` (lowest) in the precedence chain.
+    /// Never persisted — the CLI flag deliberately doesn't mutate the
+    /// stored config so a one-off override doesn't leak into later
+    /// sessions.
+    pub cli_bind_override: Option<String>,
 }
 
 impl App {
@@ -709,6 +716,7 @@ impl App {
             web_active_buffers: HashMap::new(),
             web_restart_pending: false,
             last_day: chrono::Local::now().date_naive(),
+            cli_bind_override: None,
         };
         app.recompute_wrap_indent();
 

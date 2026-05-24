@@ -31,7 +31,7 @@ mod web;
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Result, eyre};
 use tracing_subscriber::EnvFilter;
 
 fn log_path() -> std::path::PathBuf {
@@ -99,9 +99,60 @@ fn try_reap(child_pid: u32) -> Option<String> {
     }
 }
 
+/// Parse `-h <ip>`, `--bind <ip>`, or `--bind=<ip>` out of the CLI
+/// argv. Returns `Ok(Some(ip))` if any form is present, `Ok(None)` if
+/// none is, and `Err(...)` if `-h` / `--bind` appears without a value.
+///
+/// Modelled on irssi's `-h <hostname>` flag — the value is a host-wide
+/// runtime override for outgoing IRC bind address. Per-server
+/// `bind_ip` (config or `/connect -bind=`) still wins; this only fills
+/// in the gap when no per-server value is set. The CLI flag
+/// deliberately never mutates `config.toml`, so a one-off invocation
+/// (`repartee -h 192.0.2.10`) doesn't pollute later sessions.
+///
+/// We scan argv unconditionally — passing `-h` to a subcommand that
+/// doesn't IRC-connect (`attach`, `logs`) is harmless: the override is
+/// stored on `App` but never read.
+fn parse_bind_override(args: &[String]) -> Result<Option<String>> {
+    let mut i = 1;
+    while i < args.len() {
+        let arg = &args[i];
+        if let Some(value) = arg.strip_prefix("--bind=") {
+            if value.is_empty() {
+                return Err(eyre!("--bind= requires a value, e.g. --bind=192.0.2.10"));
+            }
+            return Ok(Some(value.to_string()));
+        }
+        if arg == "-h" || arg == "--bind" {
+            let value = args.get(i + 1).ok_or_else(|| {
+                eyre!("{arg} requires an argument, e.g. {arg} 192.0.2.10")
+            })?;
+            if value.starts_with('-') {
+                return Err(eyre!(
+                    "{arg} requires an IP address, got flag '{value}'"
+                ));
+            }
+            return Ok(Some(value.clone()));
+        }
+        i += 1;
+    }
+    Ok(None)
+}
+
 #[allow(clippy::too_many_lines)]
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
+
+    // Parse the bind override early so we surface a usage error to the
+    // user's TTY before forking (the daemon child has stderr redirected
+    // to /dev/null and would otherwise eat the message).
+    let cli_bind_override = match parse_bind_override(&args) {
+        Ok(value) => value,
+        Err(e) => {
+            eprintln!("{}: {e:#}", constants::APP_NAME);
+            std::process::exit(2);
+        }
+    };
 
     // Handle --version / -v before any setup (no tokio needed).
     if args.iter().any(|a| a == "--version" || a == "-v") {
@@ -160,8 +211,9 @@ fn main() -> Result<()> {
         return tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?
-            .block_on(async {
+            .block_on(async move {
                 let mut app = app::App::new()?;
+                app.cli_bind_override = cli_bind_override;
                 app.detached = true;
                 let pid = std::process::id();
                 let sock_path = session::socket_path(pid);
@@ -207,6 +259,7 @@ fn main() -> Result<()> {
             setup_logging();
             ui::install_panic_hook();
             let mut app = app::App::new()?;
+            app.cli_bind_override = cli_bind_override;
             if let Ok((cols, rows)) = crossterm::terminal::size() {
                 app.cached_term_cols = cols;
                 app.cached_term_rows = rows;
@@ -238,8 +291,9 @@ fn main() -> Result<()> {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?
-                .block_on(async {
+                .block_on(async move {
                     let mut app = app::App::new()?;
+                    app.cli_bind_override = cli_bind_override;
                     app.detached = true;
                     let result = app.run().await;
                     app::App::remove_own_socket();
@@ -299,5 +353,85 @@ fn main() -> Result<()> {
                     session::shim::run_shim(Some(child_pid), false).await
                 })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_bind_override;
+
+    fn args(xs: &[&str]) -> Vec<String> {
+        std::iter::once("repartee")
+            .chain(xs.iter().copied())
+            .map(String::from)
+            .collect()
+    }
+
+    #[test]
+    fn no_flag_returns_none() {
+        assert_eq!(parse_bind_override(&args(&[])).unwrap(), None);
+        assert_eq!(parse_bind_override(&args(&["-d"])).unwrap(), None);
+        assert_eq!(parse_bind_override(&args(&["a", "1234"])).unwrap(), None);
+    }
+
+    #[test]
+    fn short_flag_with_value() {
+        assert_eq!(
+            parse_bind_override(&args(&["-h", "192.0.2.10"])).unwrap(),
+            Some("192.0.2.10".into())
+        );
+    }
+
+    #[test]
+    fn long_flag_separate() {
+        assert_eq!(
+            parse_bind_override(&args(&["--bind", "2001:db8::1"])).unwrap(),
+            Some("2001:db8::1".into())
+        );
+    }
+
+    #[test]
+    fn long_flag_equals() {
+        assert_eq!(
+            parse_bind_override(&args(&["--bind=10.0.0.5"])).unwrap(),
+            Some("10.0.0.5".into())
+        );
+    }
+
+    #[test]
+    fn combined_with_other_flags() {
+        assert_eq!(
+            parse_bind_override(&args(&["-d", "-h", "192.0.2.10"])).unwrap(),
+            Some("192.0.2.10".into())
+        );
+        assert_eq!(
+            parse_bind_override(&args(&["--detach", "--bind=192.0.2.10"])).unwrap(),
+            Some("192.0.2.10".into())
+        );
+    }
+
+    #[test]
+    fn missing_value_errors() {
+        assert!(parse_bind_override(&args(&["-h"])).is_err());
+        assert!(parse_bind_override(&args(&["--bind"])).is_err());
+        assert!(parse_bind_override(&args(&["--bind="])).is_err());
+    }
+
+    #[test]
+    fn flag_value_rejected() {
+        // -h followed by another flag is a missing-value error, not
+        // a "bind to literal -d" mistake.
+        assert!(parse_bind_override(&args(&["-h", "-d"])).is_err());
+        assert!(parse_bind_override(&args(&["--bind", "--detach"])).is_err());
+    }
+
+    #[test]
+    fn first_occurrence_wins() {
+        // Doesn't really matter, but documents the behavior: if a user
+        // passes two binds, the first one is used.
+        assert_eq!(
+            parse_bind_override(&args(&["-h", "1.1.1.1", "--bind=2.2.2.2"])).unwrap(),
+            Some("1.1.1.1".into())
+        );
     }
 }

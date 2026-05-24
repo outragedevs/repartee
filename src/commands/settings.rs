@@ -35,6 +35,7 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 "flood_protection" => config.general.flood_protection.to_string(),
                 "flood_exemptions" => config.general.flood_exemptions.join(", "),
                 "ctcp_version" => config.general.ctcp_version.clone(),
+                "default_bind_ip" => config.general.default_bind_ip.clone().unwrap_or_default(),
                 _ => return None,
             };
             Some(Resolved {
@@ -250,6 +251,15 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
                 config.general.flood_exemptions = split_list(raw);
             }
             "ctcp_version" => config.general.ctcp_version = raw.to_string(),
+            "default_bind_ip" => {
+                // Empty string clears the field (matches the
+                // /set ... "" convention used elsewhere for Option<T>).
+                config.general.default_bind_ip = if raw.is_empty() {
+                    None
+                } else {
+                    Some(raw.to_string())
+                };
+            }
             _ => return Err(format!("Unknown field: {path}")),
         },
         "display" => match parts[1] {
@@ -528,6 +538,7 @@ const BASE_PATHS: &[&str] = &[
     "general.flood_protection",
     "general.flood_exemptions",
     "general.ctcp_version",
+    "general.default_bind_ip",
     "display.nick_column_width",
     "display.nick_max_length",
     "display.nick_alignment",

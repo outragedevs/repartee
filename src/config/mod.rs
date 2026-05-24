@@ -87,6 +87,18 @@ pub struct GeneralConfig {
     pub flood_protection: bool,
     pub flood_exemptions: Vec<String>,
     pub ctcp_version: String,
+    /// Fallback local IP to bind outgoing IRC sockets to, used when a
+    /// server's per-server `bind_ip` is unset. Useful on hosts with
+    /// multiple addresses where you want a default source IP without
+    /// duplicating it on every `[servers.*]` entry.
+    ///
+    /// Precedence (highest first):
+    ///   1. `servers.<id>.bind_ip` (config or `/server set ... -bind=`)
+    ///   2. `repartee -h <ip>` CLI override (runtime only, not persisted)
+    ///   3. `general.default_bind_ip` (this field)
+    ///   4. OS default (kernel picks via routing table)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_bind_ip: Option<String>,
 }
 
 impl Default for GeneralConfig {
@@ -101,6 +113,7 @@ impl Default for GeneralConfig {
             flood_protection: true,
             flood_exemptions: Vec::new(),
             ctcp_version: format!("{APP_NAME} {APP_VERSION}"),
+            default_bind_ip: None,
         }
     }
 }

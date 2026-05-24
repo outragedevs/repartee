@@ -194,10 +194,19 @@ impl App {
         buffer_id: &str,
         label: &str,
     ) {
-        if let Some(cfg) = server_config {
+        if let Some(mut cfg) = server_config {
             let general = self.config.general.clone();
             let tx = self.irc_tx.clone();
             let id = conn_id.to_string();
+            // Same bind-IP fallback as the interactive /connect path —
+            // per-server `bind_ip` wins, then CLI `-h`, then
+            // `general.default_bind_ip`. Pre-resolved here so the
+            // spawned task can stay agnostic.
+            cfg.bind_ip = crate::irc::resolve_bind_ip(
+                &cfg,
+                self.cli_bind_override.as_deref(),
+                &general,
+            );
             tokio::spawn(async move {
                 match crate::irc::connect_server(&id, &cfg, &general).await {
                     Ok((handle, mut rx)) => {

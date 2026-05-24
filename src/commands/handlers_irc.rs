@@ -149,7 +149,15 @@ fn spawn_connection(app: &mut App, conn_id: &str, server_config: &crate::config:
     let general = app.config.general.clone();
     let tx = app.irc_tx.clone();
     let id = conn_id.to_string();
-    let cfg = server_config.clone();
+    let mut cfg = server_config.clone();
+    // Apply CLI / config-default bind-IP fallback if the server has
+    // none of its own. Per-server `bind_ip` (already set on `cfg`)
+    // wins unconditionally; this only fills in the blank.
+    cfg.bind_ip = crate::irc::resolve_bind_ip(
+        &cfg,
+        app.cli_bind_override.as_deref(),
+        &general,
+    );
 
     tokio::spawn(async move {
         match crate::irc::connect_server(&id, &cfg, &general).await {

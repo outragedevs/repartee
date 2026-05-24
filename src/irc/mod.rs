@@ -281,6 +281,31 @@ impl<'a> Iterator for WordSplitter<'a> {
     }
 }
 
+/// Resolve the effective local bind IP for an outgoing IRC socket.
+///
+/// Precedence (highest first):
+///   1. `server.bind_ip` — explicit per-server config (or `/connect
+///      -bind=` runtime override).
+///   2. `cli_override` — `repartee -h <ip>` CLI flag (runtime only).
+///   3. `general.default_bind_ip` — host-wide fallback from
+///      `[general]` in `config.toml`.
+///   4. `None` — let the kernel choose via the routing table.
+///
+/// Pulled into a free function with explicit args so it's trivially
+/// testable and behaves identically across the `/connect` and
+/// autoconnect/reconnect spawn paths.
+pub fn resolve_bind_ip(
+    server: &crate::config::ServerConfig,
+    cli_override: Option<&str>,
+    general: &crate::config::GeneralConfig,
+) -> Option<String> {
+    server
+        .bind_ip
+        .clone()
+        .or_else(|| cli_override.map(str::to_string))
+        .or_else(|| general.default_bind_ip.clone())
+}
+
 /// Connect to an IRC server, returning a handle and the event receiver.
 ///
 /// Always performs capability negotiation (CAP LS 302), requesting all
@@ -1080,5 +1105,84 @@ mod tests {
         let orig_words: Vec<&str> = text.split_whitespace().collect();
         let re_words: Vec<&str> = reassembled.split_whitespace().collect();
         assert_eq!(orig_words, re_words);
+    }
+
+    fn server_with(bind: Option<&str>) -> crate::config::ServerConfig {
+        crate::config::ServerConfig {
+            label: "test".into(),
+            address: "irc.example".into(),
+            port: 6697,
+            tls: true,
+            tls_verify: true,
+            autoconnect: false,
+            channels: vec![],
+            nick: None,
+            username: None,
+            realname: None,
+            password: None,
+            sasl_user: None,
+            sasl_pass: None,
+            bind_ip: bind.map(str::to_string),
+            encoding: None,
+            auto_reconnect: None,
+            reconnect_delay: None,
+            reconnect_max_retries: None,
+            autosendcmd: None,
+            sasl_mechanism: None,
+            client_cert_path: None,
+        }
+    }
+
+    fn general_with(default_bind: Option<&str>) -> crate::config::GeneralConfig {
+        crate::config::GeneralConfig {
+            default_bind_ip: default_bind.map(str::to_string),
+            ..crate::config::GeneralConfig::default()
+        }
+    }
+
+    #[test]
+    fn resolve_bind_ip_prefers_per_server() {
+        let s = server_with(Some("10.0.0.1"));
+        let g = general_with(Some("10.0.0.99"));
+        let r = resolve_bind_ip(&s, Some("10.0.0.50"), &g);
+        // Per-server wins over both CLI and default.
+        assert_eq!(r.as_deref(), Some("10.0.0.1"));
+    }
+
+    #[test]
+    fn resolve_bind_ip_falls_back_to_cli() {
+        let s = server_with(None);
+        let g = general_with(Some("10.0.0.99"));
+        let r = resolve_bind_ip(&s, Some("10.0.0.50"), &g);
+        // No per-server bind: CLI override beats general default.
+        assert_eq!(r.as_deref(), Some("10.0.0.50"));
+    }
+
+    #[test]
+    fn resolve_bind_ip_falls_back_to_default() {
+        let s = server_with(None);
+        let g = general_with(Some("10.0.0.99"));
+        let r = resolve_bind_ip(&s, None, &g);
+        assert_eq!(r.as_deref(), Some("10.0.0.99"));
+    }
+
+    #[test]
+    fn resolve_bind_ip_returns_none_when_nothing_set() {
+        let s = server_with(None);
+        let g = general_with(None);
+        let r = resolve_bind_ip(&s, None, &g);
+        assert_eq!(r, None);
+    }
+
+    #[test]
+    fn resolve_bind_ip_empty_string_treated_as_value() {
+        // Defensive: an empty string IS Some("") and would propagate
+        // — make the precedence rule explicit so a future regression
+        // (e.g. someone normalises empty -> None at a different layer)
+        // is caught here rather than at runtime.
+        let s = server_with(Some(""));
+        let g = general_with(Some("10.0.0.99"));
+        let r = resolve_bind_ip(&s, None, &g);
+        assert_eq!(r.as_deref(), Some(""));
     }
 }
