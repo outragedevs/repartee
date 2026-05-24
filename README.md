@@ -260,6 +260,17 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v1.2.0
+
+- **Runtime bind-IP override** — new `repartee -h <ip>` / `--bind <ip>` / `--bind=<ip>` CLI flag (modelled on `irssi -h`) lets multi-homed hosts pick the outgoing IRC source address for a session without editing config. New `general.default_bind_ip` config key (also settable via `/set`) provides a host-wide default. Precedence: per-server `bind_ip` → CLI `-h` → `general.default_bind_ip` → OS default. The CLI flag never persists.
+- **No more duplicate web messages** — every line is now deduplicated by message id at both the live-event and backlog-fetch layers, and the `SyncInit` handler no longer triggers two competing `FetchMessages` round-trips per resync. Previously every reconnect or lag-recovery showed each chat line twice.
+- **No more web chat-view jitter** — image previews now reserve a fixed 320×200 (desktop) / aspect-ratio (mobile) box before loading, so async thumbnail loads no longer reflow the bottom-anchored chat. The message list switched to keyed `<For>` rendering, so appending a single new line stops rebuilding the entire 1000-line DOM. Browser-native `content-visibility` keeps off-screen lines out of layout/paint.
+- **Per-element web reactivity** — timestamp format, nick column width, nick truncation, nick colors, and dismissed-preview state are wrapped in fine-grained reactive closures, so settings changes and preview dismissals update only the affected DOM nodes instead of the whole message list.
+- **Multi-tab opt-out** — set `web_follow_tui_buffer = false` in localStorage to make a browser tab stop following the TUI's active-buffer flips (default behaviour is preserved for single-tab + TUI workflows).
+- **Resilient web reconnect** — a transient network blip on initial page load no longer kicks the user back to the login form; the client retries with exponential backoff for up to five attempts before giving up. Resize listener is now cleaned up on component unmount, eliminating a per-login closure leak.
+- **Eager web-state snapshot** — `SyncInit` no longer reads up-to-1-second-old state when a new WS session connects between background ticks. Snapshot is now refreshed inline whenever a structural event (`BufferCreated`, `BufferClosed`, `ActiveBufferChanged`, `ConnectionStatus`, `SettingsChanged`) is broadcast.
+- **Backend lock and asset cache cleanup** — replaced `std::sync::RwLock` with `parking_lot::RwLock` on the web-state snapshot (no risk of blocking a tokio worker on contention). Trunk-hashed static assets now ship with `Cache-Control: public, max-age=31536000, immutable`; unhashed paths get a 1-hour cache.
+
 ### v1.1.1
 
 - **Refreshed bundled web UI** — `cargo install repartee@1.1.0` shipped the v1.0.x WASM bundle because `static/web/` in the published source predated the web-improvements work. This release re-bundles the actual v1.1.0 frontend (login form with username field, clickable links, image preview rendering) so `cargo install` users get the working UI without having to clone the repo and run `make wasm` themselves.
