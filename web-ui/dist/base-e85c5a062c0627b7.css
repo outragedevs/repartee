@@ -640,9 +640,24 @@ html, body {
 
 .msg-preview-card {
     position: relative;
+    /* Hidden by default. The card is only revealed (`.loaded` added by
+       the image's onload handler) when the thumbnail actually loads,
+       so previews whose fetch fails — x.com tweets blocking og:image,
+       dead imgur links, /api/preview returning 502 — never flash a
+       placeholder box on screen, and never trigger the
+       reserve-then-collapse reflow that caused the visible jitter.
+       Trade-off: `loading="lazy"` is incompatible with display:none
+       (IntersectionObserver doesn't fire on hidden subtrees), so all
+       preview images for messages currently in the For are fetched
+       eagerly. The server-side thumbnail cache + browser HTTP cache
+       absorb the cost; per-message preview count is capped by
+       `web.image_previews_max_per_msg`. */
+    display: none;
+}
+.msg-preview-card.loaded {
     display: inline-block;
-    /* See `.chat-line` comment — same browser-native virtualization,
-       intrinsic ~220px to match the fixed 200px thumb plus padding. */
+    /* Browser-native virtualization — see `.chat-line`. Intrinsic
+       size ~220px to match the fixed 200px thumb plus padding. */
     content-visibility: auto;
     contain-intrinsic-size: auto 220px;
 }
