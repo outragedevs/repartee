@@ -104,6 +104,57 @@ pub fn ChatView() -> impl IntoView {
         }
     };
 
+    // Custom copy handler: the browser's default copy uses `innerText`,
+    // which inserts a `\n` between every block-level box — and CSS Flex
+    // promotes each flex item to block-level. Our `.chat-line` is
+    // `display: flex` with three child spans (ts, nick, text), so a
+    // selection that crosses those spans pastes as three lines split
+    // by `\n` instead of `ts nick text` on one line. The TUI doesn't
+    // hit this because terminal text is literally one line per row.
+    // We intercept and rebuild each affected `.chat-line` as
+    // space-separated text; lines stay separated by `\n` as expected.
+    // The guard `if !raw.contains('\n')` skips the override for
+    // partial selections within a single span (where the default is
+    // already correct).
+    let on_copy = move |ev: web_sys::Event| {
+        let Some(clip_ev) = ev.dyn_ref::<web_sys::ClipboardEvent>() else { return };
+        let Some(window) = web_sys::window() else { return };
+        let Ok(Some(selection)) = window.get_selection() else { return };
+        if selection.is_collapsed() {
+            return;
+        }
+        let raw_js = selection.to_string();
+        let raw: String = raw_js.into();
+        if !raw.contains('\n') {
+            return;
+        }
+        let Some(doc) = window.document() else { return };
+        let Ok(chat_lines) = doc.query_selector_all(".chat-line") else { return };
+        let mut out: Vec<String> = Vec::with_capacity(chat_lines.length() as usize);
+        for i in 0..chat_lines.length() {
+            let Some(node) = chat_lines.item(i) else { continue };
+            let in_selection = selection
+                .contains_node_with_allow_partial_containment(&node, true)
+                .unwrap_or(false);
+            if !in_selection {
+                continue;
+            }
+            if let Some(line) = format_chat_line_for_copy(&node)
+                && !line.is_empty()
+            {
+                out.push(line);
+            }
+        }
+        if out.is_empty() {
+            return;
+        }
+        let formatted = out.join("\n");
+        let Some(clipboard) = clip_ev.clipboard_data() else { return };
+        if clipboard.set_data("text/plain", &formatted).is_ok() {
+            clip_ev.prevent_default();
+        }
+    };
+
     view! {
         <div class="chat-area">
             {move || {
@@ -112,7 +163,7 @@ pub fn ChatView() -> impl IntoView {
                 }
                 view! {
             <div class="chat-messages-outer">
-                <div class="chat-messages" node_ref=chat_ref on:scroll=on_scroll>
+                <div class="chat-messages" node_ref=chat_ref on:scroll=on_scroll on:copy=on_copy>
                     <For
                         each=move || messages().unwrap_or_default()
                         key=|msg| (msg.id, msg.timestamp)
@@ -417,11 +468,33 @@ fn render_previews(
                 });
                 crate::state::save_dismissed_previews(&state.dismissed_previews.get());
             };
-            // Hide the entire preview card when the thumbnail fails to load
-            // (server returned 502, image was deleted upstream, etc.). Using
-            // an inline HTML attribute avoids a per-thumbnail Leptos closure.
-            const ON_IMG_ERROR: &str =
-                "this.closest('.msg-preview-card').style.display='none'";
+            // Reveal-on-load: the card is `display:none` by default
+            // (see `.msg-preview-card` in base.css). On successful
+            // image load we add the `.loaded` class, which switches
+            // it to `display:inline-block` and reserves its 320×200
+            // (or aspect-ratio on mobile) box. On error we do
+            // nothing, so failed previews never flash a placeholder
+            // and never trigger reserve-then-collapse reflow.
+            //
+            // The trailing scroll re-anchor handles the case where
+            // the user was at the bottom of chat when the new card
+            // appeared — without it the freshly-revealed 200 px box
+            // pushes live messages off-screen. Threshold (40 px)
+            // matches `SCROLL_THRESHOLD` so the re-anchor logic
+            // tracks the same "near bottom" semantics used elsewhere.
+            //
+            // Inline HTML attribute rather than a Leptos closure
+            // because `render_message` has no access to `ChatView`'s
+            // `chat_ref` and threading it through every per-message
+            // child would be ceremony for no functional gain. The
+            // `loading="lazy"` attribute is intentionally absent —
+            // it's a no-op while the parent is display:none, so all
+            // preview images for in-DOM messages fetch eagerly.
+            const ON_IMG_LOAD: &str = "var c=this.closest('.msg-preview-card');\
+                var m=this.closest('.chat-messages');\
+                var b=m&&(m.scrollHeight-m.scrollTop-m.clientHeight<40);\
+                c.classList.add('loaded');\
+                if(b)m.scrollTop=m.scrollHeight;";
             view! {
                 <span class="msg-preview-card">
                     <a
@@ -433,9 +506,8 @@ fn render_previews(
                         <img
                             src=thumb
                             class="msg-preview-thumb"
-                            loading="lazy"
                             alt="link preview"
-                            onerror=ON_IMG_ERROR
+                            onload=ON_IMG_LOAD
                         />
                     </a>
                     <button
@@ -484,6 +556,34 @@ fn render_styled_text(text: &str) -> Vec<leptos::prelude::AnyView> {
             }
         })
         .collect::<Vec<_>>()
+}
+
+/// Rebuild a `.chat-line` as space-joined plain text for the copy
+/// handler — concatenates each direct child span's `textContent` with
+/// a single space. Mirrors what users actually see (ts, nick, text),
+/// and matches the TUI's one-line-per-message copy semantics.
+///
+/// Children:
+///   - regular line: `<span ts><span nick><span text>` → `ts nick text`
+///   - action      : `<span ts><span action-body>`     → `ts * nick text`
+///   - event/notice: `<span ts><span text>`            → `ts text`
+///   - separator   : `<span separator-text>`           → just the text
+///
+/// `textContent` on the nick span flattens its nested mode/name/sep
+/// children to e.g. `snieg❯`, which is exactly the visual form.
+fn format_chat_line_for_copy(node: &web_sys::Node) -> Option<String> {
+    let el = node.dyn_ref::<web_sys::Element>()?;
+    let children = el.children();
+    let mut parts: Vec<String> = Vec::with_capacity(children.length() as usize);
+    for i in 0..children.length() {
+        let Some(child) = children.item(i) else { continue };
+        let text = child.text_content().unwrap_or_default();
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            parts.push(trimmed.to_string());
+        }
+    }
+    Some(parts.join(" "))
 }
 
 /// Scroll chat container to bottom via requestAnimationFrame.
