@@ -94,10 +94,14 @@ pub fn message_to_wire(
         highlight: msg.highlight,
         event_key: msg.event_key.clone(),
         previews: extractor.map(|e| e.extract(&msg.text)).unwrap_or_default(),
+        shortenings: msg.shortenings.iter().map(shortening_to_wire).collect(),
     }
 }
 
 /// Convert a `StoredMessage` (from `SQLite`) to a `WireMessage`.
+/// Backlog never carries shortenings — they live only in process
+/// memory (per the spec's in-memory-only cache rule), so this path
+/// always emits an empty `shortenings` vec.
 pub fn stored_to_wire(
     msg: &crate::storage::types::StoredMessage,
     extractor: Option<&crate::web::preview::WebPreviewExtractor>,
@@ -112,6 +116,16 @@ pub fn stored_to_wire(
         highlight: msg.highlight,
         event_key: msg.event_key.clone(),
         previews: extractor.map(|e| e.extract(&msg.text)).unwrap_or_default(),
+        shortenings: Vec::new(),
+    }
+}
+
+pub fn shortening_to_wire(
+    s: &crate::shrink::UrlShortening,
+) -> crate::web::protocol::WireUrlShortening {
+    crate::web::protocol::WireUrlShortening {
+        original: s.original.clone(),
+        shortened: s.shortened.clone(),
     }
 }
 
@@ -212,6 +226,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            shortenings: Vec::new(),
         };
         let wire = message_to_wire(&msg, None);
         assert_eq!(wire.id, 42);
@@ -237,6 +252,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            shortenings: Vec::new(),
         };
         let wire = message_to_wire(&msg, None);
         assert_eq!(wire.event_key.as_deref(), Some("join"));
@@ -259,6 +275,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            shortenings: Vec::new(),
         };
         let wire = message_to_wire(&msg, Some(&extractor));
         assert_eq!(wire.previews.len(), 1);

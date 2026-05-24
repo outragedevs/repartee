@@ -493,6 +493,7 @@ fn rows_to_buffer_messages(
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: None,
+                shortenings: Vec::new(),
             });
         }
         last_date = Some(local_date);
@@ -537,5 +538,6 @@ fn stored_to_message(
         log_msg_id: Some(stored.id.to_string()),
         log_ref_id: None,
         tags: None,
+        shortenings: Vec::new(),
     }
 }

@@ -554,6 +554,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            shortenings: Vec::new(),
         }
     }
 
@@ -611,6 +612,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            shortenings: Vec::new(),
         };
         state.add_message("libera/#rust", event_msg);
         assert!(
@@ -645,6 +647,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            shortenings: Vec::new(),
         };
         state.add_message("libera/#rust", event_msg2);
         assert_eq!(
@@ -823,6 +826,7 @@ mod tests {
             log_msg_id: Some(primary_id.clone()),
             log_ref_id: None,
             tags: None,
+            shortenings: Vec::new(),
         };
         state.add_message("libera/#rust", msg1);
 
@@ -840,6 +844,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: Some(primary_id.clone()),
             tags: None,
+            shortenings: Vec::new(),
         };
         state.add_message("libera/#linux", msg2);
 

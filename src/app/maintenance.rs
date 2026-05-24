@@ -30,6 +30,7 @@ impl App {
                         log_msg_id: None,
                         log_ref_id: None,
                         tags: None,
+                        shortenings: Vec::new(),
                     },
                 );
             }
@@ -162,6 +163,7 @@ impl App {
                     log_msg_id: None,
                     log_ref_id: None,
                     tags: None,
+                    shortenings: Vec::new(),
                 },
             );
         }
@@ -210,6 +212,7 @@ impl App {
                             log_ref_id: None,
                             event_key: None,
                             event_params: Some(Vec::new()),
+                            shortenings: Vec::new(),
                         },
                     );
                     if let Some(handle) = self.irc_handles.get(&conn_id) {

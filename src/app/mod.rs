@@ -10,8 +10,11 @@ mod mentions;
 mod scripting;
 mod session;
 mod shell;
+pub(crate) mod shrink;
 mod web;
 mod who;
+
+pub(crate) use shrink::ShrinkResult;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -449,6 +452,20 @@ pub struct App {
     pub web_restart_pending: bool,
     /// Tracks the current local date for emitting "day changed" markers.
     pub(crate) last_day: chrono::NaiveDate,
+    /// HTTP client for the shrink API. `None` when the feature is
+    /// disabled or no `SHRINK_API_KEY` is configured — keeps the
+    /// dispatch path branchless (just an `if let Some` check).
+    pub(crate) shrink_client: Option<crate::shrink::ShrinkClient>,
+    /// Shared LRU cache for shortenings. Wrapped in
+    /// `parking_lot::Mutex` so background shrink tasks can read/write
+    /// from any tokio worker without contending on a tokio mutex.
+    pub(crate) shrink_cache:
+        std::sync::Arc<parking_lot::Mutex<crate::shrink::ShrinkCache>>,
+    /// Channel for shrink-task results landing back in the main
+    /// loop. Receiver is drained by the loop arm; sender is cloned
+    /// into each spawned task.
+    pub(crate) shrink_rx: mpsc::Receiver<ShrinkResult>,
+    pub(crate) shrink_tx: mpsc::Sender<ShrinkResult>,
     /// Runtime bind-IP override from the `repartee -h <ip>` CLI flag.
     /// Sits between per-server `bind_ip` (highest) and
     /// `general.default_bind_ip` (lowest) in the precedence chain.
@@ -488,6 +505,7 @@ impl App {
         let env_vars = config::load_env(&constants::env_path())?;
         config::apply_credentials(&mut config.servers, &env_vars);
         config::apply_web_credentials(&mut config.web, &env_vars);
+        config::apply_shrink_credentials(&mut config.shrink, &env_vars);
         let theme_path = constants::theme_dir().join(format!("{}.theme", config.general.theme));
         let theme = theme::load_theme(&theme_path)?;
 
@@ -591,6 +609,8 @@ impl App {
 
         let (dict_tx, dict_rx) = mpsc::channel(64);
         let (web_tx, web_rx) = mpsc::channel(256);
+        let (shrink_client, shrink_cache, (shrink_tx, shrink_rx)) =
+            shrink::build_runtime(&config.shrink);
 
         let (mut dcc, dcc_rx) = crate::dcc::DccManager::new();
         dcc.timeout_secs = config.dcc.timeout;
@@ -716,6 +736,10 @@ impl App {
             web_active_buffers: HashMap::new(),
             web_restart_pending: false,
             last_day: chrono::Local::now().date_naive(),
+            shrink_client,
+            shrink_cache,
+            shrink_rx,
+            shrink_tx,
             cli_bind_override: None,
         };
         app.recompute_wrap_indent();
@@ -928,6 +952,7 @@ impl App {
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: None,
+                shortenings: Vec::new(),
             },
         );
     }
@@ -1230,6 +1255,18 @@ impl App {
                         }
                         self.script_snapshot_dirty = true;
                         self.update_script_snapshot();
+                        self.drain_pending_web_events();
+                    }
+                },
+                shrink_res = self.shrink_rx.recv() => {
+                    if let Some(result) = shrink_res {
+                        self.apply_shrink_result(result);
+                        // Drain any sibling results sitting in the
+                        // channel so a burst doesn't take many loop
+                        // iterations to absorb.
+                        while let Ok(extra) = self.shrink_rx.try_recv() {
+                            self.apply_shrink_result(extra);
+                        }
                         self.drain_pending_web_events();
                     }
                 },

@@ -14,6 +14,7 @@ use super::handlers_irc::{
     cmd_part, cmd_query, cmd_quote, cmd_reop, cmd_time, cmd_topic, cmd_unban, cmd_unexcept,
     cmd_uninvex, cmd_unreop, cmd_version, cmd_voice, cmd_who, cmd_whois, cmd_whowas, cmd_wii,
 };
+use super::handlers_shrink::cmd_shrink;
 use super::handlers_ui::{
     cmd_alias, cmd_clear, cmd_close, cmd_detach, cmd_help, cmd_items, cmd_quit, cmd_shell,
     cmd_unalias,
@@ -649,6 +650,15 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
                 handler: cmd_shell,
                 description: "Open an embedded terminal",
                 aliases: &["sh"],
+                category: CommandCategory::Other,
+            },
+        ),
+        (
+            "shrink",
+            CommandDef {
+                handler: cmd_shrink,
+                description: "Shorten a long URL via shr.al",
+                aliases: &[],
                 category: CommandCategory::Other,
             },
         ),

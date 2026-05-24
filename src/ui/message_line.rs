@@ -179,6 +179,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            shortenings: Vec::new(),
         }
     }
 
@@ -292,6 +293,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            shortenings: Vec::new(),
         };
         let theme = default_theme();
         let config = default_config();

@@ -133,6 +133,27 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 is_credential: false,
             })
         }
+        "shrink" => {
+            // `api_key` is intentionally never exposed via /set — it
+            // lives in .env and `apply_shrink_credentials` loads it on
+            // startup. Reading it via /set would surface secrets in
+            // command output and tab-completion.
+            let val = match parts[1] {
+                "enabled" => config.shrink.enabled.to_string(),
+                "api_url" => config.shrink.api_url.clone(),
+                "outgoing_enabled" => config.shrink.outgoing_enabled.to_string(),
+                "incoming_enabled" => config.shrink.incoming_enabled.to_string(),
+                "min_url_length" => config.shrink.min_url_length.to_string(),
+                "outgoing_timeout_ms" => config.shrink.outgoing_timeout_ms.to_string(),
+                "incoming_timeout_ms" => config.shrink.incoming_timeout_ms.to_string(),
+                "cache_max_entries" => config.shrink.cache_max_entries.to_string(),
+                _ => return None,
+            };
+            Some(Resolved {
+                value: val,
+                is_credential: false,
+            })
+        }
         "spellcheck" => {
             let val = match parts[1] {
                 "enabled" => config.spellcheck.enabled.to_string(),
@@ -390,6 +411,35 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
             }
             _ => return Err(format!("Unknown field: {path}")),
         },
+        "shrink" => match parts[1] {
+            "enabled" => config.shrink.enabled = parse_bool(raw)?,
+            "api_url" => config.shrink.api_url = raw.to_string(),
+            "outgoing_enabled" => config.shrink.outgoing_enabled = parse_bool(raw)?,
+            "incoming_enabled" => config.shrink.incoming_enabled = parse_bool(raw)?,
+            "min_url_length" => {
+                let v: u32 = raw.parse().map_err(|_| "Expected a number".to_string())?;
+                // Floor 25: shorter thresholds risk shortening URLs
+                // that aren't actually long enough to be worth it, and
+                // each shrink is an HTTP round-trip to the API.
+                if v < 25 {
+                    return Err("shrink.min_url_length must be at least 25".to_string());
+                }
+                config.shrink.min_url_length = v;
+            }
+            "outgoing_timeout_ms" => {
+                config.shrink.outgoing_timeout_ms =
+                    raw.parse().map_err(|_| "Expected a number".to_string())?;
+            }
+            "incoming_timeout_ms" => {
+                config.shrink.incoming_timeout_ms =
+                    raw.parse().map_err(|_| "Expected a number".to_string())?;
+            }
+            "cache_max_entries" => {
+                config.shrink.cache_max_entries =
+                    raw.parse().map_err(|_| "Expected a number".to_string())?;
+            }
+            _ => return Err(format!("Unknown field: {path}")),
+        },
         "spellcheck" => match parts[1] {
             "enabled" => config.spellcheck.enabled = parse_bool(raw)?,
             "computing" => config.spellcheck.computing = parse_bool(raw)?,
@@ -581,6 +631,14 @@ const BASE_PATHS: &[&str] = &[
     "dcc.autoaccept_lowports",
     "dcc.autochat_masks",
     "dcc.max_connections",
+    "shrink.enabled",
+    "shrink.api_url",
+    "shrink.outgoing_enabled",
+    "shrink.incoming_enabled",
+    "shrink.min_url_length",
+    "shrink.outgoing_timeout_ms",
+    "shrink.incoming_timeout_ms",
+    "shrink.cache_max_entries",
     "logging.event_retention_hours",
     "logging.retention_days",
     "spellcheck.enabled",

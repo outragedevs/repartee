@@ -10,6 +10,8 @@ node_modules/
 skills-lock.json
 memory.db*
 memory_optimization_2026-04-24.md
+# Private API spec notes (kept locally for agent reference)
+SHRINK_API.md
 # Brainstorm artifacts
 .superpowers/
 # Python bytecode cache

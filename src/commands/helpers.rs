@@ -23,6 +23,7 @@ pub fn add_local_event(app: &mut App, text: &str) {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            shortenings: Vec::new(),
         },
     );
 }
