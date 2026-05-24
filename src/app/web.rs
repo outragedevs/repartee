@@ -128,7 +128,7 @@ impl App {
         self.web_sessions = Some(std::sync::Arc::clone(&sessions));
         self.web_rate_limiter = Some(std::sync::Arc::clone(&limiter));
 
-        let snapshot = std::sync::Arc::new(std::sync::RwLock::new(
+        let snapshot = std::sync::Arc::new(parking_lot::RwLock::new(
             crate::web::server::WebStateSnapshot {
                 buffers: Vec::new(),
                 connections: Vec::new(),
@@ -206,15 +206,30 @@ impl App {
         if !events.is_empty() {
             tracing::debug!(count = events.len(), "draining {} web events", events.len());
         }
+        let mut structural_change = false;
         for event in events {
             match &event {
                 crate::web::protocol::WebEvent::BufferCreated { buffer } => {
                     tracing::debug!(buffer_id = %buffer.id, "broadcasting BufferCreated");
+                    structural_change = true;
                 }
                 crate::web::protocol::WebEvent::BufferClosed { buffer_id } => {
                     tracing::debug!(%buffer_id, "broadcasting BufferClosed");
+                    structural_change = true;
                 }
-                crate::web::protocol::WebEvent::ActiveBufferChanged { .. } => continue,
+                crate::web::protocol::WebEvent::ActiveBufferChanged { .. } => {
+                    // Don't re-broadcast (TUI is authoritative; clients
+                    // either followed already or opted out via their
+                    // localStorage flag), but DO mark structural so the
+                    // snapshot picks up the new active_buffer_id before
+                    // any new WS session reads SyncInit.
+                    structural_change = true;
+                    continue;
+                }
+                crate::web::protocol::WebEvent::ConnectionStatus { .. }
+                | crate::web::protocol::WebEvent::SettingsChanged { .. } => {
+                    structural_change = true;
+                }
                 _ => {}
             }
             if let crate::web::protocol::WebEvent::MentionAlert {
@@ -225,6 +240,54 @@ impl App {
                 self.record_mention(buffer_id, message);
             }
             self.broadcast_web(event);
+        }
+        if structural_change {
+            // A new WS session connecting right now would otherwise
+            // get up to 1 second of stale `SyncInit` data (buffer
+            // list / connection list / active_buffer_id). Refreshing
+            // eagerly closes that window.
+            self.refresh_web_state_snapshot();
+        }
+    }
+
+    /// Rewrite the shared `WebStateSnapshot` from the current `AppState`.
+    /// Called both from the 1 s background tick (safety net) and from
+    /// `drain_pending_web_events` whenever a structural change is in the
+    /// queue (buffer add/remove, active-buffer flip, etc.). The lock is
+    /// held briefly and never across an `.await`.
+    pub(crate) fn refresh_web_state_snapshot(&self) {
+        let Some(ref snapshot) = self.web_state_snapshot else {
+            return;
+        };
+        let mention_count = self
+            .storage
+            .as_ref()
+            .and_then(|s| {
+                s.db.try_lock()
+                    .ok()
+                    .and_then(|db| crate::storage::query::get_unread_mention_count(&db).ok())
+            })
+            .unwrap_or(0);
+        let init = crate::web::snapshot::build_sync_init(
+            &self.state,
+            mention_count,
+            &self.config.web.timestamp_format,
+        );
+        if let crate::web::protocol::WebEvent::SyncInit {
+            buffers,
+            connections,
+            mention_count,
+            active_buffer_id,
+            timestamp_format,
+            ..
+        } = init
+        {
+            let mut snap = snapshot.write();
+            snap.buffers = buffers;
+            snap.connections = connections;
+            snap.mention_count = mention_count;
+            snap.active_buffer_id = active_buffer_id;
+            snap.timestamp_format = timestamp_format;
         }
     }
 
@@ -450,6 +513,25 @@ impl App {
     }
 
     /// Execute a command from a web client in the context of a buffer.
+    ///
+    /// We temporarily flip `state.active_buffer_id` to the target
+    /// buffer, run `handle_submit`, then restore the previous active
+    /// buffer. This is intentional, not a bug:
+    ///
+    /// - `handle_submit` and everything it transitively calls (script
+    ///   hooks, command dispatch) is fully synchronous, so the
+    ///   active-buffer "flip window" never overlaps another tokio
+    ///   task. Scripts running inside the dispatch see the target
+    ///   buffer, which is the correct context for the command.
+    /// - `set_active_buffer_silent` is the `_silent` variant
+    ///   specifically so this flip does NOT broadcast
+    ///   `ActiveBufferChanged` to the TUI or other web sessions; only
+    ///   the running command observes it.
+    ///
+    /// The alternative — threading an explicit `buffer_id` through
+    /// every `handle_submit` callee — would be a cross-cutting refactor
+    /// for no functional change, since the flip is already invisible
+    /// outside the synchronous call.
     fn web_run_command(&mut self, buffer_id: &str, text: &str) {
         let prior = self.state.active_buffer_id.clone();
         self.set_active_buffer_silent(buffer_id);

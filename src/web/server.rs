@@ -40,8 +40,17 @@ pub struct AppHandle {
     pub session_cookie_max_age: i64,
     /// Server-side preview/thumbnail extractor (`None` when `image_previews` disabled).
     pub preview_extractor: Option<Arc<super::preview::WebPreviewExtractor>>,
-    /// Periodic snapshot of `AppState` for `SyncInit` / `FetchNickList`.
-    pub web_state_snapshot: Option<Arc<std::sync::RwLock<WebStateSnapshot>>>,
+    /// Snapshot of `AppState` used to build `SyncInit` for newly
+    /// connecting clients and to seed each session's initial active
+    /// buffer. Updated eagerly on relevant events (see
+    /// `App::drain_pending_web_events`); the 1 s tick is only a
+    /// safety net for state that has no specific event hook.
+    ///
+    /// `parking_lot::RwLock` rather than `std::sync::RwLock` so a
+    /// brief read from inside the async WS handler doesn't risk
+    /// blocking the runtime worker under contention. We never hold
+    /// the lock across an `.await`.
+    pub web_state_snapshot: Option<Arc<parking_lot::RwLock<WebStateSnapshot>>>,
 }
 
 #[derive(Deserialize)]

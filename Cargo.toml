@@ -75,6 +75,10 @@ rustls-pemfile = "2"
 tokio-rustls = "0.26"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 rust-embed = "8"
+# Used for the web-snapshot RwLock — std::sync::RwLock blocks the tokio
+# worker if it ever contends; parking_lot is a faster drop-in that is
+# safe to hold briefly from async (we never hold across an await).
+parking_lot = "0.12"
 portable-pty = "0.9.0"
 vt100 = "0.16.2"
 

@@ -156,9 +156,8 @@ async fn handle_socket(
 
 /// Build a `SyncInit` from the shared state snapshot.
 fn build_sync_init_from_snapshot(state: &AppHandle, active_buffer_id: Option<String>) -> WebEvent {
-    if let Some(ref snapshot) = state.web_state_snapshot
-        && let Ok(snap) = snapshot.read()
-    {
+    if let Some(ref snapshot) = state.web_state_snapshot {
+        let snap = snapshot.read();
         return WebEvent::SyncInit {
             buffers: snap.buffers.clone(),
             connections: snap.connections.clone(),
@@ -195,7 +194,7 @@ fn is_targeted_to_other(event: &WebEvent, session_id: &str) -> bool {
 
 fn initial_active_buffer_from_snapshot(state: &AppHandle) -> Option<String> {
     let snapshot = state.web_state_snapshot.as_ref()?;
-    let snap = snapshot.read().ok()?;
+    let snap = snapshot.read();
     snap.active_buffer_id.clone().or_else(|| {
         snap.buffers
             .iter()

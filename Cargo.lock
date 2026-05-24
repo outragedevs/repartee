@@ -4380,6 +4380,7 @@ dependencies = [
  "irc-repartee",
  "libc",
  "mlua",
+ "parking_lot",
  "pbkdf2",
  "portable-pty",
  "postcard",

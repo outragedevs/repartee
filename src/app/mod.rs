@@ -444,7 +444,7 @@ pub struct App {
     pub(crate) web_rate_limiter:
         Option<std::sync::Arc<tokio::sync::Mutex<crate::web::auth::RateLimiter>>>,
     pub(crate) web_state_snapshot:
-        Option<std::sync::Arc<std::sync::RwLock<crate::web::server::WebStateSnapshot>>>,
+        Option<std::sync::Arc<parking_lot::RwLock<crate::web::server::WebStateSnapshot>>>,
     pub(crate) web_active_buffers: HashMap<String, String>,
     pub web_restart_pending: bool,
     /// Tracks the current local date for emitting "day changed" markers.
@@ -1198,23 +1198,7 @@ impl App {
                         && let Ok(mut s) = sessions.try_lock() { s.purge_expired(); }
                     if let Some(ref limiter) = self.web_rate_limiter
                         && let Ok(mut l) = limiter.try_lock() { l.purge_expired(); }
-                    if let Some(ref snapshot) = self.web_state_snapshot
-                        && let Ok(mut snap) = snapshot.write()
-                    {
-                        let mention_count = self.storage.as_ref().and_then(|s| {
-                            s.db.try_lock().ok().and_then(|db| {
-                                crate::storage::query::get_unread_mention_count(&db).ok()
-                            })
-                        }).unwrap_or(0);
-                        let init = crate::web::snapshot::build_sync_init(&self.state, mention_count, &self.config.web.timestamp_format);
-                        if let crate::web::protocol::WebEvent::SyncInit { buffers, connections, mention_count, active_buffer_id, timestamp_format, .. } = init {
-                            snap.buffers = buffers;
-                            snap.connections = connections;
-                            snap.mention_count = mention_count;
-                            snap.active_buffer_id = active_buffer_id;
-                            snap.timestamp_format = timestamp_format;
-                        }
-                    }
+                    self.refresh_web_state_snapshot();
                     let expired = self.dcc.purge_expired();
                     for (_id, nick) in expired {
                         crate::commands::helpers::add_local_event(

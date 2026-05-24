@@ -4,7 +4,22 @@ use leptos::prelude::*;
 
 use crate::protocol::*;
 
-const MAX_BUFFER_MESSAGES: usize = 2000;
+/// Per-buffer cap on in-memory rendered messages. Older lines are
+/// dropped from the head (oldest-first) when the cap is exceeded; the
+/// DB still holds full history for scroll-back via `FetchMessages`.
+///
+/// 1000 strikes the balance: deep enough to cover typical IRC sessions
+/// without scroll-back, shallow enough that the DOM stays light. We
+/// don't index-virtualize the list — IRC chat lines have wildly
+/// variable heights (single line vs. wrapped paragraph vs. 200 px
+/// image preview), which makes naive index-based virtualization
+/// wrong (scrollbar size, jump-to-position) and proper
+/// measurement-based virtualization a substantial undertaking.
+/// Instead, the per-message DOM uses CSS `content-visibility: auto`
+/// (see `web-ui/styles/base.css`), letting the browser skip layout
+/// and paint for off-screen lines natively — same end-state, almost
+/// free, with no JS scroll-handling complexity.
+const MAX_BUFFER_MESSAGES: usize = 1000;
 
 /// Client-side application state, stored as Leptos signals.
 #[derive(Clone, Copy)]
@@ -380,6 +395,17 @@ impl AppState {
                 // Without this guard:
                 // - The echo re-fires the Layout Effect, causing duplicate FetchMessages
                 // - Rapid clicks can be overridden by a stale echo for a previous buffer
+                //
+                // Multi-tab opt-out: this event is broadcast to ALL web
+                // sessions whenever the TUI flips its active buffer.
+                // A user with two browser tabs would see them both jump
+                // when the TUI moves. Set localStorage
+                // `web_follow_tui_buffer=false` to make this tab
+                // ignore TUI-driven buffer changes. Default is to
+                // follow (the single-tab + TUI workflow expects sync).
+                if !follow_tui_active_buffer() {
+                    return;
+                }
                 if self.active_buffer.get_untracked().as_deref() != Some(&buffer_id) {
                     self.active_buffer.set(Some(buffer_id));
                 }
@@ -556,6 +582,22 @@ fn insert_date_separators(messages: Vec<WireMessage>) -> Vec<WireMessage> {
     }
 
     result
+}
+
+/// LocalStorage key controlling whether this browser tab follows
+/// `ActiveBufferChanged` events emitted by the TUI. Set to `"false"`
+/// to make this tab independent (typical multi-tab workflow). Any
+/// other value (missing, `"true"`) keeps the legacy follow behavior.
+const FOLLOW_TUI_BUFFER_KEY: &str = "web_follow_tui_buffer";
+
+fn follow_tui_active_buffer() -> bool {
+    let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) else {
+        return true;
+    };
+    !matches!(
+        storage.get_item(FOLLOW_TUI_BUFFER_KEY),
+        Ok(Some(ref v)) if v == "false"
+    )
 }
 
 const DISMISSED_PREVIEWS_KEY: &str = "repartee-dismissed-previews";

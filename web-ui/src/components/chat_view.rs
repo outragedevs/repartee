@@ -148,20 +148,32 @@ fn current_nick(state: AppState) -> Option<String> {
     Some(conn.nick.clone())
 }
 
-/// Render one chat line. All settings reads are untracked snapshots
-/// taken when the `<For>` first creates the child for this message id;
-/// existing rendered lines won't update on subsequent settings changes.
-/// That's an acceptable trade-off — settings change rarely, and any
-/// SyncInit (reconnect, lag recovery, manual reload) recreates all
-/// children with current settings. The win is that appending a new
-/// message no longer rebuilds the full 2000-line DOM tree.
+/// Render one chat line.
+///
+/// Static (snapshot at first render): msg-type-derived `line_class`,
+/// `is_own` (would change only on /nick), event arrow, styled text.
+///
+/// Reactive (wrapped in `move ||` so the specific DOM node updates
+/// in-place when the underlying signal fires):
+///   - timestamp text (depends on `timestamp_format`)
+///   - nick truncation (depends on `nick_max_length`)
+///   - nick column width style (depends on `nick_column_width`)
+///   - nick color style (depends on `nick_colors_enabled` +
+///     `nick_color_saturation` + `nick_color_lightness`)
+///   - preview block (depends on `dismissed_previews` — so dismissing
+///     a thumbnail makes it disappear without rebuilding the line)
+///
+/// All signal subscriptions are scoped to this one message's elements,
+/// so an attribute change updates only the elements it touches, not
+/// the 1000-line list. New-message appends create exactly one new
+/// child (via the keyed `<For>`) — that's the headline win over the
+/// old `.iter().map().collect()` pattern.
 #[expect(
     clippy::too_many_lines,
     reason = "linear per-message branch dispatch; splitting per branch would obscure the shared layout"
 )]
 fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView {
     let nick_self = current_nick(state);
-    let ts_fmt = state.timestamp_format.get_untracked();
 
     let is_mention_log = msg.msg_type == "mention_log";
     let is_event = msg.msg_type == "event";
@@ -205,8 +217,6 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
         "chat-line"
     };
 
-    let ts = format_timestamp(msg.timestamp, &ts_fmt);
-
     if is_separator {
         return view! {
             <div class=line_class>
@@ -216,7 +226,19 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
         .into_any();
     }
 
-    let previews_view = render_previews(state, msg.id, msg.previews.clone());
+    // Reactive timestamp: re-runs only when `timestamp_format` changes.
+    let timestamp = msg.timestamp;
+    let ts_fn = move || {
+        let fmt = state.timestamp_format.get();
+        format_timestamp(timestamp, &fmt)
+    };
+
+    // Reactive previews subtree: re-runs only when `dismissed_previews`
+    // changes, so clicking the × on one thumbnail visibly removes that
+    // thumbnail (and only re-renders this one message's preview list).
+    let msg_id = msg.id;
+    let preview_data = msg.previews.clone();
+    let previews_view = move || render_previews(state, msg_id, preview_data.clone());
 
     if is_mention_log {
         let styled = render_styled_text(&msg.text);
@@ -233,19 +255,15 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
 
     if is_action {
         let nick_text = msg.nick.unwrap_or_default();
-        let nick_color_style = if state.nick_colors_enabled.get_untracked() && !is_own {
-            let sat = state.nick_color_saturation.get_untracked();
-            let lit = state.nick_color_lightness.get_untracked();
-            let css_color = crate::nick_color::nick_color_css(&nick_text, sat, lit);
-            format!("color: {css_color};")
-        } else {
-            String::new()
-        };
         let styled = render_styled_text(&msg.text);
+        let nick_color_style = {
+            let nick = nick_text.clone();
+            move || nick_color_or_empty(state, &nick, !is_own)
+        };
         view! {
             <>
                 <div class=line_class>
-                    <span class="ts">{ts}</span>
+                    <span class="ts">{ts_fn}</span>
                     <span class="action-body">
                         "* "
                         <span class="action-nick" style=nick_color_style>{nick_text}</span>
@@ -263,7 +281,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
         view! {
             <>
                 <div class=line_class>
-                    <span class="ts">{ts}</span>
+                    <span class="ts">{ts_fn}</span>
                     <span class="notice-body">
                         "-"
                         <span class="notice-nick">{nick_text}</span>
@@ -280,7 +298,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
         let styled = render_styled_text(&msg.text);
         view! {
             <div class=line_class>
-                <span class="ts">{ts}</span>
+                <span class="ts">{ts_fn}</span>
                 <span>
                     {arrow.map(|(symbol, css_class)| view! {
                         <span class=css_class>{symbol}</span>
@@ -291,33 +309,32 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
         }
         .into_any()
     } else {
-        let max_len = state.nick_max_length.get_untracked() as usize;
-        let col_width = state.nick_column_width.get_untracked();
         let nick_text = msg.nick.unwrap_or_default();
         let mode = msg.nick_mode.unwrap_or_default();
-        let nick = truncate_nick(&nick_text, max_len, &mode);
         let styled = render_styled_text(&msg.text);
+        let highlight = msg.highlight;
 
-        let nick_color_style = if state.nick_colors_enabled.get_untracked()
-            && !is_own
-            && !msg.highlight
-        {
-            let sat = state.nick_color_saturation.get_untracked();
-            let lit = state.nick_color_lightness.get_untracked();
-            let css_color = crate::nick_color::nick_color_css(&nick_text, sat, lit);
-            format!("color: {css_color};")
-        } else {
-            String::new()
+        let nick_truncated = {
+            let nick = nick_text.clone();
+            let mode = mode.clone();
+            move || {
+                let max_len = state.nick_max_length.get() as usize;
+                truncate_nick(&nick, max_len, &mode)
+            }
+        };
+        let nick_style = move || format!("width: {}ch;", state.nick_column_width.get());
+        let nick_color_style = {
+            let nick = nick_text.clone();
+            move || nick_color_or_empty(state, &nick, !is_own && !highlight)
         };
 
-        let nick_style = format!("width: {col_width}ch;");
         view! {
             <>
                 <div class=line_class>
-                    <span class="ts">{ts}</span>
+                    <span class="ts">{ts_fn}</span>
                     <span class="nick" style=nick_style>
                         <span class="mode">{mode}</span>
-                        <span class="name" style=nick_color_style>{nick}</span>
+                        <span class="name" style=nick_color_style>{nick_truncated}</span>
                         <span class="sep">"❯"</span>
                     </span>
                     <span class="text">{styled}</span>
@@ -326,6 +343,22 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
             </>
         }
         .into_any()
+    }
+}
+
+/// Compute the per-nick CSS color string (`color: #rrggbb;`) when
+/// `colors_apply` and nick colors are enabled, or `""` otherwise.
+/// Reads `nick_colors_enabled`, `nick_color_saturation`, and
+/// `nick_color_lightness` tracked — the calling closure should be
+/// invoked from a reactive position so changes update the DOM.
+fn nick_color_or_empty(state: AppState, nick: &str, colors_apply: bool) -> String {
+    if state.nick_colors_enabled.get() && colors_apply {
+        let sat = state.nick_color_saturation.get();
+        let lit = state.nick_color_lightness.get();
+        let css_color = crate::nick_color::nick_color_css(nick, sat, lit);
+        format!("color: {css_color};")
+    } else {
+        String::new()
     }
 }
 
