@@ -10,6 +10,7 @@ mod mentions;
 mod scripting;
 mod session;
 mod shell;
+pub(crate) mod shrink;
 mod web;
 mod who;
 
@@ -449,6 +450,27 @@ pub struct App {
     pub web_restart_pending: bool,
     /// Tracks the current local date for emitting "day changed" markers.
     pub(crate) last_day: chrono::NaiveDate,
+    /// HTTP client for the shrink API. `None` when the feature is
+    /// disabled or no `SHRINK_API_KEY` is configured — keeps the
+    /// dispatch path branchless (just an `if let Some` check).
+    pub(crate) shrink_client: Option<crate::shrink::ShrinkClient>,
+    /// Shared LRU cache for shortenings. Wrapped in
+    /// `parking_lot::Mutex` so background shrink tasks can read/write
+    /// from any tokio worker without contending on a tokio mutex.
+    /// `Arc` because both the dispatch path (App side) and the
+    /// shrink workers (spawned tasks) read/write through it.
+    pub(crate) shrink_cache:
+        std::sync::Arc<parking_lot::Mutex<crate::shrink::ShrinkCache>>,
+    /// Pre-display queue for outgoing messages that need shrink.
+    /// `handle_plain_message` enqueues here; a dedicated worker
+    /// drains, awaits shrink, and posts an `OutgoingDeliver` back
+    /// via `shrink_deliver_rx`.
+    pub(crate) shrink_outgoing_tx: mpsc::Sender<shrink::PendingOutgoing>,
+    /// `/shrink` command + the workers all post their final actions
+    /// here; the main loop drains and routes them to
+    /// `apply_shrink_deliver`.
+    pub(crate) shrink_deliver_tx: mpsc::Sender<shrink::ShrinkDeliver>,
+    pub(crate) shrink_deliver_rx: mpsc::Receiver<shrink::ShrinkDeliver>,
     /// Runtime bind-IP override from the `repartee -h <ip>` CLI flag.
     /// Sits between per-server `bind_ip` (highest) and
     /// `general.default_bind_ip` (lowest) in the precedence chain.
@@ -488,6 +510,7 @@ impl App {
         let env_vars = config::load_env(&constants::env_path())?;
         config::apply_credentials(&mut config.servers, &env_vars);
         config::apply_web_credentials(&mut config.web, &env_vars);
+        config::apply_shrink_credentials(&mut config.shrink, &env_vars);
         let theme_path = constants::theme_dir().join(format!("{}.theme", config.general.theme));
         let theme = theme::load_theme(&theme_path)?;
 
@@ -591,6 +614,24 @@ impl App {
 
         let (dict_tx, dict_rx) = mpsc::channel(64);
         let (web_tx, web_rx) = mpsc::channel(256);
+        let shrink::ShrinkRuntime {
+            client: shrink_client,
+            cache: shrink_cache,
+            outgoing_tx: shrink_outgoing_tx,
+            incoming_tx: shrink_incoming_tx,
+            deliver_tx: shrink_deliver_tx,
+            deliver_rx: shrink_deliver_rx,
+        } = shrink::ShrinkRuntime::build(&config.shrink);
+        // Mirror shrink-incoming wiring into state so the synchronous
+        // `add_message_with_activity` path can decide between
+        // immediate add vs deferred shrink without reaching into App.
+        // `shrink_incoming_tx` lives only on `state` from here on —
+        // the App-side handle was dropped to avoid a never-read field.
+        state.shrink_incoming_active = config.shrink.enabled
+            && config.shrink.incoming_enabled
+            && shrink_client.is_some();
+        state.shrink_min_url_length = config.shrink.min_url_length;
+        state.shrink_incoming_tx = Some(shrink_incoming_tx);
 
         let (mut dcc, dcc_rx) = crate::dcc::DccManager::new();
         dcc.timeout_secs = config.dcc.timeout;
@@ -716,6 +757,11 @@ impl App {
             web_active_buffers: HashMap::new(),
             web_restart_pending: false,
             last_day: chrono::Local::now().date_naive(),
+            shrink_client,
+            shrink_cache,
+            shrink_outgoing_tx,
+            shrink_deliver_tx,
+            shrink_deliver_rx,
             cli_bind_override: None,
         };
         app.recompute_wrap_indent();
@@ -1230,6 +1276,18 @@ impl App {
                         }
                         self.script_snapshot_dirty = true;
                         self.update_script_snapshot();
+                        self.drain_pending_web_events();
+                    }
+                },
+                shrink_res = self.shrink_deliver_rx.recv() => {
+                    if let Some(deliver) = shrink_res {
+                        self.apply_shrink_deliver(deliver);
+                        // Drain sibling deliveries in the same tick
+                        // so a burst doesn't take many loop iterations
+                        // to absorb.
+                        while let Ok(extra) = self.shrink_deliver_rx.try_recv() {
+                            self.apply_shrink_deliver(extra);
+                        }
                         self.drain_pending_web_events();
                     }
                 },

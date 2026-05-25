@@ -76,7 +76,7 @@ fn render_event(msg: &Message, theme: &crate::theme::ThemeFile) -> Vec<StyledSpa
             .unwrap_or_default();
         return parse_format_string(&resolved, &params);
     }
-    // Fallback: parse text directly (may contain inline format codes)
+    // Fallback: parse text directly (may contain inline format codes).
     parse_format_string(&msg.text, &[])
 }
 

@@ -133,6 +133,27 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 is_credential: false,
             })
         }
+        "shrink" => {
+            // `api_key` is intentionally never exposed via /set — it
+            // lives in .env and `apply_shrink_credentials` loads it on
+            // startup. Reading it via /set would surface secrets in
+            // command output and tab-completion.
+            let val = match parts[1] {
+                "enabled" => config.shrink.enabled.to_string(),
+                "api_url" => config.shrink.api_url.clone(),
+                "outgoing_enabled" => config.shrink.outgoing_enabled.to_string(),
+                "incoming_enabled" => config.shrink.incoming_enabled.to_string(),
+                "min_url_length" => config.shrink.min_url_length.to_string(),
+                "outgoing_timeout_ms" => config.shrink.outgoing_timeout_ms.to_string(),
+                "incoming_timeout_ms" => config.shrink.incoming_timeout_ms.to_string(),
+                "cache_max_entries" => config.shrink.cache_max_entries.to_string(),
+                _ => return None,
+            };
+            Some(Resolved {
+                value: val,
+                is_credential: false,
+            })
+        }
         "spellcheck" => {
             let val = match parts[1] {
                 "enabled" => config.spellcheck.enabled.to_string(),
@@ -390,6 +411,53 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
             }
             _ => return Err(format!("Unknown field: {path}")),
         },
+        "shrink" => match parts[1] {
+            "enabled" => config.shrink.enabled = parse_bool(raw)?,
+            "api_url" => config.shrink.api_url = raw.to_string(),
+            "outgoing_enabled" => config.shrink.outgoing_enabled = parse_bool(raw)?,
+            "incoming_enabled" => config.shrink.incoming_enabled = parse_bool(raw)?,
+            "min_url_length" => {
+                let v: u32 = raw.parse().map_err(|_| "Expected a number".to_string())?;
+                // Floor 25: shorter thresholds risk shortening URLs
+                // that aren't actually long enough to be worth it, and
+                // each shrink is an HTTP round-trip to the API.
+                if v < 25 {
+                    return Err("shrink.min_url_length must be at least 25".to_string());
+                }
+                config.shrink.min_url_length = v;
+            }
+            "outgoing_timeout_ms" => {
+                // Floor at 100 ms. Anything lower makes
+                // tokio::time::timeout fire before reqwest can
+                // even open a TCP connection, so every shrink
+                // returns Timeout and the user silently never
+                // sees a shortened URL.
+                let v: u64 = raw.parse().map_err(|_| "Expected a number".to_string())?;
+                if v < 100 {
+                    return Err("shrink.outgoing_timeout_ms must be at least 100".to_string());
+                }
+                config.shrink.outgoing_timeout_ms = v;
+            }
+            "incoming_timeout_ms" => {
+                let v: u64 = raw.parse().map_err(|_| "Expected a number".to_string())?;
+                if v < 100 {
+                    return Err("shrink.incoming_timeout_ms must be at least 100".to_string());
+                }
+                config.shrink.incoming_timeout_ms = v;
+            }
+            "cache_max_entries" => {
+                // Floor at 1. ShrinkCache::new internally clamps
+                // 0 → 1 anyway; making /set reject 0 explicitly
+                // avoids the surprise of `/set` reporting `= 0`
+                // while the live cache silently uses 1.
+                let v: u32 = raw.parse().map_err(|_| "Expected a number".to_string())?;
+                if v == 0 {
+                    return Err("shrink.cache_max_entries must be at least 1".to_string());
+                }
+                config.shrink.cache_max_entries = v;
+            }
+            _ => return Err(format!("Unknown field: {path}")),
+        },
         "spellcheck" => match parts[1] {
             "enabled" => config.spellcheck.enabled = parse_bool(raw)?,
             "computing" => config.spellcheck.computing = parse_bool(raw)?,
@@ -581,6 +649,14 @@ const BASE_PATHS: &[&str] = &[
     "dcc.autoaccept_lowports",
     "dcc.autochat_masks",
     "dcc.max_connections",
+    "shrink.enabled",
+    "shrink.api_url",
+    "shrink.outgoing_enabled",
+    "shrink.incoming_enabled",
+    "shrink.min_url_length",
+    "shrink.outgoing_timeout_ms",
+    "shrink.incoming_timeout_ms",
+    "shrink.cache_max_entries",
     "logging.event_retention_hours",
     "logging.retention_days",
     "spellcheck.enabled",
@@ -760,6 +836,63 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                 } else {
                     app.state.remove_buffer("_mentions");
                 }
+            }
+
+            // Sync shrink-incoming flags into state so the
+            // `add_message_with_activity` decision matches the
+            // freshly-set config without restart. The shrink_client
+            // and worker queue are bound at startup — flipping
+            // `shrink.enabled` from off to on at runtime won't
+            // materialise a client; users get a restart-required
+            // notice from /set already if they hit that case.
+            if path == "shrink.enabled"
+                || path == "shrink.incoming_enabled"
+            {
+                app.state.shrink_incoming_active = app.config.shrink.enabled
+                    && app.config.shrink.incoming_enabled
+                    && app.shrink_client.is_some();
+                // Warn the user when the toggle is now `true` but no
+                // client exists (typically: SHRINK_API_KEY missing at
+                // boot). Without this, /set replies with success but
+                // shrink stays inert and the user has no diagnostic.
+                if (path == "shrink.enabled" && app.config.shrink.enabled)
+                    && app.shrink_client.is_none()
+                {
+                    crate::commands::helpers::add_local_event(
+                        app,
+                        &format!(
+                            "{warn}shrink: enabled but no API client — set \
+                             SHRINK_API_KEY in .env and restart{rst}",
+                            warn = crate::commands::types::C_ERR,
+                            rst = crate::commands::types::C_RST,
+                        ),
+                    );
+                }
+            }
+            if path == "shrink.min_url_length" {
+                app.state.shrink_min_url_length = app.config.shrink.min_url_length;
+            }
+            // Settings captured at startup by the shrink workers
+            // (api_url, timeouts) or by the cache constructor
+            // (cache_max_entries) cannot be propagated to running
+            // tasks. Surface a restart-required notice so the user
+            // knows the /set didn't take effect.
+            if matches!(
+                path.as_str(),
+                "shrink.api_url"
+                    | "shrink.outgoing_timeout_ms"
+                    | "shrink.incoming_timeout_ms"
+                    | "shrink.cache_max_entries"
+            ) {
+                crate::commands::helpers::add_local_event(
+                    app,
+                    &format!(
+                        "{dim}shrink: {path} change requires restart to \
+                         take effect{rst}",
+                        dim = crate::commands::types::C_DIM,
+                        rst = crate::commands::types::C_RST,
+                    ),
+                );
             }
 
             // Sync DCC runtime state from config

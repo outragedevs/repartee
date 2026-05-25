@@ -52,6 +52,7 @@ pub struct PendingUserhostRequest {
     pub action: PendingUserhostAction,
 }
 
+
 pub struct AppState {
     pub connections: HashMap<String, Connection>,
     pub buffers: IndexMap<String, Buffer>,
@@ -69,6 +70,22 @@ pub struct AppState {
     pub ignores: Vec<IgnoreEntry>,
     /// Sender for the storage writer. When `Some`, messages are logged to `SQLite`.
     pub log_tx: Option<mpsc::Sender<LogRow>>,
+    /// Worker-queue sender for incoming-message shrink dispatch.
+    /// `None` when the feature is disabled (no API key, master switch
+    /// off, etc.). Pushed to from `add_message_with_activity` when
+    /// `shrink_incoming_active` is true and the message text has at
+    /// least one URL of length ≥ `shrink_min_url_length`. The worker
+    /// substitutes, then forwards a `ShrinkDeliver::Incoming` back to
+    /// the main loop which calls `state.add_message_with_activity`.
+    pub shrink_incoming_tx: Option<mpsc::Sender<crate::app::shrink::PendingIncoming>>,
+    /// True when shrink incoming substitution should be applied to
+    /// live PRIVMSG/ACTION/NOTICE messages. Mirror of
+    /// `(config.shrink.enabled && config.shrink.incoming_enabled &&
+    /// SHRINK_API_KEY is configured)`. Synced from `/set` so a
+    /// runtime flip takes effect without restart.
+    pub shrink_incoming_active: bool,
+    /// URL length threshold mirrored from `config.shrink.min_url_length`.
+    pub shrink_min_url_length: u32,
     /// Message types excluded from logging (e.g. "event" to skip quit/join/nick fan-out).
     pub log_exclude_types: Vec<String>,
     /// Maximum messages per buffer (FIFO eviction). 0 = unlimited.

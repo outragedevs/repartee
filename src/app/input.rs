@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Position;
+use tokio::sync::mpsc::error::TrySendError;
 
 use crate::state::buffer::{
     ActivityLevel, Buffer, BufferType, Message, MessageType, make_buffer_id,
@@ -912,6 +913,88 @@ impl App {
             return;
         }
 
+        // Outgoing shrink is the FIRST step for any message that
+        // qualifies — by the time we reach E2E encrypt / IRC send /
+        // local echo, the text is already shortened (or the original
+        // on timeout). Worker handles the shrink async and posts
+        // back to the main loop where `apply_shrink_deliver` runs
+        // the rest of the pipeline with the substituted text.
+        //
+        // Capture EVERY state-dependent value at dispatch time so
+        // the deferred deliver is immune to /nick, /close, +o/+v,
+        // or anything else that mutates state during the shrink
+        // wait — see PendingOutgoing's doc-comment for the full
+        // list. The text-length cap matches the documented v1 scope
+        // (multi-chunk messages fall through to the synchronous
+        // path); per-chunk substitution accounting is out of scope.
+        let pre_extracted_urls = crate::shrink::find_long_urls(
+            text,
+            self.state.shrink_min_url_length as usize,
+        );
+        if self.config.shrink.enabled
+            && self.config.shrink.outgoing_enabled
+            && self.shrink_client.is_some()
+            && text.len() <= crate::irc::MESSAGE_MAX_BYTES
+            && !pre_extracted_urls.is_empty()
+        {
+            let captured_nick = self
+                .state
+                .connections
+                .get(&conn_id)
+                .map_or_else(|| nick.clone(), |c| c.nick.clone());
+            let captured_own_mode = self.state.nick_prefix(&active_id, &captured_nick);
+            let captured_peer_handle = if buf_type == BufferType::Query {
+                self.state
+                    .buffers
+                    .get(&active_id)
+                    .and_then(|b| b.peer_handle.clone())
+            } else {
+                None
+            };
+            let pending = crate::app::shrink::PendingOutgoing {
+                conn_id: conn_id.clone(),
+                buffer_id: active_id.clone(),
+                buffer_name: buffer_name.clone(),
+                buffer_type: buf_type.clone(),
+                original_text: text.to_string(),
+                urls: pre_extracted_urls,
+                nick: captured_nick,
+                own_mode: captured_own_mode,
+                peer_handle: captured_peer_handle,
+            };
+            // `try_send` rather than blocking — the queue is sized
+            // for bursts. Distinguish Full (transient backpressure,
+            // recoverable) from Closed (permanent worker death) so
+            // the operator gets a one-shot diagnostic in the
+            // permanent-breakage case instead of a stream of look-
+            // alike warnings. Either way we fall through to the
+            // synchronous send path below with the original text.
+            match self.shrink_outgoing_tx.try_send(pending) {
+                Ok(()) => return,
+                Err(TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        "shrink: outgoing queue full, sending unshrunk"
+                    );
+                }
+                Err(TrySendError::Closed(_)) => {
+                    tracing::error!(
+                        "shrink: outgoing worker dead, sending unshrunk \
+                         (restart required to restore shrink)"
+                    );
+                    crate::commands::helpers::add_local_event(
+                        self,
+                        &format!(
+                            "{err}shrink: outgoing worker has died — \
+                             restart to restore. URLs will not be \
+                             shortened until then.{rst}",
+                            err = crate::commands::types::C_ERR,
+                            rst = crate::commands::types::C_RST,
+                        ),
+                    );
+                }
+            }
+        }
+
         // E2E: if enabled for this channel, encrypt the full text into a
         // list of RPE2E01 wire-format lines (one per chunk). Each wire line
         // already fits inside the IRC byte budget, so we skip
@@ -927,7 +1010,7 @@ impl App {
         // we surface a themed refusal rather than leaking cleartext
         // under a weak key.
         let Some((wire_lines, plain_echo)) =
-            self.e2e_encrypt_or_passthrough(&buffer_name, &buf_type, text)
+            self.e2e_encrypt_or_passthrough(&active_id, &buffer_name, &buf_type, text, None)
         else {
             crate::commands::helpers::add_local_event(
                 self,
@@ -1030,11 +1113,20 @@ impl App {
     /// For real IRC channels (`#&!+`) the context is the channel name,
     /// unchanged. For Query buffers the context is `@<peer_handle>`
     /// derived from the buffer's cached handle.
-    fn e2e_encrypt_or_passthrough(
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn e2e_encrypt_or_passthrough(
         &mut self,
+        buffer_id: &str,
         buffer_name: &str,
         buffer_type: &BufferType,
         text: &str,
+        // Pre-resolved Query peer_handle. Inline callers pass None
+        // (live buffer is guaranteed present). The deferred shrink
+        // path captures the handle at dispatch time and passes
+        // Some(handle) so a `/close` during the shrink wait can't
+        // make this fall through to plain_passthrough() and leak
+        // ciphertext-intended plaintext on the wire.
+        captured_peer_handle: Option<&str>,
     ) -> Option<(Vec<String>, String)> {
         let plain_passthrough = || {
             Some((
@@ -1054,11 +1146,27 @@ impl App {
         // Derive the keyring context from the conversation. Channels pass
         // through unchanged; PMs require a server-stamped peer handle we
         // cached on the Query buffer at the first incoming PRIVMSG.
+        //
+        // CRITICAL: look the buffer up by `buffer_id` (the caller's
+        // captured target), NOT `state.active_buffer()`. The deferred
+        // shrink path runs this helper from a main-loop arm long after
+        // the user typed the message; the active buffer may have
+        // moved on. Resolving peer_handle from active_buffer would
+        // encrypt under the WRONG peer's session key (or fall back to
+        // plain) and produce a confidentiality regression.
         let context: String = match buffer_type {
             BufferType::Channel => buffer_name.to_string(),
             BufferType::Query => {
-                let active_buf = self.state.active_buffer();
-                let Some(peer_handle) = active_buf.and_then(|b| b.peer_handle.as_deref()) else {
+                // Prefer a caller-captured peer_handle (deferred
+                // shrink path) over a live state lookup — the buffer
+                // may have been closed during the shrink wait.
+                let handle_from_state = self
+                    .state
+                    .buffers
+                    .get(buffer_id)
+                    .and_then(|b| b.peer_handle.as_deref());
+                let peer_handle = captured_peer_handle.or(handle_from_state);
+                let Some(peer_handle) = peer_handle else {
                     // No peer handle yet. Check whether E2E was
                     // (mis)configured under the bare-nick key from an
                     // earlier version — if a legacy enabled row exists,
@@ -1106,11 +1214,33 @@ impl App {
         // will re-handshake on next ciphertext if they come back.
         let rekey_sends = mgr.take_pending_rekey_sends();
         if !rekey_sends.is_empty() {
-            let conn_id_opt = self.state.active_buffer().map(|b| b.connection_id.clone());
+            // Resolve the connection from the caller-passed
+            // buffer_id, NOT the active buffer, so REKEY NOTICEs
+            // from a deferred-shrink encrypt land on the correct
+            // connection. Fall back to splitting buffer_id on '/'
+            // — `make_buffer_id` joins as `conn_id/channel`, so the
+            // first segment is recoverable even when the buffer was
+            // closed during the shrink wait window.
+            let conn_id_opt = self
+                .state
+                .buffers
+                .get(buffer_id)
+                .map(|b| b.connection_id.clone())
+                .or_else(|| {
+                    buffer_id
+                        .split_once('/')
+                        .map(|(conn_id, _)| conn_id.to_string())
+                });
             if let Some(conn_id) = conn_id_opt {
-                let buf_id = crate::state::buffer::make_buffer_id(&conn_id, &context);
+                // Use the caller-passed `buffer_id` directly. For Channel
+                // buffers `buffer_id` already keys to the right buffer; for
+                // Query (PM) E2E the `context` we'd reconstruct from is
+                // `@<peer_handle>`, which does NOT match how Query buffers
+                // are stored (keyed by nick), so reconstructing via
+                // `make_buffer_id(&conn_id, &context)` would always miss
+                // and silently drop REKEY NOTICEs for every E2E PM.
                 for rk in rekey_sends {
-                    let nick = self.state.buffers.get(&buf_id).and_then(|b| {
+                    let nick = self.state.buffers.get(buffer_id).and_then(|b| {
                         b.users.values().find_map(|u| {
                             let ident = u.ident.as_deref().unwrap_or("");
                             let host = u.host.as_deref().unwrap_or("");

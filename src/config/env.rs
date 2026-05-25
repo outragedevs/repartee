@@ -87,6 +87,17 @@ pub fn apply_web_credentials(web: &mut super::WebConfig, env: &HashMap<String, S
     }
 }
 
+/// Apply `.env`-stored credentials to the shrink config.
+///
+/// Reads `SHRINK_API_KEY`. The `#[serde(skip)]` on `ShrinkConfig.api_key`
+/// guarantees the key never round-trips through `config.toml`, so this
+/// is the only path the secret reaches `AppConfig`.
+pub fn apply_shrink_credentials(shrink: &mut super::ShrinkConfig, env: &HashMap<String, String>) {
+    if let Some(val) = env.get("SHRINK_API_KEY") {
+        shrink.api_key = val.trim().to_string();
+    }
+}
+
 /// Ensure `web.session_secret` is set, generating and persisting a fresh
 /// 32-byte secret to `.env` on first run.
 ///

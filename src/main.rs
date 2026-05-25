@@ -11,6 +11,7 @@ mod nick_color;
 mod scripting;
 mod session;
 mod shell;
+mod shrink;
 mod spellcheck;
 mod state;
 mod storage;

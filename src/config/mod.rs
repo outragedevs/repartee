@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 
 pub use defaults::default_config;
 pub use env::{
-    apply_credentials, apply_web_credentials, ensure_session_secret, load_env, set_env_value,
+    apply_credentials, apply_shrink_credentials, apply_web_credentials, ensure_session_secret,
+    load_env, set_env_value,
 };
 
 // === Helper for serde defaults ===
@@ -74,6 +75,7 @@ pub struct AppConfig {
     pub spellcheck: SpellcheckConfig,
     pub web: WebConfig,
     pub e2e: E2eConfig,
+    pub shrink: ShrinkConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -429,6 +431,58 @@ impl Default for SpellcheckConfig {
             mode: "replace".to_string(),
             languages: vec!["en_US".to_string()],
             dictionary_dir: String::new(),
+        }
+    }
+}
+
+/// URL shortener integration. Shortens long URLs in outgoing and/or
+/// incoming chat messages via a shrink-compatible API (default
+/// `https://shr.al`). The API key is loaded from `.env`
+/// (`SHRINK_API_KEY`) and never serialized to `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShrinkConfig {
+    /// Master switch — when false, no shortening happens in either
+    /// direction even if outgoing/incoming flags are true.
+    pub enabled: bool,
+    /// Base URL of the shrink API (no trailing slash).
+    pub api_url: String,
+    /// API key. Always populated from `.env` (`SHRINK_API_KEY`); the
+    /// `#[serde(skip)]` ensures `/save` never writes it to disk.
+    #[serde(skip)]
+    pub api_key: String,
+    /// Shorten URLs in messages we send.
+    pub outgoing_enabled: bool,
+    /// Shorten URLs in incoming live messages (NOT in backlog).
+    pub incoming_enabled: bool,
+    /// URLs at least this many characters long are candidates. Length
+    /// includes the scheme — `https://x` counts as 9. Floor 25
+    /// enforced in `/set`.
+    pub min_url_length: u32,
+    /// Per-URL shorten timeout for outgoing messages. The user is
+    /// blocked on this; default 2 s.
+    pub outgoing_timeout_ms: u64,
+    /// Per-URL shorten timeout for incoming messages. Runs in the
+    /// background, so a longer budget is OK but kept symmetric for
+    /// predictability.
+    pub incoming_timeout_ms: u64,
+    /// LRU cache size — bounded so RAM usage stays predictable.
+    /// At ~150 bytes per entry, 500 ≈ 75 KB.
+    pub cache_max_entries: u32,
+}
+
+impl Default for ShrinkConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_url: "https://shr.al".to_string(),
+            api_key: String::new(),
+            outgoing_enabled: true,
+            incoming_enabled: true,
+            min_url_length: 50,
+            outgoing_timeout_ms: 2000,
+            incoming_timeout_ms: 2000,
+            cache_max_entries: 500,
         }
     }
 }

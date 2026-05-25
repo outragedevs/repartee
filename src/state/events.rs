@@ -1,3 +1,5 @@
+use tokio::sync::mpsc::error::TrySendError;
+
 use crate::state::AppState;
 use crate::state::buffer::{ActivityLevel, Buffer, Message, MessageType, NickEntry};
 use crate::state::connection::{Connection, ConnectionStatus};
@@ -18,6 +20,9 @@ impl AppState {
             flood_exemptions: Vec::new(),
             ignores: Vec::new(),
             log_tx: None,
+            shrink_incoming_tx: None,
+            shrink_incoming_active: false,
+            shrink_min_url_length: 50,
             log_exclude_types: Vec::new(),
             scrollback_limit: 2000,
             pending_web_events: Vec::new(),
@@ -140,6 +145,82 @@ impl AppState {
         if self.suppress_event_display && message.message_type == MessageType::Event {
             return;
         }
+        // Incoming-shrink dispatch for NOTICEs from a real user (not
+        // server-origin events, not echoes of our own outgoing).
+        // PRIVMSG/ACTION go through add_message_with_activity which
+        // has its own dispatch; this hook covers the remaining
+        // live-chat path. Server notices (nick = None) skip — they
+        // often carry one-shot tokens we shouldn't ship to a
+        // third-party shortener. Self-echoes (msg.nick == our nick
+        // for the buffer's connection) skip because /notice never
+        // went through outgoing shrink in the first place; the wire
+        // peers saw is unshrunk, so shortening on our local view
+        // would diverge from theirs (and would apply the
+        // incoming-only `[host]` hint to our own message).
+        if self.shrink_incoming_active
+            && message.message_type == MessageType::Notice
+            && message.nick.as_deref().is_some_and(|n| !n.is_empty())
+            && let Some(ref tx) = self.shrink_incoming_tx
+        {
+            let urls = crate::shrink::find_long_urls(
+                &message.text,
+                self.shrink_min_url_length as usize,
+            );
+            let our_nick = self
+                .buffers
+                .get(buffer_id)
+                .and_then(|b| self.connections.get(&b.connection_id))
+                .map(|c| c.nick.as_str());
+            // RFC 2812 §2.2: nicknames are case-insensitive. Compare with
+            // `eq_ignore_ascii_case` so a server-echoed NOTICE whose nick
+            // casing differs from our stored Connection.nick still matches.
+            let is_own = match (our_nick, message.nick.as_deref()) {
+                (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                _ => false,
+            };
+            if !urls.is_empty() && !is_own {
+                let pending = crate::app::shrink::PendingIncoming {
+                    buffer_id: buffer_id.to_string(),
+                    message,
+                    activity_level: ActivityLevel::None,
+                    urls,
+                    push_to_mentions: false,
+                };
+                match tx.try_send(pending) {
+                    Ok(()) => return,
+                    Err(TrySendError::Full(p)) => {
+                        tracing::warn!(
+                            "shrink: NOTICE queue full, delivering unshrunk"
+                        );
+                        return self.add_message_unshrunk(buffer_id, p.message);
+                    }
+                    Err(TrySendError::Closed(p)) => {
+                        tracing::error!(
+                            "shrink: incoming worker dead, delivering unshrunk"
+                        );
+                        return self.add_message_unshrunk(buffer_id, p.message);
+                    }
+                }
+            }
+        }
+        self.add_message_unshrunk(buffer_id, message);
+    }
+
+    /// Inline-only path for `add_message`: skips suppress + shrink
+    /// gates. Used by the deferred shrink deliver and by the
+    /// queue-full fallback inside `add_message`.
+    ///
+    /// Guards on buffer existence at entry: when the user parts /
+    /// closes the buffer between shrink dispatch and worker
+    /// deliver, we must NOT write to SQLite or broadcast web events
+    /// for a buffer the client side no longer knows about. Logging
+    /// would also persist the substituted text under a buffer that
+    /// no longer maps to it, making `/search` for the original URL
+    /// return nothing.
+    pub fn add_message_unshrunk(&mut self, buffer_id: &str, message: Message) {
+        if !self.buffers.contains_key(buffer_id) {
+            return;
+        }
         self.maybe_log(buffer_id, &message);
         // Queue web event for broadcast.
         let wire = crate::web::snapshot::message_to_wire(&message, self.web_preview_extractor.as_deref());
@@ -232,6 +313,82 @@ impl AppState {
         message: Message,
         level: ActivityLevel,
     ) {
+        // Incoming shrink: if the message text has URL(s) above the
+        // configured threshold and shrink-incoming is wired up, hand
+        // the message off to the background worker. The worker
+        // substitutes the URLs (with `[host]` hint), then posts a
+        // `ShrinkDeliver::Incoming` back to the main loop which
+        // re-calls this same method (with `shrink_incoming_tx` set
+        // to `None` on the substituted-message Message in the
+        // deliver path) so we don't loop forever.
+        if self.shrink_incoming_active
+            && let Some(ref tx) = self.shrink_incoming_tx
+        {
+            let urls = crate::shrink::find_long_urls(
+                &message.text,
+                self.shrink_min_url_length as usize,
+            );
+            if !urls.is_empty() {
+                let pending = crate::app::shrink::PendingIncoming {
+                    buffer_id: buffer_id.to_string(),
+                    message,
+                    activity_level: level,
+                    urls,
+                    // `push_to_mentions` is unused on the deferred
+                    // path — the mentions buffer push is run inline
+                    // by the call site (handle_privmsg) with original
+                    // text; chat-buffer text uses the shortened form.
+                    push_to_mentions: false,
+                };
+                match tx.try_send(pending) {
+                    Ok(()) => return,
+                    Err(TrySendError::Full(p)) => {
+                        tracing::warn!(
+                            "shrink: incoming queue full, delivering unshrunk"
+                        );
+                        self.add_message_with_activity_unshrunk(
+                            buffer_id,
+                            p.message,
+                            p.activity_level,
+                        );
+                        return;
+                    }
+                    Err(TrySendError::Closed(p)) => {
+                        tracing::error!(
+                            "shrink: incoming worker dead, delivering unshrunk"
+                        );
+                        self.add_message_with_activity_unshrunk(
+                            buffer_id,
+                            p.message,
+                            p.activity_level,
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+        self.add_message_with_activity_unshrunk(buffer_id, message, level);
+    }
+
+    /// Same as `add_message_with_activity`, but bypasses the shrink
+    /// dispatch. Used by the deferred deliver path which has already
+    /// substituted URLs and would otherwise loop forever.
+    ///
+    /// Same buffer-existence guard as `add_message_unshrunk` — when
+    /// the user parted the channel during the shrink wait, dropping
+    /// the delivery entirely is the only correct option (otherwise
+    /// SQLite would log the substituted text orphaned from any
+    /// visible buffer, and web clients would get a NewMessage for a
+    /// buffer they no longer have).
+    pub fn add_message_with_activity_unshrunk(
+        &mut self,
+        buffer_id: &str,
+        message: Message,
+        level: ActivityLevel,
+    ) {
+        if !self.buffers.contains_key(buffer_id) {
+            return;
+        }
         self.maybe_log(buffer_id, &message);
         // Queue web events for broadcast.
         let wire = crate::web::snapshot::message_to_wire(&message, self.web_preview_extractor.as_deref());
