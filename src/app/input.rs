@@ -1232,9 +1232,15 @@ impl App {
                         .map(|(conn_id, _)| conn_id.to_string())
                 });
             if let Some(conn_id) = conn_id_opt {
-                let buf_id = crate::state::buffer::make_buffer_id(&conn_id, &context);
+                // Use the caller-passed `buffer_id` directly. For Channel
+                // buffers `buffer_id` already keys to the right buffer; for
+                // Query (PM) E2E the `context` we'd reconstruct from is
+                // `@<peer_handle>`, which does NOT match how Query buffers
+                // are stored (keyed by nick), so reconstructing via
+                // `make_buffer_id(&conn_id, &context)` would always miss
+                // and silently drop REKEY NOTICEs for every E2E PM.
                 for rk in rekey_sends {
-                    let nick = self.state.buffers.get(&buf_id).and_then(|b| {
+                    let nick = self.state.buffers.get(buffer_id).and_then(|b| {
                         b.users.values().find_map(|u| {
                             let ident = u.ident.as_deref().unwrap_or("");
                             let host = u.host.as_deref().unwrap_or("");

@@ -171,7 +171,13 @@ impl AppState {
                 .get(buffer_id)
                 .and_then(|b| self.connections.get(&b.connection_id))
                 .map(|c| c.nick.as_str());
-            let is_own = our_nick == message.nick.as_deref();
+            // RFC 2812 §2.2: nicknames are case-insensitive. Compare with
+            // `eq_ignore_ascii_case` so a server-echoed NOTICE whose nick
+            // casing differs from our stored Connection.nick still matches.
+            let is_own = match (our_nick, message.nick.as_deref()) {
+                (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                _ => false,
+            };
             if !urls.is_empty() && !is_own {
                 let pending = crate::app::shrink::PendingIncoming {
                     buffer_id: buffer_id.to_string(),

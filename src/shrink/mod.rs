@@ -85,7 +85,15 @@ pub fn host_of(url: &str) -> Option<String> {
     if host.is_empty() {
         return None;
     }
-    let host = host.rsplit_once(':').map_or(host, |(h, _)| h);
+    // IPv6 literal authorities are bracketed (`[::1]`, `[2001:db8::1]:8080`)
+    // and contain colons inside the brackets. Using `rsplit_once(':')` here
+    // would chop a portless IPv6 mid-address. Keep the bracketed literal
+    // intact; only strip an optional `:port` that comes AFTER the `]`.
+    let host = if host.starts_with('[') {
+        host.find(']').map_or(host, |close| &host[..=close])
+    } else {
+        host.rsplit_once(':').map_or(host, |(h, _)| h)
+    };
     let host = host.strip_prefix("www.").unwrap_or(host);
     Some(host.to_ascii_lowercase())
 }
@@ -276,6 +284,16 @@ mod tests {
         assert_eq!(host_of("not-a-url"), None);
         assert_eq!(host_of("ftp://example.com"), None);
         assert_eq!(host_of("https://"), None);
+    }
+
+    #[test]
+    fn host_of_keeps_ipv6_literal_intact() {
+        // Portless IPv6: must not be chopped at an inner colon.
+        assert_eq!(host_of("https://[2001:db8::1]/path"), Some("[2001:db8::1]".into()));
+        assert_eq!(host_of("http://[::1]/"), Some("[::1]".into()));
+        // IPv6 with port: strip the port, keep the bracketed literal.
+        assert_eq!(host_of("https://[2001:db8::1]:8443/x"), Some("[2001:db8::1]".into()));
+        assert_eq!(host_of("https://[::1]:8080"), Some("[::1]".into()));
     }
 
     #[test]
