@@ -85,6 +85,15 @@ pub fn host_of(url: &str) -> Option<String> {
     if host.is_empty() {
         return None;
     }
+    // Strip userinfo (`user:pass@`) before any further parsing. Without
+    // this, a phishing URL like `https://trusted.com:x@evil.com/path`
+    // would display `[trusted.com]` as the host hint while the browser
+    // navigates to `evil.com`. Browsers anchor the authority to whatever
+    // follows the LAST `@`, so use `rsplit_once`.
+    let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
+    if host.is_empty() {
+        return None;
+    }
     // IPv6 literal authorities are bracketed (`[::1]`, `[2001:db8::1]:8080`)
     // and contain colons inside the brackets. Using `rsplit_once(':')` here
     // would chop a portless IPv6 mid-address. Keep the bracketed literal
@@ -284,6 +293,29 @@ mod tests {
         assert_eq!(host_of("not-a-url"), None);
         assert_eq!(host_of("ftp://example.com"), None);
         assert_eq!(host_of("https://"), None);
+    }
+
+    #[test]
+    fn host_of_strips_userinfo_phishing() {
+        // Classic phishing pattern — host must come from AFTER the `@`,
+        // never from the userinfo's apparent-domain prefix.
+        assert_eq!(
+            host_of("https://trusted.com:x@evil.com/path"),
+            Some("evil.com".into())
+        );
+        assert_eq!(
+            host_of("https://user:pass@example.com/x"),
+            Some("example.com".into())
+        );
+        assert_eq!(host_of("https://user@example.com/"), Some("example.com".into()));
+        // userinfo + IPv6 + port should still yield the IPv6 literal.
+        assert_eq!(
+            host_of("https://u:p@[2001:db8::1]:8443/x"),
+            Some("[2001:db8::1]".into())
+        );
+        // `@` legitimately appearing inside the path is already stripped
+        // by the earlier `/?#` split and must not be misread as userinfo.
+        assert_eq!(host_of("https://example.com/path@frag"), Some("example.com".into()));
     }
 
     #[test]
