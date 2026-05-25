@@ -260,6 +260,15 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v1.3.0
+
+- **URL shortening via `shr.al`** — long URLs are transparently shortened by an external API both **before they hit the wire** (outgoing) and **before they hit your screen** (incoming). Display: outgoing renders as `https://shr.al/abc`; incoming renders as `https://shr.al/abc [original-host.tld]` so you can see where the original link points. Independent `shrink.outgoing_enabled` / `shrink.incoming_enabled` toggles. Default threshold is `min_url_length = 50` (hard floor 25) and tunable via `/set shrink.min_url_length`.
+- **`/shrink <url>` command** — explicitly shorten a URL without sending it; result is copied into the input line. `/help shrink` shows full usage.
+- **Hardened against URL-display spoofing** — `host_of` strips `user:pass@` userinfo before extracting the displayed `[host]` hint, so a phishing URL like `https://trusted.com:x@evil.com/path` correctly renders as `[evil.com]` instead of `[trusted.com]`. Portless IPv6 literals (`[2001:db8::1]`) are preserved intact.
+- **Quality-of-life shrink internals** — in-memory LRU cache (default 500 entries) avoids re-billing API calls for repeated URLs; 2-second timeout with silent fallback to the original URL on any failure (network, API, panic); per-message URLs are pre-extracted at dispatch time so a `/set shrink.min_url_length` change mid-flight cannot desync the gate from the worker; all per-message worker bodies are wrapped in `catch_unwind` so a panic in one shortening never bricks the feature for the rest of the session.
+- **E2E REKEY fix for PMs** — REKEY NOTICEs produced by lazy session rotation in encrypted private messages are no longer silently dropped (regression that pre-dated this release: the buffer key was being reconstructed from the `@peer_handle` pseudochannel instead of the actual nick-keyed buffer).
+- **Secrets stay in `.env`** — `SHRINK_API_KEY` is loaded exclusively from the `.env` file and never written to `config.toml`.
+
 ### v1.2.0
 
 - **Runtime bind-IP override** — new `repartee -h <ip>` / `--bind <ip>` / `--bind=<ip>` CLI flag (modelled on `irssi -h`) lets multi-homed hosts pick the outgoing IRC source address for a session without editing config. New `general.default_bind_ip` config key (also settable via `/set`) provides a host-wide default. Precedence: per-server `bind_ip` → CLI `-h` → `general.default_bind_ip` → OS default. The CLI flag never persists.
