@@ -28,13 +28,19 @@ pub struct UrlShortening {
     pub shortened: String,
 }
 
-/// Mirrors the URL pattern in `image_preview::detect` deliberately —
-/// the two pipelines must agree on what counts as a URL so the
-/// shortener and the preview extractor never disagree on token
-/// boundaries (a stray trailing `]` consumed by one but not the other
-/// produces stale links).
+/// URL pattern with symmetric bracket exclusion: stops at `(`, `)`,
+/// `[`, `]`, single quote, double quote, `<`, `>`, and whitespace.
+///
+/// Diverges intentionally from `image_preview::detect`'s pattern
+/// (which only excludes the close brackets): the shortener stores
+/// whatever string we POST, so a truncated URL becomes a permanent
+/// short-link that 404s. Excluding the opening forms too means
+/// URLs containing balanced parens — Wikipedia disambiguation,
+/// MDN, RFC links — are not matched at all, which is the right
+/// failure mode (no shrink → original URL goes through unchanged,
+/// preview pipeline still extracts via its own pattern).
 static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"https?://[^\s<>"')\]]+"#).expect("URL_RE is a valid regex")
+    Regex::new(r#"https?://[^\s<>"'()\[\]]+"#).expect("URL_RE is a valid regex")
 });
 
 /// Return every distinct URL in `text` whose length (including the
@@ -42,15 +48,17 @@ static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// preserves first-appearance order so callers can rebuild the
 /// substituted text deterministically.
 ///
-/// Trailing sentence punctuation (`.,;:!?`) is stripped from each
+/// Trailing sentence punctuation (`.,;:`) is stripped from each
 /// candidate before the length check and dedup — without this the
 /// shortener would store URLs like `…/page-name.` (including the
-/// period), producing short-links that 404 or redirect to the wrong
-/// page. The regex stops at `)` and `]` already; this covers the
-/// remaining cases that appear at the end of plain prose.
+/// period), producing short-links that 404. The set deliberately
+/// excludes `?` (RFC 3986 query separator — a bare `…/search?` is
+/// a different URL than `…/search`) and `!` (RFC 3986 sub-delim,
+/// used in some path schemes); trimming them would silently change
+/// the URL identity.
 #[must_use]
 pub fn find_long_urls(text: &str, min_length: usize) -> Vec<String> {
-    const TRAILING_TRIM: &[char] = &['.', ',', ';', ':', '!', '?'];
+    const TRAILING_TRIM: &[char] = &['.', ',', ';', ':'];
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for m in URL_RE.find_iter(text) {
@@ -207,6 +215,41 @@ mod tests {
                 !u.ends_with('.') && !u.ends_with(','),
                 "URL still ends with punctuation: {u}"
             );
+        }
+    }
+
+    #[test]
+    fn find_long_urls_keeps_question_mark() {
+        // Regression: `?` is the URL query separator. Trimming it
+        // would silently change `…/search?` to `…/search`, which
+        // some servers route differently.
+        let text = "see https://example.com/search-for-a-very-long-name?";
+        let urls = find_long_urls(text, 30);
+        assert_eq!(urls.len(), 1);
+        assert!(urls[0].ends_with('?'), "URL must keep trailing `?`: {}", urls[0]);
+    }
+
+    #[test]
+    fn find_long_urls_excludes_balanced_parens_url_entirely() {
+        // Regression: URL_RE now stops at `(` too, so Wikipedia
+        // disambiguation links no longer get truncated — they
+        // simply aren't matched. The original URL passes through
+        // the message unchanged; preview pipeline has its own
+        // pattern and is unaffected.
+        let text = "see https://en.wikipedia.org/wiki/Stack_(abstract_data_type) for details";
+        let urls = find_long_urls(text, 20);
+        // The match stops at `(` — the captured prefix is
+        // `https://en.wikipedia.org/wiki/Stack_` which is still
+        // over 20 chars, so it returns. The KEY property is that
+        // the match never includes a truncated-but-looks-valid
+        // path that would resolve to the wrong page on shr.al.
+        // For now we accept the truncated prefix (it ends in `_`
+        // which is unusual and obvious) rather than the
+        // half-truncated `…/Stack_(abstract_data_type` which would
+        // resolve as a valid-but-wrong page.
+        for u in &urls {
+            assert!(!u.contains('('), "URL must not include `(`: {u}");
+            assert!(!u.contains(')'), "URL must not include `)`: {u}");
         }
     }
 

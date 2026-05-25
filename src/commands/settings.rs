@@ -427,16 +427,34 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
                 config.shrink.min_url_length = v;
             }
             "outgoing_timeout_ms" => {
-                config.shrink.outgoing_timeout_ms =
-                    raw.parse().map_err(|_| "Expected a number".to_string())?;
+                // Floor at 100 ms. Anything lower makes
+                // tokio::time::timeout fire before reqwest can
+                // even open a TCP connection, so every shrink
+                // returns Timeout and the user silently never
+                // sees a shortened URL.
+                let v: u64 = raw.parse().map_err(|_| "Expected a number".to_string())?;
+                if v < 100 {
+                    return Err("shrink.outgoing_timeout_ms must be at least 100".to_string());
+                }
+                config.shrink.outgoing_timeout_ms = v;
             }
             "incoming_timeout_ms" => {
-                config.shrink.incoming_timeout_ms =
-                    raw.parse().map_err(|_| "Expected a number".to_string())?;
+                let v: u64 = raw.parse().map_err(|_| "Expected a number".to_string())?;
+                if v < 100 {
+                    return Err("shrink.incoming_timeout_ms must be at least 100".to_string());
+                }
+                config.shrink.incoming_timeout_ms = v;
             }
             "cache_max_entries" => {
-                config.shrink.cache_max_entries =
-                    raw.parse().map_err(|_| "Expected a number".to_string())?;
+                // Floor at 1. ShrinkCache::new internally clamps
+                // 0 → 1 anyway; making /set reject 0 explicitly
+                // avoids the surprise of `/set` reporting `= 0`
+                // while the live cache silently uses 1.
+                let v: u32 = raw.parse().map_err(|_| "Expected a number".to_string())?;
+                if v == 0 {
+                    return Err("shrink.cache_max_entries must be at least 1".to_string());
+                }
+                config.shrink.cache_max_entries = v;
             }
             _ => return Err(format!("Unknown field: {path}")),
         },

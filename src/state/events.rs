@@ -1,3 +1,5 @@
+use tokio::sync::mpsc::error::TrySendError;
+
 use crate::state::AppState;
 use crate::state::buffer::{ActivityLevel, Buffer, Message, MessageType, NickEntry};
 use crate::state::connection::{Connection, ConnectionStatus};
@@ -144,41 +146,54 @@ impl AppState {
             return;
         }
         // Incoming-shrink dispatch for NOTICEs from a real user (not
-        // server-origin events). PRIVMSG/ACTION go through
-        // add_message_with_activity which has its own dispatch; this
-        // hook covers the remaining live-chat path. Server notices
-        // (nick = None) skip — they often carry one-shot tokens we
-        // shouldn't ship to a third-party shortener.
+        // server-origin events, not echoes of our own outgoing).
+        // PRIVMSG/ACTION go through add_message_with_activity which
+        // has its own dispatch; this hook covers the remaining
+        // live-chat path. Server notices (nick = None) skip — they
+        // often carry one-shot tokens we shouldn't ship to a
+        // third-party shortener. Self-echoes (msg.nick == our nick
+        // for the buffer's connection) skip because /notice never
+        // went through outgoing shrink in the first place; the wire
+        // peers saw is unshrunk, so shortening on our local view
+        // would diverge from theirs (and would apply the
+        // incoming-only `[host]` hint to our own message).
         if self.shrink_incoming_active
             && message.message_type == MessageType::Notice
             && message.nick.as_deref().is_some_and(|n| !n.is_empty())
             && let Some(ref tx) = self.shrink_incoming_tx
-            && !crate::shrink::find_long_urls(
+        {
+            let urls = crate::shrink::find_long_urls(
                 &message.text,
                 self.shrink_min_url_length as usize,
-            )
-            .is_empty()
-        {
-            let pending = crate::app::shrink::PendingIncoming {
-                buffer_id: buffer_id.to_string(),
-                message,
-                // NOTICE doesn't escalate activity via add_message;
-                // pass None so the deferred deliver's
-                // add_message_with_activity_unshrunk is a no-op for
-                // activity (matches the bare add_message semantics).
-                activity_level: ActivityLevel::None,
-                push_to_mentions: false,
-            };
-            match tx.try_send(pending) {
-                Ok(()) => return,
-                Err(
-                    tokio::sync::mpsc::error::TrySendError::Full(p)
-                    | tokio::sync::mpsc::error::TrySendError::Closed(p),
-                ) => {
-                    tracing::warn!(
-                        "shrink: NOTICE dispatch failed, delivering unshrunk"
-                    );
-                    return self.add_message_unshrunk(buffer_id, p.message);
+            );
+            let our_nick = self
+                .buffers
+                .get(buffer_id)
+                .and_then(|b| self.connections.get(&b.connection_id))
+                .map(|c| c.nick.as_str());
+            let is_own = our_nick == message.nick.as_deref();
+            if !urls.is_empty() && !is_own {
+                let pending = crate::app::shrink::PendingIncoming {
+                    buffer_id: buffer_id.to_string(),
+                    message,
+                    activity_level: ActivityLevel::None,
+                    urls,
+                    push_to_mentions: false,
+                };
+                match tx.try_send(pending) {
+                    Ok(()) => return,
+                    Err(TrySendError::Full(p)) => {
+                        tracing::warn!(
+                            "shrink: NOTICE queue full, delivering unshrunk"
+                        );
+                        return self.add_message_unshrunk(buffer_id, p.message);
+                    }
+                    Err(TrySendError::Closed(p)) => {
+                        tracing::error!(
+                            "shrink: incoming worker dead, delivering unshrunk"
+                        );
+                        return self.add_message_unshrunk(buffer_id, p.message);
+                    }
                 }
             }
         }
@@ -188,7 +203,18 @@ impl AppState {
     /// Inline-only path for `add_message`: skips suppress + shrink
     /// gates. Used by the deferred shrink deliver and by the
     /// queue-full fallback inside `add_message`.
+    ///
+    /// Guards on buffer existence at entry: when the user parts /
+    /// closes the buffer between shrink dispatch and worker
+    /// deliver, we must NOT write to SQLite or broadcast web events
+    /// for a buffer the client side no longer knows about. Logging
+    /// would also persist the substituted text under a buffer that
+    /// no longer maps to it, making `/search` for the original URL
+    /// return nothing.
     pub fn add_message_unshrunk(&mut self, buffer_id: &str, message: Message) {
+        if !self.buffers.contains_key(buffer_id) {
+            return;
+        }
         self.maybe_log(buffer_id, &message);
         // Queue web event for broadcast.
         let wire = crate::web::snapshot::message_to_wire(&message, self.web_preview_extractor.as_deref());
@@ -291,43 +317,47 @@ impl AppState {
         // deliver path) so we don't loop forever.
         if self.shrink_incoming_active
             && let Some(ref tx) = self.shrink_incoming_tx
-            && !crate::shrink::find_long_urls(
+        {
+            let urls = crate::shrink::find_long_urls(
                 &message.text,
                 self.shrink_min_url_length as usize,
-            )
-            .is_empty()
-        {
-            let pending = crate::app::shrink::PendingIncoming {
-                buffer_id: buffer_id.to_string(),
-                message,
-                activity_level: level,
-                // `push_to_mentions` is unused on the deferred path
-                // — the mentions buffer push is run inline by the
-                // call site (handle_privmsg) with original text;
-                // chat-buffer text uses the shortened form.
-                push_to_mentions: false,
-            };
-            match tx.try_send(pending) {
-                Ok(()) => return,
-                Err(
-                    tokio::sync::mpsc::error::TrySendError::Full(p)
-                    | tokio::sync::mpsc::error::TrySendError::Closed(p),
-                ) => {
-                    // Worker queue full or dead → never drop the
-                    // message. Fall through to the unshrunk path so
-                    // it still reaches the buffer / log / web with
-                    // the original URL (degraded but visible). The
-                    // worker is decoupled from message delivery,
-                    // never the other way around.
-                    tracing::warn!(
-                        "shrink: incoming dispatch failed, delivering unshrunk"
-                    );
-                    self.add_message_with_activity_unshrunk(
-                        buffer_id,
-                        p.message,
-                        p.activity_level,
-                    );
-                    return;
+            );
+            if !urls.is_empty() {
+                let pending = crate::app::shrink::PendingIncoming {
+                    buffer_id: buffer_id.to_string(),
+                    message,
+                    activity_level: level,
+                    urls,
+                    // `push_to_mentions` is unused on the deferred
+                    // path — the mentions buffer push is run inline
+                    // by the call site (handle_privmsg) with original
+                    // text; chat-buffer text uses the shortened form.
+                    push_to_mentions: false,
+                };
+                match tx.try_send(pending) {
+                    Ok(()) => return,
+                    Err(TrySendError::Full(p)) => {
+                        tracing::warn!(
+                            "shrink: incoming queue full, delivering unshrunk"
+                        );
+                        self.add_message_with_activity_unshrunk(
+                            buffer_id,
+                            p.message,
+                            p.activity_level,
+                        );
+                        return;
+                    }
+                    Err(TrySendError::Closed(p)) => {
+                        tracing::error!(
+                            "shrink: incoming worker dead, delivering unshrunk"
+                        );
+                        self.add_message_with_activity_unshrunk(
+                            buffer_id,
+                            p.message,
+                            p.activity_level,
+                        );
+                        return;
+                    }
                 }
             }
         }
@@ -337,12 +367,22 @@ impl AppState {
     /// Same as `add_message_with_activity`, but bypasses the shrink
     /// dispatch. Used by the deferred deliver path which has already
     /// substituted URLs and would otherwise loop forever.
+    ///
+    /// Same buffer-existence guard as `add_message_unshrunk` — when
+    /// the user parted the channel during the shrink wait, dropping
+    /// the delivery entirely is the only correct option (otherwise
+    /// SQLite would log the substituted text orphaned from any
+    /// visible buffer, and web clients would get a NewMessage for a
+    /// buffer they no longer have).
     pub fn add_message_with_activity_unshrunk(
         &mut self,
         buffer_id: &str,
         message: Message,
         level: ActivityLevel,
     ) {
+        if !self.buffers.contains_key(buffer_id) {
+            return;
+        }
         self.maybe_log(buffer_id, &message);
         // Queue web events for broadcast.
         let wire = crate::web::snapshot::message_to_wire(&message, self.web_preview_extractor.as_deref());

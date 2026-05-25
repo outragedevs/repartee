@@ -43,11 +43,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::FutureExt;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
 use super::App;
-use crate::shrink::{ShrinkCache, ShrinkClient, UrlShortening, find_long_urls, host_of};
+use crate::shrink::{ShrinkCache, ShrinkClient, UrlShortening, host_of};
 use crate::state::buffer::{ActivityLevel, BufferType, Message};
 
 /// Posted by either shrink worker (outgoing / incoming) and consumed
@@ -82,6 +83,15 @@ pub struct OutgoingDeliver {
     pub buffer_type: BufferType,
     /// Post-substitution text (or the original on timeout / error).
     pub substituted_text: String,
+    /// Captured at dispatch — used by `send_outgoing_substituted`
+    /// for the local echo so the deferred delivery shows the same
+    /// nick / mode the wire was sent under.
+    pub nick: String,
+    pub own_mode: Option<char>,
+    /// Captured Query peer_handle (None for channels / no-handle
+    /// queries) — passed into e2e_encrypt_or_passthrough so a
+    /// closed-buffer wait window cannot fall back to plaintext.
+    pub peer_handle: Option<String>,
 }
 
 #[derive(Debug)]
@@ -106,6 +116,14 @@ pub struct IncomingDeliver {
 /// `handle_plain_message` posts this when the message qualifies for
 /// outgoing shrink. The worker takes ownership, awaits shrink,
 /// substitutes, then posts an `OutgoingDeliver` to the main loop.
+///
+/// Every field that the deliver path would otherwise re-resolve from
+/// `state` is **captured at dispatch time** so a buffer close, /nick,
+/// or +o/+v during the shrink wait can't break the eventual encrypt
+/// + send + echo. This addresses three review findings at once:
+///   * E2E peer_handle leak when the Query buffer is closed
+///   * Local-echo nick/mode split-brain after `/nick` mid-wait
+///   * Worker re-extracting URLs against a stale `min_url_length`
 #[derive(Debug)]
 pub struct PendingOutgoing {
     pub conn_id: String,
@@ -113,6 +131,24 @@ pub struct PendingOutgoing {
     pub buffer_name: String,
     pub buffer_type: BufferType,
     pub original_text: String,
+    /// URLs pre-extracted at dispatch time using the CURRENT state's
+    /// `shrink_min_url_length`. The worker uses these directly; it
+    /// no longer calls `find_long_urls` itself, so a runtime change
+    /// to `min_url_length` via `/set` can never be out of sync.
+    pub urls: Vec<String>,
+    /// Local-echo nick captured from the connection at dispatch
+    /// time; used by `send_outgoing_substituted` instead of
+    /// re-reading current state at deliver.
+    pub nick: String,
+    /// Local-echo mode prefix (e.g. `+`, `@`) captured from the
+    /// channel's user list at dispatch time.
+    pub own_mode: Option<char>,
+    /// E2E peer handle for Query buffers, resolved at dispatch from
+    /// `state.buffers[buffer_id].peer_handle`. `None` for channels
+    /// (which key on the channel name) and for queries with no
+    /// captured handle (E2E will fall through to its existing
+    /// legacy-config refusal).
+    pub peer_handle: Option<String>,
 }
 
 /// `handle_privmsg` / `handle_action` / `handle_notice` posts this
@@ -124,11 +160,11 @@ pub struct PendingIncoming {
     pub buffer_id: String,
     pub message: Message,
     pub activity_level: ActivityLevel,
-    /// See `IncomingDeliver.push_to_mentions` — same v2 hook.
-    #[expect(
-        dead_code,
-        reason = "v2 hook for shrink-aware mentions buffer push"
-    )]
+    /// URLs pre-extracted at dispatch (same fix as `PendingOutgoing`).
+    pub urls: Vec<String>,
+    /// Copied verbatim into `IncomingDeliver.push_to_mentions` (see
+    /// its `#[expect(dead_code)]` for the v2 hook). The field IS
+    /// read here; only the destination field is dead.
     pub push_to_mentions: bool,
 }
 
@@ -168,7 +204,6 @@ impl ShrinkRuntime {
                 Arc::clone(&cache),
                 deliver_tx.clone(),
                 Duration::from_millis(cfg.outgoing_timeout_ms),
-                cfg.min_url_length as usize,
             );
             spawn_incoming_worker(
                 incoming_rx,
@@ -176,7 +211,6 @@ impl ShrinkRuntime {
                 Arc::clone(&cache),
                 deliver_tx.clone(),
                 Duration::from_millis(cfg.incoming_timeout_ms),
-                cfg.min_url_length as usize,
             );
         } else {
             // Shrink disabled: drain the queues to /dev/null so
@@ -206,30 +240,53 @@ fn spawn_outgoing_worker(
     cache: Arc<Mutex<ShrinkCache>>,
     deliver: mpsc::Sender<ShrinkDeliver>,
     timeout: Duration,
-    min_length: usize,
 ) {
     tokio::spawn(async move {
         // Process one at a time so outgoing IRC sends keep their
         // user-submitted order. Cache hits keep this from being slow.
+        // Each per-message body is wrapped in catch_unwind so a panic
+        // in shorten / substitution / json parsing kills only the
+        // current message — the worker keeps draining subsequent
+        // ones rather than going Closed and forcing a restart for
+        // the feature to recover.
         while let Some(pending) = rx.recv().await {
-            let substituted_text = shrink_and_substitute(
-                &client,
-                &cache,
-                &pending.original_text,
-                timeout,
-                min_length,
-                false, // outgoing: no [host] hint
-            )
-            .await;
-            let _ = deliver
-                .send(ShrinkDeliver::Outgoing(OutgoingDeliver {
+            let client_ref = &client;
+            let cache_ref = &cache;
+            let outcome = std::panic::AssertUnwindSafe(async move {
+                let substituted_text = shrink_and_substitute(
+                    client_ref,
+                    cache_ref,
+                    &pending.original_text,
+                    &pending.urls,
+                    timeout,
+                    false,
+                )
+                .await;
+                ShrinkDeliver::Outgoing(OutgoingDeliver {
                     conn_id: pending.conn_id,
                     buffer_id: pending.buffer_id,
                     buffer_name: pending.buffer_name,
                     buffer_type: pending.buffer_type,
                     substituted_text,
-                }))
-                .await;
+                    nick: pending.nick,
+                    own_mode: pending.own_mode,
+                    peer_handle: pending.peer_handle,
+                })
+            });
+            // futures::FutureExt::catch_unwind wraps the future
+            // so a panic becomes Err(payload) instead of unwinding
+            // the worker task.
+            match outcome.catch_unwind().await {
+                Ok(deliver_msg) => {
+                    let _ = deliver.send(deliver_msg).await;
+                }
+                Err(_) => {
+                    tracing::error!(
+                        "shrink: outgoing worker caught a panic on one \
+                         message; dropping and continuing"
+                    );
+                }
+            }
         }
     });
 }
@@ -240,51 +297,64 @@ fn spawn_incoming_worker(
     cache: Arc<Mutex<ShrinkCache>>,
     deliver: mpsc::Sender<ShrinkDeliver>,
     timeout: Duration,
-    min_length: usize,
 ) {
     tokio::spawn(async move {
-        // Sequential within the worker — keeps per-channel order
-        // intact for the typical case. A pathological busy channel
-        // with many unique long URLs and a slow API would queue up
-        // behind the slowest shortenings; that's an acceptable
-        // trade-off (and `min_url_length` keeps the candidate set
-        // small).
+        // See spawn_outgoing_worker for the panic-isolation rationale.
         while let Some(mut pending) = rx.recv().await {
-            let substituted_text = shrink_and_substitute(
-                &client,
-                &cache,
-                &pending.message.text,
-                timeout,
-                min_length,
-                true, // incoming: add [host] hint
-            )
-            .await;
-            pending.message.text = substituted_text;
-            let _ = deliver
-                .send(ShrinkDeliver::Incoming(IncomingDeliver {
+            let client_ref = &client;
+            let cache_ref = &cache;
+            let outcome = std::panic::AssertUnwindSafe(async move {
+                let substituted_text = shrink_and_substitute(
+                    client_ref,
+                    cache_ref,
+                    &pending.message.text,
+                    &pending.urls,
+                    timeout,
+                    true,
+                )
+                .await;
+                pending.message.text = substituted_text;
+                ShrinkDeliver::Incoming(IncomingDeliver {
                     buffer_id: pending.buffer_id,
                     message: pending.message,
                     activity_level: pending.activity_level,
                     push_to_mentions: pending.push_to_mentions,
-                }))
-                .await;
+                })
+            });
+            match outcome.catch_unwind().await {
+                Ok(deliver_msg) => {
+                    let _ = deliver.send(deliver_msg).await;
+                }
+                Err(_) => {
+                    tracing::error!(
+                        "shrink: incoming worker caught a panic on one \
+                         message; dropping and continuing"
+                    );
+                }
+            }
         }
     });
 }
 
+/// Substitute URLs in `text`. URLs were pre-extracted at dispatch
+/// time using the CURRENT state's `shrink_min_url_length` and passed
+/// in via `urls`; the worker does NOT re-extract here. This is the
+/// fix for the half-sync issue where lowering `min_url_length` at
+/// runtime caused the gate to dispatch messages the worker would
+/// then re-filter against the boot-time threshold and return
+/// unmodified.
 async fn shrink_and_substitute(
     client: &ShrinkClient,
     cache: &Mutex<ShrinkCache>,
     text: &str,
+    urls: &[String],
     timeout: Duration,
-    min_length: usize,
     add_host_hint: bool,
 ) -> String {
-    let urls = find_long_urls(text, min_length);
     if urls.is_empty() {
         return text.to_string();
     }
-    let shortenings = resolve_shortenings(client, cache, urls, timeout).await;
+    let shortenings = resolve_shortenings(client, cache, urls.to_vec(), timeout).await;
     if shortenings.is_empty() {
         return text.to_string();
     }
@@ -422,8 +492,22 @@ impl App {
     /// receive the shortened form inside the ciphertext, and the
     /// local echo / IRC send mirror `handle_plain_message`'s
     /// non-shrink path with the now-shrunken text.
+    ///
+    /// Uses captured `out.nick` / `out.own_mode` / `out.peer_handle`
+    /// instead of re-reading state — the user may have /nick'd,
+    /// /closed the buffer, or gained/lost a channel mode during the
+    /// shrink wait. Reading current state would produce a local echo
+    /// inconsistent with what hit the wire (sent under the prior
+    /// nick/mode) and could even leak plaintext for an E2E PM if
+    /// the Query buffer is gone.
     fn send_outgoing_substituted(&mut self, out: &OutgoingDeliver) {
+        // Surface IRC-down as an in-buffer error — old code silently
+        // returned, losing the user's message with no UI feedback.
         if !self.irc_handles.contains_key(&out.conn_id) {
+            self.deliver_outgoing_error(
+                out,
+                "Failed to send message — connection unavailable",
+            );
             return;
         }
         let Some((wire_lines, plain_echo)) = self.e2e_encrypt_or_passthrough(
@@ -431,12 +515,13 @@ impl App {
             &out.buffer_name,
             &out.buffer_type,
             &out.substituted_text,
+            out.peer_handle.as_deref(),
         ) else {
             // Mirror handle_plain_message's themed error event so
             // the user knows the PM didn't go out (no peer handle
             // yet). Without this the message vanished silently.
-            crate::commands::helpers::add_local_event(
-                self,
+            self.deliver_outgoing_error(
+                out,
                 &format!(
                     "{err}[E2E] cannot encrypt PM without peer handle \
                      — wait for a message from them first{rst}",
@@ -454,15 +539,13 @@ impl App {
         let is_e2e_encrypted = wire_lines
             .first()
             .is_some_and(|w| w.starts_with("+RPE2E01"));
-        // Re-borrow the sender for each wire — `send_privmsg` takes
-        // `&self`, so this avoids any clone/ownership friction on
-        // `IrcHandle`. Track send_ok separately so we can drain
-        // pending REKEY NOTICEs even on partial failure — leaving
-        // them queued would let them flush across a reconnect to a
-        // stale connection or wrong peers.
         let mut send_ok = true;
         for wire in wire_lines {
             let Some(handle) = self.irc_handles.get(&out.conn_id) else {
+                self.deliver_outgoing_error(
+                    out,
+                    "Failed to send message — connection dropped",
+                );
                 send_ok = false;
                 break;
             };
@@ -472,56 +555,99 @@ impl App {
                     target = %out.buffer_name,
                     "shrink: deferred outgoing send failed"
                 );
-                crate::commands::helpers::add_local_event(self, "Failed to send message");
+                self.deliver_outgoing_error(out, "Failed to send message");
                 send_ok = false;
                 break;
             }
         }
-        // ALWAYS drain pending_e2e_sends — REKEY NOTICEs queued by
-        // encrypt_outgoing must ship in the same dispatch turn (or
-        // peers' next decrypt will fail). Mirrors the inline path's
-        // unconditional drain.
-        if !self.state.pending_e2e_sends.is_empty() {
+        // Only drain pending_e2e_sends on success. Inline
+        // handle_plain_message returns early on send failure WITHOUT
+        // draining, leaving REKEY NOTICEs queued for the next
+        // successful send — match that policy here. Draining on
+        // failure would flush REKEYs to peers whose session
+        // assumes the triggering ciphertext arrived, producing
+        // silent decrypt breakage on subsequent messages.
+        if send_ok && !self.state.pending_e2e_sends.is_empty() {
             self.drain_pending_e2e_sends();
         }
         if !send_ok {
-            // Skip local echo — the user already saw the error event.
             return;
         }
         if !echo_message_enabled || is_e2e_encrypted {
-            let nick = self
-                .state
-                .connections
-                .get(&out.conn_id)
-                .map(|c| c.nick.clone())
-                .unwrap_or_default();
-            let own_mode = self.state.nick_prefix(&out.buffer_id, &nick);
-            let local_chunks = if plain_echo.len() <= crate::irc::MESSAGE_MAX_BYTES {
-                vec![plain_echo]
-            } else {
-                crate::irc::split_irc_message(&plain_echo, crate::irc::MESSAGE_MAX_BYTES)
-            };
-            for chunk in local_chunks {
-                let id = self.state.next_message_id();
-                self.state.add_message(
-                    &out.buffer_id,
-                    Message {
-                        id,
-                        timestamp: chrono::Utc::now(),
-                        message_type: crate::state::buffer::MessageType::Message,
-                        nick: Some(nick.clone()),
-                        nick_mode: own_mode.map(|c| c.to_string()),
-                        text: chunk,
-                        highlight: false,
-                        event_key: None,
-                        event_params: None,
-                        log_msg_id: None,
-                        log_ref_id: None,
-                        tags: None,
-                    },
-                );
-            }
+            self.write_outgoing_local_echo(out, &plain_echo);
         }
+    }
+
+    /// Emit the local-echo chunks for a successfully-sent outgoing
+    /// message. Uses the captured nick/own_mode from dispatch time
+    /// so the displayed sender matches what peers saw. Skips the
+    /// echo entirely (with a status-line diagnostic) when the
+    /// destination buffer was closed during the shrink wait — the
+    /// wire send already succeeded, the peer has the message, but
+    /// our buffer is gone.
+    fn write_outgoing_local_echo(&mut self, out: &OutgoingDeliver, plain_echo: &str) {
+        if !self.state.buffers.contains_key(&out.buffer_id) {
+            // Peers received the message but our buffer is gone.
+            // Surface this in the active buffer so the user knows
+            // the send went through (and won't retype).
+            crate::commands::helpers::add_local_event(
+                self,
+                &format!(
+                    "{dim}shrink: message to {target} sent (buffer was \
+                     closed during shrink wait){rst}",
+                    target = out.buffer_name,
+                    dim = crate::commands::types::C_DIM,
+                    rst = crate::commands::types::C_RST,
+                ),
+            );
+            return;
+        }
+        let local_chunks = if plain_echo.len() <= crate::irc::MESSAGE_MAX_BYTES {
+            vec![plain_echo.to_string()]
+        } else {
+            crate::irc::split_irc_message(plain_echo, crate::irc::MESSAGE_MAX_BYTES)
+        };
+        let nick_mode_str = out.own_mode.map(|c| c.to_string());
+        for chunk in local_chunks {
+            let id = self.state.next_message_id();
+            self.state.add_message(
+                &out.buffer_id,
+                Message {
+                    id,
+                    timestamp: chrono::Utc::now(),
+                    message_type: crate::state::buffer::MessageType::Message,
+                    nick: Some(out.nick.clone()),
+                    nick_mode: nick_mode_str.clone(),
+                    text: chunk,
+                    highlight: false,
+                    event_key: None,
+                    event_params: None,
+                    log_msg_id: None,
+                    log_ref_id: None,
+                    tags: None,
+                },
+            );
+        }
+    }
+
+    /// Route an outgoing-pipeline error event to the right buffer.
+    /// Prefers the original destination buffer (out.buffer_id) when
+    /// it still exists; falls back to the current active buffer
+    /// (so the user always sees the error somewhere).
+    fn deliver_outgoing_error(&mut self, out: &OutgoingDeliver, message: &str) {
+        let target_buf = if self.state.buffers.contains_key(&out.buffer_id) {
+            Some(out.buffer_id.clone())
+        } else {
+            self.state.active_buffer_id.clone()
+        };
+        let Some(buf_id) = target_buf else {
+            tracing::warn!("shrink: outgoing error with no target buffer: {message}");
+            return;
+        };
+        let prior = self.state.active_buffer_id.clone();
+        self.state.active_buffer_id = Some(buf_id);
+        crate::commands::helpers::add_local_event(self, message);
+        self.state.active_buffer_id = prior;
     }
 }
 
