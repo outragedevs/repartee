@@ -833,9 +833,48 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                 app.state.shrink_incoming_active = app.config.shrink.enabled
                     && app.config.shrink.incoming_enabled
                     && app.shrink_client.is_some();
+                // Warn the user when the toggle is now `true` but no
+                // client exists (typically: SHRINK_API_KEY missing at
+                // boot). Without this, /set replies with success but
+                // shrink stays inert and the user has no diagnostic.
+                if (path == "shrink.enabled" && app.config.shrink.enabled)
+                    && app.shrink_client.is_none()
+                {
+                    crate::commands::helpers::add_local_event(
+                        app,
+                        &format!(
+                            "{warn}shrink: enabled but no API client — set \
+                             SHRINK_API_KEY in .env and restart{rst}",
+                            warn = crate::commands::types::C_ERR,
+                            rst = crate::commands::types::C_RST,
+                        ),
+                    );
+                }
             }
             if path == "shrink.min_url_length" {
                 app.state.shrink_min_url_length = app.config.shrink.min_url_length;
+            }
+            // Settings captured at startup by the shrink workers
+            // (api_url, timeouts) or by the cache constructor
+            // (cache_max_entries) cannot be propagated to running
+            // tasks. Surface a restart-required notice so the user
+            // knows the /set didn't take effect.
+            if matches!(
+                path.as_str(),
+                "shrink.api_url"
+                    | "shrink.outgoing_timeout_ms"
+                    | "shrink.incoming_timeout_ms"
+                    | "shrink.cache_max_entries"
+            ) {
+                crate::commands::helpers::add_local_event(
+                    app,
+                    &format!(
+                        "{dim}shrink: {path} change requires restart to \
+                         take effect{rst}",
+                        dim = crate::commands::types::C_DIM,
+                        rst = crate::commands::types::C_RST,
+                    ),
+                );
             }
 
             // Sync DCC runtime state from config

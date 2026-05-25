@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use reqwest::{Client, StatusCode};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -41,8 +41,10 @@ struct CreateLinkRequest<'a> {
 
 #[derive(Deserialize)]
 struct CreateLinkResponse {
-    #[serde(default)]
-    slug: String,
+    // `slug` is informational; we only need `short_url` downstream.
+    // Some spec-compliant servers may omit slug, so we don't even
+    // deserialize it — keeping the response struct minimal also
+    // makes the parser tolerant of future API additions.
     #[serde(default)]
     short_url: String,
 }
@@ -100,43 +102,55 @@ impl ShrinkClient {
         let endpoint = format!("{}/api/links", self.api_url);
         let body = CreateLinkRequest { url };
 
-        let send = self
-            .http
-            .post(&endpoint)
-            .header("X-API-Key", &self.api_key)
-            .json(&body)
-            .send();
+        // Wrap the WHOLE request — send + body read — in one outer
+        // timeout. The earlier shape (only `send` was wrapped) let
+        // a slow body stream blow past `timeout` arbitrarily,
+        // because reqwest's per-request `.timeout()` builder option
+        // would have applied to the response headers only as well,
+        // and `resp.json()/.text()` are independent awaits.
+        let request_future = async {
+            let resp = self
+                .http
+                .post(&endpoint)
+                .header("X-API-Key", &self.api_key)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| ShrinkError::Network(e.to_string()))?;
 
-        let resp = match tokio::time::timeout(timeout, send).await {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => return Err(ShrinkError::Network(e.to_string())),
-            Err(_) => return Err(ShrinkError::Timeout),
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(ShrinkError::Api {
+                    status: status.as_u16(),
+                    body,
+                });
+            }
+
+            let parsed: CreateLinkResponse = resp
+                .json()
+                .await
+                .map_err(|e| ShrinkError::InvalidResponse(e.to_string()))?;
+
+            // `short_url` is the only field the caller needs;
+            // `slug` is informational and some compliant servers
+            // omit it. Don't reject on empty slug.
+            if parsed.short_url.is_empty() {
+                return Err(ShrinkError::InvalidResponse(
+                    "missing short_url in response".into(),
+                ));
+            }
+
+            Ok(UrlShortening {
+                original: url.to_string(),
+                shortened: parsed.short_url,
+            })
         };
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ShrinkError::Api {
-                status: status.as_u16(),
-                body,
-            });
+        match tokio::time::timeout(timeout, request_future).await {
+            Ok(result) => result,
+            Err(_) => Err(ShrinkError::Timeout),
         }
-
-        let parsed: CreateLinkResponse = match resp.json().await {
-            Ok(p) => p,
-            Err(e) => return Err(ShrinkError::InvalidResponse(e.to_string())),
-        };
-
-        if parsed.short_url.is_empty() || parsed.slug.is_empty() {
-            return Err(ShrinkError::InvalidResponse(
-                "missing slug or short_url in response".into(),
-            ));
-        }
-
-        Ok(UrlShortening {
-            original: url.to_string(),
-            shortened: parsed.short_url,
-        })
     }
 
     /// 409 from the API means the slug we asked for is already taken.

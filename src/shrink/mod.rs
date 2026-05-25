@@ -41,12 +41,20 @@ static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// `http(s)://` scheme prefix) is at least `min_length`. The result
 /// preserves first-appearance order so callers can rebuild the
 /// substituted text deterministically.
+///
+/// Trailing sentence punctuation (`.,;:!?`) is stripped from each
+/// candidate before the length check and dedup — without this the
+/// shortener would store URLs like `…/page-name.` (including the
+/// period), producing short-links that 404 or redirect to the wrong
+/// page. The regex stops at `)` and `]` already; this covers the
+/// remaining cases that appear at the end of plain prose.
 #[must_use]
 pub fn find_long_urls(text: &str, min_length: usize) -> Vec<String> {
+    const TRAILING_TRIM: &[char] = &['.', ',', ';', ':', '!', '?'];
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for m in URL_RE.find_iter(text) {
-        let url = m.as_str();
+        let url = m.as_str().trim_end_matches(TRAILING_TRIM);
         if url.len() < min_length {
             continue;
         }
@@ -98,18 +106,26 @@ impl ShrinkCache {
     }
 
     /// Look up `url`, promoting the entry to most-recently-used on hit.
+    ///
+    /// `shift_remove` (not `swap_remove`) is critical here: IndexMap's
+    /// `swap_remove` moves the LAST entry into the vacated slot, which
+    /// scrambles every entry's relative age and breaks LRU eviction
+    /// at cap ≥ 3. `shift_remove` preserves the order of all other
+    /// entries at O(n) cost — acceptable for a 500-entry cache hit
+    /// path.
     pub fn get(&mut self, url: &str) -> Option<UrlShortening> {
-        let v = self.map.swap_remove(url)?;
+        let v = self.map.shift_remove(url)?;
         self.map.insert(url.to_string(), v.clone());
         Some(v)
     }
 
     /// Insert a shortening, evicting the oldest entry when at capacity.
     /// Updating an existing key counts as a refresh (re-inserted at the
-    /// MRU end) and does not evict anything.
+    /// MRU end) and does not evict anything. See `get` for why
+    /// `shift_remove` is used on the update path.
     pub fn insert(&mut self, url: String, shortening: UrlShortening) {
         if self.map.contains_key(&url) {
-            self.map.swap_remove(&url);
+            self.map.shift_remove(&url);
         } else if self.map.len() >= self.cap {
             self.map.shift_remove_index(0);
         }
@@ -178,6 +194,23 @@ mod tests {
     }
 
     #[test]
+    fn find_long_urls_trims_trailing_punctuation() {
+        // Regression: the bare URL_RE regex doesn't strip sentence-end
+        // punctuation, and the shortener would store the trailing dot
+        // as part of the URL — producing a short-link that 404s.
+        let text =
+            "see https://example.com/very/long/path-name-that-exceeds-min, then also https://example.com/another-long-path-here-yes.";
+        let urls = find_long_urls(text, 40);
+        assert_eq!(urls.len(), 2);
+        for u in &urls {
+            assert!(
+                !u.ends_with('.') && !u.ends_with(','),
+                "URL still ends with punctuation: {u}"
+            );
+        }
+    }
+
+    #[test]
     fn find_long_urls_trims_trailing_brackets() {
         // The regex deliberately stops at `)` and `]` so a URL inside
         // parentheses doesn't pick up the closing bracket.
@@ -240,6 +273,43 @@ mod tests {
         assert!(c.get("a").is_some());
         assert!(c.get("b").is_none());
         assert!(c.get("c").is_some());
+    }
+
+    #[test]
+    fn cache_get_promotes_preserves_other_entries_order_at_cap3() {
+        // Regression: earlier `swap_remove` impl scrambled the order
+        // of entries OTHER than the touched key, so the next eviction
+        // dropped the wrong entry. Insert a, b, c (a oldest), touch
+        // a, then insert d — b must be the survivor along with c, d.
+        // Pre-fix would evict c (because swap_remove moved c to
+        // index 0 during the `get("a")` promotion).
+        let mut c = ShrinkCache::new(3);
+        c.insert("a".into(), sh("a", "https://shr.al/1"));
+        c.insert("b".into(), sh("b", "https://shr.al/2"));
+        c.insert("c".into(), sh("c", "https://shr.al/3"));
+        let _ = c.get("a");
+        c.insert("d".into(), sh("d", "https://shr.al/4"));
+        // a was just touched (MRU); b is now oldest → b evicted.
+        assert!(c.get("a").is_some(), "a was just touched, must survive");
+        assert!(c.get("b").is_none(), "b is oldest after a's promotion");
+        assert!(c.get("c").is_some(), "c must survive — swap_remove would have evicted it");
+        assert!(c.get("d").is_some(), "d just inserted");
+    }
+
+    #[test]
+    fn cache_update_preserves_other_entries_at_cap3() {
+        // Same shape as above but via `insert` (update path) instead of `get`.
+        let mut c = ShrinkCache::new(3);
+        c.insert("a".into(), sh("a", "https://shr.al/1"));
+        c.insert("b".into(), sh("b", "https://shr.al/2"));
+        c.insert("c".into(), sh("c", "https://shr.al/3"));
+        // Re-insert "a" (update). Pre-fix this swapped c into slot 0.
+        c.insert("a".into(), sh("a", "https://shr.al/1-updated"));
+        c.insert("d".into(), sh("d", "https://shr.al/4"));
+        assert!(c.get("a").is_some(), "a was just updated, must survive");
+        assert!(c.get("b").is_none(), "b is oldest");
+        assert!(c.get("c").is_some(), "c must survive");
+        assert!(c.get("d").is_some(), "d just inserted");
     }
 
     #[test]

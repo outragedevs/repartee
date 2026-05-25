@@ -931,19 +931,29 @@ impl App {
             .is_empty()
         {
             let pending = crate::app::shrink::PendingOutgoing {
-                conn_id,
-                buffer_id: active_id,
-                buffer_name,
-                buffer_type: buf_type,
+                conn_id: conn_id.clone(),
+                buffer_id: active_id.clone(),
+                buffer_name: buffer_name.clone(),
+                buffer_type: buf_type.clone(),
                 original_text: text.to_string(),
             };
             // `try_send` rather than blocking — the queue is sized
-            // for bursts; backpressure (queue full) is exceptional
-            // and we'd rather log + drop than freeze input.
-            if let Err(e) = self.shrink_outgoing_tx.try_send(pending) {
-                tracing::warn!(error = %e, "shrink: outgoing dispatch queue full");
+            // for bursts. On full/closed we fall through to the
+            // synchronous send path below with the original text
+            // (degraded but visible) rather than silently dropping
+            // the user's message.
+            match self.shrink_outgoing_tx.try_send(pending) {
+                Ok(()) => return,
+                Err(_e) => {
+                    tracing::warn!(
+                        "shrink: outgoing dispatch failed, sending unshrunk"
+                    );
+                    // Intentionally fall through — the synchronous
+                    // e2e_encrypt_or_passthrough / send_privmsg /
+                    // local echo block below will deliver the
+                    // ORIGINAL text.
+                }
             }
-            return;
         }
 
         // E2E: if enabled for this channel, encrypt the full text into a
@@ -961,7 +971,7 @@ impl App {
         // we surface a themed refusal rather than leaking cleartext
         // under a weak key.
         let Some((wire_lines, plain_echo)) =
-            self.e2e_encrypt_or_passthrough(&buffer_name, &buf_type, text)
+            self.e2e_encrypt_or_passthrough(&active_id, &buffer_name, &buf_type, text)
         else {
             crate::commands::helpers::add_local_event(
                 self,
@@ -1066,6 +1076,7 @@ impl App {
     /// derived from the buffer's cached handle.
     pub(crate) fn e2e_encrypt_or_passthrough(
         &mut self,
+        buffer_id: &str,
         buffer_name: &str,
         buffer_type: &BufferType,
         text: &str,
@@ -1088,11 +1099,19 @@ impl App {
         // Derive the keyring context from the conversation. Channels pass
         // through unchanged; PMs require a server-stamped peer handle we
         // cached on the Query buffer at the first incoming PRIVMSG.
+        //
+        // CRITICAL: look the buffer up by `buffer_id` (the caller's
+        // captured target), NOT `state.active_buffer()`. The deferred
+        // shrink path runs this helper from a main-loop arm long after
+        // the user typed the message; the active buffer may have
+        // moved on. Resolving peer_handle from active_buffer would
+        // encrypt under the WRONG peer's session key (or fall back to
+        // plain) and produce a confidentiality regression.
         let context: String = match buffer_type {
             BufferType::Channel => buffer_name.to_string(),
             BufferType::Query => {
-                let active_buf = self.state.active_buffer();
-                let Some(peer_handle) = active_buf.and_then(|b| b.peer_handle.as_deref()) else {
+                let target_buf = self.state.buffers.get(buffer_id);
+                let Some(peer_handle) = target_buf.and_then(|b| b.peer_handle.as_deref()) else {
                     // No peer handle yet. Check whether E2E was
                     // (mis)configured under the bare-nick key from an
                     // earlier version — if a legacy enabled row exists,
@@ -1140,7 +1159,16 @@ impl App {
         // will re-handshake on next ciphertext if they come back.
         let rekey_sends = mgr.take_pending_rekey_sends();
         if !rekey_sends.is_empty() {
-            let conn_id_opt = self.state.active_buffer().map(|b| b.connection_id.clone());
+            // Same fix as above — resolve the connection from the
+            // caller-passed buffer_id, NOT the active buffer, so REKEY
+            // NOTICEs from a deferred-shrink encrypt land on the
+            // correct connection (the user may have switched buffers
+            // during the shrink wait).
+            let conn_id_opt = self
+                .state
+                .buffers
+                .get(buffer_id)
+                .map(|b| b.connection_id.clone());
             if let Some(conn_id) = conn_id_opt {
                 let buf_id = crate::state::buffer::make_buffer_id(&conn_id, &context);
                 for rk in rekey_sends {

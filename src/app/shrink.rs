@@ -91,10 +91,15 @@ pub struct IncomingDeliver {
     /// timeout / error).
     pub message: Message,
     pub activity_level: ActivityLevel,
-    /// `true` when the original `handle_privmsg` would have pushed
-    /// the message into the `_mentions` buffer. We carry the flag so
-    /// the deferred deliver can replicate that side-effect with the
-    /// shortened text intact.
+    /// Reserved for the v2 fix of the mentions-buffer divergence
+    /// (`docs/commands/shrink.md` "Known limitations"): when set, the
+    /// deferred deliver would re-format and push the substituted text
+    /// into `_mentions`. Always `false` in v1 — the inline push in
+    /// `handle_privmsg` runs synchronously with the original URL.
+    #[expect(
+        dead_code,
+        reason = "v2 hook for shrink-aware mentions buffer push"
+    )]
     pub push_to_mentions: bool,
 }
 
@@ -119,6 +124,11 @@ pub struct PendingIncoming {
     pub buffer_id: String,
     pub message: Message,
     pub activity_level: ActivityLevel,
+    /// See `IncomingDeliver.push_to_mentions` — same v2 hook.
+    #[expect(
+        dead_code,
+        reason = "v2 hook for shrink-aware mentions buffer push"
+    )]
     pub push_to_mentions: bool,
 }
 
@@ -282,13 +292,23 @@ async fn shrink_and_substitute(
 }
 
 /// Resolve every URL: cache hit returns the stored shortening; miss
-/// fires a parallel HTTP call. Returns shortenings in input order.
+/// fires an HTTP call. Misses are processed with a small concurrency
+/// cap so a single chat message containing N URLs cannot burst N
+/// parallel POSTs at the API — a markdown link list (20 URLs) used
+/// to trip rate limits and burn quota for everyone. Per-message cap
+/// of 4 in-flight matches the user-facing latency budget (most
+/// shortenings complete inside the per-call timeout) while keeping
+/// the API happy.
 async fn resolve_shortenings(
     client: &ShrinkClient,
     cache: &Mutex<ShrinkCache>,
     urls: Vec<String>,
     timeout: Duration,
 ) -> Vec<UrlShortening> {
+    /// Max concurrent shorten calls per message. Tuned for shr.al's
+    /// observed throughput; safe upper bound for typical chat.
+    const PER_MESSAGE_CONCURRENCY: usize = 4;
+
     let mut hits: Vec<(usize, UrlShortening)> = Vec::new();
     let mut misses: Vec<(usize, String)> = Vec::new();
     {
@@ -302,16 +322,28 @@ async fn resolve_shortenings(
         }
     }
 
-    let miss_futures = misses.iter().map(|(_, url)| client.shorten(url, timeout));
-    let miss_results = futures::future::join_all(miss_futures).await;
+    // Process misses in chunks of PER_MESSAGE_CONCURRENCY. Each
+    // chunk is run with `join_all` (Send-friendly future shape) and
+    // chunks themselves are sequential, giving us a hard cap on
+    // in-flight requests without the lifetime headaches that
+    // `buffer_unordered` brings when borrowing `&Mutex` across await
+    // points on `tokio::spawn`.
+    let mut miss_results: Vec<(usize, Result<UrlShortening, crate::shrink::ShrinkError>)> =
+        Vec::with_capacity(misses.len());
+    for chunk in misses.chunks(PER_MESSAGE_CONCURRENCY) {
+        let chunk_futures = chunk
+            .iter()
+            .map(|(idx, url)| async move { (*idx, client.shorten(url, timeout).await) });
+        miss_results.extend(futures::future::join_all(chunk_futures).await);
+    }
 
     let mut resolved: Vec<(usize, UrlShortening)> = hits;
     {
         let mut c = cache.lock();
-        for ((idx, _), res) in misses.iter().zip(miss_results) {
+        for (idx, res) in miss_results {
             if let Ok(sh) = res {
                 c.insert(sh.original.clone(), sh.clone());
-                resolved.push((*idx, sh));
+                resolved.push((idx, sh));
             }
         }
     }
@@ -323,9 +355,18 @@ async fn resolve_shortenings(
 /// messages (`add_host_hint = true`) append `[host]` after each
 /// shortened URL so the reader still sees the destination. Outgoing
 /// messages skip the hint per spec (the sender already knew it).
+///
+/// Substitutions are applied **longest-original-first** to defeat the
+/// prefix-overlap trap: a plain `str::replace` would otherwise rewrite
+/// the shorter URL inside the longer one and corrupt both. Example:
+/// `https://x.com/abc` and `https://x.com/abc/def` in the same
+/// message — without sorting, replacing `…/abc` first also rewrites
+/// the inside of `…/abc/def`, leaving the longer URL mangled.
 fn apply_substitutions(text: &str, shortenings: &[UrlShortening], add_host_hint: bool) -> String {
+    let mut sorted: Vec<&UrlShortening> = shortenings.iter().collect();
+    sorted.sort_by(|a, b| b.original.len().cmp(&a.original.len()));
     let mut out = text.to_string();
-    for sh in shortenings {
+    for sh in sorted {
         let replacement = if add_host_hint {
             let host = host_of(&sh.original).unwrap_or_default();
             if host.is_empty() {
@@ -386,10 +427,23 @@ impl App {
             return;
         }
         let Some((wire_lines, plain_echo)) = self.e2e_encrypt_or_passthrough(
+            &out.buffer_id,
             &out.buffer_name,
             &out.buffer_type,
             &out.substituted_text,
         ) else {
+            // Mirror handle_plain_message's themed error event so
+            // the user knows the PM didn't go out (no peer handle
+            // yet). Without this the message vanished silently.
+            crate::commands::helpers::add_local_event(
+                self,
+                &format!(
+                    "{err}[E2E] cannot encrypt PM without peer handle \
+                     — wait for a message from them first{rst}",
+                    err = crate::commands::types::C_ERR,
+                    rst = crate::commands::types::C_RST,
+                ),
+            );
             return;
         };
         let echo_message_enabled = self
@@ -402,10 +456,15 @@ impl App {
             .is_some_and(|w| w.starts_with("+RPE2E01"));
         // Re-borrow the sender for each wire — `send_privmsg` takes
         // `&self`, so this avoids any clone/ownership friction on
-        // `IrcHandle`.
+        // `IrcHandle`. Track send_ok separately so we can drain
+        // pending REKEY NOTICEs even on partial failure — leaving
+        // them queued would let them flush across a reconnect to a
+        // stale connection or wrong peers.
+        let mut send_ok = true;
         for wire in wire_lines {
             let Some(handle) = self.irc_handles.get(&out.conn_id) else {
-                return;
+                send_ok = false;
+                break;
             };
             if handle.sender.send_privmsg(&out.buffer_name, &wire).is_err() {
                 tracing::warn!(
@@ -413,11 +472,21 @@ impl App {
                     target = %out.buffer_name,
                     "shrink: deferred outgoing send failed"
                 );
-                return;
+                crate::commands::helpers::add_local_event(self, "Failed to send message");
+                send_ok = false;
+                break;
             }
         }
+        // ALWAYS drain pending_e2e_sends — REKEY NOTICEs queued by
+        // encrypt_outgoing must ship in the same dispatch turn (or
+        // peers' next decrypt will fail). Mirrors the inline path's
+        // unconditional drain.
         if !self.state.pending_e2e_sends.is_empty() {
             self.drain_pending_e2e_sends();
+        }
+        if !send_ok {
+            // Skip local echo — the user already saw the error event.
+            return;
         }
         if !echo_message_enabled || is_e2e_encrypted {
             let nick = self
@@ -485,6 +554,26 @@ mod tests {
             apply_substitutions(text, &shorts, true),
             "see https://shr.al/1 [sklepinsekt.pl] for prusaki"
         );
+    }
+
+    #[test]
+    fn apply_substitutions_longest_first_defeats_prefix_overlap() {
+        // Regression: naive str::replace in order would rewrite
+        // /abc inside /abc/def, corrupting both URLs. Sorting by
+        // original.len() descending replaces /abc/def first.
+        let text = "see https://x.com/abc and https://x.com/abc/def";
+        let shorts = vec![
+            UrlShortening {
+                original: "https://x.com/abc".into(),
+                shortened: "https://shr.al/1".into(),
+            },
+            UrlShortening {
+                original: "https://x.com/abc/def".into(),
+                shortened: "https://shr.al/2".into(),
+            },
+        ];
+        let out = apply_substitutions(text, &shorts, false);
+        assert_eq!(out, "see https://shr.al/1 and https://shr.al/2");
     }
 
     #[test]

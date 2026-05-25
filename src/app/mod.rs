@@ -466,9 +466,6 @@ pub struct App {
     /// drains, awaits shrink, and posts an `OutgoingDeliver` back
     /// via `shrink_deliver_rx`.
     pub(crate) shrink_outgoing_tx: mpsc::Sender<shrink::PendingOutgoing>,
-    /// Same shape as `shrink_outgoing_tx` for incoming PRIVMSG /
-    /// ACTION / NOTICE that pass through `add_message_with_activity`.
-    pub(crate) shrink_incoming_tx: mpsc::Sender<shrink::PendingIncoming>,
     /// `/shrink` command + the workers all post their final actions
     /// here; the main loop drains and routes them to
     /// `apply_shrink_deliver`.
@@ -628,11 +625,13 @@ impl App {
         // Mirror shrink-incoming wiring into state so the synchronous
         // `add_message_with_activity` path can decide between
         // immediate add vs deferred shrink without reaching into App.
+        // `shrink_incoming_tx` lives only on `state` from here on —
+        // the App-side handle was dropped to avoid a never-read field.
         state.shrink_incoming_active = config.shrink.enabled
             && config.shrink.incoming_enabled
             && shrink_client.is_some();
         state.shrink_min_url_length = config.shrink.min_url_length;
-        state.shrink_incoming_tx = Some(shrink_incoming_tx.clone());
+        state.shrink_incoming_tx = Some(shrink_incoming_tx);
 
         let (mut dcc, dcc_rx) = crate::dcc::DccManager::new();
         dcc.timeout_secs = config.dcc.timeout;
@@ -761,7 +760,6 @@ impl App {
             shrink_client,
             shrink_cache,
             shrink_outgoing_tx,
-            shrink_incoming_tx,
             shrink_deliver_tx,
             shrink_deliver_rx,
             cli_bind_override: None,

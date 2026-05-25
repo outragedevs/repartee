@@ -48,6 +48,33 @@ calling the API.
 `SHRINK_API_KEY` is loaded from `.env` only; it is never written to
 `config.toml`.
 
+## Known limitations (v1)
+
+- **Mentions buffer (`_mentions`)** records the **original** URL even
+  when the chat buffer shows the shortened form. The mention-buffer
+  push runs synchronously inside the IRC handler before the deferred
+  shrink worker substitutes the text. Look at the chat buffer for the
+  shortened form; the mentions buffer is canonical for full URLs.
+- **Multi-chunk outgoing messages** (over ~510 bytes) fall through to
+  the non-shrink path and ship with original URLs. Per-chunk
+  substitution accounting is out of scope for v1; threshold of 50
+  chars keeps this rare in practice.
+- **`/set shrink.{api_url,outgoing_timeout_ms,incoming_timeout_ms,cache_max_entries}`**
+  changes config but the running workers captured these at startup —
+  `/set` emits a `restart required` notice for these keys.
+- **`/set shrink.enabled true`** has no effect if `SHRINK_API_KEY`
+  was missing at startup (no client was ever built). `/set` emits a
+  diagnostic and the operator must restart with the key set in `.env`.
+- **Multi-URL latency budget is per chunk, not per message.** A
+  message with N URLs that all miss the cache makes
+  `ceil(N / 4)` sequential round-trips to the API (4 is the
+  per-message concurrency cap chosen to keep shr.al rate limits
+  happy). A 12-URL paste with a 2 s per-call timeout can therefore
+  stall the outgoing pipeline for up to 6 s. The pipeline is
+  sequential per direction, so a message typed during that stall
+  falls through to the unshrunk path (visible in the buffer, but
+  with original URLs).
+
 ## See Also
 
 /set, /preview
