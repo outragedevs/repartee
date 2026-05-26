@@ -12,7 +12,8 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 html, body {
-    height: 100%;
+    height: 100vh; /* fallback for old browsers */
+    height: 100dvh; /* dynamic viewport — shrinks with mobile URL bar + keyboard */
     background: var(--bg);
     color: var(--fg);
     font-family: 'FiraCode Nerd Font Mono', 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', monospace;
@@ -30,8 +31,11 @@ html, body {
     height: 100vh; /* fallback */
     height: 100dvh; /* dynamic viewport height — accounts for mobile browser chrome */
     overflow: hidden;
-    position: fixed;
-    inset: 0;
+    /* No `position: fixed` here: on iOS Safari `fixed` re-anchors to the
+       LAYOUT viewport during URL-bar collapse animations, which creates
+       a 50–80 px dead zone vs. `100dvh` and shows up as bottom-of-chat
+       jitter. With html/body already height-100dvh + overflow:hidden,
+       a normal flow `.app` matches the visual viewport correctly. */
 }
 
 .desktop-only {
@@ -112,6 +116,18 @@ html, body {
     overflow-x: hidden;
     padding: 2px 0;
     overscroll-behavior: contain;
+    /* Disable the browser's scroll-anchor heuristic. With virtualized
+       lines (content-visibility), image previews that decode async,
+       and font-swap, the anchor moves under our feet and fights the
+       manual `scrollTop = scrollHeight` pin. The combination produces
+       the up-then-down hop. With `overflow-anchor: none` the manual
+       pin in chat_view.rs is the sole authority. */
+    overflow-anchor: none;
+    /* iOS-friendly: when the soft keyboard opens and the textarea
+       gains focus, the browser auto-scrolls to keep it visible. Add
+       a sensible padding so the snap lands above the bottom-bar
+       rather than mid-message. */
+    scroll-padding-bottom: 60px;
 }
 
 .chat-messages-outer {
@@ -120,6 +136,17 @@ html, body {
     flex-direction: column;
     overflow: hidden;
     position: relative;
+}
+
+/* Wrapper for the `<For>` children inside .chat-messages. Existence
+   is load-bearing: chat_view.rs attaches a ResizeObserver here so it
+   can re-pin scrollTop on EVERY content-height change (new line,
+   image preview decode, font swap, content-visibility re-measure).
+   Without this wrapper there is no single observable element whose
+   box size tracks total message-list height. */
+.chat-messages-inner {
+    display: flex;
+    flex-direction: column;
 }
 
 .scroll-bottom-btn {
@@ -158,9 +185,14 @@ html, body {
        lines. `contain-intrinsic-size: auto <h>` gives the browser a
        fallback height so the scrollbar is the right size before the
        line is ever rendered. This is what lets us keep a 1000-line
-       cap in DOM without scroll jank on weaker hardware. */
+       cap in DOM without scroll jank on weaker hardware. The
+       intrinsic-size estimate is intentionally generous so a freshly-
+       appended line's real height does not later EXCEED the
+       placeholder (which is what causes the bottom-of-list to jump
+       upward when the line re-measures). 40px ≈ two wrapped lines at
+       mobile body-text width. */
     content-visibility: auto;
-    contain-intrinsic-size: auto 22px;
+    contain-intrinsic-size: auto 40px;
 }
 
 .chat-line .ts {
@@ -282,6 +314,16 @@ html, body {
     background: var(--bg-alt);
     border-top: 1px solid var(--border);
     padding-bottom: env(safe-area-inset-bottom);
+    /* Pinning the bar inside its flex parent decouples its position
+       from the .chat-messages scrollHeight. Without this, when iOS
+       Safari toggles the bottom toolbar or the keyboard opens, the
+       safe-area-inset value collapses to 0 and the bar shifts up,
+       which would in turn shift the flex sibling .chat-messages and
+       desync the scrollTop. With `position: sticky; bottom: 0;` the
+       chat list grows/shrinks under a stable bar. */
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
 }
 
 .status-line {
