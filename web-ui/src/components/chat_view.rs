@@ -273,7 +273,16 @@ pub fn ChatView() -> impl IntoView {
                     <div class="chat-messages-inner" node_ref=inner_ref>
                         <For
                             each=move || messages().unwrap_or_default()
-                            key=|msg| msg.id
+                            // Date-separator rows use `id == 0` (see
+                            // state.rs:168 — "reserved for date separators
+                            // and is not unique"), so keying by `msg.id`
+                            // alone would collide across every separator
+                            // and let Leptos reuse one DOM node for all of
+                            // them. Use the timestamp as the discriminator
+                            // for separators; real messages still key by
+                            // their unique `msg.id` so backlog timestamp
+                            // re-stamps cannot force a re-mount.
+                            key=|msg| (msg.id, if msg.id == 0 { msg.timestamp } else { 0 })
                             children=move |msg| render_message(state, msg)
                         />
                     </div>
