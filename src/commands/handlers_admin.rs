@@ -10,7 +10,16 @@ use crate::storage;
 const SERVER_ADD_USAGE: &str = "Usage: /server add <id> <address>[:<port>] [port] [-tls] [-notls] [-tlsverify] [-notlsverify] [-auto] [-noauto] [-label=<name>] [-nick=<nick>] [-username=<user>] [-realname=<name>] [-password=<pass>] [-sasl=<user>:<pass>] [-sasl-user=<user>] [-sasl-pass=<pass>] [-sasl-mechanism=<mechanism>] [-channels=<ch1,ch2>] [-bind=<ip>] [-encoding=<codec>] [-autoreconnect=<bool>] [-reconnect-delay=<secs>] [-reconnect-max-retries=<n>] [-autosendcmd=<cmds>] [-client-cert=<path>]";
 
 pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
-    // Reload config
+    // Snapshot the pre-reload shrink api_key state so we can detect
+    // a transition from empty → populated and tell the user that
+    // the workers were not spawned at startup and a restart is
+    // required to activate them. (The ShrinkRuntime — client and
+    // worker tasks — is constructed once in App::new_with_mode and
+    // cannot be safely rebuilt from a command handler because the
+    // deliver receiver is owned by the main tokio::select! loop.)
+    let shrink_was_inactive = app.shrink_client.is_none();
+
+    // Reload config.toml
     match crate::config::load_config(&crate::constants::config_path()) {
         Ok(new_config) => {
             app.config = new_config;
@@ -29,6 +38,40 @@ pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
         Err(e) => {
             add_local_event(app, &format!("{C_ERR}Failed to reload config: {e}{C_RST}"));
             return;
+        }
+    }
+
+    // Re-read .env and re-apply every credential layer (server
+    // passwords / SASL, web session secret, SHRINK_API_KEY). Without
+    // this step, keys added or rotated in ~/.repartee/.env after
+    // startup stay invisible until the user quits and restarts.
+    // Existing connections keep their already-negotiated credentials;
+    // new /connect attempts (and any code path that re-reads
+    // app.config) pick up the new values.
+    match crate::config::load_env(&crate::constants::env_path()) {
+        Ok(env_vars) => {
+            crate::config::apply_credentials(&mut app.config.servers, &env_vars);
+            crate::config::apply_web_credentials(&mut app.config.web, &env_vars);
+            crate::config::apply_shrink_credentials(&mut app.config.shrink, &env_vars);
+            add_local_event(app, &format!("{C_OK}.env reloaded{C_RST}"));
+
+            // Surface the shrink restart-required edge case: the API
+            // key just appeared in .env but the runtime was built
+            // empty-keyed at startup, so the workers are not running
+            // and the in-process /shrink path stays a no-op until a
+            // full restart. Explicit message beats silent failure.
+            if shrink_was_inactive && !app.config.shrink.api_key.is_empty() {
+                add_local_event(
+                    app,
+                    &format!(
+                        "{C_OK}SHRINK_API_KEY picked up from .env — \
+                         restart repartee to activate the shrink workers{C_RST}"
+                    ),
+                );
+            }
+        }
+        Err(e) => {
+            add_local_event(app, &format!("{C_ERR}Failed to reload .env: {e}{C_RST}"));
         }
     }
 
