@@ -5,7 +5,11 @@ pub struct ParsedCommand {
 
 /// Greedy commands: the last arg consumes the rest of the line.
 /// - me, quit, close, quote: single arg (entire rest)
-/// - msg, query, notice, topic, kick, kb, disconnect, set, alias: two args (first word, rest)
+/// - msg, query, notice, topic, kb, disconnect, set, alias: two args (first word, rest)
+///
+/// `kick` is intentionally NOT greedy: it accepts multiple nicks plus an
+/// optional `:reason` (everything from the first `:`-prefixed token onward).
+/// The handler reconstructs the reason from the tokenised args.
 const GREEDY_COMMANDS: &[&str] = &[
     "msg",
     "query",
@@ -13,7 +17,6 @@ const GREEDY_COMMANDS: &[&str] = &[
     "me",
     "quit",
     "topic",
-    "kick",
     "kb",
     "close",
     "disconnect",

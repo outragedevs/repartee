@@ -353,9 +353,54 @@ pub(crate) fn cmd_topic(app: &mut App, args: &[String]) {
     }
 }
 
+/// Max nicks accepted on a single `/kick` invocation. Hard cap so a
+/// typo-pasted nick list doesn't fan out into a flood of KICK lines.
+const KICK_MAX_NICKS: usize = 6;
+
+/// Split point for /kick when more than 4 nicks are supplied.
+/// 1..=4 → single KICK line; 5 → `[2, 3]`; 6 → `[2, 4]`. Same
+/// first-line-light reasoning as [`nick_mode_chunk_sizes`].
+fn kick_chunk_sizes(n: usize) -> Vec<usize> {
+    match n {
+        0 => Vec::new(),
+        1..=4 => vec![n],
+        5 => vec![2, 3],
+        6 => vec![2, 4],
+        // Above 6 is rejected at the call site, but degrade gracefully
+        // by spilling everything past the first 2 into a single line.
+        _ => vec![2, n - 2],
+    }
+}
+
+/// Split `remaining` into `(nicks, reason)` using the `:reason` syntax.
+///
+/// Convention: scan for the first token starting with `:`. Everything
+/// before that token is treated as nicks; everything from the colon
+/// onward (with the leading `:` stripped from the first token, then
+/// joined by spaces) is the reason. If no `:` token is present, every
+/// argument is a nick and the reason is `None`. Empty reason after
+/// trimming also collapses to `None`.
+fn parse_kick_args(remaining: &[String]) -> (Vec<String>, Option<String>) {
+    for (i, t) in remaining.iter().enumerate() {
+        if let Some(rest_of_first) = t.strip_prefix(':') {
+            let nicks: Vec<String> = remaining[..i].to_vec();
+            let mut reason_parts = vec![rest_of_first.to_string()];
+            reason_parts.extend(remaining[i + 1..].iter().cloned());
+            let joined = reason_parts.join(" ");
+            let trimmed = joined.trim();
+            let reason = (!trimmed.is_empty()).then(|| trimmed.to_string());
+            return (nicks, reason);
+        }
+    }
+    (remaining.to_vec(), None)
+}
+
 pub(crate) fn cmd_kick(app: &mut App, args: &[String]) {
     if args.is_empty() {
-        add_local_event(app, "Usage: /kick [#channel] <nick> [reason]");
+        add_local_event(
+            app,
+            "Usage: /kick [#channel] <nick> [nick2 ... nick6] [:reason]",
+        );
         return;
     }
 
@@ -364,25 +409,52 @@ pub(crate) fn cmd_kick(app: &mut App, args: &[String]) {
         return;
     };
 
-    // If first arg is a channel, use it; otherwise use current buffer's channel.
-    let (channel, remaining) = if crate::irc::formatting::is_channel(&args[0]) && args.len() >= 2 {
-        (args[0].clone(), &args[1..])
-    } else {
-        let Some(buf) = app.state.active_buffer() else {
-            return;
+    // If first arg is a channel, peel it off; otherwise use the
+    // current buffer's channel.
+    let (channel, remaining): (String, &[String]) =
+        if crate::irc::formatting::is_channel(&args[0]) && args.len() >= 2 {
+            (args[0].clone(), &args[1..])
+        } else {
+            let Some(buf) = app.state.active_buffer() else {
+                return;
+            };
+            (buf.name.clone(), args)
         };
-        (buf.name.clone(), args)
-    };
 
-    let nick = remaining[0].clone();
-    let reason = if remaining.len() > 1 {
-        Some(remaining[1..].join(" "))
-    } else {
-        None
-    };
+    let (nicks, reason) = parse_kick_args(remaining);
 
-    if let Err(e) = sender.send(irc::proto::Command::KICK(channel, nick.clone(), reason)) {
-        add_local_event(app, &format!("Failed to kick {nick}: {e}"));
+    if nicks.is_empty() {
+        add_local_event(app, "Usage: /kick [#channel] <nick> [nick2 ...] [:reason]");
+        return;
+    }
+    if nicks.len() > KICK_MAX_NICKS {
+        add_local_event(
+            app,
+            &format!(
+                "/kick accepts at most {KICK_MAX_NICKS} nicks per invocation \
+                 (received {})",
+                nicks.len()
+            ),
+        );
+        return;
+    }
+
+    // Build the KICK lines. Multi-target KICK uses the comma-list form
+    // (`KICK #chan a,b,c :reason`). All lines are queued back-to-back
+    // into the IRC writer's mpsc with no awaits in between, so the
+    // server receives the whole burst as one transmission.
+    let mut cursor = 0usize;
+    for chunk_size in kick_chunk_sizes(nicks.len()) {
+        let chunk = &nicks[cursor..cursor + chunk_size];
+        cursor += chunk_size;
+        let mut params = vec![channel.clone(), chunk.join(",")];
+        if let Some(ref r) = reason {
+            params.push(r.clone());
+        }
+        if let Err(e) = sender.send(irc::proto::Command::Raw("KICK".to_string(), params)) {
+            add_local_event(app, &format!("Failed to kick {}: {e}", chunk.join(",")));
+            return;
+        }
     }
 }
 
@@ -473,6 +545,41 @@ pub(crate) fn cmd_mode(app: &mut App, args: &[String]) {
     let _ = sender.send(irc::proto::Command::Raw("MODE".to_string(), args.to_vec()));
 }
 
+/// Chunk size sequence for /op /deop /voice /devoice when the user
+/// supplies more nicks than fit in one MODE command.
+///
+/// The rule (matched to irssi/erssi convention): the standard IRC
+/// `MAXMODES=3` limit forces a split whenever there are more than
+/// three targets. The first line carries only 2 nicks, every
+/// subsequent line carries up to 3. Sending in this shape lets the
+/// server burst the full batch in a single tick instead of treating
+/// it as multiple sequential mode changes.
+///
+/// - 1..=3 → `[n]`
+/// - 4 → `[2, 2]`
+/// - 5 → `[2, 3]`
+/// - 6 → `[2, 3, 1]`
+/// - 7 → `[2, 3, 2]`
+/// - 8 → `[2, 3, 3]` … (first 2, then 3-by-3 with remainder)
+fn nick_mode_chunk_sizes(n: usize) -> Vec<usize> {
+    if n == 0 {
+        return Vec::new();
+    }
+    if n <= 3 {
+        return vec![n];
+    }
+    let mut sizes = vec![2usize];
+    let mut remaining = n - 2;
+    while remaining >= 3 {
+        sizes.push(3);
+        remaining -= 3;
+    }
+    if remaining > 0 {
+        sizes.push(remaining);
+    }
+    sizes
+}
+
 fn set_nick_mode(app: &mut App, mode_char: char, adding: bool, args: &[String]) {
     if args.is_empty() {
         let cmd = match (mode_char, adding) {
@@ -500,10 +607,19 @@ fn set_nick_mode(app: &mut App, mode_char: char, adding: bool, args: &[String]) 
     };
 
     let sign = if adding { "+" } else { "-" };
-    let modes: String = std::iter::repeat_n(mode_char, args.len()).collect();
-    let mut cmd_args = vec![channel, format!("{sign}{modes}")];
-    cmd_args.extend(args.iter().cloned());
-    let _ = sender.send(irc::proto::Command::Raw("MODE".to_string(), cmd_args));
+    let mut cursor = 0usize;
+    // All MODE lines are queued into the IRC writer's mpsc back-to-back
+    // with no awaits in between, so the server receives the whole burst
+    // as one transmission — the trick that lets it process e.g. five
+    // ops in the same tick without per-line throttling.
+    for chunk_size in nick_mode_chunk_sizes(args.len()) {
+        let chunk = &args[cursor..cursor + chunk_size];
+        cursor += chunk_size;
+        let modes: String = std::iter::repeat_n(mode_char, chunk.len()).collect();
+        let mut cmd_args = vec![channel.clone(), format!("{sign}{modes}")];
+        cmd_args.extend(chunk.iter().cloned());
+        let _ = sender.send(irc::proto::Command::Raw("MODE".to_string(), cmd_args));
+    }
 }
 
 pub(crate) fn cmd_op(app: &mut App, args: &[String]) {
@@ -1477,7 +1593,62 @@ pub(crate) fn cmd_links(app: &mut App, args: &[String]) {
 
 #[cfg(test)]
 mod tests {
-    use super::list_mode_command_args;
+    use super::{kick_chunk_sizes, list_mode_command_args, nick_mode_chunk_sizes, parse_kick_args};
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| (*x).to_string()).collect()
+    }
+
+    #[test]
+    fn nick_mode_chunk_sizes_follows_two_then_three_rule() {
+        assert_eq!(nick_mode_chunk_sizes(0), Vec::<usize>::new());
+        assert_eq!(nick_mode_chunk_sizes(1), vec![1]);
+        assert_eq!(nick_mode_chunk_sizes(2), vec![2]);
+        assert_eq!(nick_mode_chunk_sizes(3), vec![3]);
+        assert_eq!(nick_mode_chunk_sizes(4), vec![2, 2]);
+        assert_eq!(nick_mode_chunk_sizes(5), vec![2, 3]);
+        assert_eq!(nick_mode_chunk_sizes(6), vec![2, 3, 1]);
+        assert_eq!(nick_mode_chunk_sizes(7), vec![2, 3, 2]);
+        assert_eq!(nick_mode_chunk_sizes(8), vec![2, 3, 3]);
+        assert_eq!(nick_mode_chunk_sizes(9), vec![2, 3, 3, 1]);
+    }
+
+    #[test]
+    fn kick_chunk_sizes_caps_at_six() {
+        assert_eq!(kick_chunk_sizes(0), Vec::<usize>::new());
+        assert_eq!(kick_chunk_sizes(1), vec![1]);
+        assert_eq!(kick_chunk_sizes(4), vec![4]);
+        assert_eq!(kick_chunk_sizes(5), vec![2, 3]);
+        assert_eq!(kick_chunk_sizes(6), vec![2, 4]);
+    }
+
+    #[test]
+    fn parse_kick_args_nicks_only() {
+        let (nicks, reason) = parse_kick_args(&s(&["alice", "bob", "carol"]));
+        assert_eq!(nicks, s(&["alice", "bob", "carol"]));
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn parse_kick_args_with_multiword_reason() {
+        let (nicks, reason) = parse_kick_args(&s(&["alice", "bob", ":be", "nice"]));
+        assert_eq!(nicks, s(&["alice", "bob"]));
+        assert_eq!(reason.as_deref(), Some("be nice"));
+    }
+
+    #[test]
+    fn parse_kick_args_colon_first_token_means_no_nicks() {
+        let (nicks, reason) = parse_kick_args(&s(&[":no", "nicks"]));
+        assert!(nicks.is_empty());
+        assert_eq!(reason.as_deref(), Some("no nicks"));
+    }
+
+    #[test]
+    fn parse_kick_args_empty_reason_collapses_to_none() {
+        let (nicks, reason) = parse_kick_args(&s(&["alice", ":", "   "]));
+        assert_eq!(nicks, s(&["alice"]));
+        assert_eq!(reason, None);
+    }
 
     #[test]
     fn list_mode_command_args_batches_reop_except_and_invex_adds() {

@@ -198,7 +198,14 @@ pub(crate) fn cmd_close(app: &mut App, args: &[String]) {
             app.state.remove_buffer(&buf_id);
         }
         crate::state::buffer::BufferType::Channel => {
-            // Send PART for channels
+            // Irssi-style fast close: drop the buffer locally first so
+            // the UI reacts instantly, then fire-and-forget PART to the
+            // server. We do NOT wait for the server-side echo before
+            // removing the buffer — on a laggy link the previous
+            // behaviour kept a dead window visible for seconds. The
+            // echo handler `handle_part` in irc/events.rs also calls
+            // `remove_buffer`; that call is now a no-op because the
+            // buffer is already gone (remove_buffer is idempotent).
             let reason = if args.is_empty() {
                 "Window closed".to_string()
             } else {
@@ -208,10 +215,8 @@ pub(crate) fn cmd_close(app: &mut App, args: &[String]) {
                 let _ = handle
                     .sender
                     .send(irc::proto::Command::PART(buf_name, Some(reason)));
-            } else {
-                // Already disconnected — just remove
-                app.state.remove_buffer(&buf_id);
             }
+            app.state.remove_buffer(&buf_id);
         }
         crate::state::buffer::BufferType::Query | crate::state::buffer::BufferType::DccChat => {
             // DCC chat buffers close like query buffers — just remove locally.

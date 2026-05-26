@@ -81,6 +81,15 @@ impl AppState {
     }
 
     pub fn remove_buffer(&mut self, id: &str) {
+        // Idempotent: callers may invoke this twice for the same buffer
+        // — e.g. `/wc` removes the channel buffer immediately for an
+        // instant UI close, then the server's PART echo runs
+        // `handle_part` which also calls remove_buffer. Without this
+        // guard the web frontend would receive a second `BufferClosed`
+        // for an already-gone buffer.
+        if !self.buffers.contains_key(id) {
+            return;
+        }
         let was_active = self.active_buffer_id.as_deref() == Some(id);
         self.pending_web_events
             .push(crate::web::protocol::WebEvent::BufferClosed {
