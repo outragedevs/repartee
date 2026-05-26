@@ -4,11 +4,25 @@ use wasm_bindgen::JsCast;
 use crate::format;
 use crate::state::AppState;
 
-const SCROLL_THRESHOLD: f64 = 40.0;
+/// Distance in pixels from the absolute bottom that still counts as
+/// "user is at bottom" for auto-scroll purposes. Generous on mobile,
+/// where a single wrapped chat line can be 30–50 px and an unintended
+/// finger-drag of a couple of lines should not break stickiness.
+const SCROLL_THRESHOLD: f64 = 100.0;
 
 fn is_near_bottom(el: &web_sys::Element) -> bool {
     el.scroll_height() as f64 - el.scroll_top() as f64 - el.client_height() as f64
         <= SCROLL_THRESHOLD
+}
+
+/// Hard-pin the scroller to the bottom. Used by every auto-scroll
+/// site (initial render, buffer switch, ResizeObserver, viewport
+/// resize, scroll-button click). No requestAnimationFrame here — the
+/// callers either run inside one already (ResizeObserver fires at the
+/// right moment in the rendering pipeline) or want the pin to happen
+/// synchronously before the browser paints (buffer switch).
+fn pin_to_bottom(el: &web_sys::Element) {
+    el.set_scroll_top(el.scroll_height());
 }
 
 #[component]
@@ -29,66 +43,158 @@ pub fn ChatView() -> impl IntoView {
     };
 
     let chat_ref = NodeRef::<leptos::html::Div>::new();
+    let inner_ref = NodeRef::<leptos::html::Div>::new();
 
     // Track previous buffer ID to detect buffer switches.
     let prev_buffer_id = StoredValue::new(None::<String>);
 
-    // Auto-scroll: scroll to bottom on new messages (only if at bottom)
-    // or on buffer switch (always).
+    // Buffer-switch effect ONLY. Per-message re-pinning is handled by
+    // the ResizeObserver below — driving it from a Leptos Effect on
+    // `messages()` raced with image-decode / font-swap reflow and
+    // produced the visible up-then-down hop on every append. The
+    // ResizeObserver fires AFTER layout, so the pin is always against
+    // the final scrollHeight.
     Effect::new(move || {
         let active_id = state.active_buffer.get();
-        let _ = messages();
-
         let is_switch = prev_buffer_id.get_value().as_deref() != active_id.as_deref();
         if let Some(ref id) = active_id {
             prev_buffer_id.set_value(Some(id.clone()));
         }
-
         if is_switch {
             state.is_at_bottom.set(true);
-        }
-
-        if is_switch || state.is_at_bottom.get() {
-            scroll_to_bottom(&chat_ref);
+            if let Some(el) = chat_ref.get() {
+                let el_dom: web_sys::Element = el.into();
+                if let Some(window) = web_sys::window() {
+                    let scroll_fn =
+                        wasm_bindgen::prelude::Closure::once(move || pin_to_bottom(&el_dom));
+                    let _ = window
+                        .request_animation_frame(scroll_fn.as_ref().unchecked_ref());
+                    scroll_fn.forget();
+                }
+            }
         }
     });
 
-    // Scroll to bottom on resize only if user was at bottom. The
-    // listener is removed on unmount via on_cleanup, so component
-    // remounts (e.g. login→logout→login) don't leak forgotten Closures.
-    // wasm_bindgen Closure and js_sys::Function are !Send, so the
-    // cleanup handle has to use LocalStorage rather than the default
-    // SyncStorage of StoredValue::new.
-    let resize_registered = StoredValue::new(false);
-    type ResizeHandle = Option<(wasm_bindgen::prelude::Closure<dyn Fn()>, js_sys::Function)>;
-    let resize_cleanup: StoredValue<ResizeHandle, leptos::prelude::LocalStorage> =
+    // ResizeObserver on the message-list inner wrapper. Fires whenever
+    // the wrapper's box height changes — new line appended, image
+    // preview decoded, font swapped, content-visibility re-measures,
+    // any layout reflow. Re-pinning here (instead of from a Leptos
+    // Effect that runs BEFORE layout) is what eliminates the up-then-
+    // down hop on mobile and desktop alike.
+    //
+    // wasm_bindgen Closure + ResizeObserver are !Send, so cleanup uses
+    // LocalStorage rather than the default SyncStorage.
+    type ResizeObs = Option<(
+        web_sys::ResizeObserver,
+        wasm_bindgen::prelude::Closure<dyn Fn(js_sys::Array)>,
+    )>;
+    let resize_obs: StoredValue<ResizeObs, leptos::prelude::LocalStorage> =
         StoredValue::new_local(None);
+    let resize_obs_registered = StoredValue::new(false);
     Effect::new(move || {
-        let Some(el) = chat_ref.get() else { return };
-        if resize_registered.get_value() {
+        let Some(chat_el) = chat_ref.get() else { return };
+        let Some(inner_el) = inner_ref.get() else { return };
+        if resize_obs_registered.get_value() {
             return;
         }
-        resize_registered.set_value(true);
-        let el_clone: web_sys::Element = el.clone().into();
+        resize_obs_registered.set_value(true);
+        let chat_dom: web_sys::Element = chat_el.into();
         let is_at_bottom = state.is_at_bottom;
-        let cb = wasm_bindgen::prelude::Closure::<dyn Fn()>::new(move || {
-            if is_at_bottom.get() {
-                el_clone.set_scroll_top(el_clone.scroll_height());
-            }
-        });
-        if let Some(window) = web_sys::window() {
-            let cb_fn: js_sys::Function = cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
-            let _ = window.add_event_listener_with_callback("resize", &cb_fn);
-            resize_cleanup.set_value(Some((cb, cb_fn)));
+        let cb = wasm_bindgen::prelude::Closure::<dyn Fn(js_sys::Array)>::new(
+            move |_entries: js_sys::Array| {
+                if is_at_bottom.get_untracked() {
+                    pin_to_bottom(&chat_dom);
+                }
+            },
+        );
+        let observer = web_sys::ResizeObserver::new(cb.as_ref().unchecked_ref());
+        if let Ok(observer) = observer {
+            let inner_dom: web_sys::Element = inner_el.into();
+            observer.observe(&inner_dom);
+            resize_obs.set_value(Some((observer, cb)));
         }
     });
-    on_cleanup(move || {
-        let handle = resize_cleanup.try_update_value(Option::take).flatten();
-        let Some((cb, cb_fn)) = handle else { return };
-        if let Some(window) = web_sys::window() {
-            let _ = window.remove_event_listener_with_callback("resize", &cb_fn);
+
+    // Window + visualViewport resize listeners. window.resize handles
+    // desktop browser resize and Chrome Android keyboard (with
+    // `interactive-widget=resizes-content` in the viewport meta).
+    // visualViewport.resize/scroll handles iOS Safari (which does NOT
+    // fire window.resize on keyboard open) and any browser where the
+    // virtual keyboard overlays the layout viewport. Both delegate to
+    // the same pin-if-at-bottom callback.
+    type ViewportHandles = Option<(
+        wasm_bindgen::prelude::Closure<dyn Fn()>,
+        js_sys::Function,
+        Option<wasm_bindgen::prelude::Closure<dyn Fn()>>,
+        Option<js_sys::Function>,
+    )>;
+    let viewport_cleanup: StoredValue<ViewportHandles, leptos::prelude::LocalStorage> =
+        StoredValue::new_local(None);
+    let viewport_registered = StoredValue::new(false);
+    Effect::new(move || {
+        let Some(el) = chat_ref.get() else { return };
+        if viewport_registered.get_value() {
+            return;
         }
-        drop(cb);
+        viewport_registered.set_value(true);
+        let el_dom: web_sys::Element = el.into();
+        let is_at_bottom = state.is_at_bottom;
+        let el_for_window = el_dom.clone();
+        let cb_window = wasm_bindgen::prelude::Closure::<dyn Fn()>::new(move || {
+            if is_at_bottom.get_untracked() {
+                pin_to_bottom(&el_for_window);
+            }
+        });
+        let cb_window_fn: js_sys::Function = cb_window
+            .as_ref()
+            .unchecked_ref::<js_sys::Function>()
+            .clone();
+        let (cb_vv, cb_vv_fn) = if let Some(window) = web_sys::window() {
+            let _ = window.add_event_listener_with_callback("resize", &cb_window_fn);
+            let vv = window.visual_viewport();
+            if let Some(vv) = vv {
+                let el_for_vv = el_dom.clone();
+                let cb_vv =
+                    wasm_bindgen::prelude::Closure::<dyn Fn()>::new(move || {
+                        if is_at_bottom.get_untracked() {
+                            pin_to_bottom(&el_for_vv);
+                        }
+                    });
+                let cb_vv_fn: js_sys::Function =
+                    cb_vv.as_ref().unchecked_ref::<js_sys::Function>().clone();
+                let _ = vv.add_event_listener_with_callback("resize", &cb_vv_fn);
+                let _ = vv.add_event_listener_with_callback("scroll", &cb_vv_fn);
+                (Some(cb_vv), Some(cb_vv_fn))
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+        viewport_cleanup
+            .set_value(Some((cb_window, cb_window_fn, cb_vv, cb_vv_fn)));
+    });
+    on_cleanup(move || {
+        // ResizeObserver
+        let obs = resize_obs.try_update_value(Option::take).flatten();
+        if let Some((observer, cb)) = obs {
+            observer.disconnect();
+            drop(cb);
+        }
+        // Window + visualViewport listeners
+        let handles = viewport_cleanup.try_update_value(Option::take).flatten();
+        let Some((cb_window, cb_window_fn, cb_vv, cb_vv_fn)) = handles else {
+            return;
+        };
+        if let Some(window) = web_sys::window() {
+            let _ = window.remove_event_listener_with_callback("resize", &cb_window_fn);
+            if let (Some(vv), Some(cb_vv_fn)) = (window.visual_viewport(), cb_vv_fn.as_ref()) {
+                let _ = vv.remove_event_listener_with_callback("resize", cb_vv_fn);
+                let _ = vv.remove_event_listener_with_callback("scroll", cb_vv_fn);
+            }
+        }
+        drop(cb_window);
+        drop(cb_vv);
     });
 
     // Update is_at_bottom on every scroll event. Equality-guard the
@@ -164,16 +270,21 @@ pub fn ChatView() -> impl IntoView {
                 view! {
             <div class="chat-messages-outer">
                 <div class="chat-messages" node_ref=chat_ref on:scroll=on_scroll on:copy=on_copy>
-                    <For
-                        each=move || messages().unwrap_or_default()
-                        key=|msg| (msg.id, msg.timestamp)
-                        children=move |msg| render_message(state, msg)
-                    />
+                    <div class="chat-messages-inner" node_ref=inner_ref>
+                        <For
+                            each=move || messages().unwrap_or_default()
+                            key=|msg| msg.id
+                            children=move |msg| render_message(state, msg)
+                        />
+                    </div>
                 </div>
                 <div class="scroll-bottom-btn"
                     class:hidden=move || state.is_at_bottom.get()
                     on:click=move |_| {
-                        scroll_to_bottom(&chat_ref);
+                        if let Some(el) = chat_ref.get() {
+                            let el_dom: web_sys::Element = el.into();
+                            pin_to_bottom(&el_dom);
+                        }
                         state.is_at_bottom.set(true);
                     }
                 >
@@ -490,11 +601,12 @@ fn render_previews(
             // `loading="lazy"` attribute is intentionally absent —
             // it's a no-op while the parent is display:none, so all
             // preview images for in-DOM messages fetch eagerly.
-            const ON_IMG_LOAD: &str = "var c=this.closest('.msg-preview-card');\
-                var m=this.closest('.chat-messages');\
-                var b=m&&(m.scrollHeight-m.scrollTop-m.clientHeight<40);\
-                c.classList.add('loaded');\
-                if(b)m.scrollTop=m.scrollHeight;";
+            // Re-pinning on image decode is handled by the
+            // ResizeObserver on .chat-messages-inner. This inline
+            // handler now only flips the `loaded` class for the
+            // fade-in transition; the actual scroll-stickiness lives
+            // in chat_view's auto-scroll plumbing.
+            const ON_IMG_LOAD: &str = "this.closest('.msg-preview-card').classList.add('loaded');";
             view! {
                 <span class="msg-preview-card">
                     <a
@@ -584,18 +696,6 @@ fn format_chat_line_for_copy(node: &web_sys::Node) -> Option<String> {
         }
     }
     Some(parts.join(" "))
-}
-
-/// Scroll chat container to bottom via requestAnimationFrame.
-fn scroll_to_bottom(chat_ref: &NodeRef<leptos::html::Div>) {
-    let Some(el) = chat_ref.get() else { return };
-    let scroll_fn = wasm_bindgen::prelude::Closure::once(move || {
-        el.set_scroll_top(el.scroll_height());
-    });
-    if let Some(window) = web_sys::window() {
-        let _ = window.request_animation_frame(scroll_fn.as_ref().unchecked_ref());
-        scroll_fn.forget();
-    }
 }
 
 fn format_timestamp(ts: i64, fmt: &str) -> String {
