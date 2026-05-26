@@ -260,6 +260,13 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v1.3.1
+
+- **`/reload` now re-reads `~/.repartee/.env`** — previously `/reload` only picked up `config.toml` and the theme, so a freshly-added `SHRINK_API_KEY` (or rotated server `PASS` / SASL secret / `WEB_SESSION_SECRET`) stayed invisible until restart. The handler now mirrors the startup credential path. When the shrink API key transitions empty → populated, a themed message tells the user to restart explicitly, because the shrink workers were never spawned at startup and cannot be safely rebuilt from a command handler.
+- **Irssi-style instant `/wc`** — closing a channel buffer no longer waits for the server-side PART echo. The buffer disappears immediately and the PART is fire-and-forget. The eventual server echo is a clean no-op (`remove_buffer` is now idempotent, so no duplicate `BufferClosed` event reaches the web frontend).
+- **`/op`, `/deop`, `/voice`, `/devoice` no longer silently drop nicks past 3** — server `MAXMODES` caps each MODE line at 3 parameter modes, but the previous handler packed every arg into one line. The new chunker splits per the irssi convention — first line carries 2 nicks, every subsequent line up to 3 (`4 → [2,2]`, `5 → [2,3]`, `6 → [2,3,1]`, `7 → [2,3,2]`, …). All resulting MODE lines are queued back-to-back with no await between sends, so the server applies the full batch as a single burst.
+- **`/kick` accepts up to 6 nicks plus a multi-word `:reason`** — `kick` left the greedy-command list so multiple nicks tokenise naturally. Reason is everything from the first `:`-prefixed token onward (leading `:` stripped, rest joined with spaces); no `:` means every argument is a nick. Hard cap of 6 nicks. Five nicks split as `[2, 3]`, six as `[2, 4]`; multi-target uses the comma-list form `KICK #chan a,b,c :reason`. Same back-to-back burst send as the mode commands.
+
 ### v1.3.0
 
 - **URL shortening via `shr.al`** — long URLs are transparently shortened by an external API both **before they hit the wire** (outgoing) and **before they hit your screen** (incoming). Display: outgoing renders as `https://shr.al/abc`; incoming renders as `https://shr.al/abc [original-host.tld]` so you can see where the original link points. Independent `shrink.outgoing_enabled` / `shrink.incoming_enabled` toggles. Default threshold is `min_url_length = 50` (hard floor 25) and tunable via `/set shrink.min_url_length`.
