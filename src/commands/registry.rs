@@ -456,7 +456,7 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
             "reload",
             CommandDef {
                 handler: cmd_reload,
-                description: "Reload theme and config",
+                description: "Reload config, .env credentials, and theme",
                 aliases: &[],
                 category: CommandCategory::Configuration,
             },
