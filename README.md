@@ -260,6 +260,12 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v1.3.2
+
+- **Rock-solid mobile scroll stickiness** — the web chat view on mobile no longer "jumps up several lines and then back down" on every new message. Four root causes addressed together: (1) `overflow-anchor: none` on `.chat-messages` so the browser's scroll-anchor heuristic stops fighting the manual pin; (2) a `ResizeObserver` on a new `.chat-messages-inner` wrapper re-pins `scrollTop` on EVERY content-height change (image decode, font swap, content-visibility re-measure, new line), replacing the single-rAF append handler that raced layout; (3) `interactive-widget=resizes-content` in the viewport meta so Chrome 108+ Android shrinks the layout viewport when the keyboard opens; (4) a parallel `visualViewport.resize`/`scroll` listener so iOS Safari (which does NOT fire `window.resize` on keyboard open) gets the same pin-if-at-bottom treatment. Tested behaviour now matches TheLounge / Slack / Discord stickiness.
+- **Mobile compound improvements** — `SCROLL_THRESHOLD` raised 40 → 100 px (a single wrapped mobile line is often 30–50 px); `.chat-line` `contain-intrinsic-size` raised to `auto 40px` so the virtualization placeholder no longer underestimates real mobile heights; `.app` dropped `position: fixed; inset: 0` (conflicted with `100dvh` during iOS URL-bar collapse); `html, body` switched to `100dvh`; `.bottom-bar` made `position: sticky; bottom: 0` so safe-area-inset collapse on keyboard-open no longer shifts the chat list; `scroll-padding-bottom: 60px` so iOS auto-scroll-into-focus snaps above the bar instead of mid-message.
+- **`<For>` key correctness** — chat-message keying was switched to `(msg.id, msg.timestamp)` with a discriminator so date-separator rows (which share `id = 0` by design) no longer collide into a single reused DOM node, while real messages still key by their unique `msg.id` so backlog timestamp re-stamps cannot force a re-mount of the entire list.
+
 ### v1.3.1
 
 - **`/reload` now re-reads `~/.repartee/.env`** — previously `/reload` only picked up `config.toml` and the theme, so a freshly-added `SHRINK_API_KEY` (or rotated server `PASS` / SASL secret / `WEB_SESSION_SECRET`) stayed invisible until restart. The handler now mirrors the startup credential path. When the shrink API key transitions empty → populated, a themed message tells the user to restart explicitly, because the shrink workers were never spawned at startup and cannot be safely rebuilt from a command handler.
