@@ -328,6 +328,15 @@ impl ScriptManager {
             .collect()
     }
 
+    /// True if any engine currently has at least one script loaded.
+    /// Used by the main loop to short-circuit `update_script_snapshot`
+    /// when no consumer would ever read the result — eliminates a
+    /// 20-50 ms per-event state clone for users without Lua scripts.
+    #[must_use]
+    pub fn has_loaded_scripts(&self) -> bool {
+        self.engines.iter().any(|e| !e.loaded_scripts().is_empty())
+    }
+
     /// List available script files in the scripts directory.
     pub fn available_scripts(&self) -> Vec<(String, PathBuf, bool)> {
         let loaded: Vec<String> = self

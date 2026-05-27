@@ -1104,7 +1104,11 @@ impl App {
                             }
                             self.term_rx = Some(rx);
                         }
-                        self.update_script_snapshot();
+                        // No eager `update_script_snapshot()` here: the
+                        // tick arm (1 s) rebuilds when dirty. Eager
+                        // rebuild on every keystroke deep-cloned the
+                        // whole state for no consumer on the typical
+                        // no-Lua install — see the function comment.
                         self.drain_pending_web_events();
                     }
                     None => {
@@ -1127,7 +1131,8 @@ impl App {
                             }
                             self.shim_event_rx = Some(rx);
                         }
-                        self.update_script_snapshot();
+                        // Tick arm picks up the rebuild — see the
+                        // term_rx arm above for rationale.
                         self.drain_pending_web_events();
                     }
                     Some(crate::session::protocol::ShimMessage::Resize { cols, rows }) => {
@@ -1177,8 +1182,14 @@ impl App {
                 irc_ev = self.irc_rx.recv() => {
                     if let Some(event) = irc_ev {
                         self.handle_irc_event(event);
+                        // Mark dirty so the next tick rebuilds the
+                        // script snapshot — eager rebuild here
+                        // saturated the main thread on busy networks
+                        // (200 + IRC events per burst × 20-50 ms of
+                        // state cloning). Scripts get state with up
+                        // to 1 s latency now; events handlers still
+                        // receive their full payload synchronously.
                         self.script_snapshot_dirty = true;
-                        self.update_script_snapshot();
                         self.drain_pending_web_events();
                     }
                 },
@@ -1244,7 +1255,17 @@ impl App {
                     self.check_reconnects();
                     self.measure_lag();
                     self.check_day_changed();
-                    if self.script_manager.is_some() && !self.script_commands.is_empty() {
+                    // Single rebuild site for the script snapshot.
+                    // `has_loaded_scripts` is the correct guard:
+                    // scripts can subscribe to events without ever
+                    // registering a command (`script_commands` would
+                    // be empty for those), and the original guard
+                    // missed them.
+                    if self
+                        .script_manager
+                        .as_ref()
+                        .is_some_and(crate::scripting::engine::ScriptManager::has_loaded_scripts)
+                    {
                         self.update_script_snapshot();
                     }
                     self.check_stale_who_batches();
@@ -1274,8 +1295,9 @@ impl App {
                         while let Ok(action) = self.script_action_rx.try_recv() {
                             self.handle_script_action(action);
                         }
+                        // Tick arm rebuilds — see the irc_rx arm
+                        // above for the busy-network rationale.
                         self.script_snapshot_dirty = true;
-                        self.update_script_snapshot();
                         self.drain_pending_web_events();
                     }
                 },

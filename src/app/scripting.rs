@@ -313,11 +313,35 @@ impl App {
     }
 
     /// Push the current `AppState` into the shared script snapshot.
+    ///
+    /// Skipped entirely when no Lua scripts are loaded — the snapshot
+    /// is read by `api.state.*` from inside script code, so with zero
+    /// scripts there is no consumer and the deep clone of all
+    /// buffers/nicks/connections plus the full config TOML is pure
+    /// waste. This guard was the single biggest contributor to TUI
+    /// freezes on busy IRC networks: per-event 20-50 ms of cloning
+    /// stacked behind every keystroke and incoming message.
+    ///
+    /// Emits a `tracing::warn!` if the rebuild itself exceeds 50 ms
+    /// so future regressions in snapshot size show up in logs before
+    /// they show up as user-visible jank.
     pub(crate) fn update_script_snapshot(&mut self) {
         if !self.script_snapshot_dirty {
             return;
         }
+        if !self
+            .script_manager
+            .as_ref()
+            .is_some_and(crate::scripting::engine::ScriptManager::has_loaded_scripts)
+        {
+            // Stay dirty — the moment a script loads, the next tick
+            // will rebuild fresh. Clearing the flag here would let a
+            // first post-load rebuild miss state mutations that
+            // happened while no scripts existed.
+            return;
+        }
         self.script_snapshot_dirty = false;
+        let started = std::time::Instant::now();
         let config_toml = self.cached_config_toml.get_or_insert_with(|| {
             toml::Value::try_from(&self.config)
                 .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()))
@@ -326,6 +350,14 @@ impl App {
             *snap = self.state.script_snapshot();
             snap.script_config.clone_from(&self.script_config);
             snap.app_config_toml = Some(config_toml.clone());
+        }
+        let elapsed_ms = started.elapsed().as_millis();
+        if elapsed_ms > 50 {
+            tracing::warn!(
+                elapsed_ms,
+                "script_snapshot rebuild slow — risks event-loop jank \
+                 on busy networks; consider lazy on-demand state API"
+            );
         }
     }
 
