@@ -20,12 +20,6 @@ web-sys = { version = "0.3", features = [
     # `chat_view.rs` — it walks the selection to rebuild each `.chat-line`
     # as space-separated text instead of newline-separated flex items.
     "Selection", "NodeList", "HtmlCollection",
-    # `ResizeObserver` + `VisualViewport` drive the mobile-stable
-    # scroll-pinning logic in `chat_view.rs`. ResizeObserver re-pins on
-    # any content-height change (image decode, font swap, new line);
-    # VisualViewport.resize fires on iOS Safari keyboard open where
-    # `window.resize` does not.
-    "ResizeObserver", "ResizeObserverEntry", "VisualViewport",
 ] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
