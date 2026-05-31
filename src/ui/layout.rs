@@ -164,6 +164,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // Image preview overlay (drawn last, on top of everything).
     super::image_overlay::render(frame, frame.area(), app);
 
+    // Emote picker overlay (top-most when open).
+    super::emote_picker::render(frame, frame.area(), app);
+
     // Targeted repaint after image dismiss (Kitty/iTerm2 only).
     // The graphics layer was already cleaned up by escape sequences.
     // Rendering Clear over the popup area forces ratatui's diff to

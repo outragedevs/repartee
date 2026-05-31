@@ -749,3 +749,32 @@ fn find_unique_shell_name(app: &App, base: &str) -> String {
     }
     format!("{base} ({})", app.shell_mgr.session_count() + 1)
 }
+
+/// `/emote` opens the picker; `/emote <name>` inserts `:name:` if known, else
+/// lists a few matching emote names to the active buffer.
+pub(crate) fn cmd_emote(app: &mut App, args: &[String]) {
+    if args.is_empty() {
+        app.open_emote_picker();
+        return;
+    }
+    let query = args[0].trim_matches(':');
+    if crate::emotes::contains(query) {
+        let token = format!(":{query}:");
+        let at = app.input.cursor_pos;
+        app.input.value.insert_str(at, &token);
+        app.input.cursor_pos = at + token.len();
+    } else {
+        let hits: Vec<&str> = crate::emotes::names()
+            .iter()
+            .filter(|n| n.contains(query))
+            .take(10)
+            .map(String::as_str)
+            .collect();
+        let msg = if hits.is_empty() {
+            format!("No emote matches \"{query}\"")
+        } else {
+            format!("Emotes matching \"{query}\": {}", hits.join(", "))
+        };
+        add_local_event(app, &msg);
+    }
+}

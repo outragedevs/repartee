@@ -395,6 +395,8 @@ pub struct App {
     pub emote_animator: crate::app::emote_anim::EmoteAnimator,
     /// Animation clock origin; frame indices derive from `now - this`.
     pub emote_anim_start: std::time::Instant,
+    /// Emote picker overlay state (open/hidden + filter/selection).
+    pub emote_picker: crate::ui::emote_picker::EmotePickerState,
     pub needs_full_redraw: bool,
     pub outer_terminal: String,
     pub color_support: crate::nick_color::ColorSupport,
@@ -715,6 +717,7 @@ impl App {
             emote_placements: Vec::new(),
             emote_animator: crate::app::emote_anim::EmoteAnimator::default(),
             emote_anim_start: Instant::now(),
+            emote_picker: crate::ui::emote_picker::EmotePickerState::default(),
             needs_full_redraw: false,
             outer_terminal: outer_terminal.to_string(),
             color_support,
