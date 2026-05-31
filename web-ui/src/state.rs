@@ -62,6 +62,9 @@ pub struct AppState {
     /// Per-message preview dismissals: `(message_id, link)` pairs. Persisted
     /// to localStorage so a "hide this thumbnail" decision survives reload.
     pub dismissed_previews: RwSignal<HashSet<(u64, String)>>,
+    /// Known emote names fetched from `/emotes/manifest.json` (empty until loaded).
+    /// Used to rewrite `:name:` tokens into inline `<img>` emotes.
+    pub emote_names: RwSignal<Vec<String>>,
 }
 
 impl AppState {
@@ -97,6 +100,7 @@ impl AppState {
             backlog_loaded: RwSignal::new(HashSet::new()),
             is_at_bottom: RwSignal::new(true),
             dismissed_previews: RwSignal::new(load_dismissed_previews()),
+            emote_names: RwSignal::new(Vec::new()),
         }
     }
 

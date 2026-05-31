@@ -664,6 +664,16 @@ html, body {
     text-decoration-thickness: 2px;
 }
 
+/* === Inline built-in emotes (:name:) === */
+.emote {
+    height: 1.4em;
+    width: auto;
+    vertical-align: middle;
+    margin: 0 1px;
+    /* Preserve animated GIF crispness for small pixel-art emotes. */
+    image-rendering: auto;
+}
+
 /* === Link image previews === */
 
 .msg-previews {

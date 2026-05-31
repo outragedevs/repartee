@@ -332,6 +332,8 @@ fn current_nick(state: AppState) -> Option<String> {
 )]
 fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView {
     let nick_self = current_nick(state);
+    let emote_set: std::collections::HashSet<String> =
+        state.emote_names.get().into_iter().collect();
 
     let is_mention_log = msg.msg_type == "mention_log";
     let is_event = msg.msg_type == "event";
@@ -399,7 +401,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
     let previews_view = move || render_previews(state, msg_id, preview_data.clone());
 
     if is_mention_log {
-        let styled = render_styled_text(&msg.text);
+        let styled = render_styled_text(&msg.text, &emote_set);
         return view! {
             <>
                 <div class=line_class>
@@ -413,7 +415,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
 
     if is_action {
         let nick_text = msg.nick.unwrap_or_default();
-        let styled = render_styled_text(&msg.text);
+        let styled = render_styled_text(&msg.text, &emote_set);
         let nick_color_style = {
             let nick = nick_text.clone();
             move || nick_color_or_empty(state, &nick, !is_own)
@@ -435,7 +437,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
         .into_any()
     } else if is_notice {
         let nick_text = msg.nick.unwrap_or_default();
-        let styled = render_styled_text(&msg.text);
+        let styled = render_styled_text(&msg.text, &emote_set);
         view! {
             <>
                 <div class=line_class>
@@ -453,7 +455,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
         .into_any()
     } else if is_event {
         let arrow = event_icon(msg.event_key.as_deref(), &msg.text);
-        let styled = render_styled_text(&msg.text);
+        let styled = render_styled_text(&msg.text, &emote_set);
         view! {
             <div class=line_class>
                 <span class="ts">{ts_fn}</span>
@@ -469,7 +471,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
     } else {
         let nick_text = msg.nick.unwrap_or_default();
         let mode = msg.nick_mode.unwrap_or_default();
-        let styled = render_styled_text(&msg.text);
+        let styled = render_styled_text(&msg.text, &emote_set);
         let highlight = msg.highlight;
 
         let nick_truncated = {
@@ -645,17 +647,29 @@ fn render_previews(
 /// Render text with irssi/mIRC format codes as styled HTML spans.
 ///
 /// `parse_format` produces colour/bold spans; `linkify_spans` then carves
-/// URLs out of plain-text fragments. Spans with `link = Some(url)` are
-/// wrapped in `<a target="_blank" rel="noopener noreferrer">` so a left
-/// click opens a new tab and a right click yields the browser's standard
-/// "Open in New Window" context menu.
-fn render_styled_text(text: &str) -> Vec<leptos::prelude::AnyView> {
-    let spans = format::linkify_spans(format::parse_format(text));
+/// URLs out of plain-text fragments; `emotify_spans` rewrites known `:name:`
+/// tokens into emote spans. Spans with `link = Some(url)` are wrapped in
+/// `<a target="_blank" rel="noopener noreferrer">`; emote spans render as an
+/// inline `<img class="emote">` (with the `:name:` token as alt/title for
+/// accessibility and copy/paste fallback).
+fn render_styled_text(
+    text: &str,
+    emote_set: &std::collections::HashSet<String>,
+) -> Vec<leptos::prelude::AnyView> {
+    let spans =
+        format::emotify_spans(format::linkify_spans(format::parse_format(text)), emote_set);
     spans
         .into_iter()
         .map(|span| {
             let css = span.css();
-            if let Some(url) = span.link {
+            if let Some(name) = span.emote_name {
+                let src = format!("/emotes/{name}.gif");
+                let alt = span.text;
+                view! {
+                    <img class="emote" src=src alt=alt.clone() title=alt />
+                }
+                .into_any()
+            } else if let Some(url) = span.link {
                 let style = if css.is_empty() { String::new() } else { css };
                 view! {
                     <a
