@@ -65,13 +65,16 @@ frame into that cell rect on each render pass.
 - **Curation (one-time, reproducible).** From scrape dirs `1/2/3`, select one file per base
   name by precedence `3 > 2 > 1`, write as `assets/emotes/<name>.gif` (183 files), commit to
   the repo. The precedence rule is documented so the set is reproducible from the raw scrape.
-- **Embedding.** `build.rs` generates a sorted table `static EMOTES: &[(&str, &[u8])]` via
-  `include_bytes!` (no runtime dependency; lookup by binary search). It also emits the sorted
-  name list (for autocomplete/picker) and a web manifest.
-- **Registry API:**
-  - `names() -> &'static [&'static str]`
-  - `bytes(name) -> Option<&'static [u8]>`
-  - `frames(name) -> &[(RgbaImage, u32 /* delay_ms */)]` — lazy decode + cache.
+- **Embedding.** Use the existing `rust-embed = "8"` dependency (already used for `static/web/`)
+  with `#[derive(Embed)] #[folder = "assets/emotes/"]`. No new `build.rs`; matches the codebase
+  convention. The sorted name list (for autocomplete/picker/manifest) is derived at runtime from
+  `EmoteAssets::iter()` behind a `LazyLock`.
+- **Registry API (`src/emotes/mod.rs`):**
+  - `names() -> &'static [String]` — sorted, `.gif` stripped (LazyLock).
+  - `contains(name) -> bool` — whitelist check used by the tokenizer.
+  - `bytes(name) -> Option<Cow<'static, [u8]>>` — raw GIF bytes via `EmoteAssets::get`.
+  - `frames(name) -> Option<&'static [(image::RgbaImage, u32 /* delay_ms */)]>` — lazy
+    decode + cache (used only by the TUI animator in Plan 2).
 
 ### 4.2 Tokenizer (UI-agnostic) — `src/emotes/parse.rs`
 
