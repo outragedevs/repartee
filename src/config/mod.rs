@@ -76,6 +76,7 @@ pub struct AppConfig {
     pub web: WebConfig,
     pub e2e: E2eConfig,
     pub shrink: ShrinkConfig,
+    pub emotes: EmotesConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -585,6 +586,35 @@ impl Default for WebConfig {
     }
 }
 
+/// How `:name:` emote tokens are rendered.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RenderMode {
+    /// Render as an inline image where the surface supports it; fall back to text.
+    #[default]
+    Graphical,
+    /// Always render the literal `:name:` text.
+    Text,
+    /// Do not treat `:name:` as an emote at all.
+    Off,
+}
+
+/// `[emotes]` configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EmotesConfig {
+    /// Enable built-in `:name:` emotes.
+    pub enabled: bool,
+    /// How emotes are rendered.
+    pub render: RenderMode,
+}
+
+impl Default for EmotesConfig {
+    fn default() -> Self {
+        Self { enabled: true, render: RenderMode::Graphical }
+    }
+}
+
 // === Load / Save ===
 
 /// Load config from TOML file, merging with defaults for missing fields.
@@ -662,6 +692,24 @@ pub fn validate_startup_files(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emotes_config_defaults_and_roundtrip() {
+        let cfg = AppConfig::default();
+        assert!(cfg.emotes.enabled);
+        assert_eq!(cfg.emotes.render, RenderMode::Graphical);
+
+        // TOML round-trip preserves the section.
+        let toml_str = toml::to_string(&cfg).expect("serialize");
+        let back: AppConfig = toml::from_str(&toml_str).expect("deserialize");
+        assert_eq!(back.emotes.render, RenderMode::Graphical);
+
+        // Parsing an explicit section.
+        let parsed: AppConfig =
+            toml::from_str("[emotes]\nenabled = false\nrender = \"text\"\n").unwrap();
+        assert!(!parsed.emotes.enabled);
+        assert_eq!(parsed.emotes.render, RenderMode::Text);
+    }
 
     #[test]
     fn default_config_uses_app_name() {
