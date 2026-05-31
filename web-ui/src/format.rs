@@ -306,9 +306,11 @@ pub fn linkify_spans(spans: Vec<StyledSpan>) -> Vec<StyledSpan> {
 /// are already links/emotes, or carry no colon, pass through. Uses the embedded
 /// emote whitelist ([`crate::emotes::is_emote`]).
 ///
-/// Matching mirrors the native TUI tokenizer (`src/emotes/parse.rs`): `:` +
-/// `[a-z0-9_]+` + `:`. Keep the two in lockstep — `emotify_parity_with_rules`
-/// guards the shared matching semantics.
+/// Matching mirrors the native TUI tokenizer (`src/emotes/parse.rs::tokenize_with`):
+/// `:` + `[a-z0-9_]+` + `:`. The two live in separate crates (WASM cannot depend
+/// on the native binary), so keep their matching rules in lockstep by hand — both
+/// have unit tests covering the same cases (`:)`/`:D` ignored, adjacency, lone
+/// colons, unknown names).
 #[must_use]
 pub fn emotify_spans(spans: Vec<StyledSpan>) -> Vec<StyledSpan> {
     emotify_spans_with(spans, crate::emotes::is_emote)
