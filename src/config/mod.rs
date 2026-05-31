@@ -611,7 +611,10 @@ pub struct EmotesConfig {
 
 impl Default for EmotesConfig {
     fn default() -> Self {
-        Self { enabled: true, render: RenderMode::Graphical }
+        Self {
+            enabled: true,
+            render: RenderMode::Graphical,
+        }
     }
 }
 
@@ -654,16 +657,10 @@ pub fn save_config(path: &Path, config: &AppConfig) -> Result<()> {
 /// validation is a fast pre-check, not a substitute. The narrow race
 /// where the user edits between this call and `App::new` is harmless —
 /// `waitpid` will surface the child's parse error then.
-pub fn validate_startup_files(
-    config_path: &Path,
-    theme_dir: &Path,
-) -> Result<AppConfig> {
+pub fn validate_startup_files(config_path: &Path, theme_dir: &Path) -> Result<AppConfig> {
     let config = match std::fs::read_to_string(config_path) {
         Ok(content) => toml::from_str::<AppConfig>(&content).map_err(|e| {
-            color_eyre::eyre::eyre!(
-                "Invalid TOML in {}\n{e}",
-                config_path.display()
-            )
+            color_eyre::eyre::eyre!("Invalid TOML in {}\n{e}", config_path.display())
         })?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => default_config(),
         Err(e) => {

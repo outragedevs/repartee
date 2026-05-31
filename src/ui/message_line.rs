@@ -189,7 +189,9 @@ pub(crate) fn emotify_message_text(text: &str, graphical: bool) -> String {
             Segment::Text(range) => out.push_str(&text[range]),
             Segment::Emote(name) => {
                 match names.binary_search_by(|n| n.as_str().cmp(name.as_str())) {
-                    Ok(idx) => out.push_str(&placeholder_for_index(u32::try_from(idx).unwrap_or(0))),
+                    Ok(idx) => {
+                        out.push_str(&placeholder_for_index(u32::try_from(idx).unwrap_or(0)))
+                    }
                     Err(_) => {
                         out.push(':');
                         out.push_str(&name);
@@ -219,7 +221,10 @@ mod emote_tests {
 
     #[test]
     fn unchanged_when_not_graphical() {
-        assert_eq!(emotify_message_text("hi :usmiech: x", false), "hi :usmiech: x");
+        assert_eq!(
+            emotify_message_text("hi :usmiech: x", false),
+            "hi :usmiech: x"
+        );
     }
 
     #[test]

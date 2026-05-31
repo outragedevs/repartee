@@ -58,7 +58,10 @@ struct LoginRequest {
     /// Sent by the client; the server only validates the password.
     /// Exists so password managers see a complete credential pair.
     #[serde(default)]
-    #[expect(dead_code, reason = "field is part of wire format but intentionally ignored")]
+    #[expect(
+        dead_code,
+        reason = "field is part of wire format but intentionally ignored"
+    )]
     username: Option<String>,
     password: String,
 }
@@ -182,7 +185,10 @@ fn is_hashed_asset(path: &str) -> bool {
     let Some(hash) = stem.rsplit_once('-').map(|(_, h)| h) else {
         return false;
     };
-    hash.len() >= 8 && hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    hash.len() >= 8
+        && hash
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
 /// Serve the index.html for the root path (no-cache to pick up new hashed assets).
@@ -264,7 +270,10 @@ async fn emote_handler(Path(file): Path<String>) -> Response {
                 StatusCode::OK,
                 [
                     (axum::http::header::CONTENT_TYPE, "image/gif"),
-                    (axum::http::header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+                    (
+                        axum::http::header::CACHE_CONTROL,
+                        "public, max-age=31536000, immutable",
+                    ),
                 ],
                 data.into_owned(),
             )
@@ -381,10 +390,15 @@ mod tests {
         let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
-            response.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
             "image/gif"
         );
-        let body = axum::body::to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
         assert!(body.starts_with(b"GIF"), "served body must be a GIF");
     }
 

@@ -84,7 +84,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
                 None
             };
             let line = super::message_line::render_message(
-                msg, is_own, &app.theme, &app.config, nick_fg, graphical,
+                msg,
+                is_own,
+                &app.theme,
+                &app.config,
+                nick_fg,
+                graphical,
             );
             let wrapped = super::wrap_line(line, total_width, indent);
 

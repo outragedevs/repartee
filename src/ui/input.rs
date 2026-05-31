@@ -376,50 +376,64 @@ impl InputState {
             let subcommand_ctx = detect_subcommand_context(&text_before);
 
             let prefix = word;
-            let matches: Vec<String> = match subcommand_ctx {
-                Some(SubcommandContext::Help) => {
-                    // Complete with command names (without /)
-                    let mut m: Vec<String> = commands
-                        .iter()
-                        .filter(|c| c.to_lowercase().starts_with(&prefix.to_lowercase()))
-                        .map(ToString::to_string)
-                        .collect();
-                    m.sort_by_key(|a| a.to_lowercase());
-                    m
-                }
-                Some(SubcommandContext::Set) => {
-                    // Complete with setting paths
-                    let mut m: Vec<String> = setting_paths
-                        .iter()
-                        .filter(|p| p.to_lowercase().starts_with(&prefix.to_lowercase()))
-                        .cloned()
-                        .collect();
-                    m.sort_by_key(|a| a.to_lowercase());
-                    m
-                }
-                Some(SubcommandContext::Subcommand(ref subcmds)) => {
-                    // Complete with doc-driven subcommand names
-                    let mut m: Vec<String> = subcmds
-                        .iter()
-                        .filter(|s| s.to_lowercase().starts_with(&prefix.to_lowercase()))
-                        .cloned()
-                        .collect();
-                    m.sort_by_key(|a| a.to_lowercase());
-                    m
-                }
-                None if is_command => {
-                    let cmd_prefix = &prefix[1..]; // strip leading /
-                    let mut m: Vec<String> = commands
-                        .iter()
-                        .filter(|c| c.to_lowercase().starts_with(&cmd_prefix.to_lowercase()))
-                        .map(|c| format!("/{c}"))
-                        .collect();
-                    m.sort_by_key(|a| a.to_lowercase());
-                    m
-                }
-                None => {
-                    // Nick completion: recent speakers first, then remaining nicks alphabetically.
-                    nick_completions(nicks, last_speakers, &prefix)
+            // Emote completion: a word like ":usm" (single leading colon, no
+            // closing colon) completes to ":usmiech:" against the embedded set.
+            let is_emote = prefix
+                .strip_prefix(':')
+                .is_some_and(|p| !p.is_empty() && !p.contains(':'));
+            let matches: Vec<String> = if is_emote {
+                let ep = &prefix[1..];
+                crate::emotes::names()
+                    .iter()
+                    .filter(|n| n.starts_with(ep))
+                    .map(|n| format!(":{n}:"))
+                    .collect()
+            } else {
+                match subcommand_ctx {
+                    Some(SubcommandContext::Help) => {
+                        // Complete with command names (without /)
+                        let mut m: Vec<String> = commands
+                            .iter()
+                            .filter(|c| c.to_lowercase().starts_with(&prefix.to_lowercase()))
+                            .map(ToString::to_string)
+                            .collect();
+                        m.sort_by_key(|a| a.to_lowercase());
+                        m
+                    }
+                    Some(SubcommandContext::Set) => {
+                        // Complete with setting paths
+                        let mut m: Vec<String> = setting_paths
+                            .iter()
+                            .filter(|p| p.to_lowercase().starts_with(&prefix.to_lowercase()))
+                            .cloned()
+                            .collect();
+                        m.sort_by_key(|a| a.to_lowercase());
+                        m
+                    }
+                    Some(SubcommandContext::Subcommand(ref subcmds)) => {
+                        // Complete with doc-driven subcommand names
+                        let mut m: Vec<String> = subcmds
+                            .iter()
+                            .filter(|s| s.to_lowercase().starts_with(&prefix.to_lowercase()))
+                            .cloned()
+                            .collect();
+                        m.sort_by_key(|a| a.to_lowercase());
+                        m
+                    }
+                    None if is_command => {
+                        let cmd_prefix = &prefix[1..]; // strip leading /
+                        let mut m: Vec<String> = commands
+                            .iter()
+                            .filter(|c| c.to_lowercase().starts_with(&cmd_prefix.to_lowercase()))
+                            .map(|c| format!("/{c}"))
+                            .collect();
+                        m.sort_by_key(|a| a.to_lowercase());
+                        m
+                    }
+                    None => {
+                        // Nick completion: recent speakers first, then remaining nicks alphabetically.
+                        nick_completions(nicks, last_speakers, &prefix)
+                    }
                 }
             };
 
@@ -427,8 +441,10 @@ impl InputState {
                 return;
             }
 
+            // Emote matches are already wrapped as ":name:" and want a plain space
+            // suffix (never the start-of-line ": " nick suffix).
             let completion = &matches[0];
-            let suffix = if is_command {
+            let suffix = if is_emote || is_command {
                 " "
             } else if is_start_of_line {
                 ": "
@@ -443,7 +459,9 @@ impl InputState {
                 matches,
                 index: 0,
                 text_before,
-                is_start_of_line,
+                // For emotes, suppress the start-of-line flag so cycling reuses the
+                // plain-space suffix instead of ": ".
+                is_start_of_line: is_start_of_line && !is_emote,
                 is_command,
             });
         }
@@ -804,6 +822,28 @@ pub fn render_spell_popup(frame: &mut Frame, input_area: Rect, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_completes_emote_prefix() {
+        let mut input = InputState::new();
+        input.value = "hey :usm".to_owned();
+        input.cursor_pos = input.value.len();
+        input.tab_complete(&[], &[], &[], &[]);
+        // ":usm" -> ":usmiech: " (closing colon + plain space, never ": ").
+        assert!(input.value.starts_with("hey :usmiech:"), "got {:?}", input.value);
+        assert!(input.value.contains(":usmiech: "), "emote closes colon + space: {:?}", input.value);
+        assert!(!input.value.contains(":usmiech: :"), "no nick-style ': ' suffix: {:?}", input.value);
+    }
+
+    #[test]
+    fn tab_emote_does_not_fire_for_unknown_prefix() {
+        let mut input = InputState::new();
+        input.value = ":zzzzz".to_owned();
+        input.cursor_pos = input.value.len();
+        input.tab_complete(&[], &[], &[], &[]);
+        // No known emote starts with "zzzzz" -> unchanged.
+        assert_eq!(input.value, ":zzzzz");
+    }
 
     #[test]
     fn insert_and_backspace() {

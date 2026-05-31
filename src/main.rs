@@ -126,13 +126,11 @@ fn parse_bind_override(args: &[String]) -> Result<Option<String>> {
             return Ok(Some(value.to_string()));
         }
         if arg == "-h" || arg == "--bind" {
-            let value = args.get(i + 1).ok_or_else(|| {
-                eyre!("{arg} requires an argument, e.g. {arg} 192.0.2.10")
-            })?;
+            let value = args
+                .get(i + 1)
+                .ok_or_else(|| eyre!("{arg} requires an argument, e.g. {arg} 192.0.2.10"))?;
             if value.starts_with('-') {
-                return Err(eyre!(
-                    "{arg} requires an IP address, got flag '{value}'"
-                ));
+                return Err(eyre!("{arg} requires an IP address, got flag '{value}'"));
             }
             return Ok(Some(value.clone()));
         }
@@ -240,10 +238,9 @@ fn main() -> Result<()> {
     // for PID X" 5 seconds later. Failing fast here puts the actual
     // toml-error line/column on the user's screen.
     constants::ensure_config_dir();
-    if let Err(e) = config::validate_startup_files(
-        &constants::config_path(),
-        &constants::theme_dir(),
-    ) {
+    if let Err(e) =
+        config::validate_startup_files(&constants::config_path(), &constants::theme_dir())
+    {
         // `{e:#}` formats the eyre chain without color_eyre's source-location
         // footer — the toml parser already prints line/column inside the
         // message, anything more would just clutter the user's terminal.

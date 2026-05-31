@@ -83,7 +83,11 @@ mod tests {
         // "a :lol: b"
         assert_eq!(
             seg("a :lol: b"),
-            vec![Segment::Text(0..2), Segment::Emote("lol".into()), Segment::Text(7..9)]
+            vec![
+                Segment::Text(0..2),
+                Segment::Emote("lol".into()),
+                Segment::Text(7..9)
+            ]
         );
     }
 
@@ -102,7 +106,10 @@ mod tests {
     fn adjacent_emotes() {
         assert_eq!(
             seg(":lol::smutny:"),
-            vec![Segment::Emote("lol".into()), Segment::Emote("smutny".into())]
+            vec![
+                Segment::Emote("lol".into()),
+                Segment::Emote("smutny".into())
+            ]
         );
     }
 
@@ -129,6 +136,9 @@ mod tests {
         fn known2(n: &str) -> bool {
             n == "je_pizze" || n == "8p"
         }
-        assert_eq!(tokenize_with(":je_pizze:", known2), vec![Segment::Emote("je_pizze".into())]);
+        assert_eq!(
+            tokenize_with(":je_pizze:", known2),
+            vec![Segment::Emote("je_pizze".into())]
+        );
     }
 }

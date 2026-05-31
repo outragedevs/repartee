@@ -1,4 +1,7 @@
-#[allow(clippy::redundant_pub_crate, reason = "log_browser reuses format_date_separator")]
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "log_browser reuses format_date_separator"
+)]
 pub(crate) mod backlog;
 mod dcc;
 pub(crate) mod emote_anim;
@@ -467,8 +470,7 @@ pub struct App {
     /// from any tokio worker without contending on a tokio mutex.
     /// `Arc` because both the dispatch path (App side) and the
     /// shrink workers (spawned tasks) read/write through it.
-    pub(crate) shrink_cache:
-        std::sync::Arc<parking_lot::Mutex<crate::shrink::ShrinkCache>>,
+    pub(crate) shrink_cache: std::sync::Arc<parking_lot::Mutex<crate::shrink::ShrinkCache>>,
     /// Pre-display queue for outgoing messages that need shrink.
     /// `handle_plain_message` enqueues here; a dedicated worker
     /// drains, awaits shrink, and posts an `OutgoingDeliver` back
@@ -635,9 +637,8 @@ impl App {
         // immediate add vs deferred shrink without reaching into App.
         // `shrink_incoming_tx` lives only on `state` from here on —
         // the App-side handle was dropped to avoid a never-read field.
-        state.shrink_incoming_active = config.shrink.enabled
-            && config.shrink.incoming_enabled
-            && shrink_client.is_some();
+        state.shrink_incoming_active =
+            config.shrink.enabled && config.shrink.incoming_enabled && shrink_client.is_some();
         state.shrink_min_url_length = config.shrink.min_url_length;
         state.shrink_incoming_tx = Some(shrink_incoming_tx);
 
@@ -1129,7 +1130,9 @@ impl App {
                 } else {
                     std::time::Duration::from_secs(86400)
                 };
-                emote_anim_sleep.as_mut().reset(tokio::time::Instant::now() + next);
+                emote_anim_sleep
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + next);
             }
 
             tokio::select! {

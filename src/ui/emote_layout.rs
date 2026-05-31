@@ -39,7 +39,11 @@ pub fn is_placeholder_char(c: char) -> bool {
 #[must_use]
 pub fn decode_placeholder_index(c: char) -> Option<u32> {
     let u = c as u32;
-    if (PUA_BASE..=PUA_MAX).contains(&u) { Some(u - PUA_BASE) } else { None }
+    if (PUA_BASE..=PUA_MAX).contains(&u) {
+        Some(u - PUA_BASE)
+    } else {
+        None
+    }
 }
 
 /// Where one emote should be composited, in absolute screen cells.
@@ -85,7 +89,12 @@ pub fn resolve_placements(lines: &[Line<'_>], area: Rect) -> Vec<EmotePlacement>
     out
 }
 
-fn flush_run(run: &mut Option<(u32, usize, usize)>, y: u16, area_x: u16, out: &mut Vec<EmotePlacement>) {
+fn flush_run(
+    run: &mut Option<(u32, usize, usize)>,
+    y: u16,
+    area_x: u16,
+    out: &mut Vec<EmotePlacement>,
+) {
     if let Some((idx, start, w)) = run.take() {
         let x = area_x.saturating_add(u16::try_from(start).unwrap_or(u16::MAX));
         out.push(EmotePlacement {
@@ -105,7 +114,10 @@ mod tests {
         let ph = placeholder_for_index(42);
         assert_eq!(ph.chars().count(), EMOTE_COLS);
         assert!(ph.chars().all(is_placeholder_char));
-        assert_eq!(decode_placeholder_index(ph.chars().next().unwrap()), Some(42));
+        assert_eq!(
+            decode_placeholder_index(ph.chars().next().unwrap()),
+            Some(42)
+        );
     }
 
     #[test]

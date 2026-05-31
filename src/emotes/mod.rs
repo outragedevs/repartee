@@ -92,8 +92,15 @@ mod tests {
     #[test]
     fn names_are_sorted_and_nonempty() {
         let names = names();
-        assert!(names.len() >= 180, "expected the full GG7 set, got {}", names.len());
-        assert!(names.windows(2).all(|w| w[0] <= w[1]), "names must be sorted");
+        assert!(
+            names.len() >= 180,
+            "expected the full GG7 set, got {}",
+            names.len()
+        );
+        assert!(
+            names.windows(2).all(|w| w[0] <= w[1]),
+            "names must be sorted"
+        );
         assert!(names.iter().all(|n| !n.is_empty() && !n.contains('.')));
     }
 
@@ -131,7 +138,8 @@ mod tests {
     fn all_embedded_names_are_valid_tokens() {
         for n in names() {
             assert!(
-                n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
+                n.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
                 "name {n:?} contains a byte outside [a-z0-9_]"
             );
         }
