@@ -276,18 +276,20 @@ async fn emotes_manifest_handler() -> Response {
 async fn emote_handler(Path(file): Path<String>) -> Response {
     // `file` is e.g. "usmiech.gif". Strip extension, validate against the registry.
     let name = file.strip_suffix(".gif").unwrap_or(&file);
-    match crate::emotes::bytes(name) {
-        Some(data) => (
-            StatusCode::OK,
-            [
-                (axum::http::header::CONTENT_TYPE, "image/gif"),
-                (axum::http::header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
-            ],
-            data.into_owned(),
-        )
-            .into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
+    crate::emotes::bytes(name).map_or_else(
+        || StatusCode::NOT_FOUND.into_response(),
+        |data| {
+            (
+                StatusCode::OK,
+                [
+                    (axum::http::header::CONTENT_TYPE, "image/gif"),
+                    (axum::http::header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+                ],
+                data.into_owned(),
+            )
+                .into_response()
+        },
+    )
 }
 
 /// Build the axum router with all routes.
