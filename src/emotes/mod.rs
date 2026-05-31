@@ -44,6 +44,47 @@ pub fn bytes(name: &str) -> Option<Cow<'static, [u8]>> {
     EmoteAssets::get(&format!("{name}.gif")).map(|f| f.data)
 }
 
+/// One decoded animation frame and its display duration (ms, floored at 20).
+pub type Frame = (image::RgbaImage, u32);
+
+/// Lazily decode and cache all frames of an emote GIF. Returns `None` if unknown
+/// or if decoding fails. The returned slice is stable for the process lifetime.
+///
+/// Frames are decoded only on first display and live for the whole session; the
+/// `&'static` return keeps the render path lifetime-free. The set is bounded
+/// (183 emotes) so leaking the decoded buffers is acceptable.
+#[must_use]
+pub fn frames(name: &str) -> Option<&'static [Frame]> {
+    use std::collections::HashMap;
+    use std::sync::{OnceLock, RwLock};
+
+    static CACHE: OnceLock<RwLock<HashMap<String, &'static [Frame]>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+
+    if let Some(slice) = cache.read().ok()?.get(name) {
+        return Some(slice);
+    }
+    let decoded = decode_frames(name)?;
+    let leaked: &'static [Frame] = Box::leak(decoded.into_boxed_slice());
+    cache.write().ok()?.insert(name.to_owned(), leaked);
+    Some(leaked)
+}
+
+fn decode_frames(name: &str) -> Option<Vec<Frame>> {
+    use image::AnimationDecoder;
+    use image::codecs::gif::GifDecoder;
+
+    let data = bytes(name)?;
+    let decoder = GifDecoder::new(std::io::Cursor::new(data.into_owned())).ok()?;
+    let mut out = Vec::new();
+    for frame in decoder.into_frames().collect_frames().ok()? {
+        let (num, den) = frame.delay().numer_denom_ms();
+        let delay = if den == 0 { 100 } else { (num / den).max(20) };
+        out.push((frame.into_buffer(), delay));
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,6 +108,23 @@ mod tests {
     fn unknown_emote_is_absent() {
         assert!(!contains("definitely_not_an_emote"));
         assert!(bytes("definitely_not_an_emote").is_none());
+    }
+
+    #[test]
+    fn frames_decode_with_delays() {
+        let fs = frames("usmiech").expect("usmiech frames");
+        assert!(!fs.is_empty(), "at least one frame");
+        let (img, _delay) = &fs[0];
+        assert!(img.width() > 0 && img.height() > 0);
+        assert!(fs.iter().all(|(_, d)| *d >= 20));
+        // Stable identity across calls (cached, same pointer).
+        let again = frames("usmiech").unwrap();
+        assert!(std::ptr::eq(fs.as_ptr(), again.as_ptr()));
+    }
+
+    #[test]
+    fn frames_unknown_is_none() {
+        assert!(frames("definitely_not_an_emote").is_none());
     }
 
     #[test]
