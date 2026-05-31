@@ -1080,6 +1080,11 @@ impl App {
         let mut paste_tick = interval(Duration::from_millis(500));
         let shell_broadcast_sleep = tokio::time::sleep(std::time::Duration::from_secs(86400));
         tokio::pin!(shell_broadcast_sleep);
+        // ~20 FPS clock for inline emote animation. Re-armed to 50ms after each
+        // draw only while an animated (multi-frame) emote is visible; otherwise
+        // it sleeps far in the future so an idle UI never wakes for animation.
+        let emote_anim_sleep = tokio::time::sleep(std::time::Duration::from_secs(86400));
+        tokio::pin!(emote_anim_sleep);
 
         while !self.should_quit {
             if self.should_detach {
@@ -1110,6 +1115,21 @@ impl App {
 
             if self.terminal.is_some() {
                 self.write_tmux_direct_image();
+            }
+
+            // Re-arm the animation clock: wake in 50ms iff an animated (multi-frame)
+            // emote is currently on screen, else sleep far out (idle = no wakeups).
+            {
+                let animating = self.emotes_graphical()
+                    && self.emote_placements.iter().any(|p| {
+                        crate::app::emote_anim::EmoteAnimator::delays(p.emote_index).len() > 1
+                    });
+                let next = if animating {
+                    std::time::Duration::from_millis(50)
+                } else {
+                    std::time::Duration::from_secs(86400)
+                };
+                emote_anim_sleep.as_mut().reset(tokio::time::Instant::now() + next);
             }
 
             tokio::select! {
@@ -1311,6 +1331,12 @@ impl App {
                 _ = paste_tick.tick() => {
                     self.drain_paste_queue();
                     self.drain_pending_web_events();
+                },
+                () = &mut emote_anim_sleep => {
+                    // Waking here re-enters the loop and redraws unconditionally;
+                    // the next draw recomputes each emote's frame index from the
+                    // animation clock. No `needs_full_redraw` (that would clear the
+                    // screen and flicker); the re-arm above schedules the next tick.
                 },
                 action = self.script_action_rx.recv() => {
                     if let Some(action) = action {
