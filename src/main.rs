@@ -4,6 +4,7 @@ mod config;
 mod constants;
 mod dcc;
 mod e2e;
+mod emotes;
 mod fs_secure;
 mod image_preview;
 mod irc;
