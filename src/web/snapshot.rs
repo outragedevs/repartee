@@ -244,8 +244,7 @@ mod tests {
 
     #[test]
     fn message_to_wire_populates_previews_when_extractor_provided() {
-        let extractor =
-            crate::web::preview::WebPreviewExtractor::new(vec![0u8; 32], 4, 200);
+        let extractor = crate::web::preview::WebPreviewExtractor::new(vec![0u8; 32], 4, 200);
         let msg = crate::state::buffer::Message {
             id: 1,
             timestamp: Utc::now(),

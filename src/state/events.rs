@@ -171,10 +171,8 @@ impl AppState {
             && message.nick.as_deref().is_some_and(|n| !n.is_empty())
             && let Some(ref tx) = self.shrink_incoming_tx
         {
-            let urls = crate::shrink::find_long_urls(
-                &message.text,
-                self.shrink_min_url_length as usize,
-            );
+            let urls =
+                crate::shrink::find_long_urls(&message.text, self.shrink_min_url_length as usize);
             let our_nick = self
                 .buffers
                 .get(buffer_id)
@@ -198,15 +196,11 @@ impl AppState {
                 match tx.try_send(pending) {
                     Ok(()) => return,
                     Err(TrySendError::Full(p)) => {
-                        tracing::warn!(
-                            "shrink: NOTICE queue full, delivering unshrunk"
-                        );
+                        tracing::warn!("shrink: NOTICE queue full, delivering unshrunk");
                         return self.add_message_unshrunk(buffer_id, p.message);
                     }
                     Err(TrySendError::Closed(p)) => {
-                        tracing::error!(
-                            "shrink: incoming worker dead, delivering unshrunk"
-                        );
+                        tracing::error!("shrink: incoming worker dead, delivering unshrunk");
                         return self.add_message_unshrunk(buffer_id, p.message);
                     }
                 }
@@ -232,7 +226,8 @@ impl AppState {
         }
         self.maybe_log(buffer_id, &message);
         // Queue web event for broadcast.
-        let wire = crate::web::snapshot::message_to_wire(&message, self.web_preview_extractor.as_deref());
+        let wire =
+            crate::web::snapshot::message_to_wire(&message, self.web_preview_extractor.as_deref());
         if message.highlight {
             self.pending_web_events
                 .push(crate::web::protocol::WebEvent::MentionAlert {
@@ -260,7 +255,10 @@ impl AppState {
         self.pending_web_events
             .push(crate::web::protocol::WebEvent::NewMessage {
                 buffer_id: buffer_id.to_string(),
-                message: crate::web::snapshot::message_to_wire(&message, self.web_preview_extractor.as_deref()),
+                message: crate::web::snapshot::message_to_wire(
+                    &message,
+                    self.web_preview_extractor.as_deref(),
+                ),
             });
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
             buf.messages.push_back(message);
@@ -283,7 +281,8 @@ impl AppState {
         if !self.buffers.contains_key(buffer_id) {
             return;
         }
-        let wire = crate::web::snapshot::message_to_wire(&message, self.web_preview_extractor.as_deref());
+        let wire =
+            crate::web::snapshot::message_to_wire(&message, self.web_preview_extractor.as_deref());
         self.pending_web_events
             .push(crate::web::protocol::WebEvent::NewMessage {
                 buffer_id: buffer_id.to_string(),
@@ -333,10 +332,8 @@ impl AppState {
         if self.shrink_incoming_active
             && let Some(ref tx) = self.shrink_incoming_tx
         {
-            let urls = crate::shrink::find_long_urls(
-                &message.text,
-                self.shrink_min_url_length as usize,
-            );
+            let urls =
+                crate::shrink::find_long_urls(&message.text, self.shrink_min_url_length as usize);
             if !urls.is_empty() {
                 let pending = crate::app::shrink::PendingIncoming {
                     buffer_id: buffer_id.to_string(),
@@ -352,9 +349,7 @@ impl AppState {
                 match tx.try_send(pending) {
                     Ok(()) => return,
                     Err(TrySendError::Full(p)) => {
-                        tracing::warn!(
-                            "shrink: incoming queue full, delivering unshrunk"
-                        );
+                        tracing::warn!("shrink: incoming queue full, delivering unshrunk");
                         self.add_message_with_activity_unshrunk(
                             buffer_id,
                             p.message,
@@ -363,9 +358,7 @@ impl AppState {
                         return;
                     }
                     Err(TrySendError::Closed(p)) => {
-                        tracing::error!(
-                            "shrink: incoming worker dead, delivering unshrunk"
-                        );
+                        tracing::error!("shrink: incoming worker dead, delivering unshrunk");
                         self.add_message_with_activity_unshrunk(
                             buffer_id,
                             p.message,
@@ -400,7 +393,8 @@ impl AppState {
         }
         self.maybe_log(buffer_id, &message);
         // Queue web events for broadcast.
-        let wire = crate::web::snapshot::message_to_wire(&message, self.web_preview_extractor.as_deref());
+        let wire =
+            crate::web::snapshot::message_to_wire(&message, self.web_preview_extractor.as_deref());
         if message.highlight {
             self.pending_web_events
                 .push(crate::web::protocol::WebEvent::MentionAlert {

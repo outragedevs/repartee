@@ -101,9 +101,7 @@ impl App {
         // (the store HMACs raw tokens with this secret; rotating it is what
         // logs everyone out).
         let env_path = crate::constants::env_path();
-        if let Err(e) =
-            crate::config::ensure_session_secret(&mut self.config.web, &env_path)
-        {
+        if let Err(e) = crate::config::ensure_session_secret(&mut self.config.web, &env_path) {
             tracing::warn!("could not initialise WEB_SESSION_SECRET: {e}");
         }
 

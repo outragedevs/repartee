@@ -29,17 +29,11 @@ pub fn placeholder_for_index(index: u32) -> String {
     std::iter::repeat_n(c, EMOTE_COLS).collect()
 }
 
-/// True if `c` is one of our placeholder codepoints.
-#[must_use]
-pub fn is_placeholder_char(c: char) -> bool {
-    (PUA_BASE..=PUA_MAX).contains(&(c as u32))
-}
-
 /// Recover the emote registry index from a placeholder char.
 #[must_use]
-pub fn decode_placeholder_index(c: char) -> Option<u32> {
+pub const fn decode_placeholder_index(c: char) -> Option<u32> {
     let u = c as u32;
-    if (PUA_BASE..=PUA_MAX).contains(&u) {
+    if u >= PUA_BASE && u <= PUA_MAX {
         Some(u - PUA_BASE)
     } else {
         None
@@ -113,7 +107,7 @@ mod tests {
     fn encode_then_decode_roundtrips_index() {
         let ph = placeholder_for_index(42);
         assert_eq!(ph.chars().count(), EMOTE_COLS);
-        assert!(ph.chars().all(is_placeholder_char));
+        assert!(ph.chars().all(|c| decode_placeholder_index(c).is_some()));
         assert_eq!(
             decode_placeholder_index(ph.chars().next().unwrap()),
             Some(42)
@@ -129,7 +123,6 @@ mod tests {
     #[test]
     fn non_placeholder_char_decodes_none() {
         assert_eq!(decode_placeholder_index('a'), None);
-        assert!(!is_placeholder_char('a'));
     }
 
     #[test]

@@ -382,12 +382,7 @@ impl InputState {
                 .strip_prefix(':')
                 .is_some_and(|p| !p.is_empty() && !p.contains(':'));
             let matches: Vec<String> = if is_emote {
-                let ep = &prefix[1..];
-                crate::emotes::names()
-                    .iter()
-                    .filter(|n| n.starts_with(ep))
-                    .map(|n| format!(":{n}:"))
-                    .collect()
+                emote_completions(&prefix).unwrap_or_default()
             } else {
                 match subcommand_ctx {
                     Some(SubcommandContext::Help) => {
@@ -466,6 +461,23 @@ impl InputState {
             });
         }
     }
+}
+
+/// If `word` looks like an emote prefix (`:usm` — one leading colon, no closing
+/// colon), return the matching `:name:` completions against the embedded set;
+/// otherwise `None`. An empty `Vec` means the prefix was emote-shaped but matched
+/// nothing (so completion does nothing rather than falling through to nicks).
+fn emote_completions(word: &str) -> Option<Vec<String>> {
+    let ep = word
+        .strip_prefix(':')
+        .filter(|p| !p.is_empty() && !p.contains(':'))?;
+    Some(
+        crate::emotes::names()
+            .iter()
+            .filter(|n| n.starts_with(ep))
+            .map(|n| format!(":{n}:"))
+            .collect(),
+    )
 }
 
 /// Build nick completion list with recent speakers first (erssi-style).
@@ -830,9 +842,21 @@ mod tests {
         input.cursor_pos = input.value.len();
         input.tab_complete(&[], &[], &[], &[]);
         // ":usm" -> ":usmiech: " (closing colon + plain space, never ": ").
-        assert!(input.value.starts_with("hey :usmiech:"), "got {:?}", input.value);
-        assert!(input.value.contains(":usmiech: "), "emote closes colon + space: {:?}", input.value);
-        assert!(!input.value.contains(":usmiech: :"), "no nick-style ': ' suffix: {:?}", input.value);
+        assert!(
+            input.value.starts_with("hey :usmiech:"),
+            "got {:?}",
+            input.value
+        );
+        assert!(
+            input.value.contains(":usmiech: "),
+            "emote closes colon + space: {:?}",
+            input.value
+        );
+        assert!(
+            !input.value.contains(":usmiech: :"),
+            "no nick-style ': ' suffix: {:?}",
+            input.value
+        );
     }
 
     #[test]

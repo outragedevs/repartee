@@ -99,8 +99,8 @@ fn load_existing_named_key_at(path: &Path, suffix: &str) -> Result<String, Strin
             path.display()
         ));
     }
-    let file = std::fs::File::open(path)
-        .map_err(|e| format!("failed to open {}: {e}", path.display()))?;
+    let file =
+        std::fs::File::open(path).map_err(|e| format!("failed to open {}: {e}", path.display()))?;
     let reader = std::io::BufReader::new(file);
     for line in reader.lines() {
         let line = line.map_err(|e| format!("failed to read line: {e}"))?;

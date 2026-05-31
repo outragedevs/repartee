@@ -195,9 +195,7 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 "session_days" => config.web.session_days.to_string(),
                 "username" => config.web.username.clone(),
                 "image_previews" => config.web.image_previews.to_string(),
-                "image_previews_max_per_msg" => {
-                    config.web.image_previews_max_per_msg.to_string()
-                }
+                "image_previews_max_per_msg" => config.web.image_previews_max_per_msg.to_string(),
                 "thumbnail_cache_mb" => config.web.thumbnail_cache_mb.to_string(),
                 "cloudflare_tunnel_name" => config.web.cloudflare_tunnel_name.clone(),
                 "password" => config.web.password.clone(),
@@ -845,9 +843,7 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
             // `shrink.enabled` from off to on at runtime won't
             // materialise a client; users get a restart-required
             // notice from /set already if they hit that case.
-            if path == "shrink.enabled"
-                || path == "shrink.incoming_enabled"
-            {
+            if path == "shrink.enabled" || path == "shrink.incoming_enabled" {
                 app.state.shrink_incoming_active = app.config.shrink.enabled
                     && app.config.shrink.incoming_enabled
                     && app.shrink_client.is_some();

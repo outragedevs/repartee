@@ -4,6 +4,10 @@
 )]
 pub(crate) mod backlog;
 mod dcc;
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "ui::layout calls emote_anim::composite"
+)]
 pub(crate) mod emote_anim;
 mod image;
 mod input;
@@ -1087,7 +1091,7 @@ impl App {
         // ~20 FPS clock for inline emote animation. Re-armed to 50ms after each
         // draw only while an animated (multi-frame) emote is visible; otherwise
         // it sleeps far in the future so an idle UI never wakes for animation.
-        let emote_anim_sleep = tokio::time::sleep(std::time::Duration::from_secs(86400));
+        let emote_anim_sleep = tokio::time::sleep(std::time::Duration::from_hours(24));
         tokio::pin!(emote_anim_sleep);
 
         while !self.should_quit {
@@ -1131,7 +1135,7 @@ impl App {
                 let next = if animating {
                     std::time::Duration::from_millis(50)
                 } else {
-                    std::time::Duration::from_secs(86400)
+                    std::time::Duration::from_hours(24)
                 };
                 emote_anim_sleep
                     .as_mut()

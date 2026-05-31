@@ -7042,12 +7042,7 @@ mod tests {
             next_reconnect: None,
             should_reconnect: true,
             joined_channels: Vec::new(),
-            origin_config: state
-                .connections
-                .get("test")
-                .unwrap()
-                .origin_config
-                .clone(),
+            origin_config: state.connections.get("test").unwrap().origin_config.clone(),
             local_ip: None,
             enabled_caps: std::collections::HashSet::new(),
             who_token_counter: 0,
@@ -7110,8 +7105,7 @@ mod tests {
             buf.topic = Some("stale topic".into());
             buf.topic_set_by = Some("stale_setter".into());
             buf.modes = Some("nt".into());
-            buf.list_modes
-                .insert("b".into(), vec![]);
+            buf.list_modes.insert("b".into(), vec![]);
         }
 
         let msg = make_irc_msg(

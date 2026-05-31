@@ -737,9 +737,7 @@ impl App {
                 }
                 (_, KeyCode::Left | KeyCode::Up) => *selected = selected.saturating_sub(1),
                 (_, KeyCode::Right | KeyCode::Down) => {
-                    if len > 0 {
-                        *selected = (*selected + 1).min(len - 1);
-                    }
+                    *selected = (*selected + 1).min(len.saturating_sub(1));
                 }
                 (_, KeyCode::Home) => *selected = 0,
                 (_, KeyCode::End) => *selected = len.saturating_sub(1),

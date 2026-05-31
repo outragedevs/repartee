@@ -52,7 +52,6 @@ pub struct PendingUserhostRequest {
     pub action: PendingUserhostAction,
 }
 
-
 pub struct AppState {
     pub connections: HashMap<String, Connection>,
     pub buffers: IndexMap<String, Buffer>,
@@ -113,8 +112,7 @@ pub struct AppState {
     /// When `Some`, every `WireMessage` constructed for the web frontend has
     /// its `previews` populated by this extractor. `None` = web image
     /// previews disabled.
-    pub web_preview_extractor:
-        Option<std::sync::Arc<crate::web::preview::WebPreviewExtractor>>,
+    pub web_preview_extractor: Option<std::sync::Arc<crate::web::preview::WebPreviewExtractor>>,
 }
 
 impl AppState {

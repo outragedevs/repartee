@@ -79,7 +79,7 @@ fn decode_frames(name: &str) -> Option<Vec<Frame>> {
     let mut out = Vec::new();
     for frame in decoder.into_frames().collect_frames().ok()? {
         let (num, den) = frame.delay().numer_denom_ms();
-        let delay = if den == 0 { 100 } else { (num / den).max(20) };
+        let delay = num.checked_div(den).map_or(100, |ms| ms.max(20));
         out.push((frame.into_buffer(), delay));
     }
     if out.is_empty() { None } else { Some(out) }

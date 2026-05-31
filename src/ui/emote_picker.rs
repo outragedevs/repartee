@@ -33,7 +33,7 @@ pub enum EmotePickerState {
 
 impl EmotePickerState {
     #[must_use]
-    pub fn is_open(&self) -> bool {
+    pub const fn is_open(&self) -> bool {
         matches!(self, Self::Open { .. })
     }
 
@@ -109,15 +109,15 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
 
     for (vis, &reg_idx) in filtered.iter().enumerate().skip(start).take(per_page) {
         let slot = vis - start;
-        let r = slot / cols;
-        let c = slot % cols;
-        let x = inner.x + u16::try_from(c).unwrap_or(0) * CELL_W;
-        let y = inner.y + u16::try_from(r).unwrap_or(0);
-        let w = CELL_W.min(inner.x + inner.width - x);
+        let row = slot / cols;
+        let col = slot % cols;
+        let x = inner.x + u16::try_from(col).unwrap_or(0) * CELL_W;
+        let y = inner.y + u16::try_from(row).unwrap_or(0);
+        let cell_w = CELL_W.min(inner.x + inner.width - x);
         if y >= inner.y + inner.height {
             break;
         }
-        let rect = Rect::new(x, y, w, 1);
+        let rect = Rect::new(x, y, cell_w, 1);
         let name = &names[reg_idx as usize];
         let label = format!(":{name}:");
         let style = if vis == selected {

@@ -159,13 +159,7 @@ impl ShrinkClient {
     /// --slug=` extension.
     #[must_use]
     pub fn is_slug_conflict(err: &ShrinkError) -> bool {
-        matches!(
-            err,
-            ShrinkError::Api {
-                status: 409,
-                ..
-            }
-        )
+        matches!(err, ShrinkError::Api { status: 409, .. })
     }
 }
 

@@ -170,7 +170,7 @@ fn render_chat_message(
 /// text contains no emote. The emote's placeholder index is its position in
 /// `emotes::names()` (binary-searchable, matching the animator's lookup).
 #[must_use]
-pub(crate) fn emotify_message_text(text: &str, graphical: bool) -> String {
+fn emotify_message_text(text: &str, graphical: bool) -> String {
     use crate::emotes;
     use crate::emotes::parse::Segment;
     use crate::ui::emote_layout::placeholder_for_index;
@@ -188,15 +188,12 @@ pub(crate) fn emotify_message_text(text: &str, graphical: bool) -> String {
         match seg {
             Segment::Text(range) => out.push_str(&text[range]),
             Segment::Emote(name) => {
-                match names.binary_search_by(|n| n.as_str().cmp(name.as_str())) {
-                    Ok(idx) => {
-                        out.push_str(&placeholder_for_index(u32::try_from(idx).unwrap_or(0)))
-                    }
-                    Err(_) => {
-                        out.push(':');
-                        out.push_str(&name);
-                        out.push(':');
-                    }
+                if let Ok(idx) = names.binary_search_by(|n| n.as_str().cmp(name.as_str())) {
+                    out.push_str(&placeholder_for_index(u32::try_from(idx).unwrap_or(0)));
+                } else {
+                    out.push(':');
+                    out.push_str(&name);
+                    out.push(':');
                 }
             }
         }
@@ -207,12 +204,15 @@ pub(crate) fn emotify_message_text(text: &str, graphical: bool) -> String {
 #[cfg(test)]
 mod emote_tests {
     use super::emotify_message_text;
-    use crate::ui::emote_layout::{EMOTE_COLS, is_placeholder_char};
+    use crate::ui::emote_layout::{EMOTE_COLS, decode_placeholder_index};
 
     #[test]
     fn known_token_becomes_placeholder_when_graphical() {
         let out = emotify_message_text("hi :usmiech: x", true);
-        let placeholder_chars = out.chars().filter(|c| is_placeholder_char(*c)).count();
+        let placeholder_chars = out
+            .chars()
+            .filter(|c| decode_placeholder_index(*c).is_some())
+            .count();
         assert_eq!(placeholder_chars, EMOTE_COLS);
         assert!(!out.contains(":usmiech:"));
         assert!(out.starts_with("hi "));

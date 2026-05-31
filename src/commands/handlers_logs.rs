@@ -26,7 +26,10 @@ pub(crate) fn cmd_log_help(app: &mut App, _args: &[String]) {
     add_local_event(app, "  /search <text>   search the active log");
     add_local_event(app, "  /quit            exit log browser");
     add_local_event(app, "  /help            this list");
-    add_local_event(app, "Hotkeys (outside input): Q quit, ↑/↓ scroll, PgUp/PgDn page, g/G start/end");
+    add_local_event(
+        app,
+        "Hotkeys (outside input): Q quit, ↑/↓ scroll, PgUp/PgDn page, g/G start/end",
+    );
 }
 
 #[expect(
@@ -159,7 +162,13 @@ pub(crate) fn cmd_log_search(app: &mut App, args: &[String]) {
     // Plain (FTS) path header.
     add_local_event(
         app,
-        &format!("[{} matches for \"{}\" in {}/{}]", rows.len(), query, net, buf),
+        &format!(
+            "[{} matches for \"{}\" in {}/{}]",
+            rows.len(),
+            query,
+            net,
+            buf
+        ),
     );
     for hit in rows {
         let when = chrono::DateTime::<chrono::Utc>::from_timestamp(hit.timestamp, 0)

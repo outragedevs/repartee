@@ -30,7 +30,7 @@ pub fn frame_index_at(delays: &[u32], elapsed_ms: u128) -> usize {
     0
 }
 
-/// Holds per-(emote_index, frame_index) protocol images sized for compositing.
+/// Holds per-(`emote_index`, `frame_index`) protocol images sized for compositing.
 #[derive(Default)]
 pub struct EmoteAnimator {
     cache: HashMap<(u32, usize), StatefulProtocol>,
