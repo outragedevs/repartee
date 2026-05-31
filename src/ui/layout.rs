@@ -142,6 +142,22 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     app.ui_regions = Some(regions);
 
+    // Composite inline animated emotes over the placeholder cells the chat view
+    // reserved (above text, below the image-preview modal).
+    if app.emotes_graphical() && !app.emote_placements.is_empty() {
+        let elapsed = app.emote_anim_start.elapsed().as_millis();
+        // Move placements out so picker/animator field borrows stay disjoint.
+        let placements = std::mem::take(&mut app.emote_placements);
+        crate::app::emote_anim::composite(
+            frame,
+            &app.picker,
+            &mut app.emote_animator,
+            &placements,
+            elapsed,
+        );
+        app.emote_placements = placements;
+    }
+
     // Spell suggestion popup (above input, below image overlay).
     super::input::render_spell_popup(frame, input_area, app);
 

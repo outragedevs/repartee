@@ -1,6 +1,7 @@
 #[allow(clippy::redundant_pub_crate, reason = "log_browser reuses format_date_separator")]
 pub(crate) mod backlog;
 mod dcc;
+pub(crate) mod emote_anim;
 mod image;
 mod input;
 mod irc;
@@ -384,6 +385,13 @@ pub struct App {
     pub http_client: reqwest::Client,
     pub picker: ratatui_image::picker::Picker,
     pub in_tmux: bool,
+    /// Emote placements resolved during the last chat render, consumed by the
+    /// compositing pass in `layout::draw`. Cleared and rebuilt every frame.
+    pub emote_placements: Vec<crate::ui::emote_layout::EmotePlacement>,
+    /// Per-(emote, frame) protocol image cache + clock for inline animation.
+    pub emote_animator: crate::app::emote_anim::EmoteAnimator,
+    /// Animation clock origin; frame indices derive from `now - this`.
+    pub emote_anim_start: std::time::Instant,
     pub needs_full_redraw: bool,
     pub outer_terminal: String,
     pub color_support: crate::nick_color::ColorSupport,
@@ -703,6 +711,9 @@ impl App {
             http_client,
             picker,
             in_tmux,
+            emote_placements: Vec::new(),
+            emote_animator: crate::app::emote_anim::EmoteAnimator::default(),
+            emote_anim_start: Instant::now(),
             needs_full_redraw: false,
             outer_terminal: outer_terminal.to_string(),
             color_support,
@@ -774,6 +785,18 @@ impl App {
     }
 
     /// Recompute the cached wrap-indent width used by `chat_view`.
+    /// Whether emotes should render graphically this frame: enabled, mode is
+    /// `Graphical`, and the detected protocol is a real graphics protocol (not
+    /// Halfblocks). In text/off mode or on non-graphics terminals, `:name:`
+    /// tokens stay as literal text.
+    #[must_use]
+    pub fn emotes_graphical(&self) -> bool {
+        use crate::config::RenderMode;
+        self.config.emotes.enabled
+            && self.config.emotes.render == RenderMode::Graphical
+            && self.picker.protocol_type() != ratatui_image::picker::ProtocolType::Halfblocks
+    }
+
     pub fn recompute_wrap_indent(&mut self) {
         let ts_sample = chrono::Local::now()
             .format(&self.config.general.timestamp_format)
