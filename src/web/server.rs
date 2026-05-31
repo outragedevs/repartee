@@ -250,6 +250,46 @@ async fn favicon_handler() -> impl IntoResponse {
     StatusCode::NO_CONTENT
 }
 
+/// JSON array of all known emote names (sorted). Cached after first build.
+fn emote_manifest_json() -> &'static str {
+    use std::sync::LazyLock;
+    static MANIFEST: LazyLock<String> = LazyLock::new(|| {
+        serde_json::to_string(crate::emotes::names()).unwrap_or_else(|_| "[]".to_owned())
+    });
+    &MANIFEST
+}
+
+/// GET /emotes/manifest.json — the emote name whitelist for the web frontend.
+async fn emotes_manifest_handler() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "application/json; charset=utf-8"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        emote_manifest_json().to_owned(),
+    )
+        .into_response()
+}
+
+/// GET /emotes/{file} — serve an embedded emote GIF (e.g. `usmiech.gif`).
+async fn emote_handler(Path(file): Path<String>) -> Response {
+    // `file` is e.g. "usmiech.gif". Strip extension, validate against the registry.
+    let name = file.strip_suffix(".gif").unwrap_or(&file);
+    match crate::emotes::bytes(name) {
+        Some(data) => (
+            StatusCode::OK,
+            [
+                (axum::http::header::CONTENT_TYPE, "image/gif"),
+                (axum::http::header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+            ],
+            data.into_owned(),
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 /// Build the axum router with all routes.
 pub fn build_router(handle: Arc<AppHandle>) -> Router {
     Router::new()
@@ -260,6 +300,8 @@ pub fn build_router(handle: Arc<AppHandle>) -> Router {
         .route("/api/preview", get(super::preview::preview_handler))
         .route("/ws", get(super::ws::ws_handler))
         .route("/favicon.ico", get(favicon_handler))
+        .route("/emotes/manifest.json", get(emotes_manifest_handler))
+        .route("/emotes/{file}", get(emote_handler))
         .route("/", get(index_handler))
         .route("/{*path}", get(static_handler))
         .with_state(handle)
@@ -326,6 +368,15 @@ pub async fn start(
 mod tests {
     use super::*;
 
+    #[test]
+    fn emote_manifest_lists_known_names() {
+        let json = emote_manifest_json();
+        let names: Vec<String> = serde_json::from_str(json).expect("valid JSON array");
+        assert!(names.iter().any(|n| n == "usmiech"));
+        assert!(names.windows(2).all(|w| w[0] <= w[1]), "manifest must be sorted");
+        assert_eq!(names.len(), crate::emotes::names().len());
+    }
+
     fn make_test_handle() -> Arc<AppHandle> {
         let (tx, _rx) = mpsc::channel(256);
         Arc::new(AppHandle {
@@ -345,6 +396,48 @@ mod tests {
     fn test_app(handle: Arc<AppHandle>) -> Router {
         let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
         build_router(handle).layer(axum::Extension(PeerAddr(addr)))
+    }
+
+    #[tokio::test]
+    async fn emote_route_serves_gif_bytes() {
+        let app = test_app(make_test_handle());
+        let request = axum::http::Request::builder()
+            .uri("/emotes/usmiech.gif")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            "image/gif"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        assert!(body.starts_with(b"GIF"), "served body must be a GIF");
+    }
+
+    #[tokio::test]
+    async fn emote_route_unknown_is_404() {
+        let app = test_app(make_test_handle());
+        let request = axum::http::Request::builder()
+            .uri("/emotes/definitely_not_real.gif")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn emote_manifest_route_returns_json_array() {
+        let app = test_app(make_test_handle());
+        let request = axum::http::Request::builder()
+            .uri("/emotes/manifest.json")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000).await.unwrap();
+        let names: Vec<String> = serde_json::from_slice(&body).unwrap();
+        assert!(names.iter().any(|n| n == "usmiech"));
     }
 
     #[tokio::test]
