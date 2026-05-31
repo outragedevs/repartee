@@ -674,6 +674,20 @@ html, body {
     image-rendering: auto;
 }
 
+/* Visually-hidden ":name:" kept in the DOM so copy/paste and screen readers
+   still surface the shortcode for an emote rendered as an <img>. */
+.emote-code {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
 /* === Link image previews === */
 
 .msg-previews {

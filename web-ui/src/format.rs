@@ -302,17 +302,21 @@ pub fn linkify_spans(spans: Vec<StyledSpan>) -> Vec<StyledSpan> {
     out
 }
 
-/// Split any `:name:` tokens (whitelisted by `known`) inside text spans into emote
-/// spans. Spans that are already links/emotes, or carry no colon, pass through.
-/// Matching mirrors the TUI tokenizer: `:` + `[a-z0-9_]+` + `:`, name in `known`.
+/// Split any known `:name:` tokens inside text spans into emote spans. Spans that
+/// are already links/emotes, or carry no colon, pass through. Uses the embedded
+/// emote whitelist ([`crate::emotes::is_emote`]).
+///
+/// Matching mirrors the native TUI tokenizer (`src/emotes/parse.rs`): `:` +
+/// `[a-z0-9_]+` + `:`. Keep the two in lockstep — `emotify_parity_with_rules`
+/// guards the shared matching semantics.
 #[must_use]
-pub fn emotify_spans(
-    spans: Vec<StyledSpan>,
-    known: &std::collections::HashSet<String>,
-) -> Vec<StyledSpan> {
-    if known.is_empty() {
-        return spans;
-    }
+pub fn emotify_spans(spans: Vec<StyledSpan>) -> Vec<StyledSpan> {
+    emotify_spans_with(spans, crate::emotes::is_emote)
+}
+
+/// `emotify_spans` with an injectable whitelist predicate (for tests).
+#[must_use]
+pub fn emotify_spans_with(spans: Vec<StyledSpan>, is_known: impl Fn(&str) -> bool) -> Vec<StyledSpan> {
     let mut out = Vec::with_capacity(spans.len());
     for span in spans {
         if span.link.is_some() || span.emote_name.is_some() || !span.text.contains(':') {
@@ -335,7 +339,7 @@ pub fn emotify_spans(
                 }
                 if j < bytes.len() && bytes[j] == b':' && j > name_start {
                     let name = &span.text[name_start..j];
-                    if known.contains(name) {
+                    if is_known(name) {
                         if text_start < i {
                             out.push(StyledSpan {
                                 text: span.text[text_start..i].to_owned(),
@@ -538,13 +542,13 @@ mod tests {
         assert_eq!(out, spans);
     }
 
-    fn known() -> std::collections::HashSet<String> {
-        ["usmiech", "lol"].iter().map(|s| (*s).to_owned()).collect()
+    fn known(name: &str) -> bool {
+        matches!(name, "usmiech" | "lol")
     }
 
     #[test]
     fn splits_known_emote_into_emote_span() {
-        let out = emotify_spans(vec![plain("hi :lol: x")], &known());
+        let out = emotify_spans_with(vec![plain("hi :lol: x")], known);
         assert_eq!(out.len(), 3);
         assert_eq!(out[0].text, "hi ");
         assert_eq!(out[1].emote_name.as_deref(), Some("lol"));
@@ -554,22 +558,22 @@ mod tests {
 
     #[test]
     fn unknown_and_smileys_untouched() {
-        let out = emotify_spans(vec![plain(":) :nope:")], &known());
+        let out = emotify_spans_with(vec![plain(":) :nope:")], known);
         assert_eq!(out.len(), 1);
         assert!(out[0].emote_name.is_none());
         assert_eq!(out[0].text, ":) :nope:");
     }
 
     #[test]
-    fn empty_name_set_is_noop() {
-        let out = emotify_spans(vec![plain(":lol:")], &std::collections::HashSet::new());
+    fn no_match_is_noop() {
+        let out = emotify_spans_with(vec![plain(":zzz:")], known);
         assert_eq!(out.len(), 1);
         assert!(out[0].emote_name.is_none());
     }
 
     #[test]
     fn styled_span_keeps_style_on_surrounding_text() {
-        let out = emotify_spans(vec![styled("a :lol: b")], &known());
+        let out = emotify_spans_with(vec![styled("a :lol: b")], known);
         assert_eq!(out.len(), 3);
         assert!(out[0].bold && out[0].fg.is_some()); // surrounding text keeps style
         assert!(out[1].emote_name.is_some());
@@ -579,10 +583,19 @@ mod tests {
 
     #[test]
     fn link_span_is_not_emotified() {
-        let link = StyledSpan { text: ":lol:".to_owned(), link: Some("x".to_owned()), ..StyledSpan::default() };
-        let out = emotify_spans(vec![link], &known());
+        let link =
+            StyledSpan { text: ":lol:".to_owned(), link: Some("x".to_owned()), ..StyledSpan::default() };
+        let out = emotify_spans_with(vec![link], known);
         assert_eq!(out.len(), 1);
         assert!(out[0].emote_name.is_none());
+    }
+
+    #[test]
+    fn emotify_spans_uses_embedded_whitelist() {
+        // The zero-arg entry point uses the build-time embedded set.
+        let out = emotify_spans(vec![plain(":usmiech:")]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].emote_name.as_deref(), Some("usmiech"));
     }
 
     #[test]

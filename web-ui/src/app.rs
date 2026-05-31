@@ -35,16 +35,6 @@ pub fn App() -> impl IntoView {
         }
     }
 
-    // Fetch the built-in emote name manifest once so `:name:` tokens can be
-    // rewritten into inline <img> emotes. Failure is non-fatal (no emotes).
-    leptos::task::spawn_local(async move {
-        if let Ok(resp) = gloo_net::http::Request::get("/emotes/manifest.json").send().await {
-            if let Ok(names) = resp.json::<Vec<String>>().await {
-                state.emote_names.set(names);
-            }
-        }
-    });
-
     // Apply theme.
     Effect::new(move || {
         let theme = state.theme.get();
