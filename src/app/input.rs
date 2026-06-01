@@ -778,15 +778,19 @@ impl App {
         }
     }
 
-    /// Insert `:name:` for the registry index at the input cursor.
+    /// Insert `:name:` for the registry index at the input cursor, in the
+    /// configured emote language (`emotes.lang`).
     pub(crate) fn insert_emote_by_index(&mut self, index: u32) {
-        if let Some(name) = crate::emotes::names().get(index as usize) {
-            let token = format!(":{name}:");
-            let at = self.input.cursor_pos;
-            self.input.value.insert_str(at, &token);
-            self.input.cursor_pos = at + token.len();
-            self.input.tab_state = None;
+        let lang = self.config.emotes.lang.to_registry();
+        let name = crate::emotes::display_name(index, lang);
+        if name == "?" {
+            return;
         }
+        let token = format!(":{name}:");
+        let at = self.input.cursor_pos;
+        self.input.value.insert_str(at, &token);
+        self.input.cursor_pos = at + token.len();
+        self.input.tab_state = None;
     }
 
     fn handle_tab(&mut self) {

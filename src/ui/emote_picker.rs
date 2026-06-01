@@ -47,7 +47,14 @@ impl EmotePickerState {
         crate::emotes::names()
             .iter()
             .enumerate()
-            .filter(|(_, n)| needle.is_empty() || n.contains(&needle))
+            .filter(|(i, n)| {
+                if needle.is_empty() || n.contains(&needle) {
+                    return true;
+                }
+                // Also match the English alias.
+                crate::emotes::english_label(u32::try_from(*i).unwrap_or(0))
+                    .is_some_and(|e| e.contains(&needle))
+            })
             .map(|(i, _)| u32::try_from(i).unwrap_or(0))
             .collect()
     }
@@ -116,7 +123,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     // Page so the selected cell is always visible.
     let page = selected / per_page;
     let start = page * per_page;
-    let names = crate::emotes::names();
+    let lang = app.config.emotes.lang.to_registry();
 
     let emote_w = u16::try_from(crate::ui::emote_layout::EMOTE_COLS).unwrap_or(2);
     for (vis, &reg_idx) in filtered.iter().enumerate().skip(start).take(per_page) {
@@ -130,7 +137,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             break;
         }
         let rect = Rect::new(x, y, cell_w, 1);
-        let name = names[reg_idx as usize].clone();
+        let name = crate::emotes::display_name(reg_idx, lang).to_owned();
         let is_sel = vis == selected;
         let style = if is_sel {
             Style::default()
@@ -198,5 +205,16 @@ mod tests {
     fn empty_filter_returns_all() {
         let all = EmotePickerState::filtered_indices("");
         assert_eq!(all.len(), crate::emotes::names().len());
+    }
+
+    #[test]
+    fn filter_matches_english_alias() {
+        let by_en = EmotePickerState::filtered_indices("smile");
+        let by_pl = EmotePickerState::filtered_indices("usmiech");
+        assert!(!by_en.is_empty());
+        assert!(
+            by_en.iter().any(|i| by_pl.contains(i)),
+            "EN and PL filters hit the same emote"
+        );
     }
 }
