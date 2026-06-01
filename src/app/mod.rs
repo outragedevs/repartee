@@ -1136,7 +1136,11 @@ impl App {
             // Re-arm the animation clock: wake in 50ms iff an animated (multi-frame)
             // emote is currently on screen, else sleep far out (idle = no wakeups).
             {
-                let animating = self.emotes_graphical()
+                // `self.terminal.is_some()` guards the detached case: while
+                // detached there is no render to clear `emote_placements`, so a
+                // stale animated placement must not keep waking the loop at 50ms.
+                let animating = self.terminal.is_some()
+                    && self.emotes_graphical()
                     && self
                         .emote_placements
                         .iter()

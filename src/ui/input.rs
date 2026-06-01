@@ -344,6 +344,7 @@ impl InputState {
         last_speakers: &[String],
         commands: &[&str],
         setting_paths: &[String],
+        emotes_enabled: bool,
     ) {
         if let Some(ref mut tab) = self.tab_state {
             if tab.matches.is_empty() {
@@ -378,9 +379,11 @@ impl InputState {
             let prefix = word;
             // Emote completion: a word like ":usm" (single leading colon, no
             // closing colon) completes to ":usmiech:" against the embedded set.
-            let is_emote = prefix
-                .strip_prefix(':')
-                .is_some_and(|p| !p.is_empty() && !p.contains(':'));
+            // Suppressed when emotes are disabled (enabled=false or render=off).
+            let is_emote = emotes_enabled
+                && prefix
+                    .strip_prefix(':')
+                    .is_some_and(|p| !p.is_empty() && !p.contains(':'));
             let matches: Vec<String> = if is_emote {
                 emote_completions(&prefix).unwrap_or_default()
             } else {
@@ -842,8 +845,18 @@ mod tests {
         let mut input = InputState::new();
         input.value = "hey :smi".to_owned();
         input.cursor_pos = input.value.len();
-        input.tab_complete(&[], &[], &[], &[]);
+        input.tab_complete(&[], &[], &[], &[], true);
         assert!(input.value.contains(":smile:"), "got {:?}", input.value);
+    }
+
+    #[test]
+    fn tab_no_emote_completion_when_disabled() {
+        let mut input = InputState::new();
+        input.value = "hey :usm".to_owned();
+        input.cursor_pos = input.value.len();
+        // emotes disabled → no emote candidates, input unchanged.
+        input.tab_complete(&[], &[], &[], &[], false);
+        assert_eq!(input.value, "hey :usm");
     }
 
     #[test]
@@ -851,7 +864,7 @@ mod tests {
         let mut input = InputState::new();
         input.value = "hey :usm".to_owned();
         input.cursor_pos = input.value.len();
-        input.tab_complete(&[], &[], &[], &[]);
+        input.tab_complete(&[], &[], &[], &[], true);
         // ":usm" -> ":usmiech: " (closing colon + plain space, never ": ").
         assert!(
             input.value.starts_with("hey :usmiech:"),
@@ -875,7 +888,7 @@ mod tests {
         let mut input = InputState::new();
         input.value = ":zzzzz".to_owned();
         input.cursor_pos = input.value.len();
-        input.tab_complete(&[], &[], &[], &[]);
+        input.tab_complete(&[], &[], &[], &[], true);
         // No known emote starts with "zzzzz" -> unchanged.
         assert_eq!(input.value, ":zzzzz");
     }
@@ -1030,7 +1043,7 @@ mod tests {
         input.cursor_pos = 3;
 
         let nicks = vec!["ferris".to_string(), "helper".to_string()];
-        input.tab_complete(&nicks, &[], &[], &[]);
+        input.tab_complete(&nicks, &[], &[], &[], true);
 
         assert_eq!(input.value, "ferris: ");
         assert_eq!(input.cursor_pos, 8);
@@ -1043,7 +1056,7 @@ mod tests {
         input.cursor_pos = 7;
 
         let nicks = vec!["ferris".to_string(), "helper".to_string()];
-        input.tab_complete(&nicks, &[], &[], &[]);
+        input.tab_complete(&nicks, &[], &[], &[], true);
 
         assert_eq!(input.value, "hey ferris ");
         assert_eq!(input.cursor_pos, 11);
@@ -1056,17 +1069,17 @@ mod tests {
         input.cursor_pos = 1;
 
         let nicks = vec!["helper".to_string(), "hank".to_string(), "hiro".to_string()];
-        input.tab_complete(&nicks, &[], &[], &[]);
+        input.tab_complete(&nicks, &[], &[], &[], true);
         assert_eq!(input.value, "hank: "); // sorted: hank, helper, hiro
 
-        input.tab_complete(&nicks, &[], &[], &[]);
+        input.tab_complete(&nicks, &[], &[], &[], true);
         assert_eq!(input.value, "helper: ");
 
-        input.tab_complete(&nicks, &[], &[], &[]);
+        input.tab_complete(&nicks, &[], &[], &[], true);
         assert_eq!(input.value, "hiro: ");
 
         // Wraps around
-        input.tab_complete(&nicks, &[], &[], &[]);
+        input.tab_complete(&nicks, &[], &[], &[], true);
         assert_eq!(input.value, "hank: ");
     }
 
@@ -1077,7 +1090,7 @@ mod tests {
         input.cursor_pos = 3;
 
         let commands = &["join", "part", "msg", "quit"];
-        input.tab_complete(&[], &[], commands, &[]);
+        input.tab_complete(&[], &[], commands, &[], true);
 
         assert_eq!(input.value, "/join ");
     }
@@ -1089,7 +1102,7 @@ mod tests {
         input.cursor_pos = 8;
 
         let commands = &["connect", "close", "clear", "quit"];
-        input.tab_complete(&[], &[], commands, &[]);
+        input.tab_complete(&[], &[], commands, &[], true);
         assert_eq!(input.value, "/help clear ");
     }
 
@@ -1100,13 +1113,13 @@ mod tests {
         input.cursor_pos = 7;
 
         let commands = &["connect", "close", "clear"];
-        input.tab_complete(&[], &[], commands, &[]);
+        input.tab_complete(&[], &[], commands, &[], true);
         assert_eq!(input.value, "/help clear ");
 
-        input.tab_complete(&[], &[], commands, &[]);
+        input.tab_complete(&[], &[], commands, &[], true);
         assert_eq!(input.value, "/help close ");
 
-        input.tab_complete(&[], &[], commands, &[]);
+        input.tab_complete(&[], &[], commands, &[], true);
         assert_eq!(input.value, "/help connect ");
     }
 
@@ -1117,7 +1130,7 @@ mod tests {
         input.cursor_pos = 15;
 
         let settings = vec!["general.nick".to_string(), "general.username".to_string()];
-        input.tab_complete(&[], &[], &[], &settings);
+        input.tab_complete(&[], &[], &[], &settings, true);
         assert_eq!(input.value, "/set general.nick ");
     }
 
@@ -1131,7 +1144,7 @@ mod tests {
             "display.nick_column_width".to_string(),
             "display.show_timestamps".to_string(),
         ];
-        input.tab_complete(&[], &[], &[], &settings);
+        input.tab_complete(&[], &[], &[], &settings, true);
         assert_eq!(input.value, "/set display.nick_column_width ");
     }
 
@@ -1232,7 +1245,7 @@ mod tests {
         input.cursor_pos = 3;
 
         let nicks = vec!["ferris".to_string()];
-        input.tab_complete(&nicks, &[], &[], &[]);
+        input.tab_complete(&nicks, &[], &[], &[], true);
         assert!(input.tab_state.is_some());
 
         input.insert_char('x');
@@ -1248,17 +1261,17 @@ mod tests {
         let nicks = vec!["helper".to_string(), "hank".to_string(), "hiro".to_string()];
         // hiro spoke most recently, then hank
         let last_speakers = vec!["hiro".to_string(), "hank".to_string()];
-        input.tab_complete(&nicks, &last_speakers, &[], &[]);
+        input.tab_complete(&nicks, &last_speakers, &[], &[], true);
         assert_eq!(input.value, "hiro: "); // most recent speaker first
 
-        input.tab_complete(&nicks, &last_speakers, &[], &[]);
+        input.tab_complete(&nicks, &last_speakers, &[], &[], true);
         assert_eq!(input.value, "hank: "); // second most recent
 
-        input.tab_complete(&nicks, &last_speakers, &[], &[]);
+        input.tab_complete(&nicks, &last_speakers, &[], &[], true);
         assert_eq!(input.value, "helper: "); // remaining nick (alphabetical)
 
         // Wraps around
-        input.tab_complete(&nicks, &last_speakers, &[], &[]);
+        input.tab_complete(&nicks, &last_speakers, &[], &[], true);
         assert_eq!(input.value, "hiro: ");
     }
 
@@ -1270,10 +1283,10 @@ mod tests {
 
         let nicks = vec!["Helper".to_string(), "Hank".to_string()];
         let last_speakers = vec!["hank".to_string()]; // lowercase in speakers list
-        input.tab_complete(&nicks, &last_speakers, &[], &[]);
+        input.tab_complete(&nicks, &last_speakers, &[], &[], true);
         assert_eq!(input.value, "hank: "); // recent speaker first
 
-        input.tab_complete(&nicks, &last_speakers, &[], &[]);
+        input.tab_complete(&nicks, &last_speakers, &[], &[], true);
         assert_eq!(input.value, "Helper: "); // remaining nick
     }
 
@@ -1285,14 +1298,14 @@ mod tests {
 
         let nicks = vec!["hank".to_string(), "hiro".to_string()];
         let last_speakers = vec!["hank".to_string()]; // hank is in both lists
-        input.tab_complete(&nicks, &last_speakers, &[], &[]);
+        input.tab_complete(&nicks, &last_speakers, &[], &[], true);
         assert_eq!(input.value, "hank: ");
 
-        input.tab_complete(&nicks, &last_speakers, &[], &[]);
+        input.tab_complete(&nicks, &last_speakers, &[], &[], true);
         assert_eq!(input.value, "hiro: "); // not hank again
 
         // Wraps to hank
-        input.tab_complete(&nicks, &last_speakers, &[], &[]);
+        input.tab_complete(&nicks, &last_speakers, &[], &[], true);
         assert_eq!(input.value, "hank: ");
     }
 
@@ -1304,7 +1317,7 @@ mod tests {
 
         let nicks = vec!["hiro".to_string(), "hank".to_string(), "helper".to_string()];
         let last_speakers: Vec<String> = vec![];
-        input.tab_complete(&nicks, &last_speakers, &[], &[]);
+        input.tab_complete(&nicks, &last_speakers, &[], &[], true);
         assert_eq!(input.value, "hank: "); // alphabetical
     }
 

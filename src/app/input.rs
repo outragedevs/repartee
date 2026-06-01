@@ -822,8 +822,14 @@ impl App {
         all_commands.sort_unstable();
         all_commands.dedup();
         let setting_paths = crate::commands::settings::get_setting_paths(&self.config);
-        self.input
-            .tab_complete(&nicks, &last_speakers, &all_commands, &setting_paths);
+        let emotes_on = self.emotes_input_enabled();
+        self.input.tab_complete(
+            &nicks,
+            &last_speakers,
+            &all_commands,
+            &setting_paths,
+            emotes_on,
+        );
     }
 
     pub(crate) fn handle_submit(&mut self, text: &str) {
