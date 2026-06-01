@@ -171,10 +171,7 @@ fn composite_emotes(frame: &mut Frame, app: &mut App) {
         return;
     }
     let elapsed = app.emote_anim_start.elapsed().as_millis();
-    let emote_bg = match hex_to_color(&app.theme.colors.bg) {
-        Some(ratatui::style::Color::Rgb(r, g, b)) => (r, g, b),
-        _ => (0, 0, 0),
-    };
+    let emote_bg = crate::theme::hex_to_rgb_or(&app.theme.colors.bg, (0, 0, 0));
     // Move placements out so picker/animator field borrows stay disjoint.
     let placements = std::mem::take(&mut app.emote_placements);
     crate::app::emote_anim::composite(

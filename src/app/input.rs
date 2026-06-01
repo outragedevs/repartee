@@ -718,6 +718,7 @@ impl App {
             filter: String::new(),
             selected: 0,
             cell_rects: Vec::new(),
+            cols: 1,
         };
     }
 
@@ -727,11 +728,15 @@ impl App {
         let mut close = false;
         let mut insert_idx: Option<u32> = None;
         if let EmotePickerState::Open {
-            filter, selected, ..
+            filter,
+            selected,
+            cols,
+            ..
         } = &mut self.emote_picker
         {
             let filtered = EmotePickerState::filtered_indices(filter);
             let len = filtered.len();
+            let cols = (*cols).max(1);
             match (key.modifiers, key.code) {
                 // Quit chord still works while the picker is open.
                 (KeyModifiers::CONTROL, KeyCode::Char('q' | 'c')) => {
@@ -743,10 +748,11 @@ impl App {
                     insert_idx = filtered.get(*selected).copied();
                     close = true;
                 }
-                (_, KeyCode::Left | KeyCode::Up) => *selected = selected.saturating_sub(1),
-                (_, KeyCode::Right | KeyCode::Down) => {
-                    *selected = (*selected + 1).min(len.saturating_sub(1));
-                }
+                // Left/Right move within a row; Up/Down move by a grid row.
+                (_, KeyCode::Left) => *selected = selected.saturating_sub(1),
+                (_, KeyCode::Right) => *selected = (*selected + 1).min(len.saturating_sub(1)),
+                (_, KeyCode::Up) => *selected = selected.saturating_sub(cols),
+                (_, KeyCode::Down) => *selected = (*selected + cols).min(len.saturating_sub(1)),
                 (_, KeyCode::Home) => *selected = 0,
                 (_, KeyCode::End) => *selected = len.saturating_sub(1),
                 (_, KeyCode::Backspace) => {

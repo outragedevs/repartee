@@ -470,11 +470,12 @@ impl InputState {
 fn emote_completions(word: &str) -> Option<Vec<String>> {
     let ep = word
         .strip_prefix(':')
-        .filter(|p| !p.is_empty() && !p.contains(':'))?;
+        .filter(|p| !p.is_empty() && !p.contains(':'))?
+        .to_ascii_lowercase();
     Some(
         crate::emotes::names()
             .iter()
-            .filter(|n| n.starts_with(ep))
+            .filter(|n| n.starts_with(&ep))
             .map(|n| format!(":{n}:"))
             .collect(),
     )

@@ -760,21 +760,23 @@ pub(crate) fn cmd_emote(app: &mut App, args: &[String]) {
         );
         return;
     }
-    // No argument (or a bare ":" / "::") opens the picker.
-    let query = args.first().map_or("", |a| a.trim_matches(':'));
+    // No argument (or a bare ":" / "::") opens the picker. Matching is
+    // case-insensitive (emote names are lowercase).
+    let query = args
+        .first()
+        .map_or(String::new(), |a| a.trim_matches(':').to_ascii_lowercase());
     if query.is_empty() {
         app.open_emote_picker();
         return;
     }
-    if crate::emotes::contains(query) {
-        let token = format!(":{query}:");
-        let at = app.input.cursor_pos;
-        app.input.value.insert_str(at, &token);
-        app.input.cursor_pos = at + token.len();
+    let names = crate::emotes::names();
+    if let Ok(idx) = names.binary_search_by(|n| n.as_str().cmp(query.as_str())) {
+        // Reuse the shared insert path (also clears any stale tab-completion).
+        app.insert_emote_by_index(u32::try_from(idx).unwrap_or(0));
     } else {
-        let hits: Vec<&str> = crate::emotes::names()
+        let hits: Vec<&str> = names
             .iter()
-            .filter(|n| n.contains(query))
+            .filter(|n| n.contains(&query))
             .take(10)
             .map(String::as_str)
             .collect();

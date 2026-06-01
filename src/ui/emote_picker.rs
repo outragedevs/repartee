@@ -28,6 +28,8 @@ pub enum EmotePickerState {
         selected: usize,
         /// Registry index + cell rect of each rendered cell, for mouse hit-testing.
         cell_rects: Vec<(u32, Rect)>,
+        /// Number of grid columns from the last render, so Up/Down move by a row.
+        cols: usize,
     },
 }
 
@@ -38,12 +40,14 @@ impl EmotePickerState {
     }
 
     /// Registry indices whose name matches the current filter (all when empty).
+    /// Matching is case-insensitive (emote names are lowercase).
     #[must_use]
     pub fn filtered_indices(filter: &str) -> Vec<u32> {
+        let needle = filter.to_ascii_lowercase();
         crate::emotes::names()
             .iter()
             .enumerate()
-            .filter(|(_, n)| filter.is_empty() || n.contains(filter))
+            .filter(|(_, n)| needle.is_empty() || n.contains(&needle))
             .map(|(i, _)| u32::try_from(i).unwrap_or(0))
             .collect()
     }
@@ -75,10 +79,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     let border = hex_to_color(&colors.fg_muted).unwrap_or(ratatui::style::Color::DarkGray);
     let accent = hex_to_color(&colors.accent).unwrap_or(ratatui::style::Color::Cyan);
     // RGB of the popup background, for flattening transparent thumbnail pixels.
-    let bg_rgb = match hex_to_color(&colors.bg_alt) {
-        Some(ratatui::style::Color::Rgb(r, g, b)) => (r, g, b),
-        _ => (0, 0, 0),
-    };
+    let bg_rgb = crate::theme::hex_to_rgb_or(&colors.bg_alt, (0, 0, 0));
 
     // 70% of each dimension, computed in u32 to avoid u16 overflow on huge terminals.
     let pw = u16::try_from(u32::from(area.width) * 7 / 10).unwrap_or(area.width);
@@ -97,7 +98,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let mut cell_rects: Vec<(u32, Rect)> = Vec::new();
     if inner.width == 0 || inner.height == 0 {
-        store_cell_rects(app, cell_rects);
+        store_render_state(app, cell_rects, 1);
         return;
     }
 
@@ -105,7 +106,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     if filtered.is_empty() {
         let p = Paragraph::new("(no matching emotes)").style(Style::default().fg(border).bg(bg));
         frame.render_widget(p, inner);
-        store_cell_rects(app, cell_rects);
+        store_render_state(app, cell_rects, 1);
         return;
     }
 
@@ -131,43 +132,34 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         let rect = Rect::new(x, y, cell_w, 1);
         let name = names[reg_idx as usize].clone();
         let is_sel = vis == selected;
+        let style = if is_sel {
+            Style::default()
+                .fg(bg)
+                .bg(accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(accent).bg(bg)
+        };
 
-        if graphical {
-            // Static thumbnail (first frame) in the first EMOTE_COLS cells, then
-            // the name. Animating every visible cell would be far too much work.
-            if cell_w > emote_w {
-                let img_rect = Rect::new(x, y, emote_w, 1);
-                if let Some(proto) = app.emote_animator.thumbnail(&app.picker, reg_idx, bg_rgb) {
-                    frame.render_stateful_widget(
-                        ratatui_image::StatefulImage::default(),
-                        img_rect,
-                        proto,
-                    );
-                }
-                let name_x = x + emote_w + 1;
-                let name_w = cell_w.saturating_sub(emote_w + 1);
-                let name_style = if is_sel {
-                    Style::default()
-                        .fg(bg)
-                        .bg(accent)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(accent).bg(bg)
-                };
-                frame.render_widget(
-                    Paragraph::new(Span::styled(name, name_style)),
-                    Rect::new(name_x, y, name_w, 1),
+        // Graphical thumbnail + name when there's room; otherwise (text mode, or
+        // a cell too narrow for a thumbnail) fall back to the `:name:` label so a
+        // cell is never blank-but-clickable.
+        if graphical && cell_w > emote_w {
+            let img_rect = Rect::new(x, y, emote_w, 1);
+            if let Some(proto) = app.emote_animator.thumbnail(&app.picker, reg_idx, bg_rgb) {
+                frame.render_stateful_widget(
+                    ratatui_image::StatefulImage::default(),
+                    img_rect,
+                    proto,
                 );
             }
+            let name_x = x + emote_w + 1;
+            let name_w = cell_w.saturating_sub(emote_w + 1);
+            frame.render_widget(
+                Paragraph::new(Span::styled(name, style)),
+                Rect::new(name_x, y, name_w, 1),
+            );
         } else {
-            let style = if is_sel {
-                Style::default()
-                    .fg(bg)
-                    .bg(accent)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(accent).bg(bg)
-            };
             frame.render_widget(
                 Paragraph::new(Span::styled(format!(":{name}:"), style)),
                 rect,
@@ -176,12 +168,16 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         cell_rects.push((reg_idx, rect));
     }
 
-    store_cell_rects(app, cell_rects);
+    store_render_state(app, cell_rects, cols);
 }
 
-fn store_cell_rects(app: &mut App, rects: Vec<(u32, Rect)>) {
-    if let EmotePickerState::Open { cell_rects, .. } = &mut app.emote_picker {
+fn store_render_state(app: &mut App, rects: Vec<(u32, Rect)>, grid_cols: usize) {
+    if let EmotePickerState::Open {
+        cell_rects, cols, ..
+    } = &mut app.emote_picker
+    {
         *cell_rects = rects;
+        *cols = grid_cols.max(1);
     }
 }
 

@@ -66,7 +66,13 @@ pub fn resolve_placements(lines: &[Line<'_>], area: Rect) -> Vec<EmotePlacement>
                 let cw = ch.width().unwrap_or(0);
                 if let Some(idx) = decode_placeholder_index(ch) {
                     match &mut run {
-                        Some((cur, _start, w)) if *cur == idx => *w += cw,
+                        // Extend only within a single emote's width. Two identical
+                        // emotes typed back-to-back (`:x::x:`) are the same index,
+                        // so cap each run at EMOTE_COLS to keep them separate
+                        // placements instead of one stretched run.
+                        Some((cur, _start, w)) if *cur == idx && *w + cw <= EMOTE_COLS => {
+                            *w += cw;
+                        }
                         _ => {
                             flush_run(&mut run, y, area.x, &mut out);
                             run = Some((idx, col, cw));
@@ -150,6 +156,22 @@ mod tests {
         assert_eq!(placements.len(), 2);
         assert_eq!(placements[0].rect.y, 0);
         assert_eq!(placements[1].rect.y, 1);
+    }
+
+    #[test]
+    fn adjacent_identical_emotes_split() {
+        // Same emote twice, back-to-back (`:x::x:`) — must be TWO placements of
+        // width EMOTE_COLS each, not one merged stretched run.
+        let mut s = placeholder_for_index(5);
+        s.push_str(&placeholder_for_index(5));
+        let line = Line::from(Span::raw(s));
+        let placements = resolve_placements(&[line], Rect::new(0, 0, 20, 1));
+        assert_eq!(placements.len(), 2);
+        assert_eq!(placements[0].emote_index, 5);
+        assert_eq!(placements[1].emote_index, 5);
+        assert_eq!(placements[0].rect.width as usize, EMOTE_COLS);
+        assert_eq!(placements[1].rect.width as usize, EMOTE_COLS);
+        assert_eq!(placements[1].rect.x as usize, EMOTE_COLS);
     }
 
     #[test]

@@ -1137,9 +1137,10 @@ impl App {
             // emote is currently on screen, else sleep far out (idle = no wakeups).
             {
                 let animating = self.emotes_graphical()
-                    && self.emote_placements.iter().any(|p| {
-                        crate::app::emote_anim::EmoteAnimator::delays(p.emote_index).len() > 1
-                    });
+                    && self
+                        .emote_placements
+                        .iter()
+                        .any(|p| crate::app::emote_anim::EmoteAnimator::is_animated(p.emote_index));
                 let next = if animating {
                     std::time::Duration::from_millis(50)
                 } else {

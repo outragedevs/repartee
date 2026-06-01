@@ -9,27 +9,6 @@ use ratatui_image::protocol::StatefulProtocol;
 
 use crate::ui::emote_layout::EmotePlacement;
 
-/// Pick the current frame index for a loop of `delays` (ms) at `elapsed_ms`.
-#[must_use]
-pub fn frame_index_at(delays: &[u32], elapsed_ms: u128) -> usize {
-    if delays.len() <= 1 {
-        return 0;
-    }
-    let total: u128 = delays.iter().map(|d| u128::from(*d)).sum();
-    if total == 0 {
-        return 0;
-    }
-    let mut t = elapsed_ms % total;
-    for (i, d) in delays.iter().enumerate() {
-        let d = u128::from(*d);
-        if t < d {
-            return i;
-        }
-        t -= d;
-    }
-    0
-}
-
 /// Packed `0x00RRGGBB` background color the emote frames are flattened onto.
 type BgRgb = u32;
 
@@ -82,16 +61,36 @@ impl EmoteAnimator {
         self.protocol_for(picker, emote_index, 0, bg)
     }
 
-    /// Frame delays for an emote (ms), or empty if unknown.
+    /// Whether the emote has more than one frame (i.e. actually animates).
+    /// Allocation-free — reads the cached `&'static` frame slice directly.
     #[must_use]
-    pub fn delays(emote_index: u32) -> Vec<u32> {
-        let names = crate::emotes::names();
-        names
+    pub fn is_animated(emote_index: u32) -> bool {
+        crate::emotes::names()
             .get(emote_index as usize)
             .and_then(|n| crate::emotes::frames(n))
-            .map(|f| f.iter().map(|(_, d)| *d).collect())
-            .unwrap_or_default()
+            .is_some_and(|f| f.len() > 1)
     }
+}
+
+/// Current frame index for an emote's `&'static` frame slice at `elapsed_ms`,
+/// without allocating a delay `Vec` (used on the per-frame render path).
+fn frame_index_of(frames: &[crate::emotes::Frame], elapsed_ms: u128) -> usize {
+    if frames.len() <= 1 {
+        return 0;
+    }
+    let total: u128 = frames.iter().map(|(_, d)| u128::from(*d)).sum();
+    if total == 0 {
+        return 0;
+    }
+    let mut t = elapsed_ms % total;
+    for (i, (_, d)) in frames.iter().enumerate() {
+        let d = u128::from(*d);
+        if t < d {
+            return i;
+        }
+        t -= d;
+    }
+    0
 }
 
 /// Render an emote frame onto an opaque canvas sized to the *exact pixel
@@ -158,9 +157,15 @@ pub fn composite(
     bg: (u8, u8, u8),
 ) {
     use ratatui_image::StatefulImage;
+    let names = crate::emotes::names();
     for p in placements {
-        let delays = EmoteAnimator::delays(p.emote_index);
-        let fi = frame_index_at(&delays, elapsed_ms);
+        let Some(frames) = names
+            .get(p.emote_index as usize)
+            .and_then(|n| crate::emotes::frames(n))
+        else {
+            continue;
+        };
+        let fi = frame_index_of(frames, elapsed_ms);
         if let Some(proto) = animator.protocol_for(picker, p.emote_index, fi, bg) {
             // Clear the placeholder cells, then draw the frame on top.
             frame.render_widget(ratatui::widgets::Clear, p.rect);
@@ -173,22 +178,29 @@ pub fn composite(
 mod tests {
     use super::*;
 
+    fn frames_with(delays: &[u32]) -> Vec<crate::emotes::Frame> {
+        delays
+            .iter()
+            .map(|d| (image::RgbaImage::new(1, 1), *d))
+            .collect()
+    }
+
     #[test]
     fn frame_index_advances_with_time() {
-        let delays = [100u32, 100, 100];
-        assert_eq!(frame_index_at(&delays, 0), 0);
-        assert_eq!(frame_index_at(&delays, 150), 1);
-        assert_eq!(frame_index_at(&delays, 250), 2);
-        assert_eq!(frame_index_at(&delays, 350), 0); // wrapped
+        let fs = frames_with(&[100, 100, 100]);
+        assert_eq!(frame_index_of(&fs, 0), 0);
+        assert_eq!(frame_index_of(&fs, 150), 1);
+        assert_eq!(frame_index_of(&fs, 250), 2);
+        assert_eq!(frame_index_of(&fs, 350), 0); // wrapped
     }
 
     #[test]
     fn single_frame_is_static() {
-        assert_eq!(frame_index_at(&[100], 99_999), 0);
+        assert_eq!(frame_index_of(&frames_with(&[100]), 99_999), 0);
     }
 
     #[test]
-    fn empty_delays_is_zero() {
-        assert_eq!(frame_index_at(&[], 123), 0);
+    fn empty_frames_is_zero() {
+        assert_eq!(frame_index_of(&frames_with(&[]), 123), 0);
     }
 }
