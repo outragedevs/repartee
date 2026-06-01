@@ -348,7 +348,7 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
             CommandDef {
                 handler: cmd_emote,
                 description: "Open the emote picker, or insert/search :name: emotes",
-                aliases: &["emotes"],
+                aliases: &["emotes", "emoji"],
                 category: CommandCategory::Other,
             },
         ),

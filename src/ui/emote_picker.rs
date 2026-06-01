@@ -1,9 +1,9 @@
 //! Keyboard + mouse emote picker overlay. Type to filter, arrow keys to move,
 //! Enter or click to insert `:name:` at the input cursor, Esc to cancel.
 //!
-//! v1 renders a filtered grid of `:name:` shortcodes (not animated thumbnails);
-//! that keeps the render borrow-simple and works on every terminal. Graphical
-//! thumbnails in the grid are a possible future enhancement.
+//! On graphics-capable terminals each cell shows a **static** first-frame
+//! thumbnail (animating every visible cell would be far too much per-frame work)
+//! next to the name; otherwise it falls back to a `:name:` text grid.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -60,6 +60,7 @@ fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
 
 /// Render the picker overlay (no-op when hidden). Records the rendered cell rects
 /// back onto `app.emote_picker` for mouse hit-testing.
+#[allow(clippy::too_many_lines, reason = "cohesive single-pass overlay render")]
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     let (filter, selected) = match &app.emote_picker {
         EmotePickerState::Open {
@@ -68,10 +69,16 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         EmotePickerState::Hidden => return,
     };
 
+    let graphical = app.emotes_graphical();
     let colors = &app.theme.colors;
     let bg = hex_to_color(&colors.bg_alt).unwrap_or(ratatui::style::Color::Black);
     let border = hex_to_color(&colors.fg_muted).unwrap_or(ratatui::style::Color::DarkGray);
     let accent = hex_to_color(&colors.accent).unwrap_or(ratatui::style::Color::Cyan);
+    // RGB of the popup background, for flattening transparent thumbnail pixels.
+    let bg_rgb = match hex_to_color(&colors.bg_alt) {
+        Some(ratatui::style::Color::Rgb(r, g, b)) => (r, g, b),
+        _ => (0, 0, 0),
+    };
 
     // 70% of each dimension, computed in u32 to avoid u16 overflow on huge terminals.
     let pw = u16::try_from(u32::from(area.width) * 7 / 10).unwrap_or(area.width);
@@ -110,6 +117,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     let start = page * per_page;
     let names = crate::emotes::names();
 
+    let emote_w = u16::try_from(crate::ui::emote_layout::EMOTE_COLS).unwrap_or(2);
     for (vis, &reg_idx) in filtered.iter().enumerate().skip(start).take(per_page) {
         let slot = vis - start;
         let row = slot / cols;
@@ -121,17 +129,50 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             break;
         }
         let rect = Rect::new(x, y, cell_w, 1);
-        let name = &names[reg_idx as usize];
-        let label = format!(":{name}:");
-        let style = if vis == selected {
-            Style::default()
-                .fg(bg)
-                .bg(accent)
-                .add_modifier(Modifier::BOLD)
+        let name = names[reg_idx as usize].clone();
+        let is_sel = vis == selected;
+
+        if graphical {
+            // Static thumbnail (first frame) in the first EMOTE_COLS cells, then
+            // the name. Animating every visible cell would be far too much work.
+            if cell_w > emote_w {
+                let img_rect = Rect::new(x, y, emote_w, 1);
+                if let Some(proto) = app.emote_animator.thumbnail(&app.picker, reg_idx, bg_rgb) {
+                    frame.render_stateful_widget(
+                        ratatui_image::StatefulImage::default(),
+                        img_rect,
+                        proto,
+                    );
+                }
+                let name_x = x + emote_w + 1;
+                let name_w = cell_w.saturating_sub(emote_w + 1);
+                let name_style = if is_sel {
+                    Style::default()
+                        .fg(bg)
+                        .bg(accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(accent).bg(bg)
+                };
+                frame.render_widget(
+                    Paragraph::new(Span::styled(name, name_style)),
+                    Rect::new(name_x, y, name_w, 1),
+                );
+            }
         } else {
-            Style::default().fg(accent).bg(bg)
-        };
-        frame.render_widget(Paragraph::new(Span::styled(label, style)), rect);
+            let style = if is_sel {
+                Style::default()
+                    .fg(bg)
+                    .bg(accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(accent).bg(bg)
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(format!(":{name}:"), style)),
+                rect,
+            );
+        }
         cell_rects.push((reg_idx, rect));
     }
 

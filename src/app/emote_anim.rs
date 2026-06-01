@@ -70,6 +70,18 @@ impl EmoteAnimator {
         }
     }
 
+    /// Cached static first-frame protocol image for `emote_index`, flattened onto
+    /// `bg`. For non-animated thumbnails such as the emote picker grid (rendering
+    /// every visible emote animated would be far too much per-frame work).
+    pub fn thumbnail(
+        &mut self,
+        picker: &Picker,
+        emote_index: u32,
+        bg: (u8, u8, u8),
+    ) -> Option<&mut StatefulProtocol> {
+        self.protocol_for(picker, emote_index, 0, bg)
+    }
+
     /// Frame delays for an emote (ms), or empty if unknown.
     #[must_use]
     pub fn delays(emote_index: u32) -> Vec<u32> {
