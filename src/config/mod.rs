@@ -599,6 +599,28 @@ pub enum RenderMode {
     Off,
 }
 
+/// Picker / autocomplete-insert preview language for emotes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EmoteLang {
+    /// English aliases (`:smile:`).
+    #[default]
+    En,
+    /// Polish stems (`:usmiech:`).
+    Pl,
+}
+
+impl EmoteLang {
+    /// Map to the registry's language enum.
+    #[must_use]
+    pub fn to_registry(self) -> crate::emotes::Lang {
+        match self {
+            Self::En => crate::emotes::Lang::En,
+            Self::Pl => crate::emotes::Lang::Pl,
+        }
+    }
+}
+
 /// `[emotes]` configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -607,6 +629,8 @@ pub struct EmotesConfig {
     pub enabled: bool,
     /// How emotes are rendered.
     pub render: RenderMode,
+    /// Picker / insert preview language.
+    pub lang: EmoteLang,
 }
 
 impl Default for EmotesConfig {
@@ -614,6 +638,7 @@ impl Default for EmotesConfig {
         Self {
             enabled: true,
             render: RenderMode::Graphical,
+            lang: EmoteLang::En,
         }
     }
 }
@@ -689,6 +714,13 @@ pub fn validate_startup_files(config_path: &Path, theme_dir: &Path) -> Result<Ap
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emotes_lang_default_and_parse() {
+        assert_eq!(AppConfig::default().emotes.lang, EmoteLang::En);
+        let p: AppConfig = toml::from_str("[emotes]\nlang = \"pl\"\n").unwrap();
+        assert_eq!(p.emotes.lang, EmoteLang::Pl);
+    }
 
     #[test]
     fn emotes_config_defaults_and_roundtrip() {
