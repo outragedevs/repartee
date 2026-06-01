@@ -112,10 +112,16 @@ frame into that cell rect on each render pass.
 ### 4.5 Web UI
 
 - **Serving.** axum route `GET /emotes/{name}.gif` → embedded bytes (content-type +
-  cache headers), behind the existing auth.
-- **Render.** `web-ui` `format.rs` replaces known `:name:` tokens with
-  `<img class="emote" src="/emotes/<name>.gif" alt=":name:">`; the browser animates natively.
-- **Known-name list.** Served as `GET /emotes/manifest.json`, loaded once by the WASM frontend.
+  cache headers), served alongside the (public) static WASM assets.
+- **Render.** `web-ui` `format.rs::emotify_spans` replaces known `:name:` tokens with
+  `<img class="emote" alt="">` + a visually-hidden `:name:` span (so copy/paste and screen
+  readers keep the shortcode); the browser animates natively.
+- **Known-name list.** Embedded into the WASM at build time via `web-ui/build.rs` (reads the
+  shared `assets/emotes/`), so the whitelist is available synchronously on the first render —
+  no manifest fetch, no race against backlog rendering.
+- **Config parity.** The server pushes `emotes_enabled` (`enabled && render==Graphical`) on the
+  existing `SettingsChanged` event; the web UI gates emote `<img>` rendering on it so the
+  `[emotes]` config governs both surfaces.
 
 ### 4.6 Storage / session / snapshot
 
@@ -131,7 +137,17 @@ enabled = true
 render  = "graphical"   # graphical | text | off
 ```
 
-Plus an optional theme style for the fallback `:name:` text token.
+Both keys are runtime-settable via `/set emotes.enabled` / `/set emotes.render` and listed in
+`/set`. Semantics:
+- `enabled = false` → no emotes anywhere (no rendering, no insertion affordances), tokens stay
+  literal text on the wire and on screen.
+- `render = graphical` → inline images in graphics-capable terminals and the web UI; literal
+  `:name:` fallback on Halfblocks/no-graphics terminals.
+- `render = text` → always literal `:name:`, but insertion affordances (tab-complete, picker,
+  `/emote`) still work (you can insert tokens; they render as text).
+- `render = off` → tokens are inert: no images **and** no insertion affordances.
+
+The emote picker opens with **Ctrl+G** or `/emote`.
 
 ## 5. Testing
 
