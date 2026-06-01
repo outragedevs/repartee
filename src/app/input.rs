@@ -711,6 +711,9 @@ impl App {
 
     /// Open the emote picker overlay (Ctrl+G or `/emote` with no args).
     pub(crate) fn open_emote_picker(&mut self) {
+        if !self.emotes_input_enabled() {
+            return;
+        }
         self.emote_picker = crate::ui::emote_picker::EmotePickerState::Open {
             filter: String::new(),
             selected: 0,

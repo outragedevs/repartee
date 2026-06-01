@@ -32,7 +32,9 @@ pub fn Layout() -> impl IntoView {
     // sync_version is read untracked — it's a dedup key, not a trigger.
     let pending = StoredValue::new(std::collections::HashSet::<(String, u32)>::new());
     Effect::new(move || {
-        let Some(buf_id) = state.active_buffer.get() else { return };
+        let Some(buf_id) = state.active_buffer.get() else {
+            return;
+        };
         let epoch = state.sync_version.get_untracked();
         let key = (buf_id.clone(), epoch);
         let already_loaded = state.backlog_loaded.get_untracked().contains(&buf_id);

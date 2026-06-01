@@ -91,6 +91,8 @@ pub enum WebEvent {
         nick_color_saturation: f32,
         #[serde(default = "default_lightness")]
         nick_color_lightness: f32,
+        #[serde(default = "default_true")]
+        emotes_enabled: bool,
     },
     Error {
         message: String,

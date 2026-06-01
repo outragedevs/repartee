@@ -62,6 +62,9 @@ pub struct AppState {
     /// Per-message preview dismissals: `(message_id, link)` pairs. Persisted
     /// to localStorage so a "hide this thumbnail" decision survives reload.
     pub dismissed_previews: RwSignal<HashSet<(u64, String)>>,
+    /// Whether `:name:` tokens render as inline emote images (mirrors the
+    /// server's `[emotes]` config; pushed via `SettingsChanged`).
+    pub emotes_enabled: RwSignal<bool>,
 }
 
 impl AppState {
@@ -97,6 +100,7 @@ impl AppState {
             backlog_loaded: RwSignal::new(HashSet::new()),
             is_at_bottom: RwSignal::new(true),
             dismissed_previews: RwSignal::new(load_dismissed_previews()),
+            emotes_enabled: RwSignal::new(true),
         }
     }
 
@@ -269,11 +273,8 @@ impl AppState {
                     // buffer for `before=None`, which includes messages
                     // the client already received live). id=0 is the
                     // date-separator sentinel and is admitted unfiltered.
-                    let existing_ids: HashSet<u64> = entry
-                        .iter()
-                        .filter(|m| m.id != 0)
-                        .map(|m| m.id)
-                        .collect();
+                    let existing_ids: HashSet<u64> =
+                        entry.iter().filter(|m| m.id != 0).map(|m| m.id).collect();
                     let filtered: Vec<_> = messages
                         .into_iter()
                         .filter(|m| m.id == 0 || !existing_ids.contains(&m.id))
@@ -420,6 +421,7 @@ impl AppState {
                 nick_colors_in_nicklist,
                 nick_color_saturation,
                 nick_color_lightness,
+                emotes_enabled,
             } => {
                 self.timestamp_format.set(timestamp_format);
                 self.line_height.set(line_height);
@@ -434,6 +436,7 @@ impl AppState {
                 self.nick_colors_in_nicklist.set(nick_colors_in_nicklist);
                 self.nick_color_saturation.set(nick_color_saturation);
                 self.nick_color_lightness.set(nick_color_lightness);
+                self.emotes_enabled.set(emotes_enabled);
             }
             WebEvent::Error { message } => {
                 self.error.set(Some(message));

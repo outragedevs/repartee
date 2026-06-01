@@ -805,6 +805,14 @@ impl App {
             && self.picker.protocol_type() != ratatui_image::picker::ProtocolType::Halfblocks
     }
 
+    /// Whether emote insertion affordances (tab-complete, picker, `/emote`) are
+    /// offered: enabled and not in `Off` mode. `Text` keeps them (you can still
+    /// insert tokens, they just render as literal text).
+    #[must_use]
+    pub fn emotes_input_enabled(&self) -> bool {
+        self.config.emotes.enabled && self.config.emotes.render != crate::config::RenderMode::Off
+    }
+
     pub fn recompute_wrap_indent(&mut self) {
         let ts_sample = chrono::Local::now()
             .format(&self.config.general.timestamp_format)

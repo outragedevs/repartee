@@ -753,6 +753,13 @@ fn find_unique_shell_name(app: &App, base: &str) -> String {
 /// `/emote` opens the picker; `/emote <name>` inserts `:name:` if known, else
 /// lists a few matching emote names to the active buffer.
 pub(crate) fn cmd_emote(app: &mut App, args: &[String]) {
+    if !app.emotes_input_enabled() {
+        add_local_event(
+            app,
+            "Emotes are disabled ([emotes] enabled=false or render=off)",
+        );
+        return;
+    }
     // No argument (or a bare ":" / "::") opens the picker.
     let query = args.first().map_or("", |a| a.trim_matches(':'));
     if query.is_empty() {

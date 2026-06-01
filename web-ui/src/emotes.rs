@@ -24,8 +24,15 @@ mod tests {
 
     #[test]
     fn embedded_names_present_and_sorted() {
-        assert!(EMOTE_NAMES.len() >= 180, "expected full GG7 set, got {}", EMOTE_NAMES.len());
-        assert!(EMOTE_NAMES.windows(2).all(|w| w[0] <= w[1]), "must be sorted");
+        assert!(
+            EMOTE_NAMES.len() >= 180,
+            "expected full GG7 set, got {}",
+            EMOTE_NAMES.len()
+        );
+        assert!(
+            EMOTE_NAMES.windows(2).all(|w| w[0] <= w[1]),
+            "must be sorted"
+        );
         assert!(is_emote("usmiech"));
         assert!(!is_emote("definitely_not_an_emote"));
     }

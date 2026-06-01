@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+/// serde default for forward-compatible bool fields that should default to `true`.
+const fn default_true() -> bool {
+    true
+}
+
 /// Server → Client events (JSON over WSS).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -91,6 +96,10 @@ pub enum WebEvent {
         nick_colors_in_nicklist: bool,
         nick_color_saturation: f32,
         nick_color_lightness: f32,
+        /// Whether `:name:` tokens should render as inline emote images in the web
+        /// UI (`[emotes] enabled` AND `render = graphical`).
+        #[serde(default = "default_true")]
+        emotes_enabled: bool,
     },
     /// Server-side error.
     Error { message: String },

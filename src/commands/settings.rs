@@ -244,6 +244,17 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 is_credential: is_cred,
             })
         }
+        "emotes" => {
+            let val = match parts[1] {
+                "enabled" => config.emotes.enabled.to_string(),
+                "render" => format!("{:?}", config.emotes.render).to_lowercase(),
+                _ => return None,
+            };
+            Some(Resolved {
+                value: val,
+                is_credential: false,
+            })
+        }
         _ => None,
     }
 }
@@ -566,6 +577,18 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
                 _ => return Err(format!("Unknown field: {path}")),
             }
         }
+        "emotes" => match parts[1] {
+            "enabled" => config.emotes.enabled = parse_bool(raw)?,
+            "render" => {
+                config.emotes.render = match raw.to_ascii_lowercase().as_str() {
+                    "graphical" => crate::config::RenderMode::Graphical,
+                    "text" => crate::config::RenderMode::Text,
+                    "off" => crate::config::RenderMode::Off,
+                    _ => return Err("Expected graphical, text, or off".to_string()),
+                };
+            }
+            _ => return Err(format!("Unknown field: {path}")),
+        },
         _ => return Err(format!("Unknown section: {}", parts[0])),
     }
 
@@ -679,6 +702,8 @@ const BASE_PATHS: &[&str] = &[
     "web.thumbnail_cache_mb",
     "web.cloudflare_tunnel_name",
     "web.password",
+    "emotes.enabled",
+    "emotes.render",
 ];
 
 const SERVER_FIELDS: &[&str] = &[
@@ -935,6 +960,7 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                 || path == "web.nick_column_width"
                 || path == "web.nick_max_length"
                 || path.starts_with("display.nick_color")
+                || path.starts_with("emotes.")
             {
                 app.state.pending_web_events.push(
                     crate::web::protocol::WebEvent::SettingsChanged {
@@ -947,6 +973,8 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                         nick_colors_in_nicklist: app.config.display.nick_colors_in_nicklist,
                         nick_color_saturation: app.config.display.nick_color_saturation,
                         nick_color_lightness: app.config.display.nick_color_lightness,
+                        emotes_enabled: app.config.emotes.enabled
+                            && app.config.emotes.render == crate::config::RenderMode::Graphical,
                     },
                 );
             }
@@ -1063,6 +1091,7 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
                 "nick_color_lightness",
             ],
         ),
+        ("emotes", &["enabled", "render"]),
     ];
 
     for &(section, fields) in sections {
@@ -1344,6 +1373,30 @@ mod tests {
         assert_eq!(r.value, "true");
         set_config_value(&mut config, "display.nick_colors", "false").unwrap();
         assert!(!config.display.nick_colors);
+    }
+
+    #[test]
+    fn get_set_emotes() {
+        let mut config = default_config();
+        assert_eq!(
+            get_config_value(&config, "emotes.enabled").unwrap().value,
+            "true"
+        );
+        assert_eq!(
+            get_config_value(&config, "emotes.render").unwrap().value,
+            "graphical"
+        );
+        set_config_value(&mut config, "emotes.enabled", "false").unwrap();
+        assert!(!config.emotes.enabled);
+        set_config_value(&mut config, "emotes.render", "text").unwrap();
+        assert_eq!(config.emotes.render, crate::config::RenderMode::Text);
+        set_config_value(&mut config, "emotes.render", "off").unwrap();
+        assert_eq!(config.emotes.render, crate::config::RenderMode::Off);
+        // Invalid render value is rejected.
+        assert!(set_config_value(&mut config, "emotes.render", "bogus").is_err());
+        // emotes.* paths are advertised as settable.
+        assert!(BASE_PATHS.contains(&"emotes.enabled"));
+        assert!(BASE_PATHS.contains(&"emotes.render"));
     }
 
     #[test]

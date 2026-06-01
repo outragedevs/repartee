@@ -76,7 +76,9 @@ pub fn ChatView() -> impl IntoView {
         state.is_at_bottom.set(true);
         let Some(el) = chat_ref.get() else { return };
         let el_dom: web_sys::Element = el.into();
-        let Some(window) = web_sys::window() else { return };
+        let Some(window) = web_sys::window() else {
+            return;
+        };
         let cb = wasm_bindgen::prelude::Closure::once(move || do_pin(&el_dom));
         let _ = window.request_animation_frame(cb.as_ref().unchecked_ref());
         cb.forget();
@@ -98,7 +100,9 @@ pub fn ChatView() -> impl IntoView {
             return;
         }
         pin_scheduled.set_value(true);
-        let Some(window) = web_sys::window() else { return };
+        let Some(window) = web_sys::window() else {
+            return;
+        };
         let cb = wasm_bindgen::prelude::Closure::once(move || {
             pin_scheduled.set_value(false);
             if !state.is_at_bottom.get_untracked() {
@@ -126,10 +130,7 @@ pub fn ChatView() -> impl IntoView {
     // VisualViewport listener was a net negative: it fired
     // mid-animation and re-pinned partway through, producing visible
     // hops at both keyboard open and close.
-    type ResizeHandle = Option<(
-        wasm_bindgen::prelude::Closure<dyn Fn()>,
-        js_sys::Function,
-    )>;
+    type ResizeHandle = Option<(wasm_bindgen::prelude::Closure<dyn Fn()>, js_sys::Function)>;
     let resize_cleanup: StoredValue<ResizeHandle, leptos::prelude::LocalStorage> =
         StoredValue::new_local(None);
     let resize_registered = StoredValue::new(false);
@@ -147,7 +148,9 @@ pub fn ChatView() -> impl IntoView {
                 return;
             }
             resize_throttle.set_value(true);
-            let Some(window) = web_sys::window() else { return };
+            let Some(window) = web_sys::window() else {
+                return;
+            };
             let raf_cb = wasm_bindgen::prelude::Closure::once(move || {
                 resize_throttle.set_value(false);
                 if !state.is_at_bottom.get_untracked() {
@@ -160,10 +163,7 @@ pub fn ChatView() -> impl IntoView {
             let _ = window.request_animation_frame(raf_cb.as_ref().unchecked_ref());
             raf_cb.forget();
         });
-        let cb_fn: js_sys::Function = cb
-            .as_ref()
-            .unchecked_ref::<js_sys::Function>()
-            .clone();
+        let cb_fn: js_sys::Function = cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
         if let Some(window) = web_sys::window() {
             let _ = window.add_event_listener_with_callback("resize", &cb_fn);
         }
@@ -210,9 +210,15 @@ pub fn ChatView() -> impl IntoView {
     // partial selections within a single span (where the default is
     // already correct).
     let on_copy = move |ev: web_sys::Event| {
-        let Some(clip_ev) = ev.dyn_ref::<web_sys::ClipboardEvent>() else { return };
-        let Some(window) = web_sys::window() else { return };
-        let Ok(Some(selection)) = window.get_selection() else { return };
+        let Some(clip_ev) = ev.dyn_ref::<web_sys::ClipboardEvent>() else {
+            return;
+        };
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Ok(Some(selection)) = window.get_selection() else {
+            return;
+        };
         if selection.is_collapsed() {
             return;
         }
@@ -222,10 +228,14 @@ pub fn ChatView() -> impl IntoView {
             return;
         }
         let Some(doc) = window.document() else { return };
-        let Ok(chat_lines) = doc.query_selector_all(".chat-line") else { return };
+        let Ok(chat_lines) = doc.query_selector_all(".chat-line") else {
+            return;
+        };
         let mut out: Vec<String> = Vec::with_capacity(chat_lines.length() as usize);
         for i in 0..chat_lines.length() {
-            let Some(node) = chat_lines.item(i) else { continue };
+            let Some(node) = chat_lines.item(i) else {
+                continue;
+            };
             let in_selection = selection
                 .contains_node_with_allow_partial_containment(&node, true)
                 .unwrap_or(false);
@@ -242,7 +252,9 @@ pub fn ChatView() -> impl IntoView {
             return;
         }
         let formatted = out.join("\n");
-        let Some(clipboard) = clip_ev.clipboard_data() else { return };
+        let Some(clipboard) = clip_ev.clipboard_data() else {
+            return;
+        };
         if clipboard.set_data("text/plain", &formatted).is_ok() {
             clip_ev.prevent_default();
         }
@@ -332,13 +344,13 @@ fn current_nick(state: AppState) -> Option<String> {
 )]
 fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView {
     let nick_self = current_nick(state);
+    let emotes_on = state.emotes_enabled.get();
 
     let is_mention_log = msg.msg_type == "mention_log";
     let is_event = msg.msg_type == "event";
     let is_action = msg.msg_type == "action";
     let is_notice = msg.msg_type == "notice";
-    let is_separator =
-        is_event && msg.nick.is_none() && msg.text.starts_with('\u{2500}');
+    let is_separator = is_event && msg.nick.is_none() && msg.text.starts_with('\u{2500}');
 
     let is_own = nick_self
         .as_ref()
@@ -399,7 +411,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
     let previews_view = move || render_previews(state, msg_id, preview_data.clone());
 
     if is_mention_log {
-        let styled = render_styled_text(&msg.text);
+        let styled = render_styled_text(&msg.text, emotes_on);
         return view! {
             <>
                 <div class=line_class>
@@ -413,7 +425,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
 
     if is_action {
         let nick_text = msg.nick.unwrap_or_default();
-        let styled = render_styled_text(&msg.text);
+        let styled = render_styled_text(&msg.text, emotes_on);
         let nick_color_style = {
             let nick = nick_text.clone();
             move || nick_color_or_empty(state, &nick, !is_own)
@@ -435,7 +447,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
         .into_any()
     } else if is_notice {
         let nick_text = msg.nick.unwrap_or_default();
-        let styled = render_styled_text(&msg.text);
+        let styled = render_styled_text(&msg.text, emotes_on);
         view! {
             <>
                 <div class=line_class>
@@ -453,7 +465,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
         .into_any()
     } else if is_event {
         let arrow = event_icon(msg.event_key.as_deref(), &msg.text);
-        let styled = render_styled_text(&msg.text);
+        let styled = render_styled_text(&msg.text, emotes_on);
         view! {
             <div class=line_class>
                 <span class="ts">{ts_fn}</span>
@@ -469,7 +481,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
     } else {
         let nick_text = msg.nick.unwrap_or_default();
         let mode = msg.nick_mode.unwrap_or_default();
-        let styled = render_styled_text(&msg.text);
+        let styled = render_styled_text(&msg.text, emotes_on);
         let highlight = msg.highlight;
 
         let nick_truncated = {
@@ -650,8 +662,13 @@ fn render_previews(
 /// `<a target="_blank" rel="noopener noreferrer">`; emote spans render as an
 /// inline `<img class="emote">` (with the `:name:` token as alt/title for
 /// accessibility and copy/paste fallback).
-fn render_styled_text(text: &str) -> Vec<leptos::prelude::AnyView> {
-    let spans = format::emotify_spans(format::linkify_spans(format::parse_format(text)));
+fn render_styled_text(text: &str, emotes_on: bool) -> Vec<leptos::prelude::AnyView> {
+    let base = format::linkify_spans(format::parse_format(text));
+    let spans = if emotes_on {
+        format::emotify_spans(base)
+    } else {
+        base
+    };
     spans
         .into_iter()
         .map(|span| {
@@ -706,7 +723,9 @@ fn format_chat_line_for_copy(node: &web_sys::Node) -> Option<String> {
     let children = el.children();
     let mut parts: Vec<String> = Vec::with_capacity(children.length() as usize);
     for i in 0..children.length() {
-        let Some(child) = children.item(i) else { continue };
+        let Some(child) = children.item(i) else {
+            continue;
+        };
         let text = child.text_content().unwrap_or_default();
         let trimmed = text.trim();
         if !trimmed.is_empty() {

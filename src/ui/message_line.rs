@@ -24,8 +24,10 @@ pub fn render_message(
     let abstracts = &theme.abstracts;
 
     // MentionLog: pre-formatted line — render text as-is, no timestamp/nick column.
+    // Emotes are still rewritten so mention rows match the channel/web rendering.
     if msg.message_type == MessageType::MentionLog {
-        let spans = parse_format_string(&msg.text, &[]);
+        let body = emotify_message_text(&msg.text, graphical);
+        let spans = parse_format_string(&body, &[]);
         return styled_spans_to_line(&spans);
     }
 

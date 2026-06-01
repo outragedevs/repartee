@@ -2,6 +2,10 @@
 //!
 //! Matching rule: a colon, then a run of `[a-z0-9_]`, then a colon, where the inner
 //! name is a known emote. `:)`, `:D`, and unknown `:foo:` stay as plain text.
+//!
+//! The web frontend re-implements the same rule in `web-ui/src/format.rs`
+//! (`emotify_spans_with`) because the WASM crate cannot link this binary. Keep the
+//! two matching rules in lockstep; both have unit tests over the same cases.
 
 use std::ops::Range;
 

@@ -318,7 +318,10 @@ pub fn emotify_spans(spans: Vec<StyledSpan>) -> Vec<StyledSpan> {
 
 /// `emotify_spans` with an injectable whitelist predicate (for tests).
 #[must_use]
-pub fn emotify_spans_with(spans: Vec<StyledSpan>, is_known: impl Fn(&str) -> bool) -> Vec<StyledSpan> {
+pub fn emotify_spans_with(
+    spans: Vec<StyledSpan>,
+    is_known: impl Fn(&str) -> bool,
+) -> Vec<StyledSpan> {
     let mut out = Vec::with_capacity(spans.len());
     for span in spans {
         if span.link.is_some() || span.emote_name.is_some() || !span.text.contains(':') {
@@ -362,7 +365,10 @@ pub fn emotify_spans_with(spans: Vec<StyledSpan>, is_known: impl Fn(&str) -> boo
             i += 1;
         }
         if text_start < span.text.len() {
-            out.push(StyledSpan { text: span.text[text_start..].to_owned(), ..span.clone() });
+            out.push(StyledSpan {
+                text: span.text[text_start..].to_owned(),
+                ..span.clone()
+            });
         }
     }
     out
@@ -585,8 +591,11 @@ mod tests {
 
     #[test]
     fn link_span_is_not_emotified() {
-        let link =
-            StyledSpan { text: ":lol:".to_owned(), link: Some("x".to_owned()), ..StyledSpan::default() };
+        let link = StyledSpan {
+            text: ":lol:".to_owned(),
+            link: Some("x".to_owned()),
+            ..StyledSpan::default()
+        };
         let out = emotify_spans_with(vec![link], known);
         assert_eq!(out.len(), 1);
         assert!(out[0].emote_name.is_none());
@@ -631,9 +640,7 @@ mod tests {
 
     #[test]
     fn linkify_two_urls_with_text_between() {
-        let out = linkify_spans(vec![plain(
-            "a https://a.example/x b https://b.example/y c",
-        )]);
+        let out = linkify_spans(vec![plain("a https://a.example/x b https://b.example/y c")]);
         let urls: Vec<_> = out.iter().filter_map(|s| s.link.clone()).collect();
         assert_eq!(
             urls,
