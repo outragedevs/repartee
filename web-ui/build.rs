@@ -30,6 +30,23 @@ fn main() {
     pairs.sort();
     assert!(!pairs.is_empty(), "no rows in {}", aliases.display());
 
+    // Parity guard: the TSV's Polish stems must match the actual .gif files
+    // exactly, so the web whitelist can never drift from what the server serves.
+    let emotes_dir = aliases.parent().expect("aliases.tsv has a parent dir");
+    println!("cargo:rerun-if-changed={}", emotes_dir.display());
+    let mut gif_stems: Vec<String> = std::fs::read_dir(emotes_dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", emotes_dir.display()))
+        .filter_map(Result::ok)
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter_map(|n| n.strip_suffix(".gif").map(ToOwned::to_owned))
+        .collect();
+    gif_stems.sort();
+    let tsv_stems: Vec<String> = pairs.iter().map(|(p, _)| p.clone()).collect();
+    assert_eq!(
+        gif_stems, tsv_stems,
+        "aliases.tsv stems must match the .gif files exactly (add/remove a row when adding/removing an emote)"
+    );
+
     // Union of both names (whitelist), sorted + deduped.
     let mut names: Vec<String> = pairs.iter().flat_map(|(p, e)| [p.clone(), e.clone()]).collect();
     names.sort();
