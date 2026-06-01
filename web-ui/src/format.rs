@@ -352,8 +352,10 @@ pub fn emotify_spans_with(
                             });
                         }
                         out.push(StyledSpan {
-                            text: span.text[i..=j].to_owned(), // ":name:"
-                            emote_name: Some(name.to_owned()),
+                            text: span.text[i..=j].to_owned(), // ":name:" (alt / copy)
+                            // Store the Polish stem so the <img> src is the served
+                            // GIF file regardless of which language the user typed.
+                            emote_name: Some(crate::emotes::stem_for(name).to_owned()),
                             ..StyledSpan::default()
                         });
                         i = j + 1;
@@ -551,7 +553,16 @@ mod tests {
     }
 
     fn known(name: &str) -> bool {
-        matches!(name, "usmiech" | "lol")
+        matches!(name, "usmiech" | "smile" | "lol")
+    }
+
+    #[test]
+    fn english_alias_becomes_emote_span_with_stem_src() {
+        // Real embedded map: :smile: → emote span whose src-stem is usmiech.
+        let out = emotify_spans(vec![plain(":smile:")]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].emote_name.as_deref(), Some("usmiech"));
+        assert_eq!(out[0].text, ":smile:");
     }
 
     #[test]
