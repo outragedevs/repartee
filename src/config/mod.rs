@@ -613,7 +613,7 @@ pub enum EmoteLang {
 impl EmoteLang {
     /// Map to the registry's language enum.
     #[must_use]
-    pub fn to_registry(self) -> crate::emotes::Lang {
+    pub const fn to_registry(self) -> crate::emotes::Lang {
         match self {
             Self::En => crate::emotes::Lang::En,
             Self::Pl => crate::emotes::Lang::Pl,
