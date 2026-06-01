@@ -184,14 +184,14 @@ fn emotify_message_text(text: &str, graphical: bool) -> String {
     if !segs.iter().any(|s| matches!(s, Segment::Emote(_))) {
         return text.to_owned();
     }
-    let names = emotes::names();
     let mut out = String::with_capacity(text.len());
     for seg in segs {
         match seg {
             Segment::Text(range) => out.push_str(&text[range]),
             Segment::Emote(name) => {
-                if let Ok(idx) = names.binary_search_by(|n| n.as_str().cmp(name.as_str())) {
-                    out.push_str(&placeholder_for_index(u32::try_from(idx).unwrap_or(0)));
+                // Accept either language: resolve PL stem or EN alias to the index.
+                if let Some(idx) = emotes::resolve(&name) {
+                    out.push_str(&placeholder_for_index(idx));
                 } else {
                     out.push(':');
                     out.push_str(&name);
@@ -207,6 +207,14 @@ fn emotify_message_text(text: &str, graphical: bool) -> String {
 mod emote_tests {
     use super::emotify_message_text;
     use crate::ui::emote_layout::{EMOTE_COLS, decode_placeholder_index};
+
+    #[test]
+    fn english_alias_becomes_placeholder() {
+        let out = emotify_message_text("hi :smile: x", true);
+        let placeholders = out.chars().filter(|c| decode_placeholder_index(*c).is_some()).count();
+        assert_eq!(placeholders, EMOTE_COLS, ":smile: must become a placeholder");
+        assert!(!out.contains(":smile:"));
+    }
 
     #[test]
     fn known_token_becomes_placeholder_when_graphical() {
