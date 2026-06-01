@@ -23,25 +23,96 @@ static NAMES: LazyLock<Vec<String>> = LazyLock::new(|| {
     v
 });
 
-/// All known emote names, sorted ascending.
+/// Picker / insert language. Lives here (not in `config`) so the registry stays
+/// config-agnostic; `config::EmoteLang` maps onto it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lang {
+    En,
+    Pl,
+}
+
+/// `ENGLISH[i]` is the English alias for `names()[i]` (equals the stem for
+/// loanword emotes like `lol`/`ok`/`8p`). Parsed from the embedded `aliases.tsv`.
+static ENGLISH: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    let raw = include_str!("../../assets/emotes/aliases.tsv");
+    let mut map: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for line in raw.lines() {
+        if let Some((pl, en)) = line.split_once('\t') {
+            map.insert(pl.trim(), en.trim());
+        }
+    }
+    NAMES
+        .iter()
+        .map(|n| *map.get(n.as_str()).unwrap_or(&n.as_str()))
+        .collect()
+});
+
+/// English alias -> index into `NAMES`.
+static EN_TO_INDEX: LazyLock<std::collections::HashMap<&'static str, u32>> = LazyLock::new(|| {
+    ENGLISH
+        .iter()
+        .enumerate()
+        .map(|(i, en)| (*en, u32::try_from(i).unwrap_or(0)))
+        .collect()
+});
+
+/// All valid `:name:` tags (Polish stems + English aliases), sorted + deduped.
+static TAG_NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    let mut v: Vec<&'static str> = NAMES.iter().map(String::as_str).collect();
+    v.extend(ENGLISH.iter().copied());
+    v.sort_unstable();
+    v.dedup();
+    v
+});
+
+/// All known emote names, sorted ascending (Polish stems = file names).
 #[must_use]
 pub fn names() -> &'static [String] {
     &NAMES
 }
 
-/// Whether `name` (without `.gif`) is a known emote. Used as the tokenizer whitelist.
+/// English alias for the emote at `index` (equals the stem when no distinct alias).
 #[must_use]
-pub fn contains(name: &str) -> bool {
-    NAMES.binary_search_by(|n| n.as_str().cmp(name)).is_ok()
+pub fn english_label(index: u32) -> Option<&'static str> {
+    ENGLISH.get(index as usize).copied()
 }
 
-/// Raw GIF bytes for `name` (without `.gif`), or `None` if unknown.
+/// Resolve a tag name (Polish stem OR English alias) to its canonical index.
+#[must_use]
+pub fn resolve(name: &str) -> Option<u32> {
+    if let Ok(i) = NAMES.binary_search_by(|n| n.as_str().cmp(name)) {
+        return u32::try_from(i).ok();
+    }
+    EN_TO_INDEX.get(name).copied()
+}
+
+/// The name to display/insert for `index` in the given language.
+#[must_use]
+pub fn display_name(index: u32, lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => english_label(index).unwrap_or("?"),
+        Lang::Pl => names().get(index as usize).map_or("?", String::as_str),
+    }
+}
+
+/// All valid tag names in both languages, sorted (for autocomplete + whitelist).
+#[must_use]
+pub fn tag_names() -> &'static [&'static str] {
+    &TAG_NAMES
+}
+
+/// Whether `name` is a known emote in either language (tokenizer whitelist).
+#[must_use]
+pub fn contains(name: &str) -> bool {
+    resolve(name).is_some()
+}
+
+/// Raw GIF bytes for a tag in either language, or `None` if unknown.
 #[must_use]
 pub fn bytes(name: &str) -> Option<Cow<'static, [u8]>> {
-    if !contains(name) {
-        return None;
-    }
-    EmoteAssets::get(&format!("{name}.gif")).map(|f| f.data)
+    let idx = resolve(name)?;
+    let stem = NAMES.get(idx as usize)?;
+    EmoteAssets::get(&format!("{stem}.gif")).map(|f| f.data)
 }
 
 /// One decoded animation frame and its display duration (ms, floored at 20).
@@ -150,6 +221,43 @@ mod tests {
     #[test]
     fn frames_unknown_is_none() {
         assert!(frames("definitely_not_an_emote").is_none());
+    }
+
+    #[test]
+    fn aliases_cover_every_emote() {
+        for (i, n) in names().iter().enumerate() {
+            let idx = u32::try_from(i).unwrap();
+            assert_eq!(resolve(n), Some(idx), "PL stem {n} must resolve to its own index");
+            let en = english_label(idx).expect("every emote has an English label");
+            assert_eq!(resolve(en), Some(idx), "EN alias {en} must resolve to {n}'s index");
+        }
+    }
+
+    #[test]
+    fn resolve_both_languages_and_unknown() {
+        let smile = resolve("usmiech").expect("usmiech");
+        assert_eq!(resolve("smile"), Some(smile), ":smile: == :usmiech:");
+        assert!(resolve("definitely_not_an_emote").is_none());
+    }
+
+    #[test]
+    fn bytes_resolves_english_to_gif() {
+        assert!(bytes("smile").unwrap().starts_with(b"GIF"));
+        assert!(bytes("usmiech").unwrap().starts_with(b"GIF"));
+    }
+
+    #[test]
+    fn display_name_follows_lang() {
+        let i = resolve("usmiech").unwrap();
+        assert_eq!(display_name(i, Lang::En), "smile");
+        assert_eq!(display_name(i, Lang::Pl), "usmiech");
+    }
+
+    #[test]
+    fn tag_names_includes_both_languages() {
+        let tags = tag_names();
+        assert!(tags.contains(&"smile"));
+        assert!(tags.contains(&"usmiech"));
     }
 
     #[test]
