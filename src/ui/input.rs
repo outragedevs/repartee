@@ -472,8 +472,9 @@ fn emote_completions(word: &str) -> Option<Vec<String>> {
         .strip_prefix(':')
         .filter(|p| !p.is_empty() && !p.contains(':'))?
         .to_ascii_lowercase();
+    // Offer both languages — both Polish stems and English aliases are valid tags.
     Some(
-        crate::emotes::names()
+        crate::emotes::tag_names()
             .iter()
             .filter(|n| n.starts_with(&ep))
             .map(|n| format!(":{n}:"))
@@ -835,6 +836,15 @@ pub fn render_spell_popup(frame: &mut Frame, input_area: Rect, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_completes_english_alias() {
+        let mut input = InputState::new();
+        input.value = "hey :smi".to_owned();
+        input.cursor_pos = input.value.len();
+        input.tab_complete(&[], &[], &[], &[]);
+        assert!(input.value.contains(":smile:"), "got {:?}", input.value);
+    }
 
     #[test]
     fn tab_completes_emote_prefix() {
