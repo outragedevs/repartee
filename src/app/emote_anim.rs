@@ -31,30 +31,38 @@ pub fn frame_index_at(delays: &[u32], elapsed_ms: u128) -> usize {
 }
 
 /// Holds per-(`emote_index`, `frame_index`) protocol images sized for compositing.
+/// Packed `0x00RRGGBB` background color the emote frames are flattened onto.
+type BgRgb = u32;
+
 #[derive(Default)]
 pub struct EmoteAnimator {
-    cache: HashMap<(u32, usize), StatefulProtocol>,
+    /// Keyed by (emote, frame, background) so a theme background change produces
+    /// fresh flattened images rather than reusing the old-background ones.
+    cache: HashMap<(u32, usize, BgRgb), StatefulProtocol>,
 }
 
 impl EmoteAnimator {
-    /// Get or build the protocol image for one emote frame. Returns `None` if the
-    /// emote/frame can't be decoded.
+    /// Get or build the protocol image for one emote frame, with transparent
+    /// pixels alpha-blended onto `bg` (the theme background) so the emote has no
+    /// visible box against the chat background. Returns `None` if undecodable.
     fn protocol_for(
         &mut self,
         picker: &Picker,
         emote_index: u32,
         frame_index: usize,
+        bg: (u8, u8, u8),
     ) -> Option<&mut StatefulProtocol> {
         use std::collections::hash_map::Entry;
-        match self.cache.entry((emote_index, frame_index)) {
+        let bg_key = u32::from(bg.0) << 16 | u32::from(bg.1) << 8 | u32::from(bg.2);
+        match self.cache.entry((emote_index, frame_index, bg_key)) {
             Entry::Occupied(e) => Some(e.into_mut()),
             Entry::Vacant(slot) => {
                 let names = crate::emotes::names();
                 let name = names.get(emote_index as usize)?;
                 let frames = crate::emotes::frames(name)?;
                 let (img, _delay) = frames.get(frame_index)?;
-                let dyn_img = image::DynamicImage::ImageRgba8(img.clone());
-                Some(slot.insert(picker.new_resize_protocol(dyn_img)))
+                let flat = flatten_onto_bg(img, bg);
+                Some(slot.insert(picker.new_resize_protocol(image::DynamicImage::ImageRgba8(flat))))
             }
         }
     }
@@ -71,20 +79,47 @@ impl EmoteAnimator {
     }
 }
 
+/// Alpha-blend `img`'s pixels onto an opaque `bg` background. Transparent emote
+/// areas become the theme background color so the emote blends into the chat
+/// rather than showing a box of the terminal's own background.
+fn flatten_onto_bg(img: &image::RgbaImage, bg: (u8, u8, u8)) -> image::RgbaImage {
+    let blend = |fg: u8, bg: u8, a: u16| -> u8 {
+        // Result is mathematically in 0..=255; try_from documents that invariant.
+        u8::try_from((u16::from(fg) * a + u16::from(bg) * (255 - a)) / 255).unwrap_or(255)
+    };
+    let mut out = image::RgbaImage::new(img.width(), img.height());
+    for (x, y, px) in img.enumerate_pixels() {
+        let a = u16::from(px.0[3]);
+        out.put_pixel(
+            x,
+            y,
+            image::Rgba([
+                blend(px.0[0], bg.0, a),
+                blend(px.0[1], bg.1, a),
+                blend(px.0[2], bg.2, a),
+                255,
+            ]),
+        );
+    }
+    out
+}
+
 /// Composite the current frame of every recorded placement onto the frame buffer.
-/// Called from `layout::draw` after the chat view renders.
+/// Called from `layout::draw` after the chat view renders. `bg` is the theme
+/// background color (RGB) the emotes are flattened onto.
 pub fn composite(
     frame: &mut ratatui::Frame,
     picker: &Picker,
     animator: &mut EmoteAnimator,
     placements: &[EmotePlacement],
     elapsed_ms: u128,
+    bg: (u8, u8, u8),
 ) {
     use ratatui_image::StatefulImage;
     for p in placements {
         let delays = EmoteAnimator::delays(p.emote_index);
         let fi = frame_index_at(&delays, elapsed_ms);
-        if let Some(proto) = animator.protocol_for(picker, p.emote_index, fi) {
+        if let Some(proto) = animator.protocol_for(picker, p.emote_index, fi, bg) {
             // Clear the placeholder cells, then draw the frame on top.
             frame.render_widget(ratatui::widgets::Clear, p.rect);
             frame.render_stateful_widget(StatefulImage::default(), p.rect, proto);

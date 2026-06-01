@@ -144,19 +144,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     // Composite inline animated emotes over the placeholder cells the chat view
     // reserved (above text, below the image-preview modal).
-    if app.emotes_graphical() && !app.emote_placements.is_empty() {
-        let elapsed = app.emote_anim_start.elapsed().as_millis();
-        // Move placements out so picker/animator field borrows stay disjoint.
-        let placements = std::mem::take(&mut app.emote_placements);
-        crate::app::emote_anim::composite(
-            frame,
-            &app.picker,
-            &mut app.emote_animator,
-            &placements,
-            elapsed,
-        );
-        app.emote_placements = placements;
-    }
+    composite_emotes(frame, app);
 
     // Spell suggestion popup (above input, below image overlay).
     super::input::render_spell_popup(frame, input_area, app);
@@ -174,6 +162,30 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if let Some(rect) = app.image_clear_rect.take() {
         frame.render_widget(Clear, rect);
     }
+}
+
+/// Composite this frame's inline animated emotes over their reserved placeholder
+/// cells, flattening transparent pixels onto the theme background.
+fn composite_emotes(frame: &mut Frame, app: &mut App) {
+    if !app.emotes_graphical() || app.emote_placements.is_empty() {
+        return;
+    }
+    let elapsed = app.emote_anim_start.elapsed().as_millis();
+    let emote_bg = match hex_to_color(&app.theme.colors.bg) {
+        Some(ratatui::style::Color::Rgb(r, g, b)) => (r, g, b),
+        _ => (0, 0, 0),
+    };
+    // Move placements out so picker/animator field borrows stay disjoint.
+    let placements = std::mem::take(&mut app.emote_placements);
+    crate::app::emote_anim::composite(
+        frame,
+        &app.picker,
+        &mut app.emote_animator,
+        &placements,
+        elapsed,
+        emote_bg,
+    );
+    app.emote_placements = placements;
 }
 
 #[cfg(test)]
