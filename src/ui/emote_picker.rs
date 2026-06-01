@@ -73,7 +73,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     let border = hex_to_color(&colors.fg_muted).unwrap_or(ratatui::style::Color::DarkGray);
     let accent = hex_to_color(&colors.accent).unwrap_or(ratatui::style::Color::Cyan);
 
-    let popup = centered_rect(area, (area.width * 7) / 10, (area.height * 7) / 10);
+    // 70% of each dimension, computed in u32 to avoid u16 overflow on huge terminals.
+    let pw = u16::try_from(u32::from(area.width) * 7 / 10).unwrap_or(area.width);
+    let ph = u16::try_from(u32::from(area.height) * 7 / 10).unwrap_or(area.height);
+    let popup = centered_rect(area, pw, ph);
     frame.render_widget(Clear, popup);
 
     let title = format!(" Emotes  ›  filter: {filter}_ ");

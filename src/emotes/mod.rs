@@ -54,6 +54,10 @@ pub type Frame = (image::RgbaImage, u32);
 /// `&'static` return keeps the render path lifetime-free. The set is bounded
 /// (183 emotes) so leaking the decoded buffers is acceptable.
 #[must_use]
+#[allow(
+    clippy::significant_drop_tightening,
+    reason = "write guard must span the check-then-insert to stay atomic"
+)]
 pub fn frames(name: &str) -> Option<&'static [Frame]> {
     use std::collections::HashMap;
     use std::sync::{OnceLock, RwLock};
@@ -61,12 +65,26 @@ pub fn frames(name: &str) -> Option<&'static [Frame]> {
     static CACHE: OnceLock<RwLock<HashMap<String, &'static [Frame]>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| RwLock::new(HashMap::new()));
 
-    if let Some(slice) = cache.read().ok()?.get(name) {
+    // Recover from a poisoned lock rather than disabling emotes for the session;
+    // the only operation under the lock is a HashMap get/insert and cannot panic.
+    if let Some(slice) = cache
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(name)
+    {
         return Some(slice);
     }
     let decoded = decode_frames(name)?;
+    let mut guard = cache
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Re-check under the write lock: if another thread decoded the same emote
+    // first, drop ours (no leak) and return theirs.
+    if let Some(slice) = guard.get(name) {
+        return Some(slice);
+    }
     let leaked: &'static [Frame] = Box::leak(decoded.into_boxed_slice());
-    cache.write().ok()?.insert(name.to_owned(), leaked);
+    guard.insert(name.to_owned(), leaked);
     Some(leaked)
 }
 

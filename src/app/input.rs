@@ -730,6 +730,11 @@ impl App {
             let filtered = EmotePickerState::filtered_indices(filter);
             let len = filtered.len();
             match (key.modifiers, key.code) {
+                // Quit chord still works while the picker is open.
+                (KeyModifiers::CONTROL, KeyCode::Char('q' | 'c')) => {
+                    self.should_quit = true;
+                    close = true;
+                }
                 (_, KeyCode::Esc) => close = true,
                 (_, KeyCode::Enter) => {
                     insert_idx = filtered.get(*selected).copied();

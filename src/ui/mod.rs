@@ -214,6 +214,8 @@ pub fn wrap_line(line: Line<'static>, width: usize, indent: usize) -> Vec<Line<'
         let break_at = chunk.iter().rposition(|(ch, _, _)| *ch == ' ');
 
         let actual_end = break_at.map_or(end, |break_pos| pos + break_pos + 1);
+        // Never split a multi-cell emote placeholder run across the boundary.
+        let actual_end = avoid_splitting_placeholder(&styled_chars, pos, actual_end);
 
         let built =
             build_line_from_styled_chars(&styled_chars[pos..actual_end], !first_line, indent);
@@ -233,6 +235,29 @@ pub fn wrap_line(line: Line<'static>, width: usize, indent: usize) -> Vec<Line<'
     }
 
     result
+}
+
+/// If the wrap boundary `end` falls inside a run of identical emote-placeholder
+/// chars, move it back to the run's start so the whole emote wraps as a unit.
+/// Returns the original `end` when the run starts at/before `pos` (the emote is
+/// wider than the line and cannot be kept whole — avoids a zero-progress loop).
+fn avoid_splitting_placeholder(chars: &[(char, usize, Style)], pos: usize, end: usize) -> usize {
+    use crate::ui::emote_layout::decode_placeholder_index;
+    if end == 0 || end >= chars.len() {
+        return end;
+    }
+    let Some(idx) = decode_placeholder_index(chars[end].0) else {
+        return end;
+    };
+    // Only a split if the char just before the boundary is the same placeholder.
+    if decode_placeholder_index(chars[end - 1].0) != Some(idx) {
+        return end;
+    }
+    let mut e = end;
+    while e > pos && decode_placeholder_index(chars[e - 1].0) == Some(idx) {
+        e -= 1;
+    }
+    if e <= pos { end } else { e }
 }
 
 /// Build a `Line` from a slice of `(char, display_width, Style)` tuples, grouping
@@ -309,6 +334,32 @@ mod wrap_tests {
         let result = wrap_line(line, 80, 4);
         assert_eq!(result.len(), 1);
         assert_eq!(line_text(&result[0]), "hello world");
+    }
+
+    #[test]
+    fn emote_placeholder_not_split_across_wrap() {
+        use crate::ui::emote_layout::{
+            EMOTE_COLS, decode_placeholder_index, placeholder_for_index,
+        };
+        // "aaa" + 2-cell emote placeholder, wrapped at width 4 so the emote would
+        // otherwise straddle the boundary (3 text cells + 1 of 2 emote cells).
+        let ph = placeholder_for_index(7);
+        let line = Line::from(format!("aaa{ph}"));
+        let result = wrap_line(line, 4, 0);
+        // The placeholder must land entirely on one visual line as a 2-char run,
+        // never as a lone 1-char fragment at a line edge.
+        for vline in &result {
+            let run: usize = vline
+                .spans
+                .iter()
+                .flat_map(|s| s.content.chars())
+                .filter(|c| decode_placeholder_index(*c) == Some(7))
+                .count();
+            assert!(
+                run == 0 || run == EMOTE_COLS,
+                "placeholder split: run={run} in {result:?}"
+            );
+        }
     }
 
     #[test]

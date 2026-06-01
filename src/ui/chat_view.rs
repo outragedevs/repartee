@@ -27,6 +27,11 @@ fn compute_render_budget(buffer_len: usize, visible_height: usize, scroll_offset
 // config or theme changes (see `App::recompute_wrap_indent`).
 
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
+    // Clear any emote placements up-front so early returns (shell buffer, zero
+    // area) don't leave stale rects that would ghost-render over another view
+    // and keep the animation clock spinning. The normal path overwrites this.
+    app.emote_placements.clear();
+
     // Delegate to shell renderer for shell buffers.
     if app
         .state
