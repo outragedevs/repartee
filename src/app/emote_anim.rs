@@ -30,7 +30,6 @@ pub fn frame_index_at(delays: &[u32], elapsed_ms: u128) -> usize {
     0
 }
 
-/// Holds per-(`emote_index`, `frame_index`) protocol images sized for compositing.
 /// Packed `0x00RRGGBB` background color the emote frames are flattened onto.
 type BgRgb = u32;
 
@@ -61,8 +60,12 @@ impl EmoteAnimator {
                 let name = names.get(emote_index as usize)?;
                 let frames = crate::emotes::frames(name)?;
                 let (img, _delay) = frames.get(frame_index)?;
-                let flat = flatten_onto_bg(img, bg);
-                Some(slot.insert(picker.new_resize_protocol(image::DynamicImage::ImageRgba8(flat))))
+                let canvas = render_frame_on_bg(picker, img, bg);
+                Some(
+                    slot.insert(
+                        picker.new_resize_protocol(image::DynamicImage::ImageRgba8(canvas)),
+                    ),
+                )
             }
         }
     }
@@ -79,20 +82,47 @@ impl EmoteAnimator {
     }
 }
 
-/// Alpha-blend `img`'s pixels onto an opaque `bg` background. Transparent emote
-/// areas become the theme background color so the emote blends into the chat
-/// rather than showing a box of the terminal's own background.
-fn flatten_onto_bg(img: &image::RgbaImage, bg: (u8, u8, u8)) -> image::RgbaImage {
+/// Render an emote frame onto an opaque canvas sized to the *exact pixel
+/// dimensions of its cell rectangle* (`EMOTE_COLS * font_w` × `font_h`), filled
+/// with the theme background. The emote is scaled to fit (preserving aspect) and
+/// centered. Because the canvas matches the cell rect's aspect ratio and is fully
+/// painted, no terminal background shows through — not around the emote and not
+/// in the strip below it that a plain aspect-fit would leave in a non-square cell.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "scaled dims are rounded, clamped to [1, cell_px] — non-negative and in range"
+)]
+fn render_frame_on_bg(
+    picker: &Picker,
+    img: &image::RgbaImage,
+    bg: (u8, u8, u8),
+) -> image::RgbaImage {
+    use crate::ui::emote_layout::EMOTE_COLS;
+
+    let (fw, fh) = picker.font_size();
+    let cw = u32::try_from(EMOTE_COLS).unwrap_or(2) * u32::from(fw.max(1));
+    let ch = u32::from(fh.max(1));
+
+    // Scale the emote to fit the cell, preserving aspect ratio.
+    let (iw, ih) = (img.width().max(1), img.height().max(1));
+    let scale = f64::min(f64::from(cw) / f64::from(iw), f64::from(ch) / f64::from(ih));
+    let sw = (f64::from(iw) * scale).round().max(1.0).min(f64::from(cw)) as u32;
+    let sh = (f64::from(ih) * scale).round().max(1.0).min(f64::from(ch)) as u32;
+    let scaled = image::imageops::resize(img, sw, sh, image::imageops::FilterType::Triangle);
+
     let blend = |fg: u8, bg: u8, a: u16| -> u8 {
-        // Result is mathematically in 0..=255; try_from documents that invariant.
         u8::try_from((u16::from(fg) * a + u16::from(bg) * (255 - a)) / 255).unwrap_or(255)
     };
-    let mut out = image::RgbaImage::new(img.width(), img.height());
-    for (x, y, px) in img.enumerate_pixels() {
+
+    let mut canvas = image::RgbaImage::from_pixel(cw, ch, image::Rgba([bg.0, bg.1, bg.2, 255]));
+    let ox = (cw - sw) / 2;
+    let oy = (ch - sh) / 2;
+    for (x, y, px) in scaled.enumerate_pixels() {
         let a = u16::from(px.0[3]);
-        out.put_pixel(
-            x,
-            y,
+        canvas.put_pixel(
+            ox + x,
+            oy + y,
             image::Rgba([
                 blend(px.0[0], bg.0, a),
                 blend(px.0[1], bg.1, a),
@@ -101,7 +131,7 @@ fn flatten_onto_bg(img: &image::RgbaImage, bg: (u8, u8, u8)) -> image::RgbaImage
             ]),
         );
     }
-    out
+    canvas
 }
 
 /// Composite the current frame of every recorded placement onto the frame buffer.
