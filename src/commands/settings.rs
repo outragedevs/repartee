@@ -248,6 +248,7 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
             let val = match parts[1] {
                 "enabled" => config.emotes.enabled.to_string(),
                 "render" => format!("{:?}", config.emotes.render).to_lowercase(),
+                "lang" => format!("{:?}", config.emotes.lang).to_lowercase(),
                 _ => return None,
             };
             Some(Resolved {
@@ -587,6 +588,13 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
                     _ => return Err("Expected graphical, text, or off".to_string()),
                 };
             }
+            "lang" => {
+                config.emotes.lang = match raw.to_ascii_lowercase().as_str() {
+                    "en" => crate::config::EmoteLang::En,
+                    "pl" => crate::config::EmoteLang::Pl,
+                    _ => return Err("Expected en or pl".to_string()),
+                };
+            }
             _ => return Err(format!("Unknown field: {path}")),
         },
         _ => return Err(format!("Unknown section: {}", parts[0])),
@@ -704,6 +712,7 @@ const BASE_PATHS: &[&str] = &[
     "web.password",
     "emotes.enabled",
     "emotes.render",
+    "emotes.lang",
 ];
 
 const SERVER_FIELDS: &[&str] = &[
@@ -1091,7 +1100,7 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
                 "nick_color_lightness",
             ],
         ),
-        ("emotes", &["enabled", "render"]),
+        ("emotes", &["enabled", "render", "lang"]),
     ];
 
     for &(section, fields) in sections {
@@ -1397,6 +1406,16 @@ mod tests {
         // emotes.* paths are advertised as settable.
         assert!(BASE_PATHS.contains(&"emotes.enabled"));
         assert!(BASE_PATHS.contains(&"emotes.render"));
+    }
+
+    #[test]
+    fn get_set_emotes_lang() {
+        let mut config = default_config();
+        assert_eq!(get_config_value(&config, "emotes.lang").unwrap().value, "en");
+        set_config_value(&mut config, "emotes.lang", "pl").unwrap();
+        assert_eq!(config.emotes.lang, crate::config::EmoteLang::Pl);
+        assert!(set_config_value(&mut config, "emotes.lang", "fr").is_err());
+        assert!(BASE_PATHS.contains(&"emotes.lang"));
     }
 
     #[test]
