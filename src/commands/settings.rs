@@ -982,8 +982,7 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                         nick_colors_in_nicklist: app.config.display.nick_colors_in_nicklist,
                         nick_color_saturation: app.config.display.nick_color_saturation,
                         nick_color_lightness: app.config.display.nick_color_lightness,
-                        emotes_enabled: app.config.emotes.enabled
-                            && app.config.emotes.render == crate::config::RenderMode::Graphical,
+                        emotes_enabled: app.config.emotes.web_enabled(),
                     },
                 );
             }

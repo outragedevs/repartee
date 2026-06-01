@@ -633,6 +633,16 @@ pub struct EmotesConfig {
     pub lang: EmoteLang,
 }
 
+impl EmotesConfig {
+    /// Whether the web UI should render `:name:` as inline images: enabled and
+    /// in graphical mode. Pushed to the web on connect (`SyncInit`) and change
+    /// (`SettingsChanged`).
+    #[must_use]
+    pub fn web_enabled(&self) -> bool {
+        self.enabled && self.render == RenderMode::Graphical
+    }
+}
+
 impl Default for EmotesConfig {
     fn default() -> Self {
         Self {

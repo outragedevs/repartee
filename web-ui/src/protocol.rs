@@ -13,6 +13,8 @@ pub enum WebEvent {
         active_buffer_id: Option<String>,
         #[serde(default)]
         timestamp_format: Option<String>,
+        #[serde(default = "default_true")]
+        emotes_enabled: bool,
     },
     NewMessage {
         buffer_id: String,

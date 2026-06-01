@@ -26,6 +26,8 @@ pub struct WebStateSnapshot {
     pub mention_count: u32,
     pub active_buffer_id: Option<String>,
     pub timestamp_format: String,
+    /// Whether `:name:` renders as inline emote images (derived from `[emotes]`).
+    pub emotes_enabled: bool,
 }
 
 /// Shared state passed to all axum handlers.

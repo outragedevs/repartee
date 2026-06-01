@@ -16,6 +16,11 @@ pub enum WebEvent {
         mention_count: u32,
         active_buffer_id: Option<String>,
         timestamp_format: String,
+        /// Whether `:name:` renders as inline emote images (initial value on
+        /// connect, so a fresh client honors `[emotes]` config without waiting
+        /// for a `SettingsChanged`).
+        #[serde(default = "default_true")]
+        emotes_enabled: bool,
     },
     /// A new message was received in a buffer.
     NewMessage {

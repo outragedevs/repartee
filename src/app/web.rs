@@ -133,6 +133,7 @@ impl App {
                 mention_count: 0,
                 active_buffer_id: None,
                 timestamp_format: self.config.web.timestamp_format.clone(),
+                emotes_enabled: self.config.emotes.web_enabled(),
             },
         ));
         self.web_state_snapshot = Some(std::sync::Arc::clone(&snapshot));
@@ -270,6 +271,7 @@ impl App {
             &self.state,
             mention_count,
             &self.config.web.timestamp_format,
+            self.config.emotes.web_enabled(),
         );
         if let crate::web::protocol::WebEvent::SyncInit {
             buffers,
@@ -277,6 +279,7 @@ impl App {
             mention_count,
             active_buffer_id,
             timestamp_format,
+            emotes_enabled,
             ..
         } = init
         {
@@ -286,6 +289,7 @@ impl App {
             snap.mention_count = mention_count;
             snap.active_buffer_id = active_buffer_id;
             snap.timestamp_format = timestamp_format;
+            snap.emotes_enabled = emotes_enabled;
         }
     }
 

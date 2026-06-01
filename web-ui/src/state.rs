@@ -113,6 +113,7 @@ impl AppState {
                 mention_count,
                 active_buffer_id,
                 timestamp_format,
+                emotes_enabled,
             } => {
                 // Clear cached messages, nick lists, and backlog-loaded flags —
                 // forces re-fetch. Handles both initial connect and lag-recovery resync.
@@ -123,6 +124,7 @@ impl AppState {
                 self.buffers.set(buffers);
                 self.connections.set(connections);
                 self.mention_count.set(mention_count);
+                self.emotes_enabled.set(emotes_enabled);
                 self.authenticated.set(true);
                 self.connected.set(true);
                 if let Some(fmt) = timestamp_format
