@@ -769,16 +769,15 @@ pub(crate) fn cmd_emote(app: &mut App, args: &[String]) {
         app.open_emote_picker();
         return;
     }
-    let names = crate::emotes::names();
-    if let Ok(idx) = names.binary_search_by(|n| n.as_str().cmp(query.as_str())) {
-        // Reuse the shared insert path (also clears any stale tab-completion).
-        app.insert_emote_by_index(u32::try_from(idx).unwrap_or(0));
+    if let Some(idx) = crate::emotes::resolve(&query) {
+        // Reuse the shared insert path (current language; clears stale tab-state).
+        app.insert_emote_by_index(idx);
     } else {
-        let hits: Vec<&str> = names
+        let hits: Vec<&str> = crate::emotes::tag_names()
             .iter()
-            .filter(|n| n.contains(&query))
+            .filter(|n| n.contains(query.as_str()))
             .take(10)
-            .map(String::as_str)
+            .copied()
             .collect();
         let msg = if hits.is_empty() {
             format!("No emote matches \"{query}\"")
