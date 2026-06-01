@@ -1411,7 +1411,10 @@ mod tests {
     #[test]
     fn get_set_emotes_lang() {
         let mut config = default_config();
-        assert_eq!(get_config_value(&config, "emotes.lang").unwrap().value, "en");
+        assert_eq!(
+            get_config_value(&config, "emotes.lang").unwrap().value,
+            "en"
+        );
         set_config_value(&mut config, "emotes.lang", "pl").unwrap();
         assert_eq!(config.emotes.lang, crate::config::EmoteLang::Pl);
         assert!(set_config_value(&mut config, "emotes.lang", "fr").is_err());

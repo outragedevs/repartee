@@ -227,9 +227,17 @@ mod tests {
     fn aliases_cover_every_emote() {
         for (i, n) in names().iter().enumerate() {
             let idx = u32::try_from(i).unwrap();
-            assert_eq!(resolve(n), Some(idx), "PL stem {n} must resolve to its own index");
+            assert_eq!(
+                resolve(n),
+                Some(idx),
+                "PL stem {n} must resolve to its own index"
+            );
             let en = english_label(idx).expect("every emote has an English label");
-            assert_eq!(resolve(en), Some(idx), "EN alias {en} must resolve to {n}'s index");
+            assert_eq!(
+                resolve(en),
+                Some(idx),
+                "EN alias {en} must resolve to {n}'s index"
+            );
         }
     }
 

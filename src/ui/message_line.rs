@@ -211,8 +211,14 @@ mod emote_tests {
     #[test]
     fn english_alias_becomes_placeholder() {
         let out = emotify_message_text("hi :smile: x", true);
-        let placeholders = out.chars().filter(|c| decode_placeholder_index(*c).is_some()).count();
-        assert_eq!(placeholders, EMOTE_COLS, ":smile: must become a placeholder");
+        let placeholders = out
+            .chars()
+            .filter(|c| decode_placeholder_index(*c).is_some())
+            .count();
+        assert_eq!(
+            placeholders, EMOTE_COLS,
+            ":smile: must become a placeholder"
+        );
         assert!(!out.contains(":smile:"));
     }
 
