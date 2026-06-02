@@ -749,3 +749,41 @@ fn find_unique_shell_name(app: &App, base: &str) -> String {
     }
     format!("{base} ({})", app.shell_mgr.session_count() + 1)
 }
+
+/// `/emote` opens the picker; `/emote <name>` inserts `:name:` if known, else
+/// lists a few matching emote names to the active buffer.
+pub(crate) fn cmd_emote(app: &mut App, args: &[String]) {
+    if !app.emotes_input_enabled() {
+        add_local_event(
+            app,
+            "Emotes are disabled ([emotes] enabled=false or render=off)",
+        );
+        return;
+    }
+    // No argument (or a bare ":" / "::") opens the picker. Matching is
+    // case-insensitive (emote names are lowercase).
+    let query = args
+        .first()
+        .map_or(String::new(), |a| a.trim_matches(':').to_ascii_lowercase());
+    if query.is_empty() {
+        app.open_emote_picker();
+        return;
+    }
+    if let Some(idx) = crate::emotes::resolve(&query) {
+        // Reuse the shared insert path (current language; clears stale tab-state).
+        app.insert_emote_by_index(idx);
+    } else {
+        let hits: Vec<&str> = crate::emotes::tag_names()
+            .iter()
+            .filter(|n| n.contains(query.as_str()))
+            .take(10)
+            .copied()
+            .collect();
+        let msg = if hits.is_empty() {
+            format!("No emote matches \"{query}\"")
+        } else {
+            format!("Emotes matching \"{query}\": {}", hits.join(", "))
+        };
+        add_local_event(app, &msg);
+    }
+}

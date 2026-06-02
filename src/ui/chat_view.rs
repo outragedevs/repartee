@@ -26,7 +26,12 @@ fn compute_render_budget(buffer_len: usize, visible_height: usize, scroll_offset
 // Wrap-indent is cached on `App::wrap_indent` and recomputed only when
 // config or theme changes (see `App::recompute_wrap_indent`).
 
-pub fn render(frame: &mut Frame, area: Rect, app: &App) {
+pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
+    // Clear any emote placements up-front so early returns (shell buffer, zero
+    // area) don't leave stale rects that would ghost-render over another view
+    // and keep the animation clock spinning. The normal path overwrites this.
+    app.emote_placements.clear();
+
     // Delegate to shell renderer for shell buffers.
     if app
         .state
@@ -36,6 +41,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         super::shell_view::render(frame, area, app);
         return;
     }
+
+    let graphical = app.emotes_graphical();
+    // Emote placements resolved from this frame's visible lines; stored on `app`
+    // after the immutable borrow below ends, for the compositing pass.
+    let mut placements: Vec<crate::ui::emote_layout::EmotePlacement> = Vec::new();
 
     let colors = &app.theme.colors;
     let bg = hex_to_color(&colors.bg).unwrap_or(Color::Reset);
@@ -78,8 +88,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 None
             };
-            let line =
-                super::message_line::render_message(msg, is_own, &app.theme, &app.config, nick_fg);
+            let line = super::message_line::render_message(
+                msg,
+                is_own,
+                &app.theme,
+                &app.config,
+                nick_fg,
+                graphical,
+            );
             let wrapped = super::wrap_line(line, total_width, indent);
 
             // Push in reverse so the final deque is in chronological order.
@@ -103,6 +119,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             .take(visible_height)
             .collect();
 
+        // Resolve inline-emote screen rects before the Paragraph consumes the lines.
+        if graphical {
+            placements = crate::ui::emote_layout::resolve_placements(&visible_lines, area);
+        }
+
         let paragraph = Paragraph::new(visible_lines).style(Style::default().bg(bg));
         frame.render_widget(paragraph, area);
     } else {
@@ -111,6 +132,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             .alignment(Alignment::Center);
         frame.render_widget(paragraph, area);
     }
+
+    app.emote_placements = placements;
 }
 
 #[cfg(test)]

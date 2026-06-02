@@ -475,13 +475,9 @@ pub fn list_networks(db: &Connection) -> rusqlite::Result<Vec<String>> {
 }
 
 /// Distinct buffers logged for a given network, sorted ascending.
-pub fn list_buffers_for_network(
-    db: &Connection,
-    network: &str,
-) -> rusqlite::Result<Vec<String>> {
-    let mut stmt = db.prepare(
-        "SELECT DISTINCT buffer FROM messages WHERE network = ?1 ORDER BY buffer",
-    )?;
+pub fn list_buffers_for_network(db: &Connection, network: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt =
+        db.prepare("SELECT DISTINCT buffer FROM messages WHERE network = ?1 ORDER BY buffer")?;
     let rows = stmt.query_map(params![network], |r| r.get::<_, String>(0))?;
     rows.collect()
 }
@@ -791,7 +787,10 @@ mod tests {
         insert_msg(&db, "libera", "#rust", 4, "d");
         insert_msg(&db, "ircnet", "#pl", 5, "e");
 
-        assert_eq!(list_networks(&db).unwrap(), vec!["ircnet", "libera", "oftc"]);
+        assert_eq!(
+            list_networks(&db).unwrap(),
+            vec!["ircnet", "libera", "oftc"]
+        );
     }
 
     #[test]
@@ -830,13 +829,11 @@ mod tests {
             .unwrap();
         }
         // Sanity: 5 rows at ts=100, distinct ids assigned by SQLite.
-        let all =
-            get_messages_paginated(&db, "libera", "#rust", None, 1000, false, None).unwrap();
+        let all = get_messages_paginated(&db, "libera", "#rust", None, 1000, false, None).unwrap();
         assert_eq!(all.len(), 5);
 
         // Page 1: limit 2 → 2 newest at ts=100.
-        let page1 =
-            get_messages_paginated(&db, "libera", "#rust", None, 2, false, None).unwrap();
+        let page1 = get_messages_paginated(&db, "libera", "#rust", None, 2, false, None).unwrap();
         assert_eq!(page1.len(), 2);
         let oldest = page1.first().unwrap();
         // Page 2: cursor on (ts=100, id=oldest.id) → must yield the

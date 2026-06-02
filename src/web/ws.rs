@@ -164,6 +164,7 @@ fn build_sync_init_from_snapshot(state: &AppHandle, active_buffer_id: Option<Str
             mention_count: snap.mention_count,
             active_buffer_id,
             timestamp_format: snap.timestamp_format.clone(),
+            emotes_enabled: snap.emotes_enabled,
         };
     }
     // Fallback: empty init.
@@ -173,6 +174,7 @@ fn build_sync_init_from_snapshot(state: &AppHandle, active_buffer_id: Option<Str
         mention_count: 0,
         active_buffer_id,
         timestamp_format: crate::config::WebConfig::default().timestamp_format,
+        emotes_enabled: true,
     }
 }
 

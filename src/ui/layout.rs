@@ -142,11 +142,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     app.ui_regions = Some(regions);
 
+    // Composite inline animated emotes over the placeholder cells the chat view
+    // reserved (above text, below the image-preview modal).
+    composite_emotes(frame, app);
+
     // Spell suggestion popup (above input, below image overlay).
     super::input::render_spell_popup(frame, input_area, app);
 
     // Image preview overlay (drawn last, on top of everything).
     super::image_overlay::render(frame, frame.area(), app);
+
+    // Emote picker overlay (top-most when open).
+    super::emote_picker::render(frame, frame.area(), app);
 
     // Targeted repaint after image dismiss (Kitty/iTerm2 only).
     // The graphics layer was already cleaned up by escape sequences.
@@ -155,6 +162,27 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if let Some(rect) = app.image_clear_rect.take() {
         frame.render_widget(Clear, rect);
     }
+}
+
+/// Composite this frame's inline animated emotes over their reserved placeholder
+/// cells, flattening transparent pixels onto the theme background.
+fn composite_emotes(frame: &mut Frame, app: &mut App) {
+    if !app.emotes_graphical() || app.emote_placements.is_empty() {
+        return;
+    }
+    let elapsed = app.emote_anim_start.elapsed().as_millis();
+    let emote_bg = crate::theme::hex_to_rgb_or(&app.theme.colors.bg, (0, 0, 0));
+    // Move placements out so picker/animator field borrows stay disjoint.
+    let placements = std::mem::take(&mut app.emote_placements);
+    crate::app::emote_anim::composite(
+        frame,
+        &app.picker,
+        &mut app.emote_animator,
+        &placements,
+        elapsed,
+        emote_bg,
+    );
+    app.emote_placements = placements;
 }
 
 #[cfg(test)]

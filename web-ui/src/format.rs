@@ -13,6 +13,9 @@ pub struct StyledSpan {
     /// opens in a new tab and right-click yields the browser's native
     /// "open in new window" context menu.
     pub link: Option<String>,
+    /// When `Some`, this span is an emote and should render as `<img>`; `text`
+    /// holds the original `:name:` token (used as alt text / fallback).
+    pub emote_name: Option<String>,
 }
 
 impl StyledSpan {
@@ -99,6 +102,7 @@ pub fn parse_format(text: &str) -> Vec<StyledSpan> {
                     underline,
                     dim,
                     link: None,
+                    emote_name: None,
                 });
             }
         };
@@ -298,6 +302,80 @@ pub fn linkify_spans(spans: Vec<StyledSpan>) -> Vec<StyledSpan> {
     out
 }
 
+/// Split any known `:name:` tokens inside text spans into emote spans. Spans that
+/// are already links/emotes, or carry no colon, pass through. Uses the embedded
+/// emote whitelist ([`crate::emotes::is_emote`]).
+///
+/// Matching mirrors the native TUI tokenizer (`src/emotes/parse.rs::tokenize_with`):
+/// `:` + `[a-z0-9_]+` + `:`. The two live in separate crates (WASM cannot depend
+/// on the native binary), so keep their matching rules in lockstep by hand — both
+/// have unit tests covering the same cases (`:)`/`:D` ignored, adjacency, lone
+/// colons, unknown names).
+#[must_use]
+pub fn emotify_spans(spans: Vec<StyledSpan>) -> Vec<StyledSpan> {
+    emotify_spans_with(spans, crate::emotes::is_emote)
+}
+
+/// `emotify_spans` with an injectable whitelist predicate (for tests).
+#[must_use]
+pub fn emotify_spans_with(
+    spans: Vec<StyledSpan>,
+    is_known: impl Fn(&str) -> bool,
+) -> Vec<StyledSpan> {
+    let mut out = Vec::with_capacity(spans.len());
+    for span in spans {
+        if span.link.is_some() || span.emote_name.is_some() || !span.text.contains(':') {
+            out.push(span);
+            continue;
+        }
+        let bytes = span.text.as_bytes();
+        let mut text_start = 0usize;
+        let mut i = 0usize;
+        while i < bytes.len() {
+            if bytes[i] == b':' {
+                let name_start = i + 1;
+                let mut j = name_start;
+                while j < bytes.len()
+                    && (bytes[j].is_ascii_lowercase()
+                        || bytes[j].is_ascii_digit()
+                        || bytes[j] == b'_')
+                {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b':' && j > name_start {
+                    let name = &span.text[name_start..j];
+                    if is_known(name) {
+                        if text_start < i {
+                            out.push(StyledSpan {
+                                text: span.text[text_start..i].to_owned(),
+                                ..span.clone()
+                            });
+                        }
+                        out.push(StyledSpan {
+                            text: span.text[i..=j].to_owned(), // ":name:" (alt / copy)
+                            // Store the Polish stem so the <img> src is the served
+                            // GIF file regardless of which language the user typed.
+                            emote_name: Some(crate::emotes::stem_for(name).to_owned()),
+                            ..StyledSpan::default()
+                        });
+                        i = j + 1;
+                        text_start = i;
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+        if text_start < span.text.len() {
+            out.push(StyledSpan {
+                text: span.text[text_start..].to_owned(),
+                ..span.clone()
+            });
+        }
+    }
+    out
+}
+
 fn split_one(span: &StyledSpan, out: &mut Vec<StyledSpan>) {
     let text = span.text.as_str();
     let mut cursor = 0usize;
@@ -331,6 +409,7 @@ fn child_span(parent: &StyledSpan, text: &str, link: Option<String>) -> StyledSp
         underline: parent.underline,
         dim: parent.dim,
         link,
+        emote_name: None,
     }
 }
 
@@ -473,6 +552,74 @@ mod tests {
         assert_eq!(out, spans);
     }
 
+    fn known(name: &str) -> bool {
+        matches!(name, "usmiech" | "smile" | "lol")
+    }
+
+    #[test]
+    fn english_alias_becomes_emote_span_with_stem_src() {
+        // Real embedded map: :smile: → emote span whose src-stem is usmiech.
+        let out = emotify_spans(vec![plain(":smile:")]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].emote_name.as_deref(), Some("usmiech"));
+        assert_eq!(out[0].text, ":smile:");
+    }
+
+    #[test]
+    fn splits_known_emote_into_emote_span() {
+        let out = emotify_spans_with(vec![plain("hi :lol: x")], known);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].text, "hi ");
+        assert_eq!(out[1].emote_name.as_deref(), Some("lol"));
+        assert_eq!(out[1].text, ":lol:");
+        assert_eq!(out[2].text, " x");
+    }
+
+    #[test]
+    fn unknown_and_smileys_untouched() {
+        let out = emotify_spans_with(vec![plain(":) :nope:")], known);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].emote_name.is_none());
+        assert_eq!(out[0].text, ":) :nope:");
+    }
+
+    #[test]
+    fn no_match_is_noop() {
+        let out = emotify_spans_with(vec![plain(":zzz:")], known);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].emote_name.is_none());
+    }
+
+    #[test]
+    fn styled_span_keeps_style_on_surrounding_text() {
+        let out = emotify_spans_with(vec![styled("a :lol: b")], known);
+        assert_eq!(out.len(), 3);
+        assert!(out[0].bold && out[0].fg.is_some()); // surrounding text keeps style
+        assert!(out[1].emote_name.is_some());
+        assert!(!out[1].bold); // emote span itself is unstyled
+        assert!(out[2].bold);
+    }
+
+    #[test]
+    fn link_span_is_not_emotified() {
+        let link = StyledSpan {
+            text: ":lol:".to_owned(),
+            link: Some("x".to_owned()),
+            ..StyledSpan::default()
+        };
+        let out = emotify_spans_with(vec![link], known);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].emote_name.is_none());
+    }
+
+    #[test]
+    fn emotify_spans_uses_embedded_whitelist() {
+        // The zero-arg entry point uses the build-time embedded set.
+        let out = emotify_spans(vec![plain(":usmiech:")]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].emote_name.as_deref(), Some("usmiech"));
+    }
+
     #[test]
     fn linkify_single_url_in_middle() {
         let out = linkify_spans(vec![plain("see https://example.com/x.png please")]);
@@ -504,9 +651,7 @@ mod tests {
 
     #[test]
     fn linkify_two_urls_with_text_between() {
-        let out = linkify_spans(vec![plain(
-            "a https://a.example/x b https://b.example/y c",
-        )]);
+        let out = linkify_spans(vec![plain("a https://a.example/x b https://b.example/y c")]);
         let urls: Vec<_> = out.iter().filter_map(|s| s.link.clone()).collect();
         assert_eq!(
             urls,

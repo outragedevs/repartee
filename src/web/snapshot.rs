@@ -7,8 +7,13 @@ use crate::web::protocol::{BufferMeta, ConnectionMeta, WebEvent, WireMessage, Wi
 /// Build a `SyncInit` event from the current `AppState`.
 ///
 /// Buffers are sorted to match terminal order: connection label → `sort_group` → name.
-/// `timestamp_format` comes from `WebConfig` (not available in `AppState`).
-pub fn build_sync_init(state: &AppState, mention_count: u32, timestamp_format: &str) -> WebEvent {
+/// `timestamp_format` and `emotes_enabled` come from config (not in `AppState`).
+pub fn build_sync_init(
+    state: &AppState,
+    mention_count: u32,
+    timestamp_format: &str,
+    emotes_enabled: bool,
+) -> WebEvent {
     // Sort buffers in the same order as the terminal sidebar.
     let buf_refs: Vec<_> = state.buffers.values().collect();
     let sorted = sort_buffers(&buf_refs, |conn_id| {
@@ -52,6 +57,7 @@ pub fn build_sync_init(state: &AppState, mention_count: u32, timestamp_format: &
         mention_count,
         active_buffer_id: state.active_buffer_id.clone(),
         timestamp_format: timestamp_format.to_string(),
+        emotes_enabled,
     }
 }
 
@@ -174,11 +180,12 @@ mod tests {
     #[test]
     fn sync_init_includes_buffers() {
         let state = make_test_state();
-        let event = build_sync_init(&state, 5, "%H:%M");
+        let event = build_sync_init(&state, 5, "%H:%M", false);
         match event {
             WebEvent::SyncInit {
                 buffers,
                 mention_count,
+                emotes_enabled,
                 ..
             } => {
                 assert_eq!(buffers.len(), 1);
@@ -186,6 +193,10 @@ mod tests {
                 assert_eq!(buffers[0].unread_count, 3);
                 assert_eq!(buffers[0].buffer_type, "channel");
                 assert_eq!(mention_count, 5);
+                assert!(
+                    !emotes_enabled,
+                    "build_sync_init must carry the emotes flag"
+                );
             }
             _ => panic!("expected SyncInit"),
         }
@@ -244,8 +255,7 @@ mod tests {
 
     #[test]
     fn message_to_wire_populates_previews_when_extractor_provided() {
-        let extractor =
-            crate::web::preview::WebPreviewExtractor::new(vec![0u8; 32], 4, 200);
+        let extractor = crate::web::preview::WebPreviewExtractor::new(vec![0u8; 32], 4, 200);
         let msg = crate::state::buffer::Message {
             id: 1,
             timestamp: Utc::now(),

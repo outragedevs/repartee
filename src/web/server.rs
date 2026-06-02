@@ -26,6 +26,8 @@ pub struct WebStateSnapshot {
     pub mention_count: u32,
     pub active_buffer_id: Option<String>,
     pub timestamp_format: String,
+    /// Whether `:name:` renders as inline emote images (derived from `[emotes]`).
+    pub emotes_enabled: bool,
 }
 
 /// Shared state passed to all axum handlers.
@@ -58,7 +60,10 @@ struct LoginRequest {
     /// Sent by the client; the server only validates the password.
     /// Exists so password managers see a complete credential pair.
     #[serde(default)]
-    #[expect(dead_code, reason = "field is part of wire format but intentionally ignored")]
+    #[expect(
+        dead_code,
+        reason = "field is part of wire format but intentionally ignored"
+    )]
     username: Option<String>,
     password: String,
 }
@@ -182,7 +187,10 @@ fn is_hashed_asset(path: &str) -> bool {
     let Some(hash) = stem.rsplit_once('-').map(|(_, h)| h) else {
         return false;
     };
-    hash.len() >= 8 && hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    hash.len() >= 8
+        && hash
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
 /// Serve the index.html for the root path (no-cache to pick up new hashed assets).
@@ -250,6 +258,32 @@ async fn favicon_handler() -> impl IntoResponse {
     StatusCode::NO_CONTENT
 }
 
+/// GET /emotes/{file} — serve an embedded emote GIF (e.g. `usmiech.gif`).
+///
+/// The web frontend embeds the emote name whitelist at build time, so no JSON
+/// manifest endpoint is needed — only the bytes are served here.
+async fn emote_handler(Path(file): Path<String>) -> Response {
+    // `file` is e.g. "usmiech.gif". Strip extension, validate against the registry.
+    let name = file.strip_suffix(".gif").unwrap_or(&file);
+    crate::emotes::bytes(name).map_or_else(
+        || StatusCode::NOT_FOUND.into_response(),
+        |data| {
+            (
+                StatusCode::OK,
+                [
+                    (axum::http::header::CONTENT_TYPE, "image/gif"),
+                    (
+                        axum::http::header::CACHE_CONTROL,
+                        "public, max-age=31536000, immutable",
+                    ),
+                ],
+                data.into_owned(),
+            )
+                .into_response()
+        },
+    )
+}
+
 /// Build the axum router with all routes.
 pub fn build_router(handle: Arc<AppHandle>) -> Router {
     Router::new()
@@ -260,6 +294,7 @@ pub fn build_router(handle: Arc<AppHandle>) -> Router {
         .route("/api/preview", get(super::preview::preview_handler))
         .route("/ws", get(super::ws::ws_handler))
         .route("/favicon.ico", get(favicon_handler))
+        .route("/emotes/{file}", get(emote_handler))
         .route("/", get(index_handler))
         .route("/{*path}", get(static_handler))
         .with_state(handle)
@@ -345,6 +380,39 @@ mod tests {
     fn test_app(handle: Arc<AppHandle>) -> Router {
         let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
         build_router(handle).layer(axum::Extension(PeerAddr(addr)))
+    }
+
+    #[tokio::test]
+    async fn emote_route_serves_gif_bytes() {
+        let app = test_app(make_test_handle());
+        let request = axum::http::Request::builder()
+            .uri("/emotes/usmiech.gif")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
+            "image/gif"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        assert!(body.starts_with(b"GIF"), "served body must be a GIF");
+    }
+
+    #[tokio::test]
+    async fn emote_route_unknown_is_404() {
+        let app = test_app(make_test_handle());
+        let request = axum::http::Request::builder()
+            .uri("/emotes/definitely_not_real.gif")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

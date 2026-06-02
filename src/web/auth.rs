@@ -365,7 +365,10 @@ impl SessionStore {
     /// Force-flush any pending changes to disk. Used at shutdown and tests.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "called from tests; future shutdown hook will call it")
+        expect(
+            dead_code,
+            reason = "called from tests; future shutdown hook will call it"
+        )
     )]
     pub fn flush(&mut self) {
         self.flush_if_needed(true);
@@ -493,12 +496,7 @@ mod tests {
     fn validate_bumps_last_used() {
         let mut store = SessionStore::with_days(test_secret(), 90);
         let raw = store.create("ua");
-        let before = store
-            .sessions
-            .values()
-            .next()
-            .unwrap()
-            .last_used;
+        let before = store.sessions.values().next().unwrap().last_used;
         std::thread::sleep(Duration::from_millis(1100));
         store.validate(&raw).unwrap();
         let after = store.sessions.values().next().unwrap().last_used;

@@ -76,6 +76,7 @@ pub struct AppConfig {
     pub web: WebConfig,
     pub e2e: E2eConfig,
     pub shrink: ShrinkConfig,
+    pub emotes: EmotesConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -585,6 +586,73 @@ impl Default for WebConfig {
     }
 }
 
+/// How `:name:` emote tokens are rendered.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RenderMode {
+    /// Render as an inline image where the surface supports it; fall back to text.
+    #[default]
+    Graphical,
+    /// Always render the literal `:name:` text.
+    Text,
+    /// Do not treat `:name:` as an emote at all.
+    Off,
+}
+
+/// Picker / autocomplete-insert preview language for emotes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EmoteLang {
+    /// English aliases (`:smile:`).
+    #[default]
+    En,
+    /// Polish stems (`:usmiech:`).
+    Pl,
+}
+
+impl EmoteLang {
+    /// Map to the registry's language enum.
+    #[must_use]
+    pub const fn to_registry(self) -> crate::emotes::Lang {
+        match self {
+            Self::En => crate::emotes::Lang::En,
+            Self::Pl => crate::emotes::Lang::Pl,
+        }
+    }
+}
+
+/// `[emotes]` configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EmotesConfig {
+    /// Enable built-in `:name:` emotes.
+    pub enabled: bool,
+    /// How emotes are rendered.
+    pub render: RenderMode,
+    /// Picker / insert preview language.
+    pub lang: EmoteLang,
+}
+
+impl EmotesConfig {
+    /// Whether the web UI should render `:name:` as inline images: enabled and
+    /// in graphical mode. Pushed to the web on connect (`SyncInit`) and change
+    /// (`SettingsChanged`).
+    #[must_use]
+    pub fn web_enabled(&self) -> bool {
+        self.enabled && self.render == RenderMode::Graphical
+    }
+}
+
+impl Default for EmotesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            render: RenderMode::Graphical,
+            lang: EmoteLang::En,
+        }
+    }
+}
+
 // === Load / Save ===
 
 /// Load config from TOML file, merging with defaults for missing fields.
@@ -624,16 +692,10 @@ pub fn save_config(path: &Path, config: &AppConfig) -> Result<()> {
 /// validation is a fast pre-check, not a substitute. The narrow race
 /// where the user edits between this call and `App::new` is harmless —
 /// `waitpid` will surface the child's parse error then.
-pub fn validate_startup_files(
-    config_path: &Path,
-    theme_dir: &Path,
-) -> Result<AppConfig> {
+pub fn validate_startup_files(config_path: &Path, theme_dir: &Path) -> Result<AppConfig> {
     let config = match std::fs::read_to_string(config_path) {
         Ok(content) => toml::from_str::<AppConfig>(&content).map_err(|e| {
-            color_eyre::eyre::eyre!(
-                "Invalid TOML in {}\n{e}",
-                config_path.display()
-            )
+            color_eyre::eyre::eyre!("Invalid TOML in {}\n{e}", config_path.display())
         })?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => default_config(),
         Err(e) => {
@@ -662,6 +724,31 @@ pub fn validate_startup_files(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emotes_lang_default_and_parse() {
+        assert_eq!(AppConfig::default().emotes.lang, EmoteLang::En);
+        let p: AppConfig = toml::from_str("[emotes]\nlang = \"pl\"\n").unwrap();
+        assert_eq!(p.emotes.lang, EmoteLang::Pl);
+    }
+
+    #[test]
+    fn emotes_config_defaults_and_roundtrip() {
+        let cfg = AppConfig::default();
+        assert!(cfg.emotes.enabled);
+        assert_eq!(cfg.emotes.render, RenderMode::Graphical);
+
+        // TOML round-trip preserves the section.
+        let toml_str = toml::to_string(&cfg).expect("serialize");
+        let back: AppConfig = toml::from_str(&toml_str).expect("deserialize");
+        assert_eq!(back.emotes.render, RenderMode::Graphical);
+
+        // Parsing an explicit section.
+        let parsed: AppConfig =
+            toml::from_str("[emotes]\nenabled = false\nrender = \"text\"\n").unwrap();
+        assert!(!parsed.emotes.enabled);
+        assert_eq!(parsed.emotes.render, RenderMode::Text);
+    }
 
     #[test]
     fn default_config_uses_app_name() {

@@ -122,8 +122,8 @@ pub fn load_log_db(config: &LoggingConfig) -> Result<LogDb, String> {
         ));
     }
     let path_str = db_path.to_str().ok_or("invalid log dir path")?;
-    let conn = db::open_readonly_at(path_str)
-        .map_err(|e| format!("failed to open log database: {e}"))?;
+    let conn =
+        db::open_readonly_at(path_str).map_err(|e| format!("failed to open log database: {e}"))?;
 
     // Important: `load_existing_key`, NOT `load_or_create_key`. If the
     // user's LOG_KEY went missing for any reason (deleted .env, copied

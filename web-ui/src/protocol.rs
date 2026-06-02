@@ -13,6 +13,8 @@ pub enum WebEvent {
         active_buffer_id: Option<String>,
         #[serde(default)]
         timestamp_format: Option<String>,
+        #[serde(default = "default_true")]
+        emotes_enabled: bool,
     },
     NewMessage {
         buffer_id: String,
@@ -91,6 +93,8 @@ pub enum WebEvent {
         nick_color_saturation: f32,
         #[serde(default = "default_lightness")]
         nick_color_lightness: f32,
+        #[serde(default = "default_true")]
+        emotes_enabled: bool,
     },
     Error {
         message: String,

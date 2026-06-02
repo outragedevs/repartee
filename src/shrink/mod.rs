@@ -39,9 +39,8 @@ pub struct UrlShortening {
 /// MDN, RFC links — are not matched at all, which is the right
 /// failure mode (no shrink → original URL goes through unchanged,
 /// preview pipeline still extracts via its own pattern).
-static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"https?://[^\s<>"'()\[\]]+"#).expect("URL_RE is a valid regex")
-});
+static URL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"https?://[^\s<>"'()\[\]]+"#).expect("URL_RE is a valid regex"));
 
 /// Return every distinct URL in `text` whose length (including the
 /// `http(s)://` scheme prefix) is at least `min_length`. The result
@@ -223,8 +222,7 @@ mod tests {
         // Regression: the bare URL_RE regex doesn't strip sentence-end
         // punctuation, and the shortener would store the trailing dot
         // as part of the URL — producing a short-link that 404s.
-        let text =
-            "see https://example.com/very/long/path-name-that-exceeds-min, then also https://example.com/another-long-path-here-yes.";
+        let text = "see https://example.com/very/long/path-name-that-exceeds-min, then also https://example.com/another-long-path-here-yes.";
         let urls = find_long_urls(text, 40);
         assert_eq!(urls.len(), 2);
         for u in &urls {
@@ -243,7 +241,11 @@ mod tests {
         let text = "see https://example.com/search-for-a-very-long-name?";
         let urls = find_long_urls(text, 30);
         assert_eq!(urls.len(), 1);
-        assert!(urls[0].ends_with('?'), "URL must keep trailing `?`: {}", urls[0]);
+        assert!(
+            urls[0].ends_with('?'),
+            "URL must keep trailing `?`: {}",
+            urls[0]
+        );
     }
 
     #[test]
@@ -282,10 +284,22 @@ mod tests {
 
     #[test]
     fn host_of_extracts_basics() {
-        assert_eq!(host_of("https://example.com/path"), Some("example.com".into()));
-        assert_eq!(host_of("http://www.example.com/"), Some("example.com".into()));
-        assert_eq!(host_of("https://Sub.Example.COM"), Some("sub.example.com".into()));
-        assert_eq!(host_of("https://example.com:8443/x"), Some("example.com".into()));
+        assert_eq!(
+            host_of("https://example.com/path"),
+            Some("example.com".into())
+        );
+        assert_eq!(
+            host_of("http://www.example.com/"),
+            Some("example.com".into())
+        );
+        assert_eq!(
+            host_of("https://Sub.Example.COM"),
+            Some("sub.example.com".into())
+        );
+        assert_eq!(
+            host_of("https://example.com:8443/x"),
+            Some("example.com".into())
+        );
     }
 
     #[test]
@@ -307,7 +321,10 @@ mod tests {
             host_of("https://user:pass@example.com/x"),
             Some("example.com".into())
         );
-        assert_eq!(host_of("https://user@example.com/"), Some("example.com".into()));
+        assert_eq!(
+            host_of("https://user@example.com/"),
+            Some("example.com".into())
+        );
         // userinfo + IPv6 + port should still yield the IPv6 literal.
         assert_eq!(
             host_of("https://u:p@[2001:db8::1]:8443/x"),
@@ -315,16 +332,25 @@ mod tests {
         );
         // `@` legitimately appearing inside the path is already stripped
         // by the earlier `/?#` split and must not be misread as userinfo.
-        assert_eq!(host_of("https://example.com/path@frag"), Some("example.com".into()));
+        assert_eq!(
+            host_of("https://example.com/path@frag"),
+            Some("example.com".into())
+        );
     }
 
     #[test]
     fn host_of_keeps_ipv6_literal_intact() {
         // Portless IPv6: must not be chopped at an inner colon.
-        assert_eq!(host_of("https://[2001:db8::1]/path"), Some("[2001:db8::1]".into()));
+        assert_eq!(
+            host_of("https://[2001:db8::1]/path"),
+            Some("[2001:db8::1]".into())
+        );
         assert_eq!(host_of("http://[::1]/"), Some("[::1]".into()));
         // IPv6 with port: strip the port, keep the bracketed literal.
-        assert_eq!(host_of("https://[2001:db8::1]:8443/x"), Some("[2001:db8::1]".into()));
+        assert_eq!(
+            host_of("https://[2001:db8::1]:8443/x"),
+            Some("[2001:db8::1]".into())
+        );
         assert_eq!(host_of("https://[::1]:8080"), Some("[::1]".into()));
     }
 
@@ -337,8 +363,14 @@ mod tests {
     #[test]
     fn cache_returns_value_on_hit() {
         let mut c = ShrinkCache::new(10);
-        c.insert("https://x.com/long".into(), sh("https://x.com/long", "https://shr.al/a"));
-        assert_eq!(c.get("https://x.com/long").unwrap().shortened, "https://shr.al/a");
+        c.insert(
+            "https://x.com/long".into(),
+            sh("https://x.com/long", "https://shr.al/a"),
+        );
+        assert_eq!(
+            c.get("https://x.com/long").unwrap().shortened,
+            "https://shr.al/a"
+        );
     }
 
     #[test]
@@ -385,7 +417,10 @@ mod tests {
         // a was just touched (MRU); b is now oldest → b evicted.
         assert!(c.get("a").is_some(), "a was just touched, must survive");
         assert!(c.get("b").is_none(), "b is oldest after a's promotion");
-        assert!(c.get("c").is_some(), "c must survive — swap_remove would have evicted it");
+        assert!(
+            c.get("c").is_some(),
+            "c must survive — swap_remove would have evicted it"
+        );
         assert!(c.get("d").is_some(), "d just inserted");
     }
 

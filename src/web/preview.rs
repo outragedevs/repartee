@@ -613,7 +613,8 @@ impl Resolve for PublicOnlyResolver {
             if filtered.is_empty() {
                 return Err(Box::new(std::io::Error::other(
                     "no public unicast addresses for host",
-                )) as Box<dyn std::error::Error + Send + Sync>);
+                ))
+                    as Box<dyn std::error::Error + Send + Sync>);
             }
             let iter: Addrs = Box::new(filtered.into_iter());
             Ok(iter)
@@ -639,7 +640,10 @@ mod tests {
         let p = e.extract("look at https://i.imgur.com/abc123.png");
         assert_eq!(p.len(), 1);
         assert_eq!(p[0].kind, LinkPreviewKind::ClientDirect);
-        assert_eq!(p[0].thumb_url.as_deref(), Some("https://i.imgur.com/abc123.png"));
+        assert_eq!(
+            p[0].thumb_url.as_deref(),
+            Some("https://i.imgur.com/abc123.png")
+        );
     }
 
     #[test]
@@ -755,12 +759,18 @@ mod tests {
 
     #[test]
     fn host_of_extracts_lowercase_no_port() {
-        assert_eq!(host_of("https://Example.COM:8443/path").as_deref(), Some("example.com"));
+        assert_eq!(
+            host_of("https://Example.COM:8443/path").as_deref(),
+            Some("example.com")
+        );
     }
 
     #[test]
     fn host_of_handles_no_path() {
-        assert_eq!(host_of("https://example.com").as_deref(), Some("example.com"));
+        assert_eq!(
+            host_of("https://example.com").as_deref(),
+            Some("example.com")
+        );
     }
 
     #[test]

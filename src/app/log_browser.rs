@@ -29,8 +29,7 @@ impl App {
         let mut app = Self::new_with_mode(true)?;
         // `new_with_mode(true)` already sets `log_browser_mode = true`.
 
-        let log_db = crate::storage::load_log_db(&app.config.logging)
-            .map_err(|e| eyre!("{e}"))?;
+        let log_db = crate::storage::load_log_db(&app.config.logging).map_err(|e| eyre!("{e}"))?;
         app.log_db = Some(log_db);
 
         // `new_with_mode(true)` does not create any default buffers,
@@ -69,8 +68,7 @@ impl App {
             .ok_or_else(|| eyre!("log catalog requires log_db"))?;
         let networks = {
             let db = log_db.db.lock().expect("log db poisoned");
-            crate::storage::query::list_networks(&db)
-                .map_err(|e| eyre!("list_networks: {e}"))?
+            crate::storage::query::list_networks(&db).map_err(|e| eyre!("list_networks: {e}"))?
         };
 
         // Look up friendly labels from the user's chat config when present
@@ -233,10 +231,11 @@ impl App {
 
         // Cache stats first, even when there are zero messages — the
         // topic bar should show 0/range= empty for an empty buffer.
-        let stats_result = self
-            .log_db
-            .as_ref()
-            .and_then(|d| d.db.lock().ok().map(|db| crate::storage::query::buffer_stats(&db, &net, &buf)));
+        let stats_result = self.log_db.as_ref().and_then(|d| {
+            d.db.lock()
+                .ok()
+                .map(|db| crate::storage::query::buffer_stats(&db, &net, &buf))
+        });
         if let Some(Ok(Some((count, oldest, newest)))) = stats_result
             && let Some(buffer) = self.state.buffers.get_mut(buffer_id)
         {
@@ -314,11 +313,7 @@ impl App {
         // would collapse the cursor to `None`, fetching the *newest*
         // page again and producing duplicate prepends. Walk forward
         // until we find a row that came from `stored_to_message`.
-        let Some(oldest_msg) = buffer
-            .messages
-            .iter()
-            .find(|m| m.log_msg_id.is_some())
-        else {
+        let Some(oldest_msg) = buffer.messages.iter().find(|m| m.log_msg_id.is_some()) else {
             self.load_initial_messages(buffer_id);
             return;
         };
@@ -475,8 +470,8 @@ fn rows_to_buffer_messages(
     let mut out: Vec<Message> = Vec::with_capacity(rows.len() + 4);
     let mut last_date: Option<chrono::NaiveDate> = None;
     for stored in rows {
-        let ts = chrono::DateTime::<Utc>::from_timestamp(stored.timestamp, 0)
-            .unwrap_or_else(Utc::now);
+        let ts =
+            chrono::DateTime::<Utc>::from_timestamp(stored.timestamp, 0).unwrap_or_else(Utc::now);
         let local_date = Local.from_utc_datetime(&ts.naive_utc()).date_naive();
         if last_date.is_none_or(|d| d != local_date) {
             let sep_text = crate::app::backlog::format_date_separator(local_date);

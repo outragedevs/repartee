@@ -1,5 +1,6 @@
 mod app;
 mod components;
+mod emotes;
 mod format;
 mod nick_color;
 mod protocol;

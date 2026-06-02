@@ -16,8 +16,8 @@ use super::handlers_irc::{
 };
 use super::handlers_shrink::cmd_shrink;
 use super::handlers_ui::{
-    cmd_alias, cmd_clear, cmd_close, cmd_detach, cmd_help, cmd_items, cmd_quit, cmd_shell,
-    cmd_unalias,
+    cmd_alias, cmd_clear, cmd_close, cmd_detach, cmd_emote, cmd_help, cmd_items, cmd_quit,
+    cmd_shell, cmd_unalias,
 };
 use super::types::{CommandCategory, CommandDef};
 
@@ -341,6 +341,15 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
                 description: "Show help for commands",
                 aliases: &["?"],
                 category: CommandCategory::Info,
+            },
+        ),
+        (
+            "emote",
+            CommandDef {
+                handler: cmd_emote,
+                description: "Open the emote picker, or insert/search :name: emotes",
+                aliases: &["emotes", "emoji"],
+                category: CommandCategory::Other,
             },
         ),
         (
@@ -715,6 +724,11 @@ mod tests {
         for &(name, ref def) in get_commands() {
             assert!(!def.description.is_empty(), "/{name} missing description");
         }
+    }
+
+    #[test]
+    fn emote_command_registered() {
+        assert!(get_commands().iter().any(|(n, _)| *n == "emote"));
     }
 
     #[test]

@@ -69,10 +69,7 @@ pub enum ShrinkDeliver {
     Incoming(IncomingDeliver),
     /// `/shrink <url>` manual output line. The loop just appends a
     /// local event with `display` to the buffer.
-    Manual {
-        buffer_id: String,
-        display: String,
-    },
+    Manual { buffer_id: String, display: String },
 }
 
 #[derive(Debug)]
@@ -106,10 +103,7 @@ pub struct IncomingDeliver {
     /// deferred deliver would re-format and push the substituted text
     /// into `_mentions`. Always `false` in v1 — the inline push in
     /// `handle_privmsg` runs synchronously with the original URL.
-    #[expect(
-        dead_code,
-        reason = "v2 hook for shrink-aware mentions buffer push"
-    )]
+    #[expect(dead_code, reason = "v2 hook for shrink-aware mentions buffer push")]
     pub push_to_mentions: bool,
 }
 
@@ -504,10 +498,7 @@ impl App {
         // Surface IRC-down as an in-buffer error — old code silently
         // returned, losing the user's message with no UI feedback.
         if !self.irc_handles.contains_key(&out.conn_id) {
-            self.deliver_outgoing_error(
-                out,
-                "Failed to send message — connection unavailable",
-            );
+            self.deliver_outgoing_error(out, "Failed to send message — connection unavailable");
             return;
         }
         let Some((wire_lines, plain_echo)) = self.e2e_encrypt_or_passthrough(
@@ -542,10 +533,7 @@ impl App {
         let mut send_ok = true;
         for wire in wire_lines {
             let Some(handle) = self.irc_handles.get(&out.conn_id) else {
-                self.deliver_outgoing_error(
-                    out,
-                    "Failed to send message — connection dropped",
-                );
+                self.deliver_outgoing_error(out, "Failed to send message — connection dropped");
                 send_ok = false;
                 break;
             };

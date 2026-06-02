@@ -118,6 +118,12 @@ impl App {
             return;
         }
 
+        // Emote picker overlay swallows all keys while open.
+        if self.emote_picker.is_open() {
+            self.handle_emote_picker_key(key);
+            return;
+        }
+
         // Check for ESC+key combos (ESC pressed recently, now a follow-up key)
         let esc_active = if key.code == KeyCode::Esc {
             // Don't consume ESC prefix on another ESC press
@@ -169,6 +175,7 @@ impl App {
                 }
             }
             (KeyModifiers::CONTROL, KeyCode::Char('q' | 'c')) => self.should_quit = true,
+            (KeyModifiers::CONTROL, KeyCode::Char('g')) => self.open_emote_picker(),
             (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
                 // Force redraw (happens automatically on next iteration)
             }
@@ -388,6 +395,24 @@ impl App {
             return;
         };
         let pos = Position::new(mouse.column, mouse.row);
+
+        // Emote picker: a left click inserts the clicked emote (or closes on a
+        // click outside any cell). It takes priority over all other mouse use.
+        if let crate::ui::emote_picker::EmotePickerState::Open { cell_rects, .. } =
+            &self.emote_picker
+        {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                let hit = cell_rects
+                    .iter()
+                    .find(|(_, r)| r.contains(pos))
+                    .map(|(i, _)| *i);
+                if let Some(idx) = hit {
+                    self.insert_emote_by_index(idx);
+                }
+                self.emote_picker = crate::ui::emote_picker::EmotePickerState::Hidden;
+            }
+            return;
+        }
 
         // Forward mouse events to the shell PTY when in shell input mode
         // and the mouse is within the chat (shell render) area.
@@ -684,6 +709,90 @@ impl App {
         }
     }
 
+    /// Open the emote picker overlay (Ctrl+G or `/emote` with no args).
+    pub(crate) fn open_emote_picker(&mut self) {
+        if !self.emotes_input_enabled() {
+            return;
+        }
+        self.emote_picker = crate::ui::emote_picker::EmotePickerState::Open {
+            filter: String::new(),
+            selected: 0,
+            cell_rects: Vec::new(),
+            cols: 1,
+        };
+    }
+
+    /// Handle a key while the emote picker is open.
+    fn handle_emote_picker_key(&mut self, key: event::KeyEvent) {
+        use crate::ui::emote_picker::EmotePickerState;
+        let mut close = false;
+        let mut insert_idx: Option<u32> = None;
+        if let EmotePickerState::Open {
+            filter,
+            selected,
+            cols,
+            ..
+        } = &mut self.emote_picker
+        {
+            let filtered = EmotePickerState::filtered_indices(filter);
+            let len = filtered.len();
+            let cols = (*cols).max(1);
+            match (key.modifiers, key.code) {
+                // Quit chord still works while the picker is open.
+                (KeyModifiers::CONTROL, KeyCode::Char('q' | 'c')) => {
+                    self.should_quit = true;
+                    close = true;
+                }
+                (_, KeyCode::Esc) => close = true,
+                (_, KeyCode::Enter) => {
+                    insert_idx = filtered.get(*selected).copied();
+                    close = true;
+                }
+                // Left/Right move within a row; Up/Down move by a grid row.
+                (_, KeyCode::Left) => *selected = selected.saturating_sub(1),
+                (_, KeyCode::Right) => *selected = (*selected + 1).min(len.saturating_sub(1)),
+                (_, KeyCode::Up) => *selected = selected.saturating_sub(cols),
+                (_, KeyCode::Down) => *selected = (*selected + cols).min(len.saturating_sub(1)),
+                (_, KeyCode::Home) => *selected = 0,
+                (_, KeyCode::End) => *selected = len.saturating_sub(1),
+                (_, KeyCode::Backspace) => {
+                    filter.pop();
+                    *selected = 0;
+                }
+                (m, KeyCode::Char(c))
+                    if !m.contains(KeyModifiers::CONTROL)
+                        && !m.contains(KeyModifiers::ALT)
+                        && !c.is_control() =>
+                {
+                    filter.push(c);
+                    *selected = 0;
+                }
+                _ => {}
+            }
+        }
+        if let Some(idx) = insert_idx {
+            self.insert_emote_by_index(idx);
+        }
+        if close {
+            self.emote_picker = crate::ui::emote_picker::EmotePickerState::Hidden;
+        }
+    }
+
+    /// Insert `:name:` for the registry index at the input cursor, in the
+    /// configured emote language (`emotes.lang`).
+    pub(crate) fn insert_emote_by_index(&mut self, index: u32) {
+        let lang = self.config.emotes.lang.to_registry();
+        let name = crate::emotes::display_name(index, lang);
+        if name == "?" {
+            return;
+        }
+        let token = format!(":{name}:");
+        let at = self.input.cursor_pos;
+        self.input.value.insert_str(at, &token);
+        self.input.cursor_pos = at + token.len();
+        self.input.tab_state = None;
+    }
+
     fn handle_tab(&mut self) {
         let (nicks, last_speakers): (Vec<String>, Vec<String>) =
             self.state.active_buffer().map_or_else(
@@ -713,8 +822,14 @@ impl App {
         all_commands.sort_unstable();
         all_commands.dedup();
         let setting_paths = crate::commands::settings::get_setting_paths(&self.config);
-        self.input
-            .tab_complete(&nicks, &last_speakers, &all_commands, &setting_paths);
+        let emotes_on = self.emotes_input_enabled();
+        self.input.tab_complete(
+            &nicks,
+            &last_speakers,
+            &all_commands,
+            &setting_paths,
+            emotes_on,
+        );
     }
 
     pub(crate) fn handle_submit(&mut self, text: &str) {
@@ -725,10 +840,7 @@ impl App {
             // connection to send to, and routing through
             // `handle_plain_message` would produce the unrelated
             // "Cannot send messages to this buffer" line.
-            crate::commands::helpers::add_local_event(
-                self,
-                "log mode: only slash commands. /help",
-            );
+            crate::commands::helpers::add_local_event(self, "log mode: only slash commands. /help");
         } else {
             self.handle_plain_message(text);
         }
@@ -927,10 +1039,8 @@ impl App {
         // list. The text-length cap matches the documented v1 scope
         // (multi-chunk messages fall through to the synchronous
         // path); per-chunk substitution accounting is out of scope.
-        let pre_extracted_urls = crate::shrink::find_long_urls(
-            text,
-            self.state.shrink_min_url_length as usize,
-        );
+        let pre_extracted_urls =
+            crate::shrink::find_long_urls(text, self.state.shrink_min_url_length as usize);
         if self.config.shrink.enabled
             && self.config.shrink.outgoing_enabled
             && self.shrink_client.is_some()
@@ -972,9 +1082,7 @@ impl App {
             match self.shrink_outgoing_tx.try_send(pending) {
                 Ok(()) => return,
                 Err(TrySendError::Full(_)) => {
-                    tracing::warn!(
-                        "shrink: outgoing queue full, sending unshrunk"
-                    );
+                    tracing::warn!("shrink: outgoing queue full, sending unshrunk");
                 }
                 Err(TrySendError::Closed(_)) => {
                     tracing::error!(

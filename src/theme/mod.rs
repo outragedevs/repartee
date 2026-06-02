@@ -108,6 +108,17 @@ pub fn hex_to_color(hex: &str) -> Option<Color> {
     Some(Color::Rgb(r, g, b))
 }
 
+/// Convert a hex color string to an `(r, g, b)` tuple, falling back to `default`.
+/// Used where a concrete RGB triple is needed (e.g. flattening emote transparency
+/// onto the theme background in both the chat view and the picker).
+#[must_use]
+pub fn hex_to_rgb_or(hex: &str, default: (u8, u8, u8)) -> (u8, u8, u8) {
+    match hex_to_color(hex) {
+        Some(Color::Rgb(r, g, b)) => (r, g, b),
+        _ => default,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

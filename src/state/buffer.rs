@@ -339,6 +339,9 @@ mod tests {
     fn log_buffer_sorts_with_channels() {
         // Log buffers live under pseudo-networks (different connection_id from
         // any real channel), so the shared sort group is fine.
-        assert_eq!(BufferType::Log.sort_group(), BufferType::Channel.sort_group());
+        assert_eq!(
+            BufferType::Log.sort_group(),
+            BufferType::Channel.sort_group()
+        );
     }
 }

@@ -195,9 +195,7 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 "session_days" => config.web.session_days.to_string(),
                 "username" => config.web.username.clone(),
                 "image_previews" => config.web.image_previews.to_string(),
-                "image_previews_max_per_msg" => {
-                    config.web.image_previews_max_per_msg.to_string()
-                }
+                "image_previews_max_per_msg" => config.web.image_previews_max_per_msg.to_string(),
                 "thumbnail_cache_mb" => config.web.thumbnail_cache_mb.to_string(),
                 "cloudflare_tunnel_name" => config.web.cloudflare_tunnel_name.clone(),
                 "password" => config.web.password.clone(),
@@ -244,6 +242,18 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
             Some(Resolved {
                 value: val,
                 is_credential: is_cred,
+            })
+        }
+        "emotes" => {
+            let val = match parts[1] {
+                "enabled" => config.emotes.enabled.to_string(),
+                "render" => format!("{:?}", config.emotes.render).to_lowercase(),
+                "lang" => format!("{:?}", config.emotes.lang).to_lowercase(),
+                _ => return None,
+            };
+            Some(Resolved {
+                value: val,
+                is_credential: false,
             })
         }
         _ => None,
@@ -568,6 +578,25 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
                 _ => return Err(format!("Unknown field: {path}")),
             }
         }
+        "emotes" => match parts[1] {
+            "enabled" => config.emotes.enabled = parse_bool(raw)?,
+            "render" => {
+                config.emotes.render = match raw.to_ascii_lowercase().as_str() {
+                    "graphical" => crate::config::RenderMode::Graphical,
+                    "text" => crate::config::RenderMode::Text,
+                    "off" => crate::config::RenderMode::Off,
+                    _ => return Err("Expected graphical, text, or off".to_string()),
+                };
+            }
+            "lang" => {
+                config.emotes.lang = match raw.to_ascii_lowercase().as_str() {
+                    "en" => crate::config::EmoteLang::En,
+                    "pl" => crate::config::EmoteLang::Pl,
+                    _ => return Err("Expected en or pl".to_string()),
+                };
+            }
+            _ => return Err(format!("Unknown field: {path}")),
+        },
         _ => return Err(format!("Unknown section: {}", parts[0])),
     }
 
@@ -681,6 +710,9 @@ const BASE_PATHS: &[&str] = &[
     "web.thumbnail_cache_mb",
     "web.cloudflare_tunnel_name",
     "web.password",
+    "emotes.enabled",
+    "emotes.render",
+    "emotes.lang",
 ];
 
 const SERVER_FIELDS: &[&str] = &[
@@ -845,9 +877,7 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
             // `shrink.enabled` from off to on at runtime won't
             // materialise a client; users get a restart-required
             // notice from /set already if they hit that case.
-            if path == "shrink.enabled"
-                || path == "shrink.incoming_enabled"
-            {
+            if path == "shrink.enabled" || path == "shrink.incoming_enabled" {
                 app.state.shrink_incoming_active = app.config.shrink.enabled
                     && app.config.shrink.incoming_enabled
                     && app.shrink_client.is_some();
@@ -939,6 +969,7 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                 || path == "web.nick_column_width"
                 || path == "web.nick_max_length"
                 || path.starts_with("display.nick_color")
+                || path.starts_with("emotes.")
             {
                 app.state.pending_web_events.push(
                     crate::web::protocol::WebEvent::SettingsChanged {
@@ -951,6 +982,7 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                         nick_colors_in_nicklist: app.config.display.nick_colors_in_nicklist,
                         nick_color_saturation: app.config.display.nick_color_saturation,
                         nick_color_lightness: app.config.display.nick_color_lightness,
+                        emotes_enabled: app.config.emotes.web_enabled(),
                     },
                 );
             }
@@ -1067,6 +1099,7 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
                 "nick_color_lightness",
             ],
         ),
+        ("emotes", &["enabled", "render", "lang"]),
     ];
 
     for &(section, fields) in sections {
@@ -1348,6 +1381,43 @@ mod tests {
         assert_eq!(r.value, "true");
         set_config_value(&mut config, "display.nick_colors", "false").unwrap();
         assert!(!config.display.nick_colors);
+    }
+
+    #[test]
+    fn get_set_emotes() {
+        let mut config = default_config();
+        assert_eq!(
+            get_config_value(&config, "emotes.enabled").unwrap().value,
+            "true"
+        );
+        assert_eq!(
+            get_config_value(&config, "emotes.render").unwrap().value,
+            "graphical"
+        );
+        set_config_value(&mut config, "emotes.enabled", "false").unwrap();
+        assert!(!config.emotes.enabled);
+        set_config_value(&mut config, "emotes.render", "text").unwrap();
+        assert_eq!(config.emotes.render, crate::config::RenderMode::Text);
+        set_config_value(&mut config, "emotes.render", "off").unwrap();
+        assert_eq!(config.emotes.render, crate::config::RenderMode::Off);
+        // Invalid render value is rejected.
+        assert!(set_config_value(&mut config, "emotes.render", "bogus").is_err());
+        // emotes.* paths are advertised as settable.
+        assert!(BASE_PATHS.contains(&"emotes.enabled"));
+        assert!(BASE_PATHS.contains(&"emotes.render"));
+    }
+
+    #[test]
+    fn get_set_emotes_lang() {
+        let mut config = default_config();
+        assert_eq!(
+            get_config_value(&config, "emotes.lang").unwrap().value,
+            "en"
+        );
+        set_config_value(&mut config, "emotes.lang", "pl").unwrap();
+        assert_eq!(config.emotes.lang, crate::config::EmoteLang::Pl);
+        assert!(set_config_value(&mut config, "emotes.lang", "fr").is_err());
+        assert!(BASE_PATHS.contains(&"emotes.lang"));
     }
 
     #[test]

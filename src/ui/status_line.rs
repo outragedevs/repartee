@@ -238,14 +238,14 @@ fn render_log_status(
     );
     let sep = Span::styled("  \u{2022}  ", Style::default().fg(fg_muted));
     let line = Line::from(vec![
-        Span::styled("log mode", Style::default().fg(accent).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "log mode",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ),
         sep.clone(),
         Span::styled(id_text, Style::default().fg(accent)),
         sep.clone(),
-        Span::styled(
-            format!("showing {loaded}/{total}"),
-            Style::default().fg(fg),
-        ),
+        Span::styled(format!("showing {loaded}/{total}"), Style::default().fg(fg)),
         Span::styled(" from ", Style::default().fg(fg_muted)),
         Span::styled(from, Style::default().fg(fg)),
         sep,

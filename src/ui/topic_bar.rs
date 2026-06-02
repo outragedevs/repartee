@@ -60,10 +60,7 @@ fn render_log_topic(buf: &Buffer, accent: Color, fg: Color, fg_muted: Color) -> 
         Style::default().fg(accent).add_modifier(Modifier::BOLD),
     );
     let sep = Span::styled("  \u{2022}  ", Style::default().fg(fg_muted));
-    let lines = Span::styled(
-        format!("{total} lines"),
-        Style::default().fg(fg),
-    );
+    let lines = Span::styled(format!("{total} lines"), Style::default().fg(fg));
     let range_span = Span::styled(range, Style::default().fg(fg));
     Line::from(vec![header, sep.clone(), lines, sep, range_span])
 }

@@ -1,6 +1,14 @@
-#[allow(clippy::redundant_pub_crate, reason = "log_browser reuses format_date_separator")]
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "log_browser reuses format_date_separator"
+)]
 pub(crate) mod backlog;
 mod dcc;
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "ui::layout calls emote_anim::composite"
+)]
+pub(crate) mod emote_anim;
 mod image;
 mod input;
 mod irc;
@@ -384,6 +392,15 @@ pub struct App {
     pub http_client: reqwest::Client,
     pub picker: ratatui_image::picker::Picker,
     pub in_tmux: bool,
+    /// Emote placements resolved during the last chat render, consumed by the
+    /// compositing pass in `layout::draw`. Cleared and rebuilt every frame.
+    pub emote_placements: Vec<crate::ui::emote_layout::EmotePlacement>,
+    /// Per-(emote, frame) protocol image cache + clock for inline animation.
+    pub emote_animator: crate::app::emote_anim::EmoteAnimator,
+    /// Animation clock origin; frame indices derive from `now - this`.
+    pub emote_anim_start: std::time::Instant,
+    /// Emote picker overlay state (open/hidden + filter/selection).
+    pub emote_picker: crate::ui::emote_picker::EmotePickerState,
     pub needs_full_redraw: bool,
     pub outer_terminal: String,
     pub color_support: crate::nick_color::ColorSupport,
@@ -459,8 +476,7 @@ pub struct App {
     /// from any tokio worker without contending on a tokio mutex.
     /// `Arc` because both the dispatch path (App side) and the
     /// shrink workers (spawned tasks) read/write through it.
-    pub(crate) shrink_cache:
-        std::sync::Arc<parking_lot::Mutex<crate::shrink::ShrinkCache>>,
+    pub(crate) shrink_cache: std::sync::Arc<parking_lot::Mutex<crate::shrink::ShrinkCache>>,
     /// Pre-display queue for outgoing messages that need shrink.
     /// `handle_plain_message` enqueues here; a dedicated worker
     /// drains, awaits shrink, and posts an `OutgoingDeliver` back
@@ -627,9 +643,8 @@ impl App {
         // immediate add vs deferred shrink without reaching into App.
         // `shrink_incoming_tx` lives only on `state` from here on —
         // the App-side handle was dropped to avoid a never-read field.
-        state.shrink_incoming_active = config.shrink.enabled
-            && config.shrink.incoming_enabled
-            && shrink_client.is_some();
+        state.shrink_incoming_active =
+            config.shrink.enabled && config.shrink.incoming_enabled && shrink_client.is_some();
         state.shrink_min_url_length = config.shrink.min_url_length;
         state.shrink_incoming_tx = Some(shrink_incoming_tx);
 
@@ -703,6 +718,10 @@ impl App {
             http_client,
             picker,
             in_tmux,
+            emote_placements: Vec::new(),
+            emote_animator: crate::app::emote_anim::EmoteAnimator::default(),
+            emote_anim_start: Instant::now(),
+            emote_picker: crate::ui::emote_picker::EmotePickerState::default(),
             needs_full_redraw: false,
             outer_terminal: outer_terminal.to_string(),
             color_support,
@@ -774,6 +793,26 @@ impl App {
     }
 
     /// Recompute the cached wrap-indent width used by `chat_view`.
+    /// Whether emotes should render graphically this frame: enabled, mode is
+    /// `Graphical`, and the detected protocol is a real graphics protocol (not
+    /// Halfblocks). In text/off mode or on non-graphics terminals, `:name:`
+    /// tokens stay as literal text.
+    #[must_use]
+    pub fn emotes_graphical(&self) -> bool {
+        use crate::config::RenderMode;
+        self.config.emotes.enabled
+            && self.config.emotes.render == RenderMode::Graphical
+            && self.picker.protocol_type() != ratatui_image::picker::ProtocolType::Halfblocks
+    }
+
+    /// Whether emote insertion affordances (tab-complete, picker, `/emote`) are
+    /// offered: enabled and not in `Off` mode. `Text` keeps them (you can still
+    /// insert tokens, they just render as literal text).
+    #[must_use]
+    pub fn emotes_input_enabled(&self) -> bool {
+        self.config.emotes.enabled && self.config.emotes.render != crate::config::RenderMode::Off
+    }
+
     pub fn recompute_wrap_indent(&mut self) {
         let ts_sample = chrono::Local::now()
             .format(&self.config.general.timestamp_format)
@@ -1057,6 +1096,11 @@ impl App {
         let mut paste_tick = interval(Duration::from_millis(500));
         let shell_broadcast_sleep = tokio::time::sleep(std::time::Duration::from_secs(86400));
         tokio::pin!(shell_broadcast_sleep);
+        // ~20 FPS clock for inline emote animation. Re-armed to 50ms after each
+        // draw only while an animated (multi-frame) emote is visible; otherwise
+        // it sleeps far in the future so an idle UI never wakes for animation.
+        let emote_anim_sleep = tokio::time::sleep(std::time::Duration::from_hours(24));
+        tokio::pin!(emote_anim_sleep);
 
         while !self.should_quit {
             if self.should_detach {
@@ -1087,6 +1131,28 @@ impl App {
 
             if self.terminal.is_some() {
                 self.write_tmux_direct_image();
+            }
+
+            // Re-arm the animation clock: wake in 50ms iff an animated (multi-frame)
+            // emote is currently on screen, else sleep far out (idle = no wakeups).
+            {
+                // `self.terminal.is_some()` guards the detached case: while
+                // detached there is no render to clear `emote_placements`, so a
+                // stale animated placement must not keep waking the loop at 50ms.
+                let animating = self.terminal.is_some()
+                    && self.emotes_graphical()
+                    && self
+                        .emote_placements
+                        .iter()
+                        .any(|p| crate::app::emote_anim::EmoteAnimator::is_animated(p.emote_index));
+                let next = if animating {
+                    std::time::Duration::from_millis(50)
+                } else {
+                    std::time::Duration::from_hours(24)
+                };
+                emote_anim_sleep
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + next);
             }
 
             tokio::select! {
@@ -1288,6 +1354,12 @@ impl App {
                 _ = paste_tick.tick() => {
                     self.drain_paste_queue();
                     self.drain_pending_web_events();
+                },
+                () = &mut emote_anim_sleep => {
+                    // Waking here re-enters the loop and redraws unconditionally;
+                    // the next draw recomputes each emote's frame index from the
+                    // animation clock. No `needs_full_redraw` (that would clear the
+                    // screen and flicker); the re-arm above schedules the next tick.
                 },
                 action = self.script_action_rx.recv() => {
                     if let Some(action) = action {
