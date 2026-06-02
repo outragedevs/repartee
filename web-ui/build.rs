@@ -48,7 +48,10 @@ fn main() {
     );
 
     // Union of both names (whitelist), sorted + deduped.
-    let mut names: Vec<String> = pairs.iter().flat_map(|(p, e)| [p.clone(), e.clone()]).collect();
+    let mut names: Vec<String> = pairs
+        .iter()
+        .flat_map(|(p, e)| [p.clone(), e.clone()])
+        .collect();
     names.sort();
     names.dedup();
 
