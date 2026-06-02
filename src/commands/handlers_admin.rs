@@ -12,11 +12,9 @@ const SERVER_ADD_USAGE: &str = "Usage: /server add <id> <address>[:<port>] [port
 /// How a credential should be persisted to `.env`.
 #[derive(Debug, Clone)]
 pub(crate) enum CredUpdate {
-    /// Leave the existing `.env` value untouched (edit mode, masked field not modified).
-    #[allow(
-        dead_code,
-        reason = "constructed by the wizard edit-mode serializer (src/ui/wizard/server.rs)"
-    )]
+    /// Leave the existing credential untouched: preserve whatever is already
+    /// stored for this server id (edit mode, or a manual re-add that omits the
+    /// flag). Neither `.env` nor the in-memory value is changed.
     Keep,
     /// Write this value to `.env`.
     Set(String),
@@ -31,8 +29,14 @@ pub(crate) enum CredUpdate {
 /// `id` must already be lowercased. Shared by manual `/server add`, the TUI wizard,
 /// and the web `SaveServer` command.
 ///
+/// `CredUpdate::Keep` preserves the credential already stored for `id` in
+/// `config.servers` (the single source of truth for the running session), so a
+/// re-add/edit that omits a password never silently drops it. `config.toml` is
+/// saved *before* `.env` is touched, so a save failure can never leave an
+/// orphaned secret in `.env` for a server that isn't persisted.
+///
 /// # Errors
-/// Propagates I/O errors from writing `.env` or `config.toml`.
+/// Propagates I/O errors from writing `config.toml` or `.env`.
 pub(crate) fn apply_server_config(
     config: &mut crate::config::AppConfig,
     config_path: &std::path::Path,
@@ -43,34 +47,51 @@ pub(crate) fn apply_server_config(
     sasl_pass: CredUpdate,
 ) -> color_eyre::eyre::Result<()> {
     let upper = id.to_uppercase();
+    let pw_key = format!("{upper}_PASSWORD");
+    let sasl_key = format!("{upper}_SASL_PASS");
 
-    match password {
-        CredUpdate::Set(v) => {
-            crate::config::env::set_env_value(env_path, &format!("{upper}_PASSWORD"), &v)?;
-            server.password = Some(v);
-        }
-        CredUpdate::Remove => {
-            crate::config::env::remove_env_value(env_path, &format!("{upper}_PASSWORD"))?;
-            server.password = None;
-        }
-        CredUpdate::Keep => { /* server.password already carries the in-memory value */ }
-    }
+    // Resolve the in-memory credential values (Keep reads the existing entry).
+    let existing_pw = config.servers.get(id).and_then(|s| s.password.clone());
+    let existing_sasl = config.servers.get(id).and_then(|s| s.sasl_pass.clone());
+    server.password = match &password {
+        CredUpdate::Set(v) => Some(v.clone()),
+        CredUpdate::Remove => None,
+        CredUpdate::Keep => existing_pw,
+    };
+    server.sasl_pass = match &sasl_pass {
+        CredUpdate::Set(v) => Some(v.clone()),
+        CredUpdate::Remove => None,
+        CredUpdate::Keep => existing_sasl,
+    };
 
-    match sasl_pass {
-        CredUpdate::Set(v) => {
-            crate::config::env::set_env_value(env_path, &format!("{upper}_SASL_PASS"), &v)?;
-            server.sasl_pass = Some(v);
-        }
-        CredUpdate::Remove => {
-            crate::config::env::remove_env_value(env_path, &format!("{upper}_SASL_PASS"))?;
-            server.sasl_pass = None;
-        }
-        CredUpdate::Keep => {}
-    }
-
+    // Persist the non-secret config first: a failure here must not leave secrets
+    // in `.env` for a server that never made it into config.toml.
     config.servers.insert(id.to_string(), server);
     crate::config::save_config(config_path, config)?;
+
+    // Then route secrets to `.env`.
+    match password {
+        CredUpdate::Set(v) => crate::config::env::set_env_value(env_path, &pw_key, &v)?,
+        CredUpdate::Remove => crate::config::env::remove_env_value(env_path, &pw_key)?,
+        CredUpdate::Keep => {}
+    }
+    match sasl_pass {
+        CredUpdate::Set(v) => crate::config::env::set_env_value(env_path, &sasl_key, &v)?,
+        CredUpdate::Remove => crate::config::env::remove_env_value(env_path, &sasl_key)?,
+        CredUpdate::Keep => {}
+    }
     Ok(())
+}
+
+/// Map a manual `/server add` flag value to a [`CredUpdate`]: absent flag keeps
+/// any existing credential, `-password=` (explicit empty) clears it, and a
+/// non-empty value sets it.
+fn manual_cred(value: Option<String>) -> CredUpdate {
+    match value {
+        None => CredUpdate::Keep,
+        Some(s) if s.is_empty() => CredUpdate::Remove,
+        Some(s) => CredUpdate::Set(s),
+    }
 }
 
 pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
@@ -475,17 +496,11 @@ pub(crate) fn cmd_server(app: &mut App, args: &[String]) {
                 }
             };
 
-            let password = server_config
-                .password
-                .clone()
-                .map_or(CredUpdate::Remove, CredUpdate::Set);
-            let sasl_pass = server_config
-                .sasl_pass
-                .clone()
-                .map_or(CredUpdate::Remove, CredUpdate::Set);
+            let password = manual_cred(server_config.password.clone());
+            let sasl_pass = manual_cred(server_config.sasl_pass.clone());
             let cfg_path = crate::constants::config_path();
             let env_path = crate::constants::env_path();
-            if let Err(e) = apply_server_config(
+            let result = apply_server_config(
                 &mut app.config,
                 &cfg_path,
                 &env_path,
@@ -493,11 +508,13 @@ pub(crate) fn cmd_server(app: &mut App, args: &[String]) {
                 server_config,
                 password,
                 sasl_pass,
-            ) {
+            );
+            // config.servers was mutated in-memory regardless of save outcome.
+            app.cached_config_toml = None;
+            if let Err(e) = result {
                 add_local_event(app, &format!("{C_ERR}Failed to save server: {e}{C_RST}"));
                 return;
             }
-            app.cached_config_toml = None;
             add_local_event(app, &format!("{C_OK}Server '{id}' added{C_RST}"));
         }
         "remove" => {
@@ -1596,27 +1613,68 @@ mod server_add_tests {
         std::fs::write(&env_path, "LIBERA_PASSWORD=old\nLIBERA_SASL_PASS=oldsasl\n").unwrap();
 
         let mut config = crate::config::AppConfig::default();
-        let mut base = server_cfg("Libera", "irc.libera.chat");
-        // Keep mode requires the in-memory value to already be present.
-        base.password = Some("old".into());
-        base.sasl_pass = Some("oldsasl".into());
+        // The existing entry in config.servers is the source of truth for Keep.
+        let mut existing = server_cfg("Libera", "irc.libera.chat");
+        existing.password = Some("old".into());
+        existing.sasl_pass = Some("oldsasl".into());
+        config.servers.insert("libera".into(), existing);
 
+        // A re-add that keeps the password but clears SASL pass.
+        let updated = server_cfg("Libera", "irc.libera.chat");
         apply_server_config(
             &mut config,
             &cfg_path,
             &env_path,
             "libera",
-            base,
+            updated,
             CredUpdate::Keep,
             CredUpdate::Remove,
         )
         .unwrap();
 
         let env = std::fs::read_to_string(&env_path).unwrap();
-        assert!(env.contains("LIBERA_PASSWORD=old")); // kept
+        assert!(env.contains("LIBERA_PASSWORD=old")); // kept (untouched)
         assert!(!env.contains("LIBERA_SASL_PASS")); // removed
         let s = config.servers.get("libera").unwrap();
-        assert_eq!(s.password.as_deref(), Some("old"));
+        assert_eq!(s.password.as_deref(), Some("old")); // preserved in-memory too
         assert!(s.sasl_pass.is_none());
+    }
+
+    #[test]
+    fn manual_cred_maps_flag_semantics() {
+        assert!(matches!(manual_cred(None), CredUpdate::Keep));
+        assert!(matches!(manual_cred(Some(String::new())), CredUpdate::Remove));
+        assert!(matches!(manual_cred(Some("pw".into())), CredUpdate::Set(v) if v == "pw"));
+    }
+
+    #[test]
+    fn re_add_without_password_flag_preserves_env_credential() {
+        // Regression guard: `/server add <existing> <addr>` (no -password) must
+        // not wipe the stored .env password.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("config.toml");
+        let env_path = dir.path().join(".env");
+        std::fs::write(&env_path, "LIBERA_PASSWORD=secret\n").unwrap();
+
+        let mut config = crate::config::AppConfig::default();
+        let mut existing = server_cfg("Libera", "irc.libera.chat");
+        existing.password = Some("secret".into());
+        config.servers.insert("libera".into(), existing);
+
+        // Re-add to change only the address; password flag omitted -> Keep.
+        let mut updated = server_cfg("Libera", "irc.libera.new");
+        updated.password = None;
+        let password = manual_cred(updated.password.clone());
+        let sasl_pass = manual_cred(updated.sasl_pass.clone());
+        apply_server_config(
+            &mut config, &cfg_path, &env_path, "libera", updated, password, sasl_pass,
+        )
+        .unwrap();
+
+        // .env credential survived, address updated.
+        assert!(std::fs::read_to_string(&env_path).unwrap().contains("LIBERA_PASSWORD=secret"));
+        let s = config.servers.get("libera").unwrap();
+        assert_eq!(s.address, "irc.libera.new");
+        assert_eq!(s.password.as_deref(), Some("secret"));
     }
 }
