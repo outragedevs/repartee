@@ -527,7 +527,7 @@ pub(crate) fn cmd_server(app: &mut App, args: &[String]) {
                 return;
             }
             let id = &args[1];
-            if app.config.servers.remove(id).is_some() {
+            if let Some(removed) = app.config.servers.remove(id) {
                 app.cached_config_toml = None;
                 // Only purge `.env` secrets once the server is actually gone
                 // from config.toml on disk: if the save fails the entry will
@@ -536,6 +536,12 @@ pub(crate) fn cmd_server(app: &mut App, args: &[String]) {
                 if let Err(e) =
                     crate::config::save_config(&crate::constants::config_path(), &app.config)
                 {
+                    // Restore the in-memory entry so the session stays
+                    // consistent with the (unchanged) on-disk config — otherwise
+                    // the server vanishes from /server list until restart, then
+                    // silently reappears.
+                    app.config.servers.insert(id.clone(), removed);
+                    app.cached_config_toml = None;
                     add_local_event(app, &format!("{C_ERR}Failed to save config: {e}{C_RST}"));
                     return;
                 }
