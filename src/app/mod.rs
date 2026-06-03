@@ -18,7 +18,7 @@ mod mentions;
 mod scripting;
 mod session;
 mod shell;
-pub(crate) mod shrink;
+pub mod shrink;
 mod web;
 mod who;
 
@@ -1097,7 +1097,7 @@ impl App {
 
         let mut tick = interval(Duration::from_secs(1));
         let mut paste_tick = interval(Duration::from_millis(500));
-        let shell_broadcast_sleep = tokio::time::sleep(std::time::Duration::from_secs(86400));
+        let shell_broadcast_sleep = tokio::time::sleep(std::time::Duration::from_hours(24));
         tokio::pin!(shell_broadcast_sleep);
         // ~20 FPS clock for inline emote animation. Re-armed to 50ms after each
         // draw only while an animated (multi-frame) emote is visible; otherwise
@@ -1303,7 +1303,7 @@ impl App {
                             self.force_broadcast_shell_screen(&shell_id);
                         }
                     }
-                    shell_broadcast_sleep.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_secs(86400));
+                    shell_broadcast_sleep.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_hours(24));
                 },
                 _ = tick.tick() => {
                     if let Some(server_ids) = pending_autoconnect_ids.take() {

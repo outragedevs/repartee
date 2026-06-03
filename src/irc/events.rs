@@ -175,8 +175,8 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
         }
         // RPL_CREATIONTIME (329): channel creation timestamp.
         // args = [our_nick, #channel, unix_timestamp]
-        Command::Raw(cmd, args) if cmd == "329" => {
-            if args.len() >= 3 {
+        Command::Raw(cmd, args) if cmd == "329"
+            && args.len() >= 3 => {
                 let channel = &args[1];
                 let silent = state.connections.get(conn_id).is_some_and(|conn| {
                     contains_case_insensitive(&conn.silent_banlist_channels, channel)
@@ -212,7 +212,6 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
                     );
                 }
             }
-        }
         // WHOX response (354) comes as Command::Raw because the irc crate
         // doesn't recognize this non-standard numeric.
         Command::Raw(cmd, args) if cmd == "354" => {

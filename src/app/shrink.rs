@@ -15,7 +15,7 @@
 //! - **Incoming**: shrink intercepts AFTER everything else in the
 //!   PRIVMSG handler (decrypt, ignore checks, mention detection,
 //!   highlight flagging) and BEFORE the message is added to the
-//!   buffer. Display, web broadcast, and SQLite log all see the
+//!   buffer. Display, web broadcast, and `SQLite` log all see the
 //!   shortened text. This makes echo-message and E2E free of any
 //!   special-casing: their wire/cipher already carries shortened
 //!   plaintext for outgoing, and incoming shrinks the plaintext we
@@ -37,7 +37,7 @@
 //!   busy channel can't starve our outgoing.
 //!
 //! `apply_shrink_deliver` runs in the main loop and is the only path
-//! that mutates `App` state (state.add_message_with_activity, IRC
+//! that mutates `App` state (`state.add_message_with_activity`, IRC
 //! sender, e2e encrypt). Workers stay pure-async.
 
 use std::sync::Arc;
@@ -85,8 +85,8 @@ pub struct OutgoingDeliver {
     /// nick / mode the wire was sent under.
     pub nick: String,
     pub own_mode: Option<char>,
-    /// Captured Query peer_handle (None for channels / no-handle
-    /// queries) — passed into e2e_encrypt_or_passthrough so a
+    /// Captured Query `peer_handle` (None for channels / no-handle
+    /// queries) — passed into `e2e_encrypt_or_passthrough` so a
     /// closed-buffer wait window cannot fall back to plaintext.
     pub peer_handle: Option<String>,
 }
@@ -115,7 +115,7 @@ pub struct IncomingDeliver {
 /// `state` is **captured at dispatch time** so a buffer close, /nick,
 /// or +o/+v during the shrink wait can't break the eventual encrypt
 /// + send + echo. This addresses three review findings at once:
-///   * E2E peer_handle leak when the Query buffer is closed
+///   * E2E `peer_handle` leak when the Query buffer is closed
 ///   * Local-echo nick/mode split-brain after `/nick` mid-wait
 ///   * Worker re-extracting URLs against a stale `min_url_length`
 #[derive(Debug)]
@@ -164,7 +164,7 @@ pub struct PendingIncoming {
 
 /// All the channels + shared state the shrink workers need. Built
 /// once in `App::new` and kept alive for the App lifetime.
-pub(crate) struct ShrinkRuntime {
+pub struct ShrinkRuntime {
     pub client: Option<ShrinkClient>,
     pub cache: Arc<Mutex<ShrinkCache>>,
     pub outgoing_tx: mpsc::Sender<PendingOutgoing>,
@@ -179,7 +179,7 @@ impl ShrinkRuntime {
     /// into the main `tokio::select!`.
     pub fn build(cfg: &crate::config::ShrinkConfig) -> Self {
         let client = if cfg.enabled && !cfg.api_key.is_empty() {
-            Some(ShrinkClient::new(cfg.api_url.clone(), cfg.api_key.clone()))
+            Some(ShrinkClient::new(&cfg.api_url, cfg.api_key.clone()))
         } else {
             None
         };
@@ -363,6 +363,10 @@ async fn shrink_and_substitute(
 /// of 4 in-flight matches the user-facing latency budget (most
 /// shortenings complete inside the per-call timeout) while keeping
 /// the API happy.
+#[allow(
+    clippy::significant_drop_tightening,
+    reason = "single lock held for the whole batch insert is intentional — per-entry locking would increase contention"
+)]
 async fn resolve_shortenings(
     client: &ShrinkClient,
     cache: &Mutex<ShrinkCache>,
@@ -428,7 +432,7 @@ async fn resolve_shortenings(
 /// the inside of `…/abc/def`, leaving the longer URL mangled.
 fn apply_substitutions(text: &str, shortenings: &[UrlShortening], add_host_hint: bool) -> String {
     let mut sorted: Vec<&UrlShortening> = shortenings.iter().collect();
-    sorted.sort_by(|a, b| b.original.len().cmp(&a.original.len()));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.original.len()));
     let mut out = text.to_string();
     for sh in sorted {
         let replacement = if add_host_hint {
@@ -567,7 +571,7 @@ impl App {
     }
 
     /// Emit the local-echo chunks for a successfully-sent outgoing
-    /// message. Uses the captured nick/own_mode from dispatch time
+    /// message. Uses the captured `nick/own_mode` from dispatch time
     /// so the displayed sender matches what peers saw. Skips the
     /// echo entirely (with a status-line diagnostic) when the
     /// destination buffer was closed during the shrink wait — the
@@ -619,7 +623,7 @@ impl App {
     }
 
     /// Route an outgoing-pipeline error event to the right buffer.
-    /// Prefers the original destination buffer (out.buffer_id) when
+    /// Prefers the original destination buffer (`out.buffer_id`) when
     /// it still exists; falls back to the current active buffer
     /// (so the user always sees the error somewhere).
     fn deliver_outgoing_error(&mut self, out: &OutgoingDeliver, message: &str) {

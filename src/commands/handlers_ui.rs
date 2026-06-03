@@ -280,7 +280,7 @@ pub(crate) fn cmd_alias(app: &mut App, args: &[String]) {
             lines.push(format!("  {C_DIM}No aliases defined{C_RST}"));
         } else {
             let mut sorted: Vec<_> = app.config.aliases.iter().collect();
-            sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
+            sorted.sort_by_key(|(a, _)| *a);
             for (name, template) in sorted {
                 lines.push(format!(
                     "  {C_CMD}/{name}{C_RST} = {C_TEXT}{template}{C_RST}"

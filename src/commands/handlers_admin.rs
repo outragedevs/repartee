@@ -821,7 +821,7 @@ fn log_status(app: &mut App) {
         };
 
         let db_path = crate::constants::log_dir().join("messages.db");
-        let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+        let db_size = std::fs::metadata(&db_path).map_or(0, |m| m.len());
         #[allow(clippy::cast_precision_loss)]
         let size_str = if db_size > 1_048_576 {
             format!("{:.1} MB", db_size as f64 / 1_048_576.0)
