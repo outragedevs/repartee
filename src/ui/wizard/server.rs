@@ -293,6 +293,127 @@ pub fn build(w: &WizardState, servers: &HashMap<String, ServerConfig>) -> Result
     })
 }
 
+/// Raw fields from the web wizard, parallel to the `WizardState` path. Lets the
+/// web `SaveServer` handler reuse the same validation + serialization as the TUI
+/// without depending on the web protocol types.
+#[derive(Debug, Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "flat form DTO mirroring the wizard's boolean fields (tls, verify, autoconnect, auto-reconnect)"
+)]
+pub struct WebServerForm {
+    /// `None`/empty = add (id derived from `network`); `Some(id)` = edit that id.
+    pub id: Option<String>,
+    pub network: String,
+    pub address: String,
+    pub port: Option<u16>,
+    pub tls: bool,
+    pub tls_verify: bool,
+    pub autoconnect: bool,
+    pub channels: String,
+    pub nick: String,
+    pub username: String,
+    pub realname: String,
+    pub bind_ip: String,
+    pub encoding: String,
+    pub sasl_user: String,
+    pub sasl_mechanism: String,
+    pub autosendcmd: String,
+    pub client_cert_path: String,
+    pub auto_reconnect: bool,
+    pub reconnect_delay: String,
+    pub reconnect_max_retries: String,
+    /// `None` = leave unchanged, `Some("")` = clear, `Some(v)` = set.
+    pub password: Option<String>,
+    pub sasl_pass: Option<String>,
+}
+
+/// Resolve a web credential field into a [`CredUpdate`] + the in-memory value.
+fn web_cred(incoming: Option<&str>, existing: Option<&str>) -> (CredUpdate, Option<String>) {
+    match incoming {
+        None => (CredUpdate::Keep, existing.map(ToOwned::to_owned)),
+        Some("") => (CredUpdate::Remove, None),
+        Some(v) => (CredUpdate::Set(v.to_string()), Some(v.to_string())),
+    }
+}
+
+/// Validate + serialize a web-wizard form into a `ServerConfig` + credential
+/// updates, mirroring [`build`]. Shares all the same helpers (slug, uniqueness,
+/// TLS port bump, channel splitting, credential semantics).
+///
+/// # Errors
+/// Returns a human-readable message when a required field is empty or a numeric
+/// field fails to parse.
+pub fn build_from_web(
+    form: &WebServerForm,
+    servers: &HashMap<String, ServerConfig>,
+) -> Result<BuiltServer, String> {
+    if form.network.trim().is_empty() {
+        return Err("Network Name is required".into());
+    }
+    if form.address.trim().is_empty() {
+        return Err("Server address is required".into());
+    }
+
+    let tls = form.tls;
+    let mut port = form.port.unwrap_or(if tls { 6697 } else { 6667 });
+    if tls && port == 6667 {
+        port = 6697;
+    }
+
+    let reconnect_delay = parse_opt_num::<u64>(&form.reconnect_delay, "Reconnect delay")?;
+    let reconnect_max_retries =
+        parse_opt_num::<u32>(&form.reconnect_max_retries, "Reconnect max retries")?;
+
+    let edit = form.id.as_deref().is_some_and(|s| !s.is_empty());
+    let id = if edit {
+        form.id.clone().unwrap_or_default()
+    } else {
+        unique_id(&slugify(&form.network), servers)
+    };
+
+    let existing = servers.get(&id);
+    let (password, pw_mem) = web_cred(
+        form.password.as_deref(),
+        existing.and_then(|s| s.password.as_deref()),
+    );
+    let (sasl_pass, sasl_mem) = web_cred(
+        form.sasl_pass.as_deref(),
+        existing.and_then(|s| s.sasl_pass.as_deref()),
+    );
+
+    let config = ServerConfig {
+        label: form.network.trim().to_string(),
+        address: form.address.trim().to_string(),
+        port,
+        tls,
+        tls_verify: form.tls_verify,
+        autoconnect: form.autoconnect,
+        channels: split_channels(&form.channels),
+        nick: opt(&form.nick),
+        username: opt(&form.username),
+        realname: opt(&form.realname),
+        password: pw_mem,
+        sasl_user: opt(&form.sasl_user),
+        sasl_pass: sasl_mem,
+        bind_ip: opt(&form.bind_ip),
+        encoding: opt(&form.encoding),
+        auto_reconnect: Some(form.auto_reconnect),
+        reconnect_delay,
+        reconnect_max_retries,
+        autosendcmd: opt(&form.autosendcmd),
+        sasl_mechanism: mech_from_choice(&form.sasl_mechanism),
+        client_cert_path: opt(&form.client_cert_path),
+    };
+
+    Ok(BuiltServer {
+        id,
+        config,
+        password,
+        sasl_pass,
+    })
+}
+
 fn split_channels(raw: &str) -> Vec<String> {
     raw.split(',')
         .map(str::trim)
@@ -442,6 +563,63 @@ mod tests {
         assert!(matches!(built.password, CredUpdate::Keep));
         assert_eq!(built.config.password.as_deref(), Some("orig"));
         assert_eq!(built.id, "net");
+    }
+
+    #[test]
+    fn build_from_web_add_and_edit() {
+        let mut servers = empty_servers();
+
+        // Add: id derived, TLS bumps port, channels split, mechanism mapped,
+        // credentials set.
+        let add = WebServerForm {
+            id: None,
+            network: "Libera.Chat".into(),
+            address: "irc.libera.chat".into(),
+            port: None,
+            tls: true,
+            tls_verify: true,
+            autoconnect: true,
+            channels: "#rust, #repartee".into(),
+            sasl_mechanism: "PLAIN".into(),
+            password: Some("pw".into()),
+            sasl_pass: Some("sp".into()),
+            ..Default::default()
+        };
+        let built = build_from_web(&add, &servers).unwrap();
+        assert_eq!(built.id, "libera_chat");
+        assert_eq!(built.config.port, 6697);
+        assert_eq!(built.config.channels, vec!["#rust", "#repartee"]);
+        assert_eq!(built.config.sasl_mechanism.as_deref(), Some("PLAIN"));
+        assert!(matches!(built.password, CredUpdate::Set(ref v) if v == "pw"));
+
+        // Now insert it and edit with unchanged (None) password -> Keep.
+        servers.insert(built.id.clone(), built.config);
+        let edit = WebServerForm {
+            id: Some("libera_chat".into()),
+            network: "Libera.Chat".into(),
+            address: "irc.libera.chat".into(),
+            tls: true,
+            password: None,  // unchanged
+            sasl_pass: None, // unchanged
+            ..Default::default()
+        };
+        let built2 = build_from_web(&edit, &servers).unwrap();
+        assert_eq!(built2.id, "libera_chat");
+        assert!(matches!(built2.password, CredUpdate::Keep));
+        assert_eq!(built2.config.password.as_deref(), Some("pw")); // preserved
+    }
+
+    #[test]
+    fn build_from_web_requires_network() {
+        let form = WebServerForm {
+            address: "host".into(),
+            ..Default::default()
+        };
+        assert!(
+            build_from_web(&form, &empty_servers())
+                .unwrap_err()
+                .contains("Network Name")
+        );
     }
 
     #[test]

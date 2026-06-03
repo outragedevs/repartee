@@ -151,12 +151,66 @@ pub enum WebCommand {
         cols: u16,
         rows: u16,
     },
+    /// Add or edit a server from the web wizard. Boxed because the payload is
+    /// far larger than the other variants. Sent as structured fields (never a
+    /// built command string) so passwords/channels with spaces can't be mangled.
+    SaveServer(Box<SaveServerCmd>),
     /// Clean up web-specific resources on disconnect (sent internally).
     #[serde(skip)]
     WebDisconnect,
     /// Register a newly connected web session with its initial active buffer.
     #[serde(skip)]
     WebConnect { initial_buffer_id: Option<String> },
+}
+
+/// Payload of [`WebCommand::SaveServer`]. `id` empty/None = add (id derived from
+/// `network`); a present id = edit that server. Credentials (`password`,
+/// `sasl_pass`): `None` = leave unchanged, `Some("")` = clear, `Some(v)` = set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "flat wire DTO mirroring the wizard's boolean fields"
+)]
+pub struct SaveServerCmd {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub network: String,
+    pub address: String,
+    #[serde(default)]
+    pub port: Option<u16>,
+    pub tls: bool,
+    pub tls_verify: bool,
+    pub autoconnect: bool,
+    #[serde(default)]
+    pub channels: String,
+    #[serde(default)]
+    pub nick: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub realname: String,
+    #[serde(default)]
+    pub bind_ip: String,
+    #[serde(default)]
+    pub encoding: String,
+    #[serde(default)]
+    pub sasl_user: String,
+    #[serde(default)]
+    pub sasl_mechanism: String,
+    #[serde(default)]
+    pub autosendcmd: String,
+    #[serde(default)]
+    pub client_cert_path: String,
+    #[serde(default)]
+    pub auto_reconnect: bool,
+    #[serde(default)]
+    pub reconnect_delay: String,
+    #[serde(default)]
+    pub reconnect_max_retries: String,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub sasl_pass: Option<String>,
 }
 
 /// Buffer metadata sent in `SyncInit` and `BufferCreated`.
