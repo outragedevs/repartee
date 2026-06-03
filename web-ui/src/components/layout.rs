@@ -117,6 +117,17 @@ pub fn Layout() -> impl IntoView {
         <div class="app">
             // Add-server wizard modal (fixed-position overlay; rendered once).
             <ServerWizard />
+            // Backend error toast — surfaces any WebEvent::Error in the
+            // authenticated app (e.g. a failed wizard save, whose modal has
+            // already closed optimistically). Dismissible; also cleared on the
+            // next WS reconnect. Without this the error is set on state but
+            // only rendered by the login screen, so it stays invisible here.
+            {move || state.error.get().map(|msg| view! {
+                <div class="error-toast" role="alert">
+                    <span class="error-toast-msg">{msg}</span>
+                    <span class="error-toast-x" on:click=move |_| state.error.set(None)>"\u{2715}"</span>
+                </div>
+            })}
             // Desktop layout
             <div class="desktop-only">
                 <TopicBar />

@@ -530,6 +530,14 @@ pub(crate) fn cmd_server(app: &mut App, args: &[String]) {
             if app.config.servers.remove(id).is_some() {
                 app.cached_config_toml = None;
                 let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
+                // Purge any credentials this server persisted to `.env`
+                // (`<ID>_PASSWORD` / `<ID>_SASL_PASS`, keyed off the uppercased
+                // id by apply_server_config) so removal leaves no stale secrets.
+                let upper = id.to_uppercase();
+                let env_path = crate::constants::env_path();
+                let _ = crate::config::env::remove_env_value(&env_path, &format!("{upper}_PASSWORD"));
+                let _ =
+                    crate::config::env::remove_env_value(&env_path, &format!("{upper}_SASL_PASS"));
                 add_local_event(app, &format!("{C_OK}Server '{id}' removed{C_RST}"));
             } else {
                 add_local_event(app, &format!("{C_ERR}No server with id '{id}'{C_RST}"));

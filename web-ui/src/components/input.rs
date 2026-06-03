@@ -187,6 +187,18 @@ pub fn InputLine() -> impl IntoView {
                 if is_shell {
                     return;
                 }
+                // Don't steal focus while the user is typing in another control
+                // (the server wizard's fields, or any future modal/form). Only
+                // grab focus when the keystroke originated from "nowhere".
+                if let Some(el) = ev.target().and_then(|t| t.dyn_into::<web_sys::Element>().ok()) {
+                    let tag = el.tag_name();
+                    if tag.eq_ignore_ascii_case("input")
+                        || tag.eq_ignore_ascii_case("select")
+                        || tag.eq_ignore_ascii_case("textarea")
+                    {
+                        return;
+                    }
+                }
                 let key = ev.key();
                 if key == "Tab"
                     || key == "Enter"

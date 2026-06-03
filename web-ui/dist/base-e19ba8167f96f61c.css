@@ -874,3 +874,22 @@ html, body {
     font-size: 12px;
 }
 .add-network-btn:hover { color: var(--accent); border-color: var(--accent); }
+.error-toast {
+    position: fixed;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    max-width: min(560px, 92vw);
+    padding: 10px 14px;
+    background: var(--bg-alt);
+    border: 1px solid var(--red);
+    border-radius: 8px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+    z-index: 60;
+}
+.error-toast-msg { color: var(--red); font-size: 13px; }
+.error-toast-x { cursor: pointer; color: var(--fg-muted); font-size: 14px; }
+.error-toast-x:hover { color: var(--fg); }
