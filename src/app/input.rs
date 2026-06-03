@@ -319,6 +319,20 @@ impl App {
     }
 
     pub(crate) fn handle_paste(&mut self, text: &str) {
+        // Wizard overlay (top-most modal) captures paste: insert it into the
+        // focused text field. Fields are single-line, so take the first pasted
+        // line and drop control chars. Swallowed even when a non-text field is
+        // focused, so paste never leaks to the input line behind the modal.
+        if let Some(w) = self.wizard.as_mut() {
+            if w.is_text_focused() {
+                let line = text.split('\n').next().unwrap_or("").trim_end_matches('\r');
+                for ch in line.chars().filter(|c| !c.is_control()) {
+                    w.insert_char(ch);
+                }
+            }
+            return;
+        }
+
         // In shell input mode, forward paste directly to the PTY.
         if self.shell_input_active
             && let Some(buf) = self.state.active_buffer()
