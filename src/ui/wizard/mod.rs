@@ -72,6 +72,9 @@ pub enum WizardMode {
 pub struct WizardState {
     pub mode: WizardMode,
     pub title: String,
+    /// Tab labels per page (index = page number). Supplied by the consumer so
+    /// the engine stays schema-agnostic; missing entries fall back to "Page".
+    pub page_names: Vec<&'static str>,
     pub fields: Vec<Field>,
     pub values: Vec<FieldValue>,
     /// Whether each field was edited (drives masked-credential "unchanged").
@@ -98,6 +101,7 @@ impl WizardState {
     pub fn new(
         mode: WizardMode,
         title: String,
+        page_names: Vec<&'static str>,
         fields: Vec<Field>,
         values: Vec<FieldValue>,
     ) -> Self {
@@ -107,6 +111,7 @@ impl WizardState {
         let mut s = Self {
             mode,
             title,
+            page_names,
             fields,
             values,
             touched,
@@ -197,6 +202,7 @@ impl WizardState {
     /// `&mut String` of the focused Text/Masked/Number field, marking it touched.
     fn focused_text_mut(&mut self) -> Option<&mut String> {
         if let Focus::Field(i) = self.focus
+            && !self.fields[i].readonly
             && matches!(
                 self.fields[i].kind,
                 FieldKind::Text | FieldKind::Masked | FieldKind::Number
@@ -271,7 +277,9 @@ impl WizardState {
 
     #[must_use]
     pub fn is_text_focused(&self) -> bool {
-        matches!(self.focus, Focus::Field(i) if matches!(self.fields[i].kind, FieldKind::Text | FieldKind::Masked | FieldKind::Number))
+        matches!(self.focus, Focus::Field(i)
+            if !self.fields[i].readonly
+                && matches!(self.fields[i].kind, FieldKind::Text | FieldKind::Masked | FieldKind::Number))
     }
 
     fn field_index(&self, key: &str) -> Option<usize> {
@@ -339,19 +347,8 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use crate::app::App;
 use crate::theme::hex_to_color;
 
-/// Page tab labels (index = page number).
-const PAGE_NAMES: [&str; 2] = ["Basics", "Advanced"];
 /// Label column width inside the modal.
 const LABEL_W: u16 = 24;
-
-/// Center a `w`×`h` rect inside `area`, clamped to fit.
-fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
-    let w = w.min(area.width);
-    let h = h.min(area.height);
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    Rect::new(x, y, w, h)
-}
 
 /// Render the wizard overlay (no-op when none open). Records hit rects onto the
 /// `WizardState` for mouse hit-testing.
@@ -376,7 +373,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     };
 
-    let popup = centered_rect(area, 66, 24);
+    let popup = crate::ui::centered_rect(area, 66, 24);
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .title(Span::styled(
@@ -400,7 +397,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     // Tab row.
     let mut x = inner.x + 1;
     for p in 0..w.num_pages {
-        let label = PAGE_NAMES.get(p).copied().unwrap_or("Page");
+        let label = w.page_names.get(p).copied().unwrap_or("Page");
         let txt = format!(" {label} ");
         let tw = u16::try_from(txt.chars().count()).unwrap_or(0);
         if x + tw > inner.x + inner.width {
@@ -458,7 +455,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             Paragraph::new(Span::styled(rendered, val_style)),
             field_rect,
         );
-        w.field_rects.push((i, field_rect));
+        // Readonly fields are display-only: no click target, so they can never
+        // be focused (the focus ring already excludes them).
+        if !f.readonly {
+            w.field_rects.push((i, field_rect));
+        }
         y += 1;
     }
 
@@ -475,20 +476,25 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         );
     }
 
-    // Button row.
+    // Button row — hit-rects derive from the rendered label widths so they can
+    // never drift from the drawn glyphs.
     let by = inner.y + inner.height.saturating_sub(2);
-    let save_rect = Rect::new(inner.x + 2, by, 8, 1);
-    let cancel_rect = Rect::new(inner.x + 12, by, 10, 1);
+    let save_label = " Save ";
+    let cancel_label = " Cancel ";
+    let save_w = u16::try_from(save_label.len()).unwrap_or(6);
+    let cancel_w = u16::try_from(cancel_label.len()).unwrap_or(8);
+    let save_rect = Rect::new(inner.x + 2, by, save_w, 1);
+    let cancel_rect = Rect::new(save_rect.x + save_w + 2, by, cancel_w, 1);
     frame.render_widget(
         Paragraph::new(Span::styled(
-            " Save ",
+            save_label,
             button_style(w.focus == Focus::Save, accent, bg, muted),
         )),
         save_rect,
     );
     frame.render_widget(
         Paragraph::new(Span::styled(
-            " Cancel ",
+            cancel_label,
             button_style(w.focus == Focus::Cancel, accent, bg, muted),
         )),
         cancel_rect,
@@ -601,7 +607,13 @@ mod tests {
             FieldValue::Choice(0),
             FieldValue::Text("fixed".into()),
         ];
-        WizardState::new(WizardMode::Add, "Add".into(), fields, values)
+        WizardState::new(
+            WizardMode::Add,
+            "Add".into(),
+            vec!["Basics", "Advanced"],
+            fields,
+            values,
+        )
     }
 
     #[test]
@@ -654,6 +666,17 @@ mod tests {
         assert_eq!(w.choice_str("mech"), "Auto"); // wraps
         w.cycle_focused(false);
         assert_eq!(w.choice_str("mech"), "PLAIN"); // backward wraps
+    }
+
+    #[test]
+    fn readonly_field_is_not_editable_even_if_focused() {
+        let mut w = demo();
+        // Force focus onto the readonly "id" field (index 3) — defensive guard.
+        w.focus = Focus::Field(3);
+        assert!(!w.is_text_focused());
+        w.insert_char('x');
+        w.backspace();
+        assert_eq!(w.text("id"), "fixed"); // unchanged
     }
 
     #[test]

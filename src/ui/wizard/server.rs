@@ -182,7 +182,7 @@ pub fn build_wizard(mode: WizardMode, existing: Option<&ServerConfig>) -> Wizard
         }
         _ => ("Add Server".to_string(), add_values(&fields)),
     };
-    WizardState::new(mode, title, fields, values)
+    WizardState::new(mode, title, vec!["Basics", "Advanced"], fields, values)
 }
 
 /// Result of a successful build: ready to hand to `apply_server_config`.
@@ -442,6 +442,63 @@ mod tests {
         assert!(matches!(built.password, CredUpdate::Keep));
         assert_eq!(built.config.password.as_deref(), Some("orig"));
         assert_eq!(built.id, "net");
+    }
+
+    #[test]
+    fn edit_prefill_round_trips_every_field() {
+        // Guard against edit_values' catch-all silently blanking a field that
+        // is added to the schema but not mapped here.
+        let mut servers = empty_servers();
+        let s = ServerConfig {
+            label: "Full Net".into(),
+            address: "irc.full.net".into(),
+            port: 7000,
+            tls: true,
+            tls_verify: false,
+            autoconnect: false,
+            channels: vec!["#one".into(), "#two".into()],
+            nick: Some("nick".into()),
+            username: Some("user".into()),
+            realname: Some("Real Name".into()),
+            password: Some("secret".into()),
+            sasl_user: Some("sasluser".into()),
+            sasl_pass: Some("saslsecret".into()),
+            bind_ip: Some("2001:db8::1".into()),
+            encoding: Some("latin1".into()),
+            auto_reconnect: Some(false),
+            reconnect_delay: Some(42),
+            reconnect_max_retries: Some(7),
+            autosendcmd: Some("/msg NickServ identify".into()),
+            sasl_mechanism: Some("PLAIN".into()),
+            client_cert_path: Some("/tmp/cert.pem".into()),
+        };
+        servers.insert("full".into(), s.clone());
+
+        let w = build_wizard(WizardMode::Edit { id: "full".into() }, Some(&s));
+        let built = build(&w, &servers).unwrap();
+        let c = &built.config;
+        assert_eq!(c.label, "Full Net");
+        assert_eq!(c.address, "irc.full.net");
+        assert_eq!(c.port, 7000);
+        assert!(c.tls);
+        assert!(!c.tls_verify);
+        assert!(!c.autoconnect);
+        assert_eq!(c.channels, vec!["#one", "#two"]);
+        assert_eq!(c.nick.as_deref(), Some("nick"));
+        assert_eq!(c.username.as_deref(), Some("user"));
+        assert_eq!(c.realname.as_deref(), Some("Real Name"));
+        assert_eq!(c.sasl_user.as_deref(), Some("sasluser"));
+        assert_eq!(c.bind_ip.as_deref(), Some("2001:db8::1"));
+        assert_eq!(c.encoding.as_deref(), Some("latin1"));
+        assert_eq!(c.auto_reconnect, Some(false));
+        assert_eq!(c.reconnect_delay, Some(42));
+        assert_eq!(c.reconnect_max_retries, Some(7));
+        assert_eq!(c.autosendcmd.as_deref(), Some("/msg NickServ identify"));
+        assert_eq!(c.sasl_mechanism.as_deref(), Some("PLAIN"));
+        assert_eq!(c.client_cert_path.as_deref(), Some("/tmp/cert.pem"));
+        // Masked creds are untouched in edit → kept from the existing entry.
+        assert_eq!(c.password.as_deref(), Some("secret"));
+        assert_eq!(c.sasl_pass.as_deref(), Some("saslsecret"));
     }
 
     #[test]

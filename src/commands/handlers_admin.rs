@@ -109,6 +109,10 @@ pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
         Ok(new_config) => {
             app.config = new_config;
             app.cached_config_toml = None;
+            // A reload swaps out config.servers wholesale; an open edit-wizard
+            // captured the old map and would resolve "keep" credentials against
+            // a stale/absent entry on save, so close it.
+            app.wizard = None;
             // Sync derived state from new config
             app.state.scrollback_limit = app.config.display.scrollback_lines;
             app.state.flood_protection = app.config.general.flood_protection;
