@@ -225,13 +225,17 @@ pub fn ShellView() -> impl IntoView {
 ///
 /// Uses a `stop` flag checked each frame. When `on_cleanup` sets it to `true`,
 /// the loop stops scheduling itself, breaking the Rc cycle and allowing the
+/// Self-referencing `requestAnimationFrame` callback cell (the closure holds a
+/// clone of this same `Rc` so it can re-arm itself, and clears it to stop).
+type RenderCb = Rc<RefCell<Option<Closure<dyn FnMut()>>>>;
+
 /// Terminal + WebGL resources to be collected.
 fn start_render_loop(
     term: Rc<RefCell<Option<ShellTerminal>>>,
     state: AppState,
     stop: Arc<AtomicBool>,
 ) {
-    let cb: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
+    let cb: RenderCb = Rc::new(RefCell::new(None));
     let cb_clone = cb.clone();
 
     *cb.borrow_mut() = Some(Closure::new(move || {
@@ -319,11 +323,11 @@ fn start_render_loop(
     schedule_next_frame(&cb);
 }
 
-fn schedule_next_frame(cb: &Rc<RefCell<Option<Closure<dyn FnMut()>>>>) {
-    if let Some(win) = web_sys::window() {
-        if let Some(ref closure) = *cb.borrow() {
-            let _ = win.request_animation_frame(closure.as_ref().unchecked_ref());
-        }
+fn schedule_next_frame(cb: &RenderCb) {
+    if let Some(win) = web_sys::window()
+        && let Some(ref closure) = *cb.borrow()
+    {
+        let _ = win.request_animation_frame(closure.as_ref().unchecked_ref());
     }
 }
 

@@ -221,6 +221,13 @@ pub fn InputLine() -> impl IntoView {
             if trimmed.is_empty() {
                 continue;
             }
+            // `/wizard server` opens the web add-server modal client-side (the
+            // server-side handler would open the TUI overlay, useless to a web
+            // client). The web wizard is add-only, so any id argument is ignored.
+            if trimmed == "/wizard server" || trimmed.starts_with("/wizard server ") {
+                state.wizard_open.set(true);
+                continue;
+            }
             if trimmed.starts_with('/') {
                 crate::ws::send_command(&WebCommand::RunCommand {
                     buffer_id: buffer_id.clone(),

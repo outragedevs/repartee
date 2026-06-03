@@ -6,6 +6,7 @@ use super::input::InputLine;
 use super::nick_list::NickList;
 use super::status_line::StatusLine;
 use super::topic_bar::TopicBar;
+use super::wizard::ServerWizard;
 use crate::protocol::WebCommand;
 use crate::state::AppState;
 
@@ -114,6 +115,8 @@ pub fn Layout() -> impl IntoView {
 
     view! {
         <div class="app">
+            // Add-server wizard modal (fixed-position overlay; rendered once).
+            <ServerWizard />
             // Desktop layout
             <div class="desktop-only">
                 <TopicBar />
