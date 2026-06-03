@@ -529,7 +529,16 @@ pub(crate) fn cmd_server(app: &mut App, args: &[String]) {
             let id = &args[1];
             if app.config.servers.remove(id).is_some() {
                 app.cached_config_toml = None;
-                let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
+                // Only purge `.env` secrets once the server is actually gone
+                // from config.toml on disk: if the save fails the entry will
+                // reload on next start, and it must keep its credentials rather
+                // than come back password-less.
+                if let Err(e) =
+                    crate::config::save_config(&crate::constants::config_path(), &app.config)
+                {
+                    add_local_event(app, &format!("{C_ERR}Failed to save config: {e}{C_RST}"));
+                    return;
+                }
                 // Purge any credentials this server persisted to `.env`
                 // (`<ID>_PASSWORD` / `<ID>_SASL_PASS`, keyed off the uppercased
                 // id by apply_server_config) so removal leaves no stale secrets.
