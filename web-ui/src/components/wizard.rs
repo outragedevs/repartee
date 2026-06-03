@@ -78,6 +78,28 @@ pub fn ServerWizard() -> impl IntoView {
             page.set(0);
             return;
         }
+        // Validate numeric fields client-side (mirrors the TUI/build_from_web)
+        // so bad input shows an inline error instead of being silently dropped.
+        let port_t = port.get().trim().to_string();
+        if !port_t.is_empty() && port_t.parse::<u16>().is_err() {
+            error.set(Some("Port must be a number 1–65535".into()));
+            page.set(0);
+            return;
+        }
+        if !reconnect_delay.get().trim().is_empty()
+            && reconnect_delay.get().trim().parse::<u64>().is_err()
+        {
+            error.set(Some("Reconnect delay must be a number".into()));
+            page.set(1);
+            return;
+        }
+        if !reconnect_max_retries.get().trim().is_empty()
+            && reconnect_max_retries.get().trim().parse::<u32>().is_err()
+        {
+            error.set(Some("Reconnect max retries must be a number".into()));
+            page.set(1);
+            return;
+        }
         let cmd = SaveServerCmd {
             id: None, // add-only
             network: network.get(),
