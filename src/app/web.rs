@@ -543,28 +543,42 @@ impl App {
 
     /// Apply a web-wizard server form: validate, persist via the shared
     /// `apply_server_config`, and report the outcome to the requesting client.
+    ///
+    /// On failure a `WebEvent::Error` is broadcast so the web user gets feedback
+    /// (the modal closes optimistically client-side, so a silent failure would
+    /// otherwise be invisible and invite a duplicate re-submit).
     fn web_save_server(&mut self, form: &crate::ui::wizard::server::WebServerForm) {
-        match crate::ui::wizard::server::build_from_web(form, &self.config.servers) {
-            Ok(built) => {
-                let cfg_path = crate::constants::config_path();
-                let env_path = crate::constants::env_path();
-                let id = built.id.clone();
-                let result = crate::commands::handlers_admin::apply_server_config(
-                    &mut self.config,
-                    &cfg_path,
-                    &env_path,
-                    &built.id,
-                    built.config,
-                    built.password,
-                    built.sasl_pass,
-                );
-                self.cached_config_toml = None;
-                match result {
-                    Ok(()) => tracing::info!("web wizard saved server '{id}'"),
-                    Err(e) => tracing::warn!("web SaveServer failed to persist: {e}"),
-                }
+        let built = match crate::ui::wizard::server::build_from_web(form, &self.config.servers) {
+            Ok(built) => built,
+            Err(msg) => {
+                tracing::warn!("web SaveServer rejected: {msg}");
+                self.broadcast_web(crate::web::protocol::WebEvent::Error {
+                    message: format!("Add server failed: {msg}"),
+                });
+                return;
             }
-            Err(msg) => tracing::warn!("web SaveServer rejected: {msg}"),
+        };
+        let cfg_path = crate::constants::config_path();
+        let env_path = crate::constants::env_path();
+        let id = built.id.clone();
+        let result = crate::commands::handlers_admin::apply_server_config(
+            &mut self.config,
+            &cfg_path,
+            &env_path,
+            &built.id,
+            built.config,
+            built.password,
+            built.sasl_pass,
+        );
+        self.cached_config_toml = None;
+        match result {
+            Ok(()) => tracing::info!("web wizard saved server '{id}'"),
+            Err(e) => {
+                tracing::warn!("web SaveServer failed to persist: {e}");
+                self.broadcast_web(crate::web::protocol::WebEvent::Error {
+                    message: format!("Server '{id}' could not be saved: {e}"),
+                });
+            }
         }
     }
 
