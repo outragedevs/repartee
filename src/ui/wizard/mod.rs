@@ -349,6 +349,13 @@ use crate::theme::hex_to_color;
 
 /// Label column width inside the modal.
 const LABEL_W: u16 = 24;
+/// Modal width. Sized so the value column (`width - 2 border - LABEL_W - 3`)
+/// is at least 40 cols — enough to show a fully-expanded IPv6 literal
+/// (39 chars, e.g. `2001:41d0:a800:3e07:b2e5:70d3:8c4f:1a96`) plus the edit
+/// caret without truncation. `centered_rect` clamps this to narrow terminals.
+const POPUP_W: u16 = 74;
+/// Modal height.
+const POPUP_H: u16 = 24;
 
 /// Render the wizard overlay (no-op when none open). Records hit rects onto the
 /// `WizardState` for mouse hit-testing.
@@ -376,7 +383,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     };
 
-    let popup = crate::ui::centered_rect(area, 66, 24);
+    let popup = crate::ui::centered_rect(area, POPUP_W, POPUP_H);
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .title(Span::styled(
