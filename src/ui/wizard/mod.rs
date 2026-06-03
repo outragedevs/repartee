@@ -368,6 +368,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     let accent = hex_to_color(&colors.accent).unwrap_or(Color::Cyan);
     let fg = hex_to_color(&colors.fg).unwrap_or(Color::White);
     let muted = hex_to_color(&colors.fg_muted).unwrap_or(Color::Gray);
+    // Editable text inputs get the theme's main bg (the popup itself uses
+    // bg_alt), so the clickable entry area reads as a distinct box.
+    let field_bg = hex_to_color(&colors.bg).unwrap_or(Color::Black);
 
     let Some(w) = app.wizard.as_mut() else {
         return;
@@ -443,16 +446,25 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         let fx = inner.x + 1 + LABEL_W;
         let field_rect = Rect::new(fx, y, field_w, 1);
         let editing = focused && w.is_text_focused();
+        let text_like = matches!(
+            f.kind,
+            FieldKind::Text | FieldKind::Masked | FieldKind::Number
+        );
+        // Text inputs render as a filled box (distinct bg) so the clickable
+        // entry area is obvious; toggles/selects and the locked field render
+        // plainly on the popup background.
         let val_style = if focused {
             Style::default().fg(bg).bg(accent)
         } else if f.readonly {
             Style::default().fg(muted)
+        } else if text_like {
+            Style::default().fg(fg).bg(field_bg)
         } else {
             Style::default().fg(fg)
         };
         let rendered = render_value(f, &w.values[i], editing, w.cursor);
         frame.render_widget(
-            Paragraph::new(Span::styled(rendered, val_style)),
+            Paragraph::new(rendered).style(val_style),
             field_rect,
         );
         // Readonly fields are display-only: no click target, so they can never
