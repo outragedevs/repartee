@@ -260,6 +260,10 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### Unreleased
+
+- **`/wizard server` — a guided add/edit-server form, in the TUI and the web UI.** A friendly popup for "mIRC users" who don't want to memorise `/server add` flags. Fixed-size modal with **Basics** (Network Name, address/IP, port, TLS + verify-cert toggles, bind IP) and **Advanced** (nick, channels, SASL user/pass/mechanism, encoding, reconnect, autosendcmd, client cert) pages. Full mouse support — click fields, toggle checkboxes, switch pages, press buttons — plus keyboard (Tab/Shift-Tab, Space, ←→, Enter, Esc). In the TUI, `/wizard server` adds and `/wizard server <id>` edits an existing server pre-filled (the id field is locked). In the web UI, a **"+ Add network"** button or typing `/wizard server` opens an add form. Credentials are written to `.env`, never `config.toml`; on edit, an untouched password field leaves the stored secret intact. Manual `/server add` is unchanged. Built on a reusable wizard-form toolkit, so future `/wizard` forms can reuse it.
+
 ### v1.3.3
 
 - **TUI no longer freezes for seconds on busy IRC networks** — the Lua-script state snapshot was being deep-cloned (every connection, every buffer, every nick across every buffer, plus the full app `config.toml`) after every IRC event, every keystroke, every shim event, and every script action. On a power-user setup (~10 networks × 30 channels × 200 nicks) that's 20–50 ms per call, and a 200-event channel burst stacked into 4–10 seconds of frozen UI on `tokio::current_thread`. The fix: `update_script_snapshot()` early-returns when no Lua scripts are loaded (the dominant case), and the eager rebuild was dropped from the event arms — the tick arm (1 s) is now the single rebuild site. New `ScriptManager::has_loaded_scripts()` is the correct guard (the prior `!script_commands.is_empty()` missed event-only scripts). `tracing::warn!` fires if a rebuild ever exceeds 50 ms, so future snapshot growth surfaces in logs before users feel it.
