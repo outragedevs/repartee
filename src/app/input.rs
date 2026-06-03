@@ -118,6 +118,12 @@ impl App {
             return;
         }
 
+        // Wizard overlay (top-most modal) swallows all keys while open.
+        if self.wizard.is_some() {
+            self.handle_wizard_key(key);
+            return;
+        }
+
         // Emote picker overlay swallows all keys while open.
         if self.emote_picker.is_open() {
             self.handle_emote_picker_key(key);
@@ -395,6 +401,14 @@ impl App {
             return;
         };
         let pos = Position::new(mouse.column, mouse.row);
+
+        // Wizard overlay (top-most modal) captures all mouse use while open.
+        if self.wizard.is_some() {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                self.handle_wizard_click(pos);
+            }
+            return;
+        }
 
         // Emote picker: a left click inserts the clicked emote (or closes on a
         // click outside any cell). It takes priority over all other mouse use.
@@ -775,6 +789,173 @@ impl App {
         }
         if close {
             self.emote_picker = crate::ui::emote_picker::EmotePickerState::Hidden;
+        }
+    }
+
+    /// Open the add/edit-server wizard (`/wizard server [id]`). With `id`, opens
+    /// in edit mode pre-filled from that server; without, opens a blank add form.
+    pub(crate) fn open_server_wizard(&mut self, id: Option<&str>) {
+        use crate::ui::wizard::{WizardMode, server::build_wizard};
+        let wizard = match id {
+            Some(id) => {
+                let Some(server) = self.config.servers.get(id) else {
+                    crate::commands::helpers::add_local_event(
+                        self,
+                        &format!("No server with id '{id}'"),
+                    );
+                    return;
+                };
+                build_wizard(WizardMode::Edit { id: id.to_string() }, Some(server))
+            }
+            None => build_wizard(WizardMode::Add, None),
+        };
+        self.wizard = Some(wizard);
+    }
+
+    /// Handle a key while the wizard overlay is open.
+    fn handle_wizard_key(&mut self, key: event::KeyEvent) {
+        use crate::ui::wizard::Focus;
+        match (key.modifiers, key.code) {
+            // Quit chord still works while the wizard is open.
+            (KeyModifiers::CONTROL, KeyCode::Char('q' | 'c')) => {
+                self.should_quit = true;
+                self.wizard = None;
+            }
+            (_, KeyCode::Esc) => self.wizard = None,
+            (_, KeyCode::Enter) => match self.wizard.as_ref().map(|w| w.focus) {
+                Some(Focus::Save) => self.wizard_save(),
+                Some(Focus::Cancel) => self.wizard = None,
+                Some(Focus::Field(_)) => {
+                    if let Some(w) = self.wizard.as_mut() {
+                        w.focus_next();
+                    }
+                }
+                None => {}
+            },
+            // Remaining keys only mutate the wizard's own state.
+            _ => {
+                if let Some(w) = self.wizard.as_mut() {
+                    match (key.modifiers, key.code) {
+                        (_, KeyCode::Tab | KeyCode::Down) => w.focus_next(),
+                        (_, KeyCode::BackTab | KeyCode::Up) => w.focus_prev(),
+                        (_, KeyCode::Left) => {
+                            if w.is_select_focused() {
+                                w.cycle_focused(false);
+                            } else {
+                                w.prev_page();
+                            }
+                        }
+                        (_, KeyCode::Right) => {
+                            if w.is_select_focused() {
+                                w.cycle_focused(true);
+                            } else {
+                                w.next_page();
+                            }
+                        }
+                        (_, KeyCode::Char(' ')) if w.is_toggle_focused() => w.toggle_focused(),
+                        (_, KeyCode::Backspace) => w.backspace(),
+                        (m, KeyCode::Char(c))
+                            if !m.contains(KeyModifiers::CONTROL)
+                                && !m.contains(KeyModifiers::ALT)
+                                && w.is_text_focused() =>
+                        {
+                            w.insert_char(c);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    /// Validate + persist the wizard's server, or surface the error inline.
+    fn wizard_save(&mut self) {
+        let Some(w) = self.wizard.as_ref() else {
+            return;
+        };
+        match crate::ui::wizard::server::build(w, &self.config.servers) {
+            Ok(built) => {
+                let cfg_path = crate::constants::config_path();
+                let env_path = crate::constants::env_path();
+                let id = built.id.clone();
+                let result = crate::commands::handlers_admin::apply_server_config(
+                    &mut self.config,
+                    &cfg_path,
+                    &env_path,
+                    &built.id,
+                    built.config,
+                    built.password,
+                    built.sasl_pass,
+                );
+                self.cached_config_toml = None;
+                match result {
+                    Ok(()) => {
+                        self.wizard = None;
+                        crate::commands::helpers::add_local_event(
+                            self,
+                            &format!("Server '{id}' saved"),
+                        );
+                    }
+                    Err(e) => {
+                        if let Some(w) = self.wizard.as_mut() {
+                            w.error = Some(format!("Save failed: {e}"));
+                        }
+                    }
+                }
+            }
+            Err(msg) => {
+                if let Some(w) = self.wizard.as_mut() {
+                    w.error = Some(msg);
+                }
+            }
+        }
+    }
+
+    /// Handle a left click while the wizard overlay is open.
+    fn handle_wizard_click(&mut self, pos: Position) {
+        use crate::ui::wizard::Focus;
+        enum Hit {
+            Save,
+            Cancel,
+            Tab(usize),
+            Field(usize),
+            None,
+        }
+        // Resolve the click against recorded rects (immutable read first).
+        let hit = self.wizard.as_ref().map_or(Hit::None, |w| {
+            if w.save_rect.is_some_and(|r| r.contains(pos)) {
+                Hit::Save
+            } else if w.cancel_rect.is_some_and(|r| r.contains(pos)) {
+                Hit::Cancel
+            } else if let Some(&(p, _)) = w.tab_rects.iter().find(|(_, r)| r.contains(pos)) {
+                Hit::Tab(p)
+            } else if let Some(&(i, _)) = w.field_rects.iter().find(|(_, r)| r.contains(pos)) {
+                Hit::Field(i)
+            } else {
+                Hit::None
+            }
+        });
+
+        match hit {
+            Hit::Save => self.wizard_save(),
+            Hit::Cancel => self.wizard = None,
+            Hit::Tab(p) => {
+                if let Some(w) = self.wizard.as_mut() {
+                    w.set_page(p);
+                }
+            }
+            Hit::Field(i) => {
+                if let Some(w) = self.wizard.as_mut() {
+                    w.focus = Focus::Field(i);
+                    w.sync_cursor_to_focus();
+                    if w.is_toggle_focused() {
+                        w.toggle_focused();
+                    } else if w.is_select_focused() {
+                        w.cycle_focused(true);
+                    }
+                }
+            }
+            Hit::None => {}
         }
     }
 

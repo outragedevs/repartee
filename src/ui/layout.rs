@@ -155,6 +155,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // Emote picker overlay (top-most when open).
     super::emote_picker::render(frame, frame.area(), app);
 
+    // Wizard overlay (above the emote picker — the top-most modal when open).
+    super::wizard::render(frame, frame.area(), app);
+
     // Targeted repaint after image dismiss (Kitty/iTerm2 only).
     // The graphics layer was already cleaned up by escape sequences.
     // Rendering Clear over the popup area forces ratatui's diff to
