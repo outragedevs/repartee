@@ -550,10 +550,24 @@ pub(crate) fn cmd_server(app: &mut App, args: &[String]) {
                 // id by apply_server_config) so removal leaves no stale secrets.
                 let upper = id.to_uppercase();
                 let env_path = crate::constants::env_path();
-                let _ = crate::config::env::remove_env_value(&env_path, &format!("{upper}_PASSWORD"));
-                let _ =
+                let pw = crate::config::env::remove_env_value(&env_path, &format!("{upper}_PASSWORD"));
+                let sasl =
                     crate::config::env::remove_env_value(&env_path, &format!("{upper}_SASL_PASS"));
                 add_local_event(app, &format!("{C_OK}Server '{id}' removed{C_RST}"));
+                // The config entry is already gone from disk, so the removal
+                // itself succeeded — but a failed `.env` write would silently
+                // leave secrets behind. Surface that instead of swallowing it.
+                if let Err(e) = pw.and(sasl) {
+                    tracing::warn!("server '{id}' removed but .env credential purge failed: {e}");
+                    add_local_event(
+                        app,
+                        &format!(
+                            "{C_ERR}Warning: could not clear .env credentials ({e}); \
+                             they may remain in {}{C_RST}",
+                            env_path.display()
+                        ),
+                    );
+                }
             } else {
                 add_local_event(app, &format!("{C_ERR}No server with id '{id}'{C_RST}"));
             }
