@@ -368,34 +368,35 @@ fn kick_chunk_sizes(n: usize) -> Vec<usize> {
     }
 }
 
-/// Split `remaining` into `(nicks, reason)` using the `:reason` syntax.
+/// Split `remaining` into `(nicks, reason)`.
 ///
-/// Convention: scan for the first token starting with `:`. Everything
-/// before that token is treated as nicks; everything from the colon
-/// onward (with the leading `:` stripped from the first token, then
-/// joined by spaces) is the reason. If no `:` token is present, every
-/// argument is a nick and the reason is `None`. Empty reason after
-/// trimming also collapses to `None`.
+/// Convention: the first whitespace token is a comma-separated nick list;
+/// everything after it (joined by spaces) is the reason. No `:` is needed to
+/// delimit the reason — space alone separates nicks from reason, which removes
+/// the ambiguity of space-separated nick lists. A single leading `:` on the
+/// reason is still accepted and stripped for backward compatibility
+/// (`/kick nick :reason`). Empty comma segments (`a,,b`, `a,b,`) are dropped;
+/// an empty reason after trimming collapses to `None`.
 fn parse_kick_args(remaining: &[String]) -> (Vec<String>, Option<String>) {
-    for (i, t) in remaining.iter().enumerate() {
-        if let Some(rest_of_first) = t.strip_prefix(':') {
-            let nicks: Vec<String> = remaining[..i].to_vec();
-            let mut reason_parts = vec![rest_of_first.to_string()];
-            reason_parts.extend(remaining[i + 1..].iter().cloned());
-            let joined = reason_parts.join(" ");
-            let trimmed = joined.trim();
-            let reason = (!trimmed.is_empty()).then(|| trimmed.to_string());
-            return (nicks, reason);
-        }
-    }
-    (remaining.to_vec(), None)
+    let Some((nick_token, reason_parts)) = remaining.split_first() else {
+        return (Vec::new(), None);
+    };
+    let nicks: Vec<String> = nick_token
+        .split(',')
+        .filter(|seg| !seg.is_empty())
+        .map(ToString::to_string)
+        .collect();
+    let joined = reason_parts.join(" ");
+    let reason_str = joined.strip_prefix(':').unwrap_or(&joined).trim();
+    let reason = (!reason_str.is_empty()).then(|| reason_str.to_string());
+    (nicks, reason)
 }
 
 pub(crate) fn cmd_kick(app: &mut App, args: &[String]) {
     if args.is_empty() {
         add_local_event(
             app,
-            "Usage: /kick [#channel] <nick> [nick2 ... nick6] [:reason]",
+            "Usage: /kick [#channel] <nick>[,nick2,...,nick6] [reason]",
         );
         return;
     }
@@ -420,7 +421,7 @@ pub(crate) fn cmd_kick(app: &mut App, args: &[String]) {
     let (nicks, reason) = parse_kick_args(remaining);
 
     if nicks.is_empty() {
-        add_local_event(app, "Usage: /kick [#channel] <nick> [nick2 ...] [:reason]");
+        add_local_event(app, "Usage: /kick [#channel] <nick>[,nick2,...] [reason]");
         return;
     }
     if nicks.len() > KICK_MAX_NICKS {
@@ -1619,30 +1620,58 @@ mod tests {
     }
 
     #[test]
-    fn parse_kick_args_nicks_only() {
-        let (nicks, reason) = parse_kick_args(&s(&["alice", "bob", "carol"]));
+    fn parse_kick_args_single_nick_no_reason() {
+        let (nicks, reason) = parse_kick_args(&s(&["alice"]));
+        assert_eq!(nicks, s(&["alice"]));
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn parse_kick_args_comma_list_multiple_nicks() {
+        let (nicks, reason) = parse_kick_args(&s(&["alice,bob,carol"]));
         assert_eq!(nicks, s(&["alice", "bob", "carol"]));
         assert_eq!(reason, None);
     }
 
     #[test]
-    fn parse_kick_args_with_multiword_reason() {
-        let (nicks, reason) = parse_kick_args(&s(&["alice", "bob", ":be", "nice"]));
-        assert_eq!(nicks, s(&["alice", "bob"]));
+    fn parse_kick_args_reason_needs_no_colon() {
+        let (nicks, reason) = parse_kick_args(&s(&["alice", "be", "nice"]));
+        assert_eq!(nicks, s(&["alice"]));
         assert_eq!(reason.as_deref(), Some("be nice"));
     }
 
     #[test]
-    fn parse_kick_args_colon_first_token_means_no_nicks() {
-        let (nicks, reason) = parse_kick_args(&s(&[":no", "nicks"]));
-        assert!(nicks.is_empty());
-        assert_eq!(reason.as_deref(), Some("no nicks"));
+    fn parse_kick_args_comma_list_with_reason() {
+        let (nicks, reason) = parse_kick_args(&s(&["alice,bob,carol", "go", "away"]));
+        assert_eq!(nicks, s(&["alice", "bob", "carol"]));
+        assert_eq!(reason.as_deref(), Some("go away"));
+    }
+
+    #[test]
+    fn parse_kick_args_leading_colon_stripped_for_backward_compat() {
+        let (nicks, reason) = parse_kick_args(&s(&["alice", ":be", "nice"]));
+        assert_eq!(nicks, s(&["alice"]));
+        assert_eq!(reason.as_deref(), Some("be nice"));
+    }
+
+    #[test]
+    fn parse_kick_args_empty_comma_segments_dropped() {
+        let (nicks, reason) = parse_kick_args(&s(&["alice,,bob,"]));
+        assert_eq!(nicks, s(&["alice", "bob"]));
+        assert_eq!(reason, None);
     }
 
     #[test]
     fn parse_kick_args_empty_reason_collapses_to_none() {
         let (nicks, reason) = parse_kick_args(&s(&["alice", ":", "   "]));
         assert_eq!(nicks, s(&["alice"]));
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn parse_kick_args_empty_input() {
+        let (nicks, reason) = parse_kick_args(&[]);
+        assert!(nicks.is_empty());
         assert_eq!(reason, None);
     }
 

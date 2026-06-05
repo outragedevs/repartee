@@ -138,7 +138,7 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
             "kick",
             CommandDef {
                 handler: cmd_kick,
-                description: "Kick up to 6 users from channel (use :reason for multi-word reason)",
+                description: "Kick up to 6 users (comma-separate nicks; rest of line is the reason)",
                 aliases: &["k"],
                 category: CommandCategory::Channel,
             },
