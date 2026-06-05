@@ -27,26 +27,26 @@ impl FloodResult {
 
 const CTCP_THRESHOLD: usize = 5;
 const CTCP_WINDOW: Duration = Duration::from_secs(5);
-const CTCP_BLOCK: Duration = Duration::from_secs(60);
+const CTCP_BLOCK: Duration = Duration::from_mins(1);
 
 // Per-nick tilde rate limit — blocks only the offending nick.
 const TILDE_NICK_THRESHOLD: usize = 5;
 const TILDE_NICK_WINDOW: Duration = Duration::from_secs(5);
-const TILDE_NICK_BLOCK: Duration = Duration::from_secs(60);
+const TILDE_NICK_BLOCK: Duration = Duration::from_mins(1);
 
 // PM tilde storm — many different ~ nicks PMing us = botnet.
 const PM_STORM_THRESHOLD: usize = 6;
 const PM_STORM_WINDOW: Duration = Duration::from_secs(5);
-const PM_STORM_BLOCK: Duration = Duration::from_secs(60);
+const PM_STORM_BLOCK: Duration = Duration::from_mins(1);
 
 const DUP_MIN_IN_WINDOW: usize = 5;
 const DUP_THRESHOLD: usize = 3;
 const DUP_WINDOW: Duration = Duration::from_secs(5);
-const DUP_BLOCK: Duration = Duration::from_secs(60);
+const DUP_BLOCK: Duration = Duration::from_mins(1);
 
 const NICK_THRESHOLD: usize = 5;
 const NICK_WINDOW: Duration = Duration::from_secs(3);
-const NICK_BLOCK: Duration = Duration::from_secs(60);
+const NICK_BLOCK: Duration = Duration::from_mins(1);
 
 // === Per-connection state ===
 

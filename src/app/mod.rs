@@ -18,7 +18,7 @@ mod mentions;
 mod scripting;
 mod session;
 mod shell;
-pub(crate) mod shrink;
+pub mod shrink;
 mod web;
 mod who;
 
@@ -401,6 +401,8 @@ pub struct App {
     pub emote_anim_start: std::time::Instant,
     /// Emote picker overlay state (open/hidden + filter/selection).
     pub emote_picker: crate::ui::emote_picker::EmotePickerState,
+    /// Open add/edit-server (or future) wizard overlay, if any.
+    pub wizard: Option<crate::ui::wizard::WizardState>,
     pub needs_full_redraw: bool,
     pub outer_terminal: String,
     pub color_support: crate::nick_color::ColorSupport,
@@ -722,6 +724,7 @@ impl App {
             emote_animator: crate::app::emote_anim::EmoteAnimator::default(),
             emote_anim_start: Instant::now(),
             emote_picker: crate::ui::emote_picker::EmotePickerState::default(),
+            wizard: None,
             needs_full_redraw: false,
             outer_terminal: outer_terminal.to_string(),
             color_support,
@@ -1094,7 +1097,7 @@ impl App {
 
         let mut tick = interval(Duration::from_secs(1));
         let mut paste_tick = interval(Duration::from_millis(500));
-        let shell_broadcast_sleep = tokio::time::sleep(std::time::Duration::from_secs(86400));
+        let shell_broadcast_sleep = tokio::time::sleep(std::time::Duration::from_hours(24));
         tokio::pin!(shell_broadcast_sleep);
         // ~20 FPS clock for inline emote animation. Re-armed to 50ms after each
         // draw only while an animated (multi-frame) emote is visible; otherwise
@@ -1300,7 +1303,7 @@ impl App {
                             self.force_broadcast_shell_screen(&shell_id);
                         }
                     }
-                    shell_broadcast_sleep.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_secs(86400));
+                    shell_broadcast_sleep.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_hours(24));
                 },
                 _ = tick.tick() => {
                     if let Some(server_ids) = pending_autoconnect_ids.take() {

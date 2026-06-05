@@ -7,3 +7,4 @@ pub mod nick_list;
 pub mod shell_view;
 pub mod status_line;
 pub mod topic_bar;
+pub mod wizard;

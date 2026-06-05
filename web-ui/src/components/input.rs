@@ -187,6 +187,18 @@ pub fn InputLine() -> impl IntoView {
                 if is_shell {
                     return;
                 }
+                // Don't steal focus while the user is typing in another control
+                // (the server wizard's fields, or any future modal/form). Only
+                // grab focus when the keystroke originated from "nowhere".
+                if let Some(el) = ev.target().and_then(|t| t.dyn_into::<web_sys::Element>().ok()) {
+                    let tag = el.tag_name();
+                    if tag.eq_ignore_ascii_case("input")
+                        || tag.eq_ignore_ascii_case("select")
+                        || tag.eq_ignore_ascii_case("textarea")
+                    {
+                        return;
+                    }
+                }
                 let key = ev.key();
                 if key == "Tab"
                     || key == "Enter"
@@ -210,6 +222,16 @@ pub fn InputLine() -> impl IntoView {
 
     let send_text = move |text: String| {
         if text.is_empty() {
+            return;
+        }
+        // `/wizard server` opens the web add-server modal client-side (the
+        // server-side handler would open the TUI overlay, useless to a web
+        // client). The web wizard is add-only, so any id argument is ignored.
+        // Checked before the active-buffer guard so it works at bootstrap, when
+        // a client with no servers yet has no active buffer.
+        let whole = text.trim();
+        if whole == "/wizard server" || whole.starts_with("/wizard server ") {
+            state.wizard_open.set(true);
             return;
         }
         let Some(buffer_id) = state.active_buffer.get() else {

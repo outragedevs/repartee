@@ -41,14 +41,14 @@ pub const PROTO_VERSION: u8 = 1;
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(30);
 
 /// Sliding-window length for the incoming-KEYREQ rate limiter (spec §5.4).
-const INCOMING_WINDOW: Duration = Duration::from_secs(60);
+const INCOMING_WINDOW: Duration = Duration::from_mins(1);
 
 /// Maximum incoming KEYREQs per peer within `INCOMING_WINDOW` before the
 /// peer is pushed into backoff.
 const INCOMING_MAX_PER_WINDOW: usize = 3;
 
 /// Backoff duration applied after a peer exceeds the incoming window.
-const INCOMING_BACKOFF: Duration = Duration::from_secs(5 * 60);
+const INCOMING_BACKOFF: Duration = Duration::from_mins(5);
 
 /// KEYREQ message. `pubkey` is the initiator's long-term Ed25519 identity;
 /// `eph_x25519` is a fresh ephemeral X25519 public used for ECDH. Both are

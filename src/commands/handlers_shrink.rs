@@ -19,7 +19,7 @@ use super::types::{C_ERR, C_RST};
 use crate::app::App;
 use crate::app::shrink::ShrinkDeliver;
 
-pub(crate) fn cmd_shrink(app: &mut App, args: &[String]) {
+pub fn cmd_shrink(app: &mut App, args: &[String]) {
     if args.is_empty() {
         add_local_event(app, "Usage: /shrink <url>");
         return;

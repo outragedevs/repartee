@@ -119,7 +119,11 @@ async fn handle_socket(
                             }
                             Err(e) => {
                                 tracing::debug!(session_id = %session_id, error = %e, "invalid web command");
-                                let err = WebEvent::Error { message: format!("invalid command: {e}") };
+                                // Sent directly on this socket, so no session target needed.
+                                let err = WebEvent::Error {
+                                    message: format!("invalid command: {e}"),
+                                    session_id: None,
+                                };
                                 let _ = send_json(&mut ws_tx, &err).await;
                             }
                         }
@@ -187,7 +191,8 @@ fn is_targeted_to_other(event: &WebEvent, session_id: &str) -> bool {
         WebEvent::Messages { session_id, .. }
         | WebEvent::NickList { session_id, .. }
         | WebEvent::MentionsList { session_id, .. }
-        | WebEvent::ShellScreen { session_id, .. } => session_id.as_deref(),
+        | WebEvent::ShellScreen { session_id, .. }
+        | WebEvent::Error { session_id, .. } => session_id.as_deref(),
         _ => None,
     };
     // If target is Some and doesn't match, skip this event.
@@ -240,5 +245,25 @@ mod tests {
         };
         assert!(is_targeted_to_other(&event, "session-b"));
         assert!(!is_targeted_to_other(&event, "session-a"));
+    }
+
+    #[test]
+    fn targeted_error_is_filtered_for_other_sessions() {
+        let event = WebEvent::Error {
+            message: "Add server failed".into(),
+            session_id: Some("session-a".into()),
+        };
+        assert!(is_targeted_to_other(&event, "session-b"));
+        assert!(!is_targeted_to_other(&event, "session-a"));
+    }
+
+    #[test]
+    fn untargeted_error_broadcasts_to_all_sessions() {
+        let event = WebEvent::Error {
+            message: "invalid command".into(),
+            session_id: None,
+        };
+        assert!(!is_targeted_to_other(&event, "session-a"));
+        assert!(!is_targeted_to_other(&event, "session-b"));
     }
 }

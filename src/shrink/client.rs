@@ -64,7 +64,7 @@ impl ShrinkClient {
     /// suffix); `api_key` empty disables every subsequent call with
     /// `ShrinkError::Disabled` so callers can short-circuit cleanly.
     #[must_use]
-    pub fn new(api_url: String, api_key: String) -> Self {
+    pub fn new(api_url: &str, api_key: String) -> Self {
         // Default reqwest client honours each call's per-request
         // timeout via `RequestBuilder::timeout`; no global timeout
         // here so the caller controls latency budget.
@@ -147,10 +147,9 @@ impl ShrinkClient {
             })
         };
 
-        match tokio::time::timeout(timeout, request_future).await {
-            Ok(result) => result,
-            Err(_) => Err(ShrinkError::Timeout),
-        }
+        tokio::time::timeout(timeout, request_future)
+            .await
+            .map_or(Err(ShrinkError::Timeout), |result| result)
     }
 
     /// 409 from the API means the slug we asked for is already taken.
@@ -158,7 +157,11 @@ impl ShrinkClient {
     /// but the matcher is useful for tests and for a future `/shrink
     /// --slug=` extension.
     #[must_use]
-    pub fn is_slug_conflict(err: &ShrinkError) -> bool {
+    #[allow(
+        dead_code,
+        reason = "409-conflict classifier exercised by tests; kept for a future --slug= path"
+    )]
+    pub const fn is_slug_conflict(err: &ShrinkError) -> bool {
         matches!(err, ShrinkError::Api { status: 409, .. })
     }
 }
@@ -169,7 +172,7 @@ mod tests {
 
     #[test]
     fn disabled_when_key_empty() {
-        let c = ShrinkClient::new("https://shr.al".into(), String::new());
+        let c = ShrinkClient::new("https://shr.al", String::new());
         // Build a tokio runtime just to drive the future.
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -183,7 +186,7 @@ mod tests {
 
     #[test]
     fn api_url_trailing_slash_stripped() {
-        let c = ShrinkClient::new("https://shr.al/".into(), "k".into());
+        let c = ShrinkClient::new("https://shr.al/", "k".into());
         // Internal field check via private access from the same module:
         // we trust the constructor to keep this normalised so the
         // request endpoint stays `https://shr.al/api/links`.

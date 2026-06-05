@@ -212,7 +212,7 @@ impl LuaEngine {
                         script_name: sn.clone(),
                         id,
                     });
-                    inner.handlers.sort_by(|a, b| b.priority.cmp(&a.priority));
+                    inner.handlers.sort_by_key(|b| std::cmp::Reverse(b.priority));
                     drop(inner);
                     Ok(id)
                 },
@@ -240,7 +240,7 @@ impl LuaEngine {
                         script_name: sn.clone(),
                         id,
                     });
-                    inner.handlers.sort_by(|a, b| b.priority.cmp(&a.priority));
+                    inner.handlers.sort_by_key(|b| std::cmp::Reverse(b.priority));
                     drop(inner);
                     Ok(id)
                 },

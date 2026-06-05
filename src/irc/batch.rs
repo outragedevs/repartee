@@ -663,7 +663,7 @@ mod tests {
                 messages: vec![],
                 dropped_messages: 0,
                 started_at: Instant::now()
-                    .checked_sub(std::time::Duration::from_secs(120))
+                    .checked_sub(std::time::Duration::from_mins(2))
                     .unwrap(),
             },
         );
@@ -710,7 +710,7 @@ mod tests {
                 }],
                 dropped_messages: 0,
                 started_at: Instant::now()
-                    .checked_sub(std::time::Duration::from_secs(120))
+                    .checked_sub(std::time::Duration::from_mins(2))
                     .unwrap(),
             },
         );

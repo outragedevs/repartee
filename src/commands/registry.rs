@@ -17,7 +17,7 @@ use super::handlers_irc::{
 use super::handlers_shrink::cmd_shrink;
 use super::handlers_ui::{
     cmd_alias, cmd_clear, cmd_close, cmd_detach, cmd_emote, cmd_help, cmd_items, cmd_quit,
-    cmd_shell, cmd_unalias,
+    cmd_shell, cmd_unalias, cmd_wizard,
 };
 use super::types::{CommandCategory, CommandDef};
 
@@ -65,6 +65,15 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
             CommandDef {
                 handler: cmd_server,
                 description: "Manage server configurations",
+                aliases: &[],
+                category: CommandCategory::Connection,
+            },
+        ),
+        (
+            "wizard",
+            CommandDef {
+                handler: cmd_wizard,
+                description: "Open a guided add/edit form (server)",
                 aliases: &[],
                 category: CommandCategory::Connection,
             },

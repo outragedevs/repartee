@@ -214,6 +214,10 @@ impl App {
     pub(crate) fn perform_detach(&mut self) {
         self.should_detach = false;
 
+        // A wizard's captured state can go stale across a detach/reattach
+        // (config may be edited externally meanwhile), so close it.
+        self.wizard = None;
+
         if self.is_socket_attached {
             self.send_shim_control(crate::session::protocol::MainMessage::Detached);
             self.teardown_shim();

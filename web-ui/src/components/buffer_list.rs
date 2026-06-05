@@ -9,14 +9,18 @@ pub fn BufferList() -> impl IntoView {
 
     view! {
         <div class="buffer-list">
+            <button
+                class="add-network-btn"
+                title="Add a new server"
+                on:click=move |_| state.wizard_open.set(true)
+            >"+ Add network"</button>
             {move || {
                 let buffers = state.buffers.get();
                 let connections = state.connections.get();
                 let active_id = state.active_buffer.get();
                 let mut views: Vec<leptos::prelude::AnyView> = Vec::new();
-                let mut num = 1u32;
 
-                for buf in &buffers {
+                for (idx, buf) in buffers.iter().enumerate() {
                     let is_server = buf.buffer_type == "server";
                     let is_active = active_id.as_deref() == Some(buf.id.as_str());
                     let type_class = match buf.buffer_type.as_str() {
@@ -41,7 +45,7 @@ pub fn BufferList() -> impl IntoView {
 
                     let id = buf.id.clone();
                     let name = buf.name.clone();
-                    let current_num = num;
+                    let current_num = u32::try_from(idx + 1).unwrap_or(0);
 
                     let on_click = move |_| {
                         state.active_buffer.set(Some(id.clone()));
@@ -74,7 +78,6 @@ pub fn BufferList() -> impl IntoView {
                         }
                         .into_any(),
                     );
-                    num += 1;
                 }
                 views
             }}

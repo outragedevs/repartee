@@ -215,7 +215,7 @@ impl AppState {
     ///
     /// Guards on buffer existence at entry: when the user parts /
     /// closes the buffer between shrink dispatch and worker
-    /// deliver, we must NOT write to SQLite or broadcast web events
+    /// deliver, we must NOT write to `SQLite` or broadcast web events
     /// for a buffer the client side no longer knows about. Logging
     /// would also persist the substituted text under a buffer that
     /// no longer maps to it, making `/search` for the original URL
@@ -379,8 +379,8 @@ impl AppState {
     /// Same buffer-existence guard as `add_message_unshrunk` — when
     /// the user parted the channel during the shrink wait, dropping
     /// the delivery entirely is the only correct option (otherwise
-    /// SQLite would log the substituted text orphaned from any
-    /// visible buffer, and web clients would get a NewMessage for a
+    /// `SQLite` would log the substituted text orphaned from any
+    /// visible buffer, and web clients would get a `NewMessage` for a
     /// buffer they no longer have).
     pub fn add_message_with_activity_unshrunk(
         &mut self,

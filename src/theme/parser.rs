@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Write as _;
 
 use ratatui::style::Color;
 
@@ -148,10 +149,8 @@ pub fn substitute_vars(input: &str, params: &[&str]) -> String {
 
                 let abs_width = pad_width.unsigned_abs() as usize;
                 if pad_width < 0 {
-                    use std::fmt::Write;
                     let _ = write!(result, "{value:>abs_width$}");
                 } else {
-                    use std::fmt::Write;
                     let _ = write!(result, "{value:<abs_width$}");
                 }
                 continue;

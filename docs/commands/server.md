@@ -56,7 +56,8 @@ Add a new server to the configuration.
 - `-client-cert=<path>` — Client TLS certificate path for SASL EXTERNAL / CertFP
 
 Flag values are parsed as single command arguments, so values with spaces should
-be edited in `config.toml` or with `/set`.
+be edited in `config.toml` or with `/set`. For a guided form instead of flags,
+use `/wizard server`.
 
 ### remove
 
@@ -79,4 +80,4 @@ Aliases: del
 
 ## See Also
 
-/connect, /disconnect, /set
+/wizard, /connect, /disconnect, /set

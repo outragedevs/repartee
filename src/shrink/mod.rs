@@ -131,7 +131,7 @@ impl ShrinkCache {
 
     /// Look up `url`, promoting the entry to most-recently-used on hit.
     ///
-    /// `shift_remove` (not `swap_remove`) is critical here: IndexMap's
+    /// `shift_remove` (not `swap_remove`) is critical here: `IndexMap`'s
     /// `swap_remove` moves the LAST entry into the vacated slot, which
     /// scrambles every entry's relative age and breaks LRU eviction
     /// at cap ≥ 3. `shift_remove` preserves the order of all other
@@ -157,11 +157,13 @@ impl ShrinkCache {
     }
 
     #[must_use]
+    #[allow(dead_code, reason = "cache-size accessors exercised by unit tests")]
     pub fn len(&self) -> usize {
         self.map.len()
     }
 
     #[must_use]
+    #[allow(dead_code, reason = "cache-size accessors exercised by unit tests")]
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }

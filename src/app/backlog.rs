@@ -100,7 +100,7 @@ fn build_backlog_messages(
         let local_date = Local.from_utc_datetime(&ts.naive_utc()).date_naive();
 
         // Insert date separator when the day changes.
-        if last_date.is_some_and(|d| d != local_date) || last_date.is_none() {
+        if last_date.is_none_or(|d| d != local_date) {
             let sep_id = state.next_message_id();
             backlog.push_back(make_separator(
                 sep_id,

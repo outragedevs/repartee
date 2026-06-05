@@ -12,6 +12,7 @@ pub mod splash;
 pub mod status_line;
 pub mod styled_text;
 pub mod topic_bar;
+pub mod wizard;
 
 use std::io::{self, Write};
 
@@ -105,6 +106,17 @@ pub fn truncate_with_plus(s: &str, max_len: usize) -> String {
         byte_end = i + ch.len_utf8();
     }
     format!("{}+", &s[..byte_end])
+}
+
+/// Center a `w`×`h` rect inside `area`, clamped to fit. Shared by overlay
+/// widgets (emote picker, wizard) so popup placement stays consistent.
+#[must_use]
+pub fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
+    let w = w.min(area.width);
+    let h = h.min(area.height);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    Rect::new(x, y, w, h)
 }
 
 /// Count visible display width from parsed format spans (ignoring color codes).

@@ -60,15 +60,6 @@ impl EmotePickerState {
     }
 }
 
-/// Center a `w`×`h` rect inside `area`, clamped to fit.
-fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
-    let w = w.min(area.width);
-    let h = h.min(area.height);
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    Rect::new(x, y, w, h)
-}
-
 /// Render the picker overlay (no-op when hidden). Records the rendered cell rects
 /// back onto `app.emote_picker` for mouse hit-testing.
 #[allow(clippy::too_many_lines, reason = "cohesive single-pass overlay render")]
@@ -91,7 +82,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     // 70% of each dimension, computed in u32 to avoid u16 overflow on huge terminals.
     let pw = u16::try_from(u32::from(area.width) * 7 / 10).unwrap_or(area.width);
     let ph = u16::try_from(u32::from(area.height) * 7 / 10).unwrap_or(area.height);
-    let popup = centered_rect(area, pw, ph);
+    let popup = crate::ui::centered_rect(area, pw, ph);
     frame.render_widget(Clear, popup);
 
     let title = format!(" Emotes  ›  filter: {filter}_ ");

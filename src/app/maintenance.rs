@@ -60,7 +60,7 @@ impl App {
         if hours == 0 {
             return;
         }
-        if self.last_event_purge.elapsed() < Duration::from_secs(3600) {
+        if self.last_event_purge.elapsed() < Duration::from_hours(1) {
             return;
         }
         self.last_event_purge = Instant::now();
@@ -84,7 +84,7 @@ impl App {
 
     /// Purge mentions older than 7 days from DB and in-memory buffer.
     pub(crate) fn maybe_purge_old_mentions(&mut self) {
-        if self.last_mention_purge.elapsed() < Duration::from_secs(3600) {
+        if self.last_mention_purge.elapsed() < Duration::from_hours(1) {
             return;
         }
         self.last_mention_purge = Instant::now();

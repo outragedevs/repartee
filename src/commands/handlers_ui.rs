@@ -280,7 +280,7 @@ pub(crate) fn cmd_alias(app: &mut App, args: &[String]) {
             lines.push(format!("  {C_DIM}No aliases defined{C_RST}"));
         } else {
             let mut sorted: Vec<_> = app.config.aliases.iter().collect();
-            sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
+            sorted.sort_by_key(|(a, _)| *a);
             for (name, template) in sorted {
                 lines.push(format!(
                     "  {C_CMD}/{name}{C_RST} = {C_TEXT}{template}{C_RST}"
@@ -785,5 +785,17 @@ pub(crate) fn cmd_emote(app: &mut App, args: &[String]) {
             format!("Emotes matching \"{query}\": {}", hits.join(", "))
         };
         add_local_event(app, &msg);
+    }
+}
+
+/// `/wizard <kind> [args]` — open a guided popup form. Currently only
+/// `server [id]` (add, or edit an existing server pre-filled).
+pub(crate) fn cmd_wizard(app: &mut App, args: &[String]) {
+    match args.first().map(String::as_str) {
+        Some("server") => app.open_server_wizard(args.get(1).map(String::as_str)),
+        _ => add_local_event(
+            app,
+            &format!("{C_TEXT}Usage: /wizard server [id]  — open the add/edit-server form{C_RST}"),
+        ),
     }
 }

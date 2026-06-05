@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 const SPLIT_BATCH_WAIT: Duration = Duration::from_secs(5);
 const NETJOIN_BATCH_WAIT: Duration = Duration::from_secs(5);
-const SPLIT_EXPIRE: Duration = Duration::from_secs(3600); // 1 hour
+const SPLIT_EXPIRE: Duration = Duration::from_hours(1); // 1 hour
 const MAX_NICKS_DISPLAY: usize = 15;
 
 // === Types ===

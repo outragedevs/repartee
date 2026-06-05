@@ -98,6 +98,8 @@ pub enum WebEvent {
     },
     Error {
         message: String,
+        #[serde(default)]
+        session_id: Option<String>,
     },
     ShellScreen {
         buffer_id: String,
@@ -147,6 +149,59 @@ pub enum WebCommand {
         cols: u16,
         rows: u16,
     },
+    /// Add or edit a server from the web wizard (mirrors the server-side
+    /// variant). Boxed because the payload dwarfs the other variants.
+    SaveServer(Box<SaveServerCmd>),
+}
+
+/// Payload of [`WebCommand::SaveServer`]. `id` None = add (id derived from
+/// `network`); Some = edit. Credentials: None = unchanged, Some("") = clear,
+/// Some(v) = set.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "flat wire DTO mirroring the wizard's boolean fields"
+)]
+pub struct SaveServerCmd {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub network: String,
+    pub address: String,
+    #[serde(default)]
+    pub port: Option<u16>,
+    pub tls: bool,
+    pub tls_verify: bool,
+    pub autoconnect: bool,
+    #[serde(default)]
+    pub channels: String,
+    #[serde(default)]
+    pub nick: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub realname: String,
+    #[serde(default)]
+    pub bind_ip: String,
+    #[serde(default)]
+    pub encoding: String,
+    #[serde(default)]
+    pub sasl_user: String,
+    #[serde(default)]
+    pub sasl_mechanism: String,
+    #[serde(default)]
+    pub autosendcmd: String,
+    #[serde(default)]
+    pub client_cert_path: String,
+    #[serde(default)]
+    pub auto_reconnect: bool,
+    #[serde(default)]
+    pub reconnect_delay: String,
+    #[serde(default)]
+    pub reconnect_max_retries: String,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub sasl_pass: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

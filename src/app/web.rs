@@ -511,6 +511,78 @@ impl App {
                 }
                 self.force_broadcast_web_shell_screen(&web_id);
             }
+            WebCommand::SaveServer(cmd) => {
+                let form = crate::ui::wizard::server::WebServerForm {
+                    id: cmd.id,
+                    network: cmd.network,
+                    address: cmd.address,
+                    port: cmd.port,
+                    tls: cmd.tls,
+                    tls_verify: cmd.tls_verify,
+                    autoconnect: cmd.autoconnect,
+                    channels: cmd.channels,
+                    nick: cmd.nick,
+                    username: cmd.username,
+                    realname: cmd.realname,
+                    bind_ip: cmd.bind_ip,
+                    encoding: cmd.encoding,
+                    sasl_user: cmd.sasl_user,
+                    sasl_mechanism: cmd.sasl_mechanism,
+                    autosendcmd: cmd.autosendcmd,
+                    client_cert_path: cmd.client_cert_path,
+                    auto_reconnect: cmd.auto_reconnect,
+                    reconnect_delay: cmd.reconnect_delay,
+                    reconnect_max_retries: cmd.reconnect_max_retries,
+                    password: cmd.password,
+                    sasl_pass: cmd.sasl_pass,
+                };
+                self.web_save_server(&form, session_id);
+            }
+        }
+    }
+
+    /// Apply a web-wizard server form: validate, persist via the shared
+    /// `apply_server_config`, and report the outcome to the requesting client.
+    ///
+    /// On failure a `WebEvent::Error` is sent to the submitting session so the
+    /// web user gets feedback (the modal closes optimistically client-side, so a
+    /// silent failure would otherwise be invisible and invite a duplicate
+    /// re-submit). It is targeted to `session_id` so other connected clients
+    /// don't surface an error toast for a form they never submitted.
+    fn web_save_server(&mut self, form: &crate::ui::wizard::server::WebServerForm, session_id: &str) {
+        let built = match crate::ui::wizard::server::build_from_web(form, &self.config.servers) {
+            Ok(built) => built,
+            Err(msg) => {
+                tracing::warn!("web SaveServer rejected: {msg}");
+                self.broadcast_web(crate::web::protocol::WebEvent::Error {
+                    message: format!("Add server failed: {msg}"),
+                    session_id: Some(session_id.to_string()),
+                });
+                return;
+            }
+        };
+        let cfg_path = crate::constants::config_path();
+        let env_path = crate::constants::env_path();
+        let id = built.id.clone();
+        let result = crate::commands::handlers_admin::apply_server_config(
+            &mut self.config,
+            &cfg_path,
+            &env_path,
+            &built.id,
+            built.config,
+            built.password,
+            built.sasl_pass,
+        );
+        self.cached_config_toml = None;
+        match result {
+            Ok(()) => tracing::info!("web wizard saved server '{id}'"),
+            Err(e) => {
+                tracing::warn!("web SaveServer failed to persist: {e}");
+                self.broadcast_web(crate::web::protocol::WebEvent::Error {
+                    message: format!("Server '{id}' could not be saved: {e}"),
+                    session_id: Some(session_id.to_string()),
+                });
+            }
         }
     }
 

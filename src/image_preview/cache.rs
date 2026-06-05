@@ -610,7 +610,7 @@ mod tests {
         let path = store_in(dir.path(), url, b"old", "image/jpeg").unwrap();
 
         // Backdate the file's mtime to 100 days ago using std::fs::File::set_times.
-        let old_time = SystemTime::now() - Duration::from_secs(100 * 24 * 60 * 60);
+        let old_time = SystemTime::now() - Duration::from_hours(2400);
         let file = fs::File::options().write(true).open(&path).unwrap();
         file.set_times(fs::FileTimes::new().set_modified(old_time))
             .unwrap();

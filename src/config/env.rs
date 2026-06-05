@@ -69,6 +69,21 @@ pub fn set_env_value(path: &Path, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Remove a key from the `.env` file. No-op if the file or key is absent.
+pub fn remove_env_value(path: &Path, key: &str) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let prefix = format!("{key}=");
+    let kept: Vec<String> = std::fs::read_to_string(path)?
+        .lines()
+        .filter(|line| !line.trim_start().starts_with(&prefix))
+        .map(String::from)
+        .collect();
+    crate::fs_secure::write_file(path, kept.join("\n") + "\n", 0o600)?;
+    Ok(())
+}
+
 /// Apply .env credentials to the web config.
 ///
 /// Reads `WEB_PASSWORD` and `WEB_SESSION_SECRET` from the env map.
@@ -239,6 +254,29 @@ mod tests {
         assert!(content.contains("FOO=old"));
         assert!(content.contains("BAR=keep"));
         assert!(!content.contains("WEB_PASSWORD=old"));
+    }
+
+    #[test]
+    fn remove_env_value_deletes_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::write(&path, "FOO=a\nLIBERA_PASSWORD=secret\nBAR=b\n").unwrap();
+
+        remove_env_value(&path, "LIBERA_PASSWORD").unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("FOO=a"));
+        assert!(content.contains("BAR=b"));
+        assert!(!content.contains("LIBERA_PASSWORD"));
+    }
+
+    #[test]
+    fn remove_env_value_missing_key_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::write(&path, "FOO=a\n").unwrap();
+        remove_env_value(&path, "NOPE").unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("FOO=a"));
     }
 
     #[test]
