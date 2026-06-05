@@ -1,8 +1,17 @@
-//! Command documentation parser — reads docs/commands/*.md into structured help.
-//! Single source of truth for /help output and subcommand tab completion.
+//! Command documentation parser — embeds docs/commands/*.md into the binary and
+//! parses them into structured help. Single source of truth for /help output and
+//! subcommand tab completion.
 
+use rust_embed::Embed;
 use std::collections::HashMap;
 use std::sync::LazyLock;
+
+/// Command docs compiled into the binary. In debug builds rust-embed reads the
+/// files from disk (live-edit without a rebuild); release builds embed them, so
+/// the shipped binary needs no `docs/` directory on disk at runtime.
+#[derive(Embed)]
+#[folder = "docs/commands/"]
+struct HelpAssets;
 
 #[derive(Debug, Clone)]
 pub struct CommandHelp {
@@ -37,66 +46,23 @@ pub fn get_subcommand_names(cmd: &str) -> Vec<&'static str> {
         .unwrap_or_default()
 }
 
-/// Load all command docs from the embedded directory.
+/// Load and parse all command docs embedded via [`HelpAssets`].
+///
+/// Each `<name>.md` becomes a `CommandHelp` keyed by its file stem. Non-`.md`
+/// entries and any file whose bytes are not valid UTF-8 are skipped.
 fn load_all_docs() -> HashMap<String, CommandHelp> {
     let mut map = HashMap::new();
-    let docs_dir = find_docs_dir();
-
-    if let Ok(entries) = std::fs::read_dir(&docs_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "md")
-                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-                && let Ok(content) = std::fs::read_to_string(&path)
-            {
-                map.insert(stem.to_string(), parse_doc(&content));
-            }
+    for path in HelpAssets::iter() {
+        let Some(stem) = path.strip_suffix(".md") else {
+            continue;
+        };
+        if let Some(file) = HelpAssets::get(&path)
+            && let Ok(content) = std::str::from_utf8(&file.data)
+        {
+            map.insert(stem.to_string(), parse_doc(content));
         }
     }
     map
-}
-
-/// Find the docs/commands directory relative to the binary or manifest.
-fn find_docs_dir() -> std::path::PathBuf {
-    // Try relative to CARGO_MANIFEST_DIR (dev builds)
-    let manifest_dir = option_env!("CARGO_MANIFEST_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_default();
-    let from_manifest = manifest_dir.join("docs/commands");
-    if from_manifest.is_dir() {
-        return from_manifest;
-    }
-
-    // Try relative to executable
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(parent) = exe.parent()
-    {
-        let from_exe = parent.join("docs/commands");
-        if from_exe.is_dir() {
-            return from_exe;
-        }
-        if let Some(grandparent) = parent.parent() {
-            let from_grandparent = grandparent.join("docs/commands");
-            if from_grandparent.is_dir() {
-                return from_grandparent;
-            }
-            // Two levels up (target/release -> project root)
-            if let Some(great_grandparent) = grandparent.parent() {
-                let from_great_grandparent = great_grandparent.join("docs/commands");
-                if from_great_grandparent.is_dir() {
-                    return from_great_grandparent;
-                }
-            }
-        }
-    }
-
-    // Try current directory
-    let cwd = std::path::PathBuf::from("docs/commands");
-    if cwd.is_dir() {
-        return cwd;
-    }
-
-    from_manifest
 }
 
 /// Parse a single command doc from markdown content.
@@ -329,9 +295,9 @@ Add a new server.
     }
 
     #[test]
-    fn load_docs_dir_exists() {
+    fn load_all_docs_finds_embedded_docs() {
         let docs = load_all_docs();
-        // Should find at least a few docs
+        // Should find at least a few docs from the embedded HelpAssets.
         assert!(!docs.is_empty(), "No command docs found");
         assert!(docs.contains_key("join"), "Missing join doc");
         assert!(docs.contains_key("quit"), "Missing quit doc");
