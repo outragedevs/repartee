@@ -98,6 +98,8 @@ pub enum WebEvent {
     },
     Error {
         message: String,
+        #[serde(default)]
+        session_id: Option<String>,
     },
     ShellScreen {
         buffer_id: String,

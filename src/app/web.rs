@@ -536,7 +536,7 @@ impl App {
                     password: cmd.password,
                     sasl_pass: cmd.sasl_pass,
                 };
-                self.web_save_server(&form);
+                self.web_save_server(&form, session_id);
             }
         }
     }
@@ -544,16 +544,19 @@ impl App {
     /// Apply a web-wizard server form: validate, persist via the shared
     /// `apply_server_config`, and report the outcome to the requesting client.
     ///
-    /// On failure a `WebEvent::Error` is broadcast so the web user gets feedback
-    /// (the modal closes optimistically client-side, so a silent failure would
-    /// otherwise be invisible and invite a duplicate re-submit).
-    fn web_save_server(&mut self, form: &crate::ui::wizard::server::WebServerForm) {
+    /// On failure a `WebEvent::Error` is sent to the submitting session so the
+    /// web user gets feedback (the modal closes optimistically client-side, so a
+    /// silent failure would otherwise be invisible and invite a duplicate
+    /// re-submit). It is targeted to `session_id` so other connected clients
+    /// don't surface an error toast for a form they never submitted.
+    fn web_save_server(&mut self, form: &crate::ui::wizard::server::WebServerForm, session_id: &str) {
         let built = match crate::ui::wizard::server::build_from_web(form, &self.config.servers) {
             Ok(built) => built,
             Err(msg) => {
                 tracing::warn!("web SaveServer rejected: {msg}");
                 self.broadcast_web(crate::web::protocol::WebEvent::Error {
                     message: format!("Add server failed: {msg}"),
+                    session_id: Some(session_id.to_string()),
                 });
                 return;
             }
@@ -577,6 +580,7 @@ impl App {
                 tracing::warn!("web SaveServer failed to persist: {e}");
                 self.broadcast_web(crate::web::protocol::WebEvent::Error {
                     message: format!("Server '{id}' could not be saved: {e}"),
+                    session_id: Some(session_id.to_string()),
                 });
             }
         }

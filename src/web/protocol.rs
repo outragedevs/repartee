@@ -107,7 +107,13 @@ pub enum WebEvent {
         emotes_enabled: bool,
     },
     /// Server-side error.
-    Error { message: String },
+    Error {
+        message: String,
+        /// Session this error targets. When `Some`, other sessions skip it;
+        /// `None` broadcasts to every connected client.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
     /// Shell buffer screen update (full screen as styled rows).
     ShellScreen {
         buffer_id: String,

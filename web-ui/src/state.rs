@@ -444,7 +444,7 @@ impl AppState {
                 self.nick_color_lightness.set(nick_color_lightness);
                 self.emotes_enabled.set(emotes_enabled);
             }
-            WebEvent::Error { message } => {
+            WebEvent::Error { message, .. } => {
                 self.error.set(Some(message));
             }
             WebEvent::ShellScreen {
