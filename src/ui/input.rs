@@ -363,10 +363,7 @@ impl InputState {
             self.cursor_pos = self.value.len();
         } else {
             let text = self.value[..self.cursor_pos].to_string();
-            let (text_before, word) = match text.rfind(' ') {
-                Some(pos) => (text[..=pos].to_string(), text[pos + 1..].to_string()),
-                None => (String::new(), text),
-            };
+            let (text_before, word) = split_completion_word(&text);
             if word.is_empty() {
                 return;
             }
@@ -464,6 +461,27 @@ impl InputState {
             });
         }
     }
+}
+
+/// Split `text` (everything left of the cursor) into the prefix-to-complete and
+/// the text preceding it.
+///
+/// The word is the run after the last space; a comma within it acts as a
+/// nick-list separator (e.g. `/kick a,b,<TAB>`), so only the segment after the
+/// last comma is completed while the already-typed nicks stay in `text_before`.
+/// Commands, emotes, and setting paths never contain commas, so this only ever
+/// affects nick completion.
+fn split_completion_word(text: &str) -> (String, String) {
+    let (mut text_before, mut word) = text.rfind(' ').map_or_else(
+        || (String::new(), text.to_string()),
+        |pos| (text[..=pos].to_string(), text[pos + 1..].to_string()),
+    );
+    if let Some(cpos) = word.rfind(',') {
+        let seg = word[cpos + 1..].to_string();
+        text_before.push_str(&word[..=cpos]);
+        word = seg;
+    }
+    (text_before, word)
 }
 
 /// If `word` looks like an emote prefix (`:usm` — one leading colon, no closing
@@ -891,6 +909,28 @@ mod tests {
         input.tab_complete(&[], &[], &[], &[], true);
         // No known emote starts with "zzzzz" -> unchanged.
         assert_eq!(input.value, ":zzzzz");
+    }
+
+    #[test]
+    fn tab_completes_nick_after_comma_keeps_prior_nicks() {
+        let nicks = vec!["alice".to_owned(), "bob".to_owned()];
+        let mut input = InputState::new();
+        // Comma-separated nick list (e.g. `/kick alice,b<TAB>`): only the
+        // segment after the last comma is completed; "alice," is preserved.
+        input.value = "/kick alice,b".to_owned();
+        input.cursor_pos = input.value.len();
+        input.tab_complete(&nicks, &[], &[], &[], false);
+        assert_eq!(input.value, "/kick alice,bob ");
+    }
+
+    #[test]
+    fn tab_completes_first_nick_without_comma_split() {
+        let nicks = vec!["alice".to_owned()];
+        let mut input = InputState::new();
+        input.value = "/kick al".to_owned();
+        input.cursor_pos = input.value.len();
+        input.tab_complete(&nicks, &[], &[], &[], false);
+        assert_eq!(input.value, "/kick alice ");
     }
 
     #[test]
