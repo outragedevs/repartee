@@ -158,6 +158,25 @@ pub fn InputLine() -> impl IntoView {
         }
     });
 
+    // Apply a picker-requested insertion (`:name:` or a Unicode emoji) at the
+    // caret, then clear the signal. Keeps the `value` signal authoritative.
+    Effect::new(move |_| {
+        let Some(token) = state.pending_insert.get() else {
+            return;
+        };
+        let text = value.get_untracked();
+        let cursor = floor_char_boundary(&text, get_textarea_cursor(&input_ref, text.len()));
+        let new_text = format!("{}{token}{}", &text[..cursor], &text[cursor..]);
+        let new_cursor = cursor + token.len();
+        set_value.set(new_text);
+        set_textarea_cursor(&input_ref, new_cursor);
+        if let Some(el) = input_ref.get_untracked() {
+            let html_el: &web_sys::HtmlTextAreaElement = el.as_ref();
+            let _ = html_el.focus();
+        }
+        state.pending_insert.set(None);
+    });
+
     // Global keydown listener — focus textarea when user types anywhere.
     // Skipped when active buffer is a shell (shell_view captures input instead).
     let keydown_registered = StoredValue::new(false);
@@ -399,6 +418,16 @@ pub fn InputLine() -> impl IntoView {
             ></button>
         </div>
     }
+}
+
+/// Largest char boundary `<= i` (clamped to `s.len()`). Guards `str` slicing
+/// when the browser's caret offset doesn't land on a UTF-8 boundary.
+fn floor_char_boundary(s: &str, i: usize) -> usize {
+    let mut i = i.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 /// Get cursor position from the textarea element.

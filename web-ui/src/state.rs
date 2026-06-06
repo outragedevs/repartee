@@ -68,6 +68,13 @@ pub struct AppState {
     /// Server wizard modal open flag. The web wizard is add-only (the client has
     /// no full server config to pre-fill an edit), so there is no edit-id here.
     pub wizard_open: RwSignal<bool>,
+    /// GG emote (`:name:` GIF) picker modal open flag.
+    pub emote_picker_open: RwSignal<bool>,
+    /// UTF-8 Unicode emoji picker modal open flag (desktop only).
+    pub emoji_picker_open: RwSignal<bool>,
+    /// A token to splice into the input at the caret (`:name:` or a Unicode
+    /// emoji). The input component consumes it and clears it back to `None`.
+    pub pending_insert: RwSignal<Option<String>>,
 }
 
 impl AppState {
@@ -105,6 +112,9 @@ impl AppState {
             dismissed_previews: RwSignal::new(load_dismissed_previews()),
             emotes_enabled: RwSignal::new(true),
             wizard_open: RwSignal::new(false),
+            emote_picker_open: RwSignal::new(false),
+            emoji_picker_open: RwSignal::new(false),
+            pending_insert: RwSignal::new(None),
         }
     }
 
