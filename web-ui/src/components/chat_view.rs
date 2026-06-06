@@ -25,13 +25,23 @@ fn pin_to_bottom(el: &web_sys::Element) {
 pub fn ChatView() -> impl IntoView {
     let state = use_context::<AppState>().unwrap();
 
-    let is_shell = move || {
-        let active_id = state.active_buffer.get()?;
-        let bufs = state.buffers.get();
-        bufs.iter()
-            .find(|b| b.id == active_id)
-            .map(|b| b.buffer_type == "shell")
-    };
+    // Memoized so the chat-area branch closure below only re-runs when the
+    // shell/non-shell verdict actually flips — NOT on every `state.buffers`
+    // mutation (unread counts, activity, nick counts churn constantly from
+    // traffic on other channels). A plain closure here subscribed the whole
+    // chat subtree to `state.buffers`, recreating the entire `<For>` (and
+    // every preview `<img>`) several times a second — the image flicker /
+    // scroll-jump bug.
+    let is_shell = Memo::new(move |_| {
+        let Some(active_id) = state.active_buffer.get() else {
+            return false;
+        };
+        state.buffers.with(|bufs| {
+            bufs.iter()
+                .find(|b| b.id == active_id)
+                .is_some_and(|b| b.buffer_type == "shell")
+        })
+    });
 
     let messages = move || {
         let active_id = state.active_buffer.get()?;
@@ -262,7 +272,7 @@ pub fn ChatView() -> impl IntoView {
     view! {
         <div class="chat-area">
             {move || {
-                if is_shell() == Some(true) {
+                if is_shell.get() {
                     return view! { <super::shell_view::ShellView /> }.into_any();
                 }
                 view! {
