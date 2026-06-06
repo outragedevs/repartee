@@ -1,5 +1,6 @@
 pub mod buffer_list;
 pub mod chat_view;
+pub mod emoji_picker;
 pub mod emote_picker;
 pub mod input;
 pub mod layout;

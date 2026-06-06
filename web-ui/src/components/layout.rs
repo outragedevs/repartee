@@ -2,6 +2,7 @@ use leptos::prelude::*;
 
 use super::buffer_list::BufferList;
 use super::chat_view::ChatView;
+use super::emoji_picker::EmojiPicker;
 use super::emote_picker::EmotePicker;
 use super::input::InputLine;
 use super::nick_list::NickList;
@@ -120,6 +121,7 @@ pub fn Layout() -> impl IntoView {
             <ServerWizard />
             // Emote/emoji picker modals (fixed-position overlays; rendered once).
             <EmotePicker />
+            <EmojiPicker />
             // Backend error toast — surfaces any WebEvent::Error in the
             // authenticated app (e.g. a failed wizard save, whose modal has
             // already closed optimistically). Dismissible; also cleared on the

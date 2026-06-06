@@ -4423,6 +4423,7 @@ dependencies = [
  "beamterm-renderer",
  "chrono",
  "console_error_panic_hook",
+ "emojis",
  "futures",
  "gloo-net",
  "gloo-timers",
