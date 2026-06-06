@@ -165,11 +165,11 @@ pub fn InputLine() -> impl IntoView {
             return;
         };
         let text = value.get_untracked();
-        let cursor = floor_char_boundary(&text, get_textarea_cursor(&input_ref, text.len()));
+        let cursor = get_textarea_cursor(&input_ref, &text);
         let new_text = format!("{}{token}{}", &text[..cursor], &text[cursor..]);
         let new_cursor = cursor + token.len();
-        set_value.set(new_text);
-        set_textarea_cursor(&input_ref, new_cursor);
+        set_value.set(new_text.clone());
+        set_textarea_cursor(&input_ref, &new_text, new_cursor);
         if let Some(el) = input_ref.get_untracked() {
             let html_el: &web_sys::HtmlTextAreaElement = el.as_ref();
             let _ = html_el.focus();
@@ -310,7 +310,7 @@ pub fn InputLine() -> impl IntoView {
             ev.prevent_default();
 
             let text = value.get_untracked();
-            let cursor = get_textarea_cursor(&input_ref, text.len());
+            let cursor = get_textarea_cursor(&input_ref, &text);
 
             if tab_active.get_untracked() && cursor == tab_cursor_end.get_untracked() {
                 // Continue cycling through existing matches.
@@ -329,8 +329,8 @@ pub fn InputLine() -> impl IntoView {
                 let new_cursor = start + replacement.len();
 
                 set_tab_cursor_end.set(new_cursor);
-                set_value.set(new_text);
-                set_textarea_cursor(&input_ref, new_cursor);
+                set_value.set(new_text.clone());
+                set_textarea_cursor(&input_ref, &new_text, new_cursor);
             } else {
                 // New tab completion.
                 let before_cursor = &text[..cursor];
@@ -377,8 +377,8 @@ pub fn InputLine() -> impl IntoView {
                 set_tab_replace_start.set(replace_start);
                 set_tab_cursor_end.set(new_cursor);
                 set_tab_active.set(true);
-                set_value.set(new_text);
-                set_textarea_cursor(&input_ref, new_cursor);
+                set_value.set(new_text.clone());
+                set_textarea_cursor(&input_ref, &new_text, new_cursor);
             }
             return;
         }
@@ -449,7 +449,7 @@ pub fn InputLine() -> impl IntoView {
 }
 
 /// Largest char boundary `<= i` (clamped to `s.len()`). Guards `str` slicing
-/// when the browser's caret offset doesn't land on a UTF-8 boundary.
+/// when an offset doesn't land on a UTF-8 boundary.
 fn floor_char_boundary(s: &str, i: usize) -> usize {
     let mut i = i.min(s.len());
     while i > 0 && !s.is_char_boundary(i) {
@@ -458,23 +458,44 @@ fn floor_char_boundary(s: &str, i: usize) -> usize {
     i
 }
 
-/// Get cursor position from the textarea element.
-fn get_textarea_cursor(input_ref: &NodeRef<leptos::html::Textarea>, text_len: usize) -> usize {
+/// Convert a browser caret offset (UTF-16 code units) to a Rust byte index.
+/// The DOM `selectionStart`/`selectionEnd` are UTF-16 offsets; Rust `str`
+/// slicing is byte-indexed, so the two must be translated before slicing.
+fn utf16_offset_to_byte(s: &str, utf16: usize) -> usize {
+    let mut units = 0;
+    for (byte, ch) in s.char_indices() {
+        if units >= utf16 {
+            return byte;
+        }
+        units += ch.len_utf16();
+    }
+    s.len()
+}
+
+/// Convert a Rust byte index to a browser caret offset (UTF-16 code units).
+fn byte_to_utf16_offset(s: &str, byte: usize) -> usize {
+    let byte = floor_char_boundary(s, byte);
+    s[..byte].chars().map(char::len_utf16).sum()
+}
+
+/// Get the caret position from the textarea as a Rust byte index into `text`.
+fn get_textarea_cursor(input_ref: &NodeRef<leptos::html::Textarea>, text: &str) -> usize {
     input_ref
         .get_untracked()
         .and_then(|el| {
             let html_el: &web_sys::HtmlTextAreaElement = el.as_ref();
             html_el.selection_start().ok().flatten()
         })
-        .map_or(text_len, |p| (p as usize).min(text_len))
+        .map_or_else(|| text.len(), |p| utf16_offset_to_byte(text, p as usize))
 }
 
-/// Set cursor position on the textarea element.
-fn set_textarea_cursor(input_ref: &NodeRef<leptos::html::Textarea>, pos: usize) {
+/// Set the caret on the textarea from a Rust byte index into `text`.
+fn set_textarea_cursor(input_ref: &NodeRef<leptos::html::Textarea>, text: &str, byte_pos: usize) {
     if let Some(el) = input_ref.get_untracked() {
         let html_el: &web_sys::HtmlTextAreaElement = el.as_ref();
-        let _ = html_el.set_selection_start(Some(pos as u32));
-        let _ = html_el.set_selection_end(Some(pos as u32));
+        let off = u32::try_from(byte_to_utf16_offset(text, byte_pos)).unwrap_or(u32::MAX);
+        let _ = html_el.set_selection_start(Some(off));
+        let _ = html_el.set_selection_end(Some(off));
     }
 }
 
@@ -553,6 +574,21 @@ mod tests {
         assert_eq!(floor_char_boundary(s, 3), 1);
         assert_eq!(floor_char_boundary(s, 5), 5);
         assert_eq!(floor_char_boundary(s, 999), s.len());
+    }
+
+    #[test]
+    fn utf16_byte_offset_roundtrip_across_emoji() {
+        // "a😀b": 'a' 1u/1b, 😀 2u/4b, 'b' 1u/1b → utf16 {0,1,3,4}, byte {0,1,5,6}
+        let s = "a\u{1F600}b";
+        assert_eq!(utf16_offset_to_byte(s, 0), 0);
+        assert_eq!(utf16_offset_to_byte(s, 1), 1);
+        assert_eq!(utf16_offset_to_byte(s, 3), 5); // caret after the emoji
+        assert_eq!(utf16_offset_to_byte(s, 4), 6);
+        assert_eq!(utf16_offset_to_byte(s, 99), s.len()); // past end clamps
+        assert_eq!(byte_to_utf16_offset(s, 0), 0);
+        assert_eq!(byte_to_utf16_offset(s, 1), 1);
+        assert_eq!(byte_to_utf16_offset(s, 5), 3);
+        assert_eq!(byte_to_utf16_offset(s, 6), 4);
     }
 
     #[test]
