@@ -350,7 +350,9 @@ pub fn InputLine() -> impl IntoView {
                 let completions: Vec<String> = matches
                     .iter()
                     .map(|m| {
-                        if m.starts_with('/') {
+                        if m.starts_with('/') || m.starts_with(':') {
+                            // commands and `:name:` emotes already carry their
+                            // own delimiter; just add a trailing space.
                             format!("{m} ")
                         } else if word_start == 0 {
                             format!("{m}: ")
@@ -497,7 +499,15 @@ fn build_tab_matches(text: &str, word_start: usize, typed: &str, state: &AppStat
             .collect();
     }
 
-    // Case 3: Nick completion.
+    // Case 3: `:name:` emote completion (gated on the emotes setting).
+    if state.emotes_enabled.get_untracked() {
+        let emotes = emote_tab_matches(typed);
+        if !emotes.is_empty() {
+            return emotes;
+        }
+    }
+
+    // Case 4: Nick completion.
     let nicks = state.nick_lists.get_untracked();
     let active_id = state.active_buffer.get_untracked();
     let typed_lower = typed.to_lowercase();
@@ -510,4 +520,66 @@ fn build_tab_matches(text: &str, word_start: usize, typed: &str, state: &AppStat
                 .map(|n| n.nick.clone())
                 .collect()
         })
+}
+
+/// `:usm` → `[":usmiech:", ...]`. Returns empty unless `word` is a single
+/// leading colon followed by a non-empty prefix with no closing colon. Each
+/// match carries the closing colon; the caller appends the trailing space.
+fn emote_tab_matches(word: &str) -> Vec<String> {
+    let Some(rest) = word.strip_prefix(':') else {
+        return Vec::new();
+    };
+    if rest.is_empty() || rest.contains(':') {
+        return Vec::new();
+    }
+    let prefix = rest.to_ascii_lowercase();
+    crate::emotes::EMOTE_NAMES
+        .iter()
+        .filter(|n| n.to_ascii_lowercase().starts_with(&prefix))
+        .map(|n| format!(":{n}:"))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn floor_char_boundary_clamps_into_multibyte() {
+        let s = "a\u{1F600}b"; // 'a' + 😀 (4 bytes) + 'b'
+        assert_eq!(floor_char_boundary(s, 0), 0);
+        assert_eq!(floor_char_boundary(s, 1), 1);
+        // bytes 2..=4 fall inside the emoji → floor back to 1
+        assert_eq!(floor_char_boundary(s, 3), 1);
+        assert_eq!(floor_char_boundary(s, 5), 5);
+        assert_eq!(floor_char_boundary(s, 999), s.len());
+    }
+
+    #[test]
+    fn emote_tab_no_colon_no_matches() {
+        assert!(emote_tab_matches("usm").is_empty());
+    }
+
+    #[test]
+    fn emote_tab_closing_colon_no_matches() {
+        assert!(emote_tab_matches(":usm:").is_empty());
+    }
+
+    #[test]
+    fn emote_tab_bare_colon_no_matches() {
+        assert!(emote_tab_matches(":").is_empty());
+    }
+
+    #[test]
+    fn emote_tab_prefix_returns_closing_colon_matches() {
+        let m = emote_tab_matches(":usm");
+        assert!(!m.is_empty(), "expected :usmiech:");
+        assert!(m.iter().all(|s| s.starts_with(':') && s.ends_with(':')));
+        assert!(m.iter().all(|s| !s.ends_with(": ")), "no trailing space yet");
+    }
+
+    #[test]
+    fn emote_tab_is_case_insensitive() {
+        assert_eq!(emote_tab_matches(":USM").len(), emote_tab_matches(":usm").len());
+    }
 }
