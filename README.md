@@ -260,6 +260,11 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v1.4.2
+
+- **Web UI: IRC formatting now renders in the channel topic.** The chat parser already handled mIRC/irssi colour, bold, italic and underline, but the topic bar rendered raw text — so a formatted topic showed control bytes instead of styles. The topic now runs through the same parser (URLs in topics are clickable too), and the mobile topic breadcrumb strips control codes so no raw bytes leak. The web mIRC colour palette was also extended from 16 to the full 99 colours, matching the TUI.
+- **Web UI: emote & emoji pickers.** A **GG emote picker** (animated `:name:` GIF thumbnails with a live filter) opens from a toolbar button, the `/emoji` command (and `/emote`, `/emotes` aliases), or **Ctrl+G**, and `:name:` now **tab-completes** in the composer. A separate **Unicode emoji picker** (category tabs + search) opens from its own button on desktop — on mobile it's hidden, since phones already provide a system emoji keyboard. Both insert at the caret.
+
 ### v1.4.1
 
 - **Fix: inline emotes rendered as blank cells on `cargo install` builds.** `ratatui-core 0.1.1` rewrote the buffer's skip/multi-width cell handling, which breaks the skip-cell mechanism `ratatui-image` relies on to draw inline graphics — so emote thumbnails (and the `/emote` picker) showed only one or two images and empty gaps for the rest. Source and CI builds were shielded by `Cargo.lock`, but `cargo install` ignores the lockfile and pulled the newer crate. `ratatui-core` is versioned independently and floats under `ratatui`'s requirement, so the fix pins **`ratatui-core = "=0.1.0"`** directly (pinning the main `ratatui` crate is not enough). macOS/Linux source builds were never affected.
