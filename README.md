@@ -260,6 +260,12 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v1.4.3
+
+- **Web UI: emote/emoji picker now inserts on mobile.** Both the desktop and mobile layouts mount their own composer, so picking an emote routed the inserted `:name:`/emoji to the hidden desktop input; mobile saw nothing. The insertion now targets the visible composer.
+- **Web UI: active-buffer view is synced 1:1 again across the TUI and every web session.** Switching the active channel/query anywhere — the terminal, any browser tab, the phone — now propagates everywhere, restoring the original shared-view behaviour. (Shell buffers stay per-session, since each web session owns its own terminal.)
+- **Web UI: fixed chat flicker with images.** The whole chat area was re-rendering — recreating every preview `<img>` — whenever the buffer list churned (unread counts/activity from traffic on other channels), which on Chrome flashed each image off and back and jumped the scroll. The chat now only re-renders on an actual shell/non-shell switch.
+
 ### v1.4.2
 
 - **Web UI: IRC formatting now renders in the channel topic.** The chat parser already handled mIRC/irssi colour, bold, italic and underline, but the topic bar rendered raw text — so a formatted topic showed control bytes instead of styles. The topic now runs through the same parser (URLs in topics are clickable too), and the mobile topic breadcrumb strips control codes so no raw bytes leak. The web mIRC colour palette was also extended from 16 to the full 99 colours, matching the TUI.
