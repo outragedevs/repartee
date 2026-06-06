@@ -9,7 +9,8 @@
 
 use ratatui::layout::Rect;
 use ratatui::text::Line;
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 /// Width in terminal cells reserved for one emote (square-ish at 1 row tall).
 pub const EMOTE_COLS: usize = 2;
@@ -40,6 +41,18 @@ pub const fn decode_placeholder_index(c: char) -> Option<u32> {
     }
 }
 
+/// Decode a placeholder index from a single grapheme cluster. Placeholders are
+/// single Private Use Area codepoints, so any multi-codepoint grapheme (a real
+/// emoji sequence) is never mistaken for one.
+#[must_use]
+pub fn decode_placeholder_grapheme(g: &str) -> Option<u32> {
+    let mut chars = g.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => decode_placeholder_index(c),
+        _ => None,
+    }
+}
+
 /// Where one emote should be composited, in absolute screen cells.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmotePlacement {
@@ -62,9 +75,13 @@ pub fn resolve_placements(lines: &[Line<'_>], area: Rect) -> Vec<EmotePlacement>
         // (index, start_col, width) of the run currently being accumulated.
         let mut run: Option<(u32, usize, usize)> = None;
         for span in &line.spans {
-            for ch in span.content.chars() {
-                let cw = ch.width().unwrap_or(0);
-                if let Some(idx) = decode_placeholder_index(ch) {
+            // Measure by grapheme clusters so the column cursor matches ratatui's
+            // own grapheme-based layout. A per-`char` walk would mis-advance `col`
+            // across multi-codepoint emoji (VS16, flags, skin-tone, ZWJ) in the
+            // surrounding text and place the emote rect on the wrong cells.
+            for g in span.content.graphemes(true) {
+                let cw = UnicodeWidthStr::width(g);
+                if let Some(idx) = decode_placeholder_grapheme(g) {
                     match &mut run {
                         // Extend only within a single emote's width. Two identical
                         // emotes typed back-to-back (`:x::x:`) are the same index,
@@ -185,6 +202,22 @@ mod tests {
         assert_eq!(placements[0].emote_index, 1);
         assert_eq!(placements[1].emote_index, 2);
         assert_eq!(placements[1].rect.x as usize, EMOTE_COLS);
+    }
+
+    #[test]
+    fn placement_x_uses_grapheme_width_of_preceding_emoji() {
+        // A ZWJ family emoji before the placeholder is ONE grapheme of display
+        // width 2 (what ratatui reserves). Summing per-`char` widths would count
+        // it as 6 and push the emote rect to the wrong column.
+        let emoji = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let ph = placeholder_for_index(5);
+        let line = Line::from(vec![Span::raw(emoji.to_owned()), Span::raw(ph)]);
+        let placements = resolve_placements(&[line], Rect::new(0, 0, 40, 1));
+        assert_eq!(placements.len(), 1);
+        assert_eq!(
+            placements[0].rect.x, 2,
+            "preceding ZWJ emoji occupies 2 cells, not 6"
+        );
     }
 
     #[test]

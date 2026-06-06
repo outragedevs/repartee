@@ -43,6 +43,7 @@ futures = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 unicode-width = "0.2"
+unicode-segmentation = "1"
 thiserror = "2.0"
 indexmap = { version = "2", features = ["serde"] }
 regex = "1"
