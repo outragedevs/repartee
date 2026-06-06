@@ -37,7 +37,7 @@ const ANSI_COLORS: [u32; 16] = [
     0x43_5b_67, // 0: black
     0xfc_38_41, // 1: red
     0x5c_f1_9e, // 2: green
-    0xfe_d0_32, // 3: yellow
+    0xfe_d032, // 3: yellow (grouped to avoid clippy mistyped-suffix on `_32`)
     0x37_b6_ff, // 4: blue
     0xfc_22_6e, // 5: magenta
     0x59_ff_d1, // 6: cyan

@@ -158,6 +158,25 @@ pub fn InputLine() -> impl IntoView {
         }
     });
 
+    // Apply a picker-requested insertion (`:name:` or a Unicode emoji) at the
+    // caret, then clear the signal. Keeps the `value` signal authoritative.
+    Effect::new(move |_| {
+        let Some(token) = state.pending_insert.get() else {
+            return;
+        };
+        let text = value.get_untracked();
+        let cursor = get_textarea_cursor(&input_ref, &text);
+        let new_text = format!("{}{token}{}", &text[..cursor], &text[cursor..]);
+        let new_cursor = cursor + token.len();
+        set_value.set(new_text.clone());
+        set_textarea_cursor(&input_ref, &new_text, new_cursor);
+        if let Some(el) = input_ref.get_untracked() {
+            let html_el: &web_sys::HtmlTextAreaElement = el.as_ref();
+            let _ = html_el.focus();
+        }
+        state.pending_insert.set(None);
+    });
+
     // Global keydown listener — focus textarea when user types anywhere.
     // Skipped when active buffer is a shell (shell_view captures input instead).
     let keydown_registered = StoredValue::new(false);
@@ -234,6 +253,13 @@ pub fn InputLine() -> impl IntoView {
             state.wizard_open.set(true);
             return;
         }
+        // `/emoji` (and the `/emote`/`/emotes` aliases) open the GG emote picker
+        // client-side rather than dispatching to the server. `/emote <name>`
+        // still goes to the server for its insert/search behaviour.
+        if matches!(whole.to_ascii_lowercase().as_str(), "/emoji" | "/emote" | "/emotes") {
+            state.emote_picker_open.set(true);
+            return;
+        }
         let Some(buffer_id) = state.active_buffer.get() else {
             return;
         };
@@ -258,6 +284,13 @@ pub fn InputLine() -> impl IntoView {
     };
 
     let on_keydown = move |ev: web_sys::KeyboardEvent| {
+        // Ctrl+G opens the GG emote picker (parity with the TUI keybind).
+        if ev.ctrl_key() && ev.key().eq_ignore_ascii_case("g") {
+            ev.prevent_default();
+            state.emote_picker_open.set(true);
+            return;
+        }
+
         if ev.key() == "Enter" && !ev.shift_key() {
             ev.prevent_default();
             set_tab_active.set(false);
@@ -277,7 +310,7 @@ pub fn InputLine() -> impl IntoView {
             ev.prevent_default();
 
             let text = value.get_untracked();
-            let cursor = get_textarea_cursor(&input_ref, text.len());
+            let cursor = get_textarea_cursor(&input_ref, &text);
 
             if tab_active.get_untracked() && cursor == tab_cursor_end.get_untracked() {
                 // Continue cycling through existing matches.
@@ -296,8 +329,8 @@ pub fn InputLine() -> impl IntoView {
                 let new_cursor = start + replacement.len();
 
                 set_tab_cursor_end.set(new_cursor);
-                set_value.set(new_text);
-                set_textarea_cursor(&input_ref, new_cursor);
+                set_value.set(new_text.clone());
+                set_textarea_cursor(&input_ref, &new_text, new_cursor);
             } else {
                 // New tab completion.
                 let before_cursor = &text[..cursor];
@@ -317,7 +350,9 @@ pub fn InputLine() -> impl IntoView {
                 let completions: Vec<String> = matches
                     .iter()
                     .map(|m| {
-                        if m.starts_with('/') {
+                        if m.starts_with('/') || m.starts_with(':') {
+                            // commands and `:name:` emotes already carry their
+                            // own delimiter; just add a trailing space.
                             format!("{m} ")
                         } else if word_start == 0 {
                             format!("{m}: ")
@@ -342,8 +377,8 @@ pub fn InputLine() -> impl IntoView {
                 set_tab_replace_start.set(replace_start);
                 set_tab_cursor_end.set(new_cursor);
                 set_tab_active.set(true);
-                set_value.set(new_text);
-                set_textarea_cursor(&input_ref, new_cursor);
+                set_value.set(new_text.clone());
+                set_textarea_cursor(&input_ref, &new_text, new_cursor);
             }
             return;
         }
@@ -372,6 +407,18 @@ pub fn InputLine() -> impl IntoView {
 
     view! {
         <div class="input-line">
+            <button
+                type="button"
+                class="input-emote-btn"
+                title="GG emotes (/emoji, Ctrl+G)"
+                on:click=move |_| state.emote_picker_open.set(true)
+            >"GG"</button>
+            <button
+                type="button"
+                class="input-emote-btn emoji"
+                title="Emoji"
+                on:click=move |_| state.emoji_picker_open.set(true)
+            >"\u{1F600}"</button>
             <span class="prompt">"❯"</span>
             <textarea
                 id="chat-input"
@@ -401,23 +448,54 @@ pub fn InputLine() -> impl IntoView {
     }
 }
 
-/// Get cursor position from the textarea element.
-fn get_textarea_cursor(input_ref: &NodeRef<leptos::html::Textarea>, text_len: usize) -> usize {
+/// Largest char boundary `<= i` (clamped to `s.len()`). Guards `str` slicing
+/// when an offset doesn't land on a UTF-8 boundary.
+fn floor_char_boundary(s: &str, i: usize) -> usize {
+    let mut i = i.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Convert a browser caret offset (UTF-16 code units) to a Rust byte index.
+/// The DOM `selectionStart`/`selectionEnd` are UTF-16 offsets; Rust `str`
+/// slicing is byte-indexed, so the two must be translated before slicing.
+fn utf16_offset_to_byte(s: &str, utf16: usize) -> usize {
+    let mut units = 0;
+    for (byte, ch) in s.char_indices() {
+        if units >= utf16 {
+            return byte;
+        }
+        units += ch.len_utf16();
+    }
+    s.len()
+}
+
+/// Convert a Rust byte index to a browser caret offset (UTF-16 code units).
+fn byte_to_utf16_offset(s: &str, byte: usize) -> usize {
+    let byte = floor_char_boundary(s, byte);
+    s[..byte].chars().map(char::len_utf16).sum()
+}
+
+/// Get the caret position from the textarea as a Rust byte index into `text`.
+fn get_textarea_cursor(input_ref: &NodeRef<leptos::html::Textarea>, text: &str) -> usize {
     input_ref
         .get_untracked()
         .and_then(|el| {
             let html_el: &web_sys::HtmlTextAreaElement = el.as_ref();
             html_el.selection_start().ok().flatten()
         })
-        .map_or(text_len, |p| (p as usize).min(text_len))
+        .map_or_else(|| text.len(), |p| utf16_offset_to_byte(text, p as usize))
 }
 
-/// Set cursor position on the textarea element.
-fn set_textarea_cursor(input_ref: &NodeRef<leptos::html::Textarea>, pos: usize) {
+/// Set the caret on the textarea from a Rust byte index into `text`.
+fn set_textarea_cursor(input_ref: &NodeRef<leptos::html::Textarea>, text: &str, byte_pos: usize) {
     if let Some(el) = input_ref.get_untracked() {
         let html_el: &web_sys::HtmlTextAreaElement = el.as_ref();
-        let _ = html_el.set_selection_start(Some(pos as u32));
-        let _ = html_el.set_selection_end(Some(pos as u32));
+        let off = u32::try_from(byte_to_utf16_offset(text, byte_pos)).unwrap_or(u32::MAX);
+        let _ = html_el.set_selection_start(Some(off));
+        let _ = html_el.set_selection_end(Some(off));
     }
 }
 
@@ -442,7 +520,15 @@ fn build_tab_matches(text: &str, word_start: usize, typed: &str, state: &AppStat
             .collect();
     }
 
-    // Case 3: Nick completion.
+    // Case 3: `:name:` emote completion (gated on the emotes setting).
+    if state.emotes_enabled.get_untracked() {
+        let emotes = emote_tab_matches(typed);
+        if !emotes.is_empty() {
+            return emotes;
+        }
+    }
+
+    // Case 4: Nick completion.
     let nicks = state.nick_lists.get_untracked();
     let active_id = state.active_buffer.get_untracked();
     let typed_lower = typed.to_lowercase();
@@ -455,4 +541,81 @@ fn build_tab_matches(text: &str, word_start: usize, typed: &str, state: &AppStat
                 .map(|n| n.nick.clone())
                 .collect()
         })
+}
+
+/// `:usm` → `[":usmiech:", ...]`. Returns empty unless `word` is a single
+/// leading colon followed by a non-empty prefix with no closing colon. Each
+/// match carries the closing colon; the caller appends the trailing space.
+fn emote_tab_matches(word: &str) -> Vec<String> {
+    let Some(rest) = word.strip_prefix(':') else {
+        return Vec::new();
+    };
+    if rest.is_empty() || rest.contains(':') {
+        return Vec::new();
+    }
+    let prefix = rest.to_ascii_lowercase();
+    crate::emotes::EMOTE_NAMES
+        .iter()
+        .filter(|n| n.to_ascii_lowercase().starts_with(&prefix))
+        .map(|n| format!(":{n}:"))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn floor_char_boundary_clamps_into_multibyte() {
+        let s = "a\u{1F600}b"; // 'a' + 😀 (4 bytes) + 'b'
+        assert_eq!(floor_char_boundary(s, 0), 0);
+        assert_eq!(floor_char_boundary(s, 1), 1);
+        // bytes 2..=4 fall inside the emoji → floor back to 1
+        assert_eq!(floor_char_boundary(s, 3), 1);
+        assert_eq!(floor_char_boundary(s, 5), 5);
+        assert_eq!(floor_char_boundary(s, 999), s.len());
+    }
+
+    #[test]
+    fn utf16_byte_offset_roundtrip_across_emoji() {
+        // "a😀b": 'a' 1u/1b, 😀 2u/4b, 'b' 1u/1b → utf16 {0,1,3,4}, byte {0,1,5,6}
+        let s = "a\u{1F600}b";
+        assert_eq!(utf16_offset_to_byte(s, 0), 0);
+        assert_eq!(utf16_offset_to_byte(s, 1), 1);
+        assert_eq!(utf16_offset_to_byte(s, 3), 5); // caret after the emoji
+        assert_eq!(utf16_offset_to_byte(s, 4), 6);
+        assert_eq!(utf16_offset_to_byte(s, 99), s.len()); // past end clamps
+        assert_eq!(byte_to_utf16_offset(s, 0), 0);
+        assert_eq!(byte_to_utf16_offset(s, 1), 1);
+        assert_eq!(byte_to_utf16_offset(s, 5), 3);
+        assert_eq!(byte_to_utf16_offset(s, 6), 4);
+    }
+
+    #[test]
+    fn emote_tab_no_colon_no_matches() {
+        assert!(emote_tab_matches("usm").is_empty());
+    }
+
+    #[test]
+    fn emote_tab_closing_colon_no_matches() {
+        assert!(emote_tab_matches(":usm:").is_empty());
+    }
+
+    #[test]
+    fn emote_tab_bare_colon_no_matches() {
+        assert!(emote_tab_matches(":").is_empty());
+    }
+
+    #[test]
+    fn emote_tab_prefix_returns_closing_colon_matches() {
+        let m = emote_tab_matches(":usm");
+        assert!(!m.is_empty(), "expected :usmiech:");
+        assert!(m.iter().all(|s| s.starts_with(':') && s.ends_with(':')));
+        assert!(m.iter().all(|s| !s.ends_with(": ")), "no trailing space yet");
+    }
+
+    #[test]
+    fn emote_tab_is_case_insensitive() {
+        assert_eq!(emote_tab_matches(":USM").len(), emote_tab_matches(":usm").len());
+    }
 }

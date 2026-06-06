@@ -19,7 +19,7 @@ pub fn TopicBar() -> impl IntoView {
                     view! {
                         <span style="color: var(--accent); font-weight: bold;">{buf.name.clone()}</span>
                         <span style="color: var(--fg-muted); margin: 0 6px;">" \u{2014} "</span>
-                        <span>{topic}</span>
+                        <span>{crate::components::styled::render_topic_text(&topic)}</span>
                     }.into_any()
                 } else {
                     view! { <span>"repartee"</span> }.into_any()

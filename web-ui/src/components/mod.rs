@@ -1,10 +1,13 @@
 pub mod buffer_list;
 pub mod chat_view;
+pub mod emoji_picker;
+pub mod emote_picker;
 pub mod input;
 pub mod layout;
 pub mod login;
 pub mod nick_list;
 pub mod shell_view;
 pub mod status_line;
+pub mod styled;
 pub mod topic_bar;
 pub mod wizard;

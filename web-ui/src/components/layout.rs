@@ -2,6 +2,8 @@ use leptos::prelude::*;
 
 use super::buffer_list::BufferList;
 use super::chat_view::ChatView;
+use super::emoji_picker::EmojiPicker;
+use super::emote_picker::EmotePicker;
 use super::input::InputLine;
 use super::nick_list::NickList;
 use super::status_line::StatusLine;
@@ -117,6 +119,9 @@ pub fn Layout() -> impl IntoView {
         <div class="app">
             // Add-server wizard modal (fixed-position overlay; rendered once).
             <ServerWizard />
+            // Emote/emoji picker modals (fixed-position overlays; rendered once).
+            <EmotePicker />
+            <EmojiPicker />
             // Backend error toast — surfaces any WebEvent::Error in the
             // authenticated app (e.g. a failed wizard save, whose modal has
             // already closed optimistically). Dismissible; also cleared on the
@@ -156,7 +161,10 @@ pub fn Layout() -> impl IntoView {
                                 .filter(|m| !m.is_empty())
                                 .map(|m| format!(" (+{m})"))
                                 .unwrap_or_default();
-                            let topic = b.topic.as_deref().unwrap_or("");
+                            // Strip IRC control codes so raw bytes never leak
+                            // into the breadcrumb (the desktop TopicBar renders
+                            // them styled; the mobile preview is plain text).
+                            let topic = crate::format::strip_format(b.topic.as_deref().unwrap_or(""));
                             let topic_end = topic.char_indices()
                                 .nth(30)
                                 .map_or(topic.len(), |(i, _)| i);
