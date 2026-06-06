@@ -1,7 +1,6 @@
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-use crate::format;
 use crate::state::AppState;
 
 /// Distance in pixels from the absolute bottom that still counts as
@@ -663,46 +662,7 @@ fn render_previews(
 /// inline `<img class="emote">` (with the `:name:` token as alt/title for
 /// accessibility and copy/paste fallback).
 fn render_styled_text(text: &str, emotes_on: bool) -> Vec<leptos::prelude::AnyView> {
-    let base = format::linkify_spans(format::parse_format(text));
-    let spans = if emotes_on {
-        format::emotify_spans(base)
-    } else {
-        base
-    };
-    spans
-        .into_iter()
-        .map(|span| {
-            let css = span.css();
-            if let Some(name) = span.emote_name {
-                let src = format!("/emotes/{name}.gif");
-                let token = span.text; // ":name:"
-                // The <img> shows the emote; the visually-hidden span keeps the
-                // `:name:` token in the DOM text so the copy handler (which reads
-                // textContent) and screen readers still surface it.
-                view! {
-                    <img class="emote" src=src alt="" title=token.clone() />
-                    <span class="emote-code">{token}</span>
-                }
-                .into_any()
-            } else if let Some(url) = span.link {
-                let style = if css.is_empty() { String::new() } else { css };
-                view! {
-                    <a
-                        href=url
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        class="msg-link"
-                        style=style
-                    >{span.text}</a>
-                }
-                .into_any()
-            } else if span.has_style() {
-                view! { <span style=css>{span.text}</span> }.into_any()
-            } else {
-                view! { <span>{span.text}</span> }.into_any()
-            }
-        })
-        .collect::<Vec<_>>()
+    crate::components::styled::render_message_text(text, emotes_on)
 }
 
 /// Rebuild a `.chat-line` as space-joined plain text for the copy
