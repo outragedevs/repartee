@@ -156,7 +156,10 @@ pub fn Layout() -> impl IntoView {
                                 .filter(|m| !m.is_empty())
                                 .map(|m| format!(" (+{m})"))
                                 .unwrap_or_default();
-                            let topic = b.topic.as_deref().unwrap_or("");
+                            // Strip IRC control codes so raw bytes never leak
+                            // into the breadcrumb (the desktop TopicBar renders
+                            // them styled; the mobile preview is plain text).
+                            let topic = crate::format::strip_format(b.topic.as_deref().unwrap_or(""));
                             let topic_end = topic.char_indices()
                                 .nth(30)
                                 .map_or(topic.len(), |(i, _)| i);
