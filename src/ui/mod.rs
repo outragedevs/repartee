@@ -219,6 +219,15 @@ pub fn wrap_line(line: Line<'static>, width: usize, indent: usize) -> Vec<Line<'
             end += 1;
         }
 
+        // Guarantee forward progress. An indivisible grapheme wider than the
+        // available width (e.g. a 2-cell emoji or CJK char at width 1) fits
+        // nowhere, leaving `end == pos`. Emit it anyway (overflowing the line) so
+        // `pos` always advances — otherwise the outer loop spins forever, growing
+        // `result` until the process is OOM-killed.
+        if end == pos {
+            end = pos + 1;
+        }
+
         // Last chunk — take everything remaining.
         if end >= styled_chars.len() {
             let built = build_line_from_styled_chars(&styled_chars[pos..], !first_line, indent);
@@ -490,6 +499,18 @@ mod wrap_tests {
             format!("{emoji}x"),
             "emoji grapheme must stay intact, never split"
         );
+    }
+
+    #[test]
+    fn oversized_grapheme_at_width_one_terminates() {
+        // ❤️ is an indivisible 2-cell grapheme; at width 1 it can never "fit", but
+        // the wrapper must still make forward progress (emit it, overflowing the
+        // line) instead of looping forever. Also covers the pre-existing case of a
+        // lone 2-cell char (😀, CJK) at width 1.
+        let line = plain_line("a\u{2764}\u{FE0F}b");
+        let result = wrap_line(line, 1, 0);
+        let joined: String = result.iter().map(line_text).collect();
+        assert_eq!(joined, "a\u{2764}\u{FE0F}b", "all content preserved, no hang");
     }
 
     #[test]
