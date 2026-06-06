@@ -217,13 +217,14 @@ impl App {
                     structural_change = true;
                 }
                 crate::web::protocol::WebEvent::ActiveBufferChanged { .. } => {
-                    // Don't re-broadcast (TUI is authoritative; clients
-                    // either followed already or opted out via their
-                    // localStorage flag), but DO mark structural so the
-                    // snapshot picks up the new active_buffer_id before
-                    // any new WS session reads SyncInit.
+                    // Broadcast so the TUI and every web session stay 1:1 in
+                    // sync — switching the active buffer anywhere (TUI, any tab,
+                    // phone) propagates everywhere. Also structural so a
+                    // newly-connecting session's SyncInit snapshot reflects the
+                    // new active buffer. (Clients ignore the echo for a buffer
+                    // they already switched to, and may opt out via the
+                    // `web_follow_tui_buffer` localStorage flag.)
                     structural_change = true;
-                    continue;
                 }
                 crate::web::protocol::WebEvent::ConnectionStatus { .. }
                 | crate::web::protocol::WebEvent::SettingsChanged { .. } => {
@@ -416,6 +417,13 @@ impl App {
                 self.web_send_message(&buffer_id, &text);
             }
             WebCommand::SwitchBuffer { buffer_id } => {
+                // Flip the GLOBAL active buffer so the TUI and every other web
+                // session follow (1:1 sync across all clients). This queues an
+                // `ActiveBufferChanged` web event (see `State::set_active_buffer`)
+                // which `drain_pending_web_events` broadcasts to all sessions.
+                self.state.set_active_buffer(&buffer_id);
+                // Per-session tracking is still needed for shell input/screen
+                // routing (a web shell is keyed by the session's active buffer).
                 self.web_active_buffers
                     .insert(session_id.to_string(), buffer_id.clone());
                 let web_id = format!("web-{session_id}");
