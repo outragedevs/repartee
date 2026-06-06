@@ -23,6 +23,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::prelude::*;
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub type Tui = Terminal<CrosstermBackend<Box<dyn Write + Send>>>;
@@ -171,14 +172,18 @@ pub fn wrap_line(line: Line<'static>, width: usize, indent: usize) -> Vec<Line<'
         return vec![line];
     }
 
-    // Flatten to (char, display_width, Style) and measure total width in one pass.
-    let styled_chars: Vec<(char, usize, Style)> = line
+    // Flatten to (grapheme, display_width, Style) and measure total width in one
+    // pass. Tokenizing by grapheme cluster (not `char`) and measuring each with
+    // `UnicodeWidthStr` mirrors how ratatui lays the line out, so multi-codepoint
+    // emoji (VS16, flags, skin-tone, ZWJ) get their real on-screen width and are
+    // never split across a wrap boundary.
+    let styled_chars: Vec<(String, usize, Style)> = line
         .spans
         .iter()
         .flat_map(|span| {
             span.content
-                .chars()
-                .map(move |ch| (ch, ch.width().unwrap_or(0), span.style))
+                .graphemes(true)
+                .map(move |g| (g.to_owned(), UnicodeWidthStr::width(g), span.style))
         })
         .collect();
 
@@ -214,6 +219,15 @@ pub fn wrap_line(line: Line<'static>, width: usize, indent: usize) -> Vec<Line<'
             end += 1;
         }
 
+        // Guarantee forward progress. An indivisible grapheme wider than the
+        // available width (e.g. a 2-cell emoji or CJK char at width 1) fits
+        // nowhere, leaving `end == pos`. Emit it anyway (overflowing the line) so
+        // `pos` always advances — otherwise the outer loop spins forever, growing
+        // `result` until the process is OOM-killed.
+        if end == pos {
+            end = pos + 1;
+        }
+
         // Last chunk — take everything remaining.
         if end >= styled_chars.len() {
             let built = build_line_from_styled_chars(&styled_chars[pos..], !first_line, indent);
@@ -223,7 +237,7 @@ pub fn wrap_line(line: Line<'static>, width: usize, indent: usize) -> Vec<Line<'
 
         // Try to find a word break point (last space within the chunk).
         let chunk = &styled_chars[pos..end];
-        let break_at = chunk.iter().rposition(|(ch, _, _)| *ch == ' ');
+        let break_at = chunk.iter().rposition(|(g, _, _)| g == " ");
 
         let actual_end = break_at.map_or(end, |break_pos| pos + break_pos + 1);
         // Never split a multi-cell emote placeholder run across the boundary.
@@ -237,7 +251,7 @@ pub fn wrap_line(line: Line<'static>, width: usize, indent: usize) -> Vec<Line<'
         first_line = false;
 
         // Skip leading spaces on continuation lines.
-        while pos < styled_chars.len() && styled_chars[pos].0 == ' ' {
+        while pos < styled_chars.len() && styled_chars[pos].0 == " " {
             pos += 1;
         }
     }
@@ -253,20 +267,20 @@ pub fn wrap_line(line: Line<'static>, width: usize, indent: usize) -> Vec<Line<'
 /// chars, move it back to the run's start so the whole emote wraps as a unit.
 /// Returns the original `end` when the run starts at/before `pos` (the emote is
 /// wider than the line and cannot be kept whole — avoids a zero-progress loop).
-fn avoid_splitting_placeholder(chars: &[(char, usize, Style)], pos: usize, end: usize) -> usize {
-    use crate::ui::emote_layout::decode_placeholder_index;
+fn avoid_splitting_placeholder(chars: &[(String, usize, Style)], pos: usize, end: usize) -> usize {
+    use crate::ui::emote_layout::decode_placeholder_grapheme;
     if end == 0 || end >= chars.len() {
         return end;
     }
-    let Some(idx) = decode_placeholder_index(chars[end].0) else {
+    let Some(idx) = decode_placeholder_grapheme(&chars[end].0) else {
         return end;
     };
-    // Only a split if the char just before the boundary is the same placeholder.
-    if decode_placeholder_index(chars[end - 1].0) != Some(idx) {
+    // Only a split if the cell just before the boundary is the same placeholder.
+    if decode_placeholder_grapheme(&chars[end - 1].0) != Some(idx) {
         return end;
     }
     let mut e = end;
-    while e > pos && decode_placeholder_index(chars[e - 1].0) == Some(idx) {
+    while e > pos && decode_placeholder_grapheme(&chars[e - 1].0) == Some(idx) {
         e -= 1;
     }
     if e <= pos { end } else { e }
@@ -276,7 +290,7 @@ fn avoid_splitting_placeholder(chars: &[(char, usize, Style)], pos: usize, end: 
 /// consecutive chars with the same style into spans.  Prepends `indent` spaces when
 /// `is_continuation` is true.
 fn build_line_from_styled_chars(
-    chars: &[(char, usize, Style)],
+    chars: &[(String, usize, Style)],
     is_continuation: bool,
     indent: usize,
 ) -> Line<'static> {
@@ -293,15 +307,15 @@ fn build_line_from_styled_chars(
     let mut current_text = String::new();
     let mut current_style = chars[0].2;
 
-    for &(ch, _, style) in chars {
-        if style != current_style && !current_text.is_empty() {
+    for (g, _, style) in chars {
+        if *style != current_style && !current_text.is_empty() {
             spans.push(Span::styled(
                 std::mem::take(&mut current_text),
                 current_style,
             ));
-            current_style = style;
+            current_style = *style;
         }
-        current_text.push(ch);
+        current_text.push_str(g);
     }
 
     if !current_text.is_empty() {
@@ -461,6 +475,55 @@ mod wrap_tests {
         assert!(
             result.len() >= 2,
             "CJK should cause wrap at width=5, got {} lines",
+            result.len()
+        );
+    }
+
+    #[test]
+    fn multi_codepoint_emoji_measured_and_kept_whole() {
+        // 👨‍👩‍👧 (man-ZWJ-woman-ZWJ-girl) renders as ONE grapheme cluster of
+        // display width 2 — the same measurement ratatui uses when it lays the
+        // line out. Summing per-`char` widths would count it as 6 columns and
+        // could split the ZWJ sequence across wrapped lines.
+        let emoji = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let line = Line::from(format!("{emoji}x")); // grapheme width 2 + 1 = 3
+        let result = wrap_line(line, 3, 0);
+        assert_eq!(
+            result.len(),
+            1,
+            "width-3 budget fits emoji(2)+x(1) on one line, got {}",
+            result.len()
+        );
+        assert_eq!(
+            line_text(&result[0]),
+            format!("{emoji}x"),
+            "emoji grapheme must stay intact, never split"
+        );
+    }
+
+    #[test]
+    fn oversized_grapheme_at_width_one_terminates() {
+        // ❤️ is an indivisible 2-cell grapheme; at width 1 it can never "fit", but
+        // the wrapper must still make forward progress (emit it, overflowing the
+        // line) instead of looping forever. Also covers the pre-existing case of a
+        // lone 2-cell char (😀, CJK) at width 1.
+        let line = plain_line("a\u{2764}\u{FE0F}b");
+        let result = wrap_line(line, 1, 0);
+        let joined: String = result.iter().map(line_text).collect();
+        assert_eq!(joined, "a\u{2764}\u{FE0F}b", "all content preserved, no hang");
+    }
+
+    #[test]
+    fn variation_selector_emoji_counts_as_two_columns() {
+        // ❤️ is U+2764 + U+FE0F (VS16); as a grapheme it is width 2, the same as
+        // ratatui measures it. Summing per-`char` widths yields only 1 (VS16 is
+        // width 0), so "a❤️" (3 grapheme columns) would be wrongly kept on one
+        // line at width 2. It must wrap to match what ratatui actually draws.
+        let line = plain_line("a\u{2764}\u{FE0F}");
+        let result = wrap_line(line, 2, 0);
+        assert!(
+            result.len() >= 2,
+            "a + 2-column heart exceeds width 2 and must wrap, got {}",
             result.len()
         );
     }

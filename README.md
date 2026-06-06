@@ -260,6 +260,11 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v1.4.1
+
+- **Fix: inline emotes rendered as blank cells on `cargo install` builds.** `ratatui-core 0.1.1` rewrote the buffer's skip/multi-width cell handling, which breaks the skip-cell mechanism `ratatui-image` relies on to draw inline graphics — so emote thumbnails (and the `/emote` picker) showed only one or two images and empty gaps for the rest. Source and CI builds were shielded by `Cargo.lock`, but `cargo install` ignores the lockfile and pulled the newer crate. `ratatui-core` is versioned independently and floats under `ratatui`'s requirement, so the fix pins **`ratatui-core = "=0.1.0"`** directly (pinning the main `ratatui` crate is not enough). macOS/Linux source builds were never affected.
+- **Fix: multi-codepoint emoji in chat are now measured by grapheme cluster.** Line wrapping and inline-emote placement summed per-`char` widths, but ratatui lays text out by grapheme clusters — so a ZWJ family emoji (👨‍👩‍👧), a skin-tone modifier (👍🏽) or a variation-selector glyph (❤️) was mis-measured. This could split an emoji across wrapped lines or position an inline emote image on the wrong cells when such an emoji preceded it on the same line. Both paths now tokenize with `unicode-segmentation` and measure each cluster with `UnicodeWidthStr`, matching ratatui's own layout.
+
 ### v1.4.0
 
 - **Built-in `:name:` emotes — 183 curated GG7 GIFs, embedded in the binary, rendered inline in both the TUI and the web UI.** Type `:usmiech:` (or the English alias `:smile:`) and it renders as an animated emote in place. The TUI composites GIF frames onto a cell-sized, theme-coloured background with an idle-friendly ~20 fps animation clock (pinned sleep, no busy-loop when nothing moves); the web UI serves them as inline `<img>` from `/emotes/{name}.gif`. An **emote picker overlay** (`Ctrl+G`) with keyboard + mouse navigation and graphical thumbnails, plus `/emote` (alias `/emoji`) to insert by name. Tab-completion offers `:name:` prefixes (closing colon + space). Names work in **Polish or English**, case-insensitive, selectable with `/set emotes.lang en|pl`. New `[emotes]` config section (`enabled`, `render` mode). The whole set — GIFs and the PL→EN alias table — is compiled in via `rust-embed`, so nothing is fetched at runtime.
