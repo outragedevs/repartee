@@ -38,9 +38,16 @@ pub fn EmojiPicker() -> impl IntoView {
                             "Enter" => {
                                 ev.prevent_default();
                                 let f = filter.get();
-                                if !f.trim().is_empty()
-                                    && let Some(&ch) = crate::emoji::search(&f).first()
-                                {
+                                // Insert the first cell currently shown — search
+                                // results when filtering, else the active group.
+                                let first = if f.trim().is_empty() {
+                                    crate::emoji::in_group(crate::emoji::GROUPS[group.get()].1)
+                                        .first()
+                                        .copied()
+                                } else {
+                                    crate::emoji::search(&f).first().copied()
+                                };
+                                if let Some(ch) = first {
                                     pick(ch);
                                 }
                             }

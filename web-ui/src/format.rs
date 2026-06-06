@@ -527,57 +527,12 @@ fn mirc_color(code: u8) -> Option<&'static str> {
 
 /// Remove all mIRC/irssi formatting control codes, returning the visible text.
 /// Used where plain text is needed (e.g. the mobile topic breadcrumb).
+///
+/// Implemented in terms of [`parse_format`] so the set of codes it consumes can
+/// never drift from what the renderer recognises — the visible text is exactly
+/// the concatenation of every parsed span's text.
 pub fn strip_format(text: &str) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let len = chars.len();
-    let mut out = String::with_capacity(text.len());
-    let mut i = 0;
-    while i < len {
-        match chars[i] {
-            '%' if i + 1 < len => match chars[i + 1] {
-                'Z' | 'z' if i + 8 <= len => i += 8,
-                'N' | 'n' | '_' | 'u' | 'U' | 'i' | 'I' | 'd' => i += 2,
-                '%' => {
-                    out.push('%');
-                    i += 2;
-                }
-                c if irssi_color(c).is_some() => i += 2,
-                c => {
-                    out.push('%');
-                    out.push(c);
-                    i += 2;
-                }
-            },
-            '\x02' | '\x0F' | '\x16' | '\x1D' | '\x1E' | '\x1F' => i += 1,
-            '\x03' => {
-                i += 1;
-                let mut digits = 0;
-                while i < len && chars[i].is_ascii_digit() && digits < 2 {
-                    i += 1;
-                    digits += 1;
-                }
-                if digits > 0 && i < len && chars[i] == ',' {
-                    i += 1;
-                    let mut d2 = 0;
-                    while i < len && chars[i].is_ascii_digit() && d2 < 2 {
-                        i += 1;
-                        d2 += 1;
-                    }
-                }
-            }
-            '\x04' => {
-                i += 1;
-                if i + 6 <= len && chars[i..i + 6].iter().all(|c| c.is_ascii_hexdigit()) {
-                    i += 6;
-                }
-            }
-            ch => {
-                out.push(ch);
-                i += 1;
-            }
-        }
-    }
-    out
+    parse_format(text).into_iter().map(|s| s.text).collect()
 }
 
 #[cfg(test)]
