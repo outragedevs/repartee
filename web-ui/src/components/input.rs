@@ -160,20 +160,35 @@ pub fn InputLine() -> impl IntoView {
 
     // Apply a picker-requested insertion (`:name:` or a Unicode emoji) at the
     // caret, then clear the signal. Keeps the `value` signal authoritative.
+    //
+    // Two InputLine instances are mounted at once (desktop + mobile layouts,
+    // toggled by CSS `display`), so both subscribe to the shared
+    // `pending_insert`. Only the *visible* textarea may consume the token —
+    // otherwise the hidden desktop instance swallows it on mobile and the
+    // visible field never updates. `offset_parent()` is `None` when an ancestor
+    // is `display:none`, which is exactly the hidden layout.
     Effect::new(move |_| {
         let Some(token) = state.pending_insert.get() else {
             return;
         };
+        let Some(el) = input_ref.get_untracked() else {
+            return;
+        };
+        let html_el: &web_sys::HtmlTextAreaElement = el.as_ref();
+        let visible = {
+            let he: &web_sys::HtmlElement = html_el.unchecked_ref();
+            he.offset_parent().is_some()
+        };
+        if !visible {
+            return; // hidden instance — leave the token for the visible one.
+        }
         let text = value.get_untracked();
         let cursor = get_textarea_cursor(&input_ref, &text);
         let new_text = format!("{}{token}{}", &text[..cursor], &text[cursor..]);
         let new_cursor = cursor + token.len();
         set_value.set(new_text.clone());
         set_textarea_cursor(&input_ref, &new_text, new_cursor);
-        if let Some(el) = input_ref.get_untracked() {
-            let html_el: &web_sys::HtmlTextAreaElement = el.as_ref();
-            let _ = html_el.focus();
-        }
+        let _ = html_el.focus();
         state.pending_insert.set(None);
     });
 
