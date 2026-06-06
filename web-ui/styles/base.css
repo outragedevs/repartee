@@ -995,3 +995,8 @@ html, body {
     color: var(--fg-muted);
 }
 .input-emote-btn:hover { color: var(--fg); border-color: var(--accent); }
+
+/* UTF-8 emoji button is desktop-only — phones provide a system emoji keyboard. */
+@media (max-width: 767px) {
+    .input-emote-btn.emoji { display: none; }
+}

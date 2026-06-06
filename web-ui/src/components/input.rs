@@ -253,6 +253,13 @@ pub fn InputLine() -> impl IntoView {
             state.wizard_open.set(true);
             return;
         }
+        // `/emoji` (and the `/emote`/`/emotes` aliases) open the GG emote picker
+        // client-side rather than dispatching to the server. `/emote <name>`
+        // still goes to the server for its insert/search behaviour.
+        if matches!(whole.to_ascii_lowercase().as_str(), "/emoji" | "/emote" | "/emotes") {
+            state.emote_picker_open.set(true);
+            return;
+        }
         let Some(buffer_id) = state.active_buffer.get() else {
             return;
         };
@@ -277,6 +284,13 @@ pub fn InputLine() -> impl IntoView {
     };
 
     let on_keydown = move |ev: web_sys::KeyboardEvent| {
+        // Ctrl+G opens the GG emote picker (parity with the TUI keybind).
+        if ev.ctrl_key() && ev.key().eq_ignore_ascii_case("g") {
+            ev.prevent_default();
+            state.emote_picker_open.set(true);
+            return;
+        }
+
         if ev.key() == "Enter" && !ev.shift_key() {
             ev.prevent_default();
             set_tab_active.set(false);
@@ -391,6 +405,18 @@ pub fn InputLine() -> impl IntoView {
 
     view! {
         <div class="input-line">
+            <button
+                type="button"
+                class="input-emote-btn"
+                title="GG emotes (/emoji, Ctrl+G)"
+                on:click=move |_| state.emote_picker_open.set(true)
+            >"GG"</button>
+            <button
+                type="button"
+                class="input-emote-btn emoji"
+                title="Emoji"
+                on:click=move |_| state.emoji_picker_open.set(true)
+            >"\u{1F600}"</button>
             <span class="prompt">"❯"</span>
             <textarea
                 id="chat-input"
