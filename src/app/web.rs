@@ -216,7 +216,7 @@ impl App {
                     tracing::debug!(%buffer_id, "broadcasting BufferClosed");
                     structural_change = true;
                 }
-                crate::web::protocol::WebEvent::ActiveBufferChanged { .. } => {
+                crate::web::protocol::WebEvent::ActiveBufferChanged { buffer_id } => {
                     // Broadcast so the TUI and every web session stay 1:1 in
                     // sync — switching the active buffer anywhere (TUI, any tab,
                     // phone) propagates everywhere. Also structural so a
@@ -225,6 +225,18 @@ impl App {
                     // they already switched to, and may opt out via the
                     // `web_follow_tui_buffer` localStorage flag.)
                     structural_change = true;
+                    // …except shell buffers: they're per-session web terminals,
+                    // so a followed session would render an unusable ShellView
+                    // and have its shell I/O rejected. Don't propagate a switch
+                    // into a shell (e.g. the TUI opening its own /shell).
+                    if self
+                        .state
+                        .buffers
+                        .get(buffer_id)
+                        .is_some_and(|b| b.buffer_type == crate::state::buffer::BufferType::Shell)
+                    {
+                        continue;
+                    }
                 }
                 crate::web::protocol::WebEvent::ConnectionStatus { .. }
                 | crate::web::protocol::WebEvent::SettingsChanged { .. } => {
@@ -418,11 +430,22 @@ impl App {
             }
             WebCommand::SwitchBuffer { buffer_id } => {
                 // Flip the GLOBAL active buffer so the TUI and every other web
-                // session follow (1:1 sync across all clients). This queues an
-                // `ActiveBufferChanged` web event (see `State::set_active_buffer`)
-                // which `drain_pending_web_events` broadcasts to all sessions.
-                self.state.set_active_buffer(&buffer_id);
-                // Per-session tracking is still needed for shell input/screen
+                // session follow (1:1 sync across all clients) — but ONLY for
+                // channels/queries. Shell buffers are per-session terminals
+                // (each web session owns its own PTY, keyed by its per-session
+                // active buffer); syncing them would make followed sessions
+                // render an unusable ShellView whose ShellInput/ShellResize the
+                // server rejects, and would drag the TUI into a web shell. So a
+                // shell switch stays purely local to the initiating session.
+                let is_shell = self
+                    .state
+                    .buffers
+                    .get(&buffer_id)
+                    .is_some_and(|b| b.buffer_type == crate::state::buffer::BufferType::Shell);
+                if !is_shell {
+                    self.state.set_active_buffer(&buffer_id);
+                }
+                // Per-session tracking is always needed for shell input/screen
                 // routing (a web shell is keyed by the session's active buffer).
                 self.web_active_buffers
                     .insert(session_id.to_string(), buffer_id.clone());
