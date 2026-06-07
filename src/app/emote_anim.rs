@@ -61,6 +61,20 @@ impl EmoteAnimator {
         self.protocol_for(picker, emote_index, 0, bg)
     }
 
+    /// Drop every cached protocol image. Call after the terminal cell pixel size
+    /// changes (font resize / reattach): cache keys do not include the cell size,
+    /// so without this the animator keeps serving bitmaps rendered for the old
+    /// font and emotes display at the wrong size.
+    pub fn clear(&mut self) {
+        self.cache.clear();
+    }
+
+    /// Number of cached protocol images (test-only observability for [`clear`]).
+    #[cfg(test)]
+    pub(crate) fn cache_len(&self) -> usize {
+        self.cache.len()
+    }
+
     /// Whether the emote has more than one frame (i.e. actually animates).
     /// Allocation-free — reads the cached `&'static` frame slice directly.
     #[must_use]
@@ -202,5 +216,22 @@ mod tests {
     #[test]
     fn empty_frames_is_zero() {
         assert_eq!(frame_index_of(&frames_with(&[]), 123), 0);
+    }
+
+    #[test]
+    fn clear_empties_the_protocol_cache() {
+        // halfblocks needs no terminal, so the cache can be populated offline.
+        let picker = ratatui_image::picker::Picker::halfblocks();
+        let mut animator = EmoteAnimator::default();
+        let idx = crate::emotes::resolve("usmiech").expect("usmiech exists");
+        assert!(
+            animator.thumbnail(&picker, idx, (0, 0, 0)).is_some(),
+            "thumbnail must build and cache a protocol image"
+        );
+        assert_eq!(animator.cache_len(), 1, "one image cached after thumbnail");
+
+        animator.clear();
+
+        assert_eq!(animator.cache_len(), 0, "clear() must drop every cached image");
     }
 }

@@ -12,6 +12,22 @@ use crate::ui::layout::UiRegions;
 
 use super::{App, MAX_ALIAS_DEPTH, MAX_PASTE_LINES, expand_alias_template};
 
+/// Derive the terminal's cell pixel size (font width/height) from a window-size
+/// report. Returns `None` when any dimension is zero — many terminals leave the
+/// pixel fields unset, in which case we must keep the previously detected size
+/// rather than divide by or compute a bogus `0`.
+const fn font_size_from_window_px(
+    columns: u16,
+    rows: u16,
+    width_px: u16,
+    height_px: u16,
+) -> Option<(u16, u16)> {
+    if columns == 0 || rows == 0 || width_px == 0 || height_px == 0 {
+        return None;
+    }
+    Some((width_px / columns, height_px / rows))
+}
+
 impl App {
     pub(crate) fn handle_event(&mut self, event: Event) {
         match event {
@@ -21,10 +37,45 @@ impl App {
             Event::Resize(cols, rows) => {
                 self.cached_term_cols = cols;
                 self.cached_term_rows = rows;
+                self.refresh_emote_font_size();
                 self.resize_all_shells();
             }
             _ => {}
         }
+    }
+
+    /// Re-derive the terminal cell pixel size after a resize and, if it changed,
+    /// rebuild the image picker so inline emotes scale to the new font size. The
+    /// emote frame cache is keyed by `(emote, frame, bg)` — not by cell size — so
+    /// it must be cleared, otherwise stale-sized bitmaps would keep rendering.
+    ///
+    /// Pixel size is read from `window_size()` (a `TIOCGWINSZ` ioctl on Unix), not
+    /// by re-querying via stdio: the crossterm event stream owns stdin during the
+    /// session, so a stdio query would race it. Terminals that report a font-size
+    /// change as a resize event update the ioctl's pixel fields, so this catches
+    /// live zoom in/out. Terminals that leave the pixel fields at 0 are left
+    /// untouched (the startup-detected size stands).
+    pub(crate) fn refresh_emote_font_size(&mut self) {
+        let Ok(ws) = crossterm::terminal::window_size() else {
+            return;
+        };
+        let Some(new_size) = font_size_from_window_px(ws.columns, ws.rows, ws.width, ws.height)
+        else {
+            return;
+        };
+        if new_size == self.picker.font_size() {
+            return;
+        }
+        tracing::debug!(
+            old = ?self.picker.font_size(),
+            new = ?new_size,
+            "refreshing picker font_size after resize"
+        );
+        #[expect(deprecated, reason = "only API to set font dimensions on a Picker")]
+        let mut new_picker = ratatui_image::picker::Picker::from_fontsize(new_size);
+        new_picker.set_protocol_type(self.picker.protocol_type());
+        self.picker = new_picker;
+        self.emote_animator.clear();
     }
 
     /// Maximum time (ms) between ESC and follow-up key to treat as ESC+key combo.
@@ -1806,6 +1857,34 @@ fn key_event_to_bytes(key: &event::KeyEvent, app_cursor: bool) -> Vec<u8> {
 mod tests {
     use super::*;
     use crossterm::event;
+
+    // ── font_size_from_window_px tests ──
+
+    #[test]
+    fn font_size_divides_pixels_by_cells() {
+        // 80×24 cells over a 640×384px window => an 8×16px cell.
+        assert_eq!(font_size_from_window_px(80, 24, 640, 384), Some((8, 16)));
+    }
+
+    #[test]
+    fn font_size_tracks_a_larger_font() {
+        // Same grid, a zoomed-in font reports a bigger pixel window => bigger cell.
+        assert_eq!(font_size_from_window_px(80, 24, 800, 480), Some((10, 20)));
+    }
+
+    #[test]
+    fn font_size_none_when_pixels_unreported() {
+        // Terminals that leave the pixel fields at 0 must yield None, not a 0 cell.
+        assert_eq!(font_size_from_window_px(80, 24, 0, 0), None);
+        assert_eq!(font_size_from_window_px(80, 24, 640, 0), None);
+        assert_eq!(font_size_from_window_px(80, 24, 0, 384), None);
+    }
+
+    #[test]
+    fn font_size_none_when_grid_is_zero() {
+        assert_eq!(font_size_from_window_px(0, 24, 640, 384), None);
+        assert_eq!(font_size_from_window_px(80, 0, 640, 384), None);
+    }
 
     // ── expand_alias_template tests ──
 
