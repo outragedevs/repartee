@@ -17,6 +17,13 @@ use unicode_width::UnicodeWidthStr;
 /// fallback; chat rendering sizes each emote per [`emote_footprint`].
 pub const EMOTE_COLS: usize = 2;
 
+/// Hard ceilings on an emote's cell footprint, independent of the configured
+/// caps. They bound work driven by user config: a multi-row emote reserves a
+/// blank line per row, so an unsanitised `max_rows` (or a degenerate tiny cell
+/// size) must not be able to balloon the line count.
+pub const MAX_FOOTPRINT_COLS: u16 = 32;
+pub const MAX_FOOTPRINT_ROWS: u16 = 12;
+
 /// Compute the cell footprint `(cols, rows)` for an emote from its native GIF
 /// pixel size, the terminal cell pixel size, and the configured caps.
 ///
@@ -44,8 +51,8 @@ pub fn emote_footprint(
     let nh = f64::from(native_h.max(1));
     let fw = f64::from(font_w.max(1));
     let fh = f64::from(font_h.max(1));
-    let max_cols = max_cols.max(1);
-    let max_rows = max_rows.max(1);
+    let max_cols = max_cols.clamp(1, MAX_FOOTPRINT_COLS);
+    let max_rows = max_rows.clamp(1, MAX_FOOTPRINT_ROWS);
 
     // Fit within the cap box preserving aspect; `min(.., 1.0)` forbids upscaling
     // past the native pixel size.
@@ -132,6 +139,34 @@ pub struct EmotePlacement {
     pub rect: Rect,
 }
 
+/// Reserve vertical space for multi-row emotes: for each wrapped line, find the
+/// tallest emote on it (via `rows_of`) and append that many `- 1` blank lines
+/// after it, so the emote's rect can span downward without overlapping the next
+/// line's text. Lines with only single-row (or no) emotes pass through unchanged.
+#[must_use]
+pub fn reserve_emote_rows(
+    lines: Vec<Line<'_>>,
+    rows_of: impl Fn(u32) -> u16,
+) -> Vec<Line<'_>> {
+    let mut out = Vec::with_capacity(lines.len());
+    for line in lines {
+        let mut max_rows: u16 = 1;
+        for span in &line.spans {
+            for g in span.content.graphemes(true) {
+                if let Some(idx) = decode_placeholder_grapheme(g) {
+                    max_rows = max_rows.max(rows_of(idx).max(1));
+                }
+            }
+        }
+        out.push(line);
+        // Reserve `max_rows - 1` blank continuation rows below the emote line.
+        for _ in 1..max_rows {
+            out.push(Line::default());
+        }
+    }
+    out
+}
+
 /// An emote placeholder run being accumulated across cells on one line.
 struct Run {
     idx: u32,
@@ -159,6 +194,7 @@ pub fn resolve_placements(
     footprint_of: impl Fn(u32) -> (u16, u16),
 ) -> Vec<EmotePlacement> {
     let mut out = Vec::new();
+    let area_bottom = area.y.saturating_add(area.height);
     for (row, line) in lines.iter().enumerate() {
         if row >= area.height as usize {
             break;
@@ -183,7 +219,7 @@ pub fn resolve_placements(
                             r.width += cw;
                         }
                         _ => {
-                            flush_run(&mut run, y, area.x, &mut out);
+                            flush_run(&mut run, y, area.x, area_bottom, &mut out);
                             let (cols, rows) = footprint_of(idx);
                             run = Some(Run {
                                 idx,
@@ -195,19 +231,30 @@ pub fn resolve_placements(
                         }
                     }
                 } else {
-                    flush_run(&mut run, y, area.x, &mut out);
+                    flush_run(&mut run, y, area.x, area_bottom, &mut out);
                 }
                 col += cw;
             }
         }
-        flush_run(&mut run, y, area.x, &mut out);
+        flush_run(&mut run, y, area.x, area_bottom, &mut out);
     }
     out
 }
 
-fn flush_run(run: &mut Option<Run>, y: u16, area_x: u16, out: &mut Vec<EmotePlacement>) {
+fn flush_run(
+    run: &mut Option<Run>,
+    y: u16,
+    area_x: u16,
+    area_bottom: u16,
+    out: &mut Vec<EmotePlacement>,
+) {
     if let Some(r) = run.take() {
         let x = area_x.saturating_add(u16::try_from(r.start).unwrap_or(u16::MAX));
+        // Clamp the height to the rows remaining below `y` in the chat area so a
+        // tall emote on the last visible row never paints over the status/input
+        // bar. `reserve_emote_rows` guarantees the in-area rows below are blank.
+        let avail = area_bottom.saturating_sub(y);
+        let height = r.rows.min(avail).max(1);
         out.push(EmotePlacement {
             emote_index: r.idx,
             // Width is the cells actually occupied (`r.width`), not the target
@@ -215,7 +262,7 @@ fn flush_run(run: &mut Option<Run>, y: u16, area_x: u16, out: &mut Vec<EmotePlac
             // wrapper had to split an over-wide emote across a line edge, this
             // fragment must cover only its own cells — the compositor sizes the
             // image canvas from this rect, so a wider claim would overpaint text.
-            rect: Rect::new(x, y, u16::try_from(r.width).unwrap_or(u16::MAX), r.rows),
+            rect: Rect::new(x, y, u16::try_from(r.width).unwrap_or(u16::MAX), height),
         });
     }
 }
@@ -226,6 +273,16 @@ mod tests {
     use ratatui::text::Span;
 
     // ── emote_footprint tests (font 8×16, caps 8×3 unless noted) ──
+
+    #[test]
+    fn footprint_caps_pathological_config_and_font() {
+        // A huge config cap with a degenerate 1px font must not let an emote's
+        // footprint explode — `reserve_emote_rows` allocates one blank line per
+        // reserved row, so the row count is a hard ceiling, not just the config.
+        let (cols, rows) = emote_footprint(4000, 4000, 1, 1, u16::MAX, u16::MAX);
+        assert!(cols <= MAX_FOOTPRINT_COLS, "cols {cols} exceeds hard cap");
+        assert!(rows <= MAX_FOOTPRINT_ROWS, "rows {rows} exceeds hard cap");
+    }
 
     #[test]
     fn footprint_small_square_stays_two_by_one() {
@@ -281,6 +338,43 @@ mod tests {
         assert_eq!(emote_footprint(40, 18, 16, 32, 8, 3), (3, 1));
     }
 
+    // ── reserve_emote_rows tests ──
+
+    #[test]
+    fn reserve_adds_blank_rows_for_a_tall_emote() {
+        let line = Line::from(Span::raw(placeholder_for_emote(1, 2)));
+        let out = reserve_emote_rows(vec![line], |_| 3);
+        assert_eq!(out.len(), 3, "the line plus 2 reserved blank rows");
+        assert!(!out[0].spans.is_empty(), "row 0 keeps the emote");
+        assert!(out[1].spans.is_empty(), "row 1 is a reserved blank");
+        assert!(out[2].spans.is_empty(), "row 2 is a reserved blank");
+    }
+
+    #[test]
+    fn reserve_leaves_single_row_emote_untouched() {
+        let line = Line::from(Span::raw(placeholder_for_emote(1, 2)));
+        let out = reserve_emote_rows(vec![line], |_| 1);
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn reserve_ignores_lines_without_emotes() {
+        let line = Line::from(Span::raw("plain text"));
+        let out = reserve_emote_rows(vec![line], |_| 3);
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn reserve_uses_the_tallest_emote_on_a_line() {
+        // idx 1 wants 2 rows, idx 2 wants 3 rows → reserve max(2,3)-1 = 2 blanks.
+        let mut s = placeholder_for_emote(1, 2);
+        s.push_str(&placeholder_for_emote(2, 2));
+        let line = Line::from(Span::raw(s));
+        let out = reserve_emote_rows(vec![line], |idx| if idx == 2 { 3 } else { 2 });
+        assert_eq!(out.len(), 3);
+        assert!(out[1].spans.is_empty() && out[2].spans.is_empty());
+    }
+
     #[test]
     fn resolve_uses_footprint_width_and_splits_adjacent_wide_emotes() {
         // Two adjacent copies of the same 5-col emote must become two 5-wide
@@ -294,6 +388,35 @@ mod tests {
         assert_eq!(placements[1].rect.width, 5);
         assert_eq!(placements[0].rect.x, 0);
         assert_eq!(placements[1].rect.x, 5);
+    }
+
+    #[test]
+    fn resolve_clamps_rect_height_to_area_bottom() {
+        // Area is 2 rows tall; a 3-row emote on the last row must clamp to the one
+        // remaining row so it never paints below the chat area (into status/input).
+        let blank = Line::default();
+        let emote = Line::from(Span::raw(placeholder_for_emote(1, 2)));
+        let placements =
+            resolve_placements(&[blank, emote], Rect::new(0, 0, 40, 2), |_| (2, 3));
+        assert_eq!(placements.len(), 1);
+        assert_eq!(placements[0].rect.y, 1);
+        assert_eq!(
+            placements[0].rect.height, 1,
+            "clamped to the single remaining row"
+        );
+    }
+
+    #[test]
+    fn resolve_keeps_full_height_when_rows_fit() {
+        let emote = Line::from(Span::raw(placeholder_for_emote(1, 2)));
+        let placements = resolve_placements(
+            &[emote, Line::default(), Line::default()],
+            Rect::new(0, 0, 40, 5),
+            |_| (2, 3),
+        );
+        assert_eq!(placements.len(), 1);
+        assert_eq!(placements[0].rect.y, 0);
+        assert_eq!(placements[0].rect.height, 3);
     }
 
     #[test]

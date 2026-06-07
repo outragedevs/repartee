@@ -635,6 +635,11 @@ pub struct EmotesConfig {
     /// scale up to this many columns (preserving aspect, never past native size)
     /// instead of being crushed into a fixed 2-cell box.
     pub max_cols: u16,
+    /// Maximum height, in terminal rows, an inline emote may occupy. Tall GIFs
+    /// grow up to this many rows (the chat reserves blank rows below the line so
+    /// the emote does not overlap following text). `1` keeps every emote strictly
+    /// inline (no reserved rows).
+    pub max_rows: u16,
 }
 
 impl EmotesConfig {
@@ -654,6 +659,7 @@ impl Default for EmotesConfig {
             render: RenderMode::Graphical,
             lang: EmoteLang::En,
             max_cols: 8,
+            max_rows: 3,
         }
     }
 }
