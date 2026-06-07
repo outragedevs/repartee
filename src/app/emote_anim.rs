@@ -14,32 +14,36 @@ type BgRgb = u32;
 
 #[derive(Default)]
 pub struct EmoteAnimator {
-    /// Keyed by (emote, frame, background) so a theme background change produces
-    /// fresh flattened images rather than reusing the old-background ones.
-    cache: HashMap<(u32, usize, BgRgb), StatefulProtocol>,
+    /// Keyed by (emote, frame, background, cols, rows): a theme background change
+    /// or a different cell footprint (font resize, picker grid vs chat) produces
+    /// fresh flattened images rather than reusing wrongly-sized/coloured ones.
+    cache: HashMap<(u32, usize, BgRgb, u16, u16), StatefulProtocol>,
 }
 
 impl EmoteAnimator {
-    /// Get or build the protocol image for one emote frame, with transparent
-    /// pixels alpha-blended onto `bg` (the theme background) so the emote has no
-    /// visible box against the chat background. Returns `None` if undecodable.
+    /// Get or build the protocol image for one emote frame at a `cols × rows`
+    /// cell footprint, with transparent pixels alpha-blended onto `bg` (the theme
+    /// background) so the emote has no visible box against the chat background.
+    /// Returns `None` if undecodable.
     fn protocol_for(
         &mut self,
         picker: &Picker,
         emote_index: u32,
         frame_index: usize,
         bg: (u8, u8, u8),
+        cols: u16,
+        rows: u16,
     ) -> Option<&mut StatefulProtocol> {
         use std::collections::hash_map::Entry;
         let bg_key = u32::from(bg.0) << 16 | u32::from(bg.1) << 8 | u32::from(bg.2);
-        match self.cache.entry((emote_index, frame_index, bg_key)) {
+        match self.cache.entry((emote_index, frame_index, bg_key, cols, rows)) {
             Entry::Occupied(e) => Some(e.into_mut()),
             Entry::Vacant(slot) => {
                 let names = crate::emotes::names();
                 let name = names.get(emote_index as usize)?;
                 let frames = crate::emotes::frames(name)?;
                 let (img, _delay) = frames.get(frame_index)?;
-                let canvas = render_frame_on_bg(picker, img, bg);
+                let canvas = render_frame_on_bg(picker, img, bg, cols, rows);
                 Some(
                     slot.insert(
                         picker.new_resize_protocol(image::DynamicImage::ImageRgba8(canvas)),
@@ -49,16 +53,19 @@ impl EmoteAnimator {
         }
     }
 
-    /// Cached static first-frame protocol image for `emote_index`, flattened onto
-    /// `bg`. For non-animated thumbnails such as the emote picker grid (rendering
-    /// every visible emote animated would be far too much per-frame work).
+    /// Cached static first-frame protocol image for `emote_index` at a `cols ×
+    /// rows` footprint, flattened onto `bg`. For non-animated thumbnails such as
+    /// the emote picker grid (rendering every visible emote animated would be far
+    /// too much per-frame work).
     pub fn thumbnail(
         &mut self,
         picker: &Picker,
         emote_index: u32,
         bg: (u8, u8, u8),
+        cols: u16,
+        rows: u16,
     ) -> Option<&mut StatefulProtocol> {
-        self.protocol_for(picker, emote_index, 0, bg)
+        self.protocol_for(picker, emote_index, 0, bg, cols, rows)
     }
 
     /// Drop every cached protocol image. Call after the terminal cell pixel size
@@ -108,7 +115,7 @@ fn frame_index_of(frames: &[crate::emotes::Frame], elapsed_ms: u128) -> usize {
 }
 
 /// Render an emote frame onto an opaque canvas sized to the *exact pixel
-/// dimensions of its cell rectangle* (`EMOTE_COLS * font_w` × `font_h`), filled
+/// dimensions of its cell rectangle* (`cols * font_w` × `rows * font_h`), filled
 /// with the theme background. The emote is scaled to fit (preserving aspect) and
 /// centered. Because the canvas matches the cell rect's aspect ratio and is fully
 /// painted, no terminal background shows through — not around the emote and not
@@ -122,12 +129,12 @@ fn render_frame_on_bg(
     picker: &Picker,
     img: &image::RgbaImage,
     bg: (u8, u8, u8),
+    cols: u16,
+    rows: u16,
 ) -> image::RgbaImage {
-    use crate::ui::emote_layout::EMOTE_COLS;
-
     let (fw, fh) = picker.font_size();
-    let cw = u32::try_from(EMOTE_COLS).unwrap_or(2) * u32::from(fw.max(1));
-    let ch = u32::from(fh.max(1));
+    let cw = u32::from(cols.max(1)) * u32::from(fw.max(1));
+    let ch = u32::from(rows.max(1)) * u32::from(fh.max(1));
 
     // Scale the emote to fit the cell, preserving aspect ratio.
     let (iw, ih) = (img.width().max(1), img.height().max(1));
@@ -180,7 +187,9 @@ pub fn composite(
             continue;
         };
         let fi = frame_index_of(frames, elapsed_ms);
-        if let Some(proto) = animator.protocol_for(picker, p.emote_index, fi, bg) {
+        if let Some(proto) =
+            animator.protocol_for(picker, p.emote_index, fi, bg, p.rect.width, p.rect.height)
+        {
             // Clear the placeholder cells, then draw the frame on top.
             frame.render_widget(ratatui::widgets::Clear, p.rect);
             frame.render_stateful_widget(StatefulImage::default(), p.rect, proto);
@@ -225,7 +234,7 @@ mod tests {
         let mut animator = EmoteAnimator::default();
         let idx = crate::emotes::resolve("usmiech").expect("usmiech exists");
         assert!(
-            animator.thumbnail(&picker, idx, (0, 0, 0)).is_some(),
+            animator.thumbnail(&picker, idx, (0, 0, 0), 2, 1).is_some(),
             "thumbnail must build and cache a protocol image"
         );
         assert_eq!(animator.cache_len(), 1, "one image cached after thumbnail");

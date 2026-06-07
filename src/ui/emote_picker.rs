@@ -144,7 +144,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         // cell is never blank-but-clickable.
         if graphical && cell_w > emote_w {
             let img_rect = Rect::new(x, y, emote_w, 1);
-            if let Some(proto) = app.emote_animator.thumbnail(&app.picker, reg_idx, bg_rgb) {
+            if let Some(proto) =
+                app.emote_animator
+                    .thumbnail(&app.picker, reg_idx, bg_rgb, emote_w, 1)
+            {
                 frame.render_stateful_widget(
                     ratatui_image::StatefulImage::default(),
                     img_rect,

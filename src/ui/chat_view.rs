@@ -43,6 +43,18 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     let graphical = app.emotes_graphical();
+    // Per-frame emote sizing from the live terminal cell size + config caps. The
+    // height cap is pinned to one row here; multi-row reservation is wired
+    // separately. `None` in text mode.
+    let emote_sizing = graphical.then(|| {
+        let (font_w, font_h) = app.picker.font_size();
+        crate::ui::emote_layout::EmoteSizing {
+            font_w,
+            font_h,
+            max_cols: app.config.emotes.max_cols,
+            max_rows: 1,
+        }
+    });
     // Emote placements resolved from this frame's visible lines; stored on `app`
     // after the immutable borrow below ends, for the compositing pass.
     let mut placements: Vec<crate::ui::emote_layout::EmotePlacement> = Vec::new();
@@ -94,7 +106,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
                 &app.theme,
                 &app.config,
                 nick_fg,
-                graphical,
+                emote_sizing,
             );
             let wrapped = super::wrap_line(line, total_width, indent);
 
@@ -120,8 +132,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             .collect();
 
         // Resolve inline-emote screen rects before the Paragraph consumes the lines.
-        if graphical {
-            placements = crate::ui::emote_layout::resolve_placements(&visible_lines, area);
+        if let Some(sizing) = emote_sizing {
+            placements = crate::ui::emote_layout::resolve_placements(
+                &visible_lines,
+                area,
+                |idx| sizing.footprint(idx),
+            );
         }
 
         let paragraph = Paragraph::new(visible_lines).style(Style::default().bg(bg));

@@ -631,6 +631,10 @@ pub struct EmotesConfig {
     pub render: RenderMode,
     /// Picker / insert preview language.
     pub lang: EmoteLang,
+    /// Maximum width, in terminal cells, an inline emote may occupy. Wide GIFs
+    /// scale up to this many columns (preserving aspect, never past native size)
+    /// instead of being crushed into a fixed 2-cell box.
+    pub max_cols: u16,
 }
 
 impl EmotesConfig {
@@ -649,6 +653,7 @@ impl Default for EmotesConfig {
             enabled: true,
             render: RenderMode::Graphical,
             lang: EmoteLang::En,
+            max_cols: 8,
         }
     }
 }

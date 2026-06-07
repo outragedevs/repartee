@@ -9,24 +9,25 @@ use ratatui::text::Line;
 
 /// Render a single message into a themed ratatui Line.
 ///
-/// When `graphical` is true (emotes enabled, render=Graphical, terminal supports
-/// graphics), known `:name:` tokens in the message body are rewritten to
-/// fixed-width placeholders so the wrapper reserves cells for the inline image;
-/// otherwise the literal `:name:` text is kept.
+/// When `emote_sizing` is `Some` (emotes enabled, render=Graphical, terminal
+/// supports graphics), known `:name:` tokens in the message body are rewritten
+/// to placeholders sized per the emote's cell footprint so the wrapper reserves
+/// the right number of cells for the inline image; otherwise the literal
+/// `:name:` text is kept.
 pub fn render_message(
     msg: &Message,
     is_own: bool,
     theme: &crate::theme::ThemeFile,
     config: &AppConfig,
     nick_fg_override: Option<Color>,
-    graphical: bool,
+    emote_sizing: Option<crate::ui::emote_layout::EmoteSizing>,
 ) -> Line<'static> {
     let abstracts = &theme.abstracts;
 
     // MentionLog: pre-formatted line — render text as-is, no timestamp/nick column.
     // Emotes are still rewritten so mention rows match the channel/web rendering.
     if msg.message_type == MessageType::MentionLog {
-        let body = emotify_message_text(&msg.text, graphical);
+        let body = emotify_message_text(&msg.text, emote_sizing);
         let spans = parse_format_string(&body, &[]);
         return styled_spans_to_line(&spans);
     }
@@ -48,7 +49,7 @@ pub fn render_message(
     let msg_spans = if msg.message_type == MessageType::Event {
         render_event(msg, theme)
     } else {
-        render_chat_message(msg, is_own, theme, config, nick_fg_override, graphical)
+        render_chat_message(msg, is_own, theme, config, nick_fg_override, emote_sizing)
     };
 
     // 3. Combine: timestamp + space + message
@@ -94,7 +95,7 @@ fn render_chat_message(
     theme: &crate::theme::ThemeFile,
     config: &AppConfig,
     nick_fg_override: Option<Color>,
-    graphical: bool,
+    emote_sizing: Option<crate::ui::emote_layout::EmoteSizing>,
 ) -> Vec<StyledSpan> {
     let abstracts = &theme.abstracts;
     let messages = &theme.formats.messages;
@@ -148,7 +149,7 @@ fn render_chat_message(
         .unwrap_or_else(|| "$0 $1".to_string());
     let resolved = resolve_abstractions(&msg_format, abstracts, 0);
     // params: $0=displayNick, $1=text, $2=paddedNickMode
-    let body = emotify_message_text(&msg.text, graphical);
+    let body = emotify_message_text(&msg.text, emote_sizing);
     let mut spans = parse_format_string(&resolved, &[&display_nick, &body, &padded_nick_mode]);
 
     // Apply nick color override: recolor spans containing the nick text.
@@ -167,17 +168,25 @@ fn render_chat_message(
     spans
 }
 
-/// Replace known `:name:` tokens with fixed-width PUA placeholders so the wrapper
-/// reserves cells for the inline image. No-op when `graphical` is false or the
-/// text contains no emote. The emote's placeholder index is its position in
-/// `emotes::names()` (binary-searchable, matching the animator's lookup).
+/// Replace known `:name:` tokens with PUA placeholders so the wrapper reserves
+/// cells for the inline image. Each emote's placeholder width is its cell
+/// footprint (`sizing.footprint().0`) so wide GIFs reserve more columns. No-op
+/// when `sizing` is `None` (text mode) or the text contains no emote. The emote's
+/// placeholder index is its position in `emotes::names()` (binary-searchable,
+/// matching the animator's lookup).
 #[must_use]
-fn emotify_message_text(text: &str, graphical: bool) -> String {
+fn emotify_message_text(
+    text: &str,
+    sizing: Option<crate::ui::emote_layout::EmoteSizing>,
+) -> String {
     use crate::emotes;
     use crate::emotes::parse::Segment;
-    use crate::ui::emote_layout::placeholder_for_index;
+    use crate::ui::emote_layout::placeholder_for_emote;
 
-    if !graphical || !text.contains(':') {
+    let Some(sizing) = sizing else {
+        return text.to_owned();
+    };
+    if !text.contains(':') {
         return text.to_owned();
     }
     let segs = emotes::parse::tokenize(text);
@@ -191,7 +200,8 @@ fn emotify_message_text(text: &str, graphical: bool) -> String {
             Segment::Emote(name) => {
                 // Accept either language: resolve PL stem or EN alias to the index.
                 if let Some(idx) = emotes::resolve(&name) {
-                    out.push_str(&placeholder_for_index(idx));
+                    let (cols, _rows) = sizing.footprint(idx);
+                    out.push_str(&placeholder_for_emote(idx, cols));
                 } else {
                     out.push(':');
                     out.push_str(&name);
@@ -206,51 +216,86 @@ fn emotify_message_text(text: &str, graphical: bool) -> String {
 #[cfg(test)]
 mod emote_tests {
     use super::emotify_message_text;
-    use crate::ui::emote_layout::{EMOTE_COLS, decode_placeholder_index};
+    use crate::ui::emote_layout::{EmoteSizing, decode_placeholder_index};
+
+    /// A representative cell size (8×16) with the conservative one-row cap.
+    fn sizing() -> EmoteSizing {
+        EmoteSizing {
+            font_w: 8,
+            font_h: 16,
+            max_cols: 8,
+            max_rows: 1,
+        }
+    }
+
+    fn placeholder_count(s: &str) -> usize {
+        s.chars()
+            .filter(|c| decode_placeholder_index(*c).is_some())
+            .count()
+    }
 
     #[test]
     fn english_alias_becomes_placeholder() {
-        let out = emotify_message_text("hi :smile: x", true);
-        let placeholders = out
-            .chars()
-            .filter(|c| decode_placeholder_index(*c).is_some())
-            .count();
+        let sizing = sizing();
+        let idx = crate::emotes::resolve("smile").expect("smile resolves");
+        let expected = usize::from(sizing.footprint(idx).0);
+        let out = emotify_message_text("hi :smile: x", Some(sizing));
         assert_eq!(
-            placeholders, EMOTE_COLS,
-            ":smile: must become a placeholder"
+            placeholder_count(&out),
+            expected,
+            ":smile: must become a footprint-width placeholder run"
         );
         assert!(!out.contains(":smile:"));
     }
 
     #[test]
     fn known_token_becomes_placeholder_when_graphical() {
-        let out = emotify_message_text("hi :usmiech: x", true);
-        let placeholder_chars = out
-            .chars()
-            .filter(|c| decode_placeholder_index(*c).is_some())
-            .count();
-        assert_eq!(placeholder_chars, EMOTE_COLS);
+        let sizing = sizing();
+        let idx = crate::emotes::resolve("usmiech").expect("usmiech resolves");
+        let expected = usize::from(sizing.footprint(idx).0);
+        let out = emotify_message_text("hi :usmiech: x", Some(sizing));
+        assert_eq!(placeholder_count(&out), expected);
         assert!(!out.contains(":usmiech:"));
         assert!(out.starts_with("hi "));
         assert!(out.ends_with(" x"));
     }
 
     #[test]
+    fn wide_emote_reserves_more_columns_than_a_square_one() {
+        // A wide GIF (a banner like 40×18) must reserve strictly more cells than a
+        // small square one (:smile:/15×15) — the core of "size to the original".
+        let sizing = sizing();
+        let square = crate::emotes::resolve("smile").expect("smile");
+        let names_len = u32::try_from(crate::emotes::names().len()).unwrap_or(u32::MAX);
+        let wide = (0..names_len)
+            .find(|&i| {
+                crate::emotes::native_size(i).is_some_and(|(w, h)| w >= h.saturating_mul(2))
+            })
+            .expect("the curated set has at least one wide emote");
+        let square_cols = usize::from(sizing.footprint(square).0);
+        let wide_cols = usize::from(sizing.footprint(wide).0);
+        assert!(
+            wide_cols > square_cols,
+            "wide emote ({wide_cols} cols) must reserve more than square ({square_cols} cols)"
+        );
+    }
+
+    #[test]
     fn unchanged_when_not_graphical() {
         assert_eq!(
-            emotify_message_text("hi :usmiech: x", false),
+            emotify_message_text("hi :usmiech: x", None),
             "hi :usmiech: x"
         );
     }
 
     #[test]
     fn unknown_token_unchanged() {
-        assert_eq!(emotify_message_text(":nope: :)", true), ":nope: :)");
+        assert_eq!(emotify_message_text(":nope: :)", Some(sizing())), ":nope: :)");
     }
 
     #[test]
     fn no_colon_fast_path() {
-        assert_eq!(emotify_message_text("plain text", true), "plain text");
+        assert_eq!(emotify_message_text("plain text", Some(sizing())), "plain text");
     }
 }
 
@@ -284,7 +329,7 @@ mod tests {
         let msg = test_message("me", "hello world", MessageType::Message);
         let theme = default_theme();
         let config = default_config();
-        let line = render_message(&msg, true, &theme, &config, None, false);
+        let line = render_message(&msg, true, &theme, &config, None, None);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(text.contains("me"));
         assert!(text.contains("hello world"));
@@ -295,7 +340,7 @@ mod tests {
         let msg = test_message("bob", "hi there", MessageType::Message);
         let theme = default_theme();
         let config = default_config();
-        let line = render_message(&msg, false, &theme, &config, None, false);
+        let line = render_message(&msg, false, &theme, &config, None, None);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(text.contains("bob"));
         assert!(text.contains("hi there"));
@@ -309,7 +354,7 @@ mod tests {
         let mut config = default_config();
         config.display.nick_truncation = true;
         config.display.nick_max_length = 4;
-        let line = render_message(&msg, false, &theme, &config, None, false);
+        let line = render_message(&msg, false, &theme, &config, None, None);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(text.contains("Ñóçk"));
         assert!(text.contains("hola mundo"));
@@ -323,7 +368,7 @@ mod tests {
         let mut config = default_config();
         config.display.nick_truncation = true;
         config.display.nick_max_length = 4;
-        let line = render_message(&msg, false, &theme, &config, None, false);
+        let line = render_message(&msg, false, &theme, &config, None, None);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         // Should be truncated to first 3 chars + '+': "Ñóç+"
         assert!(text.contains("Ñóç+"));
@@ -339,7 +384,7 @@ mod tests {
         let mut config = default_config();
         config.display.nick_truncation = true;
         config.display.nick_max_length = 7;
-        let line = render_message(&msg, false, &theme, &config, None, false);
+        let line = render_message(&msg, false, &theme, &config, None, None);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(text.contains("verylo+"));
         assert!(!text.contains("verylon"));
@@ -355,7 +400,7 @@ mod tests {
         let mut config = default_config();
         config.display.nick_truncation = true;
         config.display.nick_max_length = 8;
-        let line = render_message(&msg, false, &theme, &config, None, false);
+        let line = render_message(&msg, false, &theme, &config, None, None);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         // Nick should be "verylo+" (7 chars), not "verylon+" (8 chars)
         assert!(text.contains("verylo+"), "expected 'verylo+' in: {text}");
@@ -366,7 +411,7 @@ mod tests {
 
         // Without mode prefix, same nick gets full budget: "verylon+" (8 chars)
         let msg2 = test_message("verylongnick", "test", MessageType::Message);
-        let line2 = render_message(&msg2, false, &theme, &config, None, false);
+        let line2 = render_message(&msg2, false, &theme, &config, None, None);
         let text2: String = line2.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(
             text2.contains("verylon+"),
@@ -392,7 +437,7 @@ mod tests {
         };
         let theme = default_theme();
         let config = default_config();
-        let line = render_message(&msg, false, &theme, &config, None, false);
+        let line = render_message(&msg, false, &theme, &config, None, None);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(text.contains("system message"));
     }
@@ -412,7 +457,7 @@ mod tests {
             .insert("pubmsg".into(), "{msgnick $2 {pubnick $0}}$1".into());
         let config = default_config();
         let override_color = Color::Rgb(255, 0, 0);
-        let line = render_message(&msg, false, &theme, &config, Some(override_color), false);
+        let line = render_message(&msg, false, &theme, &config, Some(override_color), None);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(text.contains("alice"));
         // Check that at least one span has the override color

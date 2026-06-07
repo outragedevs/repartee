@@ -115,6 +115,35 @@ pub fn bytes(name: &str) -> Option<Cow<'static, [u8]>> {
     EmoteAssets::get(&format!("{stem}.gif")).map(|f| f.data)
 }
 
+/// Native pixel size `(width, height)` of each emote, read once from the GIF
+/// logical-screen descriptor (bytes 6..10) without decoding frames. `(0, 0)`
+/// marks an asset whose header could not be read (never happens for the curated
+/// set, but keeps the index total-mappable). Indexed by registry index.
+static NATIVE_SIZES: LazyLock<Vec<(u16, u16)>> = LazyLock::new(|| {
+    NAMES
+        .iter()
+        .map(|stem| {
+            EmoteAssets::get(&format!("{stem}.gif"))
+                .filter(|f| f.data.len() >= 10 && f.data.starts_with(b"GIF"))
+                .map_or((0, 0), |f| {
+                    let d = &f.data;
+                    (
+                        u16::from_le_bytes([d[6], d[7]]),
+                        u16::from_le_bytes([d[8], d[9]]),
+                    )
+                })
+        })
+        .collect()
+});
+
+/// Native GIF pixel size `(width, height)` for the emote at `index`, or `None`
+/// if the index is out of range. Cheap (cached header read, no frame decode) so
+/// the render path can size each emote from its real dimensions every frame.
+#[must_use]
+pub fn native_size(index: u32) -> Option<(u16, u16)> {
+    NATIVE_SIZES.get(index as usize).copied()
+}
+
 /// One decoded animation frame and its display duration (ms, floored at 20).
 pub type Frame = (image::RgbaImage, u32);
 
@@ -221,6 +250,31 @@ mod tests {
     #[test]
     fn frames_unknown_is_none() {
         assert!(frames("definitely_not_an_emote").is_none());
+    }
+
+    #[test]
+    fn native_size_matches_decoded_frame_dimensions() {
+        // The header read (LE bytes 6..10) must agree with the fully decoded
+        // first frame for several differently-shaped assets — this pins both the
+        // byte offsets and the endianness.
+        for name in ["usmiech", "lol", "ok"] {
+            let idx = resolve(name).unwrap_or_else(|| panic!("{name} resolves"));
+            let (hw, hh) = native_size(idx).expect("native size");
+            let (img, _) = &frames(name).expect("frames")[0];
+            assert_eq!(
+                (u32::from(hw), u32::from(hh)),
+                (img.width(), img.height()),
+                "{name}: header size {hw}x{hh} must match decoded {}x{}",
+                img.width(),
+                img.height()
+            );
+            assert!(hw > 0 && hh > 0, "{name}: non-zero native size");
+        }
+    }
+
+    #[test]
+    fn native_size_out_of_range_is_none() {
+        assert!(native_size(u32::MAX).is_none());
     }
 
     #[test]
