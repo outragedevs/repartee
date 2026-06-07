@@ -260,6 +260,11 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v1.5.0
+
+- **Inline emotes now size to the GIF, not a fixed box.** Every `:name:` emote was previously crushed into a fixed 2-cell square, so the many wide GG7 animations (e.g. 40×18, 50×20) rendered as a tiny squished strip. Each emote's on-screen footprint is now derived from its native GIF dimensions and the terminal's cell size — preserving aspect ratio and never upscaling past the original — so small square emotes keep their size while wide GIFs span proportionally more columns. Tall GIFs may also span multiple rows: the chat reserves blank rows below the line so the emote grows downward without overlapping following text (and never paints over the input bar). Tunable via `[emotes] max_cols` (default 8) and `max_rows` (default 3); set `max_rows = 1` to keep every emote strictly one row tall.
+- **Inline emotes rescale when you change the terminal font size.** The cell pixel size was detected once at startup, so zooming the terminal in/out left emotes rendered for the old font — correct only near the launch size. A resize now re-derives the cell size and re-renders emotes at the new scale.
+
 ### v1.4.3
 
 - **Web UI: emote/emoji picker now inserts on mobile.** Both the desktop and mobile layouts mount their own composer, so picking an emote routed the inserted `:name:`/emoji to the hidden desktop input; mobile saw nothing. The insertion now targets the visible composer.
