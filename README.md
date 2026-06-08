@@ -260,6 +260,10 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v1.6.0
+
+- **Scroll up to read backlog from the logs — no more `repartee l`.** Scrolling a live channel/query toward the top now pages older messages straight from the SQLite log and prepends them, so you can catch up on days of history right in the normal view (irssi/weechat/The Lounge style) instead of dropping into the read-only log browser. This works in **both the TUI and the web UI** — in the browser the scroll position is anchored so loading older messages doesn't make the view jump. Memory stays bounded: a buffer you've scrolled up into is kept larger while you read it and trimmed back down (freeing the loaded history) when you return to the live bottom. Encrypted logs now decrypt on these reads too (both the TUI buffer-open backlog and web scroll-back previously showed ciphertext when `[storage] encrypt = true`).
+
 ### v1.5.0
 
 - **Inline emotes now size to the GIF, not a fixed box.** Every `:name:` emote was previously crushed into a fixed 2-cell square, so the many wide GG7 animations (e.g. 40×18, 50×20) rendered as a tiny squished strip. Each emote's on-screen footprint is now derived from its native GIF dimensions and the terminal's cell size — preserving aspect ratio and never upscaling past the original — so small square emotes keep their size while wide GIFs span proportionally more columns. Tall GIFs may also span multiple rows: the chat reserves blank rows below the line so the emote grows downward without overlapping following text (and never paints over the input bar). Tunable via `[emotes] max_cols` (default 8) and `max_rows` (default 3); set `max_rows = 1` to keep every emote strictly one row tall.
