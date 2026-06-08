@@ -184,6 +184,13 @@ pub struct Buffer {
     /// before the first lazy load fires; without an explicit flag the
     /// real history would never load.
     pub log_initial_loaded: bool,
+    /// `true` while the user has scrolled this live-chat buffer up into
+    /// on-demand-loaded backlog. Pinned buffers are exempt from normal
+    /// scrollback trimming (so a live message can't drop the loaded history)
+    /// and are instead bounded by `PINNED_BACKLOG_CAP`. Reset — and the buffer
+    /// collapsed back to `scrollback_limit` — when the user returns to the live
+    /// bottom. See `app::backlog`.
+    pub pin_backlog: bool,
 }
 
 impl Buffer {
@@ -235,6 +242,7 @@ mod tests {
             log_newest_ts: None,
             history_exhausted: false,
             log_initial_loaded: false,
+            pin_backlog: false,
         };
 
         buf.touch_speaker("alice");
@@ -271,6 +279,7 @@ mod tests {
             log_newest_ts: None,
             history_exhausted: false,
             log_initial_loaded: false,
+            pin_backlog: false,
         };
 
         buf.touch_speaker("Alice");
@@ -303,6 +312,7 @@ mod tests {
             log_newest_ts: None,
             history_exhausted: false,
             log_initial_loaded: false,
+            pin_backlog: false,
         };
 
         for i in 0..60 {

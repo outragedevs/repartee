@@ -115,6 +115,25 @@ impl AppState {
         }
     }
 
+    /// Collapse a buffer's on-demand backlog window: if it's pinned (the user
+    /// scrolled it up into loaded history), unpin it, clear `history_exhausted`
+    /// so a later scroll-up reloads, and trim back to the normal
+    /// `scrollback_limit` — freeing the loaded backlog. No-op if not pinned.
+    pub(crate) fn collapse_buffer_backlog(&mut self, buffer_id: &str) {
+        let limit = self.scrollback_limit;
+        if let Some(buf) = self.buffers.get_mut(buffer_id)
+            && buf.pin_backlog
+        {
+            buf.pin_backlog = false;
+            buf.history_exhausted = false;
+            if limit > 0 && buf.messages.len() > limit {
+                let excess = buf.messages.len() - limit;
+                buf.messages.drain(..excess);
+                buf.messages.shrink_to(limit);
+            }
+        }
+    }
+
     pub fn set_active_buffer(&mut self, id: &str) {
         if !self.buffers.contains_key(id) {
             return;
@@ -122,6 +141,13 @@ impl AppState {
         let changed = self.active_buffer_id.as_deref() != Some(id);
         // Save current as previous
         if changed {
+            // Collapse the outgoing buffer's backlog window — otherwise a buffer
+            // left while scrolled up stays pinned forever (exempt from trimming,
+            // capped at PINNED_BACKLOG_CAP), leaking memory. This is the common
+            // chokepoint for every buffer switch (Alt+arrows, Alt+N, click, …).
+            if let Some(old) = self.active_buffer_id.clone() {
+                self.collapse_buffer_backlog(&old);
+            }
             self.previous_buffer_id = self.active_buffer_id.clone();
         }
         self.active_buffer_id = Some(id.to_string());
@@ -604,9 +630,26 @@ fn track_speaker(buf: &mut Buffer, message: &Message) {
     }
 }
 
-/// Trim oldest messages from the buffer if it exceeds the scrollback limit.
-/// Uses `VecDeque::drain` which is O(n) on the drained range only (no shift of remaining).
+/// The scrollback limit actually applied to a buffer, accounting for the pin.
+/// A pinned buffer (the user has scrolled it up into on-demand-loaded backlog)
+/// keeps up to [`crate::app::backlog::PINNED_BACKLOG_CAP`] (or `limit` if the
+/// user configured an even larger scrollback) so a live message can't drop the
+/// loaded history; an unpinned buffer keeps `limit`. `limit == 0` means
+/// unlimited and is preserved in both states.
+const fn effective_scrollback_limit(pinned: bool, limit: usize) -> usize {
+    if !pinned || limit == 0 {
+        // Unpinned uses the plain limit; `0` (unlimited) is preserved in both
+        // states so a user who opted out of trimming keeps everything.
+        return limit;
+    }
+    let cap = crate::app::backlog::PINNED_BACKLOG_CAP;
+    if limit > cap { limit } else { cap }
+}
+
+/// Trim oldest messages from the buffer if it exceeds the (pin-aware) scrollback
+/// limit. Uses `VecDeque::drain` which is O(n) on the drained range only.
 fn enforce_scrollback(buf: &mut Buffer, limit: usize) {
+    let limit = effective_scrollback_limit(buf.pin_backlog, limit);
     if limit > 0 && buf.messages.len() > limit {
         let excess = buf.messages.len() - limit;
         buf.messages.drain(..excess);
@@ -697,6 +740,7 @@ mod tests {
             log_newest_ts: None,
             history_exhausted: false,
             log_initial_loaded: false,
+            pin_backlog: false,
         }
     }
 
@@ -1013,6 +1057,91 @@ mod tests {
         let row2 = rx.try_recv().unwrap();
         assert!(row2.text.is_empty(), "reference row should have empty text");
         assert_eq!(row2.ref_id, Some(primary_id));
+    }
+
+    #[test]
+    fn effective_limit_unpinned_is_the_plain_limit() {
+        assert_eq!(super::effective_scrollback_limit(false, 2000), 2000);
+        assert_eq!(super::effective_scrollback_limit(false, 0), 0);
+    }
+
+    #[test]
+    fn effective_limit_pinned_raises_to_backlog_cap() {
+        assert_eq!(
+            super::effective_scrollback_limit(true, 2000),
+            crate::app::backlog::PINNED_BACKLOG_CAP
+        );
+    }
+
+    #[test]
+    fn effective_limit_pinned_keeps_unlimited() {
+        // limit == 0 means unlimited and must stay unlimited even when pinned.
+        assert_eq!(super::effective_scrollback_limit(true, 0), 0);
+    }
+
+    #[test]
+    fn effective_limit_pinned_keeps_a_larger_configured_limit() {
+        let bigger = crate::app::backlog::PINNED_BACKLOG_CAP + 5000;
+        assert_eq!(super::effective_scrollback_limit(true, bigger), bigger);
+    }
+
+    #[test]
+    fn pinned_buffer_is_exempt_from_trimming() {
+        // With a tiny limit, a pinned buffer keeps all its messages (the loaded
+        // backlog) instead of being trimmed down to the limit.
+        let mut state = make_test_state();
+        state.scrollback_limit = 3;
+        // Seed one message so the buffer exists, then pin it.
+        let seed = make_test_message(&mut state, "seed");
+        state.add_message("libera/#rust", seed);
+        state
+            .buffers
+            .get_mut("libera/#rust")
+            .expect("buffer created by add_message")
+            .pin_backlog = true;
+        for i in 0..6 {
+            let msg = make_test_message(&mut state, &format!("msg{i}"));
+            state.add_message("libera/#rust", msg);
+        }
+        let buf = state.buffers.get("libera/#rust").unwrap();
+        assert_eq!(buf.messages.len(), 7, "pinned buffer must not trim to limit");
+    }
+
+    #[test]
+    fn switching_away_collapses_a_pinned_buffer() {
+        // A buffer scrolled up into backlog (pinned, holding more than the limit)
+        // must collapse — unpin + trim — when the user switches to another buffer,
+        // so it can't stay pinned (and memory-bloated) forever.
+        let mut state = make_test_state();
+        state.scrollback_limit = 3;
+        // Build #rust with 6 messages, pinned (simulating loaded backlog).
+        for i in 0..6 {
+            let msg = make_test_message(&mut state, &format!("r{i}"));
+            state.add_message("libera/#rust", msg);
+        }
+        state.set_active_buffer("libera/#rust");
+        state
+            .buffers
+            .get_mut("libera/#rust")
+            .unwrap()
+            .pin_backlog = true;
+        // Re-add so the pinned buffer holds >limit again (it was trimmed to 3
+        // before pinning; push it back up to 6 while pinned).
+        for i in 6..9 {
+            let msg = make_test_message(&mut state, &format!("r{i}"));
+            state.add_message("libera/#rust", msg);
+        }
+        assert_eq!(state.buffers.get("libera/#rust").unwrap().messages.len(), 6);
+
+        // Switch to another buffer → outgoing #rust collapses.
+        let other = make_test_message(&mut state, "l0");
+        state.add_message("libera/#linux", other);
+        state.set_active_buffer("libera/#linux");
+
+        let rust = state.buffers.get("libera/#rust").unwrap();
+        assert!(!rust.pin_backlog, "outgoing buffer must be unpinned");
+        assert!(!rust.history_exhausted, "exhausted flag cleared on collapse");
+        assert_eq!(rust.messages.len(), 3, "collapsed back to scrollback_limit");
     }
 
     #[test]

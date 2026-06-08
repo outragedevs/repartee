@@ -534,6 +534,7 @@ mod tests {
             log_newest_ts: None,
             history_exhausted: false,
             log_initial_loaded: false,
+            pin_backlog: false,
         });
 
         // Add users to the channel
@@ -773,6 +774,7 @@ mod tests {
             log_newest_ts: None,
             history_exhausted: false,
             log_initial_loaded: false,
+            pin_backlog: false,
         });
 
         // Add users — add_nick stores keys as lowercase

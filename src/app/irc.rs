@@ -80,6 +80,7 @@ impl App {
             log_newest_ts: None,
             history_exhausted: false,
             log_initial_loaded: false,
+            pin_backlog: false,
         });
         self.state.set_active_buffer(&server_buf_id);
 
@@ -404,6 +405,7 @@ impl App {
                             log_newest_ts: None,
                             history_exhausted: false,
                             log_initial_loaded: false,
+                            pin_backlog: false,
                         });
                     }
                 }

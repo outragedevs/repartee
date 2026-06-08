@@ -843,6 +843,7 @@ fn handle_privmsg(
             log_newest_ts: None,
             history_exhausted: false,
             log_initial_loaded: false,
+            pin_backlog: false,
         });
     }
 
@@ -1309,6 +1310,7 @@ fn handle_join(
                 log_newest_ts: None,
                 history_exhausted: false,
                 log_initial_loaded: false,
+                pin_backlog: false,
             });
         }
         state.set_active_buffer(&buffer_id);
@@ -4187,6 +4189,7 @@ mod tests {
             log_newest_ts: None,
             history_exhausted: false,
             log_initial_loaded: false,
+            pin_backlog: false,
         });
         // Channel buffer
         let chan_id = make_buffer_id("test", "#test");
@@ -4212,6 +4215,7 @@ mod tests {
             log_newest_ts: None,
             history_exhausted: false,
             log_initial_loaded: false,
+            pin_backlog: false,
         });
         // Add ourselves to the channel
         state.add_nick(
@@ -4252,6 +4256,7 @@ mod tests {
             log_newest_ts: None,
             history_exhausted: false,
             log_initial_loaded: false,
+            pin_backlog: false,
         }
     }
 
@@ -5105,6 +5110,7 @@ mod tests {
             log_newest_ts: None,
             history_exhausted: false,
             log_initial_loaded: false,
+            pin_backlog: false,
         });
 
         // Add alice to both channels
@@ -5245,6 +5251,7 @@ mod tests {
             log_newest_ts: None,
             history_exhausted: false,
             log_initial_loaded: false,
+            pin_backlog: false,
         });
 
         // Add alice to both channels
@@ -5378,6 +5385,7 @@ mod tests {
             log_newest_ts: None,
             history_exhausted: false,
             log_initial_loaded: false,
+            pin_backlog: false,
         });
 
         // Add alice to both channels
@@ -5922,6 +5930,7 @@ mod tests {
             log_newest_ts: None,
             history_exhausted: false,
             log_initial_loaded: false,
+            pin_backlog: false,
         });
 
         // Server echoes our NOTICE to "bob"
