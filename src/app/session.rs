@@ -157,6 +157,23 @@ impl App {
         // Re-detect image protocol using the shim's terminal env.
         self.refresh_image_protocol();
 
+        // Drop every cached emote protocol image. This reattach is a *new*
+        // terminal (new SSH session / window) with a fresh graphics state — none
+        // of the images this daemon transmitted to the previous terminal exist in
+        // it. ratatui-image's Kitty protocol transmits each image exactly once
+        // (a `transmitted` flag on the cached `StatefulProtocol`) and thereafter
+        // emits only the Unicode placeholder glyphs (U+10EEEE) that reference it
+        // by id. Reusing the cached protocols would send those placeholders to a
+        // terminal that never received the image, so they render as missing-glyph
+        // black squares. Clearing forces fresh protocols that re-transmit on the
+        // first frame to the new terminal.
+        self.emote_animator.clear();
+
+        // Same transmit-once hazard for an image-preview overlay left open across
+        // the reattach: its cached `StatefulProtocol` would emit dangling
+        // placeholders to the new terminal. Dismiss it so reopening re-transmits.
+        self.image_preview = crate::image_preview::PreviewStatus::Hidden;
+
         // Add system message to the active buffer.
         let buf_id = self.state.active_buffer_id.clone().unwrap_or_default();
         let id = self.state.next_message_id();
