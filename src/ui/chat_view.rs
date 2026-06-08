@@ -43,6 +43,17 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     let graphical = app.emotes_graphical();
+    // Per-frame emote sizing from the live terminal cell size + config caps.
+    // `None` in text mode.
+    let emote_sizing = graphical.then(|| {
+        let (font_w, font_h) = app.picker.font_size();
+        crate::ui::emote_layout::EmoteSizing {
+            font_w,
+            font_h,
+            max_cols: app.config.emotes.max_cols,
+            max_rows: app.config.emotes.max_rows,
+        }
+    });
     // Emote placements resolved from this frame's visible lines; stored on `app`
     // after the immutable borrow below ends, for the compositing pass.
     let mut placements: Vec<crate::ui::emote_layout::EmotePlacement> = Vec::new();
@@ -94,15 +105,28 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
                 &app.theme,
                 &app.config,
                 nick_fg,
-                graphical,
+                emote_sizing,
             );
             let wrapped = super::wrap_line(line, total_width, indent);
+            // Reserve blank rows below any line carrying a multi-row emote so the
+            // emote's rect spans down without overlapping the next line's text.
+            let wrapped = match emote_sizing {
+                Some(sizing) => crate::ui::emote_layout::reserve_emote_rows(wrapped, |idx| {
+                    sizing.footprint(idx).1
+                }),
+                None => wrapped,
+            };
 
             // Push in reverse so the final deque is in chronological order.
             for wl in wrapped.into_iter().rev() {
                 visual_lines.push_front(wl);
             }
 
+            // The budget check counts the *expanded* lines (reserved blanks
+            // included), so multi-row emotes only make this break fire sooner —
+            // `visual_lines.len()` stays bounded by `needed` (≤ buffer_len *
+            // MAX_WRAPPED_LINES_PER_MSG) plus one message's lines. The v0.8.4 OOM
+            // bound therefore still holds; do not move the reservation after this.
             if visual_lines.len() > needed {
                 break;
             }
@@ -120,8 +144,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             .collect();
 
         // Resolve inline-emote screen rects before the Paragraph consumes the lines.
-        if graphical {
-            placements = crate::ui::emote_layout::resolve_placements(&visible_lines, area);
+        if let Some(sizing) = emote_sizing {
+            placements = crate::ui::emote_layout::resolve_placements(
+                &visible_lines,
+                area,
+                |idx| sizing.footprint(idx),
+            );
         }
 
         let paragraph = Paragraph::new(visible_lines).style(Style::default().bg(bg));

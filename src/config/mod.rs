@@ -631,6 +631,15 @@ pub struct EmotesConfig {
     pub render: RenderMode,
     /// Picker / insert preview language.
     pub lang: EmoteLang,
+    /// Maximum width, in terminal cells, an inline emote may occupy. Wide GIFs
+    /// scale up to this many columns (preserving aspect, never past native size)
+    /// instead of being crushed into a fixed 2-cell box.
+    pub max_cols: u16,
+    /// Maximum height, in terminal rows, an inline emote may occupy. Tall GIFs
+    /// grow up to this many rows (the chat reserves blank rows below the line so
+    /// the emote does not overlap following text). `1` keeps every emote strictly
+    /// inline (no reserved rows).
+    pub max_rows: u16,
 }
 
 impl EmotesConfig {
@@ -649,6 +658,8 @@ impl Default for EmotesConfig {
             enabled: true,
             render: RenderMode::Graphical,
             lang: EmoteLang::En,
+            max_cols: 8,
+            max_rows: 3,
         }
     }
 }
@@ -737,17 +748,24 @@ mod tests {
         let cfg = AppConfig::default();
         assert!(cfg.emotes.enabled);
         assert_eq!(cfg.emotes.render, RenderMode::Graphical);
+        assert_eq!(cfg.emotes.max_cols, 8);
+        assert_eq!(cfg.emotes.max_rows, 3);
 
         // TOML round-trip preserves the section.
         let toml_str = toml::to_string(&cfg).expect("serialize");
         let back: AppConfig = toml::from_str(&toml_str).expect("deserialize");
         assert_eq!(back.emotes.render, RenderMode::Graphical);
+        assert_eq!(back.emotes.max_cols, 8);
+        assert_eq!(back.emotes.max_rows, 3);
 
-        // Parsing an explicit section.
+        // Parsing an explicit section. An older config without the new sizing
+        // fields must still deserialize, falling back to the defaults.
         let parsed: AppConfig =
             toml::from_str("[emotes]\nenabled = false\nrender = \"text\"\n").unwrap();
         assert!(!parsed.emotes.enabled);
         assert_eq!(parsed.emotes.render, RenderMode::Text);
+        assert_eq!(parsed.emotes.max_cols, 8, "missing max_cols falls back to default");
+        assert_eq!(parsed.emotes.max_rows, 3, "missing max_rows falls back to default");
     }
 
     #[test]
