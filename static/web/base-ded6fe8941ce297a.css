@@ -1000,3 +1000,53 @@ html, body {
 @media (max-width: 767px) {
     .input-emote-btn.emoji { display: none; }
 }
+
+/* ── Scrollbars ──────────────────────────────────────────────────────────
+   Safari/macOS draws thin, auto-hiding overlay scrollbars natively, so the UI
+   looked clean there; every other browser fell back to wide, opaque OS
+   scrollbars that eat layout width and clash with the theme. Style them to be
+   thin, theme-coloured, and reveal only while the pointer is over the scrolling
+   area — matching Safari across Chrome, Edge and Firefox. The thumb uses the
+   per-theme --fg-muted / --fg-dim tokens, so it adapts to every theme. */
+
+/* Firefox — inherits to every scrollable descendant. It cannot hide the thumb
+   on hover, so it shows a permanently-thin themed bar (still far subtler than
+   the default).
+
+   Gated behind `@supports not selector(::-webkit-scrollbar)` so ONLY Firefox
+   applies it: Chrome/Edge 121+ now support `scrollbar-color`, and when it is set
+   they ignore the `::-webkit-scrollbar-*` pseudo-elements entirely — which would
+   kill the reveal-on-hover thumb below and leave a permanently-visible bar. The
+   feature query keeps WebKit browsers on the pseudo-element path. */
+@supports not selector(::-webkit-scrollbar) {
+    html {
+        scrollbar-width: thin;
+        scrollbar-color: var(--fg-muted) transparent;
+    }
+}
+
+/* WebKit (Chrome, Edge, Safari) — thin track, no arrow buttons, rounded thumb. */
+*::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+    background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+    /* Transparent (invisible) by default. The 2px transparent border plus
+       background-clip:padding-box insets it into a slim rounded pill when shown. */
+    background-color: transparent;
+    border: 2px solid transparent;
+    border-radius: 8px;
+    background-clip: padding-box;
+}
+/* Reveal while the pointer is over the scrolling area; brighten while dragging. */
+*:hover::-webkit-scrollbar-thumb {
+    background-color: var(--fg-muted);
+}
+*::-webkit-scrollbar-thumb:hover,
+*::-webkit-scrollbar-thumb:active {
+    background-color: var(--fg-dim);
+}
