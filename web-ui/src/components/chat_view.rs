@@ -9,6 +9,11 @@ use crate::state::AppState;
 /// user has to actively scroll up before stickiness flips off.
 const SCROLL_THRESHOLD: f64 = 30.0;
 
+/// Distance from the top (px) at which scrolling up triggers an on-demand
+/// fetch of an older backlog page from the server. Generous so the page is
+/// usually loaded before the user reaches the very top.
+const BACKLOG_TRIGGER_PX: f64 = 400.0;
+
 fn is_near_bottom(el: &web_sys::Element) -> bool {
     el.scroll_height() as f64 - el.scroll_top() as f64 - el.client_height() as f64
         <= SCROLL_THRESHOLD
@@ -65,6 +70,12 @@ pub fn ChatView() -> impl IntoView {
     // messages would queue N pins per tick.
     let pin_scheduled = StoredValue::new(false);
 
+    // While scrolling up, holds the viewport's distance-from-bottom captured
+    // when a backlog fetch was sent. After the older page prepends (content
+    // added above), an Effect restores `scrollTop` to keep that same distance,
+    // so the view stays anchored instead of jumping. `None` = no fetch pending.
+    let pending_anchor = StoredValue::new(None::<f64>);
+
     let do_pin = move |el: &web_sys::Element| {
         skip_next_scroll.set_value(true);
         pin_to_bottom(el);
@@ -75,12 +86,18 @@ pub fn ChatView() -> impl IntoView {
     // chance to render the new buffer's messages).
     Effect::new(move || {
         let active_id = state.active_buffer.get();
-        let is_switch = prev_buffer_id.get_value().as_deref() != active_id.as_deref();
+        let old_id = prev_buffer_id.get_value();
+        let is_switch = old_id.as_deref() != active_id.as_deref();
         if let Some(ref id) = active_id {
             prev_buffer_id.set_value(Some(id.clone()));
         }
         if !is_switch {
             return;
+        }
+        // Collapse the buffer we just left so it doesn't keep a pinned (up to
+        // PINNED_WEB_CAP) backlog window in memory forever.
+        if let Some(old_id) = old_id {
+            state.collapse_backlog(&old_id);
         }
         state.is_at_bottom.set(true);
         let Some(el) = chat_ref.get() else { return };
@@ -120,6 +137,40 @@ pub fn ChatView() -> impl IntoView {
             let Some(el) = chat_ref.get() else { return };
             let el_dom: web_sys::Element = el.into();
             do_pin(&el_dom);
+        });
+        let _ = window.request_animation_frame(cb.as_ref().unchecked_ref());
+        cb.forget();
+    });
+
+    // After a scroll-back prepend lands, restore the scroll position so the
+    // view stays anchored on the same content (older lines were added above).
+    // Subscribes to `backlog_fetching` (NOT `messages`): it fires once when the
+    // fetch starts (still fetching → skip) and again when the response clears the
+    // guard (restore). Keying on the guard — not the message list — means a live
+    // NewMessage arriving mid-fetch can't consume the anchor early.
+    Effect::new(move || {
+        let active = state.active_buffer.get();
+        let still_fetching = state
+            .backlog_fetching
+            .with(|s| active.as_deref().is_some_and(|id| s.contains(id)));
+        if still_fetching {
+            return;
+        }
+        let Some(dist) = pending_anchor.get_value() else {
+            return;
+        };
+        pending_anchor.set_value(None);
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let cb = wasm_bindgen::prelude::Closure::once(move || {
+            let Some(el) = chat_ref.get() else { return };
+            let el_dom: web_sys::Element = el.into();
+            // Keep the same distance from the bottom across the prepend.
+            skip_next_scroll.set_value(true);
+            let target = (f64::from(el_dom.scroll_height()) - dist).max(0.0);
+            #[allow(clippy::cast_possible_truncation)]
+            el_dom.set_scroll_top(target as i32);
         });
         let _ = window.request_animation_frame(cb.as_ref().unchecked_ref());
         cb.forget();
@@ -203,6 +254,47 @@ pub fn ChatView() -> impl IntoView {
         let next = is_near_bottom(el);
         if state.is_at_bottom.get_untracked() != next {
             state.is_at_bottom.set(next);
+            // Returned to the live bottom: collapse the loaded backlog window
+            // (free the older lines, re-arm scroll-up).
+            if next && let Some(id) = state.active_buffer.get_untracked() {
+                state.collapse_backlog(&id);
+            }
+        }
+        // Near the top: pull an older page from the server, unless one is already
+        // in flight or the server told us there's nothing older.
+        if f64::from(el.scroll_top()) < BACKLOG_TRIGGER_PX {
+            let Some(id) = state.active_buffer.get_untracked() else {
+                return;
+            };
+            if state.backlog_fetching.with_untracked(|s| s.contains(&id)) {
+                return;
+            }
+            if state
+                .backlog_has_more
+                .with_untracked(|m| m.get(&id) == Some(&false))
+            {
+                return;
+            }
+            // Oldest real (non-separator) message's timestamp = the cursor.
+            let before = state.messages.with_untracked(|m| {
+                m.get(&id)
+                    .and_then(|v| v.iter().find(|msg| msg.id != 0).map(|msg| msg.timestamp))
+            });
+            let Some(before) = before else {
+                return;
+            };
+            // Anchor: remember the distance from the bottom so the restore Effect
+            // can keep the view put once the older page prepends.
+            pending_anchor
+                .set_value(Some(f64::from(el.scroll_height()) - f64::from(el.scroll_top())));
+            state.backlog_fetching.update(|s| {
+                s.insert(id.clone());
+            });
+            crate::ws::send_command(&crate::protocol::WebCommand::FetchMessages {
+                buffer_id: id,
+                limit: 100,
+                before: Some(before),
+            });
         }
     };
 

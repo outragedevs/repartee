@@ -21,6 +21,12 @@ use crate::protocol::*;
 /// free, with no JS scroll-handling complexity.
 const MAX_BUFFER_MESSAGES: usize = 1000;
 
+/// Higher per-buffer cap while the user is scrolled up reading backlog (the
+/// buffer is "pinned"). Loaded older pages are kept up to this bound instead of
+/// being trimmed back to `MAX_BUFFER_MESSAGES`; returning to the bottom collapses
+/// the buffer back down. Mirrors the TUI's `PINNED_BACKLOG_CAP`.
+const PINNED_WEB_CAP: usize = 5000;
+
 /// Client-side application state, stored as Leptos signals.
 #[derive(Clone, Copy)]
 pub struct AppState {
@@ -75,6 +81,13 @@ pub struct AppState {
     /// A token to splice into the input at the caret (`:name:` or a Unicode
     /// emoji). The input component consumes it and clears it back to `None`.
     pub pending_insert: RwSignal<Option<String>>,
+    /// Per-buffer: whether the server reported more history is available older
+    /// than what's loaded (from the `has_more` field of `Messages`). Drives the
+    /// scroll-up loader — `false` (or absent) means stop fetching.
+    pub backlog_has_more: RwSignal<HashMap<String, bool>>,
+    /// Buffers with an in-flight scroll-up `FetchMessages`. Guards against
+    /// firing a second request before the first response lands.
+    pub backlog_fetching: RwSignal<HashSet<String>>,
 }
 
 impl AppState {
@@ -115,6 +128,31 @@ impl AppState {
             emote_picker_open: RwSignal::new(false),
             emoji_picker_open: RwSignal::new(false),
             pending_insert: RwSignal::new(None),
+            backlog_has_more: RwSignal::new(HashMap::new()),
+            backlog_fetching: RwSignal::new(HashSet::new()),
+        }
+    }
+
+    /// Collapse a buffer's loaded backlog window after the user returns to the
+    /// bottom: trim back to `MAX_BUFFER_MESSAGES` (freeing the older lines we're
+    /// no longer displaying) and re-arm `has_more` so a later scroll-up fetches
+    /// again. Mirrors the TUI's collapse-on-return-to-bottom.
+    pub fn collapse_backlog(&self, buffer_id: &str) {
+        let mut trimmed = false;
+        self.messages.update(|msgs| {
+            if let Some(entry) = msgs.get_mut(buffer_id)
+                && entry.len() > MAX_BUFFER_MESSAGES
+            {
+                let drop = entry.len() - MAX_BUFFER_MESSAGES;
+                entry.drain(..drop);
+                entry.shrink_to(MAX_BUFFER_MESSAGES);
+                trimmed = true;
+            }
+        });
+        if trimmed {
+            self.backlog_has_more.update(|m| {
+                m.insert(buffer_id.to_string(), true);
+            });
         }
     }
 
@@ -134,6 +172,8 @@ impl AppState {
                 self.messages.set(HashMap::new());
                 self.nick_lists.set(HashMap::new());
                 self.backlog_loaded.set(HashSet::new());
+                self.backlog_has_more.set(HashMap::new());
+                self.backlog_fetching.set(HashSet::new());
 
                 self.buffers.set(buffers);
                 self.connections.set(connections);
@@ -180,6 +220,13 @@ impl AppState {
                 }
             }
             WebEvent::NewMessage { buffer_id, message } => {
+                // Keep the larger window only for the buffer the user is actively
+                // reading backlog in (active + scrolled up); every other buffer
+                // trims to the normal cap.
+                let active = self.active_buffer.get_untracked();
+                let pinned =
+                    active.as_deref() == Some(&buffer_id) && !self.is_at_bottom.get_untracked();
+                let cap = if pinned { PINNED_WEB_CAP } else { MAX_BUFFER_MESSAGES };
                 self.messages.update(|msgs| {
                     let entry = msgs.entry(buffer_id.clone()).or_default();
                     // Dedup by id — guards against the SyncInit →
@@ -190,7 +237,7 @@ impl AppState {
                     // so always admit those.
                     if message.id == 0 || !entry.iter().any(|m| m.id == message.id) {
                         entry.push(message);
-                        cap_messages(entry);
+                        cap_messages(entry, cap);
                     }
                 });
                 // Update unread count if not the active buffer.
@@ -278,8 +325,18 @@ impl AppState {
             WebEvent::Messages {
                 buffer_id,
                 messages,
+                has_more,
                 ..
             } => {
+                // A scroll-back response arrives while the user is reading
+                // backlog (not at bottom): keep a larger window so the just-
+                // prepended older page isn't immediately trimmed away. An
+                // initial load arrives at the bottom and uses the normal cap.
+                let cap = if self.is_at_bottom.get_untracked() {
+                    MAX_BUFFER_MESSAGES
+                } else {
+                    PINNED_WEB_CAP
+                };
                 self.messages.update(|msgs| {
                     let entry = msgs.entry(buffer_id.clone()).or_default();
                     // Drop incoming messages whose id is already present
@@ -299,13 +356,21 @@ impl AppState {
                     // Prepend older messages (they come from scroll-back).
                     let mut combined = with_separators;
                     combined.append(entry);
-                    cap_messages(&mut combined);
+                    cap_messages(&mut combined, cap);
                     *entry = combined;
                 });
                 // Mark this buffer's DB backlog as loaded so the Layout Effect
                 // won't re-fetch on subsequent switches to this buffer.
                 self.backlog_loaded.update(|set| {
-                    set.insert(buffer_id);
+                    set.insert(buffer_id.clone());
+                });
+                // Record whether older history remains, and clear the in-flight
+                // guard so the next scroll-up may fetch again.
+                self.backlog_has_more.update(|m| {
+                    m.insert(buffer_id.clone(), has_more);
+                });
+                self.backlog_fetching.update(|s| {
+                    s.remove(&buffer_id);
                 });
             }
             WebEvent::NickList {
@@ -519,13 +584,13 @@ impl AppState {
     }
 }
 
-fn cap_messages(messages: &mut Vec<WireMessage>) {
-    if messages.len() <= MAX_BUFFER_MESSAGES {
+fn cap_messages(messages: &mut Vec<WireMessage>, cap: usize) {
+    if messages.len() <= cap {
         return;
     }
-    let drop_count = messages.len() - MAX_BUFFER_MESSAGES;
+    let drop_count = messages.len() - cap;
     messages.drain(..drop_count);
-    messages.shrink_to(MAX_BUFFER_MESSAGES);
+    messages.shrink_to(cap);
 }
 
 fn buf_type_order(t: &str) -> u8 {

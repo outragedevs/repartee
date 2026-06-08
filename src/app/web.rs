@@ -732,7 +732,13 @@ impl App {
                 .map(|m| crate::web::snapshot::message_to_wire(m, extractor))
                 .collect();
             if !msgs.is_empty() {
-                let has_more = buf.messages.len() > capped;
+                // More history is available if the in-memory page itself was
+                // truncated, OR a log DB exists that may hold older rows than
+                // what's in memory. Without the latter, a buffer with fewer than
+                // `capped` live messages would report `has_more = false` and the
+                // web client would never scroll back into the logs. A brand-new
+                // channel with no DB history just gets one empty scroll-back fetch.
+                let has_more = buf.messages.len() > capped || self.storage.is_some();
                 tracing::debug!(
                     %buffer_id, count = msgs.len(),
                     "web FetchMessages: sending {} in-memory messages", msgs.len()
@@ -749,12 +755,25 @@ impl App {
 
         // If the in-memory buffer was empty (e.g. brand new buffer or post-reconnect
         // before messages arrive), fall through to DB. Also used for scroll-back.
+        // Every path below MUST send exactly one Messages reply (even empty) so
+        // the client clears its per-buffer in-flight guard and doesn't block
+        // future scroll-up fetches.
+        let send_empty = |app: &Self| {
+            app.broadcast_web(crate::web::protocol::WebEvent::Messages {
+                buffer_id: buffer_id.to_string(),
+                messages: Vec::new(),
+                has_more: false,
+                session_id: Some(session_id.to_string()),
+            });
+        };
         let Some(ref storage) = self.storage else {
             tracing::warn!("web FetchMessages: storage not available");
+            send_empty(self);
             return;
         };
         let Ok(db) = storage.db.lock() else {
             tracing::warn!("web FetchMessages: failed to lock db");
+            send_empty(self);
             return;
         };
         let capped_limit = limit.min(500) as usize;
@@ -771,7 +790,9 @@ impl App {
             before,
             capped_limit + 1,
             storage.encrypt,
-            None,
+            // Read-side key so encrypted logs decrypt on web scroll-back
+            // (previously `None` => the client received ciphertext).
+            storage.crypto_key.as_ref(),
         );
         match messages {
             Ok(mut msgs) => {
@@ -795,6 +816,8 @@ impl App {
             }
             Err(e) => {
                 tracing::warn!(%buffer_id, error = %e, "web FetchMessages: query failed");
+                drop(db);
+                send_empty(self);
             }
         }
     }
