@@ -1011,10 +1011,18 @@ html, body {
 
 /* Firefox — inherits to every scrollable descendant. It cannot hide the thumb
    on hover, so it shows a permanently-thin themed bar (still far subtler than
-   the default). */
-html {
-    scrollbar-width: thin;
-    scrollbar-color: var(--fg-muted) transparent;
+   the default).
+
+   Gated behind `@supports not selector(::-webkit-scrollbar)` so ONLY Firefox
+   applies it: Chrome/Edge 121+ now support `scrollbar-color`, and when it is set
+   they ignore the `::-webkit-scrollbar-*` pseudo-elements entirely — which would
+   kill the reveal-on-hover thumb below and leave a permanently-visible bar. The
+   feature query keeps WebKit browsers on the pseudo-element path. */
+@supports not selector(::-webkit-scrollbar) {
+    html {
+        scrollbar-width: thin;
+        scrollbar-color: var(--fg-muted) transparent;
+    }
 }
 
 /* WebKit (Chrome, Edge, Safari) — thin track, no arrow buttons, rounded thumb. */
