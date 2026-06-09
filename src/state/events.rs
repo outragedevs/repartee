@@ -657,6 +657,11 @@ fn enforce_scrollback(buf: &mut Buffer, limit: usize) {
         // Without this, a burst of 10K messages → drain to 2000 still
         // holds 10K slots of heap allocation.
         buf.messages.shrink_to(limit);
+        // We just dropped the oldest in-memory rows, so there is now older
+        // history below the in-memory head (it still lives in the log DB).
+        // Clear any stale `history_exhausted` set by an earlier short backlog
+        // load, otherwise `maybe_load_older_chat_backlog` would refuse to page.
+        buf.history_exhausted = false;
     }
 }
 
@@ -1105,6 +1110,33 @@ mod tests {
         }
         let buf = state.buffers.get("libera/#rust").unwrap();
         assert_eq!(buf.messages.len(), 7, "pinned buffer must not trim to limit");
+    }
+
+    #[test]
+    fn trimming_clears_stale_history_exhausted() {
+        // A buffer that loaded its whole (short) history is marked exhausted.
+        // Once live traffic trims the oldest rows, older history exists below the
+        // in-memory head again, so the flag must clear or scroll-up would refuse.
+        let mut state = make_test_state();
+        state.scrollback_limit = 3;
+        let seed = make_test_message(&mut state, "seed");
+        state.add_message("libera/#rust", seed);
+        state
+            .buffers
+            .get_mut("libera/#rust")
+            .unwrap()
+            .history_exhausted = true;
+        // Add enough to force a trim (unpinned → trims to limit 3).
+        for i in 0..5 {
+            let msg = make_test_message(&mut state, &format!("m{i}"));
+            state.add_message("libera/#rust", msg);
+        }
+        let buf = state.buffers.get("libera/#rust").unwrap();
+        assert_eq!(buf.messages.len(), 3, "trimmed to limit");
+        assert!(
+            !buf.history_exhausted,
+            "trimming must clear the stale exhausted flag"
+        );
     }
 
     #[test]

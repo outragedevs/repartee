@@ -467,8 +467,9 @@ impl App {
                 buffer_id,
                 limit,
                 before,
+                before_id,
             } => {
-                self.web_fetch_messages(&buffer_id, limit, before, session_id);
+                self.web_fetch_messages(&buffer_id, limit, before, before_id, session_id);
             }
             WebCommand::FetchNickList { buffer_id } => {
                 if let Some(crate::web::protocol::WebEvent::NickList {
@@ -687,6 +688,7 @@ impl App {
         buffer_id: &str,
         limit: u32,
         before: Option<i64>,
+        before_id: Option<i64>,
         session_id: &str,
     ) {
         if buffer_id == Self::MENTIONS_BUFFER_ID {
@@ -783,17 +785,32 @@ impl App {
             .connections
             .get(conn_id)
             .map_or_else(|| conn_id.to_string(), |c| c.label.clone());
-        let messages = crate::storage::query::get_messages(
-            &db,
-            &network,
-            buffer,
-            before,
-            capped_limit + 1,
-            storage.encrypt,
-            // Read-side key so encrypted logs decrypt on web scroll-back
-            // (previously `None` => the client received ciphertext).
-            storage.crypto_key.as_ref(),
-        );
+        // Read-side key so encrypted logs decrypt on web scroll-back (previously
+        // `None` => the client received ciphertext).
+        let key = storage.crypto_key.as_ref();
+        let messages = match (before, before_id) {
+            // Lossless keyset cursor when the client sent the oldest row's id
+            // (a DB rowid for log-sourced rows): no same-second drops.
+            (Some(ts), Some(id)) => crate::storage::query::get_messages_paginated(
+                &db,
+                &network,
+                buffer,
+                Some((ts, id)),
+                capped_limit + 1,
+                storage.encrypt,
+                key,
+            ),
+            // Initial load or a boundary with no usable id: timestamp-only.
+            _ => crate::storage::query::get_messages(
+                &db,
+                &network,
+                buffer,
+                before,
+                capped_limit + 1,
+                storage.encrypt,
+                key,
+            ),
+        };
         match messages {
             Ok(mut msgs) => {
                 let has_more = msgs.len() > capped_limit;

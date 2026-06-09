@@ -142,6 +142,11 @@ pub enum WebCommand {
         buffer_id: String,
         limit: u32,
         before: Option<i64>,
+        /// Oldest loaded message's id (DB rowid for log-sourced rows), forming a
+        /// `(before, before_id)` keyset cursor so same-second rows aren't dropped.
+        /// Defaulted for forward-compat with clients that don't send it.
+        #[serde(default)]
+        before_id: Option<i64>,
     },
     /// Request full nick list for a channel buffer.
     FetchNickList { buffer_id: String },

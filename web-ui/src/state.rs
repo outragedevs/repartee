@@ -25,7 +25,7 @@ const MAX_BUFFER_MESSAGES: usize = 1000;
 /// buffer is "pinned"). Loaded older pages are kept up to this bound instead of
 /// being trimmed back to `MAX_BUFFER_MESSAGES`; returning to the bottom collapses
 /// the buffer back down. Mirrors the TUI's `PINNED_BACKLOG_CAP`.
-const PINNED_WEB_CAP: usize = 5000;
+pub(crate) const PINNED_WEB_CAP: usize = 5000;
 
 /// Client-side application state, stored as Leptos signals.
 #[derive(Clone, Copy)]

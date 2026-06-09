@@ -70,11 +70,13 @@ pub fn ChatView() -> impl IntoView {
     // messages would queue N pins per tick.
     let pin_scheduled = StoredValue::new(false);
 
-    // While scrolling up, holds the viewport's distance-from-bottom captured
-    // when a backlog fetch was sent. After the older page prepends (content
-    // added above), an Effect restores `scrollTop` to keep that same distance,
-    // so the view stays anchored instead of jumping. `None` = no fetch pending.
-    let pending_anchor = StoredValue::new(None::<f64>);
+    // While scrolling up, holds `(buffer_id, distance-from-bottom)` captured when
+    // a backlog fetch was sent. After the older page prepends (content added
+    // above), an Effect restores `scrollTop` to keep that same distance, so the
+    // view stays anchored instead of jumping. Keyed by buffer so a fetch that
+    // completes after the user switched away can't move the new buffer's view.
+    // `None` = no fetch pending.
+    let pending_anchor = StoredValue::new(None::<(String, f64)>);
 
     let do_pin = move |el: &web_sys::Element| {
         skip_next_scroll.set_value(true);
@@ -156,9 +158,16 @@ pub fn ChatView() -> impl IntoView {
         if still_fetching {
             return;
         }
-        let Some(dist) = pending_anchor.get_value() else {
+        let Some((anchor_buf, dist)) = pending_anchor.get_value() else {
             return;
         };
+        // Only restore for the buffer the anchor was captured in. If the user
+        // switched away before the fetch landed, drop it — restoring would move
+        // the *new* buffer's view to a stale position.
+        if active.as_deref() != Some(anchor_buf.as_str()) {
+            pending_anchor.set_value(None);
+            return;
+        }
         pending_anchor.set_value(None);
         let Some(window) = web_sys::window() else {
             return;
@@ -275,18 +284,37 @@ pub fn ChatView() -> impl IntoView {
             {
                 return;
             }
-            // Oldest real (non-separator) message's timestamp = the cursor.
-            let before = state.messages.with_untracked(|m| {
-                m.get(&id)
-                    .and_then(|v| v.iter().find(|msg| msg.id != 0).map(|msg| msg.timestamp))
+            // Window already full: stop paging until the user returns to the
+            // bottom (which collapses + frees it). Without this, the prepend
+            // would be trimmed straight back off the front and the same page
+            // re-requested in a loop.
+            let len = state
+                .messages
+                .with_untracked(|m| m.get(&id).map_or(0, Vec::len));
+            if len >= crate::state::PINNED_WEB_CAP {
+                return;
+            }
+            // Cursor = oldest real (non-separator) message's `(timestamp, id)`.
+            // The id is the DB rowid for rows already loaded from the log, giving
+            // the server a lossless keyset cursor (no same-second drops); at the
+            // live/DB boundary it's an in-memory counter, which the server's
+            // keyset predicate degrades to a plain timestamp cursor.
+            let cursor = state.messages.with_untracked(|m| {
+                m.get(&id).and_then(|v| {
+                    v.iter()
+                        .find(|msg| msg.id != 0)
+                        .map(|msg| (msg.timestamp, msg.id))
+                })
             });
-            let Some(before) = before else {
+            let Some((before, before_id)) = cursor else {
                 return;
             };
-            // Anchor: remember the distance from the bottom so the restore Effect
-            // can keep the view put once the older page prepends.
-            pending_anchor
-                .set_value(Some(f64::from(el.scroll_height()) - f64::from(el.scroll_top())));
+            // Anchor (keyed by buffer): remember the distance from the bottom so
+            // the restore Effect can keep the view put once the page prepends.
+            pending_anchor.set_value(Some((
+                id.clone(),
+                f64::from(el.scroll_height()) - f64::from(el.scroll_top()),
+            )));
             state.backlog_fetching.update(|s| {
                 s.insert(id.clone());
             });
@@ -294,6 +322,7 @@ pub fn ChatView() -> impl IntoView {
                 buffer_id: id,
                 limit: 100,
                 before: Some(before),
+                before_id: i64::try_from(before_id).ok(),
             });
         }
     };
