@@ -308,6 +308,15 @@ impl AppState {
                 self.backlog_loaded.update(|set| {
                     set.remove(&buffer_id);
                 });
+                // Also drop backlog scroll state, so a buffer later re-created
+                // with the same id (e.g. rejoining a channel) doesn't inherit a
+                // stale `has_more`/`fetching` entry that would block scroll-up.
+                self.backlog_has_more.update(|m| {
+                    m.remove(&buffer_id);
+                });
+                self.backlog_fetching.update(|s| {
+                    s.remove(&buffer_id);
+                });
             }
             WebEvent::ConnectionStatus {
                 conn_id,
