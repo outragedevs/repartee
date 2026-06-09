@@ -242,6 +242,11 @@ pub struct WireMessage {
     pub nick_mode: Option<String>,
     pub text: String,
     pub highlight: bool,
+    /// SQLite log rowid for log-sourced messages (`None` for live in-memory
+    /// rows). Echoed back as `FetchMessages.before_id` for a lossless keyset
+    /// scroll-back cursor.
+    #[serde(default)]
+    pub log_id: Option<i64>,
     #[serde(default)]
     pub event_key: Option<String>,
     /// Server-extracted link previews. Empty when image previews are

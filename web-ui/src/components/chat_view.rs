@@ -294,16 +294,17 @@ pub fn ChatView() -> impl IntoView {
             if len >= crate::state::PINNED_WEB_CAP {
                 return;
             }
-            // Cursor = oldest real (non-separator) message's `(timestamp, id)`.
-            // The id is the DB rowid for rows already loaded from the log, giving
-            // the server a lossless keyset cursor (no same-second drops); at the
-            // live/DB boundary it's an in-memory counter, which the server's
-            // keyset predicate degrades to a plain timestamp cursor.
+            // Cursor = oldest real (non-separator) message's timestamp, plus its
+            // `log_id` (the SQLite rowid) when it came from the log. With both,
+            // the server uses a lossless keyset cursor (no same-second drops); at
+            // the live/DB boundary `log_id` is None, so it falls back to a plain
+            // timestamp cursor. Never the in-memory `id` counter (unrelated to
+            // rowids — sending it would corrupt the keyset comparison).
             let cursor = state.messages.with_untracked(|m| {
                 m.get(&id).and_then(|v| {
                     v.iter()
                         .find(|msg| msg.id != 0)
-                        .map(|msg| (msg.timestamp, msg.id))
+                        .map(|msg| (msg.timestamp, msg.log_id))
                 })
             });
             let Some((before, before_id)) = cursor else {
@@ -322,7 +323,7 @@ pub fn ChatView() -> impl IntoView {
                 buffer_id: id,
                 limit: 100,
                 before: Some(before),
-                before_id: i64::try_from(before_id).ok(),
+                before_id,
             });
         }
     };

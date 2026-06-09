@@ -262,6 +262,12 @@ pub struct WireMessage {
     pub nick_mode: Option<String>,
     pub text: String,
     pub highlight: bool,
+    /// `SQLite` log rowid for messages sourced from the log DB; `None` for live
+    /// in-memory messages not yet (re)loaded from the DB. The client echoes this
+    /// back as `FetchMessages.before_id` so scroll-back uses a lossless keyset
+    /// cursor — never the unrelated in-memory `id` counter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_id: Option<i64>,
     /// IRC event type key (e.g. "join", "part", "quit", "kick", "mode").
     /// Used by the web frontend to apply event-specific styling.
     /// `None` for backlog messages that predate this field.
@@ -373,6 +379,7 @@ mod tests {
             nick_mode: Some("@".into()),
             text: "hello 🚀".into(),
             highlight: false,
+            log_id: Some(42),
             event_key: None,
             previews: Vec::new(),
         };

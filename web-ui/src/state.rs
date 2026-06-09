@@ -227,6 +227,7 @@ impl AppState {
                 let pinned =
                     active.as_deref() == Some(&buffer_id) && !self.is_at_bottom.get_untracked();
                 let cap = if pinned { PINNED_WEB_CAP } else { MAX_BUFFER_MESSAGES };
+                let mut trimmed = false;
                 self.messages.update(|msgs| {
                     let entry = msgs.entry(buffer_id.clone()).or_default();
                     // Dedup by id — guards against the SyncInit →
@@ -237,9 +238,17 @@ impl AppState {
                     // so always admit those.
                     if message.id == 0 || !entry.iter().any(|m| m.id == message.id) {
                         entry.push(message);
-                        cap_messages(entry, cap);
+                        trimmed = cap_messages(entry, cap);
                     }
                 });
+                // A trim dropped the oldest rows, so older history exists below
+                // the in-memory head again: re-arm scroll-up even if a previous
+                // fetch had reached the start and set has_more=false.
+                if trimmed {
+                    self.backlog_has_more.update(|m| {
+                        m.insert(buffer_id.clone(), true);
+                    });
+                }
                 // Update unread count if not the active buffer.
                 let is_active = self.active_buffer.get_untracked().as_deref() == Some(&buffer_id);
                 if !is_active {
@@ -584,13 +593,17 @@ impl AppState {
     }
 }
 
-fn cap_messages(messages: &mut Vec<WireMessage>, cap: usize) {
+/// Trim the buffer to `cap`, dropping oldest from the head. Returns `true` if it
+/// actually dropped anything — the caller uses that to re-arm `has_more`, since a
+/// trim means older history now lives only below the in-memory head.
+fn cap_messages(messages: &mut Vec<WireMessage>, cap: usize) -> bool {
     if messages.len() <= cap {
-        return;
+        return false;
     }
     let drop_count = messages.len() - cap;
     messages.drain(..drop_count);
     messages.shrink_to(cap);
+    true
 }
 
 fn buf_type_order(t: &str) -> u8 {
@@ -655,6 +668,7 @@ fn insert_date_separators(messages: Vec<WireMessage>) -> Vec<WireMessage> {
                     nick_mode: None,
                     text: format!("\u{2500}\u{2500}\u{2500} {formatted} \u{2500}\u{2500}\u{2500}"),
                     highlight: false,
+                    log_id: None,
                     event_key: Some("date_separator".to_string()),
                     previews: Vec::new(),
                 });
