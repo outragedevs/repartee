@@ -1117,6 +1117,14 @@ impl App {
                 self.start_web_server().await;
             }
 
+            // Catch-all collapse: many paths return the view to the live bottom
+            // by setting `scroll_offset = 0` directly (sending a message, running
+            // a command, scripts) without routing through the scroll handlers.
+            // Collapsing here, once per frame, frees a pinned buffer's enlarged
+            // backlog window however the user got back to the bottom. Cheap —
+            // it early-returns unless the active buffer is at-bottom AND pinned.
+            self.collapse_backlog_if_at_bottom();
+
             if let Some(mut terminal) = self.terminal.take() {
                 if self.needs_full_redraw {
                     let _ = terminal.clear();

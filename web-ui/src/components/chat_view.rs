@@ -303,7 +303,15 @@ pub fn ChatView() -> impl IntoView {
             let cursor = state.messages.with_untracked(|m| {
                 m.get(&id).and_then(|v| {
                     v.iter()
-                        .find(|msg| msg.id != 0)
+                        // Skip client separators (id 0) AND server-side separators
+                        // from load_backlog — those have nonzero ids but no log_id,
+                        // so picking one would null out before_id and lose the
+                        // keyset cursor. Mirrors the TUI's oldest_backlog_cursor.
+                        .find(|msg| {
+                            msg.id != 0
+                                && msg.event_key.as_deref() != Some("date_separator")
+                                && msg.event_key.as_deref() != Some("backlog_end")
+                        })
                         .map(|msg| (msg.timestamp, msg.log_id))
                 })
             });
