@@ -26,6 +26,47 @@ fn pin_to_bottom(el: &web_sys::Element) {
     el.set_scroll_top(el.scroll_height());
 }
 
+/// First real (non-separator) chat line currently visible in `container`,
+/// returned as `(data-mid, pixel offset from the container's top edge)`.
+/// Used to anchor a backlog-prepend restore to a concrete element instead of
+/// a distance from the bottom (the latter is corrupted by live appends).
+fn first_visible_anchor(container: &web_sys::Element) -> Option<(u64, f64)> {
+    let ctop = container.get_bounding_client_rect().top();
+    let lines = container.query_selector_all(".chat-line[data-mid]").ok()?;
+    for i in 0..lines.length() {
+        let Some(node) = lines.item(i) else { continue };
+        let Ok(elem) = node.dyn_into::<web_sys::Element>() else {
+            continue;
+        };
+        let Some(mid) = elem
+            .get_attribute("data-mid")
+            .and_then(|s| s.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        if mid == 0 {
+            continue; // date separator — its id isn't a stable anchor
+        }
+        let rect = elem.get_bounding_client_rect();
+        // First line whose bottom edge is below the container's top is the
+        // first (partially) visible one.
+        if rect.bottom() > ctop {
+            return Some((mid, rect.top() - ctop));
+        }
+    }
+    None
+}
+
+/// Current pixel offset of the chat line with `data-mid == mid` from the
+/// container's top edge, or `None` if that line is no longer rendered.
+fn anchor_offset(container: &web_sys::Element, mid: u64) -> Option<f64> {
+    let selector = format!(".chat-line[data-mid=\"{mid}\"]");
+    let node = container.query_selector(&selector).ok()??;
+    let elem = node.dyn_into::<web_sys::Element>().ok()?;
+    let ctop = container.get_bounding_client_rect().top();
+    Some(elem.get_bounding_client_rect().top() - ctop)
+}
+
 #[component]
 pub fn ChatView() -> impl IntoView {
     let state = use_context::<AppState>().unwrap();
@@ -70,13 +111,18 @@ pub fn ChatView() -> impl IntoView {
     // messages would queue N pins per tick.
     let pin_scheduled = StoredValue::new(false);
 
-    // While scrolling up, holds `(buffer_id, distance-from-bottom)` captured when
-    // a backlog fetch was sent. After the older page prepends (content added
-    // above), an Effect restores `scrollTop` to keep that same distance, so the
-    // view stays anchored instead of jumping. Keyed by buffer so a fetch that
-    // completes after the user switched away can't move the new buffer's view.
-    // `None` = no fetch pending.
-    let pending_anchor = StoredValue::new(None::<(String, f64)>);
+    // While scrolling up, holds `(buffer_id, anchor_mid, on-screen-offset)`
+    // captured when a backlog fetch was sent: a concrete chat line (its
+    // `data-mid`) and its pixel offset from the viewport top. After the older
+    // page prepends (content added above), an Effect re-finds that same line
+    // and restores `scrollTop` so it sits at the same on-screen offset. Keying
+    // on a real element — not a distance from the bottom — keeps the view put
+    // even when a live message appends at the bottom mid-fetch (a bottom append
+    // grows `scrollHeight`, which a distance-from-bottom anchor would wrongly
+    // absorb into the restore and jump the reader). Keyed by buffer so a fetch
+    // that completes after the user switched away can't move the new buffer's
+    // view. `None` = no fetch pending.
+    let pending_anchor = StoredValue::new(None::<(String, u64, f64)>);
 
     let do_pin = move |el: &web_sys::Element| {
         skip_next_scroll.set_value(true);
@@ -158,7 +204,7 @@ pub fn ChatView() -> impl IntoView {
         if still_fetching {
             return;
         }
-        let Some((anchor_buf, dist)) = pending_anchor.get_value() else {
+        let Some((anchor_buf, anchor_mid, anchor_off)) = pending_anchor.get_value() else {
             return;
         };
         // Only restore for the buffer the anchor was captured in. If the user
@@ -175,11 +221,17 @@ pub fn ChatView() -> impl IntoView {
         let cb = wasm_bindgen::prelude::Closure::once(move || {
             let Some(el) = chat_ref.get() else { return };
             let el_dom: web_sys::Element = el.into();
-            // Keep the same distance from the bottom across the prepend.
+            // Re-find the anchored line and shift scrollTop so it returns to the
+            // same on-screen offset. The prepend pushed it down by the page's
+            // height; any live append landed below it and so doesn't move it.
+            let Some(new_off) = anchor_offset(&el_dom, anchor_mid) else {
+                return; // anchor trimmed away — leave the view as-is, don't jump
+            };
             skip_next_scroll.set_value(true);
-            let target = (f64::from(el_dom.scroll_height()) - dist).max(0.0);
+            let delta = new_off - anchor_off;
             #[allow(clippy::cast_possible_truncation)]
-            el_dom.set_scroll_top(target as i32);
+            let target = (f64::from(el_dom.scroll_top()) + delta).max(0.0) as i32;
+            el_dom.set_scroll_top(target);
         });
         let _ = window.request_animation_frame(cb.as_ref().unchecked_ref());
         cb.forget();
@@ -318,12 +370,16 @@ pub fn ChatView() -> impl IntoView {
             let Some((before, before_id)) = cursor else {
                 return;
             };
-            // Anchor (keyed by buffer): remember the distance from the bottom so
-            // the restore Effect can keep the view put once the page prepends.
-            pending_anchor.set_value(Some((
-                id.clone(),
-                f64::from(el.scroll_height()) - f64::from(el.scroll_top()),
-            )));
+            // Anchor (keyed by buffer): remember the first visible real line and
+            // its on-screen offset so the restore Effect can keep the view put
+            // once the page prepends — immune to live appends at the bottom. If
+            // no real line is visible yet (e.g. only separators), skip anchoring
+            // rather than fall back to a bottom-relative measure.
+            if let Some((mid, off)) = first_visible_anchor(el) {
+                pending_anchor.set_value(Some((id.clone(), mid, off)));
+            } else {
+                pending_anchor.set_value(None);
+            }
             state.backlog_fetching.update(|s| {
                 s.insert(id.clone());
             });
@@ -485,6 +541,11 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
     let nick_self = current_nick(state);
     let emotes_on = state.emotes_enabled.get();
 
+    // `data-mid` lets the backlog-prepend restore re-find this exact line
+    // (separators carry id 0 and are skipped as anchors — see
+    // `first_visible_anchor`).
+    let mid = msg.id.to_string();
+
     let is_mention_log = msg.msg_type == "mention_log";
     let is_event = msg.msg_type == "event";
     let is_action = msg.msg_type == "action";
@@ -528,7 +589,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
 
     if is_separator {
         return view! {
-            <div class=line_class>
+            <div class=line_class data-mid=mid>
                 <span class="separator-text">{msg.text}</span>
             </div>
         }
@@ -553,7 +614,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
         let styled = render_styled_text(&msg.text, emotes_on);
         return view! {
             <>
-                <div class=line_class>
+                <div class=line_class data-mid=mid>
                     <span class="mention-log-text">{styled}</span>
                 </div>
                 {previews_view}
@@ -571,7 +632,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
         };
         view! {
             <>
-                <div class=line_class>
+                <div class=line_class data-mid=mid>
                     <span class="ts">{ts_fn}</span>
                     <span class="action-body">
                         "* "
@@ -589,7 +650,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
         let styled = render_styled_text(&msg.text, emotes_on);
         view! {
             <>
-                <div class=line_class>
+                <div class=line_class data-mid=mid>
                     <span class="ts">{ts_fn}</span>
                     <span class="notice-body">
                         "-"
@@ -606,7 +667,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
         let arrow = event_icon(msg.event_key.as_deref(), &msg.text);
         let styled = render_styled_text(&msg.text, emotes_on);
         view! {
-            <div class=line_class>
+            <div class=line_class data-mid=mid>
                 <span class="ts">{ts_fn}</span>
                 <span>
                     {arrow.map(|(symbol, css_class)| view! {
@@ -639,7 +700,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
 
         view! {
             <>
-                <div class=line_class>
+                <div class=line_class data-mid=mid>
                     <span class="ts">{ts_fn}</span>
                     <span class="nick" style=nick_style>
                         <span class="mode">{mode}</span>

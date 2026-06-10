@@ -370,10 +370,10 @@ impl AppState {
                         .into_iter()
                         .filter(|m| m.id == 0 || !existing_ids.contains(&m.id))
                         .collect();
-                    let with_separators = insert_date_separators(filtered);
-                    // Prepend older messages (they come from scroll-back).
-                    let mut combined = with_separators;
-                    combined.append(entry);
+                    // Prepend the older page, inserting date separators and
+                    // dropping the redundant head separator at a same-day seam
+                    // (mirrors the TUI paginator — see `prepend_backlog_page`).
+                    let mut combined = prepend_backlog_page(filtered, std::mem::take(entry));
                     cap_messages(&mut combined, cap);
                     *entry = combined;
                 });
@@ -646,6 +646,47 @@ fn prefix_rank(prefix: &str) -> u8 {
         .map_or(ORDER.len() as u8, |i| i as u8)
 }
 
+/// Local calendar date for a Unix timestamp (the grouping key for date
+/// separators). `None` only if the timestamp is out of `chrono`'s range.
+fn local_date_of(ts: i64) -> Option<chrono::NaiveDate> {
+    use chrono::TimeZone;
+    chrono::DateTime::from_timestamp(ts, 0)
+        .map(|dt| chrono::Local.from_utc_datetime(&dt.naive_utc()).date_naive())
+}
+
+/// Combine a freshly-fetched older `page` (chronological, oldest→newest) with
+/// the existing newer `tail`, inserting date separators into the page and
+/// dropping the now-redundant head separator at the seam.
+///
+/// Mirrors the TUI paginator (`src/app/backlog.rs`): `insert_date_separators`
+/// always emits a leading separator for the page's first date, and the existing
+/// `tail` already carries its own leading separator from when it was first
+/// loaded. When the page's newest real message shares a local date with that
+/// head separator, the seam has no date change — so the head separator is a
+/// duplicate of the one the page just emitted and must be removed, else
+/// scrolling back through several pages of the same day shows the date header
+/// repeated mid-day.
+fn prepend_backlog_page(page: Vec<WireMessage>, mut tail: Vec<WireMessage>) -> Vec<WireMessage> {
+    let mut combined = insert_date_separators(page);
+
+    let seam_date = combined
+        .iter()
+        .rev()
+        .find(|m| m.event_key.as_deref() != Some("date_separator"))
+        .and_then(|m| local_date_of(m.timestamp));
+    if let Some(seam_date) = seam_date
+        && tail.first().is_some_and(|m| {
+            m.event_key.as_deref() == Some("date_separator")
+                && local_date_of(m.timestamp) == Some(seam_date)
+        })
+    {
+        tail.remove(0);
+    }
+
+    combined.append(&mut tail);
+    combined
+}
+
 /// Insert date separator lines between messages from different days.
 ///
 /// Mirrors the TUI's `load_backlog` behavior — adds `─── Day, DD Mon YYYY ───`
@@ -659,12 +700,7 @@ fn insert_date_separators(messages: Vec<WireMessage>) -> Vec<WireMessage> {
     let mut last_date: Option<chrono::NaiveDate> = None;
 
     for msg in messages {
-        let local_date = chrono::DateTime::from_timestamp(msg.timestamp, 0).map(|dt| {
-            use chrono::TimeZone;
-            chrono::Local
-                .from_utc_datetime(&dt.naive_utc())
-                .date_naive()
-        });
+        let local_date = local_date_of(msg.timestamp);
 
         if let Some(date) = local_date {
             if last_date.is_some_and(|d| d != date) || last_date.is_none() {
@@ -751,4 +787,82 @@ pub fn save_dismissed_previews(dismissed: &HashSet<(u64, String)>) {
         serialised.push('\n');
     }
     let _ = storage.set_item(DISMISSED_PREVIEWS_KEY, &serialised);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A real (non-separator) message at `ts` with a unique `id`.
+    fn msg(id: u64, ts: i64) -> WireMessage {
+        WireMessage {
+            id,
+            timestamp: ts,
+            msg_type: "message".to_string(),
+            nick: Some("alice".to_string()),
+            nick_mode: None,
+            text: "hi".to_string(),
+            highlight: false,
+            log_id: Some(i64::try_from(id).unwrap_or_default()),
+            event_key: None,
+            previews: Vec::new(),
+        }
+    }
+
+    fn separator_count(list: &[WireMessage]) -> usize {
+        list.iter()
+            .filter(|m| m.event_key.as_deref() == Some("date_separator"))
+            .count()
+    }
+
+    // 2024-06-09 12:00 / 13:00 UTC — same calendar day in every realistic tz.
+    const JUN9_12: i64 = 1_717_934_400; // 2024-06-09T12:00:00Z
+    const JUN9_13: i64 = 1_717_938_000; // 2024-06-09T13:00:00Z
+    const JUN9_14: i64 = 1_717_941_600; // 2024-06-09T14:00:00Z
+    // 2024-06-08 12:00 UTC — a clearly different day, far from any midnight.
+    const JUN8_12: i64 = 1_717_848_000; // 2024-06-08T12:00:00Z
+
+    #[test]
+    fn seam_same_day_drops_duplicate_separator() {
+        // Existing tail: one Jun-9 page already loaded, led by its separator.
+        let tail = insert_date_separators(vec![msg(10, JUN9_14)]);
+        assert_eq!(separator_count(&tail), 1);
+
+        // Scroll back: an older Jun-9 page. The seam has no date change, so the
+        // tail's head separator must be dropped — exactly one Jun-9 header total.
+        let page = vec![msg(1, JUN9_12), msg(2, JUN9_13)];
+        let combined = prepend_backlog_page(page, tail);
+
+        assert_eq!(
+            separator_count(&combined),
+            1,
+            "same-day seam must collapse to a single date separator"
+        );
+        // The lone separator sits at the very top, above the oldest message.
+        assert_eq!(combined[0].event_key.as_deref(), Some("date_separator"));
+        assert_eq!(combined[1].id, 1);
+    }
+
+    #[test]
+    fn seam_date_change_keeps_both_separators() {
+        // Tail starts on Jun 9; older page is entirely Jun 8 → the boundary is a
+        // real date change, so both separators are correct and must survive.
+        let tail = insert_date_separators(vec![msg(10, JUN9_12)]);
+        let page = vec![msg(1, JUN8_12)];
+        let combined = prepend_backlog_page(page, tail);
+
+        assert_eq!(
+            separator_count(&combined),
+            2,
+            "a genuine date change at the seam keeps both date separators"
+        );
+    }
+
+    #[test]
+    fn prepend_with_empty_page_is_a_noop_on_separators() {
+        let tail = insert_date_separators(vec![msg(10, JUN9_12)]);
+        let before = separator_count(&tail);
+        let combined = prepend_backlog_page(Vec::new(), tail);
+        assert_eq!(separator_count(&combined), before);
+    }
 }
