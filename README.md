@@ -260,6 +260,10 @@ Full documentation is available at **[repart.ee/docs](https://repart.ee/docs)**.
 
 ## Changelog
 
+### v1.6.1
+
+- **Fix: backlog scroll-back couldn't be started in the web UI.** Scrolling up to load older history only ever began once the message list overflowed the browser window — but a fresh connect seeds just a handful of lines (the TUI's `display.backlog_lines`, default 20), which rarely fills the viewport, so there was no scrollbar and the older-history fetch was never reachable (it appeared to work only after first scrolling that channel back in the TUI). The web view now auto-fills: it pulls successive older pages until the viewport overflows (or history runs out), so scroll-back works from a fresh page load. The scroll anchor is captured for these fills too, so a live message or preview image arriving mid-fetch can't make the view jump.
+
 ### v1.6.0
 
 - **Scroll up to read backlog from the logs — no more `repartee l`.** Scrolling a live channel/query toward the top now pages older messages straight from the SQLite log and prepends them, so you can catch up on days of history right in the normal view (irssi/weechat/The Lounge style) instead of dropping into the read-only log browser. This works in **both the TUI and the web UI** — in the browser the scroll position is anchored so loading older messages doesn't make the view jump. Memory stays bounded: a buffer you've scrolled up into is kept larger while you read it and trimmed back down (freeing the loaded history) when you return to the live bottom. Encrypted logs now decrypt on these reads too (both the TUI buffer-open backlog and web scroll-back previously showed ciphertext when `[storage] encrypt = true`).
