@@ -30,23 +30,27 @@ fn pin_to_bottom(el: &web_sys::Element) {
 /// returned as `(data-mid, pixel offset from the container's top edge)`.
 /// Used to anchor a backlog-prepend restore to a concrete element instead of
 /// a distance from the bottom (the latter is corrupted by live appends).
-fn first_visible_anchor(container: &web_sys::Element) -> Option<(u64, f64)> {
+///
+/// `data-mid` is the `(id, log_id)` composite the `<For>` keys on — NOT the
+/// transport id alone, which isn't unique across sources (a live message and a
+/// backlog DB row can share a number), so an id-only selector could re-find the
+/// wrong element after a prepend. Date separators are skipped by their
+/// `date-separator` class, not by id: server-side (backlog-path) separators
+/// carry nonzero ids, and a same-day prepend removes the seam separator — both
+/// of which would break an id-based skip.
+fn first_visible_anchor(container: &web_sys::Element) -> Option<(String, f64)> {
     let ctop = container.get_bounding_client_rect().top();
-    let lines = container.query_selector_all(".chat-line[data-mid]").ok()?;
+    let lines = container
+        .query_selector_all(".chat-line[data-mid]:not(.date-separator)")
+        .ok()?;
     for i in 0..lines.length() {
         let Some(node) = lines.item(i) else { continue };
         let Ok(elem) = node.dyn_into::<web_sys::Element>() else {
             continue;
         };
-        let Some(mid) = elem
-            .get_attribute("data-mid")
-            .and_then(|s| s.parse::<u64>().ok())
-        else {
+        let Some(mid) = elem.get_attribute("data-mid") else {
             continue;
         };
-        if mid == 0 {
-            continue; // date separator — its id isn't a stable anchor
-        }
         let rect = elem.get_bounding_client_rect();
         // First line whose bottom edge is below the container's top is the
         // first (partially) visible one.
@@ -59,7 +63,7 @@ fn first_visible_anchor(container: &web_sys::Element) -> Option<(u64, f64)> {
 
 /// Current pixel offset of the chat line with `data-mid == mid` from the
 /// container's top edge, or `None` if that line is no longer rendered.
-fn anchor_offset(container: &web_sys::Element, mid: u64) -> Option<f64> {
+fn anchor_offset(container: &web_sys::Element, mid: &str) -> Option<f64> {
     let selector = format!(".chat-line[data-mid=\"{mid}\"]");
     let node = container.query_selector(&selector).ok()??;
     let elem = node.dyn_into::<web_sys::Element>().ok()?;
@@ -122,7 +126,7 @@ pub fn ChatView() -> impl IntoView {
     // absorb into the restore and jump the reader). Keyed by buffer so a fetch
     // that completes after the user switched away can't move the new buffer's
     // view. `None` = no fetch pending.
-    let pending_anchor = StoredValue::new(None::<(String, u64, f64)>);
+    let pending_anchor = StoredValue::new(None::<(String, String, f64)>);
 
     let do_pin = move |el: &web_sys::Element| {
         skip_next_scroll.set_value(true);
@@ -232,7 +236,7 @@ pub fn ChatView() -> impl IntoView {
             // Re-find the anchored line and shift scrollTop so it returns to the
             // same on-screen offset. The prepend pushed it down by the page's
             // height; any live append landed below it and so doesn't move it.
-            let Some(new_off) = anchor_offset(&el_dom, anchor_mid) else {
+            let Some(new_off) = anchor_offset(&el_dom, &anchor_mid) else {
                 return; // anchor trimmed away — leave the view as-is, don't jump
             };
             skip_next_scroll.set_value(true);
@@ -565,10 +569,15 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
     let nick_self = current_nick(state);
     let emotes_on = state.emotes_enabled.get();
 
-    // `data-mid` lets the backlog-prepend restore re-find this exact line
-    // (separators carry id 0 and are skipped as anchors — see
-    // `first_visible_anchor`).
-    let mid = msg.id.to_string();
+    // `data-mid` lets the backlog-prepend restore re-find this exact line. It
+    // must be the same `(id, log_id)` identity the `<For>` keys on — the
+    // transport id alone isn't unique (a live message and a backlog DB row can
+    // share a number), so an id-only attribute could match the wrong element.
+    // Separators are excluded from anchoring by their class, not this value.
+    let mid = match msg.log_id {
+        Some(log) => format!("{}:{log}", msg.id),
+        None => format!("{}:n", msg.id),
+    };
 
     let is_mention_log = msg.msg_type == "mention_log";
     let is_event = msg.msg_type == "event";
