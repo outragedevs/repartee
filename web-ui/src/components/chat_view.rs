@@ -207,6 +207,14 @@ pub fn ChatView() -> impl IntoView {
         let Some((anchor_buf, anchor_mid, anchor_off)) = pending_anchor.get_value() else {
             return;
         };
+        // If the user jumped back to the bottom while the fetch was in flight
+        // (e.g. the scroll-to-bottom button, which doesn't run `on_scroll`), the
+        // anchor is stale — restoring it would yank them back up into the
+        // backlog and undo the jump. Drop it.
+        if state.is_at_bottom.get_untracked() {
+            pending_anchor.set_value(None);
+            return;
+        }
         // Only restore for the buffer the anchor was captured in. If the user
         // switched away before the fetch landed, drop it — restoring would move
         // the *new* buffer's view to a stale position.
@@ -485,6 +493,15 @@ pub fn ChatView() -> impl IntoView {
                     class:hidden=move || state.is_at_bottom.get()
                     on:click=move |_| {
                         state.is_at_bottom.set(true);
+                        // Mirror the `on_scroll` return-to-bottom path: collapse
+                        // the pinned backlog window. `do_pin` sets
+                        // `skip_next_scroll`, so the resulting scroll event
+                        // returns early and never reaches that collapse — without
+                        // this, a buffer loaded to PINNED_WEB_CAP stays full and
+                        // the scroll-up fetch guard blocks deeper history.
+                        if let Some(id) = state.active_buffer.get_untracked() {
+                            state.collapse_backlog(&id);
+                        }
                         if let Some(el) = chat_ref.get() {
                             let el_dom: web_sys::Element = el.into();
                             do_pin(&el_dom);
