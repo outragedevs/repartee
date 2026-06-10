@@ -135,14 +135,17 @@ pub fn ChatView() -> impl IntoView {
 
     // Send an older-history `FetchMessages` for the active buffer using the
     // oldest loaded real message as the keyset cursor. Shared by the scroll-up
-    // handler (`on_scroll`, `set_anchor = true` so the post-prepend restore can
-    // keep the view put) and the viewport-fill Effect below (`set_anchor =
-    // false` — it runs while pinned at the bottom, where the restore is a
-    // no-op). Returns `true` if a fetch was actually dispatched; `false` when a
+    // handler (`on_scroll`) and the viewport-fill Effect below. Always captures
+    // a scroll anchor: when the response arrives with the user still at the
+    // bottom the restore Effect drops it (its `is_at_bottom` guard), so it costs
+    // nothing in the common fill case — but if a live append or preview-image
+    // load grows the viewport mid-fetch and the user scrolls up before the page
+    // lands, the anchor is what keeps the view on the line being read instead of
+    // jumping. Returns `true` if a fetch was actually dispatched; `false` when a
     // guard (already fetching / no more history / window full / no cursor)
     // short-circuited it. Reads everything untracked so it is safe to call from
     // inside a RAF callback without creating reactive subscriptions.
-    let trigger_backlog_fetch = move |el: &web_sys::Element, set_anchor: bool| -> bool {
+    let trigger_backlog_fetch = move |el: &web_sys::Element| -> bool {
         let Some(id) = state.active_buffer.get_untracked() else {
             return false;
         };
@@ -184,17 +187,13 @@ pub fn ChatView() -> impl IntoView {
         let Some((before, before_id)) = cursor else {
             return false;
         };
-        if set_anchor {
-            // Remember the first visible real line and its on-screen offset so
-            // the restore Effect can keep the view put once the page prepends —
-            // immune to live appends at the bottom. If no real line is visible
-            // yet (e.g. only separators), skip anchoring rather than fall back
-            // to a bottom-relative measure.
-            if let Some((mid, off)) = first_visible_anchor(el) {
-                pending_anchor.set_value(Some((id.clone(), mid, off)));
-            } else {
-                pending_anchor.set_value(None);
-            }
+        // Remember the first visible real line and its on-screen offset so the
+        // restore Effect can keep the view put once the page prepends — immune
+        // to live appends at the bottom. If no real line is visible yet (e.g.
+        // only separators), skip anchoring rather than fall back to a
+        // bottom-relative measure.
+        if let Some((mid, off)) = first_visible_anchor(el) {
+            pending_anchor.set_value(Some((id.clone(), mid, off)));
         } else {
             pending_anchor.set_value(None);
         }
@@ -375,7 +374,7 @@ pub fn ChatView() -> impl IntoView {
             if el_dom.scroll_height() > el_dom.client_height() {
                 return;
             }
-            trigger_backlog_fetch(&el_dom, false);
+            trigger_backlog_fetch(&el_dom);
         });
         let _ = window.request_animation_frame(cb.as_ref().unchecked_ref());
         cb.forget();
@@ -466,11 +465,11 @@ pub fn ChatView() -> impl IntoView {
             }
         }
         // Near the top: pull an older page from the server (the shared helper
-        // applies the in-flight / no-more-history / window-full guards). Anchor
-        // the restore to the first visible line so the prepend keeps the view
-        // put.
+        // applies the in-flight / no-more-history / window-full guards, and
+        // anchors the restore to the first visible line so the prepend keeps the
+        // view put).
         if f64::from(el.scroll_top()) < BACKLOG_TRIGGER_PX {
-            trigger_backlog_fetch(el, true);
+            trigger_backlog_fetch(el);
         }
     };
 
