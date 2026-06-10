@@ -135,6 +135,16 @@ pub(crate) fn oldest_backlog_cursor(messages: &VecDeque<Message>) -> Option<(i64
     Some((ts, id))
 }
 
+/// Remove the synthetic "End of backlog (N lines)" marker from a buffer.
+///
+/// `load_backlog` plants it at the startup-snapshot boundary (just above the
+/// live session) with a fixed line count. Once the user scrolls up and pages
+/// older rows in above it, that count is stale and the marker no longer denotes
+/// a meaningful point — so it's dropped on the first older-page prepend.
+pub(crate) fn remove_backlog_end_marker(messages: &mut VecDeque<Message>) {
+    messages.retain(|m| m.event_key.as_deref() != Some("backlog_end"));
+}
+
 impl App {
     /// If the active live-chat buffer is scrolled close to the top of its loaded
     /// messages, load an older page from the log DB and prepend it — the live-mode
@@ -230,6 +240,13 @@ impl App {
 
         let messages = crate::app::log_browser::rows_to_buffer_messages(&mut self.state, &rows, None);
         if let Some(buf) = self.state.buffers.get_mut(buffer_id) {
+            if !messages.is_empty() {
+                // Older rows are about to land above the startup backlog, so the
+                // "End of backlog (N lines)" marker — pinned at the snapshot
+                // boundary with a now-stale count — no longer marks a meaningful
+                // point. Drop it before prepending. [P3 review]
+                remove_backlog_end_marker(&mut buf.messages);
+            }
             for msg in messages.into_iter().rev() {
                 buf.messages.push_front(msg);
             }
@@ -309,7 +326,7 @@ mod tests {
 
     use chrono::Utc;
 
-    use super::{make_separator, oldest_backlog_cursor};
+    use super::{make_separator, oldest_backlog_cursor, remove_backlog_end_marker};
     use crate::state::buffer::{Message, MessageType};
 
     fn msg(ts: i64, log_id: Option<&str>, event_key: Option<&str>) -> Message {
@@ -354,6 +371,39 @@ mod tests {
         q.push_back(msg(1500, None, None));
         q.push_back(msg(2500, None, None));
         assert_eq!(oldest_backlog_cursor(&q), Some((1500, 0)));
+    }
+
+    #[test]
+    fn remove_backlog_end_marker_drops_only_that_marker() {
+        // [history, backlog_end, live] -> the marker is removed, the real
+        // messages and other separators are preserved in order.
+        let mut q = VecDeque::new();
+        q.push_back(msg(1000, Some("10"), None)); // history (DB row)
+        q.push_back(msg(1500, None, Some("date_separator")));
+        q.push_back(msg(2000, None, Some("backlog_end")));
+        q.push_back(msg(2500, None, None)); // live
+
+        remove_backlog_end_marker(&mut q);
+
+        assert_eq!(q.len(), 3, "only the backlog_end marker is removed");
+        assert!(
+            !q.iter()
+                .any(|m| m.event_key.as_deref() == Some("backlog_end")),
+            "no backlog_end marker remains"
+        );
+        // Surrounding rows keep their order and identity.
+        assert_eq!(q[0].log_msg_id.as_deref(), Some("10"));
+        assert_eq!(q[1].event_key.as_deref(), Some("date_separator"));
+        assert_eq!(q[2].timestamp.timestamp(), 2500);
+    }
+
+    #[test]
+    fn remove_backlog_end_marker_is_a_noop_without_one() {
+        let mut q = VecDeque::new();
+        q.push_back(msg(1000, Some("10"), None));
+        q.push_back(msg(2000, None, None));
+        remove_backlog_end_marker(&mut q);
+        assert_eq!(q.len(), 2);
     }
 
     #[test]
