@@ -357,19 +357,12 @@ impl AppState {
                 };
                 self.messages.update(|msgs| {
                     let entry = msgs.entry(buffer_id.clone()).or_default();
-                    // Drop incoming messages whose id is already present
-                    // in the cache — happens when NewMessage events
-                    // arrive between sending FetchMessages and receiving
-                    // the response (the server serves the in-memory
-                    // buffer for `before=None`, which includes messages
-                    // the client already received live). id=0 is the
-                    // date-separator sentinel and is admitted unfiltered.
-                    let existing_ids: HashSet<u64> =
-                        entry.iter().filter(|m| m.id != 0).map(|m| m.id).collect();
-                    let filtered: Vec<_> = messages
-                        .into_iter()
-                        .filter(|m| m.id == 0 || !existing_ids.contains(&m.id))
-                        .collect();
+                    // Drop incoming messages already present in the cache —
+                    // happens when NewMessage events arrive between sending
+                    // FetchMessages and receiving the response (the server
+                    // serves the in-memory buffer for `before=None`, which
+                    // includes messages the client already received live).
+                    let filtered = dedupe_incoming(entry, messages);
                     // Prepend the older page, inserting date separators and
                     // dropping the redundant head separator at a same-day seam
                     // (mirrors the TUI paginator — see `prepend_backlog_page`).
@@ -654,6 +647,29 @@ fn local_date_of(ts: i64) -> Option<chrono::NaiveDate> {
         .map(|dt| chrono::Local.from_utc_datetime(&dt.naive_utc()).date_naive())
 }
 
+/// Drop entries from an incoming `messages` batch that are already loaded in
+/// `existing`.
+///
+/// The transport `id` is NOT a stable cross-source key: live messages carry a
+/// transient in-memory `AppState` counter (`message_to_wire`) while stored rows
+/// carry a `SQLite` rowid (`stored_to_wire`), and the two ranges overlap. Keying
+/// on `id` alone would treat a valid older DB row as a duplicate of an unrelated
+/// live message with the same number, punching gaps in scroll-back. Key on
+/// `(log_id, id)` instead — a DB row (`log_id = Some(rowid)`) can never collide
+/// with a live message (`log_id = None`) sharing the numeric id. Date separators
+/// (`id == 0`) are always admitted.
+fn dedupe_incoming(existing: &[WireMessage], messages: Vec<WireMessage>) -> Vec<WireMessage> {
+    let existing_keys: HashSet<(Option<i64>, u64)> = existing
+        .iter()
+        .filter(|m| m.id != 0)
+        .map(|m| (m.log_id, m.id))
+        .collect();
+    messages
+        .into_iter()
+        .filter(|m| m.id == 0 || !existing_keys.contains(&(m.log_id, m.id)))
+        .collect()
+}
+
 /// Combine a freshly-fetched older `page` (chronological, oldest→newest) with
 /// the existing newer `tail`, inserting date separators into the page and
 /// dropping the now-redundant head separator at the seam.
@@ -793,7 +809,8 @@ pub fn save_dismissed_previews(dismissed: &HashSet<(u64, String)>) {
 mod tests {
     use super::*;
 
-    /// A real (non-separator) message at `ts` with a unique `id`.
+    /// A stored (DB-sourced) message: `log_id == id` (the rowid), as
+    /// `stored_to_wire` produces.
     fn msg(id: u64, ts: i64) -> WireMessage {
         WireMessage {
             id,
@@ -806,6 +823,15 @@ mod tests {
             log_id: Some(i64::try_from(id).unwrap_or_default()),
             event_key: None,
             previews: Vec::new(),
+        }
+    }
+
+    /// A live (in-memory) message: transient counter `id`, no `log_id`, as
+    /// `message_to_wire` produces for a freshly received message.
+    fn live_msg(id: u64, ts: i64) -> WireMessage {
+        WireMessage {
+            log_id: None,
+            ..msg(id, ts)
         }
     }
 
@@ -864,5 +890,50 @@ mod tests {
         let before = separator_count(&tail);
         let combined = prepend_backlog_page(Vec::new(), tail);
         assert_eq!(separator_count(&combined), before);
+    }
+
+    #[test]
+    fn dedupe_keeps_db_rows_overlapping_live_ids() {
+        // The bug: live messages hold transient counter ids (100,150,200) while
+        // an older DB page holds rowids (50,100,150). Keying on id alone would
+        // drop rowids 100 and 150 as "duplicates" of the live ids, gapping the
+        // scroll-back. They are distinct messages and must all survive.
+        let existing = vec![
+            live_msg(100, JUN9_12),
+            live_msg(150, JUN9_13),
+            live_msg(200, JUN9_14),
+        ];
+        let incoming = vec![msg(50, JUN8_12), msg(100, JUN8_12), msg(150, JUN8_12)];
+        let kept = dedupe_incoming(&existing, incoming);
+        assert_eq!(kept.len(), 3, "overlapping DB rowids must not be dropped");
+    }
+
+    #[test]
+    fn dedupe_drops_live_message_already_present() {
+        // Initial-load overlap: the server re-sends a live message the client
+        // already received (same in-memory id, both log_id = None) — drop it.
+        let existing = vec![live_msg(5, JUN9_12)];
+        let incoming = vec![live_msg(5, JUN9_12), live_msg(6, JUN9_13)];
+        let kept = dedupe_incoming(&existing, incoming);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, 6);
+    }
+
+    #[test]
+    fn dedupe_drops_db_row_already_present() {
+        // A re-served stored row (same rowid) is a genuine duplicate.
+        let existing = vec![msg(100, JUN9_12)];
+        let incoming = vec![msg(100, JUN9_12), msg(99, JUN8_12)];
+        let kept = dedupe_incoming(&existing, incoming);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, 99);
+    }
+
+    #[test]
+    fn dedupe_always_admits_separators() {
+        let existing = vec![live_msg(0, JUN9_12)]; // id 0 sentinel present
+        let incoming = vec![live_msg(0, JUN9_13)];
+        let kept = dedupe_incoming(&existing, incoming);
+        assert_eq!(kept.len(), 1, "id-0 separators are never deduped");
     }
 }

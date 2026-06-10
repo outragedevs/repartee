@@ -812,16 +812,24 @@ impl App {
             ),
         };
         match messages {
-            Ok(mut msgs) => {
+            Ok(msgs) => {
                 let has_more = msgs.len() > capped_limit;
-                msgs.truncate(capped_limit);
+                // The query fetches `capped_limit + 1` rows `ORDER BY timestamp
+                // DESC` then reverses to chronological order, so the extra
+                // sentinel row sits at the FRONT (oldest). When more history
+                // exists, skip that front row — truncating the tail instead
+                // would drop the NEWEST row (the one adjacent to the cursor),
+                // which the next page can never re-fetch, leaving a permanent
+                // one-message gap between pages.
+                let skip = usize::from(has_more);
                 tracing::debug!(
-                    %buffer_id, count = msgs.len(), %has_more,
-                    "web FetchMessages: sending {} messages", msgs.len()
+                    %buffer_id, count = msgs.len() - skip, %has_more,
+                    "web FetchMessages: sending {} messages", msgs.len() - skip
                 );
                 let extractor = self.state.web_preview_extractor.as_deref();
                 let wire: Vec<_> = msgs
                     .iter()
+                    .skip(skip)
                     .map(|m| crate::web::snapshot::stored_to_wire(m, extractor))
                     .collect();
                 self.broadcast_web(crate::web::protocol::WebEvent::Messages {
