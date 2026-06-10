@@ -230,13 +230,14 @@ impl AppState {
                 let mut trimmed = false;
                 self.messages.update(|msgs| {
                     let entry = msgs.entry(buffer_id.clone()).or_default();
-                    // Dedup by id — guards against the SyncInit →
-                    // FetchMessages round-trip race where the same
-                    // message arrives as both a live NewMessage and
-                    // inside the fetched backlog snapshot. id=0 is
-                    // reserved for date separators and is not unique,
-                    // so always admit those.
-                    if message.id == 0 || !entry.iter().any(|m| m.id == message.id) {
+                    // Dedup — guards against the SyncInit → FetchMessages
+                    // round-trip race where the same message arrives as both a
+                    // live NewMessage and inside the fetched backlog snapshot.
+                    // Keyed on `(log_id, id)` (not id alone): a live message
+                    // (log_id None) must not be rejected because a DB-sourced
+                    // backlog row happens to share its numeric id. id=0
+                    // (date separators) is always admitted.
+                    if !message_already_present(entry, &message) {
                         entry.push(message);
                         trimmed = cap_messages(entry, cap);
                     }
@@ -647,6 +648,17 @@ fn local_date_of(ts: i64) -> Option<chrono::NaiveDate> {
         .map(|dt| chrono::Local.from_utc_datetime(&dt.naive_utc()).date_naive())
 }
 
+/// Whether `msg` is already loaded in `existing`, by the same stable
+/// `(log_id, id)` identity [`dedupe_incoming`] uses (see there for why the
+/// transport `id` alone is not a cross-source key). Date separators (`id == 0`)
+/// are never considered duplicates.
+fn message_already_present(existing: &[WireMessage], msg: &WireMessage) -> bool {
+    msg.id != 0
+        && existing
+            .iter()
+            .any(|m| m.id == msg.id && m.log_id == msg.log_id)
+}
+
 /// Drop entries from an incoming `messages` batch that are already loaded in
 /// `existing`.
 ///
@@ -935,5 +947,33 @@ mod tests {
         let incoming = vec![live_msg(0, JUN9_13)];
         let kept = dedupe_incoming(&existing, incoming);
         assert_eq!(kept.len(), 1, "id-0 separators are never deduped");
+    }
+
+    #[test]
+    fn new_live_message_not_dropped_by_db_row_with_same_id() {
+        // A backlog DB row with rowid 42 is loaded; a fresh live message also
+        // carries in-memory id 42. They are distinct (log_id Some vs None) and
+        // the live one must NOT be silently dropped.
+        let existing = vec![msg(42, JUN9_12)]; // DB row, log_id = Some(42)
+        let incoming = live_msg(42, JUN9_14); // live, log_id = None
+        assert!(
+            !message_already_present(&existing, &incoming),
+            "a live message must not collide with a DB rowid"
+        );
+    }
+
+    #[test]
+    fn duplicate_live_message_is_detected() {
+        // The race the dedup guards: the same live message already present.
+        let existing = vec![live_msg(7, JUN9_12)];
+        let incoming = live_msg(7, JUN9_12);
+        assert!(message_already_present(&existing, &incoming));
+    }
+
+    #[test]
+    fn separator_is_never_a_duplicate() {
+        let existing = vec![live_msg(0, JUN9_12)];
+        let incoming = live_msg(0, JUN9_13);
+        assert!(!message_already_present(&existing, &incoming));
     }
 }

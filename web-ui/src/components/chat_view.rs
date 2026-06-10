@@ -481,10 +481,17 @@ pub fn ChatView() -> impl IntoView {
                             // alone would collide across every separator
                             // and let Leptos reuse one DOM node for all of
                             // them. Use the timestamp as the discriminator
-                            // for separators; real messages still key by
-                            // their unique `msg.id` so backlog timestamp
-                            // re-stamps cannot force a re-mount.
-                            key=|msg| (msg.id, if msg.id == 0 { msg.timestamp } else { 0 })
+                            // for separators. Real messages key by
+                            // `(id, log_id)`: the transport `id` alone is not
+                            // unique across sources — a live message
+                            // (log_id None) and a backlog DB row (log_id Some)
+                            // can share a numeric id, and keying on id alone
+                            // would collide them into one reused DOM node.
+                            key=|msg| (
+                                msg.id,
+                                msg.log_id,
+                                if msg.id == 0 { msg.timestamp } else { 0 },
+                            )
                             children=move |msg| render_message(state, msg)
                         />
                     </div>
