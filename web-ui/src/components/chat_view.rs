@@ -133,6 +133,83 @@ pub fn ChatView() -> impl IntoView {
         pin_to_bottom(el);
     };
 
+    // Send an older-history `FetchMessages` for the active buffer using the
+    // oldest loaded real message as the keyset cursor. Shared by the scroll-up
+    // handler (`on_scroll`, `set_anchor = true` so the post-prepend restore can
+    // keep the view put) and the viewport-fill Effect below (`set_anchor =
+    // false` — it runs while pinned at the bottom, where the restore is a
+    // no-op). Returns `true` if a fetch was actually dispatched; `false` when a
+    // guard (already fetching / no more history / window full / no cursor)
+    // short-circuited it. Reads everything untracked so it is safe to call from
+    // inside a RAF callback without creating reactive subscriptions.
+    let trigger_backlog_fetch = move |el: &web_sys::Element, set_anchor: bool| -> bool {
+        let Some(id) = state.active_buffer.get_untracked() else {
+            return false;
+        };
+        if state.backlog_fetching.with_untracked(|s| s.contains(&id)) {
+            return false;
+        }
+        if state
+            .backlog_has_more
+            .with_untracked(|m| m.get(&id) == Some(&false))
+        {
+            return false;
+        }
+        // Window already full: stop paging until the user returns to the bottom
+        // (which collapses + frees it). Without this, the prepend would be
+        // trimmed straight back off the front and the same page re-requested.
+        let len = state
+            .messages
+            .with_untracked(|m| m.get(&id).map_or(0, Vec::len));
+        if len >= crate::state::PINNED_WEB_CAP {
+            return false;
+        }
+        // Cursor = oldest real (non-separator) message's timestamp, plus its
+        // `log_id` (the SQLite rowid) when it came from the log. With both, the
+        // server uses a lossless keyset cursor (no same-second drops); at the
+        // live/DB boundary `log_id` is None, so it falls back to a plain
+        // timestamp cursor. Never the in-memory `id` counter (unrelated to
+        // rowids — sending it would corrupt the keyset comparison).
+        let cursor = state.messages.with_untracked(|m| {
+            m.get(&id).and_then(|v| {
+                v.iter()
+                    .find(|msg| {
+                        msg.id != 0
+                            && msg.event_key.as_deref() != Some("date_separator")
+                            && msg.event_key.as_deref() != Some("backlog_end")
+                    })
+                    .map(|msg| (msg.timestamp, msg.log_id))
+            })
+        });
+        let Some((before, before_id)) = cursor else {
+            return false;
+        };
+        if set_anchor {
+            // Remember the first visible real line and its on-screen offset so
+            // the restore Effect can keep the view put once the page prepends —
+            // immune to live appends at the bottom. If no real line is visible
+            // yet (e.g. only separators), skip anchoring rather than fall back
+            // to a bottom-relative measure.
+            if let Some((mid, off)) = first_visible_anchor(el) {
+                pending_anchor.set_value(Some((id.clone(), mid, off)));
+            } else {
+                pending_anchor.set_value(None);
+            }
+        } else {
+            pending_anchor.set_value(None);
+        }
+        state.backlog_fetching.update(|s| {
+            s.insert(id.clone());
+        });
+        crate::ws::send_command(&crate::protocol::WebCommand::FetchMessages {
+            buffer_id: id,
+            limit: 100,
+            before: Some(before),
+            before_id,
+        });
+        true
+    };
+
     // Buffer-switch: always reset `is_at_bottom = true` and snap to
     // the bottom on the next animation frame (so the `<For>` has had a
     // chance to render the new buffer's messages).
@@ -249,6 +326,61 @@ pub fn ChatView() -> impl IntoView {
         cb.forget();
     });
 
+    // Viewport-fill: when the loaded page is shorter than the viewport, the
+    // container never overflows, so no `scroll` event ever fires and the
+    // scroll-up fetch in `on_scroll` can never be reached — the user is stuck
+    // with whatever the initial load returned (the TUI seeds only
+    // `display.backlog_lines`, default 20, which rarely fills a browser
+    // window). This Effect closes that gap: after each page lands, if the
+    // container still isn't scrollable and the server says more history exists,
+    // it pulls the next older page. Subscribes to `messages` + `active_buffer`
+    // so it re-checks after every prepend, looping (one page per render) until
+    // the viewport overflows, `has_more` turns false, or the window cap is hit.
+    // Gated on `is_at_bottom`: once the user scrolls up, the container is
+    // overflowing by definition and `on_scroll` takes over.
+    Effect::new(move || {
+        state.messages.with(|_| ());
+        let active = state.active_buffer.get();
+        // Re-runs when a fetch completes (guard cleared) — skip while one is in
+        // flight so we don't stack duplicate requests for the same page.
+        let still_fetching = state
+            .backlog_fetching
+            .with(|s| active.as_deref().is_some_and(|id| s.contains(id)));
+        if still_fetching {
+            return;
+        }
+        if !state.is_at_bottom.get_untracked() {
+            return;
+        }
+        let Some(id) = active else { return };
+        if state
+            .backlog_has_more
+            .with_untracked(|m| m.get(&id) == Some(&false))
+        {
+            return;
+        }
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        // RAF so Leptos has committed the latest prepend before we measure
+        // scrollHeight against the viewport.
+        let cb = wasm_bindgen::prelude::Closure::once(move || {
+            if !state.is_at_bottom.get_untracked() {
+                return;
+            }
+            let Some(el) = chat_ref.get() else { return };
+            let el_dom: web_sys::Element = el.into();
+            // Already scrollable → the user can reach the top and `on_scroll`
+            // takes over; nothing to pre-fill.
+            if el_dom.scroll_height() > el_dom.client_height() {
+                return;
+            }
+            trigger_backlog_fetch(&el_dom, false);
+        });
+        let _ = window.request_animation_frame(cb.as_ref().unchecked_ref());
+        cb.forget();
+    });
+
     // Single window.resize listener, coalesced into the next RAF.
     // Fires on:
     //   - desktop browser resize
@@ -333,74 +465,12 @@ pub fn ChatView() -> impl IntoView {
                 state.collapse_backlog(&id);
             }
         }
-        // Near the top: pull an older page from the server, unless one is already
-        // in flight or the server told us there's nothing older.
+        // Near the top: pull an older page from the server (the shared helper
+        // applies the in-flight / no-more-history / window-full guards). Anchor
+        // the restore to the first visible line so the prepend keeps the view
+        // put.
         if f64::from(el.scroll_top()) < BACKLOG_TRIGGER_PX {
-            let Some(id) = state.active_buffer.get_untracked() else {
-                return;
-            };
-            if state.backlog_fetching.with_untracked(|s| s.contains(&id)) {
-                return;
-            }
-            if state
-                .backlog_has_more
-                .with_untracked(|m| m.get(&id) == Some(&false))
-            {
-                return;
-            }
-            // Window already full: stop paging until the user returns to the
-            // bottom (which collapses + frees it). Without this, the prepend
-            // would be trimmed straight back off the front and the same page
-            // re-requested in a loop.
-            let len = state
-                .messages
-                .with_untracked(|m| m.get(&id).map_or(0, Vec::len));
-            if len >= crate::state::PINNED_WEB_CAP {
-                return;
-            }
-            // Cursor = oldest real (non-separator) message's timestamp, plus its
-            // `log_id` (the SQLite rowid) when it came from the log. With both,
-            // the server uses a lossless keyset cursor (no same-second drops); at
-            // the live/DB boundary `log_id` is None, so it falls back to a plain
-            // timestamp cursor. Never the in-memory `id` counter (unrelated to
-            // rowids — sending it would corrupt the keyset comparison).
-            let cursor = state.messages.with_untracked(|m| {
-                m.get(&id).and_then(|v| {
-                    v.iter()
-                        // Skip client separators (id 0) AND server-side separators
-                        // from load_backlog — those have nonzero ids but no log_id,
-                        // so picking one would null out before_id and lose the
-                        // keyset cursor. Mirrors the TUI's oldest_backlog_cursor.
-                        .find(|msg| {
-                            msg.id != 0
-                                && msg.event_key.as_deref() != Some("date_separator")
-                                && msg.event_key.as_deref() != Some("backlog_end")
-                        })
-                        .map(|msg| (msg.timestamp, msg.log_id))
-                })
-            });
-            let Some((before, before_id)) = cursor else {
-                return;
-            };
-            // Anchor (keyed by buffer): remember the first visible real line and
-            // its on-screen offset so the restore Effect can keep the view put
-            // once the page prepends — immune to live appends at the bottom. If
-            // no real line is visible yet (e.g. only separators), skip anchoring
-            // rather than fall back to a bottom-relative measure.
-            if let Some((mid, off)) = first_visible_anchor(el) {
-                pending_anchor.set_value(Some((id.clone(), mid, off)));
-            } else {
-                pending_anchor.set_value(None);
-            }
-            state.backlog_fetching.update(|s| {
-                s.insert(id.clone());
-            });
-            crate::ws::send_command(&crate::protocol::WebCommand::FetchMessages {
-                buffer_id: id,
-                limit: 100,
-                before: Some(before),
-                before_id,
-            });
+            trigger_backlog_fetch(el, true);
         }
     };
 
