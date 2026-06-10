@@ -467,8 +467,9 @@ impl App {
                 buffer_id,
                 limit,
                 before,
+                before_id,
             } => {
-                self.web_fetch_messages(&buffer_id, limit, before, session_id);
+                self.web_fetch_messages(&buffer_id, limit, before, before_id, session_id);
             }
             WebCommand::FetchNickList { buffer_id } => {
                 if let Some(crate::web::protocol::WebEvent::NickList {
@@ -687,6 +688,7 @@ impl App {
         buffer_id: &str,
         limit: u32,
         before: Option<i64>,
+        before_id: Option<i64>,
         session_id: &str,
     ) {
         if buffer_id == Self::MENTIONS_BUFFER_ID {
@@ -732,7 +734,13 @@ impl App {
                 .map(|m| crate::web::snapshot::message_to_wire(m, extractor))
                 .collect();
             if !msgs.is_empty() {
-                let has_more = buf.messages.len() > capped;
+                // More history is available if the in-memory page itself was
+                // truncated, OR a log DB exists that may hold older rows than
+                // what's in memory. Without the latter, a buffer with fewer than
+                // `capped` live messages would report `has_more = false` and the
+                // web client would never scroll back into the logs. A brand-new
+                // channel with no DB history just gets one empty scroll-back fetch.
+                let has_more = buf.messages.len() > capped || self.storage.is_some();
                 tracing::debug!(
                     %buffer_id, count = msgs.len(),
                     "web FetchMessages: sending {} in-memory messages", msgs.len()
@@ -749,12 +757,25 @@ impl App {
 
         // If the in-memory buffer was empty (e.g. brand new buffer or post-reconnect
         // before messages arrive), fall through to DB. Also used for scroll-back.
+        // Every path below MUST send exactly one Messages reply (even empty) so
+        // the client clears its per-buffer in-flight guard and doesn't block
+        // future scroll-up fetches.
+        let send_empty = |app: &Self| {
+            app.broadcast_web(crate::web::protocol::WebEvent::Messages {
+                buffer_id: buffer_id.to_string(),
+                messages: Vec::new(),
+                has_more: false,
+                session_id: Some(session_id.to_string()),
+            });
+        };
         let Some(ref storage) = self.storage else {
             tracing::warn!("web FetchMessages: storage not available");
+            send_empty(self);
             return;
         };
         let Ok(db) = storage.db.lock() else {
             tracing::warn!("web FetchMessages: failed to lock db");
+            send_empty(self);
             return;
         };
         let capped_limit = limit.min(500) as usize;
@@ -764,26 +785,51 @@ impl App {
             .connections
             .get(conn_id)
             .map_or_else(|| conn_id.to_string(), |c| c.label.clone());
-        let messages = crate::storage::query::get_messages(
-            &db,
-            &network,
-            buffer,
-            before,
-            capped_limit + 1,
-            storage.encrypt,
-            None,
-        );
+        // Read-side key so encrypted logs decrypt on web scroll-back (previously
+        // `None` => the client received ciphertext).
+        let key = storage.crypto_key.as_ref();
+        let messages = match (before, before_id) {
+            // Lossless keyset cursor when the client sent the oldest row's id
+            // (a DB rowid for log-sourced rows): no same-second drops.
+            (Some(ts), Some(id)) => crate::storage::query::get_messages_paginated(
+                &db,
+                &network,
+                buffer,
+                Some((ts, id)),
+                capped_limit + 1,
+                storage.encrypt,
+                key,
+            ),
+            // Initial load or a boundary with no usable id: timestamp-only.
+            _ => crate::storage::query::get_messages(
+                &db,
+                &network,
+                buffer,
+                before,
+                capped_limit + 1,
+                storage.encrypt,
+                key,
+            ),
+        };
         match messages {
-            Ok(mut msgs) => {
+            Ok(msgs) => {
                 let has_more = msgs.len() > capped_limit;
-                msgs.truncate(capped_limit);
+                // The query fetches `capped_limit + 1` rows `ORDER BY timestamp
+                // DESC` then reverses to chronological order, so the extra
+                // sentinel row sits at the FRONT (oldest). When more history
+                // exists, skip that front row — truncating the tail instead
+                // would drop the NEWEST row (the one adjacent to the cursor),
+                // which the next page can never re-fetch, leaving a permanent
+                // one-message gap between pages.
+                let skip = usize::from(has_more);
                 tracing::debug!(
-                    %buffer_id, count = msgs.len(), %has_more,
-                    "web FetchMessages: sending {} messages", msgs.len()
+                    %buffer_id, count = msgs.len() - skip, %has_more,
+                    "web FetchMessages: sending {} messages", msgs.len() - skip
                 );
                 let extractor = self.state.web_preview_extractor.as_deref();
                 let wire: Vec<_> = msgs
                     .iter()
+                    .skip(skip)
                     .map(|m| crate::web::snapshot::stored_to_wire(m, extractor))
                     .collect();
                 self.broadcast_web(crate::web::protocol::WebEvent::Messages {
@@ -795,6 +841,8 @@ impl App {
             }
             Err(e) => {
                 tracing::warn!(%buffer_id, error = %e, "web FetchMessages: query failed");
+                drop(db);
+                send_empty(self);
             }
         }
     }

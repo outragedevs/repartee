@@ -21,6 +21,12 @@ use crate::protocol::*;
 /// free, with no JS scroll-handling complexity.
 const MAX_BUFFER_MESSAGES: usize = 1000;
 
+/// Higher per-buffer cap while the user is scrolled up reading backlog (the
+/// buffer is "pinned"). Loaded older pages are kept up to this bound instead of
+/// being trimmed back to `MAX_BUFFER_MESSAGES`; returning to the bottom collapses
+/// the buffer back down. Mirrors the TUI's `PINNED_BACKLOG_CAP`.
+pub(crate) const PINNED_WEB_CAP: usize = 5000;
+
 /// Client-side application state, stored as Leptos signals.
 #[derive(Clone, Copy)]
 pub struct AppState {
@@ -75,6 +81,13 @@ pub struct AppState {
     /// A token to splice into the input at the caret (`:name:` or a Unicode
     /// emoji). The input component consumes it and clears it back to `None`.
     pub pending_insert: RwSignal<Option<String>>,
+    /// Per-buffer: whether the server reported more history is available older
+    /// than what's loaded (from the `has_more` field of `Messages`). Drives the
+    /// scroll-up loader — `false` (or absent) means stop fetching.
+    pub backlog_has_more: RwSignal<HashMap<String, bool>>,
+    /// Buffers with an in-flight scroll-up `FetchMessages`. Guards against
+    /// firing a second request before the first response lands.
+    pub backlog_fetching: RwSignal<HashSet<String>>,
 }
 
 impl AppState {
@@ -115,6 +128,31 @@ impl AppState {
             emote_picker_open: RwSignal::new(false),
             emoji_picker_open: RwSignal::new(false),
             pending_insert: RwSignal::new(None),
+            backlog_has_more: RwSignal::new(HashMap::new()),
+            backlog_fetching: RwSignal::new(HashSet::new()),
+        }
+    }
+
+    /// Collapse a buffer's loaded backlog window after the user returns to the
+    /// bottom: trim back to `MAX_BUFFER_MESSAGES` (freeing the older lines we're
+    /// no longer displaying) and re-arm `has_more` so a later scroll-up fetches
+    /// again. Mirrors the TUI's collapse-on-return-to-bottom.
+    pub fn collapse_backlog(&self, buffer_id: &str) {
+        let mut trimmed = false;
+        self.messages.update(|msgs| {
+            if let Some(entry) = msgs.get_mut(buffer_id)
+                && entry.len() > MAX_BUFFER_MESSAGES
+            {
+                let drop = entry.len() - MAX_BUFFER_MESSAGES;
+                entry.drain(..drop);
+                entry.shrink_to(MAX_BUFFER_MESSAGES);
+                trimmed = true;
+            }
+        });
+        if trimmed {
+            self.backlog_has_more.update(|m| {
+                m.insert(buffer_id.to_string(), true);
+            });
         }
     }
 
@@ -134,6 +172,8 @@ impl AppState {
                 self.messages.set(HashMap::new());
                 self.nick_lists.set(HashMap::new());
                 self.backlog_loaded.set(HashSet::new());
+                self.backlog_has_more.set(HashMap::new());
+                self.backlog_fetching.set(HashSet::new());
 
                 self.buffers.set(buffers);
                 self.connections.set(connections);
@@ -180,19 +220,36 @@ impl AppState {
                 }
             }
             WebEvent::NewMessage { buffer_id, message } => {
+                // Keep the larger window only for the buffer the user is actively
+                // reading backlog in (active + scrolled up); every other buffer
+                // trims to the normal cap.
+                let active = self.active_buffer.get_untracked();
+                let pinned =
+                    active.as_deref() == Some(&buffer_id) && !self.is_at_bottom.get_untracked();
+                let cap = if pinned { PINNED_WEB_CAP } else { MAX_BUFFER_MESSAGES };
+                let mut trimmed = false;
                 self.messages.update(|msgs| {
                     let entry = msgs.entry(buffer_id.clone()).or_default();
-                    // Dedup by id — guards against the SyncInit →
-                    // FetchMessages round-trip race where the same
-                    // message arrives as both a live NewMessage and
-                    // inside the fetched backlog snapshot. id=0 is
-                    // reserved for date separators and is not unique,
-                    // so always admit those.
-                    if message.id == 0 || !entry.iter().any(|m| m.id == message.id) {
+                    // Dedup — guards against the SyncInit → FetchMessages
+                    // round-trip race where the same message arrives as both a
+                    // live NewMessage and inside the fetched backlog snapshot.
+                    // Keyed on `(log_id, id)` (not id alone): a live message
+                    // (log_id None) must not be rejected because a DB-sourced
+                    // backlog row happens to share its numeric id. id=0
+                    // (date separators) is always admitted.
+                    if !message_already_present(entry, &message) {
                         entry.push(message);
-                        cap_messages(entry);
+                        trimmed = cap_messages(entry, cap);
                     }
                 });
+                // A trim dropped the oldest rows, so older history exists below
+                // the in-memory head again: re-arm scroll-up even if a previous
+                // fetch had reached the start and set has_more=false.
+                if trimmed {
+                    self.backlog_has_more.update(|m| {
+                        m.insert(buffer_id.clone(), true);
+                    });
+                }
                 // Update unread count if not the active buffer.
                 let is_active = self.active_buffer.get_untracked().as_deref() == Some(&buffer_id);
                 if !is_active {
@@ -252,6 +309,15 @@ impl AppState {
                 self.backlog_loaded.update(|set| {
                     set.remove(&buffer_id);
                 });
+                // Also drop backlog scroll state, so a buffer later re-created
+                // with the same id (e.g. rejoining a channel) doesn't inherit a
+                // stale `has_more`/`fetching` entry that would block scroll-up.
+                self.backlog_has_more.update(|m| {
+                    m.remove(&buffer_id);
+                });
+                self.backlog_fetching.update(|s| {
+                    s.remove(&buffer_id);
+                });
             }
             WebEvent::ConnectionStatus {
                 conn_id,
@@ -278,34 +344,45 @@ impl AppState {
             WebEvent::Messages {
                 buffer_id,
                 messages,
+                has_more,
                 ..
             } => {
+                // A scroll-back response arrives while the user is reading
+                // backlog (not at bottom): keep a larger window so the just-
+                // prepended older page isn't immediately trimmed away. An
+                // initial load arrives at the bottom and uses the normal cap.
+                let cap = if self.is_at_bottom.get_untracked() {
+                    MAX_BUFFER_MESSAGES
+                } else {
+                    PINNED_WEB_CAP
+                };
                 self.messages.update(|msgs| {
                     let entry = msgs.entry(buffer_id.clone()).or_default();
-                    // Drop incoming messages whose id is already present
-                    // in the cache — happens when NewMessage events
-                    // arrive between sending FetchMessages and receiving
-                    // the response (the server serves the in-memory
-                    // buffer for `before=None`, which includes messages
-                    // the client already received live). id=0 is the
-                    // date-separator sentinel and is admitted unfiltered.
-                    let existing_ids: HashSet<u64> =
-                        entry.iter().filter(|m| m.id != 0).map(|m| m.id).collect();
-                    let filtered: Vec<_> = messages
-                        .into_iter()
-                        .filter(|m| m.id == 0 || !existing_ids.contains(&m.id))
-                        .collect();
-                    let with_separators = insert_date_separators(filtered);
-                    // Prepend older messages (they come from scroll-back).
-                    let mut combined = with_separators;
-                    combined.append(entry);
-                    cap_messages(&mut combined);
+                    // Drop incoming messages already present in the cache —
+                    // happens when NewMessage events arrive between sending
+                    // FetchMessages and receiving the response (the server
+                    // serves the in-memory buffer for `before=None`, which
+                    // includes messages the client already received live).
+                    let filtered = dedupe_incoming(entry, messages);
+                    // Prepend the older page, inserting date separators and
+                    // dropping the redundant head separator at a same-day seam
+                    // (mirrors the TUI paginator — see `prepend_backlog_page`).
+                    let mut combined = prepend_backlog_page(filtered, std::mem::take(entry));
+                    cap_messages(&mut combined, cap);
                     *entry = combined;
                 });
                 // Mark this buffer's DB backlog as loaded so the Layout Effect
                 // won't re-fetch on subsequent switches to this buffer.
                 self.backlog_loaded.update(|set| {
-                    set.insert(buffer_id);
+                    set.insert(buffer_id.clone());
+                });
+                // Record whether older history remains, and clear the in-flight
+                // guard so the next scroll-up may fetch again.
+                self.backlog_has_more.update(|m| {
+                    m.insert(buffer_id.clone(), has_more);
+                });
+                self.backlog_fetching.update(|s| {
+                    s.remove(&buffer_id);
                 });
             }
             WebEvent::NickList {
@@ -519,13 +596,17 @@ impl AppState {
     }
 }
 
-fn cap_messages(messages: &mut Vec<WireMessage>) {
-    if messages.len() <= MAX_BUFFER_MESSAGES {
-        return;
+/// Trim the buffer to `cap`, dropping oldest from the head. Returns `true` if it
+/// actually dropped anything — the caller uses that to re-arm `has_more`, since a
+/// trim means older history now lives only below the in-memory head.
+fn cap_messages(messages: &mut Vec<WireMessage>, cap: usize) -> bool {
+    if messages.len() <= cap {
+        return false;
     }
-    let drop_count = messages.len() - MAX_BUFFER_MESSAGES;
+    let drop_count = messages.len() - cap;
     messages.drain(..drop_count);
-    messages.shrink_to(MAX_BUFFER_MESSAGES);
+    messages.shrink_to(cap);
+    true
 }
 
 fn buf_type_order(t: &str) -> u8 {
@@ -559,6 +640,81 @@ fn prefix_rank(prefix: &str) -> u8 {
         .map_or(ORDER.len() as u8, |i| i as u8)
 }
 
+/// Local calendar date for a Unix timestamp (the grouping key for date
+/// separators). `None` only if the timestamp is out of `chrono`'s range.
+fn local_date_of(ts: i64) -> Option<chrono::NaiveDate> {
+    use chrono::TimeZone;
+    chrono::DateTime::from_timestamp(ts, 0)
+        .map(|dt| chrono::Local.from_utc_datetime(&dt.naive_utc()).date_naive())
+}
+
+/// Whether `msg` is already loaded in `existing`, by the same stable
+/// `(log_id, id)` identity [`dedupe_incoming`] uses (see there for why the
+/// transport `id` alone is not a cross-source key). Date separators (`id == 0`)
+/// are never considered duplicates.
+fn message_already_present(existing: &[WireMessage], msg: &WireMessage) -> bool {
+    msg.id != 0
+        && existing
+            .iter()
+            .any(|m| m.id == msg.id && m.log_id == msg.log_id)
+}
+
+/// Drop entries from an incoming `messages` batch that are already loaded in
+/// `existing`.
+///
+/// The transport `id` is NOT a stable cross-source key: live messages carry a
+/// transient in-memory `AppState` counter (`message_to_wire`) while stored rows
+/// carry a `SQLite` rowid (`stored_to_wire`), and the two ranges overlap. Keying
+/// on `id` alone would treat a valid older DB row as a duplicate of an unrelated
+/// live message with the same number, punching gaps in scroll-back. Key on
+/// `(log_id, id)` instead — a DB row (`log_id = Some(rowid)`) can never collide
+/// with a live message (`log_id = None`) sharing the numeric id. Date separators
+/// (`id == 0`) are always admitted.
+fn dedupe_incoming(existing: &[WireMessage], messages: Vec<WireMessage>) -> Vec<WireMessage> {
+    let existing_keys: HashSet<(Option<i64>, u64)> = existing
+        .iter()
+        .filter(|m| m.id != 0)
+        .map(|m| (m.log_id, m.id))
+        .collect();
+    messages
+        .into_iter()
+        .filter(|m| m.id == 0 || !existing_keys.contains(&(m.log_id, m.id)))
+        .collect()
+}
+
+/// Combine a freshly-fetched older `page` (chronological, oldest→newest) with
+/// the existing newer `tail`, inserting date separators into the page and
+/// dropping the now-redundant head separator at the seam.
+///
+/// Mirrors the TUI paginator (`src/app/backlog.rs`): `insert_date_separators`
+/// always emits a leading separator for the page's first date, and the existing
+/// `tail` already carries its own leading separator from when it was first
+/// loaded. When the page's newest real message shares a local date with that
+/// head separator, the seam has no date change — so the head separator is a
+/// duplicate of the one the page just emitted and must be removed, else
+/// scrolling back through several pages of the same day shows the date header
+/// repeated mid-day.
+fn prepend_backlog_page(page: Vec<WireMessage>, mut tail: Vec<WireMessage>) -> Vec<WireMessage> {
+    let mut combined = insert_date_separators(page);
+
+    let seam_date = combined
+        .iter()
+        .rev()
+        .find(|m| m.event_key.as_deref() != Some("date_separator"))
+        .and_then(|m| local_date_of(m.timestamp));
+    if let Some(seam_date) = seam_date
+        && tail.first().is_some_and(|m| {
+            m.event_key.as_deref() == Some("date_separator")
+                && local_date_of(m.timestamp) == Some(seam_date)
+        })
+    {
+        tail.remove(0);
+    }
+
+    combined.append(&mut tail);
+    combined
+}
+
 /// Insert date separator lines between messages from different days.
 ///
 /// Mirrors the TUI's `load_backlog` behavior — adds `─── Day, DD Mon YYYY ───`
@@ -572,12 +728,7 @@ fn insert_date_separators(messages: Vec<WireMessage>) -> Vec<WireMessage> {
     let mut last_date: Option<chrono::NaiveDate> = None;
 
     for msg in messages {
-        let local_date = chrono::DateTime::from_timestamp(msg.timestamp, 0).map(|dt| {
-            use chrono::TimeZone;
-            chrono::Local
-                .from_utc_datetime(&dt.naive_utc())
-                .date_naive()
-        });
+        let local_date = local_date_of(msg.timestamp);
 
         if let Some(date) = local_date {
             if last_date.is_some_and(|d| d != date) || last_date.is_none() {
@@ -590,6 +741,7 @@ fn insert_date_separators(messages: Vec<WireMessage>) -> Vec<WireMessage> {
                     nick_mode: None,
                     text: format!("\u{2500}\u{2500}\u{2500} {formatted} \u{2500}\u{2500}\u{2500}"),
                     highlight: false,
+                    log_id: None,
                     event_key: Some("date_separator".to_string()),
                     previews: Vec::new(),
                 });
@@ -663,4 +815,165 @@ pub fn save_dismissed_previews(dismissed: &HashSet<(u64, String)>) {
         serialised.push('\n');
     }
     let _ = storage.set_item(DISMISSED_PREVIEWS_KEY, &serialised);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stored (DB-sourced) message: `log_id == id` (the rowid), as
+    /// `stored_to_wire` produces.
+    fn msg(id: u64, ts: i64) -> WireMessage {
+        WireMessage {
+            id,
+            timestamp: ts,
+            msg_type: "message".to_string(),
+            nick: Some("alice".to_string()),
+            nick_mode: None,
+            text: "hi".to_string(),
+            highlight: false,
+            log_id: Some(i64::try_from(id).unwrap_or_default()),
+            event_key: None,
+            previews: Vec::new(),
+        }
+    }
+
+    /// A live (in-memory) message: transient counter `id`, no `log_id`, as
+    /// `message_to_wire` produces for a freshly received message.
+    fn live_msg(id: u64, ts: i64) -> WireMessage {
+        WireMessage {
+            log_id: None,
+            ..msg(id, ts)
+        }
+    }
+
+    fn separator_count(list: &[WireMessage]) -> usize {
+        list.iter()
+            .filter(|m| m.event_key.as_deref() == Some("date_separator"))
+            .count()
+    }
+
+    // 2024-06-09 12:00 / 13:00 UTC — same calendar day in every realistic tz.
+    const JUN9_12: i64 = 1_717_934_400; // 2024-06-09T12:00:00Z
+    const JUN9_13: i64 = 1_717_938_000; // 2024-06-09T13:00:00Z
+    const JUN9_14: i64 = 1_717_941_600; // 2024-06-09T14:00:00Z
+    // 2024-06-08 12:00 UTC — a clearly different day, far from any midnight.
+    const JUN8_12: i64 = 1_717_848_000; // 2024-06-08T12:00:00Z
+
+    #[test]
+    fn seam_same_day_drops_duplicate_separator() {
+        // Existing tail: one Jun-9 page already loaded, led by its separator.
+        let tail = insert_date_separators(vec![msg(10, JUN9_14)]);
+        assert_eq!(separator_count(&tail), 1);
+
+        // Scroll back: an older Jun-9 page. The seam has no date change, so the
+        // tail's head separator must be dropped — exactly one Jun-9 header total.
+        let page = vec![msg(1, JUN9_12), msg(2, JUN9_13)];
+        let combined = prepend_backlog_page(page, tail);
+
+        assert_eq!(
+            separator_count(&combined),
+            1,
+            "same-day seam must collapse to a single date separator"
+        );
+        // The lone separator sits at the very top, above the oldest message.
+        assert_eq!(combined[0].event_key.as_deref(), Some("date_separator"));
+        assert_eq!(combined[1].id, 1);
+    }
+
+    #[test]
+    fn seam_date_change_keeps_both_separators() {
+        // Tail starts on Jun 9; older page is entirely Jun 8 → the boundary is a
+        // real date change, so both separators are correct and must survive.
+        let tail = insert_date_separators(vec![msg(10, JUN9_12)]);
+        let page = vec![msg(1, JUN8_12)];
+        let combined = prepend_backlog_page(page, tail);
+
+        assert_eq!(
+            separator_count(&combined),
+            2,
+            "a genuine date change at the seam keeps both date separators"
+        );
+    }
+
+    #[test]
+    fn prepend_with_empty_page_is_a_noop_on_separators() {
+        let tail = insert_date_separators(vec![msg(10, JUN9_12)]);
+        let before = separator_count(&tail);
+        let combined = prepend_backlog_page(Vec::new(), tail);
+        assert_eq!(separator_count(&combined), before);
+    }
+
+    #[test]
+    fn dedupe_keeps_db_rows_overlapping_live_ids() {
+        // The bug: live messages hold transient counter ids (100,150,200) while
+        // an older DB page holds rowids (50,100,150). Keying on id alone would
+        // drop rowids 100 and 150 as "duplicates" of the live ids, gapping the
+        // scroll-back. They are distinct messages and must all survive.
+        let existing = vec![
+            live_msg(100, JUN9_12),
+            live_msg(150, JUN9_13),
+            live_msg(200, JUN9_14),
+        ];
+        let incoming = vec![msg(50, JUN8_12), msg(100, JUN8_12), msg(150, JUN8_12)];
+        let kept = dedupe_incoming(&existing, incoming);
+        assert_eq!(kept.len(), 3, "overlapping DB rowids must not be dropped");
+    }
+
+    #[test]
+    fn dedupe_drops_live_message_already_present() {
+        // Initial-load overlap: the server re-sends a live message the client
+        // already received (same in-memory id, both log_id = None) — drop it.
+        let existing = vec![live_msg(5, JUN9_12)];
+        let incoming = vec![live_msg(5, JUN9_12), live_msg(6, JUN9_13)];
+        let kept = dedupe_incoming(&existing, incoming);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, 6);
+    }
+
+    #[test]
+    fn dedupe_drops_db_row_already_present() {
+        // A re-served stored row (same rowid) is a genuine duplicate.
+        let existing = vec![msg(100, JUN9_12)];
+        let incoming = vec![msg(100, JUN9_12), msg(99, JUN8_12)];
+        let kept = dedupe_incoming(&existing, incoming);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, 99);
+    }
+
+    #[test]
+    fn dedupe_always_admits_separators() {
+        let existing = vec![live_msg(0, JUN9_12)]; // id 0 sentinel present
+        let incoming = vec![live_msg(0, JUN9_13)];
+        let kept = dedupe_incoming(&existing, incoming);
+        assert_eq!(kept.len(), 1, "id-0 separators are never deduped");
+    }
+
+    #[test]
+    fn new_live_message_not_dropped_by_db_row_with_same_id() {
+        // A backlog DB row with rowid 42 is loaded; a fresh live message also
+        // carries in-memory id 42. They are distinct (log_id Some vs None) and
+        // the live one must NOT be silently dropped.
+        let existing = vec![msg(42, JUN9_12)]; // DB row, log_id = Some(42)
+        let incoming = live_msg(42, JUN9_14); // live, log_id = None
+        assert!(
+            !message_already_present(&existing, &incoming),
+            "a live message must not collide with a DB rowid"
+        );
+    }
+
+    #[test]
+    fn duplicate_live_message_is_detected() {
+        // The race the dedup guards: the same live message already present.
+        let existing = vec![live_msg(7, JUN9_12)];
+        let incoming = live_msg(7, JUN9_12);
+        assert!(message_already_present(&existing, &incoming));
+    }
+
+    #[test]
+    fn separator_is_never_a_duplicate() {
+        let existing = vec![live_msg(0, JUN9_12)];
+        let incoming = live_msg(0, JUN9_13);
+        assert!(!message_already_present(&existing, &incoming));
+    }
 }

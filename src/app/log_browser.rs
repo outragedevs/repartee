@@ -162,6 +162,7 @@ impl App {
                 log_newest_ts: None,
                 history_exhausted: false,
                 log_initial_loaded: false,
+                pin_backlog: false,
             });
 
             let buffers = {
@@ -196,6 +197,7 @@ impl App {
                     log_newest_ts: None,
                     history_exhausted: false,
                     log_initial_loaded: false,
+                    pin_backlog: false,
                 });
             }
         }
@@ -460,7 +462,11 @@ impl App {
 /// The caller is responsible for stripping any leading separator from
 /// the existing buffer that would duplicate the first separator
 /// produced here — see `load_older_messages` for the prepend dance.
-fn rows_to_buffer_messages(
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "shared with app::backlog's live-chat paginator; module nesting is private but the cross-module use is real"
+)]
+pub(crate) fn rows_to_buffer_messages(
     state: &mut crate::state::AppState,
     rows: &[crate::storage::StoredMessage],
     _unused: Option<chrono::NaiveDate>,
@@ -496,7 +502,11 @@ fn rows_to_buffer_messages(
     out
 }
 
-fn stored_to_message(
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "shared with app::backlog's live-chat paginator"
+)]
+pub(crate) fn stored_to_message(
     state: &mut crate::state::AppState,
     stored: &crate::storage::StoredMessage,
 ) -> crate::state::buffer::Message {

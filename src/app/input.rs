@@ -250,6 +250,7 @@ impl App {
             (KeyModifiers::CONTROL, KeyCode::Char('e')) | (_, KeyCode::End) => {
                 self.input.end();
                 self.scroll_offset = 0;
+                self.collapse_backlog_if_at_bottom();
             }
             (KeyModifiers::ALT, KeyCode::Char(c)) if c.is_ascii_digit() => {
                 let n = c.to_digit(10).unwrap_or(0) as usize;
@@ -288,10 +289,14 @@ impl App {
                 self.scroll_offset = self.scroll_offset.saturating_add(10);
                 if self.log_browser_mode {
                     self.maybe_paginate_log_buffer();
+                } else {
+                    self.pin_active_backlog();
+                    self.maybe_load_older_chat_backlog();
                 }
             }
             (_, KeyCode::PageDown) => {
                 self.scroll_offset = self.scroll_offset.saturating_sub(10);
+                self.collapse_backlog_if_at_bottom();
             }
             (_, KeyCode::Tab) => {
                 let is_highlight = self
@@ -506,6 +511,9 @@ impl App {
                     self.scroll_offset = self.scroll_offset.saturating_add(3);
                     if self.log_browser_mode {
                         self.maybe_paginate_log_buffer();
+                    } else {
+                        self.pin_active_backlog();
+                        self.maybe_load_older_chat_backlog();
                     }
                 } else if regions.buffer_list_area.is_some_and(|r| r.contains(pos)) {
                     self.buffer_list_scroll = self.buffer_list_scroll.saturating_sub(1);
@@ -516,6 +524,7 @@ impl App {
             MouseEventKind::ScrollDown => {
                 if regions.chat_area.is_some_and(|r| r.contains(pos)) {
                     self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                    self.collapse_backlog_if_at_bottom();
                 } else if let Some(r) = regions.buffer_list_area
                     && r.contains(pos)
                 {
@@ -657,6 +666,7 @@ impl App {
                 log_newest_ts: None,
                 history_exhausted: false,
                 log_initial_loaded: false,
+                pin_backlog: false,
             });
         }
         self.state.set_active_buffer(&query_buf_id);

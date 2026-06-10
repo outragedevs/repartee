@@ -131,6 +131,9 @@ pub enum WebCommand {
         buffer_id: String,
         limit: u32,
         before: Option<i64>,
+        /// Oldest loaded message's id (DB rowid for log-sourced rows), forming a
+        /// `(before, before_id)` keyset cursor so same-second rows aren't dropped.
+        before_id: Option<i64>,
     },
     FetchNickList {
         buffer_id: String,
@@ -239,6 +242,11 @@ pub struct WireMessage {
     pub nick_mode: Option<String>,
     pub text: String,
     pub highlight: bool,
+    /// SQLite log rowid for log-sourced messages (`None` for live in-memory
+    /// rows). Echoed back as `FetchMessages.before_id` for a lossless keyset
+    /// scroll-back cursor.
+    #[serde(default)]
+    pub log_id: Option<i64>,
     #[serde(default)]
     pub event_key: Option<String>,
     /// Server-extracted link previews. Empty when image previews are

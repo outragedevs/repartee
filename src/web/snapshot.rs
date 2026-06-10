@@ -98,6 +98,9 @@ pub fn message_to_wire(
         nick_mode: msg.nick_mode.clone(),
         text: msg.text.clone(),
         highlight: msg.highlight,
+        // Only set when this in-memory message was itself loaded from the log DB
+        // (backlog); live messages have no rowid yet.
+        log_id: msg.log_msg_id.as_ref().and_then(|s| s.parse::<i64>().ok()),
         event_key: msg.event_key.clone(),
         previews: extractor.map(|e| e.extract(&msg.text)).unwrap_or_default(),
     }
@@ -116,6 +119,8 @@ pub fn stored_to_wire(
         nick_mode: None,
         text: msg.text.clone(),
         highlight: msg.highlight,
+        // The SQLite rowid — the lossless scroll-back cursor key.
+        log_id: Some(msg.id),
         event_key: msg.event_key.clone(),
         previews: extractor.map(|e| e.extract(&msg.text)).unwrap_or_default(),
     }
@@ -172,6 +177,7 @@ mod tests {
                 log_newest_ts: None,
                 history_exhausted: false,
                 log_initial_loaded: false,
+                pin_backlog: false,
             },
         );
         state

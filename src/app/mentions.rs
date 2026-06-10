@@ -35,6 +35,7 @@ impl App {
             log_newest_ts: None,
             history_exhausted: false,
             log_initial_loaded: false,
+            pin_backlog: false,
         };
         self.state
             .buffers

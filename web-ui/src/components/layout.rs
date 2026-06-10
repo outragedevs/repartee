@@ -50,6 +50,7 @@ pub fn Layout() -> impl IntoView {
                 buffer_id: buf_id.clone(),
                 limit: 100,
                 before: None,
+                before_id: None,
             });
         }
         crate::ws::send_command(&WebCommand::FetchNickList { buffer_id: buf_id });

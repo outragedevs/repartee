@@ -29,6 +29,10 @@ pub struct Storage {
     pub log_tx: mpsc::Sender<LogRow>,
     writer: writer::LogWriterHandle,
     pub encrypt: bool,
+    /// AES-256-GCM key when `[storage] encrypt = true`, kept so backlog *reads*
+    /// (on-demand scroll, buffer-open history) can decrypt stored text. The
+    /// writer task owns its own clone for writes; this is the read-side copy.
+    pub crypto_key: Option<aes_gcm::Key<aes_gcm::Aes256Gcm>>,
 }
 
 impl Storage {
@@ -79,13 +83,16 @@ impl Storage {
         }
 
         let db = Arc::new(Mutex::new(conn));
-        let (writer, log_tx) = writer::LogWriterHandle::spawn(Arc::clone(&db), crypto_key);
+        // Keep a read-side copy of the key before the writer takes ownership.
+        let read_key = crypto_key;
+        let (writer, log_tx) = writer::LogWriterHandle::spawn(Arc::clone(&db), read_key);
 
         Ok(Self {
             db,
             log_tx,
             writer,
             encrypt: config.encrypt,
+            crypto_key: read_key,
         })
     }
 

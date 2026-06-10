@@ -9,6 +9,11 @@ use crate::state::AppState;
 /// user has to actively scroll up before stickiness flips off.
 const SCROLL_THRESHOLD: f64 = 30.0;
 
+/// Distance from the top (px) at which scrolling up triggers an on-demand
+/// fetch of an older backlog page from the server. Generous so the page is
+/// usually loaded before the user reaches the very top.
+const BACKLOG_TRIGGER_PX: f64 = 400.0;
+
 fn is_near_bottom(el: &web_sys::Element) -> bool {
     el.scroll_height() as f64 - el.scroll_top() as f64 - el.client_height() as f64
         <= SCROLL_THRESHOLD
@@ -19,6 +24,51 @@ fn is_near_bottom(el: &web_sys::Element) -> bool {
 /// re-enter `on_scroll` and re-measure mid-paint.
 fn pin_to_bottom(el: &web_sys::Element) {
     el.set_scroll_top(el.scroll_height());
+}
+
+/// First real (non-separator) chat line currently visible in `container`,
+/// returned as `(data-mid, pixel offset from the container's top edge)`.
+/// Used to anchor a backlog-prepend restore to a concrete element instead of
+/// a distance from the bottom (the latter is corrupted by live appends).
+///
+/// `data-mid` is the `(id, log_id)` composite the `<For>` keys on — NOT the
+/// transport id alone, which isn't unique across sources (a live message and a
+/// backlog DB row can share a number), so an id-only selector could re-find the
+/// wrong element after a prepend. Date separators are skipped by their
+/// `date-separator` class, not by id: server-side (backlog-path) separators
+/// carry nonzero ids, and a same-day prepend removes the seam separator — both
+/// of which would break an id-based skip.
+fn first_visible_anchor(container: &web_sys::Element) -> Option<(String, f64)> {
+    let ctop = container.get_bounding_client_rect().top();
+    let lines = container
+        .query_selector_all(".chat-line[data-mid]:not(.date-separator)")
+        .ok()?;
+    for i in 0..lines.length() {
+        let Some(node) = lines.item(i) else { continue };
+        let Ok(elem) = node.dyn_into::<web_sys::Element>() else {
+            continue;
+        };
+        let Some(mid) = elem.get_attribute("data-mid") else {
+            continue;
+        };
+        let rect = elem.get_bounding_client_rect();
+        // First line whose bottom edge is below the container's top is the
+        // first (partially) visible one.
+        if rect.bottom() > ctop {
+            return Some((mid, rect.top() - ctop));
+        }
+    }
+    None
+}
+
+/// Current pixel offset of the chat line with `data-mid == mid` from the
+/// container's top edge, or `None` if that line is no longer rendered.
+fn anchor_offset(container: &web_sys::Element, mid: &str) -> Option<f64> {
+    let selector = format!(".chat-line[data-mid=\"{mid}\"]");
+    let node = container.query_selector(&selector).ok()??;
+    let elem = node.dyn_into::<web_sys::Element>().ok()?;
+    let ctop = container.get_bounding_client_rect().top();
+    Some(elem.get_bounding_client_rect().top() - ctop)
 }
 
 #[component]
@@ -65,6 +115,19 @@ pub fn ChatView() -> impl IntoView {
     // messages would queue N pins per tick.
     let pin_scheduled = StoredValue::new(false);
 
+    // While scrolling up, holds `(buffer_id, anchor_mid, on-screen-offset)`
+    // captured when a backlog fetch was sent: a concrete chat line (its
+    // `data-mid`) and its pixel offset from the viewport top. After the older
+    // page prepends (content added above), an Effect re-finds that same line
+    // and restores `scrollTop` so it sits at the same on-screen offset. Keying
+    // on a real element — not a distance from the bottom — keeps the view put
+    // even when a live message appends at the bottom mid-fetch (a bottom append
+    // grows `scrollHeight`, which a distance-from-bottom anchor would wrongly
+    // absorb into the restore and jump the reader). Keyed by buffer so a fetch
+    // that completes after the user switched away can't move the new buffer's
+    // view. `None` = no fetch pending.
+    let pending_anchor = StoredValue::new(None::<(String, String, f64)>);
+
     let do_pin = move |el: &web_sys::Element| {
         skip_next_scroll.set_value(true);
         pin_to_bottom(el);
@@ -75,12 +138,18 @@ pub fn ChatView() -> impl IntoView {
     // chance to render the new buffer's messages).
     Effect::new(move || {
         let active_id = state.active_buffer.get();
-        let is_switch = prev_buffer_id.get_value().as_deref() != active_id.as_deref();
+        let old_id = prev_buffer_id.get_value();
+        let is_switch = old_id.as_deref() != active_id.as_deref();
         if let Some(ref id) = active_id {
             prev_buffer_id.set_value(Some(id.clone()));
         }
         if !is_switch {
             return;
+        }
+        // Collapse the buffer we just left so it doesn't keep a pinned (up to
+        // PINNED_WEB_CAP) backlog window in memory forever.
+        if let Some(old_id) = old_id {
+            state.collapse_backlog(&old_id);
         }
         state.is_at_bottom.set(true);
         let Some(el) = chat_ref.get() else { return };
@@ -120,6 +189,61 @@ pub fn ChatView() -> impl IntoView {
             let Some(el) = chat_ref.get() else { return };
             let el_dom: web_sys::Element = el.into();
             do_pin(&el_dom);
+        });
+        let _ = window.request_animation_frame(cb.as_ref().unchecked_ref());
+        cb.forget();
+    });
+
+    // After a scroll-back prepend lands, restore the scroll position so the
+    // view stays anchored on the same content (older lines were added above).
+    // Subscribes to `backlog_fetching` (NOT `messages`): it fires once when the
+    // fetch starts (still fetching → skip) and again when the response clears the
+    // guard (restore). Keying on the guard — not the message list — means a live
+    // NewMessage arriving mid-fetch can't consume the anchor early.
+    Effect::new(move || {
+        let active = state.active_buffer.get();
+        let still_fetching = state
+            .backlog_fetching
+            .with(|s| active.as_deref().is_some_and(|id| s.contains(id)));
+        if still_fetching {
+            return;
+        }
+        let Some((anchor_buf, anchor_mid, anchor_off)) = pending_anchor.get_value() else {
+            return;
+        };
+        // If the user jumped back to the bottom while the fetch was in flight
+        // (e.g. the scroll-to-bottom button, which doesn't run `on_scroll`), the
+        // anchor is stale — restoring it would yank them back up into the
+        // backlog and undo the jump. Drop it.
+        if state.is_at_bottom.get_untracked() {
+            pending_anchor.set_value(None);
+            return;
+        }
+        // Only restore for the buffer the anchor was captured in. If the user
+        // switched away before the fetch landed, drop it — restoring would move
+        // the *new* buffer's view to a stale position.
+        if active.as_deref() != Some(anchor_buf.as_str()) {
+            pending_anchor.set_value(None);
+            return;
+        }
+        pending_anchor.set_value(None);
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let cb = wasm_bindgen::prelude::Closure::once(move || {
+            let Some(el) = chat_ref.get() else { return };
+            let el_dom: web_sys::Element = el.into();
+            // Re-find the anchored line and shift scrollTop so it returns to the
+            // same on-screen offset. The prepend pushed it down by the page's
+            // height; any live append landed below it and so doesn't move it.
+            let Some(new_off) = anchor_offset(&el_dom, &anchor_mid) else {
+                return; // anchor trimmed away — leave the view as-is, don't jump
+            };
+            skip_next_scroll.set_value(true);
+            let delta = new_off - anchor_off;
+            #[allow(clippy::cast_possible_truncation)]
+            let target = (f64::from(el_dom.scroll_top()) + delta).max(0.0) as i32;
+            el_dom.set_scroll_top(target);
         });
         let _ = window.request_animation_frame(cb.as_ref().unchecked_ref());
         cb.forget();
@@ -203,6 +327,80 @@ pub fn ChatView() -> impl IntoView {
         let next = is_near_bottom(el);
         if state.is_at_bottom.get_untracked() != next {
             state.is_at_bottom.set(next);
+            // Returned to the live bottom: collapse the loaded backlog window
+            // (free the older lines, re-arm scroll-up).
+            if next && let Some(id) = state.active_buffer.get_untracked() {
+                state.collapse_backlog(&id);
+            }
+        }
+        // Near the top: pull an older page from the server, unless one is already
+        // in flight or the server told us there's nothing older.
+        if f64::from(el.scroll_top()) < BACKLOG_TRIGGER_PX {
+            let Some(id) = state.active_buffer.get_untracked() else {
+                return;
+            };
+            if state.backlog_fetching.with_untracked(|s| s.contains(&id)) {
+                return;
+            }
+            if state
+                .backlog_has_more
+                .with_untracked(|m| m.get(&id) == Some(&false))
+            {
+                return;
+            }
+            // Window already full: stop paging until the user returns to the
+            // bottom (which collapses + frees it). Without this, the prepend
+            // would be trimmed straight back off the front and the same page
+            // re-requested in a loop.
+            let len = state
+                .messages
+                .with_untracked(|m| m.get(&id).map_or(0, Vec::len));
+            if len >= crate::state::PINNED_WEB_CAP {
+                return;
+            }
+            // Cursor = oldest real (non-separator) message's timestamp, plus its
+            // `log_id` (the SQLite rowid) when it came from the log. With both,
+            // the server uses a lossless keyset cursor (no same-second drops); at
+            // the live/DB boundary `log_id` is None, so it falls back to a plain
+            // timestamp cursor. Never the in-memory `id` counter (unrelated to
+            // rowids — sending it would corrupt the keyset comparison).
+            let cursor = state.messages.with_untracked(|m| {
+                m.get(&id).and_then(|v| {
+                    v.iter()
+                        // Skip client separators (id 0) AND server-side separators
+                        // from load_backlog — those have nonzero ids but no log_id,
+                        // so picking one would null out before_id and lose the
+                        // keyset cursor. Mirrors the TUI's oldest_backlog_cursor.
+                        .find(|msg| {
+                            msg.id != 0
+                                && msg.event_key.as_deref() != Some("date_separator")
+                                && msg.event_key.as_deref() != Some("backlog_end")
+                        })
+                        .map(|msg| (msg.timestamp, msg.log_id))
+                })
+            });
+            let Some((before, before_id)) = cursor else {
+                return;
+            };
+            // Anchor (keyed by buffer): remember the first visible real line and
+            // its on-screen offset so the restore Effect can keep the view put
+            // once the page prepends — immune to live appends at the bottom. If
+            // no real line is visible yet (e.g. only separators), skip anchoring
+            // rather than fall back to a bottom-relative measure.
+            if let Some((mid, off)) = first_visible_anchor(el) {
+                pending_anchor.set_value(Some((id.clone(), mid, off)));
+            } else {
+                pending_anchor.set_value(None);
+            }
+            state.backlog_fetching.update(|s| {
+                s.insert(id.clone());
+            });
+            crate::ws::send_command(&crate::protocol::WebCommand::FetchMessages {
+                buffer_id: id,
+                limit: 100,
+                before: Some(before),
+                before_id,
+            });
         }
     };
 
@@ -287,10 +485,17 @@ pub fn ChatView() -> impl IntoView {
                             // alone would collide across every separator
                             // and let Leptos reuse one DOM node for all of
                             // them. Use the timestamp as the discriminator
-                            // for separators; real messages still key by
-                            // their unique `msg.id` so backlog timestamp
-                            // re-stamps cannot force a re-mount.
-                            key=|msg| (msg.id, if msg.id == 0 { msg.timestamp } else { 0 })
+                            // for separators. Real messages key by
+                            // `(id, log_id)`: the transport `id` alone is not
+                            // unique across sources — a live message
+                            // (log_id None) and a backlog DB row (log_id Some)
+                            // can share a numeric id, and keying on id alone
+                            // would collide them into one reused DOM node.
+                            key=|msg| (
+                                msg.id,
+                                msg.log_id,
+                                if msg.id == 0 { msg.timestamp } else { 0 },
+                            )
                             children=move |msg| render_message(state, msg)
                         />
                     </div>
@@ -299,6 +504,15 @@ pub fn ChatView() -> impl IntoView {
                     class:hidden=move || state.is_at_bottom.get()
                     on:click=move |_| {
                         state.is_at_bottom.set(true);
+                        // Mirror the `on_scroll` return-to-bottom path: collapse
+                        // the pinned backlog window. `do_pin` sets
+                        // `skip_next_scroll`, so the resulting scroll event
+                        // returns early and never reaches that collapse — without
+                        // this, a buffer loaded to PINNED_WEB_CAP stays full and
+                        // the scroll-up fetch guard blocks deeper history.
+                        if let Some(id) = state.active_buffer.get_untracked() {
+                            state.collapse_backlog(&id);
+                        }
                         if let Some(el) = chat_ref.get() {
                             let el_dom: web_sys::Element = el.into();
                             do_pin(&el_dom);
@@ -355,6 +569,16 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
     let nick_self = current_nick(state);
     let emotes_on = state.emotes_enabled.get();
 
+    // `data-mid` lets the backlog-prepend restore re-find this exact line. It
+    // must be the same `(id, log_id)` identity the `<For>` keys on — the
+    // transport id alone isn't unique (a live message and a backlog DB row can
+    // share a number), so an id-only attribute could match the wrong element.
+    // Separators are excluded from anchoring by their class, not this value.
+    let mid = match msg.log_id {
+        Some(log) => format!("{}:{log}", msg.id),
+        None => format!("{}:n", msg.id),
+    };
+
     let is_mention_log = msg.msg_type == "mention_log";
     let is_event = msg.msg_type == "event";
     let is_action = msg.msg_type == "action";
@@ -398,7 +622,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
 
     if is_separator {
         return view! {
-            <div class=line_class>
+            <div class=line_class data-mid=mid>
                 <span class="separator-text">{msg.text}</span>
             </div>
         }
@@ -423,7 +647,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
         let styled = render_styled_text(&msg.text, emotes_on);
         return view! {
             <>
-                <div class=line_class>
+                <div class=line_class data-mid=mid>
                     <span class="mention-log-text">{styled}</span>
                 </div>
                 {previews_view}
@@ -441,7 +665,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
         };
         view! {
             <>
-                <div class=line_class>
+                <div class=line_class data-mid=mid>
                     <span class="ts">{ts_fn}</span>
                     <span class="action-body">
                         "* "
@@ -459,7 +683,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
         let styled = render_styled_text(&msg.text, emotes_on);
         view! {
             <>
-                <div class=line_class>
+                <div class=line_class data-mid=mid>
                     <span class="ts">{ts_fn}</span>
                     <span class="notice-body">
                         "-"
@@ -476,7 +700,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
         let arrow = event_icon(msg.event_key.as_deref(), &msg.text);
         let styled = render_styled_text(&msg.text, emotes_on);
         view! {
-            <div class=line_class>
+            <div class=line_class data-mid=mid>
                 <span class="ts">{ts_fn}</span>
                 <span>
                     {arrow.map(|(symbol, css_class)| view! {
@@ -509,7 +733,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
 
         view! {
             <>
-                <div class=line_class>
+                <div class=line_class data-mid=mid>
                     <span class="ts">{ts_fn}</span>
                     <span class="nick" style=nick_style>
                         <span class="mode">{mode}</span>

@@ -724,6 +724,7 @@ fn shell_open(app: &mut App, command: Option<&str>) {
                 log_newest_ts: None,
                 history_exhausted: false,
                 log_initial_loaded: false,
+                pin_backlog: false,
             });
             app.state.set_active_buffer(&buf_id);
             app.shell_input_active = true;
