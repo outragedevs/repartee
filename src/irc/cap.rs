@@ -15,6 +15,8 @@ pub const DESIRED_CAPS: &[&str] = &[
     "batch",
     "userhost-in-names",
     "message-tags",
+    "draft/chathistory",
+    "draft/event-playback",
     "sasl",
 ];
 
@@ -195,7 +197,8 @@ mod tests {
         let caps = ServerCaps::parse(
             "multi-prefix extended-join server-time account-tag cap-notify \
              away-notify account-notify chghost echo-message invite-notify \
-             batch userhost-in-names message-tags sasl=PLAIN,EXTERNAL",
+             batch userhost-in-names message-tags draft/chathistory \
+             draft/event-playback sasl=PLAIN,EXTERNAL",
         );
         let result = caps.negotiate(DESIRED_CAPS);
         // All desired caps should be returned since the server advertises them all
@@ -206,5 +209,13 @@ mod tests {
                 "missing cap: {cap}"
             );
         }
+    }
+
+    #[test]
+    fn desired_caps_include_chathistory() {
+        assert!(DESIRED_CAPS.contains(&"draft/chathistory"));
+        assert!(DESIRED_CAPS.contains(&"draft/event-playback"));
+        // chathistory requires batch
+        assert!(DESIRED_CAPS.contains(&"batch"));
     }
 }
