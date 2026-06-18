@@ -444,6 +444,10 @@ impl App {
                             .send(::irc::proto::Command::JOIN(chanlist, None, None));
                     }
                 }
+
+                // Reconnect gap-fill: pull messages missed while disconnected
+                // for the active buffer via draft/chathistory (best-effort).
+                self.gapfill_active_buffer_on_connect(&conn_id);
             }
             IrcEvent::Disconnected(conn_id, error) => {
                 // DCC connections are peer-to-peer and independent of the IRC

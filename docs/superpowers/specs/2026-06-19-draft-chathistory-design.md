@@ -167,6 +167,9 @@ Known v1 limitations:
 - E2E-encrypted (`+RPE2E01…`) history messages are stored as received (not
   decrypted) — niche; revisit with event-playback.
 - Historical events (joins/parts/etc.) are not shown in backlog yet.
+- Reconnect gap-fill covers the **active** buffer only; lazy gap-fill for other
+  buffers on focus/open is a follow-up (the focus path is in `AppState`, which
+  has no IRC handle; wiring it needs an App-level focus hook).
 
 ## Out of scope (v1)
 

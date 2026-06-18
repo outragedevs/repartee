@@ -375,6 +375,58 @@ impl App {
         true
     }
 
+    /// On (re)connect, request a `CHATHISTORY` gap-fill for the **active**
+    /// buffer when it belongs to `conn_id` and the connection negotiated
+    /// `draft/chathistory`. Anchors `AFTER` the newest stored row (so we pull
+    /// only what we missed while disconnected), or `LATEST` when the buffer has
+    /// no stored history yet. Other buffers fill lazily when focused (follow-up).
+    pub(crate) fn gapfill_active_buffer_on_connect(&mut self, conn_id: &str) {
+        use crate::irc::chathistory::Direction;
+
+        let Some(active_id) = self.state.active_buffer_id.clone() else {
+            return;
+        };
+        let Some(buf) = self.state.buffers.get(&active_id) else {
+            return;
+        };
+        if buf.connection_id != conn_id
+            || !matches!(
+                buf.buffer_type,
+                BufferType::Channel | BufferType::Query | BufferType::DccChat
+            )
+        {
+            return;
+        }
+        let target = buf.name.clone();
+
+        let Some(conn) = self.state.connections.get(conn_id) else {
+            return;
+        };
+        if !conn.enabled_caps.contains("draft/chathistory") {
+            return;
+        }
+        let network = conn.label.clone();
+
+        // Newest stored row → AFTER anchor; if the buffer has never been
+        // logged, ask for the LATEST page instead.
+        let anchor = self.storage.as_ref().and_then(|storage| {
+            let db = storage.db.lock().ok()?;
+            crate::storage::query::newest_anchor(&db, &network, &target)
+                .ok()
+                .flatten()
+        });
+
+        match anchor {
+            Some((msgid, ts, _id)) => {
+                let msgid = (!msgid.is_empty()).then_some(msgid);
+                self.request_chathistory(conn_id, &target, Direction::After, Some((msgid, ts)));
+            }
+            None => {
+                self.request_chathistory(conn_id, &target, Direction::Latest, None);
+            }
+        }
+    }
+
     /// Pin the active live-chat buffer so loaded backlog survives trimming. Called
     /// when the user scrolls up. No-op in log mode or for non-chat buffers.
     pub(crate) fn pin_active_backlog(&mut self) {
