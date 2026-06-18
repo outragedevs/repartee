@@ -583,18 +583,6 @@ impl App {
                                 &conn_id,
                                 &batch,
                             );
-                            // chathistory bookkeeping: clear the in-flight
-                            // request for this target and, if the batch came
-                            // back short, record server-side exhaustion. The
-                            // newly ingested rows are surfaced by the next
-                            // scroll-up pagination tick.
-                            if batch.batch_type == "CHATHISTORY"
-                                && let Some(target) = batch.params.first()
-                                && let Some(conn) = self.state.connections.get_mut(&conn_id)
-                            {
-                                conn.chathistory
-                                    .complete_target(target, batch.messages.len());
-                            }
                         }
                     }
                     // BATCH commands themselves are not dispatched further

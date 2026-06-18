@@ -5,11 +5,6 @@
 //! history batches are quietly ingested (see [`crate::irc::batch`]). The UI
 //! always reads from `SQLite`, so this module never touches buffers directly.
 
-// Wired into the binary incrementally across the chathistory tasks (request
-// state, batch ingest, scroll-up + reconnect triggers). Matches the
-// `#[allow(dead_code)]` convention used by `cap.rs` / `isupport.rs`.
-#![allow(dead_code)]
-
 use std::collections::{HashMap, HashSet};
 
 /// Which reference type to anchor a `CHATHISTORY` request with.
@@ -75,6 +70,15 @@ pub fn build_command(
     format!("CHATHISTORY {subcommand} {target} {anchor_str} {limit}")
 }
 
+/// Format a Unix timestamp (secs) as an `IRCv3` `server-time` reference
+/// (`YYYY-MM-DDTHH:MM:SS.sssZ`) for a `CHATHISTORY` timestamp anchor.
+#[must_use]
+pub fn rfc3339_millis(unix: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(unix, 0)
+        .unwrap_or_default()
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
 /// Direction of a `CHATHISTORY` request, used both to pick the subcommand and
 /// to key in-flight tracking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -113,6 +117,13 @@ pub struct HistoryState {
     in_flight: HashMap<(String, Direction), usize>,
     /// Targets (lowercased) whose `BEFORE` history the server has exhausted.
     before_exhausted: HashSet<String>,
+    /// Per-target oldest server-time (unix secs) we have pulled via
+    /// chathistory, across **all** batch lines including event-playback. The
+    /// next `BEFORE` anchors at this so scroll-up keeps making progress even
+    /// through windows that contain only (un-ingested) event-playback lines —
+    /// otherwise the in-memory conversational anchor never moves and the same
+    /// window is re-requested forever.
+    oldest_fetched: HashMap<String, i64>,
 }
 
 impl HistoryState {
@@ -149,9 +160,11 @@ impl HistoryState {
             .is_none()
     }
 
-    /// Clear an in-flight request (on failure / explicit cancel).
-    pub fn clear_in_flight(&mut self, target: &str, dir: Direction) {
-        self.in_flight.remove(&(target.to_ascii_lowercase(), dir));
+    /// Whether a request in `dir` for `target` is currently awaiting its batch.
+    #[must_use]
+    pub fn is_in_flight(&self, target: &str, dir: Direction) -> bool {
+        self.in_flight
+            .contains_key(&(target.to_ascii_lowercase(), dir))
     }
 
     /// Mark a target's `BEFORE` history as exhausted (start of history reached,
@@ -166,32 +179,44 @@ impl HistoryState {
             .contains(&target.to_ascii_lowercase())
     }
 
+    /// Oldest server-time (unix secs) pulled so far for `target`, if any.
+    #[must_use]
+    pub fn oldest_fetched(&self, target: &str) -> Option<i64> {
+        self.oldest_fetched
+            .get(&target.to_ascii_lowercase())
+            .copied()
+    }
+
     /// Complete all in-flight requests for `target` after its batch arrived
-    /// with `rows` total messages.
+    /// with `rows` total messages whose oldest server-time was `oldest_ts`.
     ///
-    /// Clears the in-flight markers and, for a `BEFORE` request whose batch
-    /// came back short (`rows < requested limit`), records server-side
-    /// exhaustion so scroll-up stops asking. Returns `true` if a `BEFORE`
-    /// request was completed (the caller can then re-paginate / settle).
-    pub fn complete_target(&mut self, target: &str, rows: usize) -> bool {
+    /// Clears the in-flight markers, advances the per-target oldest-fetched
+    /// watermark (so the next `BEFORE` keeps making progress), and — for a
+    /// `BEFORE` request whose batch came back short (`rows < requested limit`)
+    /// — records server-side exhaustion so scroll-up stops asking.
+    pub fn complete_target(&mut self, target: &str, rows: usize, oldest_ts: Option<i64>) {
         let target = target.to_ascii_lowercase();
-        let mut had_before = false;
+
+        if let Some(ts) = oldest_ts {
+            self.oldest_fetched
+                .entry(target.clone())
+                .and_modify(|cur| *cur = (*cur).min(ts))
+                .or_insert(ts);
+        }
+
         let completed: Vec<(Direction, usize)> = self
             .in_flight
-            .iter()
-            .filter(|((t, _), _)| *t == target)
-            .map(|((_, dir), limit)| (*dir, *limit))
+            .keys()
+            .filter(|(t, _)| *t == target)
+            .map(|(_, dir)| *dir)
+            .map(|dir| (dir, self.in_flight[&(target.clone(), dir)]))
             .collect();
         for (dir, limit) in completed {
             self.in_flight.remove(&(target.clone(), dir));
-            if dir == Direction::Before {
-                had_before = true;
-                if rows < limit {
-                    self.before_exhausted.insert(target.clone());
-                }
+            if dir == Direction::Before && rows < limit {
+                self.mark_before_exhausted(&target);
             }
         }
-        had_before
     }
 }
 
@@ -282,19 +307,21 @@ mod tests {
     }
 
     #[test]
-    fn clear_in_flight_reenables() {
+    fn is_in_flight_tracks_requests() {
         let mut st = HistoryState::new();
+        assert!(!st.is_in_flight("#chan", Direction::Before));
         st.mark_in_flight("#chan", Direction::Before, 200);
-        st.clear_in_flight("#chan", Direction::Before);
-        assert!(st.should_request("#chan", Direction::Before, true));
+        assert!(st.is_in_flight("#chan", Direction::Before));
+        assert!(!st.is_in_flight("#chan", Direction::After));
+        st.complete_target("#chan", 200, Some(1000));
+        assert!(!st.is_in_flight("#chan", Direction::Before));
     }
 
     #[test]
     fn short_before_batch_marks_exhausted() {
         let mut st = HistoryState::new();
         st.mark_in_flight("#chan", Direction::Before, 100);
-        let had_before = st.complete_target("#chan", 30);
-        assert!(had_before);
+        st.complete_target("#chan", 30, Some(1000));
         assert!(st.is_before_exhausted("#chan"));
         assert!(!st.should_request("#chan", Direction::Before, true));
     }
@@ -303,7 +330,7 @@ mod tests {
     fn full_before_batch_not_exhausted() {
         let mut st = HistoryState::new();
         st.mark_in_flight("#chan", Direction::Before, 100);
-        st.complete_target("#chan", 100);
+        st.complete_target("#chan", 100, Some(1000));
         assert!(!st.is_before_exhausted("#chan"));
         // In-flight cleared, so a fresh request is allowed again.
         assert!(st.should_request("#chan", Direction::Before, true));
@@ -313,8 +340,7 @@ mod tests {
     fn after_batch_never_exhausts_before() {
         let mut st = HistoryState::new();
         st.mark_in_flight("#chan", Direction::After, 100);
-        let had_before = st.complete_target("#chan", 0);
-        assert!(!had_before);
+        st.complete_target("#chan", 0, Some(1000));
         assert!(!st.is_before_exhausted("#chan"));
     }
 
@@ -322,9 +348,31 @@ mod tests {
     fn complete_target_clears_in_flight() {
         let mut st = HistoryState::new();
         st.mark_in_flight("#chan", Direction::After, 50);
-        st.complete_target("#chan", 50);
+        st.complete_target("#chan", 50, Some(1000));
         // After completion the AFTER slot is free for a new gap-fill.
         assert!(st.should_request("#chan", Direction::After, true));
+    }
+
+    #[test]
+    fn oldest_fetched_advances_to_minimum() {
+        let mut st = HistoryState::new();
+        assert_eq!(st.oldest_fetched("#chan"), None);
+        st.mark_in_flight("#chan", Direction::Before, 100);
+        st.complete_target("#chan", 100, Some(5000));
+        assert_eq!(st.oldest_fetched("#chan"), Some(5000));
+        // A later, older page lowers the watermark; a newer one does not raise it.
+        st.mark_in_flight("#chan", Direction::Before, 100);
+        st.complete_target("#chan", 100, Some(3000));
+        assert_eq!(st.oldest_fetched("#chan"), Some(3000));
+        st.mark_in_flight("#chan", Direction::Before, 100);
+        st.complete_target("#chan", 100, Some(9000));
+        assert_eq!(st.oldest_fetched("#chan"), Some(3000));
+    }
+
+    #[test]
+    fn rfc3339_millis_format() {
+        // 2024-01-01T00:00:00Z
+        assert_eq!(rfc3339_millis(1_704_067_200), "2024-01-01T00:00:00.000Z");
     }
 
     #[test]

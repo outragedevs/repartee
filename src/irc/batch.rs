@@ -154,10 +154,17 @@ pub fn process_completed_batch(state: &mut AppState, conn_id: &str, batch: &Batc
         "CHATHISTORY" => {
             // draft/chathistory: store-only backlog fill. Conversational lines
             // are persisted to SQLite without live display/state mutation; the
-            // UI surfaces them via normal pagination. Request bookkeeping
-            // (in-flight clear, exhaustion, UI refresh) is handled by the
-            // scroll-up / reconnect trigger wiring.
-            crate::irc::events::ingest_chathistory_batch(state, conn_id, batch);
+            // UI surfaces them via normal pagination. Bookkeeping (clear
+            // in-flight, advance the BEFORE anchor watermark, mark exhaustion)
+            // runs here so it covers BOTH the normal `BATCH -tag` end path and
+            // the timed-out-batch purge path (app/maintenance.rs).
+            let oldest_ts = crate::irc::events::ingest_chathistory_batch(state, conn_id, batch);
+            if let Some(target) = batch.params.first()
+                && let Some(conn) = state.connections.get_mut(conn_id)
+            {
+                conn.chathistory
+                    .complete_target(target, batch.messages.len(), oldest_ts);
+            }
         }
         _ => {
             // Unknown batch type — replay messages through the normal handler.

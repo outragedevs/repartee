@@ -167,6 +167,19 @@ impl App {
         {
             return;
         }
+        // A server BEFORE request is in flight: the local page can't grow until
+        // its batch lands, so skip the per-tick paginated DB query + lock.
+        if self
+            .state
+            .connections
+            .get(&buf.connection_id)
+            .is_some_and(|c| {
+                c.chathistory
+                    .is_in_flight(&buf.name, crate::irc::chathistory::Direction::Before)
+            })
+        {
+            return;
+        }
         // Memory bound: once the window is full, stop paging deeper this session.
         if buf.messages.len() >= PINNED_BACKLOG_CAP {
             return;
@@ -284,23 +297,20 @@ impl App {
         let target = buf.name.clone();
         // Anchor by timestamp: the in-memory `log_msg_id` is a SQLite rowid,
         // not an IRC `@msgid`, so we cannot use a msgid reference here.
-        let Some((oldest_ts, _)) = oldest_backlog_cursor(&buf.messages) else {
+        let Some((local_oldest_ts, _)) = oldest_backlog_cursor(&buf.messages) else {
             return false;
         };
 
-        let (cap, exhausted, in_flight) = {
+        let (cap, exhausted, in_flight, watermark) = {
             let Some(conn) = self.state.connections.get(&conn_id) else {
                 return false;
             };
-            let cap = conn.enabled_caps.contains("draft/chathistory");
-            let exhausted = conn.chathistory.is_before_exhausted(&target);
-            // should_request is false when in flight (cap true, not exhausted).
-            let in_flight = cap
-                && !exhausted
-                && !conn
-                    .chathistory
-                    .should_request(&target, Direction::Before, cap);
-            (cap, exhausted, in_flight)
+            (
+                conn.enabled_caps.contains("draft/chathistory"),
+                conn.chathistory.is_before_exhausted(&target),
+                conn.chathistory.is_in_flight(&target, Direction::Before),
+                conn.chathistory.oldest_fetched(&target),
+            )
         };
 
         if !cap || exhausted {
@@ -309,7 +319,11 @@ impl App {
         if in_flight {
             return true; // already waiting on a BEFORE batch
         }
-        self.request_chathistory(&conn_id, &target, Direction::Before, Some((None, oldest_ts)))
+        // Anchor at the oldest point we know of — the local oldest message, or
+        // the (older) chathistory watermark — so each BEFORE strictly advances
+        // backwards even across windows of only event-playback lines.
+        let anchor_ts = watermark.map_or(local_oldest_ts, |w| w.min(local_oldest_ts));
+        self.request_chathistory(&conn_id, &target, Direction::Before, Some((None, anchor_ts)))
     }
 
     /// Issue a `CHATHISTORY` request for `target` on `conn_id` in `dir`.
@@ -350,7 +364,7 @@ impl App {
                     if use_msgid {
                         HistoryRef::MsgId(msgid.unwrap_or_default())
                     } else {
-                        HistoryRef::Timestamp(rfc3339_millis(ts))
+                        HistoryRef::Timestamp(chathistory::rfc3339_millis(ts))
                     }
                 }
             };
@@ -480,14 +494,6 @@ fn make_separator(
         log_ref_id: None,
         tags: None,
     }
-}
-
-/// Format a Unix timestamp as an `IRCv3` `server-time` reference
-/// (`YYYY-MM-DDTHH:MM:SS.sssZ`) for a `CHATHISTORY` timestamp anchor.
-fn rfc3339_millis(unix: i64) -> String {
-    chrono::DateTime::<Utc>::from_timestamp(unix, 0)
-        .unwrap_or_else(Utc::now)
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 /// Format a date separator line like irssi/weechat.

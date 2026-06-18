@@ -283,6 +283,10 @@ pub fn handle_connected(state: &mut AppState, conn_id: &str) {
         conn.isupport_parsed = crate::irc::isupport::Isupport::default();
         conn.silent_who_channels.clear();
         conn.silent_banlist_channels.clear();
+        // Fresh connection ⇒ fresh chathistory state. Clears any request left
+        // in-flight by a mid-request disconnect (which would otherwise block
+        // future CHATHISTORY for that target) and re-evaluates exhaustion.
+        conn.chathistory = crate::irc::chathistory::HistoryState::new();
     }
 
     let label = state
@@ -731,17 +735,20 @@ fn message_timestamp(tags: Option<&HashMap<String, String>>) -> DateTime<Utc> {
 /// through normal `SQLite` pagination, and the unique `msg_id` index
 /// deduplicates against messages already stored from the live stream.
 ///
-/// Returns the number of conversational messages ingested, so the caller can
-/// detect server-side history exhaustion (a short batch means no more history).
+/// Returns the oldest server-time (unix secs) seen across **all** batch lines
+/// (conversational and event-playback), or `None` if none carried a `@time`
+/// tag. The caller advances its per-target `BEFORE` anchor to this so
+/// scroll-up keeps making progress even through windows that contain only
+/// (un-ingested) event-playback lines.
 ///
 /// v1 scope: `draft/event-playback` lines (JOIN/PART/QUIT/NICK/TOPIC/MODE) and
-/// non-ACTION CTCP are counted and skipped rather than rendered into stored
-/// event rows. See `docs/superpowers/specs/2026-06-19-draft-chathistory-design.md`.
+/// non-ACTION CTCP are skipped rather than rendered into stored event rows.
+/// See `docs/superpowers/specs/2026-06-19-draft-chathistory-design.md`.
 pub fn ingest_chathistory_batch(
     state: &AppState,
     conn_id: &str,
     batch: &crate::irc::batch::BatchInfo,
-) -> usize {
+) -> Option<i64> {
     let our_nick = state
         .connections
         .get(conn_id)
@@ -750,8 +757,22 @@ pub fn ingest_chathistory_batch(
 
     let mut ingested = 0usize;
     let mut skipped = 0usize;
+    let mut oldest_ts: Option<i64> = None;
 
     for msg in &batch.messages {
+        let tags = extract_tags(msg);
+
+        // Track the oldest server-time across every line (events included) so
+        // the BEFORE anchor advances past event-only windows.
+        if let Some(ts) = tags
+            .as_ref()
+            .and_then(|t| t.get("time"))
+            .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+        {
+            let ts = ts.timestamp();
+            oldest_ts = Some(oldest_ts.map_or(ts, |o| o.min(ts)));
+        }
+
         let (base_type, target, text) = match &msg.command {
             Command::PRIVMSG(target, text) => (MessageType::Message, target, text),
             Command::NOTICE(target, text) => (MessageType::Notice, target, text),
@@ -789,7 +810,6 @@ pub fn ingest_chathistory_batch(
         };
         let buffer_id = make_buffer_id(conn_id, buffer_name);
 
-        let tags = extract_tags(msg);
         let timestamp = message_timestamp(tags.as_ref());
         let log_msg_id = tags.as_ref().and_then(|t| t.get("msgid").cloned());
 
@@ -821,7 +841,7 @@ pub fn ingest_chathistory_batch(
         );
     }
 
-    ingested
+    oldest_ts
 }
 
 // === Private handlers ===

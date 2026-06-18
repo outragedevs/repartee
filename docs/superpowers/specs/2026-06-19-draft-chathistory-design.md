@@ -170,6 +170,15 @@ Known v1 limitations:
 - Reconnect gap-fill covers the **active** buffer only; lazy gap-fill for other
   buffers on focus/open is a follow-up (the focus path is in `AppState`, which
   has no IRC handle; wiring it needs an App-level focus hook).
+- On servers that neither advertise `msgid` in `MSGREFTYPES` nor stamp history
+  lines with `@msgid`, the reconnect `AFTER` gap-fill can re-store the small
+  overlap window of messages also seen live during the session (no stable id to
+  dedup against the live rows). Bounded (the anchor advances each reconnect);
+  real chathistory servers (ergo, soju) send `@msgid`, so this is an edge case.
+- Request bookkeeping keys on the `BATCH` target echoed by the server
+  (`batch.params[0]`), matched case-insensitively against the buffer name. A
+  server that canonicalises the target into a non-ASCII-case-equivalent form
+  would not clear the in-flight marker; the per-connect reset recovers it.
 
 ## Out of scope (v1)
 
