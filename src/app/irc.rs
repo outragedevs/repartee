@@ -52,6 +52,7 @@ impl App {
             origin_config: server_config.clone(),
             local_ip: None,
             enabled_caps: HashSet::new(),
+            chathistory: crate::irc::chathistory::HistoryState::new(),
             who_token_counter: 0,
             silent_who_channels: HashSet::new(),
             silent_banlist_channels: HashSet::new(),

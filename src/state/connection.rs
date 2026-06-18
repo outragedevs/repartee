@@ -45,6 +45,9 @@ pub struct Connection {
     pub local_ip: Option<IpAddr>,
     /// `IRCv3` capabilities that were successfully negotiated with the server.
     pub enabled_caps: HashSet<String>,
+    /// Client-side `draft/chathistory` request state (in-flight tracking and
+    /// per-target server-history exhaustion).
+    pub chathistory: crate::irc::chathistory::HistoryState,
     /// Counter for WHOX tokens. Each `WHO %fields,TOKEN` request gets
     /// a unique numeric token so we can match 354 replies.
     pub who_token_counter: u32,
