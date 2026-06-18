@@ -508,6 +508,18 @@ impl AppState {
         }
     }
 
+    /// Persist a `draft/chathistory` message to the log store WITHOUT
+    /// displaying it, mutating buffers/nicklists, or emitting notifications.
+    ///
+    /// chathistory is a background backlog filler: rows are written here and
+    /// the UI surfaces them later through normal `SQLite` pagination
+    /// (`get_messages_paginated`). Deduplication is handled by the unique
+    /// `msg_id` index on the messages table, so re-ingesting an
+    /// already-stored message is a no-op at the database layer.
+    pub fn ingest_history_message(&self, buffer_id: &str, message: &Message) {
+        self.maybe_log(buffer_id, message);
+    }
+
     #[allow(dead_code, reason = "reserved for scripting API; used in tests")]
     pub fn set_activity(&mut self, buffer_id: &str, level: ActivityLevel) {
         if let Some(buf) = self.buffers.get_mut(buffer_id)

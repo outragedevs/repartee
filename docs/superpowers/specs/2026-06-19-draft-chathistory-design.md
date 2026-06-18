@@ -145,9 +145,33 @@ reconnect:   (re)connect → active buffer newest cursor
 - **integration**: scroll-up issues `BEFORE` only when SQLite exhausted;
   reconnect issues `AFTER` for the active buffer only (others lazy).
 
+## v1 scope refinement (implementation note, 2026-06-19)
+
+During implementation the event-playback ingest was scoped down. The live
+event handlers (JOIN/PART/QUIT/NICK/TOPIC/MODE) mutate live state through ~15+
+direct sites (`buf.users`, topic, modes, away, prefixes) and render their
+display text *inline* per handler (no shared formatter), and the messages
+table has **no `event_params` column** (event rows must store fully-rendered
+text). Re-using the live handlers under a "history mode" flag would require
+gating every one of those mutation sites (high risk of corrupting live state);
+a parallel renderer would duplicate six inline formatters.
+
+Therefore **v1 ingests conversational lines only** (PRIVMSG / NOTICE, including
+CTCP ACTION), store-only, via `events::ingest_chathistory_batch` →
+`AppState::ingest_history_message`. `draft/event-playback` lines are counted
+and skipped (the cap stays negotiated). This delivers the core backlog value
+safely; rendering historical events into stored `type='event'` rows is a
+documented follow-up.
+
+Known v1 limitations:
+- E2E-encrypted (`+RPE2E01…`) history messages are stored as received (not
+  decrypted) — niche; revisit with event-playback.
+- Historical events (joins/parts/etc.) are not shown in backlog yet.
+
 ## Out of scope (v1)
 
 - Typed `Command::CHATHISTORY` in the fork (documented follow-up).
 - `CHATHISTORY TARGETS`, `BETWEEN`, `AROUND`.
+- Event-playback rendering into stored event rows (follow-up; see above).
 - Eager gap-fill for all channels on reconnect (config toggle is a later item).
 - `soju.im/bouncer-networks` integration (separate roadmap item).

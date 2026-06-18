@@ -151,6 +151,14 @@ pub fn process_completed_batch(state: &mut AppState, conn_id: &str, batch: &Batc
     match batch.batch_type.as_str() {
         "NETSPLIT" => process_netsplit_batch(state, conn_id, batch),
         "NETJOIN" => process_netjoin_batch(state, conn_id, batch),
+        "CHATHISTORY" => {
+            // draft/chathistory: store-only backlog fill. Conversational lines
+            // are persisted to SQLite without live display/state mutation; the
+            // UI surfaces them via normal pagination. Request bookkeeping
+            // (in-flight clear, exhaustion, UI refresh) is handled by the
+            // scroll-up / reconnect trigger wiring.
+            crate::irc::events::ingest_chathistory_batch(state, conn_id, batch);
+        }
         _ => {
             // Unknown batch type — replay messages through the normal handler.
             for msg in &batch.messages {
@@ -721,6 +729,164 @@ mod tests {
         assert_eq!(purged.len(), 1);
         assert_eq!(purged[0].messages.len(), 1);
         assert_eq!(purged[0].params.len(), 2);
+    }
+
+    /// Build a connection + one channel buffer with `alice` present, wired to
+    /// a log channel. Returns `(state, rx, buf_id)`.
+    fn setup_ingest_state(
+        conn_id: &str,
+    ) -> (
+        AppState,
+        tokio::sync::mpsc::Receiver<crate::storage::types::LogRow>,
+        String,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let mut state = AppState::new();
+        state.log_tx = Some(tx);
+        state.add_connection(crate::state::connection::Connection {
+            id: conn_id.to_string(),
+            label: "libera".to_string(),
+            status: crate::state::connection::ConnectionStatus::Connected,
+            nick: "me".to_string(),
+            user_modes: String::new(),
+            isupport: HashMap::new(),
+            isupport_parsed: crate::irc::isupport::Isupport::new(),
+            error: None,
+            lag: None,
+            lag_pending: false,
+            reconnect_attempts: 0,
+            reconnect_delay_secs: 30,
+            next_reconnect: None,
+            should_reconnect: true,
+            joined_channels: vec!["#test".to_string()],
+            origin_config: make_test_server_config(),
+            enabled_caps: std::collections::HashSet::new(),
+            chathistory: crate::irc::chathistory::HistoryState::new(),
+            who_token_counter: 0,
+            local_ip: None,
+            silent_who_channels: std::collections::HashSet::new(),
+            silent_banlist_channels: std::collections::HashSet::new(),
+        });
+        let buf_id = make_buffer_id(conn_id, "#test");
+        state.add_buffer(crate::state::buffer::Buffer {
+            id: buf_id.clone(),
+            connection_id: conn_id.to_string(),
+            buffer_type: crate::state::buffer::BufferType::Channel,
+            name: "#test".to_string(),
+            messages: std::collections::VecDeque::new(),
+            activity: crate::state::buffer::ActivityLevel::None,
+            unread_count: 0,
+            last_read: chrono::Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
+            peer_handle: None,
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
+            log_initial_loaded: false,
+            pin_backlog: false,
+        });
+        state.add_nick(
+            &buf_id,
+            NickEntry {
+                nick: "alice".to_string(),
+                prefix: String::new(),
+                modes: String::new(),
+                away: false,
+                account: None,
+                ident: None,
+                host: None,
+            },
+        );
+        (state, rx, buf_id)
+    }
+
+    fn make_history_privmsg(nick: &str, target: &str, text: &str, msgid: &str) -> IrcMessage {
+        IrcMessage {
+            tags: Some(vec![
+                Tag("batch".to_string(), Some("h1".to_string())),
+                Tag("time".to_string(), Some("2024-01-01T00:00:00.000Z".to_string())),
+                Tag("msgid".to_string(), Some(msgid.to_string())),
+            ]),
+            prefix: Some(irc::proto::Prefix::Nickname(
+                nick.to_string(),
+                "u".to_string(),
+                "h.net".to_string(),
+            )),
+            command: Command::PRIVMSG(target.to_string(), text.to_string()),
+        }
+    }
+
+    #[test]
+    fn chathistory_batch_ingests_conversational_store_only() {
+        let conn_id = "test";
+        let (mut state, mut rx, buf_id) = setup_ingest_state(conn_id);
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![
+                make_history_privmsg("bob", "#test", "hello", "m1"),
+                make_history_privmsg("carol", "#test", "hi there", "m2"),
+                // Event-playback line — must be skipped in v1 (no live mutation).
+                make_join_msg("dave", "#test", "h1"),
+            ],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch);
+
+        // Two conversational rows persisted, in order; JOIN not persisted.
+        let r1 = rx.try_recv().expect("first history row");
+        assert_eq!(r1.msg_id, "m1");
+        assert_eq!(r1.text, "hello");
+        assert_eq!(r1.msg_type, MessageType::Message);
+        assert_eq!(r1.timestamp, 1_704_067_200); // 2024-01-01T00:00:00Z
+        let r2 = rx.try_recv().expect("second history row");
+        assert_eq!(r2.msg_id, "m2");
+        assert!(rx.try_recv().is_err(), "JOIN must not be persisted in v1");
+
+        // Store-only: no live display, no nicklist mutation.
+        let buf = state.buffers.get(&buf_id).expect("buffer exists");
+        assert!(buf.messages.is_empty(), "history must not display live");
+        assert!(buf.users.contains_key("alice"), "live nicklist unchanged");
+        assert!(
+            !buf.users.contains_key("dave"),
+            "history JOIN must not mutate live nicklist"
+        );
+    }
+
+    #[test]
+    fn chathistory_batch_strips_ctcp_action() {
+        let conn_id = "test";
+        let (mut state, mut rx, _buf_id) = setup_ingest_state(conn_id);
+
+        let action = make_history_privmsg("bob", "#test", "\u{1}ACTION waves\u{1}", "a1");
+        let other_ctcp = make_history_privmsg("bob", "#test", "\u{1}VERSION\u{1}", "c1");
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![action, other_ctcp],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch);
+
+        let r1 = rx.try_recv().expect("action row");
+        assert_eq!(r1.msg_type, MessageType::Action);
+        assert_eq!(r1.text, "waves");
+        assert!(
+            rx.try_recv().is_err(),
+            "non-ACTION CTCP must be skipped in v1"
+        );
     }
 
     #[test]

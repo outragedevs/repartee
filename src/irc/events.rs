@@ -722,6 +722,108 @@ fn message_timestamp(tags: Option<&HashMap<String, String>>) -> DateTime<Utc> {
         .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc))
 }
 
+/// Ingest a completed `draft/chathistory` batch into the log store.
+///
+/// chathistory is a background backlog filler: conversational lines
+/// (PRIVMSG / NOTICE, including CTCP ACTION) are persisted **store-only** via
+/// [`AppState::ingest_history_message`] — no live display, no nicklist/topic
+/// mutation, no highlights or notifications. The UI surfaces these rows later
+/// through normal `SQLite` pagination, and the unique `msg_id` index
+/// deduplicates against messages already stored from the live stream.
+///
+/// Returns the number of conversational messages ingested, so the caller can
+/// detect server-side history exhaustion (a short batch means no more history).
+///
+/// v1 scope: `draft/event-playback` lines (JOIN/PART/QUIT/NICK/TOPIC/MODE) and
+/// non-ACTION CTCP are counted and skipped rather than rendered into stored
+/// event rows. See `docs/superpowers/specs/2026-06-19-draft-chathistory-design.md`.
+pub fn ingest_chathistory_batch(
+    state: &AppState,
+    conn_id: &str,
+    batch: &crate::irc::batch::BatchInfo,
+) -> usize {
+    let our_nick = state
+        .connections
+        .get(conn_id)
+        .map(|c| c.nick.clone())
+        .unwrap_or_default();
+
+    let mut ingested = 0usize;
+    let mut skipped = 0usize;
+
+    for msg in &batch.messages {
+        let (base_type, target, text) = match &msg.command {
+            Command::PRIVMSG(target, text) => (MessageType::Message, target, text),
+            Command::NOTICE(target, text) => (MessageType::Notice, target, text),
+            // Event-playback and other commands are not ingested in v1.
+            _ => {
+                skipped += 1;
+                continue;
+            }
+        };
+
+        // CTCP ACTION becomes an Action; any other CTCP is skipped in history.
+        let is_ctcp = text.starts_with('\u{1}') && text.ends_with('\u{1}');
+        let is_action =
+            is_ctcp && text.len() > 2 && text[1..text.len() - 1].starts_with("ACTION ");
+        if is_ctcp && !is_action {
+            skipped += 1;
+            continue;
+        }
+        let (msg_type, display_text) = if is_action {
+            let inner = &text[1..text.len() - 1];
+            (MessageType::Action, inner["ACTION ".len()..].to_string())
+        } else {
+            (base_type, text.clone())
+        };
+
+        let (nick, _ident, _host) = extract_nick_userhost(msg.prefix.as_ref());
+
+        // Channel messages route to the channel buffer; PMs route to the
+        // peer's nick buffer (or our own target for echoed history).
+        let is_own = nick == our_nick;
+        let buffer_name = if is_channel(target) || is_own {
+            target.as_str()
+        } else {
+            nick.as_str()
+        };
+        let buffer_id = make_buffer_id(conn_id, buffer_name);
+
+        let tags = extract_tags(msg);
+        let timestamp = message_timestamp(tags.as_ref());
+        let log_msg_id = tags.as_ref().and_then(|t| t.get("msgid").cloned());
+
+        let message = Message {
+            id: 0, // store-only: in-memory id is never used by the log path
+            timestamp,
+            message_type: msg_type,
+            nick: Some(nick),
+            nick_mode: None,
+            text: display_text,
+            highlight: false,
+            event_key: None,
+            event_params: None,
+            log_msg_id,
+            log_ref_id: None,
+            tags,
+        };
+
+        state.ingest_history_message(&buffer_id, &message);
+        ingested += 1;
+    }
+
+    if skipped > 0 {
+        tracing::debug!(
+            conn_id,
+            ingested,
+            skipped,
+            "chathistory: ingested conversational messages (non-conversational skipped in v1)"
+        );
+    }
+
+    ingested
+}
+
 // === Private handlers ===
 
 #[expect(clippy::too_many_lines, reason = "linear message handler")]
