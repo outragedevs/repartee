@@ -213,7 +213,7 @@ impl App {
         let Ok(rows) = rows else {
             return;
         };
-        let exhausted = rows.len() < CHAT_BACKLOG_PAGE;
+        let local_short = rows.len() < CHAT_BACKLOG_PAGE;
 
         // If the batch's newest local date matches the buffer's current head
         // date-separator, drop that separator — the new batch re-emits it above
@@ -251,10 +251,128 @@ impl App {
                 buf.messages.push_front(msg);
             }
             buf.pin_backlog = true;
-            if exhausted {
-                buf.history_exhausted = true;
-            }
         }
+
+        // Local SQLite is drained for this page. Before declaring the buffer
+        // history-exhausted, try to pull older messages from the server via
+        // `draft/chathistory`; only mark exhausted when that isn't possible
+        // (cap absent, or the server already reported no more history). When a
+        // request is in flight or freshly sent, leave `history_exhausted`
+        // false so the next scroll tick re-paginates the newly ingested rows.
+        if local_short
+            && !self.fetch_older_via_chathistory(buffer_id)
+            && let Some(buf) = self.state.buffers.get_mut(buffer_id)
+        {
+            buf.history_exhausted = true;
+        }
+    }
+
+    /// Attempt to fetch older history for `buffer_id` from the server via
+    /// `draft/chathistory` (`BEFORE`). Returns `true` when chathistory is
+    /// handling it — a request was sent or one is already in flight — so the
+    /// caller should keep the buffer non-exhausted and wait. Returns `false`
+    /// when chathistory can't help (cap absent, server history exhausted, no
+    /// anchor, or no connection handle), so the caller marks the buffer
+    /// exhausted as before.
+    fn fetch_older_via_chathistory(&mut self, buffer_id: &str) -> bool {
+        use crate::irc::chathistory::Direction;
+
+        let Some(buf) = self.state.buffers.get(buffer_id) else {
+            return false;
+        };
+        let conn_id = buf.connection_id.clone();
+        let target = buf.name.clone();
+        // Anchor by timestamp: the in-memory `log_msg_id` is a SQLite rowid,
+        // not an IRC `@msgid`, so we cannot use a msgid reference here.
+        let Some((oldest_ts, _)) = oldest_backlog_cursor(&buf.messages) else {
+            return false;
+        };
+
+        let (cap, exhausted, in_flight) = {
+            let Some(conn) = self.state.connections.get(&conn_id) else {
+                return false;
+            };
+            let cap = conn.enabled_caps.contains("draft/chathistory");
+            let exhausted = conn.chathistory.is_before_exhausted(&target);
+            // should_request is false when in flight (cap true, not exhausted).
+            let in_flight = cap
+                && !exhausted
+                && !conn
+                    .chathistory
+                    .should_request(&target, Direction::Before, cap);
+            (cap, exhausted, in_flight)
+        };
+
+        if !cap || exhausted {
+            return false;
+        }
+        if in_flight {
+            return true; // already waiting on a BEFORE batch
+        }
+        self.request_chathistory(&conn_id, &target, Direction::Before, Some((None, oldest_ts)))
+    }
+
+    /// Issue a `CHATHISTORY` request for `target` on `conn_id` in `dir`.
+    ///
+    /// `anchor` is `(msgid?, unix_ts)` for `BEFORE`/`AFTER` (the msgid reference
+    /// is used only when the server advertises it via `MSGREFTYPES` and one is
+    /// available; otherwise a timestamp reference is used), or `None` for
+    /// `LATEST`. The page size is clamped to the server's `CHATHISTORY` limit.
+    /// Returns `true` if a request was sent, recording it as in-flight.
+    pub(crate) fn request_chathistory(
+        &mut self,
+        conn_id: &str,
+        target: &str,
+        dir: crate::irc::chathistory::Direction,
+        anchor: Option<(Option<String>, i64)>,
+    ) -> bool {
+        use crate::irc::chathistory::{self, HistoryRef, RefKind};
+
+        let (limit, history_ref) = {
+            let Some(conn) = self.state.connections.get(conn_id) else {
+                return false;
+            };
+            let cap = conn.enabled_caps.contains("draft/chathistory");
+            if !conn.chathistory.should_request(target, dir, cap) {
+                return false;
+            }
+            let limit = chathistory::clamp_limit(
+                CHAT_BACKLOG_PAGE,
+                conn.isupport_parsed.chathistory_max(),
+            );
+            let history_ref = match anchor {
+                None => HistoryRef::Latest,
+                Some((msgid, ts)) => {
+                    let use_msgid = matches!(
+                        chathistory::pick_ref_type(&conn.isupport_parsed.msgreftypes()),
+                        RefKind::MsgId
+                    ) && msgid.as_ref().is_some_and(|m| !m.is_empty());
+                    if use_msgid {
+                        HistoryRef::MsgId(msgid.unwrap_or_default())
+                    } else {
+                        HistoryRef::Timestamp(rfc3339_millis(ts))
+                    }
+                }
+            };
+            (limit, history_ref)
+        };
+
+        let line = chathistory::build_command(dir.subcommand(), target, &history_ref, limit);
+        let Some(handle) = self.irc_handles.get(conn_id) else {
+            return false;
+        };
+        if handle
+            .sender
+            .send(::irc::proto::Command::Raw(line.clone(), vec![]))
+            .is_err()
+        {
+            return false;
+        }
+        tracing::debug!(conn_id, %line, "chathistory: request sent");
+        if let Some(conn) = self.state.connections.get_mut(conn_id) {
+            conn.chathistory.mark_in_flight(target, dir, limit);
+        }
+        true
     }
 
     /// Pin the active live-chat buffer so loaded backlog survives trimming. Called
@@ -310,6 +428,14 @@ fn make_separator(
         log_ref_id: None,
         tags: None,
     }
+}
+
+/// Format a Unix timestamp as an `IRCv3` `server-time` reference
+/// (`YYYY-MM-DDTHH:MM:SS.sssZ`) for a `CHATHISTORY` timestamp anchor.
+fn rfc3339_millis(unix: i64) -> String {
+    chrono::DateTime::<Utc>::from_timestamp(unix, 0)
+        .unwrap_or_else(Utc::now)
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 /// Format a date separator line like irssi/weechat.

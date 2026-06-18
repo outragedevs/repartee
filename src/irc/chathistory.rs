@@ -10,7 +10,7 @@
 // `#[allow(dead_code)]` convention used by `cap.rs` / `isupport.rs`.
 #![allow(dead_code)]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Which reference type to anchor a `CHATHISTORY` request with.
 ///
@@ -107,8 +107,10 @@ impl Direction {
 /// case-insensitively.
 #[derive(Debug, Clone, Default)]
 pub struct HistoryState {
-    /// `(target_lower, direction)` pairs currently awaiting a batch/response.
-    in_flight: HashSet<(String, Direction)>,
+    /// `(target_lower, direction)` → requested limit, for requests currently
+    /// awaiting their batch. The stored limit lets batch completion decide
+    /// server-side exhaustion (`rows < limit`).
+    in_flight: HashMap<(String, Direction), usize>,
     /// Targets (lowercased) whose `BEFORE` history the server has exhausted.
     before_exhausted: HashSet<String>,
 }
@@ -129,7 +131,7 @@ impl HistoryState {
             return false;
         }
         let target = target.to_ascii_lowercase();
-        if self.in_flight.contains(&(target.clone(), dir)) {
+        if self.in_flight.contains_key(&(target.clone(), dir)) {
             return false;
         }
         if dir == Direction::Before && self.before_exhausted.contains(&target) {
@@ -138,13 +140,16 @@ impl HistoryState {
         true
     }
 
-    /// Record that a request is now in flight. Returns `false` if an identical
-    /// request was already tracked (caller should not send a duplicate).
-    pub fn mark_in_flight(&mut self, target: &str, dir: Direction) -> bool {
-        self.in_flight.insert((target.to_ascii_lowercase(), dir))
+    /// Record that a request (with its requested `limit`) is now in flight.
+    /// Returns `false` if an identical request was already tracked (caller
+    /// should not send a duplicate).
+    pub fn mark_in_flight(&mut self, target: &str, dir: Direction, limit: usize) -> bool {
+        self.in_flight
+            .insert((target.to_ascii_lowercase(), dir), limit)
+            .is_none()
     }
 
-    /// Clear an in-flight request (on batch end / failure).
+    /// Clear an in-flight request (on failure / explicit cancel).
     pub fn clear_in_flight(&mut self, target: &str, dir: Direction) {
         self.in_flight.remove(&(target.to_ascii_lowercase(), dir));
     }
@@ -152,8 +157,7 @@ impl HistoryState {
     /// Mark a target's `BEFORE` history as exhausted (start of history reached,
     /// or a server failure), so we stop requesting older messages for it.
     pub fn mark_before_exhausted(&mut self, target: &str) {
-        self.before_exhausted
-            .insert(target.to_ascii_lowercase());
+        self.before_exhausted.insert(target.to_ascii_lowercase());
     }
 
     #[must_use]
@@ -162,14 +166,32 @@ impl HistoryState {
             .contains(&target.to_ascii_lowercase())
     }
 
-    /// Update state from a completed batch: clears the in-flight marker and,
-    /// for a `BEFORE` request that returned fewer rows than requested, records
-    /// that the server has no more history for the target.
-    pub fn note_batch_size(&mut self, target: &str, dir: Direction, rows: usize, limit: usize) {
-        self.clear_in_flight(target, dir);
-        if dir == Direction::Before && rows < limit {
-            self.mark_before_exhausted(target);
+    /// Complete all in-flight requests for `target` after its batch arrived
+    /// with `rows` total messages.
+    ///
+    /// Clears the in-flight markers and, for a `BEFORE` request whose batch
+    /// came back short (`rows < requested limit`), records server-side
+    /// exhaustion so scroll-up stops asking. Returns `true` if a `BEFORE`
+    /// request was completed (the caller can then re-paginate / settle).
+    pub fn complete_target(&mut self, target: &str, rows: usize) -> bool {
+        let target = target.to_ascii_lowercase();
+        let mut had_before = false;
+        let completed: Vec<(Direction, usize)> = self
+            .in_flight
+            .iter()
+            .filter(|((t, _), _)| *t == target)
+            .map(|((_, dir), limit)| (*dir, *limit))
+            .collect();
+        for (dir, limit) in completed {
+            self.in_flight.remove(&(target.clone(), dir));
+            if dir == Direction::Before {
+                had_before = true;
+                if rows < limit {
+                    self.before_exhausted.insert(target.clone());
+                }
+            }
         }
+        had_before
     }
 }
 
@@ -251,18 +273,18 @@ mod tests {
     #[test]
     fn gating_blocks_in_flight_same_direction() {
         let mut st = HistoryState::new();
-        assert!(st.mark_in_flight("#chan", Direction::Before));
+        assert!(st.mark_in_flight("#chan", Direction::Before, 200));
         assert!(!st.should_request("#chan", Direction::Before, true));
         // Different direction is still allowed.
         assert!(st.should_request("#chan", Direction::After, true));
         // Marking the same request again reports the duplicate.
-        assert!(!st.mark_in_flight("#chan", Direction::Before));
+        assert!(!st.mark_in_flight("#chan", Direction::Before, 200));
     }
 
     #[test]
     fn clear_in_flight_reenables() {
         let mut st = HistoryState::new();
-        st.mark_in_flight("#chan", Direction::Before);
+        st.mark_in_flight("#chan", Direction::Before, 200);
         st.clear_in_flight("#chan", Direction::Before);
         assert!(st.should_request("#chan", Direction::Before, true));
     }
@@ -270,8 +292,9 @@ mod tests {
     #[test]
     fn short_before_batch_marks_exhausted() {
         let mut st = HistoryState::new();
-        st.mark_in_flight("#chan", Direction::Before);
-        st.note_batch_size("#chan", Direction::Before, 30, 100);
+        st.mark_in_flight("#chan", Direction::Before, 100);
+        let had_before = st.complete_target("#chan", 30);
+        assert!(had_before);
         assert!(st.is_before_exhausted("#chan"));
         assert!(!st.should_request("#chan", Direction::Before, true));
     }
@@ -279,24 +302,35 @@ mod tests {
     #[test]
     fn full_before_batch_not_exhausted() {
         let mut st = HistoryState::new();
-        st.mark_in_flight("#chan", Direction::Before);
-        st.note_batch_size("#chan", Direction::Before, 100, 100);
+        st.mark_in_flight("#chan", Direction::Before, 100);
+        st.complete_target("#chan", 100);
         assert!(!st.is_before_exhausted("#chan"));
+        // In-flight cleared, so a fresh request is allowed again.
         assert!(st.should_request("#chan", Direction::Before, true));
     }
 
     #[test]
     fn after_batch_never_exhausts_before() {
         let mut st = HistoryState::new();
-        st.mark_in_flight("#chan", Direction::After);
-        st.note_batch_size("#chan", Direction::After, 0, 100);
+        st.mark_in_flight("#chan", Direction::After, 100);
+        let had_before = st.complete_target("#chan", 0);
+        assert!(!had_before);
         assert!(!st.is_before_exhausted("#chan"));
+    }
+
+    #[test]
+    fn complete_target_clears_in_flight() {
+        let mut st = HistoryState::new();
+        st.mark_in_flight("#chan", Direction::After, 50);
+        st.complete_target("#chan", 50);
+        // After completion the AFTER slot is free for a new gap-fill.
+        assert!(st.should_request("#chan", Direction::After, true));
     }
 
     #[test]
     fn target_tracking_is_case_insensitive() {
         let mut st = HistoryState::new();
-        st.mark_in_flight("#Chan", Direction::Before);
+        st.mark_in_flight("#Chan", Direction::Before, 200);
         assert!(!st.should_request("#chan", Direction::Before, true));
         st.mark_before_exhausted("#CHAN");
         assert!(st.is_before_exhausted("#chan"));
