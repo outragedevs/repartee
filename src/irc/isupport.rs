@@ -205,10 +205,10 @@ impl Isupport {
     /// apply their own page size). Absent or malformed → `None`.
     #[must_use]
     pub fn chathistory_max(&self) -> Option<usize> {
-        match self.tokens.get("CHATHISTORY").and_then(|v| v.parse().ok()) {
-            Some(0) | None => None,
-            Some(n) => Some(n),
-        }
+        self.tokens
+            .get("CHATHISTORY")
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n != 0)
     }
 
     /// Message reference types the server accepts for `CHATHISTORY`
