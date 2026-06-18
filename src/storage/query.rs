@@ -194,6 +194,37 @@ pub fn get_messages_paginated(
     Ok(messages)
 }
 
+/// Newest stored row for a buffer, used as the anchor for a
+/// `CHATHISTORY AFTER` gap-fill request after (re)connecting.
+///
+/// Returns `(msg_id, timestamp, id)` for the row with the greatest
+/// `(timestamp, id)`, or `None` if the buffer has no stored messages.
+///
+/// `msg_id` may be empty when the newest row was stored without an IRC
+/// `@msgid` tag; callers should then fall back to a timestamp reference.
+pub fn newest_anchor(
+    db: &Connection,
+    network: &str,
+    buffer: &str,
+) -> rusqlite::Result<Option<(String, i64, i64)>> {
+    let mut stmt = db.prepare(
+        "SELECT msg_id, timestamp, id FROM messages
+         WHERE network = ?1 AND buffer = ?2
+         ORDER BY timestamp DESC, id DESC
+         LIMIT 1",
+    )?;
+    let mut rows = stmt.query(params![network, buffer])?;
+    match rows.next()? {
+        Some(row) => {
+            let msg_id: Option<String> = row.get(0)?;
+            let timestamp: i64 = row.get(1)?;
+            let id: i64 = row.get(2)?;
+            Ok(Some((msg_id.unwrap_or_default(), timestamp, id)))
+        }
+        None => Ok(None),
+    }
+}
+
 /// Full-text search across messages (plain mode only, no encryption).
 ///
 /// The query string is wrapped in double quotes for phrase matching.
@@ -849,6 +880,51 @@ mod tests {
         )
         .unwrap();
         assert_eq!(page2.len(), 3, "all same-timestamp rows must paginate");
+    }
+
+    #[test]
+    fn newest_anchor_empty_is_none() {
+        let db = setup_test_db();
+        assert_eq!(newest_anchor(&db, "net", "#chan").unwrap(), None);
+    }
+
+    #[test]
+    fn newest_anchor_returns_latest_row() {
+        let db = setup_test_db();
+        insert_msg(&db, "net", "#chan", 100, "a");
+        insert_msg(&db, "net", "#chan", 300, "c");
+        insert_msg(&db, "net", "#chan", 200, "b");
+
+        let anchor = newest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
+        assert_eq!(anchor.0, "msg-300");
+        assert_eq!(anchor.1, 300);
+    }
+
+    #[test]
+    fn newest_anchor_breaks_ties_by_id() {
+        let db = setup_test_db();
+        for i in 0..3 {
+            db.execute(
+                "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight) \
+                 VALUES (?1, 'net', '#chan', 500, 'message', 'ada', ?2, 0)",
+                params![format!("dup-{i}"), format!("t{i}")],
+            )
+            .unwrap();
+        }
+        let anchor = newest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
+        // Last inserted shares timestamp 500 but has the greatest id.
+        assert_eq!(anchor.0, "dup-2");
+        assert_eq!(anchor.1, 500);
+    }
+
+    #[test]
+    fn newest_anchor_scoped_to_buffer() {
+        let db = setup_test_db();
+        insert_msg(&db, "net", "#chan", 100, "a");
+        insert_msg(&db, "net", "#other", 999, "b");
+
+        let anchor = newest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
+        assert_eq!(anchor.1, 100);
     }
 
     #[test]
