@@ -197,6 +197,35 @@ impl Isupport {
         })
     }
 
+    /// Maximum number of messages the server will return for a single
+    /// `CHATHISTORY` request (`draft/chathistory`).
+    ///
+    /// Parses the `CHATHISTORY=<n>` token. A value of `0` means the server
+    /// advertises no fixed limit, which we represent as `None` (callers should
+    /// apply their own page size). Absent or malformed → `None`.
+    #[must_use]
+    pub fn chathistory_max(&self) -> Option<usize> {
+        match self.tokens.get("CHATHISTORY").and_then(|v| v.parse().ok()) {
+            Some(0) | None => None,
+            Some(n) => Some(n),
+        }
+    }
+
+    /// Message reference types the server accepts for `CHATHISTORY`
+    /// (`MSGREFTYPES`), lowercased and in advertised order.
+    ///
+    /// Example: `MSGREFTYPES=timestamp,msgid` → `["timestamp", "msgid"]`.
+    /// Absent → empty vec.
+    #[must_use]
+    pub fn msgreftypes(&self) -> Vec<String> {
+        self.tokens.get("MSGREFTYPES").map_or_else(Vec::new, |v| {
+            v.split(',')
+                .filter(|s| !s.is_empty())
+                .map(str::to_ascii_lowercase)
+                .collect()
+        })
+    }
+
     /// Look up a raw token value by key.
     #[must_use]
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -440,5 +469,44 @@ mod tests {
         let mut is = Isupport::new();
         is.parse_tokens(&["TARGMAX=MODE:,PRIVMSG:4"]);
         assert!(is.supports_multi_target_mode());
+    }
+
+    #[test]
+    fn chathistory_max_parsing() {
+        let mut is = Isupport::new();
+        assert_eq!(is.chathistory_max(), None);
+
+        is.parse_tokens(&["CHATHISTORY=50"]);
+        assert_eq!(is.chathistory_max(), Some(50));
+    }
+
+    #[test]
+    fn chathistory_max_zero_means_no_limit() {
+        let mut is = Isupport::new();
+        is.parse_tokens(&["CHATHISTORY=0"]);
+        assert_eq!(is.chathistory_max(), None);
+    }
+
+    #[test]
+    fn chathistory_max_malformed() {
+        let mut is = Isupport::new();
+        is.parse_tokens(&["CHATHISTORY=abc"]);
+        assert_eq!(is.chathistory_max(), None);
+    }
+
+    #[test]
+    fn msgreftypes_parsing() {
+        let mut is = Isupport::new();
+        assert!(is.msgreftypes().is_empty());
+
+        is.parse_tokens(&["MSGREFTYPES=timestamp,msgid"]);
+        assert_eq!(is.msgreftypes(), vec!["timestamp", "msgid"]);
+    }
+
+    #[test]
+    fn msgreftypes_lowercased_and_filtered() {
+        let mut is = Isupport::new();
+        is.parse_tokens(&["MSGREFTYPES=Timestamp,,MSGID"]);
+        assert_eq!(is.msgreftypes(), vec!["timestamp", "msgid"]);
     }
 }
