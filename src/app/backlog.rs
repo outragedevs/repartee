@@ -167,16 +167,13 @@ impl App {
         {
             return;
         }
-        // A server BEFORE request is in flight: the local page can't grow until
-        // its batch lands, so skip the per-tick paginated DB query + lock.
+        // A server CHATHISTORY request is in flight: the local page can't grow
+        // until its batch lands, so skip the per-tick paginated DB query + lock.
         if self
             .state
             .connections
             .get(&buf.connection_id)
-            .is_some_and(|c| {
-                c.chathistory
-                    .is_in_flight(&buf.name, crate::irc::chathistory::Direction::Before)
-            })
+            .is_some_and(|c| c.chathistory.any_in_flight(&buf.name))
         {
             return;
         }
@@ -293,6 +290,12 @@ impl App {
         let Some(buf) = self.state.buffers.get(buffer_id) else {
             return false;
         };
+        // DCC chats are peer-to-peer; no IRC server can serve their history, so
+        // keep them on local log pagination only (never issue CHATHISTORY for a
+        // DCC target — it would fail and leave the target stuck in-flight).
+        if !matches!(buf.buffer_type, BufferType::Channel | BufferType::Query) {
+            return false;
+        }
         let conn_id = buf.connection_id.clone();
         let target = buf.name.clone();
         // Anchor by timestamp: the in-memory `log_msg_id` is a SQLite rowid,
@@ -308,7 +311,7 @@ impl App {
             (
                 conn.enabled_caps.contains("draft/chathistory"),
                 conn.chathistory.is_before_exhausted(&target),
-                conn.chathistory.is_in_flight(&target, Direction::Before),
+                conn.chathistory.any_in_flight(&target),
                 conn.chathistory.oldest_fetched(&target),
             )
         };
@@ -317,7 +320,11 @@ impl App {
             return false;
         }
         if in_flight {
-            return true; // already waiting on a BEFORE batch
+            // A CHATHISTORY request (BEFORE, or a reconnect AFTER/LATEST) is
+            // already outstanding for this target. Requests are serialized, so
+            // wait for it to complete rather than marking the buffer exhausted;
+            // the next scroll tick re-evaluates.
+            return true;
         }
         // Anchor at the oldest point we know of — the local oldest message, or
         // the (older) chathistory watermark — so each BEFORE strictly advances
@@ -403,11 +410,9 @@ impl App {
         let Some(buf) = self.state.buffers.get(&active_id) else {
             return;
         };
+        // DCC chats are peer-to-peer — the IRC server has no history for them.
         if buf.connection_id != conn_id
-            || !matches!(
-                buf.buffer_type,
-                BufferType::Channel | BufferType::Query | BufferType::DccChat
-            )
+            || !matches!(buf.buffer_type, BufferType::Channel | BufferType::Query)
         {
             return;
         }

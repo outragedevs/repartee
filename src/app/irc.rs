@@ -445,9 +445,11 @@ impl App {
                     }
                 }
 
-                // Reconnect gap-fill: pull messages missed while disconnected
-                // for the active buffer via draft/chathistory (best-effort).
-                self.gapfill_active_buffer_on_connect(&conn_id);
+                // Reconnect gap-fill is deferred until end-of-MOTD (see the
+                // RPL_ENDOFMOTD/ERR_NOMOTD handling below): at RPL_WELCOME the
+                // 005 ISUPPORT lines haven't been parsed and channels aren't
+                // joined yet, so a CHATHISTORY request here would use default
+                // limits/ref types and could be rejected for non-membership.
             }
             IrcEvent::Disconnected(conn_id, error) => {
                 // DCC connections are peer-to-peer and independent of the IRC
@@ -853,6 +855,23 @@ impl App {
                     // Check if a WHO batch completed.
                     if let Some(ref target) = endofwho_target {
                         self.handle_who_batch_complete(&conn_id, target);
+                    }
+
+                    // Reconnect gap-fill (deferred from RPL_WELCOME): by
+                    // end-of-MOTD the 005 ISUPPORT lines are parsed (correct
+                    // CHATHISTORY limit/ref types) and the rejoin JOINs sent at
+                    // RPL_WELCOME have been processed by the server (the request
+                    // won't be rejected for non-membership). Fires on the MOTD
+                    // terminator (376) or its absence (422).
+                    if matches!(
+                        msg.command,
+                        ::irc::proto::Command::Response(
+                            ::irc::proto::Response::RPL_ENDOFMOTD
+                                | ::irc::proto::Response::ERR_NOMOTD,
+                            _
+                        )
+                    ) {
+                        self.gapfill_active_buffer_on_connect(&conn_id);
                     }
                 }
             }

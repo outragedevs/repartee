@@ -134,15 +134,22 @@ impl HistoryState {
 
     /// Whether a request in `dir` for `target` should be sent now.
     ///
-    /// False if the cap is disabled, an identical request is already in
-    /// flight, or (for `Before`) the server already reported exhaustion.
+    /// False if the cap is disabled, **any** request for the target is already
+    /// in flight, or (for `Before`) the server already reported exhaustion.
+    ///
+    /// Requests are serialized per target (any direction): the server does not
+    /// echo the subcommand on the returned `BATCH`, so a completing batch can't
+    /// be matched back to its request. Allowing a `BEFORE` and an
+    /// `AFTER`/`LATEST` to be in flight at once would let the first batch to
+    /// return clear both and possibly mark `BEFORE` exhausted using the other
+    /// request's row count. Serializing keeps completion unambiguous.
     #[must_use]
     pub fn should_request(&self, target: &str, dir: Direction, cap_enabled: bool) -> bool {
         if !cap_enabled {
             return false;
         }
         let target = target.to_ascii_lowercase();
-        if self.in_flight.contains_key(&(target.clone(), dir)) {
+        if self.in_flight.keys().any(|(t, _)| *t == target) {
             return false;
         }
         if dir == Direction::Before && self.before_exhausted.contains(&target) {
@@ -160,11 +167,13 @@ impl HistoryState {
             .is_none()
     }
 
-    /// Whether a request in `dir` for `target` is currently awaiting its batch.
+    /// Whether **any** request (in any direction) for `target` is awaiting its
+    /// batch. Used to serialize CHATHISTORY per target so scroll-up
+    /// (`BEFORE`) and reconnect gap-fill (`AFTER`/`LATEST`) never overlap.
     #[must_use]
-    pub fn is_in_flight(&self, target: &str, dir: Direction) -> bool {
-        self.in_flight
-            .contains_key(&(target.to_ascii_lowercase(), dir))
+    pub fn any_in_flight(&self, target: &str) -> bool {
+        let target = target.to_ascii_lowercase();
+        self.in_flight.keys().any(|(t, _)| *t == target)
     }
 
     /// Mark a target's `BEFORE` history as exhausted (start of history reached,
@@ -296,25 +305,32 @@ mod tests {
     }
 
     #[test]
-    fn gating_blocks_in_flight_same_direction() {
+    fn gating_serializes_requests_per_target() {
         let mut st = HistoryState::new();
         assert!(st.mark_in_flight("#chan", Direction::Before, 200));
         assert!(!st.should_request("#chan", Direction::Before, true));
-        // Different direction is still allowed.
-        assert!(st.should_request("#chan", Direction::After, true));
+        // A different direction is blocked too: requests are serialized per
+        // target so a returning batch is never mis-attributed.
+        assert!(!st.should_request("#chan", Direction::After, true));
+        assert!(!st.should_request("#chan", Direction::Latest, true));
+        // A different target is unaffected.
+        assert!(st.should_request("#other", Direction::After, true));
         // Marking the same request again reports the duplicate.
         assert!(!st.mark_in_flight("#chan", Direction::Before, 200));
+        // After completion the target frees up for any direction again.
+        st.complete_target("#chan", 200, Some(1000));
+        assert!(st.should_request("#chan", Direction::After, true));
     }
 
     #[test]
-    fn is_in_flight_tracks_requests() {
+    fn any_in_flight_spans_directions() {
         let mut st = HistoryState::new();
-        assert!(!st.is_in_flight("#chan", Direction::Before));
-        st.mark_in_flight("#chan", Direction::Before, 200);
-        assert!(st.is_in_flight("#chan", Direction::Before));
-        assert!(!st.is_in_flight("#chan", Direction::After));
-        st.complete_target("#chan", 200, Some(1000));
-        assert!(!st.is_in_flight("#chan", Direction::Before));
+        assert!(!st.any_in_flight("#chan"));
+        st.mark_in_flight("#chan", Direction::After, 50);
+        assert!(st.any_in_flight("#chan"));
+        assert!(!st.any_in_flight("#other"));
+        st.complete_target("#chan", 50, Some(1000));
+        assert!(!st.any_in_flight("#chan"));
     }
 
     #[test]
