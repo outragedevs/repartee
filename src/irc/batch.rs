@@ -815,10 +815,20 @@ mod tests {
     }
 
     fn make_history_privmsg(nick: &str, target: &str, text: &str, msgid: &str) -> IrcMessage {
+        make_history_privmsg_at(nick, target, text, msgid, "2024-01-01T00:00:00.000Z")
+    }
+
+    fn make_history_privmsg_at(
+        nick: &str,
+        target: &str,
+        text: &str,
+        msgid: &str,
+        time: &str,
+    ) -> IrcMessage {
         IrcMessage {
             tags: Some(vec![
                 Tag("batch".to_string(), Some("h1".to_string())),
-                Tag("time".to_string(), Some("2024-01-01T00:00:00.000Z".to_string())),
+                Tag("time".to_string(), Some(time.to_string())),
                 Tag("msgid".to_string(), Some(msgid.to_string())),
             ]),
             prefix: Some(irc::proto::Prefix::Nickname(
@@ -868,6 +878,48 @@ mod tests {
             !buf.users.contains_key("dave"),
             "history JOIN must not mutate live nicklist"
         );
+    }
+
+    #[test]
+    fn chathistory_watermark_keeps_millis_and_msgid() {
+        let conn_id = "test";
+        let (mut state, _rx, _buf_id) = setup_ingest_state(conn_id);
+
+        // Two lines in the same second (batch order newest-first); the oldest
+        // is at .200 with msgid "old". The next-BEFORE watermark must record
+        // its full millisecond time and its msgid — not a floored second.
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![
+                make_history_privmsg_at(
+                    "carol",
+                    "#test",
+                    "second",
+                    "new",
+                    "2024-01-01T00:00:00.800Z",
+                ),
+                make_history_privmsg_at(
+                    "bob",
+                    "#test",
+                    "first",
+                    "old",
+                    "2024-01-01T00:00:00.200Z",
+                ),
+            ],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch);
+
+        let conn = state.connections.get(conn_id).expect("connection exists");
+        let (ms, msgid) = conn
+            .chathistory
+            .oldest_fetched("#test")
+            .expect("watermark recorded");
+        assert_eq!(ms, 1_704_067_200_200, "subsecond precision preserved");
+        assert_eq!(msgid.as_deref(), Some("old"), "oldest line's msgid kept");
     }
 
     #[test]

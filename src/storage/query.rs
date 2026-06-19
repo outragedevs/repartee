@@ -225,6 +225,38 @@ pub fn newest_anchor(
     }
 }
 
+/// Oldest stored row for a buffer, used as the anchor for the **first**
+/// `CHATHISTORY BEFORE` scroll-back request (before any per-target watermark
+/// has been recorded).
+///
+/// Returns `(msg_id, timestamp, id)` for the row with the least
+/// `(timestamp, id)`, or `None` if the buffer has no stored messages.
+///
+/// `msg_id` may be empty when the oldest row was stored without an IRC
+/// `@msgid` tag; callers should then fall back to a timestamp reference.
+pub fn oldest_anchor(
+    db: &Connection,
+    network: &str,
+    buffer: &str,
+) -> rusqlite::Result<Option<(String, i64, i64)>> {
+    let mut stmt = db.prepare(
+        "SELECT msg_id, timestamp, id FROM messages
+         WHERE network = ?1 AND buffer = ?2
+         ORDER BY timestamp ASC, id ASC
+         LIMIT 1",
+    )?;
+    let mut rows = stmt.query(params![network, buffer])?;
+    match rows.next()? {
+        Some(row) => {
+            let msg_id: Option<String> = row.get(0)?;
+            let timestamp: i64 = row.get(1)?;
+            let id: i64 = row.get(2)?;
+            Ok(Some((msg_id.unwrap_or_default(), timestamp, id)))
+        }
+        None => Ok(None),
+    }
+}
+
 /// Full-text search across messages (plain mode only, no encryption).
 ///
 /// The query string is wrapped in double quotes for phrase matching.

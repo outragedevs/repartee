@@ -70,11 +70,14 @@ pub fn build_command(
     format!("CHATHISTORY {subcommand} {target} {anchor_str} {limit}")
 }
 
-/// Format a Unix timestamp (secs) as an `IRCv3` `server-time` reference
-/// (`YYYY-MM-DDTHH:MM:SS.sssZ`) for a `CHATHISTORY` timestamp anchor.
+/// Format a Unix timestamp in **milliseconds** as an `IRCv3` `server-time`
+/// reference (`YYYY-MM-DDTHH:MM:SS.sssZ`) for a `CHATHISTORY` timestamp anchor.
+///
+/// Millisecond precision matters: anchoring `BEFORE` at a whole second would
+/// skip any messages later in that second that we have not fetched yet.
 #[must_use]
-pub fn rfc3339_millis(unix: i64) -> String {
-    chrono::DateTime::<chrono::Utc>::from_timestamp(unix, 0)
+pub fn rfc3339_millis(unix_ms: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(unix_ms)
         .unwrap_or_default()
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
@@ -117,13 +120,14 @@ pub struct HistoryState {
     in_flight: HashMap<(String, Direction), usize>,
     /// Targets (lowercased) whose `BEFORE` history the server has exhausted.
     before_exhausted: HashSet<String>,
-    /// Per-target oldest server-time (unix secs) we have pulled via
-    /// chathistory, across **all** batch lines including event-playback. The
-    /// next `BEFORE` anchors at this so scroll-up keeps making progress even
-    /// through windows that contain only (un-ingested) event-playback lines —
-    /// otherwise the in-memory conversational anchor never moves and the same
-    /// window is re-requested forever.
-    oldest_fetched: HashMap<String, i64>,
+    /// Per-target oldest point we have pulled via chathistory: the oldest
+    /// server-time (unix **millis**) seen across **all** batch lines (including
+    /// event-playback) paired with that line's IRC `@msgid` (if any). The next
+    /// `BEFORE` anchors here — by `@msgid` when the server prefers it, else by
+    /// the full-precision timestamp — so scroll-up keeps making progress even
+    /// through windows that contain only (un-ingested) event-playback lines,
+    /// and never skips messages within the boundary second.
+    oldest_fetched: HashMap<String, (i64, Option<String>)>,
 }
 
 impl HistoryState {
@@ -188,29 +192,40 @@ impl HistoryState {
             .contains(&target.to_ascii_lowercase())
     }
 
-    /// Oldest server-time (unix secs) pulled so far for `target`, if any.
+    /// Oldest point pulled so far for `target`: `(unix_millis, msgid?)`, if any.
     #[must_use]
-    pub fn oldest_fetched(&self, target: &str) -> Option<i64> {
+    pub fn oldest_fetched(&self, target: &str) -> Option<(i64, Option<String>)> {
         self.oldest_fetched
             .get(&target.to_ascii_lowercase())
-            .copied()
+            .cloned()
     }
 
     /// Complete all in-flight requests for `target` after its batch arrived
-    /// with `rows` total messages whose oldest server-time was `oldest_ts`.
+    /// with `rows` total messages whose oldest line was `oldest` —
+    /// `(unix_millis, msgid?)`.
     ///
     /// Clears the in-flight markers, advances the per-target oldest-fetched
     /// watermark (so the next `BEFORE` keeps making progress), and — for a
     /// `BEFORE` request whose batch came back short (`rows < requested limit`)
     /// — records server-side exhaustion so scroll-up stops asking.
-    pub fn complete_target(&mut self, target: &str, rows: usize, oldest_ts: Option<i64>) {
+    pub fn complete_target(
+        &mut self,
+        target: &str,
+        rows: usize,
+        oldest: Option<(i64, Option<String>)>,
+    ) {
         let target = target.to_ascii_lowercase();
 
-        if let Some(ts) = oldest_ts {
+        if let Some((ts, msgid)) = oldest {
             self.oldest_fetched
                 .entry(target.clone())
-                .and_modify(|cur| *cur = (*cur).min(ts))
-                .or_insert(ts);
+                // Keep whichever line is older; take its msgid alongside.
+                .and_modify(|cur| {
+                    if ts < cur.0 {
+                        *cur = (ts, msgid.clone());
+                    }
+                })
+                .or_insert((ts, msgid));
         }
 
         let completed: Vec<(Direction, usize)> = self
@@ -318,7 +333,7 @@ mod tests {
         // Marking the same request again reports the duplicate.
         assert!(!st.mark_in_flight("#chan", Direction::Before, 200));
         // After completion the target frees up for any direction again.
-        st.complete_target("#chan", 200, Some(1000));
+        st.complete_target("#chan", 200, Some((1000, None)));
         assert!(st.should_request("#chan", Direction::After, true));
     }
 
@@ -329,7 +344,7 @@ mod tests {
         st.mark_in_flight("#chan", Direction::After, 50);
         assert!(st.any_in_flight("#chan"));
         assert!(!st.any_in_flight("#other"));
-        st.complete_target("#chan", 50, Some(1000));
+        st.complete_target("#chan", 50, Some((1000, None)));
         assert!(!st.any_in_flight("#chan"));
     }
 
@@ -337,7 +352,7 @@ mod tests {
     fn short_before_batch_marks_exhausted() {
         let mut st = HistoryState::new();
         st.mark_in_flight("#chan", Direction::Before, 100);
-        st.complete_target("#chan", 30, Some(1000));
+        st.complete_target("#chan", 30, Some((1000, None)));
         assert!(st.is_before_exhausted("#chan"));
         assert!(!st.should_request("#chan", Direction::Before, true));
     }
@@ -346,7 +361,7 @@ mod tests {
     fn full_before_batch_not_exhausted() {
         let mut st = HistoryState::new();
         st.mark_in_flight("#chan", Direction::Before, 100);
-        st.complete_target("#chan", 100, Some(1000));
+        st.complete_target("#chan", 100, Some((1000, None)));
         assert!(!st.is_before_exhausted("#chan"));
         // In-flight cleared, so a fresh request is allowed again.
         assert!(st.should_request("#chan", Direction::Before, true));
@@ -356,7 +371,7 @@ mod tests {
     fn after_batch_never_exhausts_before() {
         let mut st = HistoryState::new();
         st.mark_in_flight("#chan", Direction::After, 100);
-        st.complete_target("#chan", 0, Some(1000));
+        st.complete_target("#chan", 0, Some((1000, None)));
         assert!(!st.is_before_exhausted("#chan"));
     }
 
@@ -364,7 +379,7 @@ mod tests {
     fn complete_target_clears_in_flight() {
         let mut st = HistoryState::new();
         st.mark_in_flight("#chan", Direction::After, 50);
-        st.complete_target("#chan", 50, Some(1000));
+        st.complete_target("#chan", 50, Some((1000, None)));
         // After completion the AFTER slot is free for a new gap-fill.
         assert!(st.should_request("#chan", Direction::After, true));
     }
@@ -374,21 +389,24 @@ mod tests {
         let mut st = HistoryState::new();
         assert_eq!(st.oldest_fetched("#chan"), None);
         st.mark_in_flight("#chan", Direction::Before, 100);
-        st.complete_target("#chan", 100, Some(5000));
-        assert_eq!(st.oldest_fetched("#chan"), Some(5000));
-        // A later, older page lowers the watermark; a newer one does not raise it.
+        st.complete_target("#chan", 100, Some((5000, Some("m5".into()))));
+        assert_eq!(st.oldest_fetched("#chan"), Some((5000, Some("m5".into()))));
+        // A later, older page lowers the watermark (and adopts its msgid); a
+        // newer one does not raise it.
         st.mark_in_flight("#chan", Direction::Before, 100);
-        st.complete_target("#chan", 100, Some(3000));
-        assert_eq!(st.oldest_fetched("#chan"), Some(3000));
+        st.complete_target("#chan", 100, Some((3000, Some("m3".into()))));
+        assert_eq!(st.oldest_fetched("#chan"), Some((3000, Some("m3".into()))));
         st.mark_in_flight("#chan", Direction::Before, 100);
-        st.complete_target("#chan", 100, Some(9000));
-        assert_eq!(st.oldest_fetched("#chan"), Some(3000));
+        st.complete_target("#chan", 100, Some((9000, Some("m9".into()))));
+        assert_eq!(st.oldest_fetched("#chan"), Some((3000, Some("m3".into()))));
     }
 
     #[test]
     fn rfc3339_millis_format() {
-        // 2024-01-01T00:00:00Z
-        assert_eq!(rfc3339_millis(1_704_067_200), "2024-01-01T00:00:00.000Z");
+        // Input is milliseconds: 2024-01-01T00:00:00.000Z
+        assert_eq!(rfc3339_millis(1_704_067_200_000), "2024-01-01T00:00:00.000Z");
+        // Subsecond precision is preserved (not floored to the second).
+        assert_eq!(rfc3339_millis(1_704_067_200_500), "2024-01-01T00:00:00.500Z");
     }
 
     #[test]

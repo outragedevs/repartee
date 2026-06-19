@@ -748,7 +748,7 @@ pub fn ingest_chathistory_batch(
     state: &AppState,
     conn_id: &str,
     batch: &crate::irc::batch::BatchInfo,
-) -> Option<i64> {
+) -> Option<(i64, Option<String>)> {
     let our_nick = state
         .connections
         .get(conn_id)
@@ -757,20 +757,26 @@ pub fn ingest_chathistory_batch(
 
     let mut ingested = 0usize;
     let mut skipped = 0usize;
-    let mut oldest_ts: Option<i64> = None;
+    // Oldest line seen across the whole batch (events included): full
+    // millisecond server-time plus its IRC @msgid (if any). The caller uses
+    // this as the next BEFORE anchor — by msgid when the server prefers it,
+    // else by the full-precision timestamp — so scroll-up never floors to the
+    // second (skipping same-second messages) or stalls on event-only windows.
+    let mut oldest: Option<(i64, Option<String>)> = None;
 
     for msg in &batch.messages {
         let tags = extract_tags(msg);
 
-        // Track the oldest server-time across every line (events included) so
-        // the BEFORE anchor advances past event-only windows.
         if let Some(ts) = tags
             .as_ref()
             .and_then(|t| t.get("time"))
             .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
         {
-            let ts = ts.timestamp();
-            oldest_ts = Some(oldest_ts.map_or(ts, |o| o.min(ts)));
+            let ms = ts.timestamp_millis();
+            if oldest.as_ref().is_none_or(|(cur, _)| ms < *cur) {
+                let msgid = tags.as_ref().and_then(|t| t.get("msgid").cloned());
+                oldest = Some((ms, msgid));
+            }
         }
 
         let (base_type, target, text) = match &msg.command {
@@ -841,7 +847,7 @@ pub fn ingest_chathistory_batch(
         );
     }
 
-    oldest_ts
+    oldest
 }
 
 // === Private handlers ===

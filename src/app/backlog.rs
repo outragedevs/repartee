@@ -298,13 +298,8 @@ impl App {
         }
         let conn_id = buf.connection_id.clone();
         let target = buf.name.clone();
-        // Anchor by timestamp: the in-memory `log_msg_id` is a SQLite rowid,
-        // not an IRC `@msgid`, so we cannot use a msgid reference here.
-        let Some((local_oldest_ts, _)) = oldest_backlog_cursor(&buf.messages) else {
-            return false;
-        };
 
-        let (cap, exhausted, in_flight, watermark) = {
+        let (cap, exhausted, in_flight, watermark, network) = {
             let Some(conn) = self.state.connections.get(&conn_id) else {
                 return false;
             };
@@ -313,6 +308,7 @@ impl App {
                 conn.chathistory.is_before_exhausted(&target),
                 conn.chathistory.any_in_flight(&target),
                 conn.chathistory.oldest_fetched(&target),
+                conn.label.clone(),
             )
         };
 
@@ -326,19 +322,44 @@ impl App {
             // the next scroll tick re-evaluates.
             return true;
         }
-        // Anchor at the oldest point we know of — the local oldest message, or
-        // the (older) chathistory watermark — so each BEFORE strictly advances
-        // backwards even across windows of only event-playback lines.
-        let anchor_ts = watermark.map_or(local_oldest_ts, |w| w.min(local_oldest_ts));
-        self.request_chathistory(&conn_id, &target, Direction::Before, Some((None, anchor_ts)))
+
+        // Anchor at the oldest point we have already pulled — full-precision
+        // (millis) timestamp plus the exact IRC @msgid when the server gave us
+        // one — so each BEFORE strictly advances backwards (even across
+        // windows of only event-playback lines) and never skips messages
+        // within the boundary second. The watermark is authoritative once set;
+        // on the very first request we anchor at the absolute oldest stored row
+        // (whose @msgid the DB preserves), falling back to its timestamp.
+        let anchor: (Option<String>, i64) = if let Some((ms, msgid)) = watermark {
+            (msgid, ms)
+        } else {
+            // First request for this target: anchor at the absolute oldest
+            // stored row (whose @msgid the DB preserves), else its timestamp.
+            let Some(storage) = self.storage.as_ref() else {
+                return false;
+            };
+            let row = storage.db.lock().ok().and_then(|db| {
+                crate::storage::query::oldest_anchor(&db, &network, &target)
+                    .ok()
+                    .flatten()
+            });
+            let Some((msgid, ts_secs, _id)) = row else {
+                return false;
+            };
+            ((!msgid.is_empty()).then_some(msgid), ts_secs * 1000)
+        };
+
+        self.request_chathistory(&conn_id, &target, Direction::Before, Some(anchor))
     }
 
     /// Issue a `CHATHISTORY` request for `target` on `conn_id` in `dir`.
     ///
-    /// `anchor` is `(msgid?, unix_ts)` for `BEFORE`/`AFTER` (the msgid reference
-    /// is used only when the server advertises it via `MSGREFTYPES` and one is
-    /// available; otherwise a timestamp reference is used), or `None` for
-    /// `LATEST`. The page size is clamped to the server's `CHATHISTORY` limit.
+    /// `anchor` is `(msgid?, unix_millis)` for `BEFORE`/`AFTER` (the msgid
+    /// reference is used only when the server advertises it via `MSGREFTYPES`
+    /// and one is available; otherwise a full-precision timestamp reference is
+    /// used), or `None` for `LATEST`. The timestamp is in **milliseconds** so
+    /// the anchor never floors to the second and skips same-second messages.
+    /// The page size is clamped to the server's `CHATHISTORY` limit.
     /// Returns `true` if a request was sent, recording it as in-flight.
     pub(crate) fn request_chathistory(
         &mut self,
@@ -436,9 +457,17 @@ impl App {
         });
 
         match anchor {
-            Some((msgid, ts, _id)) => {
+            Some((msgid, ts_secs, _id)) => {
                 let msgid = (!msgid.is_empty()).then_some(msgid);
-                self.request_chathistory(conn_id, &target, Direction::After, Some((msgid, ts)));
+                // The anchor timestamp is passed in milliseconds (the DB stores
+                // whole seconds; a msgid reference is preferred when available).
+                let anchor_ms = ts_secs * 1000;
+                self.request_chathistory(
+                    conn_id,
+                    &target,
+                    Direction::After,
+                    Some((msgid, anchor_ms)),
+                );
             }
             None => {
                 self.request_chathistory(conn_id, &target, Direction::Latest, None);
