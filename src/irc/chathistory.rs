@@ -208,11 +208,19 @@ impl HistoryState {
     /// watermark (so the next `BEFORE` keeps making progress), and — for a
     /// `BEFORE` request whose batch came back short (`rows < requested limit`)
     /// — records server-side exhaustion so scroll-up stops asking.
+    ///
+    /// `clean_end` is `true` when the batch closed normally (`BATCH -tag`) and
+    /// `false` when it was force-completed by the timeout purge. A timed-out
+    /// batch is a transport/server failure, not proof that history ended, so a
+    /// short timed-out `BEFORE` batch still clears in-flight (allowing a retry)
+    /// but is NEVER marked exhausted — otherwise a single dropped `BATCH -tag`
+    /// would wedge the target with no older history until reconnect.
     pub fn complete_target(
         &mut self,
         target: &str,
         rows: usize,
         oldest: Option<(i64, Option<String>)>,
+        clean_end: bool,
     ) {
         let target = target.to_ascii_lowercase();
 
@@ -237,7 +245,7 @@ impl HistoryState {
             .collect();
         for (dir, limit) in completed {
             self.in_flight.remove(&(target.clone(), dir));
-            if dir == Direction::Before && rows < limit {
+            if clean_end && dir == Direction::Before && rows < limit {
                 self.mark_before_exhausted(&target);
             }
         }
@@ -333,7 +341,7 @@ mod tests {
         // Marking the same request again reports the duplicate.
         assert!(!st.mark_in_flight("#chan", Direction::Before, 200));
         // After completion the target frees up for any direction again.
-        st.complete_target("#chan", 200, Some((1000, None)));
+        st.complete_target("#chan", 200, Some((1000, None)), true);
         assert!(st.should_request("#chan", Direction::After, true));
     }
 
@@ -344,7 +352,7 @@ mod tests {
         st.mark_in_flight("#chan", Direction::After, 50);
         assert!(st.any_in_flight("#chan"));
         assert!(!st.any_in_flight("#other"));
-        st.complete_target("#chan", 50, Some((1000, None)));
+        st.complete_target("#chan", 50, Some((1000, None)), true);
         assert!(!st.any_in_flight("#chan"));
     }
 
@@ -352,16 +360,36 @@ mod tests {
     fn short_before_batch_marks_exhausted() {
         let mut st = HistoryState::new();
         st.mark_in_flight("#chan", Direction::Before, 100);
-        st.complete_target("#chan", 30, Some((1000, None)));
+        st.complete_target("#chan", 30, Some((1000, None)), true);
         assert!(st.is_before_exhausted("#chan"));
         assert!(!st.should_request("#chan", Direction::Before, true));
+    }
+
+    #[test]
+    fn timed_out_short_before_batch_stays_fetchable() {
+        // A CHATHISTORY batch that times out (its closing `BATCH -tag` never
+        // arrived) with fewer rows than requested is a transport/server
+        // failure, NOT proof that history ended. It must clear the in-flight
+        // marker (so scroll-up can retry) WITHOUT marking BEFORE exhausted —
+        // otherwise the target is wedged with no older history until reconnect.
+        let mut st = HistoryState::new();
+        st.mark_in_flight("#chan", Direction::Before, 100);
+        st.complete_target("#chan", 30, Some((1000, None)), false);
+        assert!(
+            !st.is_before_exhausted("#chan"),
+            "a timed-out short batch must not exhaust history"
+        );
+        assert!(
+            st.should_request("#chan", Direction::Before, true),
+            "in-flight cleared so a later scroll-up retries the fetch"
+        );
     }
 
     #[test]
     fn full_before_batch_not_exhausted() {
         let mut st = HistoryState::new();
         st.mark_in_flight("#chan", Direction::Before, 100);
-        st.complete_target("#chan", 100, Some((1000, None)));
+        st.complete_target("#chan", 100, Some((1000, None)), true);
         assert!(!st.is_before_exhausted("#chan"));
         // In-flight cleared, so a fresh request is allowed again.
         assert!(st.should_request("#chan", Direction::Before, true));
@@ -371,7 +399,7 @@ mod tests {
     fn after_batch_never_exhausts_before() {
         let mut st = HistoryState::new();
         st.mark_in_flight("#chan", Direction::After, 100);
-        st.complete_target("#chan", 0, Some((1000, None)));
+        st.complete_target("#chan", 0, Some((1000, None)), true);
         assert!(!st.is_before_exhausted("#chan"));
     }
 
@@ -379,7 +407,7 @@ mod tests {
     fn complete_target_clears_in_flight() {
         let mut st = HistoryState::new();
         st.mark_in_flight("#chan", Direction::After, 50);
-        st.complete_target("#chan", 50, Some((1000, None)));
+        st.complete_target("#chan", 50, Some((1000, None)), true);
         // After completion the AFTER slot is free for a new gap-fill.
         assert!(st.should_request("#chan", Direction::After, true));
     }
@@ -389,15 +417,15 @@ mod tests {
         let mut st = HistoryState::new();
         assert_eq!(st.oldest_fetched("#chan"), None);
         st.mark_in_flight("#chan", Direction::Before, 100);
-        st.complete_target("#chan", 100, Some((5000, Some("m5".into()))));
+        st.complete_target("#chan", 100, Some((5000, Some("m5".into()))), true);
         assert_eq!(st.oldest_fetched("#chan"), Some((5000, Some("m5".into()))));
         // A later, older page lowers the watermark (and adopts its msgid); a
         // newer one does not raise it.
         st.mark_in_flight("#chan", Direction::Before, 100);
-        st.complete_target("#chan", 100, Some((3000, Some("m3".into()))));
+        st.complete_target("#chan", 100, Some((3000, Some("m3".into()))), true);
         assert_eq!(st.oldest_fetched("#chan"), Some((3000, Some("m3".into()))));
         st.mark_in_flight("#chan", Direction::Before, 100);
-        st.complete_target("#chan", 100, Some((9000, Some("m9".into()))));
+        st.complete_target("#chan", 100, Some((9000, Some("m9".into()))), true);
         assert_eq!(st.oldest_fetched("#chan"), Some((3000, Some("m3".into()))));
     }
 

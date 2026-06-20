@@ -163,12 +163,12 @@ impl App {
         if !matches!(
             buf.buffer_type,
             BufferType::Channel | BufferType::Query | BufferType::DccChat
-        ) || buf.history_exhausted
-        {
+        ) {
             return;
         }
-        // A server CHATHISTORY request is in flight: the local page can't grow
-        // until its batch lands, so skip the per-tick paginated DB query + lock.
+        // A server CHATHISTORY request is in flight: nothing can grow until its
+        // batch lands, so skip both the per-tick paginated DB query and a
+        // duplicate server request.
         if self
             .state
             .connections
@@ -181,8 +181,21 @@ impl App {
         if buf.messages.len() >= PINNED_BACKLOG_CAP {
             return;
         }
-        // Trigger when within 50 lines of the loaded top (mirrors log mode).
-        if self.scroll_offset.saturating_add(50) >= buf.messages.len() {
+        // Only act when scrolled within 50 lines of the loaded top (mirrors log mode).
+        if self.scroll_offset.saturating_add(50) < buf.messages.len() {
+            return;
+        }
+        if buf.history_exhausted {
+            // Local SQLite is drained for this buffer (often just a few recent
+            // lines loaded at startup), but the server may still hold older
+            // history. Ask via `draft/chathistory` BEFORE — the batch ingests
+            // older rows into SQLite and clears `history_exhausted`
+            // (`process_completed_batch`), so a later tick re-paginates them
+            // into the buffer. A no-op when the cap is absent or the server
+            // already reported BEFORE exhausted, so a truly exhausted buffer
+            // stays quiet.
+            self.fetch_older_via_chathistory(&active_id);
+        } else {
             self.load_older_chat_backlog(&active_id);
         }
     }
@@ -323,18 +336,23 @@ impl App {
             return true;
         }
 
-        // Anchor at the oldest point we have already pulled — full-precision
-        // (millis) timestamp plus the exact IRC @msgid when the server gave us
-        // one — so each BEFORE strictly advances backwards (even across
-        // windows of only event-playback lines) and never skips messages
-        // within the boundary second. The watermark is authoritative once set;
-        // on the very first request we anchor at the absolute oldest stored row
-        // (whose @msgid the DB preserves), falling back to its timestamp.
+        // Anchor at the oldest point we have already pulled. The per-target
+        // watermark is authoritative once set: it carries a full-precision
+        // (millis) timestamp plus the exact IRC @msgid when a chathistory batch
+        // gave us one (a *verified* server id), so each BEFORE strictly
+        // advances backwards — even across windows of only event-playback lines
+        // — and never skips messages within the boundary second.
+        //
+        // On the very first request (no watermark yet) we anchor by timestamp
+        // only. The oldest stored row's `messages.msg_id` is NOT a usable
+        // server reference: live rows are logged with a locally-minted UUID
+        // (state/events::maybe_log), and the column can't tell a UUID from a
+        // real @msgid — so passing it as `msgid=` would fail on a
+        // MSGREFTYPES=msgid server. `oldest_anchor` returns only (timestamp,
+        // id) to enforce this.
         let anchor: (Option<String>, i64) = if let Some((ms, msgid)) = watermark {
             (msgid, ms)
         } else {
-            // First request for this target: anchor at the absolute oldest
-            // stored row (whose @msgid the DB preserves), else its timestamp.
             let Some(storage) = self.storage.as_ref() else {
                 return false;
             };
@@ -343,10 +361,10 @@ impl App {
                     .ok()
                     .flatten()
             });
-            let Some((msgid, ts_secs, _id)) = row else {
+            let Some((ts_secs, _id)) = row else {
                 return false;
             };
-            ((!msgid.is_empty()).then_some(msgid), ts_secs * 1000)
+            (None, ts_secs * 1000)
         };
 
         self.request_chathistory(&conn_id, &target, Direction::Before, Some(anchor))
@@ -457,16 +475,17 @@ impl App {
         });
 
         match anchor {
-            Some((msgid, ts_secs, _id)) => {
-                let msgid = (!msgid.is_empty()).then_some(msgid);
-                // The anchor timestamp is passed in milliseconds (the DB stores
-                // whole seconds; a msgid reference is preferred when available).
+            Some((ts_secs, _id)) => {
+                // Anchor by timestamp (passed in milliseconds; the DB stores
+                // whole seconds). The stored `msg_id` is not used as a server
+                // reference — it may be a locally-minted UUID rather than a real
+                // IRC @msgid, which a MSGREFTYPES=msgid server cannot resolve.
                 let anchor_ms = ts_secs * 1000;
                 self.request_chathistory(
                     conn_id,
                     &target,
                     Direction::After,
-                    Some((msgid, anchor_ms)),
+                    Some((None, anchor_ms)),
                 );
             }
             None => {

@@ -580,10 +580,12 @@ impl App {
                                 batch.batch_type,
                                 batch.messages.len()
                             );
+                            // Normal close via `BATCH -tag` (`clean_end = true`).
                             crate::irc::batch::process_completed_batch(
                                 &mut self.state,
                                 &conn_id,
                                 &batch,
+                                true,
                             );
                         }
                     }

@@ -50,7 +50,10 @@ impl App {
             }
         }
         for (conn_id, batch) in to_replay {
-            crate::irc::batch::process_completed_batch(&mut self.state, &conn_id, &batch);
+            // Force-completed by timeout (`clean_end = false`): a missing
+            // `BATCH -tag` is a transport/server failure, so a short CHATHISTORY
+            // batch here must not be treated as genuine end-of-history.
+            crate::irc::batch::process_completed_batch(&mut self.state, &conn_id, &batch, false);
         }
     }
 

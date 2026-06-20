@@ -197,18 +197,23 @@ pub fn get_messages_paginated(
 /// Newest stored row for a buffer, used as the anchor for a
 /// `CHATHISTORY AFTER` gap-fill request after (re)connecting.
 ///
-/// Returns `(msg_id, timestamp, id)` for the row with the greatest
-/// `(timestamp, id)`, or `None` if the buffer has no stored messages.
+/// Returns `(timestamp, id)` for the row with the greatest `(timestamp, id)`,
+/// or `None` if the buffer has no stored messages.
 ///
-/// `msg_id` may be empty when the newest row was stored without an IRC
-/// `@msgid` tag; callers should then fall back to a timestamp reference.
+/// The stored `msg_id` is intentionally NOT returned: live PRIVMSG/NOTICE rows
+/// are logged with a locally-minted UUID (see `state/events::maybe_log`), not
+/// the server's IRC `@msgid`, and the column can't distinguish the two. Feeding
+/// such a UUID to `CHATHISTORY ... msgid=<uuid>` fails on a `MSGREFTYPES=msgid`
+/// server, so the anchor is always a full-precision timestamp reference. Only a
+/// `@msgid` verified via a chathistory batch (the per-target watermark) is ever
+/// used as a msgid reference.
 pub fn newest_anchor(
     db: &Connection,
     network: &str,
     buffer: &str,
-) -> rusqlite::Result<Option<(String, i64, i64)>> {
+) -> rusqlite::Result<Option<(i64, i64)>> {
     let mut stmt = db.prepare(
-        "SELECT msg_id, timestamp, id FROM messages
+        "SELECT timestamp, id FROM messages
          WHERE network = ?1 AND buffer = ?2
          ORDER BY timestamp DESC, id DESC
          LIMIT 1",
@@ -216,10 +221,9 @@ pub fn newest_anchor(
     let mut rows = stmt.query(params![network, buffer])?;
     match rows.next()? {
         Some(row) => {
-            let msg_id: Option<String> = row.get(0)?;
-            let timestamp: i64 = row.get(1)?;
-            let id: i64 = row.get(2)?;
-            Ok(Some((msg_id.unwrap_or_default(), timestamp, id)))
+            let timestamp: i64 = row.get(0)?;
+            let id: i64 = row.get(1)?;
+            Ok(Some((timestamp, id)))
         }
         None => Ok(None),
     }
@@ -229,18 +233,19 @@ pub fn newest_anchor(
 /// `CHATHISTORY BEFORE` scroll-back request (before any per-target watermark
 /// has been recorded).
 ///
-/// Returns `(msg_id, timestamp, id)` for the row with the least
-/// `(timestamp, id)`, or `None` if the buffer has no stored messages.
+/// Returns `(timestamp, id)` for the row with the least `(timestamp, id)`, or
+/// `None` if the buffer has no stored messages.
 ///
-/// `msg_id` may be empty when the oldest row was stored without an IRC
-/// `@msgid` tag; callers should then fall back to a timestamp reference.
+/// The stored `msg_id` is intentionally NOT returned — see [`newest_anchor`]
+/// for the rationale. The first BEFORE request always anchors by timestamp;
+/// once a chathistory batch lands, its verified `@msgid` watermark takes over.
 pub fn oldest_anchor(
     db: &Connection,
     network: &str,
     buffer: &str,
-) -> rusqlite::Result<Option<(String, i64, i64)>> {
+) -> rusqlite::Result<Option<(i64, i64)>> {
     let mut stmt = db.prepare(
-        "SELECT msg_id, timestamp, id FROM messages
+        "SELECT timestamp, id FROM messages
          WHERE network = ?1 AND buffer = ?2
          ORDER BY timestamp ASC, id ASC
          LIMIT 1",
@@ -248,10 +253,9 @@ pub fn oldest_anchor(
     let mut rows = stmt.query(params![network, buffer])?;
     match rows.next()? {
         Some(row) => {
-            let msg_id: Option<String> = row.get(0)?;
-            let timestamp: i64 = row.get(1)?;
-            let id: i64 = row.get(2)?;
-            Ok(Some((msg_id.unwrap_or_default(), timestamp, id)))
+            let timestamp: i64 = row.get(0)?;
+            let id: i64 = row.get(1)?;
+            Ok(Some((timestamp, id)))
         }
         None => Ok(None),
     }
@@ -927,9 +931,10 @@ mod tests {
         insert_msg(&db, "net", "#chan", 300, "c");
         insert_msg(&db, "net", "#chan", 200, "b");
 
+        // Anchor is (timestamp, id) — the stored `msg_id` is deliberately NOT
+        // returned (it may be a locally-minted UUID, not a server @msgid).
         let anchor = newest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
-        assert_eq!(anchor.0, "msg-300");
-        assert_eq!(anchor.1, 300);
+        assert_eq!(anchor.0, 300);
     }
 
     #[test]
@@ -945,8 +950,7 @@ mod tests {
         }
         let anchor = newest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
         // Last inserted shares timestamp 500 but has the greatest id.
-        assert_eq!(anchor.0, "dup-2");
-        assert_eq!(anchor.1, 500);
+        assert_eq!(anchor, (500, db.last_insert_rowid()));
     }
 
     #[test]
@@ -956,7 +960,46 @@ mod tests {
         insert_msg(&db, "net", "#other", 999, "b");
 
         let anchor = newest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
-        assert_eq!(anchor.1, 100);
+        assert_eq!(anchor.0, 100);
+    }
+
+    #[test]
+    fn anchors_do_not_expose_stored_msgid() {
+        // Regression: live PRIVMSG/NOTICE rows are logged with a generated
+        // UUID in `messages.msg_id` (state/events::maybe_log), NOT the server's
+        // IRC @msgid. The anchor helpers must surface only (timestamp, id) so a
+        // caller can never feed that UUID to `CHATHISTORY ... msgid=<uuid>`,
+        // which a MSGREFTYPES=msgid server cannot resolve.
+        let db = setup_test_db();
+        db.execute(
+            "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight) \
+             VALUES ('550e8400-e29b-41d4-a716-446655440000', 'net', '#chan', 100, 'message', 'ada', 'hi', 0)",
+            [],
+        )
+        .unwrap();
+
+        let newest = newest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
+        let oldest = oldest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
+        // Both anchors carry the timestamp only; the unusable UUID never leaks.
+        assert_eq!(newest.0, 100);
+        assert_eq!(oldest.0, 100);
+    }
+
+    #[test]
+    fn oldest_anchor_empty_is_none() {
+        let db = setup_test_db();
+        assert_eq!(oldest_anchor(&db, "net", "#chan").unwrap(), None);
+    }
+
+    #[test]
+    fn oldest_anchor_returns_earliest_row() {
+        let db = setup_test_db();
+        insert_msg(&db, "net", "#chan", 100, "a");
+        insert_msg(&db, "net", "#chan", 300, "c");
+        insert_msg(&db, "net", "#chan", 200, "b");
+
+        let anchor = oldest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
+        assert_eq!(anchor.0, 100);
     }
 
     #[test]

@@ -147,7 +147,17 @@ impl BatchTracker {
 /// - NETSPLIT: Produces a single summary line instead of individual QUIT messages.
 /// - NETJOIN: Produces a single summary line instead of individual JOIN messages.
 /// - Other batch types: Messages are replayed through the normal handler.
-pub fn process_completed_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo) {
+///
+/// `clean_end` is `true` for a batch closed by its `BATCH -tag` line and
+/// `false` for one force-completed by the timeout purge. It only matters for
+/// CHATHISTORY: a timed-out short `BEFORE` batch must not be mistaken for
+/// genuine end-of-history (see [`crate::irc::chathistory::HistoryState::complete_target`]).
+pub fn process_completed_batch(
+    state: &mut AppState,
+    conn_id: &str,
+    batch: &BatchInfo,
+    clean_end: bool,
+) {
     match batch.batch_type.as_str() {
         "NETSPLIT" => process_netsplit_batch(state, conn_id, batch),
         "NETJOIN" => process_netjoin_batch(state, conn_id, batch),
@@ -159,11 +169,26 @@ pub fn process_completed_batch(state: &mut AppState, conn_id: &str, batch: &Batc
             // runs here so it covers BOTH the normal `BATCH -tag` end path and
             // the timed-out-batch purge path (app/maintenance.rs).
             let oldest_ts = crate::irc::events::ingest_chathistory_batch(state, conn_id, batch);
-            if let Some(target) = batch.params.first()
-                && let Some(conn) = state.connections.get_mut(conn_id)
-            {
-                conn.chathistory
-                    .complete_target(target, batch.messages.len(), oldest_ts);
+            if let Some(target) = batch.params.first() {
+                if let Some(conn) = state.connections.get_mut(conn_id) {
+                    conn.chathistory.complete_target(
+                        target,
+                        batch.messages.len(),
+                        oldest_ts,
+                        clean_end,
+                    );
+                }
+                // Older rows just landed in SQLite. A buffer that marked itself
+                // history-exhausted from a short startup log must re-open so a
+                // later scroll-up paginates the freshly ingested rows. Skip when
+                // the batch was empty — nothing new to surface, so leave the
+                // flag (and avoid a pointless re-pagination of unchanged rows).
+                if !batch.messages.is_empty() {
+                    let buf_id = make_buffer_id(conn_id, target);
+                    if let Some(buf) = state.buffers.get_mut(&buf_id) {
+                        buf.history_exhausted = false;
+                    }
+                }
             }
         }
         _ => {
@@ -591,7 +616,7 @@ mod tests {
             ],
         };
 
-        process_completed_batch(&mut state, conn_id, &batch);
+        process_completed_batch(&mut state, conn_id, &batch, true);
 
         // Nicks should be removed from the buffer
         let buf = state.buffers.get(&buf_id).expect("buffer should exist");
@@ -858,7 +883,7 @@ mod tests {
             ],
         };
 
-        process_completed_batch(&mut state, conn_id, &batch);
+        process_completed_batch(&mut state, conn_id, &batch, true);
 
         // Two conversational rows persisted, in order; JOIN not persisted.
         let r1 = rx.try_recv().expect("first history row");
@@ -911,7 +936,7 @@ mod tests {
             ],
         };
 
-        process_completed_batch(&mut state, conn_id, &batch);
+        process_completed_batch(&mut state, conn_id, &batch, true);
 
         let conn = state.connections.get(conn_id).expect("connection exists");
         let (ms, msgid) = conn
@@ -937,7 +962,7 @@ mod tests {
             messages: vec![action, other_ctcp],
         };
 
-        process_completed_batch(&mut state, conn_id, &batch);
+        process_completed_batch(&mut state, conn_id, &batch, true);
 
         let r1 = rx.try_recv().expect("action row");
         assert_eq!(r1.msg_type, MessageType::Action);
@@ -945,6 +970,143 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "non-ACTION CTCP must be skipped in v1"
+        );
+    }
+
+    #[test]
+    fn chathistory_batch_clears_buffer_history_exhausted() {
+        // A buffer whose tiny local log was exhausted at startup
+        // (history_exhausted = true) must become re-paginable once a
+        // CHATHISTORY batch ingests older rows into SQLite — otherwise the
+        // freshly fetched rows never get pulled into the buffer on scroll-up.
+        let conn_id = "test";
+        let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
+        state
+            .buffers
+            .get_mut(&buf_id)
+            .expect("buffer exists")
+            .history_exhausted = true;
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![make_history_privmsg("bob", "#test", "older line", "m1")],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        assert!(
+            !state
+                .buffers
+                .get(&buf_id)
+                .expect("buffer exists")
+                .history_exhausted,
+            "ingesting older rows must re-open the buffer for pagination"
+        );
+    }
+
+    #[test]
+    fn empty_chathistory_batch_keeps_history_exhausted() {
+        // A batch that ingested nothing leaves history_exhausted untouched, so
+        // we don't trigger a pointless re-pagination of unchanged local rows.
+        let conn_id = "test";
+        let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
+        state
+            .buffers
+            .get_mut(&buf_id)
+            .expect("buffer exists")
+            .history_exhausted = true;
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        assert!(
+            state
+                .buffers
+                .get(&buf_id)
+                .expect("buffer exists")
+                .history_exhausted,
+            "an empty batch must not reset the exhausted flag"
+        );
+    }
+
+    #[test]
+    fn clean_short_chathistory_batch_marks_before_exhausted() {
+        // Baseline: a normally-closed BEFORE batch shorter than the requested
+        // page is genuine end-of-history and DOES mark the target exhausted.
+        let conn_id = "test";
+        let (mut state, _rx, _buf_id) = setup_ingest_state(conn_id);
+        state
+            .connections
+            .get_mut(conn_id)
+            .expect("connection exists")
+            .chathistory
+            .mark_in_flight("#test", crate::irc::chathistory::Direction::Before, 200);
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![make_history_privmsg("bob", "#test", "only line", "m1")],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        assert!(
+            state
+                .connections
+                .get(conn_id)
+                .expect("connection exists")
+                .chathistory
+                .is_before_exhausted("#test"),
+            "a clean short BEFORE batch is genuine end-of-history"
+        );
+    }
+
+    #[test]
+    fn timed_out_chathistory_batch_does_not_mark_before_exhausted() {
+        // A CHATHISTORY batch force-completed by the timeout purge (its
+        // `BATCH -tag` never arrived) is a transport failure. It must release
+        // the in-flight lock so scroll-up can retry, but must NOT mark BEFORE
+        // exhausted — otherwise the target is wedged until reconnect.
+        let conn_id = "test";
+        let (mut state, _rx, _buf_id) = setup_ingest_state(conn_id);
+        state
+            .connections
+            .get_mut(conn_id)
+            .expect("connection exists")
+            .chathistory
+            .mark_in_flight("#test", crate::irc::chathistory::Direction::Before, 200);
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![make_history_privmsg("bob", "#test", "partial line", "m1")],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, false);
+
+        let conn = state.connections.get(conn_id).expect("connection exists");
+        assert!(
+            !conn.chathistory.is_before_exhausted("#test"),
+            "a timed-out batch must not be treated as end-of-history"
+        );
+        assert!(
+            conn.chathistory
+                .should_request("#test", crate::irc::chathistory::Direction::Before, true),
+            "in-flight cleared so a later scroll-up retries the fetch"
         );
     }
 
@@ -1042,7 +1204,7 @@ mod tests {
             ],
         };
 
-        process_completed_batch(&mut state, conn_id, &batch);
+        process_completed_batch(&mut state, conn_id, &batch, true);
 
         // Nicks should be removed despite case mismatch between IRC prefix and HashMap key
         let buf = state.buffers.get(&buf_id).expect("buffer should exist");
