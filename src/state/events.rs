@@ -482,21 +482,28 @@ impl AppState {
             .tags
             .as_ref()
             .and_then(|t| serde_json::to_string(t).ok());
-        // Key the stored row by the server IRC `@msgid` when present, so a live
-        // message and its later CHATHISTORY replay collapse to one row via the
-        // unique `msg_id` index. Fall back to an explicit `log_msg_id` (set by
-        // paths that supply their own id), then to a generated UUID. The live
-        // PRIVMSG/NOTICE path leaves `log_msg_id` None and carries the @msgid in
-        // `tags`, so reading it here covers live and history uniformly.
-        let row = LogRow {
-            msg_id: message
+        // Choose the stored row's `msg_id`:
+        // 1. An explicit `log_msg_id` wins — it's a primary id that fan-out
+        //    reference rows point at via `ref_id`, and must be preserved verbatim.
+        // 2. A reference row (`log_ref_id` set) gets a fresh UUID so siblings
+        //    sharing the same server `@msgid` tag don't collide on it and get
+        //    dropped by the unique index.
+        // 3. A plain conversational row is keyed by the server `@msgid` (carried
+        //    in `tags`) when present, so a live message and its later CHATHISTORY
+        //    replay collapse to one row. Otherwise a generated UUID.
+        let msg_id = match (message.log_msg_id.clone(), message.log_ref_id.is_some()) {
+            (Some(explicit), _) => explicit,
+            (None, true) => uuid::Uuid::new_v4().to_string(),
+            (None, false) => message
                 .tags
                 .as_ref()
                 .and_then(|t| t.get("msgid"))
                 .filter(|m| !m.is_empty())
                 .cloned()
-                .or_else(|| message.log_msg_id.clone())
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        };
+        let row = LogRow {
+            msg_id,
             network,
             buffer: buf_name.to_string(),
             timestamp: message.timestamp.timestamp(),
@@ -1114,6 +1121,66 @@ mod tests {
             row.msg_id, "server-msgid-xyz",
             "live row must be keyed by the server @msgid for dedup"
         );
+    }
+
+    #[test]
+    fn maybe_log_preserves_explicit_id_over_server_msgid_for_fanout() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let mut state = make_test_state();
+        state.log_tx = Some(tx);
+
+        let mut tags = std::collections::HashMap::new();
+        tags.insert("msgid".to_string(), "server-M".to_string());
+
+        // Fan-out primary (e.g. a QUIT across channels): carries its own
+        // generated id that reference rows point at, *plus* a server @msgid
+        // tag. The explicit id must win — otherwise reference rows, which share
+        // the same @msgid, would all collide on it and be dropped by the unique
+        // index, and `ref_id` would point at a primary stored under a different id.
+        let primary = Message {
+            id: state.next_message_id(),
+            timestamp: Utc::now(),
+            message_type: MessageType::Event,
+            nick: None,
+            nick_mode: None,
+            text: "alice has quit".to_string(),
+            highlight: false,
+            event_key: None,
+            event_params: None,
+            log_msg_id: Some("primary-gen-id".to_string()),
+            log_ref_id: None,
+            tags: Some(tags.clone()),
+        };
+        state.add_message("libera/#rust", primary);
+
+        let reference = Message {
+            id: state.next_message_id(),
+            timestamp: Utc::now(),
+            message_type: MessageType::Event,
+            nick: None,
+            nick_mode: None,
+            text: "alice has quit".to_string(),
+            highlight: false,
+            event_key: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: Some("primary-gen-id".to_string()),
+            tags: Some(tags),
+        };
+        state.add_message("libera/#linux", reference);
+
+        let row1 = rx.try_recv().expect("primary row");
+        assert_eq!(
+            row1.msg_id, "primary-gen-id",
+            "explicit primary id must be preserved over the @msgid tag"
+        );
+        let row2 = rx.try_recv().expect("reference row");
+        assert_eq!(row2.ref_id, Some("primary-gen-id".to_string()));
+        assert_ne!(
+            row2.msg_id, "server-M",
+            "reference rows must not collide on the shared @msgid"
+        );
+        assert_ne!(row2.msg_id, "primary-gen-id");
     }
 
     #[test]

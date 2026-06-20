@@ -233,19 +233,26 @@ pub fn newest_anchor(
 /// `CHATHISTORY BEFORE` scroll-back request (before any per-target watermark
 /// has been recorded).
 ///
-/// Returns `(timestamp, id)` for the row with the least `(timestamp, id)`, or
-/// `None` if the buffer has no stored messages.
+/// Returns `(unix_millis, msgid?)` for the row with the least `(timestamp, id)`,
+/// or `None` if the buffer has no stored messages.
 ///
-/// The stored `msg_id` is intentionally NOT returned — see [`newest_anchor`]
-/// for the rationale. The first BEFORE request always anchors by timestamp;
-/// once a chathistory batch lands, its verified `@msgid` watermark takes over.
+/// The anchor is taken from the row's `IRCv3` `tags` (the `@time`/`@msgid` the
+/// server sent), NOT from the second-resolution `messages.timestamp` column or
+/// the ambiguous `msg_id` column:
+/// - `@time` gives the full-millisecond boundary, so `BEFORE` does not floor to
+///   `.000Z` and skip older messages from the same second forever.
+/// - `@msgid` is a *verified* server reference (it came from the server tag),
+///   safe to use as a `msgid=` anchor; the `msg_id` column may be a locally
+///   minted UUID and is never used here.
+///
+/// Falls back to `timestamp × 1000` (and no msgid) for rows stored without tags.
 pub fn oldest_anchor(
     db: &Connection,
     network: &str,
     buffer: &str,
-) -> rusqlite::Result<Option<(i64, i64)>> {
+) -> rusqlite::Result<Option<(i64, Option<String>)>> {
     let mut stmt = db.prepare(
-        "SELECT timestamp, id FROM messages
+        "SELECT timestamp, tags FROM messages
          WHERE network = ?1 AND buffer = ?2
          ORDER BY timestamp ASC, id ASC
          LIMIT 1",
@@ -254,11 +261,30 @@ pub fn oldest_anchor(
     match rows.next()? {
         Some(row) => {
             let timestamp: i64 = row.get(0)?;
-            let id: i64 = row.get(1)?;
-            Ok(Some((timestamp, id)))
+            let tags: Option<String> = row.get(1)?;
+            Ok(Some(anchor_from_tags(tags.as_deref(), timestamp)))
         }
         None => Ok(None),
     }
+}
+
+/// Build a full-precision `(unix_millis, msgid?)` CHATHISTORY anchor from a
+/// stored row's `IRCv3` `tags` JSON, falling back to `timestamp_secs × 1000` (and
+/// no msgid) when `@time`/`@msgid` are absent or unparseable.
+fn anchor_from_tags(tags_json: Option<&str>, timestamp_secs: i64) -> (i64, Option<String>) {
+    let tags: Option<std::collections::HashMap<String, String>> =
+        tags_json.and_then(|j| serde_json::from_str(j).ok());
+    let millis = tags
+        .as_ref()
+        .and_then(|t| t.get("time"))
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map_or(timestamp_secs * 1000, |dt| dt.timestamp_millis());
+    let msgid = tags
+        .as_ref()
+        .and_then(|t| t.get("msgid"))
+        .filter(|m| !m.is_empty())
+        .cloned();
+    (millis, msgid)
 }
 
 /// Full-text search across messages (plain mode only, no encryption).
@@ -964,12 +990,11 @@ mod tests {
     }
 
     #[test]
-    fn anchors_do_not_expose_stored_msgid() {
-        // Regression: live PRIVMSG/NOTICE rows are logged with a generated
-        // UUID in `messages.msg_id` (state/events::maybe_log), NOT the server's
-        // IRC @msgid. The anchor helpers must surface only (timestamp, id) so a
-        // caller can never feed that UUID to `CHATHISTORY ... msgid=<uuid>`,
-        // which a MSGREFTYPES=msgid server cannot resolve.
+    fn newest_anchor_does_not_expose_stored_msgid_column() {
+        // Regression: live rows are logged with a generated UUID in
+        // `messages.msg_id` (state/events::maybe_log), NOT the server @msgid.
+        // newest_anchor surfaces only (timestamp, id) so a caller can never feed
+        // that UUID to `CHATHISTORY ... msgid=<uuid>`.
         let db = setup_test_db();
         db.execute(
             "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight) \
@@ -977,12 +1002,8 @@ mod tests {
             [],
         )
         .unwrap();
-
         let newest = newest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
-        let oldest = oldest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
-        // Both anchors carry the timestamp only; the unusable UUID never leaks.
         assert_eq!(newest.0, 100);
-        assert_eq!(oldest.0, 100);
     }
 
     #[test]
@@ -992,14 +1013,35 @@ mod tests {
     }
 
     #[test]
-    fn oldest_anchor_returns_earliest_row() {
+    fn oldest_anchor_uses_full_precision_time_and_msgid_from_tags() {
+        // The first BEFORE anchor must not floor to the whole second: the
+        // boundary row's @time/@msgid (preserved in the `tags` column) give a
+        // full-precision anchor, so older messages within the same second are
+        // not skipped forever. msg-100 (whole-second 100) carries @time .800.
+        let db = setup_test_db();
+        db.execute(
+            "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight, tags) \
+             VALUES ('msg-100', 'net', '#chan', 100, 'message', 'ada', 'hi', 0, \
+             '{\"time\":\"1970-01-01T00:01:40.800Z\",\"msgid\":\"server-M\"}')",
+            [],
+        )
+        .unwrap();
+
+        let anchor = oldest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
+        assert_eq!(anchor, (100_800, Some("server-M".to_string())));
+    }
+
+    #[test]
+    fn oldest_anchor_floors_to_millis_and_no_msgid_without_tags() {
+        // Rows stored without server tags fall back to the whole-second
+        // timestamp (×1000) and carry no msgid — and never leak the stored
+        // `msg_id` column (a UUID for live rows) as a server reference.
         let db = setup_test_db();
         insert_msg(&db, "net", "#chan", 100, "a");
         insert_msg(&db, "net", "#chan", 300, "c");
-        insert_msg(&db, "net", "#chan", 200, "b");
 
         let anchor = oldest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
-        assert_eq!(anchor.0, 100);
+        assert_eq!(anchor, (100_000, None));
     }
 
     #[test]

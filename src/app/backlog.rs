@@ -343,13 +343,12 @@ impl App {
         // advances backwards — even across windows of only event-playback lines
         // — and never skips messages within the boundary second.
         //
-        // On the very first request (no watermark yet) we anchor by timestamp
-        // only. The oldest stored row's `messages.msg_id` is NOT a usable
-        // server reference: live rows are logged with a locally-minted UUID
-        // (state/events::maybe_log), and the column can't tell a UUID from a
-        // real @msgid — so passing it as `msgid=` would fail on a
-        // MSGREFTYPES=msgid server. `oldest_anchor` returns only (timestamp,
-        // id) to enforce this.
+        // On the very first request (no watermark yet) we anchor from the oldest
+        // stored row's IRCv3 `tags` — its `@time` (full millisecond, so BEFORE
+        // doesn't floor to `.000Z` and skip same-second history) and its `@msgid`
+        // (a *verified* server reference; the `msg_id` column is never used, as
+        // it may be a locally-minted UUID). `oldest_anchor` returns that
+        // `(millis, msgid?)` pair directly.
         let anchor: (Option<String>, i64) = if let Some((ms, msgid)) = watermark {
             (msgid, ms)
         } else {
@@ -361,10 +360,10 @@ impl App {
                     .ok()
                     .flatten()
             });
-            let Some((ts_secs, _id)) = row else {
+            let Some((millis, msgid)) = row else {
                 return false;
             };
-            (None, ts_secs * 1000)
+            (msgid, millis)
         };
 
         self.request_chathistory(&conn_id, &target, Direction::Before, Some(anchor))
