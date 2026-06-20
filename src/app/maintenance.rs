@@ -8,6 +8,14 @@ use crate::state::buffer::{BufferType, Message, MessageType};
 
 use super::App;
 
+/// How long a CHATHISTORY request may sit in-flight before a sweep releases it.
+///
+/// Longer than the 60s batch timeout (`crate::irc::batch`), so an opened-but-slow
+/// batch is always cleared by `purge_expired_batches` first; only requests the
+/// server never answered with a batch (FAIL/error numeric/silent drop) reach
+/// this fallback.
+const CHATHISTORY_REQUEST_TIMEOUT_SECS: u64 = 90;
+
 impl App {
     /// Tick the netsplit state and emit batched netsplit/netjoin messages.
     pub(crate) fn handle_netsplit_tick(&mut self) {
@@ -54,6 +62,28 @@ impl App {
             // `BATCH -tag` is a transport/server failure, so a short CHATHISTORY
             // batch here must not be treated as genuine end-of-history.
             crate::irc::batch::process_completed_batch(&mut self.state, &conn_id, &batch, false);
+        }
+    }
+
+    /// Release CHATHISTORY requests stuck in-flight past the request timeout.
+    ///
+    /// The usual clear path is batch completion (normal `BATCH -tag` or the
+    /// batch purge above). A request the server rejects (`FAIL`/error numeric)
+    /// or drops without ever opening a batch never reaches it, so without this
+    /// sweep `should_request` would suppress all future history for that target
+    /// until reconnect. Clearing the marker is treated as a failure, not
+    /// end-of-history, so it never marks `BEFORE` exhausted.
+    pub(crate) fn purge_stale_chathistory_requests(&mut self) {
+        let timeout = Duration::from_secs(CHATHISTORY_REQUEST_TIMEOUT_SECS);
+        for (conn_id, conn) in &mut self.state.connections {
+            let cleared = conn.chathistory.clear_stale(timeout);
+            if !cleared.is_empty() {
+                tracing::warn!(
+                    %conn_id,
+                    targets = ?cleared,
+                    "CHATHISTORY request(s) timed out with no batch — releasing in-flight lock"
+                );
+            }
         }
     }
 

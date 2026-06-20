@@ -726,6 +726,11 @@ fn message_timestamp(tags: Option<&HashMap<String, String>>) -> DateTime<Utc> {
         .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc))
 }
 
+/// Result of [`ingest_chathistory_batch`]: the oldest `(unix_millis, msgid?)`
+/// anchor seen across the batch, and the `(buffer_id, Message)` rows to splice
+/// into a live buffer (empty unless display collection was requested).
+type IngestOutcome = (Option<(i64, Option<String>)>, Vec<(String, Message)>);
+
 /// Ingest a completed `draft/chathistory` batch into the log store.
 ///
 /// chathistory is a background backlog filler: conversational lines
@@ -735,11 +740,20 @@ fn message_timestamp(tags: Option<&HashMap<String, String>>) -> DateTime<Utc> {
 /// through normal `SQLite` pagination, and the unique `msg_id` index
 /// deduplicates against messages already stored from the live stream.
 ///
-/// Returns the oldest server-time (unix secs) seen across **all** batch lines
-/// (conversational and event-playback), or `None` if none carried a `@time`
-/// tag. The caller advances its per-target `BEFORE` anchor to this so
+/// Returns `(oldest, display_rows)`. `oldest` is the oldest server-time (unix
+/// **millis**) seen across **all** batch lines (conversational and
+/// event-playback) paired with that line's `@msgid`, or `None` if none carried
+/// a `@time` tag; the caller advances its per-target `BEFORE` anchor to this so
 /// scroll-up keeps making progress even through windows that contain only
 /// (un-ingested) event-playback lines.
+///
+/// `display_rows` is `(buffer_id, Message)` for each ingested conversational
+/// line, populated only when `collect_display` is set. The caller uses it to
+/// splice a reconnect `AFTER`/`LATEST` gap-fill into the live buffer (those
+/// rows fall between the pre-disconnect tail and post-reconnect live messages,
+/// so scroll-up pagination — which only fetches OLDER rows — would never reach
+/// them). For `BEFORE` scroll-back the rows surface through normal pagination,
+/// so collection is skipped to avoid cloning whole pages.
 ///
 /// v1 scope: `draft/event-playback` lines (JOIN/PART/QUIT/NICK/TOPIC/MODE) and
 /// non-ACTION CTCP are skipped rather than rendered into stored event rows.
@@ -748,7 +762,8 @@ pub fn ingest_chathistory_batch(
     state: &AppState,
     conn_id: &str,
     batch: &crate::irc::batch::BatchInfo,
-) -> Option<(i64, Option<String>)> {
+    collect_display: bool,
+) -> IngestOutcome {
     let our_nick = state
         .connections
         .get(conn_id)
@@ -757,6 +772,7 @@ pub fn ingest_chathistory_batch(
 
     let mut ingested = 0usize;
     let mut skipped = 0usize;
+    let mut display_rows: Vec<(String, Message)> = Vec::new();
     // Oldest line seen across the whole batch (events included): full
     // millisecond server-time plus its IRC @msgid (if any). The caller uses
     // this as the next BEFORE anchor — by msgid when the server prefers it,
@@ -817,10 +833,9 @@ pub fn ingest_chathistory_batch(
         let buffer_id = make_buffer_id(conn_id, buffer_name);
 
         let timestamp = message_timestamp(tags.as_ref());
-        let log_msg_id = tags.as_ref().and_then(|t| t.get("msgid").cloned());
 
         let message = Message {
-            id: 0, // store-only: in-memory id is never used by the log path
+            id: 0, // store-only: real id assigned if/when spliced into a buffer
             timestamp,
             message_type: msg_type,
             nick: Some(nick),
@@ -829,13 +844,19 @@ pub fn ingest_chathistory_batch(
             highlight: false,
             event_key: None,
             event_params: None,
-            log_msg_id,
+            // The DB row is keyed by the @msgid carried in `tags` (see
+            // `maybe_log`); leaving `log_msg_id` None keeps a spliced display
+            // copy from being mistaken for a SQLite-row-id pagination cursor.
+            log_msg_id: None,
             log_ref_id: None,
             tags,
         };
 
         state.ingest_history_message(&buffer_id, &message);
         ingested += 1;
+        if collect_display {
+            display_rows.push((buffer_id, message));
+        }
     }
 
     if skipped > 0 {
@@ -847,7 +868,7 @@ pub fn ingest_chathistory_batch(
         );
     }
 
-    oldest
+    (oldest, display_rows)
 }
 
 // === Private handlers ===

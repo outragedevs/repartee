@@ -6,6 +6,7 @@
 //! always reads from `SQLite`, so this module never touches buffers directly.
 
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 /// Which reference type to anchor a `CHATHISTORY` request with.
 ///
@@ -114,10 +115,12 @@ impl Direction {
 /// case-insensitively.
 #[derive(Debug, Clone, Default)]
 pub struct HistoryState {
-    /// `(target_lower, direction)` → requested limit, for requests currently
-    /// awaiting their batch. The stored limit lets batch completion decide
-    /// server-side exhaustion (`rows < limit`).
-    in_flight: HashMap<(String, Direction), usize>,
+    /// `(target_lower, direction)` → `(requested limit, sent-at)`, for requests
+    /// currently awaiting their batch. The stored limit lets batch completion
+    /// decide server-side exhaustion (`rows < limit`); the timestamp lets a
+    /// periodic sweep release requests the server rejected or dropped without
+    /// ever opening a batch (see [`HistoryState::clear_stale`]).
+    in_flight: HashMap<(String, Direction), (usize, Instant)>,
     /// Targets (lowercased) whose `BEFORE` history the server has exhausted.
     before_exhausted: HashSet<String>,
     /// Per-target oldest point we have pulled via chathistory: the oldest
@@ -167,8 +170,32 @@ impl HistoryState {
     /// should not send a duplicate).
     pub fn mark_in_flight(&mut self, target: &str, dir: Direction, limit: usize) -> bool {
         self.in_flight
-            .insert((target.to_ascii_lowercase(), dir), limit)
+            .insert((target.to_ascii_lowercase(), dir), (limit, Instant::now()))
             .is_none()
+    }
+
+    /// Release in-flight markers older than `timeout` and return the affected
+    /// targets (deduplicated). Used by a periodic sweep to recover from
+    /// CHATHISTORY requests the server rejected (`FAIL`/error numeric) or
+    /// dropped without ever opening a batch: their markers would otherwise wedge
+    /// the target so `should_request` suppresses all future history requests
+    /// until reconnect. A stale request is a failure, NOT end-of-history, so
+    /// this only clears the marker — it never marks `BEFORE` exhausted.
+    pub fn clear_stale(&mut self, timeout: Duration) -> Vec<String> {
+        let stale: Vec<(String, Direction)> = self
+            .in_flight
+            .iter()
+            .filter(|(_, (_, sent_at))| sent_at.elapsed() >= timeout)
+            .map(|(key, _)| key.clone())
+            .collect();
+        let mut targets: Vec<String> = Vec::new();
+        for key in stale {
+            if !targets.contains(&key.0) {
+                targets.push(key.0.clone());
+            }
+            self.in_flight.remove(&key);
+        }
+        targets
     }
 
     /// Whether **any** request (in any direction) for `target` is awaiting its
@@ -178,6 +205,19 @@ impl HistoryState {
     pub fn any_in_flight(&self, target: &str) -> bool {
         let target = target.to_ascii_lowercase();
         self.in_flight.keys().any(|(t, _)| *t == target)
+    }
+
+    /// The direction of the (single, serialized) in-flight request for
+    /// `target`, if any. Read at batch completion to decide whether the
+    /// just-fetched rows need splicing into the live buffer (`AFTER`/`LATEST`
+    /// gap-fill) or surface through normal pagination (`BEFORE` scroll-back).
+    #[must_use]
+    pub fn in_flight_direction(&self, target: &str) -> Option<Direction> {
+        let target = target.to_ascii_lowercase();
+        self.in_flight
+            .keys()
+            .find(|(t, _)| *t == target)
+            .map(|(_, dir)| *dir)
     }
 
     /// Mark a target's `BEFORE` history as exhausted (start of history reached,
@@ -241,7 +281,7 @@ impl HistoryState {
             .keys()
             .filter(|(t, _)| *t == target)
             .map(|(_, dir)| *dir)
-            .map(|dir| (dir, self.in_flight[&(target.clone(), dir)]))
+            .map(|dir| (dir, self.in_flight[&(target.clone(), dir)].0))
             .collect();
         for (dir, limit) in completed {
             self.in_flight.remove(&(target.clone(), dir));
@@ -363,6 +403,54 @@ mod tests {
         st.complete_target("#chan", 30, Some((1000, None)), true);
         assert!(st.is_before_exhausted("#chan"));
         assert!(!st.should_request("#chan", Direction::Before, true));
+    }
+
+    #[test]
+    fn clear_stale_releases_in_flight_after_timeout() {
+        // A request that the server rejected (FAIL/error numeric) or silently
+        // dropped never completes a batch, so its in-flight marker would wedge
+        // the target forever. A periodic stale sweep must release it WITHOUT
+        // marking history exhausted (a failure isn't end-of-history). A zero
+        // timeout makes the just-marked request immediately stale.
+        let mut st = HistoryState::new();
+        st.mark_in_flight("#chan", Direction::Before, 200);
+        assert!(!st.should_request("#chan", Direction::Before, true));
+
+        let cleared = st.clear_stale(std::time::Duration::ZERO);
+
+        assert_eq!(cleared, vec!["#chan".to_string()]);
+        assert!(
+            st.should_request("#chan", Direction::Before, true),
+            "retry allowed once the stuck marker is cleared"
+        );
+        assert!(
+            !st.is_before_exhausted("#chan"),
+            "a failed request must not exhaust history"
+        );
+    }
+
+    #[test]
+    fn in_flight_direction_reports_the_pending_request() {
+        // Requests are serialized per target, so at most one direction is in
+        // flight. The batch-completion path reads it (before clearing) to know
+        // whether to splice an AFTER/LATEST gap-fill into the live buffer.
+        let mut st = HistoryState::new();
+        assert_eq!(st.in_flight_direction("#chan"), None);
+        st.mark_in_flight("#chan", Direction::After, 50);
+        assert_eq!(st.in_flight_direction("#chan"), Some(Direction::After));
+        assert_eq!(st.in_flight_direction("#CHAN"), Some(Direction::After));
+        assert_eq!(st.in_flight_direction("#other"), None);
+    }
+
+    #[test]
+    fn clear_stale_keeps_fresh_in_flight() {
+        // A request still within its timeout window is left alone — a batch may
+        // still be on its way.
+        let mut st = HistoryState::new();
+        st.mark_in_flight("#chan", Direction::After, 200);
+        let cleared = st.clear_stale(std::time::Duration::from_secs(90));
+        assert!(cleared.is_empty());
+        assert!(!st.should_request("#chan", Direction::After, true));
     }
 
     #[test]

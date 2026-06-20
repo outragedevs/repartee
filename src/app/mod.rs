@@ -1331,6 +1331,7 @@ impl App {
                     }
                     self.handle_netsplit_tick();
                     self.purge_expired_batches();
+                    self.purge_stale_chathistory_requests();
                     self.check_reconnects();
                     self.measure_lag();
                     self.check_day_changed();

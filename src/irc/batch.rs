@@ -168,7 +168,22 @@ pub fn process_completed_batch(
             // in-flight, advance the BEFORE anchor watermark, mark exhaustion)
             // runs here so it covers BOTH the normal `BATCH -tag` end path and
             // the timed-out-batch purge path (app/maintenance.rs).
-            let oldest_ts = crate::irc::events::ingest_chathistory_batch(state, conn_id, batch);
+            //
+            // A reconnect AFTER/LATEST gap-fill is the exception: its rows fall
+            // between the pre-disconnect tail and post-reconnect live messages,
+            // which scroll-up pagination (OLDER-only) never reaches. For those
+            // directions we also collect the conversational rows and splice
+            // them into the live buffer.
+            use crate::irc::chathistory::Direction;
+            let direction = batch.params.first().and_then(|target| {
+                state
+                    .connections
+                    .get(conn_id)
+                    .and_then(|c| c.chathistory.in_flight_direction(target))
+            });
+            let is_gapfill = matches!(direction, Some(Direction::After | Direction::Latest));
+            let (oldest_ts, display_rows) =
+                crate::irc::events::ingest_chathistory_batch(state, conn_id, batch, is_gapfill);
             if let Some(target) = batch.params.first() {
                 if let Some(conn) = state.connections.get_mut(conn_id) {
                     conn.chathistory.complete_target(
@@ -188,6 +203,18 @@ pub fn process_completed_batch(
                     if let Some(buf) = state.buffers.get_mut(&buf_id) {
                         buf.history_exhausted = false;
                     }
+                }
+            }
+            // Splice gap-fill rows into their live buffers, grouped by the
+            // buffer_id resolved during ingest (channel messages and PM echoes
+            // may route to different buffers).
+            if !display_rows.is_empty() {
+                let mut by_buffer: HashMap<String, Vec<Message>> = HashMap::new();
+                for (buf_id, msg) in display_rows {
+                    by_buffer.entry(buf_id).or_default().push(msg);
+                }
+                for (buf_id, msgs) in by_buffer {
+                    state.surface_history_rows(&buf_id, msgs);
                 }
             }
         }
@@ -970,6 +997,104 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "non-ACTION CTCP must be skipped in v1"
+        );
+    }
+
+    #[test]
+    fn gapfill_after_batch_splices_rows_into_live_buffer() {
+        use crate::state::buffer::Message;
+        let conn_id = "test";
+        let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
+
+        // An existing live message sits in the buffer at 00:00:02, tagged with
+        // its server @msgid.
+        let live_ts = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:02.000Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let mut live_tags = HashMap::new();
+        live_tags.insert("msgid".to_string(), "live1".to_string());
+        state
+            .buffers
+            .get_mut(&buf_id)
+            .unwrap()
+            .messages
+            .push_back(Message {
+                id: 1,
+                timestamp: live_ts,
+                message_type: MessageType::Message,
+                nick: Some("bob".to_string()),
+                nick_mode: None,
+                text: "live line".to_string(),
+                highlight: false,
+                event_key: None,
+                event_params: None,
+                log_msg_id: None,
+                log_ref_id: None,
+                tags: Some(live_tags),
+            });
+
+        // A reconnect AFTER gap-fill is in flight for this target.
+        state
+            .connections
+            .get_mut(conn_id)
+            .unwrap()
+            .chathistory
+            .mark_in_flight("#test", crate::irc::chathistory::Direction::After, 200);
+
+        // The batch carries one older missed line, one newer one, and a replay
+        // of the message already shown live (same @msgid → must dedup).
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![
+                make_history_privmsg_at("carol", "#test", "earlier", "gap1", "2024-01-01T00:00:01.000Z"),
+                make_history_privmsg_at("dave", "#test", "later", "gap2", "2024-01-01T00:00:03.000Z"),
+                make_history_privmsg_at("bob", "#test", "live line", "live1", "2024-01-01T00:00:02.000Z"),
+            ],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        let texts: Vec<&str> = state
+            .buffers
+            .get(&buf_id)
+            .unwrap()
+            .messages
+            .iter()
+            .map(|m| m.text.as_str())
+            .collect();
+        // Gap rows spliced in timestamp order; the @msgid duplicate skipped.
+        assert_eq!(texts, vec!["earlier", "live line", "later"]);
+    }
+
+    #[test]
+    fn before_batch_does_not_splice_into_live_buffer() {
+        // A BEFORE scroll-back is store-only — its rows surface via pagination,
+        // never spliced live — so the in-memory buffer stays untouched.
+        let conn_id = "test";
+        let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
+        state
+            .connections
+            .get_mut(conn_id)
+            .unwrap()
+            .chathistory
+            .mark_in_flight("#test", crate::irc::chathistory::Direction::Before, 200);
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![make_history_privmsg("bob", "#test", "older line", "b1")],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        assert!(
+            state.buffers.get(&buf_id).unwrap().messages.is_empty(),
+            "BEFORE rows are store-only, not spliced into the live buffer"
         );
     }
 

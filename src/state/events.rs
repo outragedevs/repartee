@@ -482,10 +482,20 @@ impl AppState {
             .tags
             .as_ref()
             .and_then(|t| serde_json::to_string(t).ok());
+        // Key the stored row by the server IRC `@msgid` when present, so a live
+        // message and its later CHATHISTORY replay collapse to one row via the
+        // unique `msg_id` index. Fall back to an explicit `log_msg_id` (set by
+        // paths that supply their own id), then to a generated UUID. The live
+        // PRIVMSG/NOTICE path leaves `log_msg_id` None and carries the @msgid in
+        // `tags`, so reading it here covers live and history uniformly.
         let row = LogRow {
             msg_id: message
-                .log_msg_id
-                .clone()
+                .tags
+                .as_ref()
+                .and_then(|t| t.get("msgid"))
+                .filter(|m| !m.is_empty())
+                .cloned()
+                .or_else(|| message.log_msg_id.clone())
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             network,
             buffer: buf_name.to_string(),
@@ -518,6 +528,35 @@ impl AppState {
     /// already-stored message is a no-op at the database layer.
     pub fn ingest_history_message(&self, buffer_id: &str, message: &Message) {
         self.maybe_log(buffer_id, message);
+    }
+
+    /// Splice reconnect gap-fill rows (from an `AFTER`/`LATEST` CHATHISTORY
+    /// fetch) into a live buffer in timestamp order, skipping any already
+    /// present. Scroll-up pagination only pulls rows OLDER than the current
+    /// oldest message, so these gap rows — which sit between the pre-disconnect
+    /// tail and post-reconnect live messages — would otherwise never appear
+    /// until a restart or log-browser reload. Each spliced row is assigned a
+    /// fresh in-memory id; rows are inserted before the first existing message
+    /// with a strictly greater timestamp so ordering is preserved.
+    pub(crate) fn surface_history_rows(&mut self, buffer_id: &str, rows: Vec<Message>) {
+        for mut msg in rows {
+            let already_present = match self.buffers.get(buffer_id) {
+                Some(buf) => buffer_contains_history_row(buf, &msg),
+                None => return,
+            };
+            if already_present {
+                continue;
+            }
+            msg.id = self.next_message_id();
+            if let Some(buf) = self.buffers.get_mut(buffer_id) {
+                let pos = buf
+                    .messages
+                    .iter()
+                    .position(|m| m.timestamp > msg.timestamp)
+                    .unwrap_or(buf.messages.len());
+                buf.messages.insert(pos, msg);
+            }
+        }
     }
 
     #[allow(dead_code, reason = "reserved for scripting API; used in tests")]
@@ -656,6 +695,25 @@ const fn effective_scrollback_limit(pinned: bool, limit: usize) -> usize {
     }
     let cap = crate::app::backlog::PINNED_BACKLOG_CAP;
     if limit > cap { limit } else { cap }
+}
+
+/// Whether `buf` already contains the same logical message as `candidate`.
+/// Used to dedup CHATHISTORY gap-fill rows against messages already shown live.
+/// Prefers IRC `@msgid` equality (authoritative when both carry one), falling
+/// back to matching timestamp, nick, type and text.
+fn buffer_contains_history_row(buf: &Buffer, candidate: &Message) -> bool {
+    let candidate_msgid = candidate.tags.as_ref().and_then(|t| t.get("msgid"));
+    buf.messages.iter().any(|m| {
+        if let Some(cid) = candidate_msgid
+            && let Some(mid) = m.tags.as_ref().and_then(|t| t.get("msgid"))
+        {
+            return cid == mid;
+        }
+        m.timestamp == candidate.timestamp
+            && m.nick == candidate.nick
+            && m.message_type == candidate.message_type
+            && m.text == candidate.text
+    })
 }
 
 /// Trim oldest messages from the buffer if it exceeds the (pin-aware) scrollback
@@ -1021,6 +1079,41 @@ mod tests {
 
         state.remove_nick("libera/#rust", "alice_");
         assert!(state.buffers.get("libera/#rust").unwrap().users.is_empty());
+    }
+
+    #[test]
+    fn maybe_log_uses_server_msgid_from_tags_for_dedup() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let mut state = make_test_state();
+        state.log_tx = Some(tx);
+
+        // A live PRIVMSG carries the server @msgid in its tags but no
+        // log_msg_id (only DB-loaded rows set that). It must be stored under
+        // the @msgid so a later CHATHISTORY replay of the same message dedups
+        // via the unique msg_id index instead of inserting a second row.
+        let mut tags = std::collections::HashMap::new();
+        tags.insert("msgid".to_string(), "server-msgid-xyz".to_string());
+        let msg = Message {
+            id: state.next_message_id(),
+            timestamp: Utc::now(),
+            message_type: MessageType::Message,
+            nick: Some("bob".to_string()),
+            nick_mode: None,
+            text: "hello".to_string(),
+            highlight: false,
+            event_key: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: Some(tags),
+        };
+        state.add_message("libera/#rust", msg);
+
+        let row = rx.try_recv().expect("logged row");
+        assert_eq!(
+            row.msg_id, "server-msgid-xyz",
+            "live row must be keyed by the server @msgid for dedup"
+        );
     }
 
     #[test]
