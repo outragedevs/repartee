@@ -91,7 +91,7 @@ pub fn get_messages(
         let sql = format!(
             "SELECT {SELECT_MESSAGE_COLUMNS}
              FROM messages m
-             LEFT JOIN messages p ON p.msg_id = m.ref_id
+             LEFT JOIN messages p ON p.msg_id = m.ref_id AND p.network = m.network
              WHERE m.network = ?1 AND m.buffer = ?2 AND m.timestamp < ?3
              ORDER BY m.timestamp DESC
              LIMIT ?4"
@@ -109,7 +109,7 @@ pub fn get_messages(
         let sql = format!(
             "SELECT {SELECT_MESSAGE_COLUMNS}
              FROM messages m
-             LEFT JOIN messages p ON p.msg_id = m.ref_id
+             LEFT JOIN messages p ON p.msg_id = m.ref_id AND p.network = m.network
              WHERE m.network = ?1 AND m.buffer = ?2
              ORDER BY m.timestamp DESC
              LIMIT ?3"
@@ -156,7 +156,7 @@ pub fn get_messages_paginated(
         let sql = format!(
             "SELECT {SELECT_MESSAGE_COLUMNS}
              FROM messages m
-             LEFT JOIN messages p ON p.msg_id = m.ref_id
+             LEFT JOIN messages p ON p.msg_id = m.ref_id AND p.network = m.network
              WHERE m.network = ?1 AND m.buffer = ?2
                AND (m.timestamp < ?3 OR (m.timestamp = ?3 AND m.id < ?4))
              ORDER BY m.timestamp DESC, m.id DESC
@@ -175,7 +175,7 @@ pub fn get_messages_paginated(
         let sql = format!(
             "SELECT {SELECT_MESSAGE_COLUMNS}
              FROM messages m
-             LEFT JOIN messages p ON p.msg_id = m.ref_id
+             LEFT JOIN messages p ON p.msg_id = m.ref_id AND p.network = m.network
              WHERE m.network = ?1 AND m.buffer = ?2
              ORDER BY m.timestamp DESC, m.id DESC
              LIMIT ?3"
@@ -1108,6 +1108,37 @@ mod tests {
             get_messages_paginated(&db, "libera", "#polska", None, 10, false, None).unwrap();
         assert_eq!(on_polska_paged.len(), 1);
         assert_eq!(on_polska_paged[0].text, "alice has quit (Bye)");
+    }
+
+    #[test]
+    fn ref_rows_resolve_within_their_own_network() {
+        // The composite (network, msg_id) index permits the same primary msg_id
+        // on two networks. A reference row must hydrate from ITS OWN network's
+        // primary; an unscoped join would match the other network's primary
+        // (wrong text) or duplicate the row.
+        let db = setup_test_db();
+        db.execute(
+            "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight) \
+             VALUES ('P', 'neta', '#chan', 100, 'event', 'alice', 'quit on A', 0)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight) \
+             VALUES ('P', 'netb', '#chan', 100, 'event', 'bob', 'quit on B', 0)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight, ref_id) \
+             VALUES ('R', 'netb', '#other', 100, 'event', 'bob', '', 0, 'P')",
+            [],
+        )
+        .unwrap();
+
+        let rows = get_messages_paginated(&db, "netb", "#other", None, 10, false, None).unwrap();
+        assert_eq!(rows.len(), 1, "no cross-network duplicate join");
+        assert_eq!(rows[0].text, "quit on B", "hydrated from netb's primary");
     }
 
     #[test]

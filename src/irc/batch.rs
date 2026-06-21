@@ -1012,6 +1012,34 @@ mod tests {
     }
 
     #[test]
+    fn chathistory_skips_undecryptable_e2e_lines() {
+        // An E2E ciphertext line we can't decrypt (no session) must NOT be
+        // stored as raw +RPE2E01 wire — that would show ciphertext on scroll-up
+        // and poison @msgid dedup against a later live plaintext row.
+        let conn_id = "test";
+        let (mut state, mut rx, _buf_id) = setup_ingest_state(conn_id);
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![
+                make_history_privmsg("bob", "#test", "+RPE2E01ciphertext", "e1"),
+                make_history_privmsg("carol", "#test", "plain text", "p1"),
+            ],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        let mut texts = Vec::new();
+        while let Ok(row) = rx.try_recv() {
+            texts.push(row.text);
+        }
+        assert_eq!(texts, vec!["plain text"], "undecryptable E2E line is skipped");
+    }
+
+    #[test]
     fn chathistory_batch_strips_ctcp_action() {
         let conn_id = "test";
         let (mut state, mut rx, _buf_id) = setup_ingest_state(conn_id);
@@ -1109,9 +1137,10 @@ mod tests {
     #[test]
     fn gapfill_after_batch_broadcasts_web_events() {
         // Splicing into buf.messages bypasses add_message's web-event queue, so
-        // surface_history_rows must push WebEvent::NewMessage itself — otherwise
+        // surface_history_rows must broadcast the row itself — otherwise
         // connected web clients never see the gap-fill rows (they aren't
-        // reachable by older-only pagination) until a full resync.
+        // reachable by older-only pagination) until a full resync. It uses
+        // InsertMessage (sorted insert), not NewMessage (append).
         let conn_id = "test";
         let (mut state, _rx, _buf_id) = setup_ingest_state(conn_id);
         state
@@ -1134,7 +1163,7 @@ mod tests {
         let broadcast = state
             .pending_web_events
             .iter()
-            .filter(|e| matches!(e, crate::web::protocol::WebEvent::NewMessage { .. }))
+            .filter(|e| matches!(e, crate::web::protocol::WebEvent::InsertMessage { .. }))
             .count();
         assert_eq!(broadcast, 1, "spliced gap-fill row must be broadcast to web clients");
     }

@@ -27,6 +27,14 @@ pub enum WebEvent {
         buffer_id: String,
         message: WireMessage,
     },
+    /// A historical row spliced into a buffer (reconnect `CHATHISTORY`
+    /// `AFTER`/`LATEST` gap-fill). Unlike `NewMessage` (which the client
+    /// appends), the client inserts this by `(timestamp, id)` — these rows can
+    /// be older than already-displayed post-reconnect live messages.
+    InsertMessage {
+        buffer_id: String,
+        message: WireMessage,
+    },
     /// Channel topic changed.
     TopicChanged {
         buffer_id: String,

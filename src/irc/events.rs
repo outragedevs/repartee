@@ -726,6 +726,41 @@ fn message_timestamp(tags: Option<&HashMap<String, String>>) -> DateTime<Utc> {
         .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc))
 }
 
+/// Decrypt a CHATHISTORY conversational line's text for storage, mirroring the
+/// live PRIVMSG E2E path. Returns the text to store, or `None` to skip the line.
+///
+/// A non-E2E line passes through unchanged. An `+RPE2E01…` line is decrypted via
+/// the same `decrypt_incoming` the live path uses (without firing a KEYREQ — we
+/// don't chase sessions for backlog). A ciphertext we can't decrypt (no session,
+/// our own echo, or a decrypt error) is skipped rather than stored: persisting
+/// it would show gibberish on scroll-up AND let it win the `@msgid` dedup over a
+/// later live plaintext row.
+fn decrypt_chathistory_text(
+    state: &AppState,
+    target: &str,
+    ident: &str,
+    host: &str,
+    is_own: bool,
+    raw_text: &str,
+) -> Option<String> {
+    if !raw_text.starts_with("+RPE2E01") {
+        return Some(raw_text.to_string());
+    }
+    if is_own {
+        return None;
+    }
+    let sender_handle = format!("{ident}@{host}");
+    let context = crate::e2e::context_key(target, &sender_handle);
+    match state
+        .e2e_manager
+        .as_ref()?
+        .decrypt_incoming(&sender_handle, &context, raw_text)
+    {
+        Ok(crate::e2e::manager::DecryptOutcome::Plaintext(plain)) => Some(plain),
+        _ => None,
+    }
+}
+
 /// Result of [`ingest_chathistory_batch`]: the oldest `(unix_millis, msgid?)`
 /// anchor seen across the batch, and the `(buffer_id, Message)` rows to splice
 /// into a live buffer (empty unless display collection was requested).
@@ -810,7 +845,7 @@ pub fn ingest_chathistory_batch(
             }
         }
 
-        let (base_type, target, text) = match &msg.command {
+        let (base_type, target, raw_text) = match &msg.command {
             Command::PRIVMSG(target, text) => (MessageType::Message, target, text),
             Command::NOTICE(target, text) => (MessageType::Notice, target, text),
             // Event-playback and other commands are not ingested in v1.
@@ -819,6 +854,18 @@ pub fn ingest_chathistory_batch(
                 continue;
             }
         };
+
+        let (nick, ident, host) = extract_nick_userhost(msg.prefix.as_ref());
+        let is_own = nick == our_nick;
+
+        // Decrypt RPE2E ciphertext (same path as live PRIVMSGs) before storing,
+        // or skip a line we can't decrypt — see `decrypt_chathistory_text`.
+        let Some(text) = decrypt_chathistory_text(state, target, &ident, &host, is_own, raw_text)
+        else {
+            skipped += 1;
+            continue;
+        };
+        let text = text.as_str();
 
         // CTCP ACTION becomes an Action; any other CTCP is skipped in history.
         let is_ctcp = text.starts_with('\u{1}') && text.ends_with('\u{1}');
@@ -832,14 +879,11 @@ pub fn ingest_chathistory_batch(
             let inner = &text[1..text.len() - 1];
             (MessageType::Action, inner["ACTION ".len()..].to_string())
         } else {
-            (base_type, text.clone())
+            (base_type, text.to_string())
         };
-
-        let (nick, _ident, _host) = extract_nick_userhost(msg.prefix.as_ref());
 
         // Channel messages route to the channel buffer; PMs route to the
         // peer's nick buffer (or our own target for echoed history).
-        let is_own = nick == our_nick;
         let buffer_name = if is_channel(target) || is_own {
             target.as_str()
         } else {

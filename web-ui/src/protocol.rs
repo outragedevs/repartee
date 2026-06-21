@@ -20,6 +20,13 @@ pub enum WebEvent {
         buffer_id: String,
         message: WireMessage,
     },
+    /// A historical gap-fill row (reconnect CHATHISTORY) — inserted by
+    /// `(timestamp, id)` rather than appended, since it may be older than
+    /// already-displayed live messages.
+    InsertMessage {
+        buffer_id: String,
+        message: WireMessage,
+    },
     TopicChanged {
         buffer_id: String,
         topic: Option<String>,

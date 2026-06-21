@@ -260,6 +260,28 @@ impl AppState {
                     });
                 }
             }
+            WebEvent::InsertMessage { buffer_id, message } => {
+                // A reconnect gap-fill row. It belongs between the pre-disconnect
+                // tail and post-reconnect live messages, so insert it by
+                // (timestamp, id) instead of appending. No unread bump — it's
+                // backlog, not new activity.
+                let active = self.active_buffer.get_untracked();
+                let pinned = active.as_deref() == Some(&buffer_id)
+                    && !self.is_at_bottom.get_untracked();
+                let cap = if pinned { PINNED_WEB_CAP } else { MAX_BUFFER_MESSAGES };
+                self.messages.update(|msgs| {
+                    let entry = msgs.entry(buffer_id.clone()).or_default();
+                    if !message_already_present(entry, &message) {
+                        let key = (message.timestamp, message.id);
+                        let pos = entry
+                            .iter()
+                            .position(|m| (m.timestamp, m.id) > key)
+                            .unwrap_or(entry.len());
+                        entry.insert(pos, message);
+                        cap_messages(entry, cap);
+                    }
+                });
+            }
             WebEvent::TopicChanged {
                 buffer_id, topic, ..
             } => {
