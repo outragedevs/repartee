@@ -242,6 +242,31 @@ mod tests {
         assert_eq!(msg_count(&conn), 1, "duplicate msg_id collapses to one row");
     }
 
+    #[test]
+    fn flush_keeps_same_msgid_across_networks() {
+        // An IRCv3 @msgid is only unique per network/server. Two different
+        // networks emitting the same @msgid are distinct messages and must both
+        // persist — the unique constraint is composite on (network, msg_id), not
+        // global on msg_id, or INSERT OR IGNORE would silently drop the second.
+        let db = Arc::new(Mutex::new(open_database(false).unwrap()));
+        let mut a = make_row("hi from libera");
+        a.msg_id = "shared-id".to_string();
+        a.network = "libera".to_string();
+        let mut b = make_row("hi from oftc");
+        b.msg_id = "shared-id".to_string();
+        b.network = "oftc".to_string();
+
+        let remaining = flush(&db, vec![a, b], None);
+
+        assert!(remaining.is_empty(), "flush consumes the queue on success");
+        let conn = db.lock().unwrap();
+        assert_eq!(
+            msg_count(&conn),
+            2,
+            "same @msgid on different networks must both be stored"
+        );
+    }
+
     #[tokio::test]
     async fn writer_flushes_on_shutdown() {
         let db = Arc::new(Mutex::new(open_database(false).unwrap()));

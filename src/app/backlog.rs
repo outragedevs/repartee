@@ -135,6 +135,30 @@ pub(crate) fn oldest_backlog_cursor(messages: &VecDeque<Message>) -> Option<(i64
     Some((ts, id))
 }
 
+/// Build a first-`BEFORE` CHATHISTORY anchor `(msgid?, unix_millis)` from the
+/// oldest **in-memory** real message, skipping synthetic separators. Used as a
+/// fallback when `SQLite` has no stored row for the target yet (a freshly joined
+/// buffer, or live rows still queued in the async log writer) but the buffer
+/// already holds live messages and the server may have older history.
+///
+/// The timestamp is full-precision (millis) and the `@msgid` (from the message's
+/// tags) is a verified server reference. Returns `None` when the buffer has no
+/// real (non-separator) message to anchor on.
+pub(crate) fn in_memory_oldest_anchor(messages: &VecDeque<Message>) -> Option<(Option<String>, i64)> {
+    let oldest = messages.iter().find(|m| {
+        m.event_key.as_deref() != Some("date_separator")
+            && m.event_key.as_deref() != Some("backlog_end")
+    })?;
+    let millis = oldest.timestamp.timestamp_millis();
+    let msgid = oldest
+        .tags
+        .as_ref()
+        .and_then(|t| t.get("msgid"))
+        .filter(|m| !m.is_empty())
+        .cloned();
+    Some((msgid, millis))
+}
+
 /// Remove the synthetic "End of backlog (N lines)" marker from a buffer.
 ///
 /// `load_backlog` plants it at the startup-snapshot boundary (just above the
@@ -311,6 +335,8 @@ impl App {
         }
         let conn_id = buf.connection_id.clone();
         let target = buf.name.clone();
+        // Fallback anchor if SQLite has nothing stored yet (see below).
+        let in_memory_anchor = in_memory_oldest_anchor(&buf.messages);
 
         let (cap, exhausted, in_flight, watermark, network) = {
             let Some(conn) = self.state.connections.get(&conn_id) else {
@@ -349,21 +375,26 @@ impl App {
         // (a *verified* server reference; the `msg_id` column is never used, as
         // it may be a locally-minted UUID). `oldest_anchor` returns that
         // `(millis, msgid?)` pair directly.
+        //
+        // If SQLite has no row for this target yet — a freshly joined buffer, or
+        // live rows still queued in the async log writer — fall back to the
+        // oldest in-memory message so scroll-up can still reach older server
+        // history instead of giving up (which would mark the buffer exhausted).
         let anchor: (Option<String>, i64) = if let Some((ms, msgid)) = watermark {
             (msgid, ms)
         } else {
-            let Some(storage) = self.storage.as_ref() else {
-                return false;
-            };
-            let row = storage.db.lock().ok().and_then(|db| {
-                crate::storage::query::oldest_anchor(&db, &network, &target)
-                    .ok()
-                    .flatten()
+            let sqlite_anchor = self.storage.as_ref().and_then(|storage| {
+                storage.db.lock().ok().and_then(|db| {
+                    crate::storage::query::oldest_anchor(&db, &network, &target)
+                        .ok()
+                        .flatten()
+                        .map(|(millis, msgid)| (msgid, millis))
+                })
             });
-            let Some((millis, msgid)) = row else {
+            let Some(resolved) = sqlite_anchor.or(in_memory_anchor) else {
                 return false;
             };
-            (msgid, millis)
+            resolved
         };
 
         self.request_chathistory(&conn_id, &target, Direction::Before, Some(anchor))
@@ -562,7 +593,9 @@ mod tests {
 
     use chrono::Utc;
 
-    use super::{make_separator, oldest_backlog_cursor, remove_backlog_end_marker};
+    use super::{
+        in_memory_oldest_anchor, make_separator, oldest_backlog_cursor, remove_backlog_end_marker,
+    };
     use crate::state::buffer::{Message, MessageType};
 
     fn msg(ts: i64, log_id: Option<&str>, event_key: Option<&str>) -> Message {
@@ -580,6 +613,41 @@ mod tests {
             log_ref_id: None,
             tags: None,
         }
+    }
+
+    #[test]
+    fn in_memory_anchor_uses_oldest_real_message_time_and_msgid() {
+        // When SQLite has no stored row yet, the first BEFORE anchors on the
+        // oldest in-memory message: full-precision millis from its timestamp and
+        // the verified @msgid from its tags. Separators are skipped.
+        let mut q: VecDeque<Message> = VecDeque::new();
+        q.push_back(msg(1000, None, Some("date_separator")));
+        let mut tags = std::collections::HashMap::new();
+        tags.insert("msgid".to_string(), "M1".to_string());
+        let mut oldest = msg(1500, None, None);
+        oldest.tags = Some(tags);
+        q.push_back(oldest);
+        q.push_back(msg(2000, None, None));
+
+        assert_eq!(
+            in_memory_oldest_anchor(&q),
+            Some((Some("M1".to_string()), 1_500_000))
+        );
+    }
+
+    #[test]
+    fn in_memory_anchor_without_msgid_tag_is_timestamp_only() {
+        let mut q: VecDeque<Message> = VecDeque::new();
+        q.push_back(msg(1500, None, None));
+        assert_eq!(in_memory_oldest_anchor(&q), Some((None, 1_500_000)));
+    }
+
+    #[test]
+    fn in_memory_anchor_none_without_real_messages() {
+        let mut q: VecDeque<Message> = VecDeque::new();
+        q.push_back(msg(100, None, Some("date_separator")));
+        q.push_back(msg(100, None, Some("backlog_end")));
+        assert_eq!(in_memory_oldest_anchor(&q), None);
     }
 
     #[test]

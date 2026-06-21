@@ -20,9 +20,14 @@ const CREATE_MESSAGES_IDX: &str = "
 CREATE INDEX IF NOT EXISTS idx_messages_network_buffer
 ON messages (network, buffer, timestamp)";
 
+// Unique on (network, msg_id), NOT msg_id alone: an IRCv3 @msgid is only unique
+// per network/server, so the same @msgid from two configured networks are
+// distinct messages. A global unique index would make INSERT OR IGNORE silently
+// drop the second one. Live↔CHATHISTORY dedup still works because both copies of
+// a message carry the same (network, @msgid).
 const CREATE_MESSAGES_MSG_ID_IDX: &str = "
-CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_msg_id
-ON messages (msg_id) WHERE msg_id IS NOT NULL";
+CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_network_msg_id
+ON messages (network, msg_id) WHERE msg_id IS NOT NULL";
 
 /// Partial index for fast event pruning — only indexes rows with type='event'.
 const CREATE_MESSAGES_EVENT_IDX: &str = "
@@ -201,6 +206,13 @@ fn migrate_schema(db: &Connection) {
         } else {
             tracing::info!("migrated messages table: added {col}");
         }
+    }
+    // Replace the old global-unique msg_id index with the composite
+    // (network, msg_id) one (created by CREATE_MESSAGES_MSG_ID_IDX above). The
+    // composite is a weaker constraint, so dropping the global never conflicts
+    // with existing data. No-op once the old index is gone.
+    if let Err(e) = db.execute_batch("DROP INDEX IF EXISTS idx_messages_msg_id") {
+        tracing::warn!("migration warning dropping idx_messages_msg_id: {e}");
     }
 }
 
