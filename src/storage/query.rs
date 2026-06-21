@@ -218,7 +218,9 @@ pub fn newest_anchor(
          ORDER BY timestamp DESC, id DESC
          LIMIT 1",
     )?;
-    let mut rows = stmt.query(params![network, buffer])?;
+    // Log rows are stored under the lowercased buffer key (make_buffer_id);
+    // callers pass the display-case channel/nick, so normalize for the lookup.
+    let mut rows = stmt.query(params![network, buffer.to_lowercase()])?;
     match rows.next()? {
         Some(row) => {
             let timestamp: i64 = row.get(0)?;
@@ -257,7 +259,8 @@ pub fn oldest_anchor(
          ORDER BY timestamp ASC, id ASC
          LIMIT 1",
     )?;
-    let mut rows = stmt.query(params![network, buffer])?;
+    // Normalize the buffer key to match how rows are stored (see `newest_anchor`).
+    let mut rows = stmt.query(params![network, buffer.to_lowercase()])?;
     match rows.next()? {
         Some(row) => {
             let timestamp: i64 = row.get(0)?;
@@ -1004,6 +1007,22 @@ mod tests {
         .unwrap();
         let newest = newest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
         assert_eq!(newest.0, 100);
+    }
+
+    #[test]
+    fn anchors_match_buffer_case_insensitively() {
+        // Log rows are stored under the lowercased buffer key (make_buffer_id),
+        // but callers pass the display-case channel/nick. Both anchor lookups
+        // must normalize, or a mixed-case target misses its stored history and
+        // gap-fill falls back to LATEST (replaying) instead of AFTER.
+        let db = setup_test_db();
+        insert_msg(&db, "net", "#rust", 100, "a");
+        insert_msg(&db, "net", "#rust", 200, "b");
+
+        let newest = newest_anchor(&db, "net", "#Rust").unwrap().expect("anchor");
+        assert_eq!(newest.0, 200);
+        let oldest = oldest_anchor(&db, "net", "#Rust").unwrap().expect("anchor");
+        assert_eq!(oldest.0, 100_000);
     }
 
     #[test]

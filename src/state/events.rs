@@ -555,6 +555,19 @@ impl AppState {
                 continue;
             }
             msg.id = self.next_message_id();
+            // Splicing into buf.messages bypasses add_message's web-event queue,
+            // so broadcast the row ourselves — these gap-fill rows are not
+            // reachable by the web client's older-only pagination, so without
+            // this they stay invisible there until a full resync.
+            let wire = crate::web::snapshot::message_to_wire(
+                &msg,
+                self.web_preview_extractor.as_deref(),
+            );
+            self.pending_web_events
+                .push(crate::web::protocol::WebEvent::NewMessage {
+                    buffer_id: buffer_id.to_string(),
+                    message: wire,
+                });
             if let Some(buf) = self.buffers.get_mut(buffer_id) {
                 let pos = buf
                     .messages

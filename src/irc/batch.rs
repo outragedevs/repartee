@@ -1099,6 +1099,39 @@ mod tests {
     }
 
     #[test]
+    fn gapfill_after_batch_broadcasts_web_events() {
+        // Splicing into buf.messages bypasses add_message's web-event queue, so
+        // surface_history_rows must push WebEvent::NewMessage itself — otherwise
+        // connected web clients never see the gap-fill rows (they aren't
+        // reachable by older-only pagination) until a full resync.
+        let conn_id = "test";
+        let (mut state, _rx, _buf_id) = setup_ingest_state(conn_id);
+        state
+            .connections
+            .get_mut(conn_id)
+            .unwrap()
+            .chathistory
+            .mark_in_flight("#test", crate::irc::chathistory::Direction::After, 200);
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![make_history_privmsg("bob", "#test", "gap line", "g1")],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        let broadcast = state
+            .pending_web_events
+            .iter()
+            .filter(|e| matches!(e, crate::web::protocol::WebEvent::NewMessage { .. }))
+            .count();
+        assert_eq!(broadcast, 1, "spliced gap-fill row must be broadcast to web clients");
+    }
+
+    #[test]
     fn before_batch_does_not_splice_into_live_buffer() {
         // A BEFORE scroll-back is store-only — its rows surface via pagination,
         // never spliced live — so the in-memory buffer stays untouched.
