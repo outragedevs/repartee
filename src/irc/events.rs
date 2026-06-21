@@ -780,7 +780,22 @@ pub fn ingest_chathistory_batch(
     // second (skipping same-second messages) or stalls on event-only windows.
     let mut oldest: Option<(i64, Option<String>)> = None;
 
-    for msg in &batch.messages {
+    // Persist in chronological order. The DB stores only whole-second
+    // timestamps and breaks same-second ties by insertion id, so a page the
+    // server returned newest-first would otherwise reload in reverse order
+    // within that second. Sort by full-precision `@time` (stable, so lines that
+    // share — or lack — a timestamp keep their server order); untimed lines sort
+    // last. Ordering only matters for storage/`oldest`; both are order-robust.
+    let mut ordered: Vec<&IrcMessage> = batch.messages.iter().collect();
+    ordered.sort_by_key(|m| {
+        extract_tags(m)
+            .as_ref()
+            .and_then(|t| t.get("time"))
+            .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+            .map_or(i64::MAX, |dt| dt.timestamp_millis())
+    });
+
+    for msg in ordered {
         let tags = extract_tags(msg);
 
         if let Some(ts) = tags

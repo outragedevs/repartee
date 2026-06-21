@@ -354,6 +354,14 @@ impl App {
         if !cap || exhausted {
             return false;
         }
+        // A BEFORE fetch is store-only: the batch is ingested via the log writer
+        // (`log_tx`) and surfaced through SQLite pagination, never spliced into
+        // the live buffer. With logging/storage unavailable (disabled or failed
+        // to initialize) those rows would be silently dropped and scrollback
+        // could keep issuing requests without ever growing — so don't ask.
+        if self.state.log_tx.is_none() {
+            return false;
+        }
         if in_flight {
             // A CHATHISTORY request (BEFORE, or a reconnect AFTER/LATEST) is
             // already outstanding for this target. Requests are serialized, so

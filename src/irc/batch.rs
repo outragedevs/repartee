@@ -933,6 +933,35 @@ mod tests {
     }
 
     #[test]
+    fn chathistory_stores_same_second_rows_in_chronological_order() {
+        // The DB keeps only whole-second timestamps and breaks ties by insertion
+        // id, so a same-second page returned newest-first must be persisted
+        // oldest-first or it reloads in reverse order within that second.
+        let conn_id = "test";
+        let (mut state, mut rx, _buf_id) = setup_ingest_state(conn_id);
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![
+                make_history_privmsg_at("c", "#test", "third", "m3", "2024-01-01T00:00:05.800Z"),
+                make_history_privmsg_at("b", "#test", "second", "m2", "2024-01-01T00:00:05.500Z"),
+                make_history_privmsg_at("a", "#test", "first", "m1", "2024-01-01T00:00:05.200Z"),
+            ],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        let mut texts = Vec::new();
+        while let Ok(row) = rx.try_recv() {
+            texts.push(row.text);
+        }
+        assert_eq!(texts, vec!["first", "second", "third"]);
+    }
+
+    #[test]
     fn chathistory_watermark_keeps_millis_and_msgid() {
         let conn_id = "test";
         let (mut state, _rx, _buf_id) = setup_ingest_state(conn_id);
