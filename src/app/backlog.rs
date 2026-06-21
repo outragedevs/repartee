@@ -159,6 +159,24 @@ pub(crate) fn in_memory_oldest_anchor(messages: &VecDeque<Message>) -> Option<(O
     Some((msgid, millis))
 }
 
+/// Whether scroll-back pagination has reached the oldest row chathistory
+/// fetched from the server — its `BEFORE` watermark (`watermark_ms`) vs the
+/// buffer's oldest in-memory message (`buffer_oldest_ms`).
+///
+/// Returns `false` only when a server fetch exists and the buffer's oldest is
+/// still strictly newer than the watermark — meaning a just-fetched final page
+/// is queued in the async log writer but not yet paginated into the buffer. In
+/// that case the buffer must NOT be marked `history_exhausted`, or those rows
+/// stay hidden once they flush to `SQLite`.
+const fn reached_history_watermark(watermark_ms: Option<i64>, buffer_oldest_ms: Option<i64>) -> bool {
+    match (watermark_ms, buffer_oldest_ms) {
+        // No server fetch yet, or no in-memory rows — local exhaustion is final.
+        (None, _) | (Some(_), None) => true,
+        // Displayed down to (or past) the oldest the server gave us.
+        (Some(watermark), Some(oldest)) => oldest <= watermark,
+    }
+}
+
 /// Remove the synthetic "End of backlog (N lines)" marker from a buffer.
 ///
 /// `load_backlog` plants it at the startup-snapshot boundary (just above the
@@ -306,12 +324,36 @@ impl App {
         // (cap absent, or the server already reported no more history). When a
         // request is in flight or freshly sent, leave `history_exhausted`
         // false so the next scroll tick re-paginates the newly ingested rows.
+        //
+        // Also defer exhaustion while a just-completed final BEFORE batch is
+        // still queued in the async log writer: marking it now (before the rows
+        // reach SQLite) would hide them, since the exhausted path stops
+        // paginating once they flush. `history_fully_paginated` guards this.
         if local_short
             && !self.fetch_older_via_chathistory(buffer_id)
+            && self.history_fully_paginated(buffer_id)
             && let Some(buf) = self.state.buffers.get_mut(buffer_id)
         {
             buf.history_exhausted = true;
         }
+    }
+
+    /// Whether the buffer has paginated down to chathistory's `BEFORE`
+    /// watermark — i.e. every server-fetched row is now displayed, so it's safe
+    /// to mark the buffer `history_exhausted`. False while a final short BEFORE
+    /// batch is queued in the async log writer but not yet paginated in.
+    fn history_fully_paginated(&self, buffer_id: &str) -> bool {
+        let Some(buf) = self.state.buffers.get(buffer_id) else {
+            return true;
+        };
+        let watermark_ms = self
+            .state
+            .connections
+            .get(&buf.connection_id)
+            .and_then(|c| c.chathistory.oldest_fetched(&buf.name))
+            .map(|(ms, _)| ms);
+        let buffer_oldest_ms = in_memory_oldest_anchor(&buf.messages).map(|(_, ms)| ms);
+        reached_history_watermark(watermark_ms, buffer_oldest_ms)
     }
 
     /// Attempt to fetch older history for `buffer_id` from the server via
@@ -602,7 +644,8 @@ mod tests {
     use chrono::Utc;
 
     use super::{
-        in_memory_oldest_anchor, make_separator, oldest_backlog_cursor, remove_backlog_end_marker,
+        in_memory_oldest_anchor, make_separator, oldest_backlog_cursor, reached_history_watermark,
+        remove_backlog_end_marker,
     };
     use crate::state::buffer::{Message, MessageType};
 
@@ -648,6 +691,20 @@ mod tests {
         let mut q: VecDeque<Message> = VecDeque::new();
         q.push_back(msg(1500, None, None));
         assert_eq!(in_memory_oldest_anchor(&q), Some((None, 1_500_000)));
+    }
+
+    #[test]
+    fn reached_history_watermark_gates_exhaustion() {
+        // No server fetch yet → local exhaustion is authoritative.
+        assert!(reached_history_watermark(None, Some(1000)));
+        // No in-memory rows → nothing pending.
+        assert!(reached_history_watermark(Some(5000), None));
+        // Buffer oldest still NEWER than the watermark → a just-fetched final
+        // page is queued in the writer but not yet paginated; don't exhaust.
+        assert!(!reached_history_watermark(Some(5000), Some(9000)));
+        // Buffer oldest reached/passed the watermark → fetched rows displayed.
+        assert!(reached_history_watermark(Some(5000), Some(5000)));
+        assert!(reached_history_watermark(Some(5000), Some(3000)));
     }
 
     #[test]

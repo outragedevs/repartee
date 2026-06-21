@@ -264,7 +264,23 @@ impl HistoryState {
     ) {
         let target = target.to_ascii_lowercase();
 
-        if let Some((ts, msgid)) = oldest {
+        let completed: Vec<(Direction, usize)> = self
+            .in_flight
+            .keys()
+            .filter(|(t, _)| *t == target)
+            .map(|(_, dir)| *dir)
+            .map(|dir| (dir, self.in_flight[&(target.clone(), dir)].0))
+            .collect();
+
+        // Only a BEFORE completion advances the scroll-back watermark: it tracks
+        // how far back scroll-up has reached. An AFTER/LATEST gap-fill pulls
+        // RECENT messages near the reconnect gap, so seeding the watermark from
+        // it would make the next BEFORE anchor there and replay already-local
+        // history page by page (scrollback appears stuck).
+        let advances_watermark = completed.iter().any(|(dir, _)| *dir == Direction::Before);
+        if advances_watermark
+            && let Some((ts, msgid)) = oldest
+        {
             self.oldest_fetched
                 .entry(target.clone())
                 // Keep whichever line is older; take its msgid alongside.
@@ -275,14 +291,6 @@ impl HistoryState {
                 })
                 .or_insert((ts, msgid));
         }
-
-        let completed: Vec<(Direction, usize)> = self
-            .in_flight
-            .keys()
-            .filter(|(t, _)| *t == target)
-            .map(|(_, dir)| *dir)
-            .map(|dir| (dir, self.in_flight[&(target.clone(), dir)].0))
-            .collect();
         for (dir, limit) in completed {
             self.in_flight.remove(&(target.clone(), dir));
             if clean_end && dir == Direction::Before && rows < limit {
@@ -498,6 +506,22 @@ mod tests {
         st.complete_target("#chan", 50, Some((1000, None)), true);
         // After completion the AFTER slot is free for a new gap-fill.
         assert!(st.should_request("#chan", Direction::After, true));
+    }
+
+    #[test]
+    fn after_gapfill_does_not_seed_before_watermark() {
+        // A reconnect AFTER gap-fill pulls recent messages near the reconnect
+        // gap. Its oldest line must NOT become the BEFORE scroll-back watermark,
+        // or the next BEFORE would anchor there and replay already-local history
+        // page by page (scrollback appears stuck).
+        let mut st = HistoryState::new();
+        st.mark_in_flight("#chan", Direction::After, 100);
+        st.complete_target("#chan", 100, Some((9000, Some("recent".into()))), true);
+        assert_eq!(
+            st.oldest_fetched("#chan"),
+            None,
+            "AFTER/LATEST must not seed the BEFORE watermark"
+        );
     }
 
     #[test]

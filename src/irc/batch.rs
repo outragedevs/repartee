@@ -965,6 +965,14 @@ mod tests {
     fn chathistory_watermark_keeps_millis_and_msgid() {
         let conn_id = "test";
         let (mut state, _rx, _buf_id) = setup_ingest_state(conn_id);
+        // A BEFORE request is in flight — only a BEFORE completion advances the
+        // scroll-back watermark.
+        state
+            .connections
+            .get_mut(conn_id)
+            .unwrap()
+            .chathistory
+            .mark_in_flight("#test", crate::irc::chathistory::Direction::Before, 200);
 
         // Two lines in the same second (batch order newest-first); the oldest
         // is at .200 with msgid "old". The next-BEFORE watermark must record
