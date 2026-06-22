@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS messages (
     network   TEXT NOT NULL,
     buffer    TEXT NOT NULL,
     timestamp INTEGER NOT NULL,
+    ts_ms     INTEGER,
     type      TEXT NOT NULL,
     nick      TEXT,
     text      TEXT NOT NULL,
@@ -197,7 +198,14 @@ fn create_schema(db: &Connection, encrypt: bool) -> rusqlite::Result<()> {
 /// (permissions, corruption, wrong table) is logged as a warning so it does
 /// not go unnoticed.
 fn migrate_schema(db: &Connection) {
-    for col in ["ref_id TEXT", "tags TEXT", "event_key TEXT"] {
+    // `ts_ms` holds the full-millisecond message time (the IRCv3 `@time`), added
+    // so scroll-back pagination can order same-second rows by real time instead
+    // of insertion id (a backfilled older row gets a larger autoincrement id and
+    // would otherwise be skipped by a `(timestamp, id)` keyset cursor). It is
+    // left NULL on existing rows: read paths `COALESCE(ts_ms, timestamp * 1000)`,
+    // so un-migrated rows keep exactly their old second-resolution ordering — no
+    // backfill UPDATE is run, keeping the migration cheap on large logs.
+    for col in ["ref_id TEXT", "tags TEXT", "event_key TEXT", "ts_ms INTEGER"] {
         let sql = format!("ALTER TABLE messages ADD COLUMN {col}");
         if let Err(e) = db.execute_batch(&sql) {
             if !e.to_string().contains("duplicate column name") {
@@ -357,6 +365,62 @@ mod tests {
     fn open_creates_read_markers_table() {
         let db = open_database(false).unwrap();
         assert!(table_exists(&db, "read_markers"));
+    }
+
+    fn column_exists(db: &Connection, table: &str, column: &str) -> bool {
+        db.prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|name| name == column)
+    }
+
+    #[test]
+    fn migration_adds_ts_ms_to_pre_existing_database() {
+        // Simulate an old log DB whose `messages` table predates the `ts_ms`
+        // column, with a row already stored. create_schema must add the column
+        // (CREATE TABLE IF NOT EXISTS is a no-op, so the ALTER in migrate_schema
+        // is what backfills the schema) without disturbing the existing row.
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE messages (
+                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                 msg_id    TEXT,
+                 network   TEXT NOT NULL,
+                 buffer    TEXT NOT NULL,
+                 timestamp INTEGER NOT NULL,
+                 type      TEXT NOT NULL,
+                 nick      TEXT,
+                 text      TEXT NOT NULL,
+                 highlight INTEGER DEFAULT 0,
+                 iv        BLOB,
+                 ref_id    TEXT,
+                 tags      TEXT,
+                 event_key TEXT
+             )",
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight) \
+             VALUES ('old-1', 'libera', '#rust', 100, 'message', 'ada', 'legacy line', 0)",
+            [],
+        )
+        .unwrap();
+        assert!(!column_exists(&db, "messages", "ts_ms"), "precondition: no ts_ms");
+
+        create_schema(&db, false).unwrap();
+
+        assert!(column_exists(&db, "messages", "ts_ms"), "migration added ts_ms");
+        // The pre-existing row keeps NULL ts_ms; the read path COALESCEs it to
+        // timestamp*1000, so it still paginates with whole-second ordering.
+        let rows = crate::storage::query::get_messages_paginated_subsecond(
+            &db, "libera", "#rust", None, 10, false, None,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "legacy line");
+        assert_eq!(rows[0].ts_ms, 100_000);
     }
 
     #[test]

@@ -507,6 +507,7 @@ impl AppState {
             network,
             buffer: buf_name.to_string(),
             timestamp: message.timestamp.timestamp(),
+            ts_ms: message.timestamp.timestamp_millis(),
             msg_type: message.message_type.clone(),
             nick: message.nick.clone(),
             text: if is_ref {

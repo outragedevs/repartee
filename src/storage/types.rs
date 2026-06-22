@@ -7,6 +7,10 @@ pub struct LogRow {
     pub network: String,
     pub buffer: String,
     pub timestamp: i64,
+    /// Full-millisecond message time (from the `IRCv3` `@time`). Drives
+    /// subsecond-correct scroll-back ordering; the `timestamp` column keeps
+    /// whole seconds for retention/date logic.
+    pub ts_ms: i64,
     pub msg_type: MessageType,
     pub nick: Option<String>,
     pub text: String,
@@ -30,6 +34,9 @@ pub struct StoredMessage {
     pub network: String,
     pub buffer: String,
     pub timestamp: i64,
+    /// Full-millisecond message time, read as `COALESCE(ts_ms, timestamp * 1000)`
+    /// so rows predating the column still yield a sensible value.
+    pub ts_ms: i64,
     pub msg_type: String,
     pub nick: Option<String>,
     pub text: String,

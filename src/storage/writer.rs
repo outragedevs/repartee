@@ -145,13 +145,14 @@ fn flush(
         // its CHATHISTORY replay share the server @msgid) is silently skipped by
         // the unique index instead of raising an error we'd log as a failure.
         if let Err(e) = conn.execute(
-            "INSERT OR IGNORE INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight, iv, ref_id, tags, event_key)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT OR IGNORE INTO messages (msg_id, network, buffer, timestamp, ts_ms, type, nick, text, highlight, iv, ref_id, tags, event_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 row.msg_id,
                 row.network,
                 row.buffer,
                 row.timestamp,
+                row.ts_ms,
                 msg_type_str,
                 row.nick,
                 stored_text,
@@ -196,6 +197,7 @@ mod tests {
             network: "testnet".into(),
             buffer: "#test".into(),
             timestamp: chrono::Utc::now().timestamp(),
+            ts_ms: chrono::Utc::now().timestamp_millis(),
             msg_type: MessageType::Message,
             nick: Some("alice".into()),
             text: text.into(),

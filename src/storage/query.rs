@@ -15,6 +15,12 @@ fn map_row(
     let network: String = row.get("network")?;
     let buffer: String = row.get("buffer")?;
     let timestamp: i64 = row.get("timestamp")?;
+    // Read paths usually alias `COALESCE(ts_ms, timestamp*1000) AS ts_ms` (always
+    // non-null), but `search_messages` selects raw `m.*` where `ts_ms` may be
+    // NULL for rows predating the column — fall back to whole-seconds either way.
+    let ts_ms: i64 = row
+        .get::<_, Option<i64>>("ts_ms")?
+        .unwrap_or(timestamp * 1000);
     let msg_type: String = row.get("type")?;
     let nick: Option<String> = row.get("nick")?;
     let stored_text: String = row.get("text")?;
@@ -47,6 +53,7 @@ fn map_row(
         network,
         buffer,
         timestamp,
+        ts_ms,
         msg_type,
         nick,
         text,
@@ -67,7 +74,9 @@ fn map_row(
 /// below transparently substitute the primary's `text` + `iv` whenever
 /// a reference exists; `map_row` is unchanged.
 const SELECT_MESSAGE_COLUMNS: &str = "
-    m.id, m.msg_id, m.network, m.buffer, m.timestamp, m.type, m.nick,
+    m.id, m.msg_id, m.network, m.buffer, m.timestamp,
+    COALESCE(m.ts_ms, m.timestamp * 1000) AS ts_ms,
+    m.type, m.nick,
     COALESCE(p.text, m.text) AS text,
     m.highlight,
     COALESCE(p.iv,   m.iv)   AS iv,
@@ -130,7 +139,7 @@ pub fn get_messages(
     Ok(messages)
 }
 
-/// Cursor-paginated fetch using a `(timestamp, id)` tuple as the cursor.
+/// Second-resolution cursor-paginated fetch using a `(timestamp, id)` tuple.
 ///
 /// `get_messages` alone uses `WHERE timestamp < ?` which silently drops
 /// rows that share a timestamp with the cursor — a real problem when
@@ -139,10 +148,14 @@ pub fn get_messages(
 /// `WHERE timestamp < ?ts OR (timestamp = ?ts AND id < ?id)`, so paging
 /// is lossless even at second-precision timestamps.
 ///
-/// Pass `before = None` for the initial page (latest messages). Used by
-/// the log browser; chat-mode `load_backlog` keeps using the simpler
-/// timestamp-only `get_messages` because backlog is one-shot, not
-/// paginated.
+/// Pass `before = None` for the initial page (latest messages).
+///
+/// This is the cursor the **web** client uses: its wire timestamps are whole
+/// seconds (`message_to_wire`) and it re-sorts by `(seconds, id)`, so the
+/// second-resolution keyset matches its world exactly. Native TUI scroll-back
+/// instead uses [`get_messages_paginated_subsecond`], which orders by the
+/// full-millisecond `ts_ms` so a backfilled older same-second row (which gets a
+/// larger autoincrement id) is not skipped.
 pub fn get_messages_paginated(
     db: &Connection,
     network: &str,
@@ -178,6 +191,79 @@ pub fn get_messages_paginated(
              LEFT JOIN messages p ON p.msg_id = m.ref_id AND p.network = m.network
              WHERE m.network = ?1 AND m.buffer = ?2
              ORDER BY m.timestamp DESC, m.id DESC
+             LIMIT ?3"
+        );
+        let mut stmt = db.prepare(&sql)?;
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "limit will never exceed i64::MAX in practice"
+        )]
+        let rows = stmt.query_map(params![network, buffer, limit as i64], |row| {
+            map_row(row, encrypt, crypto_key)
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    messages.reverse();
+    Ok(messages)
+}
+
+/// Subsecond-resolution cursor-paginated fetch using a `(unix_millis, id)` tuple.
+///
+/// Native scroll-back (live-chat backlog and the log browser) reconstructs each
+/// in-memory row's timestamp at full millisecond precision (see
+/// `stored_to_message`), so its cursor carries true `@time` millis. Rows are
+/// ordered by `COALESCE(ts_ms, timestamp * 1000)` — the persisted millisecond
+/// time, falling back to `timestamp * 1000` for rows written before the `ts_ms`
+/// column existed. This is what fixes the same-second backfill bug: a
+/// `CHATHISTORY BEFORE` row that is older in `@time` than an existing same-second
+/// row, yet inserted later (so it has a larger autoincrement id), still sorts —
+/// and paginates — as older, instead of being hidden by an `id`-based keyset.
+///
+/// The cursor predicate keeps the indexed `m.timestamp <= ?secs` bound (so the
+/// `(network, buffer, timestamp)` index still prunes the scan) alongside the
+/// precise millisecond keyset; `?secs` is the floored-second of the cursor and
+/// never excludes a wanted row (any row with `COALESCE(...) <= ?ms` has
+/// `timestamp <= ?ms / 1000`).
+///
+/// Pass `before = None` for the initial page (latest messages).
+pub fn get_messages_paginated_subsecond(
+    db: &Connection,
+    network: &str,
+    buffer: &str,
+    before: Option<(i64, i64)>,
+    limit: usize,
+    encrypt: bool,
+    crypto_key: Option<&Key<Aes256Gcm>>,
+) -> rusqlite::Result<Vec<StoredMessage>> {
+    let mut messages = if let Some((ms, id)) = before {
+        let secs = ms.div_euclid(1000);
+        let sql = format!(
+            "SELECT {SELECT_MESSAGE_COLUMNS}
+             FROM messages m
+             LEFT JOIN messages p ON p.msg_id = m.ref_id AND p.network = m.network
+             WHERE m.network = ?1 AND m.buffer = ?2
+               AND m.timestamp <= ?3
+               AND (COALESCE(m.ts_ms, m.timestamp * 1000) < ?4
+                    OR (COALESCE(m.ts_ms, m.timestamp * 1000) = ?4 AND m.id < ?5))
+             ORDER BY COALESCE(m.ts_ms, m.timestamp * 1000) DESC, m.id DESC
+             LIMIT ?6"
+        );
+        let mut stmt = db.prepare(&sql)?;
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "limit will never exceed i64::MAX in practice"
+        )]
+        let rows = stmt.query_map(params![network, buffer, secs, ms, id, limit as i64], |row| {
+            map_row(row, encrypt, crypto_key)
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    } else {
+        let sql = format!(
+            "SELECT {SELECT_MESSAGE_COLUMNS}
+             FROM messages m
+             LEFT JOIN messages p ON p.msg_id = m.ref_id AND p.network = m.network
+             WHERE m.network = ?1 AND m.buffer = ?2
+             ORDER BY COALESCE(m.ts_ms, m.timestamp * 1000) DESC, m.id DESC
              LIMIT ?3"
         );
         let mut stmt = db.prepare(&sql)?;
@@ -945,6 +1031,80 @@ mod tests {
         )
         .unwrap();
         assert_eq!(page2.len(), 3, "all same-timestamp rows must paginate");
+    }
+
+    #[test]
+    fn paginated_subsecond_orders_same_second_backfill_by_time() {
+        // P1 regression: three messages share whole-second 100 but were stored
+        // in REVERSED time order (as a live row, then an older CHATHISTORY BEFORE
+        // backfill), so insertion id contradicts @time:
+        //   id=1  ts_ms=100_900  "a900"  (newest in the second, stored first)
+        //   id=2  ts_ms=100_700  "b700"  (oldest, backfilled later -> larger id)
+        //   id=3  ts_ms=100_800  "c800"  (middle, backfilled later)
+        let db = setup_test_db();
+        for (ms, text) in [(100_900_i64, "a900"), (100_700, "b700"), (100_800, "c800")] {
+            db.execute(
+                "INSERT INTO messages (msg_id, network, buffer, timestamp, ts_ms, type, nick, text, highlight) \
+                 VALUES (?1, 'libera', '#rust', 100, ?2, 'message', 'ada', ?3, 0)",
+                params![text, ms, text],
+            )
+            .unwrap();
+        }
+
+        // The second-resolution keyset (web path) HIDES the older same-second
+        // rows: anchored at the newest row (timestamp=100, id=1), `id < 1` matches
+        // nothing even though b700/c800 are older in @time. This is the bug.
+        let hidden = get_messages_paginated(&db, "libera", "#rust", Some((100, 1)), 10, false, None)
+            .unwrap();
+        assert!(
+            hidden.is_empty(),
+            "seconds keyset skips same-second rows with larger ids (the P1 bug)"
+        );
+
+        // The subsecond keyset orders by @time, so a full page is chronological…
+        let all =
+            get_messages_paginated_subsecond(&db, "libera", "#rust", None, 10, false, None).unwrap();
+        let texts: Vec<&str> = all.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(texts, vec!["b700", "c800", "a900"], "ordered by @time, not id");
+
+        // …and anchoring at the newest row (its true millis + id) still yields the
+        // two older same-second rows instead of dropping them.
+        let newest = all.last().expect("newest row");
+        assert_eq!(newest.text, "a900");
+        let page = get_messages_paginated_subsecond(
+            &db,
+            "libera",
+            "#rust",
+            Some((newest.ts_ms, newest.id)),
+            10,
+            false,
+            None,
+        )
+        .unwrap();
+        let page_texts: Vec<&str> = page.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(page_texts, vec!["b700", "c800"], "older same-second rows paginate");
+    }
+
+    #[test]
+    fn paginated_subsecond_falls_back_to_seconds_for_null_ts_ms() {
+        // Backwards compat: rows written before the ts_ms column exists store
+        // NULL. COALESCE(ts_ms, timestamp*1000) keeps them ordering exactly as
+        // before — by whole second, tie-broken by id.
+        let db = setup_test_db();
+        for (ts, text) in [(100_i64, "older"), (100, "same-sec"), (200, "newer")] {
+            db.execute(
+                "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight) \
+                 VALUES (?1, 'libera', '#rust', ?2, 'message', 'ada', ?3, 0)",
+                params![text, ts, text],
+            )
+            .unwrap();
+        }
+        let all =
+            get_messages_paginated_subsecond(&db, "libera", "#rust", None, 10, false, None).unwrap();
+        let texts: Vec<&str> = all.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(texts, vec!["older", "same-sec", "newer"]);
+        // ts_ms surfaces as timestamp*1000 for these NULL rows.
+        assert_eq!(all[0].ts_ms, 100_000);
     }
 
     #[test]

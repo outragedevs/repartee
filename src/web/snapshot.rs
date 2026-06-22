@@ -298,6 +298,7 @@ mod tests {
             network: "Libera".to_string(),
             buffer: "#rust".to_string(),
             timestamp: 1_710_000_000,
+            ts_ms: 1_710_000_000_000,
             msg_type: "event".to_string(),
             nick: None,
             text: "You were kicked from #rust by op (behave)".to_string(),

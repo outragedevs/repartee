@@ -55,12 +55,12 @@ impl App {
             let Ok(db) = storage.db.lock() else {
                 return;
             };
-            // Paginated (composite-cursor) query, `None` = newest page. Unlike the
-            // old `get_messages`, this returns rows tagged with their SQLite id via
+            // Subsecond-paginated (composite-cursor) query, `None` = newest page.
+            // Returns rows tagged with their SQLite id via
             // `rows_to_buffer_messages` -> `stored_to_message`, so the first
-            // scroll-up can build a lossless `(timestamp, id)` cursor. Passing the
+            // scroll-up can build a lossless `(millis, id)` cursor. Passing the
             // read key lets encrypted logs decrypt (previously `None` => ciphertext).
-            crate::storage::query::get_messages_paginated(
+            crate::storage::query::get_messages_paginated_subsecond(
                 &db,
                 &network,
                 &buf_name,
@@ -108,25 +108,33 @@ impl App {
 /// Page size for an on-demand older-history load in live chat mode.
 pub(crate) const CHAT_BACKLOG_PAGE: usize = 200;
 
-/// The `(timestamp, id)` pagination cursor for fetching messages OLDER than a
+/// The `(unix_millis, id)` pagination cursor for fetching messages OLDER than a
 /// buffer's current oldest real message. Synthetic date separators (and the
 /// end-of-backlog marker) carry no `log_msg_id`, so they're skipped.
 ///
+/// The timestamp is full milliseconds (the in-memory row is reconstructed from
+/// `ts_ms` in `stored_to_message`), so [`get_messages_paginated_subsecond`]
+/// orders same-second rows by real `@time` — a backfilled older row with a
+/// larger autoincrement id is not skipped.
+///
 /// - Oldest message came from the DB (`log_msg_id` set): use the real
-///   `(timestamp, id)` keyset cursor — lossless, never re-fetches the cursor row.
+///   `(millis, id)` keyset cursor — lossless, never re-fetches the cursor row.
 /// - Oldest message is a *live* message (`log_msg_id` None): there's no DB id, so
-///   use `(timestamp, 0)`, which the `< OR (= AND id < 0)` predicate collapses to
-///   "strictly older timestamp". This may skip same-second rows exactly at the
-///   live/DB boundary, but never duplicates the boundary message — preferred,
-///   since a visible duplicate is worse than a rare dropped same-second line.
+///   use `(millis, 0)`, which the `< OR (= AND id < 0)` predicate collapses to
+///   "strictly older millisecond". This may skip rows in the exact same
+///   millisecond at the live/DB boundary, but never duplicates the boundary
+///   message — preferred, since a visible duplicate is worse than a rare dropped
+///   same-millisecond line (far rarer than the old same-second drop).
 ///
 /// Returns `None` when there is no real (non-separator) message.
+///
+/// [`get_messages_paginated_subsecond`]: crate::storage::query::get_messages_paginated_subsecond
 pub(crate) fn oldest_backlog_cursor(messages: &VecDeque<Message>) -> Option<(i64, i64)> {
     let oldest = messages.iter().find(|m| {
         m.event_key.as_deref() != Some("date_separator")
             && m.event_key.as_deref() != Some("backlog_end")
     })?;
-    let ts = oldest.timestamp.timestamp();
+    let ts = oldest.timestamp.timestamp_millis();
     let id = oldest
         .log_msg_id
         .as_ref()
@@ -265,7 +273,7 @@ impl App {
             let Ok(db) = storage.db.lock() else {
                 return;
             };
-            crate::storage::query::get_messages_paginated(
+            crate::storage::query::get_messages_paginated_subsecond(
                 &db,
                 &network,
                 &buf_name,
@@ -725,21 +733,21 @@ mod tests {
 
     #[test]
     fn cursor_uses_oldest_db_row_keyset_skipping_separators() {
-        // [date_sep, db row id=42 @1000, live @2000] -> cursor is (1000, 42).
+        // [date_sep, db row id=42 @1000s, live @2000s] -> cursor is (millis, 42).
         let mut q = VecDeque::new();
         q.push_back(msg(1000, None, Some("date_separator")));
         q.push_back(msg(1000, Some("42"), None));
         q.push_back(msg(2000, None, None));
-        assert_eq!(oldest_backlog_cursor(&q), Some((1000, 42)));
+        assert_eq!(oldest_backlog_cursor(&q), Some((1_000_000, 42)));
     }
 
     #[test]
     fn cursor_for_live_oldest_uses_id_zero() {
-        // Oldest real message is live (no log_msg_id) -> id 0 => strictly-older-ts.
+        // Oldest real message is live (no log_msg_id) -> id 0 => strictly-older-ms.
         let mut q = VecDeque::new();
         q.push_back(msg(1500, None, None));
         q.push_back(msg(2500, None, None));
-        assert_eq!(oldest_backlog_cursor(&q), Some((1500, 0)));
+        assert_eq!(oldest_backlog_cursor(&q), Some((1_500_000, 0)));
     }
 
     #[test]
