@@ -251,10 +251,12 @@ impl HistoryState {
     ///
     /// `clean_end` is `true` when the batch closed normally (`BATCH -tag`) and
     /// `false` when it was force-completed by the timeout purge. A timed-out
-    /// batch is a transport/server failure, not proof that history ended, so a
-    /// short timed-out `BEFORE` batch still clears in-flight (allowing a retry)
-    /// but is NEVER marked exhausted — otherwise a single dropped `BATCH -tag`
-    /// would wedge the target with no older history until reconnect.
+    /// batch is a transport/server failure, not proof that history ended, so an
+    /// unclean `BEFORE` batch still clears in-flight (allowing a retry) but
+    /// neither advances the watermark (it may be a partial page — moving it would
+    /// skip the unsent rows on retry) nor marks the target exhausted (otherwise a
+    /// single dropped `BATCH -tag` would wedge the target with no older history
+    /// until reconnect).
     pub fn complete_target(
         &mut self,
         target: &str,
@@ -272,12 +274,20 @@ impl HistoryState {
             .map(|dir| (dir, self.in_flight[&(target.clone(), dir)].0))
             .collect();
 
-        // Only a BEFORE completion advances the scroll-back watermark: it tracks
-        // how far back scroll-up has reached. An AFTER/LATEST gap-fill pulls
-        // RECENT messages near the reconnect gap, so seeding the watermark from
-        // it would make the next BEFORE anchor there and replay already-local
-        // history page by page (scrollback appears stuck).
-        let advances_watermark = completed.iter().any(|(dir, _)| *dir == Direction::Before);
+        // Only a *cleanly closed* BEFORE completion advances the scroll-back
+        // watermark, which tracks how far back scroll-up has reached.
+        //
+        // - AFTER/LATEST gap-fills pull RECENT messages near the reconnect gap,
+        //   so seeding the watermark from one would make the next BEFORE anchor
+        //   there and replay already-local history page by page (stuck scrollback).
+        // - A timed-out BEFORE batch (`clean_end == false`) may be a PARTIAL page:
+        //   if the server stalled mid-transmission we only have some of the
+        //   requested rows. Advancing to that partial oldest would make the retry
+        //   anchor there and permanently skip the rows between the original anchor
+        //   and the partial oldest. Leave the watermark put so the retry re-fetches
+        //   the whole page (already-stored rows dedupe by @msgid).
+        let advances_watermark =
+            clean_end && completed.iter().any(|(dir, _)| *dir == Direction::Before);
         if advances_watermark
             && let Some((ts, msgid)) = oldest
         {
@@ -478,6 +488,28 @@ mod tests {
         assert!(
             st.should_request("#chan", Direction::Before, true),
             "in-flight cleared so a later scroll-up retries the fetch"
+        );
+    }
+
+    #[test]
+    fn timed_out_before_batch_does_not_advance_watermark() {
+        // A timed-out BEFORE batch may be a PARTIAL page (the server stalled
+        // mid-transmission). Advancing the watermark to its oldest partial row
+        // would make the next BEFORE anchor there and permanently skip rows that
+        // belonged between the original anchor and that partial row. An unclean
+        // batch must leave the watermark put so the retry re-fetches the page.
+        let mut st = HistoryState::new();
+        // Establish a watermark from a clean page first.
+        st.mark_in_flight("#chan", Direction::Before, 100);
+        st.complete_target("#chan", 100, Some((5000, Some("m5".into()))), true);
+        assert_eq!(st.oldest_fetched("#chan"), Some((5000, Some("m5".into()))));
+        // A timed-out batch reports an older partial oldest — must be ignored.
+        st.mark_in_flight("#chan", Direction::Before, 100);
+        st.complete_target("#chan", 40, Some((3000, Some("m3".into()))), false);
+        assert_eq!(
+            st.oldest_fetched("#chan"),
+            Some((5000, Some("m5".into()))),
+            "a timed-out batch must not move the watermark"
         );
     }
 
