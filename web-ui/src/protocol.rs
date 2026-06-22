@@ -244,6 +244,11 @@ pub struct ConnectionMeta {
 pub struct WireMessage {
     pub id: u64,
     pub timestamp: i64,
+    /// Full-millisecond `@time`; the ordering key for sorted gap-fill inserts
+    /// (whole-second `timestamp` is too coarse). `0` when the server omitted it,
+    /// in which case ordering falls back to `timestamp * 1000`.
+    #[serde(default)]
+    pub ts_ms: i64,
     pub msg_type: String,
     pub nick: Option<String>,
     pub nick_mode: Option<String>,

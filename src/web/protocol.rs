@@ -265,6 +265,13 @@ pub struct ConnectionMeta {
 pub struct WireMessage {
     pub id: u64,
     pub timestamp: i64,
+    /// Full-millisecond `@time`. `timestamp` is only whole seconds, which is too
+    /// coarse to order a reconnect gap-fill row against same-second live
+    /// messages (the gap-fill row gets a fresh, larger `id`), so the client sorts
+    /// inserts by this. `#[serde(default)]` → 0 for any sender that omits it; the
+    /// client then falls back to `timestamp * 1000`.
+    #[serde(default)]
+    pub ts_ms: i64,
     pub msg_type: String,
     pub nick: Option<String>,
     pub nick_mode: Option<String>,
@@ -382,6 +389,7 @@ mod tests {
         let msg = WireMessage {
             id: 42,
             timestamp: 1_710_000_000,
+            ts_ms: 1_710_000_000_500,
             msg_type: "message".into(),
             nick: Some("ferris".into()),
             nick_mode: Some("@".into()),
@@ -394,6 +402,7 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: WireMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.id, 42);
+        assert_eq!(decoded.ts_ms, 1_710_000_000_500);
         assert_eq!(decoded.nick.as_deref(), Some("ferris"));
         assert_eq!(decoded.text, "hello 🚀");
     }

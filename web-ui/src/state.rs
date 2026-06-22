@@ -272,10 +272,14 @@ impl AppState {
                 self.messages.update(|msgs| {
                     let entry = msgs.entry(buffer_id.clone()).or_default();
                     if !message_already_present(entry, &message) {
-                        let key = (message.timestamp, message.id);
+                        // Order by full-millisecond ts_ms, not whole-second
+                        // timestamp: a gap-fill row sharing a second with live
+                        // messages gets a fresh, larger id, so a (seconds, id) key
+                        // would place older history after newer live lines.
+                        let key = insert_order_key(&message);
                         let pos = entry
                             .iter()
-                            .position(|m| (m.timestamp, m.id) > key)
+                            .position(|m| insert_order_key(m) > key)
                             .unwrap_or(entry.len());
                         entry.insert(pos, message);
                         cap_messages(entry, cap);
@@ -681,6 +685,18 @@ fn message_already_present(existing: &[WireMessage], msg: &WireMessage) -> bool 
             .any(|m| m.id == msg.id && m.log_id == msg.log_id)
 }
 
+/// Timeline ordering key for a sorted (gap-fill) insert: full-millisecond time,
+/// tie-broken by transport id. Falls back to `timestamp * 1000` when `ts_ms` is
+/// absent (`0`) so a server that omits the field still orders by whole seconds.
+fn insert_order_key(msg: &WireMessage) -> (i64, u64) {
+    let ms = if msg.ts_ms != 0 {
+        msg.ts_ms
+    } else {
+        msg.timestamp * 1000
+    };
+    (ms, msg.id)
+}
+
 /// Drop entries from an incoming `messages` batch that are already loaded in
 /// `existing`.
 ///
@@ -758,6 +774,7 @@ fn insert_date_separators(messages: Vec<WireMessage>) -> Vec<WireMessage> {
                 result.push(WireMessage {
                     id: 0,
                     timestamp: msg.timestamp,
+                    ts_ms: msg.ts_ms,
                     msg_type: "event".to_string(),
                     nick: None,
                     nick_mode: None,
@@ -849,6 +866,7 @@ mod tests {
         WireMessage {
             id,
             timestamp: ts,
+            ts_ms: ts * 1000,
             msg_type: "message".to_string(),
             nick: Some("alice".to_string()),
             nick_mode: None,
@@ -873,6 +891,32 @@ mod tests {
         list.iter()
             .filter(|m| m.event_key.as_deref() == Some("date_separator"))
             .count()
+    }
+
+    #[test]
+    fn gap_fill_orders_by_subsecond_not_id() {
+        // A live message at .500 with a small id, and a reconnect gap-fill row at
+        // .200 (older) that was assigned a fresh, larger id. The gap-fill row must
+        // sort BEFORE the live message — a whole-second (timestamp, id) key would
+        // wrongly place it after, since they share the second and its id is bigger.
+        let mut live = live_msg(5, 100);
+        live.ts_ms = 100_500;
+        let mut gap = msg(99, 100);
+        gap.ts_ms = 100_200;
+
+        assert!(
+            insert_order_key(&gap) < insert_order_key(&live),
+            "older gap-fill row sorts before the newer same-second live line"
+        );
+        // The pre-fix (timestamp, id) key would order them the wrong way round.
+        assert!((gap.timestamp, gap.id) > (live.timestamp, live.id));
+    }
+
+    #[test]
+    fn insert_order_key_falls_back_to_seconds_when_ts_ms_absent() {
+        let mut m = live_msg(3, 150);
+        m.ts_ms = 0; // a sender that omitted the field
+        assert_eq!(insert_order_key(&m), (150_000, 3));
     }
 
     // 2024-06-09 12:00 / 13:00 UTC — same calendar day in every realistic tz.
