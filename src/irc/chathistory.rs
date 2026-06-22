@@ -131,6 +131,14 @@ pub struct HistoryState {
     /// through windows that contain only (un-ingested) event-playback lines,
     /// and never skips messages within the boundary second.
     oldest_fetched: HashMap<String, (i64, Option<String>)>,
+    /// Per-target oldest server-time (unix **millis**) of a row actually
+    /// **ingested** into `SQLite` via `BEFORE` scroll-back — i.e. one that will
+    /// surface through pagination. Distinct from `oldest_fetched`, which also
+    /// counts skipped event-playback lines for anchor progress: those never
+    /// become `SQLite` rows, so the buffer's oldest displayed message could never
+    /// reach them. Pagination-exhaustion (`history_fully_paginated`) compares
+    /// against THIS so a skipped-only final batch settles instead of looping.
+    oldest_ingested: HashMap<String, i64>,
 }
 
 impl HistoryState {
@@ -238,6 +246,31 @@ impl HistoryState {
         self.oldest_fetched
             .get(&target.to_ascii_lowercase())
             .cloned()
+    }
+
+    /// Record the oldest server-time (unix **millis**) of a row actually ingested
+    /// from a `BEFORE` batch, lowering the per-target ingested watermark. A batch
+    /// that stored nothing (e.g. only event-playback) never calls this, so the
+    /// watermark stays put and pagination-exhaustion can settle.
+    pub fn note_oldest_ingested(&mut self, target: &str, oldest_ms: i64) {
+        self.oldest_ingested
+            .entry(target.to_ascii_lowercase())
+            .and_modify(|cur| {
+                if oldest_ms < *cur {
+                    *cur = oldest_ms;
+                }
+            })
+            .or_insert(oldest_ms);
+    }
+
+    /// Oldest **ingested** server-time (unix millis) for `target`, if any — the
+    /// deepest row scroll-back can actually display. `None` until a `BEFORE`
+    /// batch stores at least one row.
+    #[must_use]
+    pub fn oldest_ingested(&self, target: &str) -> Option<i64> {
+        self.oldest_ingested
+            .get(&target.to_ascii_lowercase())
+            .copied()
     }
 
     /// Complete all in-flight requests for `target` after its batch arrived
@@ -554,6 +587,21 @@ mod tests {
             None,
             "AFTER/LATEST must not seed the BEFORE watermark"
         );
+    }
+
+    #[test]
+    fn oldest_ingested_advances_to_minimum_independently() {
+        let mut st = HistoryState::new();
+        assert_eq!(st.oldest_ingested("#chan"), None);
+        st.note_oldest_ingested("#chan", 5000);
+        assert_eq!(st.oldest_ingested("#chan"), Some(5000));
+        // Lowers to an older row, ignores a newer one.
+        st.note_oldest_ingested("#chan", 3000);
+        assert_eq!(st.oldest_ingested("#chan"), Some(3000));
+        st.note_oldest_ingested("#chan", 9000);
+        assert_eq!(st.oldest_ingested("#chan"), Some(3000));
+        // Case-insensitive, like the other per-target maps.
+        assert_eq!(st.oldest_ingested("#CHAN"), Some(3000));
     }
 
     #[test]

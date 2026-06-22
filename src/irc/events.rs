@@ -776,6 +776,12 @@ pub struct IngestOutcome {
     /// `history_exhausted` flag only when this is non-zero — a batch that stored
     /// nothing has nothing for pagination to surface.
     pub ingested: usize,
+    /// Oldest server-time (unix **millis**) among the rows actually persisted, or
+    /// `None` if none were. Unlike `oldest` (all lines, for the next anchor) this
+    /// tracks only rows that will surface via pagination, so the caller can settle
+    /// scroll-back exhaustion once the buffer has displayed down to it — a
+    /// skipped-only batch leaves it `None` and the buffer settles immediately.
+    pub oldest_ingested_ms: Option<i64>,
 }
 
 /// Ingest a completed `draft/chathistory` batch into the log store.
@@ -809,6 +815,7 @@ pub struct IngestOutcome {
 /// v1 scope: `draft/event-playback` lines (JOIN/PART/QUIT/NICK/TOPIC/MODE) and
 /// non-ACTION CTCP are skipped rather than rendered into stored event rows.
 /// See `docs/superpowers/specs/2026-06-19-draft-chathistory-design.md`.
+#[expect(clippy::too_many_lines, reason = "linear chathistory ingest loop")]
 pub fn ingest_chathistory_batch(
     state: &AppState,
     conn_id: &str,
@@ -822,6 +829,7 @@ pub fn ingest_chathistory_batch(
         .unwrap_or_default();
 
     let mut ingested = 0usize;
+    let mut oldest_ingested_ms: Option<i64> = None;
     let mut skipped = 0usize;
     let mut display_rows: Vec<(String, Message)> = Vec::new();
     // Oldest line seen across the whole batch (events included): full
@@ -929,6 +937,10 @@ pub fn ingest_chathistory_batch(
 
         state.ingest_history_message(&buffer_id, &message);
         ingested += 1;
+        let ingested_ms = message.timestamp.timestamp_millis();
+        if oldest_ingested_ms.is_none_or(|cur| ingested_ms < cur) {
+            oldest_ingested_ms = Some(ingested_ms);
+        }
         if collect_display {
             display_rows.push((buffer_id, message));
         }
@@ -947,6 +959,7 @@ pub fn ingest_chathistory_batch(
         oldest,
         display_rows,
         ingested,
+        oldest_ingested_ms,
     }
 }
 

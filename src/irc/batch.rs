@@ -184,6 +184,7 @@ pub fn process_completed_batch(
             let is_gapfill = matches!(direction, Some(Direction::After | Direction::Latest));
             let outcome =
                 crate::irc::events::ingest_chathistory_batch(state, conn_id, batch, is_gapfill);
+            let is_before = matches!(direction, Some(Direction::Before));
             if let Some(target) = batch.params.first() {
                 if let Some(conn) = state.connections.get_mut(conn_id) {
                     conn.chathistory.complete_target(
@@ -192,6 +193,16 @@ pub fn process_completed_batch(
                         outcome.oldest,
                         clean_end,
                     );
+                    // Advance the pagination watermark only by rows that were
+                    // actually stored (a BEFORE scroll-back fetch). A skipped-only
+                    // batch leaves it untouched so `history_fully_paginated` can
+                    // settle exhaustion instead of waiting for rows that will
+                    // never appear.
+                    if is_before
+                        && let Some(ms) = outcome.oldest_ingested_ms
+                    {
+                        conn.chathistory.note_oldest_ingested(target, ms);
+                    }
                 }
                 // Older rows just landed in SQLite. A buffer that marked itself
                 // history-exhausted from a short startup log must re-open so a
@@ -1303,6 +1314,73 @@ mod tests {
                 .expect("buffer exists")
                 .history_exhausted,
             "a batch that ingested no rows must not reset the exhausted flag"
+        );
+    }
+
+    #[test]
+    fn skipped_only_before_batch_leaves_ingested_watermark_unset() {
+        // The pagination-exhaustion watermark (oldest_ingested) must only move
+        // for rows actually stored. A skipped-only BEFORE batch leaves it None so
+        // history_fully_paginated settles instead of waiting forever for rows that
+        // never reach SQLite — even though oldest_fetched DID advance (anchor
+        // progress past the event-playback window). [P2 review]
+        let conn_id = "test";
+        let (mut state, _rx, _buf_id) = setup_ingest_state(conn_id);
+        state
+            .connections
+            .get_mut(conn_id)
+            .expect("connection")
+            .chathistory
+            .mark_in_flight("#test", crate::irc::chathistory::Direction::Before, 200);
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![make_join_msg("dave", "#test", "h1")],
+        };
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        let hist = &state.connections.get(conn_id).expect("connection").chathistory;
+        assert_eq!(
+            hist.oldest_ingested("#test"),
+            None,
+            "skipped-only batch must not advance the ingested watermark"
+        );
+    }
+
+    #[test]
+    fn conversational_before_batch_advances_ingested_watermark() {
+        let conn_id = "test";
+        let (mut state, _rx, _buf_id) = setup_ingest_state(conn_id);
+        state
+            .connections
+            .get_mut(conn_id)
+            .expect("connection")
+            .chathistory
+            .mark_in_flight("#test", crate::irc::chathistory::Direction::Before, 200);
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![make_history_privmsg_at(
+                "bob",
+                "#test",
+                "older line",
+                "m1",
+                "2024-01-01T00:00:01.500Z",
+            )],
+        };
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        let hist = &state.connections.get(conn_id).expect("connection").chathistory;
+        assert_eq!(
+            hist.oldest_ingested("#test"),
+            Some(1_704_067_201_500),
+            "an ingested row advances the watermark to its @time millis"
         );
     }
 

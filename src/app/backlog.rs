@@ -346,10 +346,17 @@ impl App {
         }
     }
 
-    /// Whether the buffer has paginated down to chathistory's `BEFORE`
-    /// watermark — i.e. every server-fetched row is now displayed, so it's safe
-    /// to mark the buffer `history_exhausted`. False while a final short BEFORE
-    /// batch is queued in the async log writer but not yet paginated in.
+    /// Whether the buffer has paginated down to every row chathistory actually
+    /// **ingested** — so it's safe to mark the buffer `history_exhausted`. False
+    /// while a final short BEFORE batch's stored rows are queued in the async log
+    /// writer but not yet paginated in.
+    ///
+    /// Compares against the *ingested* watermark, NOT `oldest_fetched`: the latter
+    /// advances past skipped event-playback lines (for the next BEFORE anchor),
+    /// but those never become `SQLite` rows, so the buffer's oldest displayed
+    /// message could never reach them — a skipped-only final batch would loop
+    /// forever re-querying an empty local page. The ingested watermark only moves
+    /// for rows that will actually surface.
     fn history_fully_paginated(&self, buffer_id: &str) -> bool {
         let Some(buf) = self.state.buffers.get(buffer_id) else {
             return true;
@@ -358,8 +365,7 @@ impl App {
             .state
             .connections
             .get(&buf.connection_id)
-            .and_then(|c| c.chathistory.oldest_fetched(&buf.name))
-            .map(|(ms, _)| ms);
+            .and_then(|c| c.chathistory.oldest_ingested(&buf.name));
         let buffer_oldest_ms = in_memory_oldest_anchor(&buf.messages).map(|(_, ms)| ms);
         reached_history_watermark(watermark_ms, buffer_oldest_ms)
     }
