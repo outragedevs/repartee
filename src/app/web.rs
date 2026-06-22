@@ -796,7 +796,19 @@ impl App {
         // comparison. A DB-sourced cursor row supplies its rowid; at the live/DB
         // boundary (`before_id` None) id 0 makes the keyset "strictly older ms".
         // `before == None` is the initial load (newest page).
-        let cursor: Option<(i64, i64)> = match (before, before_id) {
+        //
+        // Back-compat: the WS protocol is not version-gated, so a web client still
+        // running the previous bundle sends whole-SECOND timestamps. A second-scale
+        // value (< year ~2001 in millis) is scaled up to millis, or it would query
+        // around 1970 (ms/1000) and return empty scrollback.
+        let before_ms = before.map(|b| {
+            if b < 1_000_000_000_000 {
+                b.saturating_mul(1000)
+            } else {
+                b
+            }
+        });
+        let cursor: Option<(i64, i64)> = match (before_ms, before_id) {
             (Some(ms), Some(id)) => Some((ms, id)),
             (Some(ms), None) => Some((ms, 0)),
             (None, _) => None,
