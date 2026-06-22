@@ -137,9 +137,12 @@ pub enum WebCommand {
     FetchMessages {
         buffer_id: String,
         limit: u32,
+        /// Oldest loaded message's full-millisecond `@time` (`ts_ms`); the server
+        /// runs the subsecond keyset against it. `None` for the initial load.
         before: Option<i64>,
         /// Oldest loaded message's id (DB rowid for log-sourced rows), forming a
-        /// `(before, before_id)` keyset cursor so same-second rows aren't dropped.
+        /// `(before_ms, before_id)` keyset cursor so same-second (including
+        /// CHATHISTORY-backfilled) rows aren't dropped.
         before_id: Option<i64>,
     },
     FetchNickList {
