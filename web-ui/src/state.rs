@@ -269,6 +269,7 @@ impl AppState {
                 let pinned = active.as_deref() == Some(&buffer_id)
                     && !self.is_at_bottom.get_untracked();
                 let cap = if pinned { PINNED_WEB_CAP } else { MAX_BUFFER_MESSAGES };
+                let mut trimmed = false;
                 self.messages.update(|msgs| {
                     let entry = msgs.entry(buffer_id.clone()).or_default();
                     if !message_already_present(entry, &message) {
@@ -282,9 +283,19 @@ impl AppState {
                             .position(|m| insert_order_key(m) > key)
                             .unwrap_or(entry.len());
                         entry.insert(pos, message);
-                        cap_messages(entry, cap);
+                        trimmed = cap_messages(entry, cap);
                     }
                 });
+                // A trim dropped the oldest loaded rows, so older history exists
+                // below the in-memory head again — re-arm scroll-up even if a
+                // previous fetch had reached the start and set has_more=false
+                // (mirrors the NewMessage path). Without this, a gap-fill insert at
+                // a full buffer could permanently suppress further scroll-back.
+                if trimmed {
+                    self.backlog_has_more.update(|m| {
+                        m.insert(buffer_id.clone(), true);
+                    });
+                }
             }
             WebEvent::TopicChanged {
                 buffer_id, topic, ..
@@ -917,6 +928,21 @@ mod tests {
         let mut m = live_msg(3, 150);
         m.ts_ms = 0; // a sender that omitted the field
         assert_eq!(insert_order_key(&m), (150_000, 3));
+    }
+
+    #[test]
+    fn cap_messages_reports_whether_it_trimmed() {
+        // The InsertMessage (gap-fill) and NewMessage handlers both rely on this
+        // return value to re-arm backlog_has_more when a trim drops loaded rows.
+        let mut under: Vec<WireMessage> = (0..3).map(|i| msg(i, 100)).collect();
+        assert!(!cap_messages(&mut under, 5), "no trim under the cap");
+        assert_eq!(under.len(), 3);
+
+        let mut over: Vec<WireMessage> = (0..8).map(|i| msg(i, 100)).collect();
+        assert!(cap_messages(&mut over, 5), "trims and reports true at the cap");
+        assert_eq!(over.len(), 5);
+        // Oldest rows are the ones dropped (drain from the front).
+        assert_eq!(over.first().map(|m| m.id), Some(3));
     }
 
     // 2024-06-09 12:00 / 13:00 UTC — same calendar day in every realistic tz.
