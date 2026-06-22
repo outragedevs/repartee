@@ -524,26 +524,57 @@ impl App {
     }
 
     /// On (re)connect, request a `CHATHISTORY` gap-fill for the **active**
-    /// buffer when it belongs to `conn_id` and the connection negotiated
-    /// `draft/chathistory`. Anchors `AFTER` the newest stored row (so we pull
-    /// only what we missed while disconnected), or `LATEST` when the buffer has
-    /// no stored history yet. Other buffers fill lazily when focused (follow-up).
+    /// buffer when it is a **query** (PM) belonging to `conn_id`. Fired at
+    /// end-of-MOTD.
+    ///
+    /// Channels are deliberately excluded here: their gap-fill runs from the
+    /// end-of-NAMES path ([`Self::gapfill_active_channel_on_join`]) instead.
+    /// Config-channel auto-joins are sent by the irc crate at end-of-MOTD, so a
+    /// channel `CHATHISTORY` issued here would race the JOIN and be rejected for
+    /// non-membership by servers that gate history on channel membership, with no
+    /// retry. A query needs no membership, so MOTD timing is correct for it.
     pub(crate) fn gapfill_active_buffer_on_connect(&mut self, conn_id: &str) {
-        use crate::irc::chathistory::Direction;
-
         let Some(active_id) = self.state.active_buffer_id.clone() else {
             return;
         };
         let Some(buf) = self.state.buffers.get(&active_id) else {
             return;
         };
-        // DCC chats are peer-to-peer — the IRC server has no history for them.
+        if buf.connection_id != conn_id || !matches!(buf.buffer_type, BufferType::Query) {
+            return;
+        }
+        let target = buf.name.clone();
+        self.request_connect_gapfill(conn_id, &target);
+    }
+
+    /// On a channel's NAMES completion after (re)connect, gap-fill that channel's
+    /// history **if it is the active buffer**. Running here (rather than at
+    /// end-of-MOTD) guarantees the server has acknowledged our JOIN — NAMES is
+    /// only sent to members — so a membership-gated `CHATHISTORY` is not rejected.
+    /// Other channels fill lazily when focused (follow-up).
+    pub(crate) fn gapfill_active_channel_on_join(&mut self, conn_id: &str, channel: &str) {
+        let Some(active_id) = self.state.active_buffer_id.clone() else {
+            return;
+        };
+        let Some(buf) = self.state.buffers.get(&active_id) else {
+            return;
+        };
         if buf.connection_id != conn_id
-            || !matches!(buf.buffer_type, BufferType::Channel | BufferType::Query)
+            || !matches!(buf.buffer_type, BufferType::Channel)
+            || !buf.name.eq_ignore_ascii_case(channel)
         {
             return;
         }
         let target = buf.name.clone();
+        self.request_connect_gapfill(conn_id, &target);
+    }
+
+    /// Shared gap-fill request: anchor `AFTER` the newest stored row (so we pull
+    /// only what we missed while disconnected), or `LATEST` when the buffer has
+    /// no stored history yet. No-op unless the connection negotiated
+    /// `draft/chathistory`.
+    fn request_connect_gapfill(&mut self, conn_id: &str, target: &str) {
+        use crate::irc::chathistory::Direction;
 
         let Some(conn) = self.state.connections.get(conn_id) else {
             return;
@@ -557,27 +588,29 @@ impl App {
         // logged, ask for the LATEST page instead.
         let anchor = self.storage.as_ref().and_then(|storage| {
             let db = storage.db.lock().ok()?;
-            crate::storage::query::newest_anchor(&db, &network, &target)
+            crate::storage::query::newest_anchor(&db, &network, target)
                 .ok()
                 .flatten()
         });
 
         match anchor {
-            Some((ts_secs, _id)) => {
-                // Anchor by timestamp (passed in milliseconds; the DB stores
-                // whole seconds). The stored `msg_id` is not used as a server
-                // reference — it may be a locally-minted UUID rather than a real
-                // IRC @msgid, which a MSGREFTYPES=msgid server cannot resolve.
-                let anchor_ms = ts_secs * 1000;
+            Some((anchor_ms, _id)) => {
+                // `newest_anchor` returns the full-millisecond `@time`, so the
+                // AFTER anchor is not floored to `.000` of the boundary second
+                // (which on a busy channel could refetch only already-stored rows
+                // and never reach the disconnected-gap messages). The stored
+                // `msg_id` is not used as a server reference — it may be a
+                // locally-minted UUID rather than a real IRC @msgid, which a
+                // MSGREFTYPES=msgid server cannot resolve.
                 self.request_chathistory(
                     conn_id,
-                    &target,
+                    target,
                     Direction::After,
                     Some((None, anchor_ms)),
                 );
             }
             None => {
-                self.request_chathistory(conn_id, &target, Direction::Latest, None);
+                self.request_chathistory(conn_id, target, Direction::Latest, None);
             }
         }
     }

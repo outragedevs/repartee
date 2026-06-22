@@ -283,25 +283,29 @@ pub fn get_messages_paginated_subsecond(
 /// Newest stored row for a buffer, used as the anchor for a
 /// `CHATHISTORY AFTER` gap-fill request after (re)connecting.
 ///
-/// Returns `(timestamp, id)` for the row with the greatest `(timestamp, id)`,
-/// or `None` if the buffer has no stored messages.
+/// Returns `(unix_millis, id)` for the newest row, or `None` if the buffer has
+/// no stored messages. The timestamp is the full-millisecond `@time`
+/// (`COALESCE(ts_ms, timestamp * 1000)`), NOT the floored whole second: a busy
+/// channel can fit a whole `CHATHISTORY` page inside the boundary second, so an
+/// `AFTER` anchor floored to `.000` could keep refetching already-stored rows
+/// and never reach the messages missed during the disconnect.
 ///
 /// The stored `msg_id` is intentionally NOT returned: live PRIVMSG/NOTICE rows
-/// are logged with a locally-minted UUID (see `state/events::maybe_log`), not
-/// the server's IRC `@msgid`, and the column can't distinguish the two. Feeding
-/// such a UUID to `CHATHISTORY ... msgid=<uuid>` fails on a `MSGREFTYPES=msgid`
-/// server, so the anchor is always a full-precision timestamp reference. Only a
-/// `@msgid` verified via a chathistory batch (the per-target watermark) is ever
-/// used as a msgid reference.
+/// are logged with a locally-minted UUID (see `state/events::maybe_log`) when no
+/// server `@msgid` was present, and the column can't distinguish the two.
+/// Feeding such a UUID to `CHATHISTORY ... msgid=<uuid>` fails on a
+/// `MSGREFTYPES=msgid` server, so the anchor is always a full-precision
+/// timestamp reference. Only a `@msgid` verified via a chathistory batch (the
+/// per-target watermark) is ever used as a msgid reference.
 pub fn newest_anchor(
     db: &Connection,
     network: &str,
     buffer: &str,
 ) -> rusqlite::Result<Option<(i64, i64)>> {
     let mut stmt = db.prepare(
-        "SELECT timestamp, id FROM messages
+        "SELECT COALESCE(ts_ms, timestamp * 1000) AS ts_ms, id FROM messages
          WHERE network = ?1 AND buffer = ?2
-         ORDER BY timestamp DESC, id DESC
+         ORDER BY COALESCE(ts_ms, timestamp * 1000) DESC, id DESC
          LIMIT 1",
     )?;
     // Log rows are stored under the lowercased buffer key (make_buffer_id);
@@ -309,9 +313,9 @@ pub fn newest_anchor(
     let mut rows = stmt.query(params![network, buffer.to_lowercase()])?;
     match rows.next()? {
         Some(row) => {
-            let timestamp: i64 = row.get(0)?;
+            let ts_ms: i64 = row.get(0)?;
             let id: i64 = row.get(1)?;
-            Ok(Some((timestamp, id)))
+            Ok(Some((ts_ms, id)))
         }
         None => Ok(None),
     }
@@ -1120,10 +1124,10 @@ mod tests {
         insert_msg(&db, "net", "#chan", 300, "c");
         insert_msg(&db, "net", "#chan", 200, "b");
 
-        // Anchor is (timestamp, id) — the stored `msg_id` is deliberately NOT
+        // Anchor is (unix_millis, id) — the stored `msg_id` is deliberately NOT
         // returned (it may be a locally-minted UUID, not a server @msgid).
         let anchor = newest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
-        assert_eq!(anchor.0, 300);
+        assert_eq!(anchor.0, 300_000);
     }
 
     #[test]
@@ -1139,7 +1143,7 @@ mod tests {
         }
         let anchor = newest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
         // Last inserted shares timestamp 500 but has the greatest id.
-        assert_eq!(anchor, (500, db.last_insert_rowid()));
+        assert_eq!(anchor, (500_000, db.last_insert_rowid()));
     }
 
     #[test]
@@ -1149,7 +1153,7 @@ mod tests {
         insert_msg(&db, "net", "#other", 999, "b");
 
         let anchor = newest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
-        assert_eq!(anchor.0, 100);
+        assert_eq!(anchor.0, 100_000);
     }
 
     #[test]
@@ -1166,7 +1170,7 @@ mod tests {
         )
         .unwrap();
         let newest = newest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
-        assert_eq!(newest.0, 100);
+        assert_eq!(newest.0, 100_000);
     }
 
     #[test]
@@ -1180,7 +1184,7 @@ mod tests {
         insert_msg(&db, "net", "#rust", 200, "b");
 
         let newest = newest_anchor(&db, "net", "#Rust").unwrap().expect("anchor");
-        assert_eq!(newest.0, 200);
+        assert_eq!(newest.0, 200_000);
         let oldest = oldest_anchor(&db, "net", "#Rust").unwrap().expect("anchor");
         assert_eq!(oldest.0, 100_000);
     }

@@ -851,6 +851,11 @@ impl App {
 
                     // Queue channel for batched WHO + MODE after join.
                     if let Some(channel) = endofnames_channel {
+                        // NAMES completing confirms the server has us in the
+                        // channel, so a membership-gated CHATHISTORY won't be
+                        // rejected. Run the active channel's reconnect gap-fill
+                        // here rather than at end-of-MOTD, which races the JOIN.
+                        self.gapfill_active_channel_on_join(&conn_id, &channel);
                         self.queue_channel_query(&conn_id, channel);
                     }
 
@@ -859,12 +864,14 @@ impl App {
                         self.handle_who_batch_complete(&conn_id, target);
                     }
 
-                    // Reconnect gap-fill (deferred from RPL_WELCOME): by
-                    // end-of-MOTD the 005 ISUPPORT lines are parsed (correct
-                    // CHATHISTORY limit/ref types) and the rejoin JOINs sent at
-                    // RPL_WELCOME have been processed by the server (the request
-                    // won't be rejected for non-membership). Fires on the MOTD
-                    // terminator (376) or its absence (422).
+                    // Reconnect gap-fill for an active QUERY buffer (deferred
+                    // from RPL_WELCOME): by end-of-MOTD the 005 ISUPPORT lines are
+                    // parsed, so CHATHISTORY uses the correct limit/ref types. A
+                    // query needs no channel membership, so this timing is safe.
+                    // Active CHANNEL buffers gap-fill from the end-of-NAMES path
+                    // instead (membership is confirmed there; firing here would
+                    // race the auto-JOIN). Fires on the MOTD terminator (376) or
+                    // its absence (422).
                     if matches!(
                         msg.command,
                         ::irc::proto::Command::Response(
