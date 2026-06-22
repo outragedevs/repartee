@@ -15,11 +15,15 @@ fn map_row(
     let network: String = row.get("network")?;
     let buffer: String = row.get("buffer")?;
     let timestamp: i64 = row.get("timestamp")?;
-    // Read paths usually alias `COALESCE(ts_ms, timestamp*1000) AS ts_ms` (always
-    // non-null), but `search_messages` selects raw `m.*` where `ts_ms` may be
-    // NULL for rows predating the column — fall back to whole-seconds either way.
+    // Read paths usually alias `<expr> AS ts_ms` (always non-null), but
+    // `search_messages` selects raw `m.*`, where `ts_ms` is NULL for rows
+    // predating the column — or absent entirely on an unmigrated read-only DB.
+    // `get_ref` tolerates a missing column (Err) as well as NULL, both falling
+    // back to whole-seconds.
     let ts_ms: i64 = row
-        .get::<_, Option<i64>>("ts_ms")?
+        .get_ref("ts_ms")
+        .ok()
+        .and_then(|v| v.as_i64().ok())
         .unwrap_or(timestamp * 1000);
     let msg_type: String = row.get("type")?;
     let nick: Option<String> = row.get("nick")?;
@@ -64,6 +68,30 @@ fn map_row(
     })
 }
 
+/// Whether the `messages` table has the `ts_ms` column.
+///
+/// A read-only log DB (`repartee l` via `open_readonly_at`) deliberately skips
+/// migration, so a database created before `ts_ms` existed will not have the
+/// column. Read paths must not reference `m.ts_ms` unconditionally — that would
+/// fail at prepare time with `no such column` — so they consult this first and
+/// fall back to `timestamp * 1000` when the column is absent.
+fn has_ts_ms_column(db: &Connection) -> bool {
+    db.prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name = 'ts_ms'")
+        .and_then(|mut stmt| stmt.exists([]))
+        .unwrap_or(false)
+}
+
+/// SQL expression yielding a row's millisecond `@time`, tolerant of databases
+/// that lack the `ts_ms` column (see [`has_ts_ms_column`]). `prefix` is the
+/// table alias plus dot (`"m."` for the JOIN reads, `""` for single-table reads).
+fn ts_ms_expr(db: &Connection, prefix: &str) -> String {
+    if has_ts_ms_column(db) {
+        format!("COALESCE({prefix}ts_ms, {prefix}timestamp * 1000)")
+    } else {
+        format!("({prefix}timestamp * 1000)")
+    }
+}
+
 /// Columns selected by every chat/log read path.
 ///
 /// Fan-out reference rows (e.g. a single QUIT broadcast across N channels)
@@ -72,16 +100,20 @@ fn map_row(
 /// Without a JOIN to that primary row, every reference row would render
 /// as a blank event line in backlog or in the log browser. The aliases
 /// below transparently substitute the primary's `text` + `iv` whenever
-/// a reference exists; `map_row` is unchanged.
-const SELECT_MESSAGE_COLUMNS: &str = "
-    m.id, m.msg_id, m.network, m.buffer, m.timestamp,
-    COALESCE(m.ts_ms, m.timestamp * 1000) AS ts_ms,
-    m.type, m.nick,
-    COALESCE(p.text, m.text) AS text,
-    m.highlight,
-    COALESCE(p.iv,   m.iv)   AS iv,
-    m.ref_id, m.tags, m.event_key
-";
+/// a reference exists; `map_row` is unchanged. `ts_ms` is built via
+/// [`ts_ms_expr`] so the read works even on an unmigrated read-only DB.
+fn select_message_columns(db: &Connection) -> String {
+    format!(
+        "m.id, m.msg_id, m.network, m.buffer, m.timestamp,
+         {} AS ts_ms,
+         m.type, m.nick,
+         COALESCE(p.text, m.text) AS text,
+         m.highlight,
+         COALESCE(p.iv,   m.iv)   AS iv,
+         m.ref_id, m.tags, m.event_key",
+        ts_ms_expr(db, "m.")
+    )
+}
 
 /// Fetch messages for a buffer with cursor-based pagination.
 ///
@@ -96,9 +128,10 @@ pub fn get_messages(
     encrypt: bool,
     crypto_key: Option<&Key<Aes256Gcm>>,
 ) -> rusqlite::Result<Vec<StoredMessage>> {
+    let cols = select_message_columns(db);
     let mut messages = if let Some(before_ts) = before {
         let sql = format!(
-            "SELECT {SELECT_MESSAGE_COLUMNS}
+            "SELECT {cols}
              FROM messages m
              LEFT JOIN messages p ON p.msg_id = m.ref_id AND p.network = m.network
              WHERE m.network = ?1 AND m.buffer = ?2 AND m.timestamp < ?3
@@ -116,7 +149,7 @@ pub fn get_messages(
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     } else {
         let sql = format!(
-            "SELECT {SELECT_MESSAGE_COLUMNS}
+            "SELECT {cols}
              FROM messages m
              LEFT JOIN messages p ON p.msg_id = m.ref_id AND p.network = m.network
              WHERE m.network = ?1 AND m.buffer = ?2
@@ -165,9 +198,10 @@ pub fn get_messages_paginated(
     encrypt: bool,
     crypto_key: Option<&Key<Aes256Gcm>>,
 ) -> rusqlite::Result<Vec<StoredMessage>> {
+    let cols = select_message_columns(db);
     let mut messages = if let Some((ts, id)) = before {
         let sql = format!(
-            "SELECT {SELECT_MESSAGE_COLUMNS}
+            "SELECT {cols}
              FROM messages m
              LEFT JOIN messages p ON p.msg_id = m.ref_id AND p.network = m.network
              WHERE m.network = ?1 AND m.buffer = ?2
@@ -186,7 +220,7 @@ pub fn get_messages_paginated(
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     } else {
         let sql = format!(
-            "SELECT {SELECT_MESSAGE_COLUMNS}
+            "SELECT {cols}
              FROM messages m
              LEFT JOIN messages p ON p.msg_id = m.ref_id AND p.network = m.network
              WHERE m.network = ?1 AND m.buffer = ?2
@@ -235,17 +269,21 @@ pub fn get_messages_paginated_subsecond(
     encrypt: bool,
     crypto_key: Option<&Key<Aes256Gcm>>,
 ) -> rusqlite::Result<Vec<StoredMessage>> {
+    let cols = select_message_columns(db);
+    // Same millisecond expression drives the SELECT alias, the cursor predicate
+    // and the ORDER BY, and degrades to `timestamp * 1000` on an unmigrated DB.
+    let order = ts_ms_expr(db, "m.");
     let mut messages = if let Some((ms, id)) = before {
         let secs = ms.div_euclid(1000);
         let sql = format!(
-            "SELECT {SELECT_MESSAGE_COLUMNS}
+            "SELECT {cols}
              FROM messages m
              LEFT JOIN messages p ON p.msg_id = m.ref_id AND p.network = m.network
              WHERE m.network = ?1 AND m.buffer = ?2
                AND m.timestamp <= ?3
-               AND (COALESCE(m.ts_ms, m.timestamp * 1000) < ?4
-                    OR (COALESCE(m.ts_ms, m.timestamp * 1000) = ?4 AND m.id < ?5))
-             ORDER BY COALESCE(m.ts_ms, m.timestamp * 1000) DESC, m.id DESC
+               AND ({order} < ?4
+                    OR ({order} = ?4 AND m.id < ?5))
+             ORDER BY {order} DESC, m.id DESC
              LIMIT ?6"
         );
         let mut stmt = db.prepare(&sql)?;
@@ -259,11 +297,11 @@ pub fn get_messages_paginated_subsecond(
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     } else {
         let sql = format!(
-            "SELECT {SELECT_MESSAGE_COLUMNS}
+            "SELECT {cols}
              FROM messages m
              LEFT JOIN messages p ON p.msg_id = m.ref_id AND p.network = m.network
              WHERE m.network = ?1 AND m.buffer = ?2
-             ORDER BY COALESCE(m.ts_ms, m.timestamp * 1000) DESC, m.id DESC
+             ORDER BY {order} DESC, m.id DESC
              LIMIT ?3"
         );
         let mut stmt = db.prepare(&sql)?;
@@ -302,12 +340,14 @@ pub fn newest_anchor(
     network: &str,
     buffer: &str,
 ) -> rusqlite::Result<Option<(i64, i64)>> {
-    let mut stmt = db.prepare(
-        "SELECT COALESCE(ts_ms, timestamp * 1000) AS ts_ms, id FROM messages
+    let expr = ts_ms_expr(db, "");
+    let sql = format!(
+        "SELECT {expr} AS ts_ms, id FROM messages
          WHERE network = ?1 AND buffer = ?2
-         ORDER BY COALESCE(ts_ms, timestamp * 1000) DESC, id DESC
-         LIMIT 1",
-    )?;
+         ORDER BY {expr} DESC, id DESC
+         LIMIT 1"
+    );
+    let mut stmt = db.prepare(&sql)?;
     // Log rows are stored under the lowercased buffer key (make_buffer_id);
     // callers pass the display-case channel/nick, so normalize for the lookup.
     let mut rows = stmt.query(params![network, buffer.to_lowercase()])?;
@@ -1109,6 +1149,82 @@ mod tests {
         assert_eq!(texts, vec!["older", "same-sec", "newer"]);
         // ts_ms surfaces as timestamp*1000 for these NULL rows.
         assert_eq!(all[0].ts_ms, 100_000);
+    }
+
+    /// A `messages` table shaped like a read-only log DB opened before the
+    /// `ts_ms` migration: the column simply does not exist.
+    fn db_without_ts_ms() -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE messages (
+                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                 msg_id    TEXT,
+                 network   TEXT NOT NULL,
+                 buffer    TEXT NOT NULL,
+                 timestamp INTEGER NOT NULL,
+                 type      TEXT NOT NULL,
+                 nick      TEXT,
+                 text      TEXT NOT NULL,
+                 highlight INTEGER DEFAULT 0,
+                 iv        BLOB,
+                 ref_id    TEXT,
+                 tags      TEXT,
+                 event_key TEXT
+             );
+             CREATE VIRTUAL TABLE messages_fts USING fts5(nick, text, content=messages, content_rowid=id);
+             CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
+                 INSERT INTO messages_fts(rowid, nick, text) VALUES (new.id, new.nick, new.text);
+             END;",
+        )
+        .unwrap();
+        db
+    }
+
+    #[test]
+    fn read_paths_work_without_ts_ms_column() {
+        // Regression: a read-only log DB (repartee l) skips migration, so the
+        // ts_ms column is absent. The read paths must not reference m.ts_ms
+        // unconditionally — they fall back to timestamp*1000.
+        let db = db_without_ts_ms();
+        assert!(!has_ts_ms_column(&db));
+        for (ts, text) in [(100_i64, "a"), (100, "b"), (200, "c")] {
+            db.execute(
+                "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight) \
+                 VALUES (?1, 'libera', '#rust', ?2, 'message', 'ada', ?3, 0)",
+                params![text, ts, text],
+            )
+            .unwrap();
+        }
+
+        // The log browser's initial + keyset pages (would previously panic with
+        // "no such column: m.ts_ms").
+        let all =
+            get_messages_paginated_subsecond(&db, "libera", "#rust", None, 10, false, None).unwrap();
+        let texts: Vec<&str> = all.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(texts, vec!["a", "b", "c"]);
+        assert_eq!(all[0].ts_ms, 100_000, "ts_ms falls back to timestamp*1000");
+
+        let newest = all.last().unwrap();
+        assert_eq!(newest.text, "c");
+        let page = get_messages_paginated_subsecond(
+            &db,
+            "libera",
+            "#rust",
+            Some((newest.ts_ms, newest.id)),
+            10,
+            false,
+            None,
+        )
+        .unwrap();
+        let page_texts: Vec<&str> = page.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(page_texts, vec!["a", "b"], "keyset pages older rows without ts_ms");
+
+        // newest_anchor and FTS search also tolerate the missing column.
+        let anchor = newest_anchor(&db, "libera", "#rust").unwrap().expect("anchor");
+        assert_eq!(anchor.0, 200_000);
+        let hits = search_messages(&db, "c", None, None, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].ts_ms, 200_000);
     }
 
     #[test]
