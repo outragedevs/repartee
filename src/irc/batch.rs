@@ -182,23 +182,26 @@ pub fn process_completed_batch(
                     .and_then(|c| c.chathistory.in_flight_direction(target))
             });
             let is_gapfill = matches!(direction, Some(Direction::After | Direction::Latest));
-            let (oldest_ts, display_rows) =
+            let outcome =
                 crate::irc::events::ingest_chathistory_batch(state, conn_id, batch, is_gapfill);
             if let Some(target) = batch.params.first() {
                 if let Some(conn) = state.connections.get_mut(conn_id) {
                     conn.chathistory.complete_target(
                         target,
                         batch.messages.len(),
-                        oldest_ts,
+                        outcome.oldest,
                         clean_end,
                     );
                 }
                 // Older rows just landed in SQLite. A buffer that marked itself
                 // history-exhausted from a short startup log must re-open so a
-                // later scroll-up paginates the freshly ingested rows. Skip when
-                // the batch was empty — nothing new to surface, so leave the
-                // flag (and avoid a pointless re-pagination of unchanged rows).
-                if !batch.messages.is_empty() {
+                // later scroll-up paginates the freshly ingested rows. Gate on the
+                // ingested row count, NOT the raw batch size: a batch of only
+                // skipped lines (event-playback, undecryptable, non-ACTION CTCP)
+                // stores nothing, so re-opening would leave scrollback re-querying
+                // unchanged local history every tick with no new rows to surface
+                // (the server is also marked BEFORE-exhausted). Leave the flag set.
+                if outcome.ingested > 0 {
                     let buf_id = make_buffer_id(conn_id, target);
                     if let Some(buf) = state.buffers.get_mut(&buf_id) {
                         buf.history_exhausted = false;
@@ -208,9 +211,9 @@ pub fn process_completed_batch(
             // Splice gap-fill rows into their live buffers, grouped by the
             // buffer_id resolved during ingest (channel messages and PM echoes
             // may route to different buffers).
-            if !display_rows.is_empty() {
+            if !outcome.display_rows.is_empty() {
                 let mut by_buffer: HashMap<String, Vec<Message>> = HashMap::new();
-                for (buf_id, msg) in display_rows {
+                for (buf_id, msg) in outcome.display_rows {
                     by_buffer.entry(buf_id).or_default().push(msg);
                 }
                 for (buf_id, msgs) in by_buffer {
@@ -1260,6 +1263,46 @@ mod tests {
                 .expect("buffer exists")
                 .history_exhausted,
             "an empty batch must not reset the exhausted flag"
+        );
+    }
+
+    #[test]
+    fn skipped_only_chathistory_batch_keeps_history_exhausted() {
+        // A batch whose lines are ALL skipped (event-playback JOINs, etc.)
+        // ingests zero SQLite rows, so there is nothing new for pagination to
+        // surface. The buffer's `history_exhausted` flag must stay set — basing
+        // the re-open on the raw batch message count instead of the ingested
+        // row count leaves scrollback re-querying unchanged local history every
+        // tick (the server is also marked BEFORE-exhausted, so no new rows ever
+        // arrive). [P2 review]
+        let conn_id = "test";
+        let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
+        state
+            .buffers
+            .get_mut(&buf_id)
+            .expect("buffer exists")
+            .history_exhausted = true;
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![
+                make_join_msg("dave", "#test", "h1"),
+                make_join_msg("erin", "#test", "h1"),
+            ],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        assert!(
+            state
+                .buffers
+                .get(&buf_id)
+                .expect("buffer exists")
+                .history_exhausted,
+            "a batch that ingested no rows must not reset the exhausted flag"
         );
     }
 

@@ -761,10 +761,22 @@ fn decrypt_chathistory_text(
     }
 }
 
-/// Result of [`ingest_chathistory_batch`]: the oldest `(unix_millis, msgid?)`
-/// anchor seen across the batch, and the `(buffer_id, Message)` rows to splice
-/// into a live buffer (empty unless display collection was requested).
-type IngestOutcome = (Option<(i64, Option<String>)>, Vec<(String, Message)>);
+/// Result of [`ingest_chathistory_batch`].
+pub struct IngestOutcome {
+    /// Oldest `(unix_millis, msgid?)` anchor seen across the batch (event lines
+    /// included), or `None` if no line carried a `@time` tag. The caller
+    /// advances its per-target `BEFORE` anchor to this.
+    pub oldest: Option<(i64, Option<String>)>,
+    /// `(buffer_id, Message)` rows to splice into a live buffer; empty unless
+    /// display collection was requested.
+    pub display_rows: Vec<(String, Message)>,
+    /// Count of conversational rows actually persisted to `SQLite` (PRIVMSG /
+    /// NOTICE / ACTION). Skipped lines (event-playback, undecryptable ciphertext,
+    /// non-ACTION CTCP) are excluded. The caller re-opens a buffer's
+    /// `history_exhausted` flag only when this is non-zero — a batch that stored
+    /// nothing has nothing for pagination to surface.
+    pub ingested: usize,
+}
 
 /// Ingest a completed `draft/chathistory` batch into the log store.
 ///
@@ -775,7 +787,7 @@ type IngestOutcome = (Option<(i64, Option<String>)>, Vec<(String, Message)>);
 /// through normal `SQLite` pagination, and the unique `msg_id` index
 /// deduplicates against messages already stored from the live stream.
 ///
-/// Returns `(oldest, display_rows)`. `oldest` is the oldest server-time (unix
+/// Returns an [`IngestOutcome`]. `oldest` is the oldest server-time (unix
 /// **millis**) seen across **all** batch lines (conversational and
 /// event-playback) paired with that line's `@msgid`, or `None` if none carried
 /// a `@time` tag; the caller advances its per-target `BEFORE` anchor to this so
@@ -789,6 +801,10 @@ type IngestOutcome = (Option<(i64, Option<String>)>, Vec<(String, Message)>);
 /// so scroll-up pagination — which only fetches OLDER rows — would never reach
 /// them). For `BEFORE` scroll-back the rows surface through normal pagination,
 /// so collection is skipped to avoid cloning whole pages.
+///
+/// `ingested` counts the conversational rows actually persisted (skipped lines
+/// excluded), so the caller can tell a productive batch from one that stored
+/// nothing.
 ///
 /// v1 scope: `draft/event-playback` lines (JOIN/PART/QUIT/NICK/TOPIC/MODE) and
 /// non-ACTION CTCP are skipped rather than rendered into stored event rows.
@@ -927,7 +943,11 @@ pub fn ingest_chathistory_batch(
         );
     }
 
-    (oldest, display_rows)
+    IngestOutcome {
+        oldest,
+        display_rows,
+        ingested,
+    }
 }
 
 // === Private handlers ===
