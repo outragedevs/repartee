@@ -589,12 +589,16 @@ impl App {
             return;
         }
         let network = conn.label.clone();
+        // Exclude reconnect-time rows (JOIN echo, traffic logged during a slow
+        // NAMES) so the AFTER anchor stays on the pre-disconnect tail and the
+        // gap-fill targets the actual disconnected gap.
+        let cutoff = conn.chathistory.gapfill_cutoff();
 
-        // Newest stored row → AFTER anchor; if the buffer has never been
-        // logged, ask for the LATEST page instead.
+        // Newest stored row (older than the reconnect cutoff) → AFTER anchor; if
+        // the buffer has no such row, ask for the LATEST page instead.
         let anchor = self.storage.as_ref().and_then(|storage| {
             let db = storage.db.lock().ok()?;
-            crate::storage::query::newest_anchor(&db, &network, target)
+            crate::storage::query::newest_anchor(&db, &network, target, cutoff)
                 .ok()
                 .flatten()
         });

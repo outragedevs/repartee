@@ -328,6 +328,13 @@ pub fn get_messages_paginated_subsecond(
 /// `AFTER` anchor floored to `.000` could keep refetching already-stored rows
 /// and never reach the messages missed during the disconnect.
 ///
+/// `before_ms` optionally excludes rows at or after a millisecond cutoff. The
+/// reconnect gap-fill passes the moment of (re)connection so the anchor stays on
+/// the pre-disconnect tail: by end-of-NAMES the JOIN echo and any traffic during
+/// a slow NAMES may already be logged, and anchoring `AFTER` one of those would
+/// ask only for post-reconnect messages and miss the disconnected gap entirely.
+/// `None` imposes no cutoff (the newest row overall).
+///
 /// The stored `msg_id` is intentionally NOT returned: live PRIVMSG/NOTICE rows
 /// are logged with a locally-minted UUID (see `state/events::maybe_log`) when no
 /// server `@msgid` was present, and the column can't distinguish the two.
@@ -339,18 +346,28 @@ pub fn newest_anchor(
     db: &Connection,
     network: &str,
     buffer: &str,
+    before_ms: Option<i64>,
 ) -> rusqlite::Result<Option<(i64, i64)>> {
     let expr = ts_ms_expr(db, "");
+    let cutoff_clause = if before_ms.is_some() {
+        format!(" AND {expr} < ?3")
+    } else {
+        String::new()
+    };
     let sql = format!(
         "SELECT {expr} AS ts_ms, id FROM messages
-         WHERE network = ?1 AND buffer = ?2
+         WHERE network = ?1 AND buffer = ?2{cutoff_clause}
          ORDER BY {expr} DESC, id DESC
          LIMIT 1"
     );
     let mut stmt = db.prepare(&sql)?;
     // Log rows are stored under the lowercased buffer key (make_buffer_id);
     // callers pass the display-case channel/nick, so normalize for the lookup.
-    let mut rows = stmt.query(params![network, buffer.to_lowercase()])?;
+    let buffer_lc = buffer.to_lowercase();
+    let mut rows = match before_ms {
+        Some(cutoff) => stmt.query(params![network, buffer_lc, cutoff])?,
+        None => stmt.query(params![network, buffer_lc])?,
+    };
     match rows.next()? {
         Some(row) => {
             let ts_ms: i64 = row.get(0)?;
@@ -1220,7 +1237,7 @@ mod tests {
         assert_eq!(page_texts, vec!["a", "b"], "keyset pages older rows without ts_ms");
 
         // newest_anchor and FTS search also tolerate the missing column.
-        let anchor = newest_anchor(&db, "libera", "#rust").unwrap().expect("anchor");
+        let anchor = newest_anchor(&db, "libera", "#rust", None).unwrap().expect("anchor");
         assert_eq!(anchor.0, 200_000);
         let hits = search_messages(&db, "c", None, None, 10).unwrap();
         assert_eq!(hits.len(), 1);
@@ -1230,7 +1247,7 @@ mod tests {
     #[test]
     fn newest_anchor_empty_is_none() {
         let db = setup_test_db();
-        assert_eq!(newest_anchor(&db, "net", "#chan").unwrap(), None);
+        assert_eq!(newest_anchor(&db, "net", "#chan", None).unwrap(), None);
     }
 
     #[test]
@@ -1242,8 +1259,34 @@ mod tests {
 
         // Anchor is (unix_millis, id) — the stored `msg_id` is deliberately NOT
         // returned (it may be a locally-minted UUID, not a server @msgid).
-        let anchor = newest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
+        let anchor = newest_anchor(&db, "net", "#chan", None).unwrap().expect("anchor");
         assert_eq!(anchor.0, 300_000);
+    }
+
+    #[test]
+    fn newest_anchor_cutoff_excludes_reconnect_time_rows() {
+        // The reconnect gap-fill passes the connect time as `before_ms`: a row at
+        // or after it (a JOIN echo or traffic logged before end-of-NAMES) must be
+        // excluded so the AFTER anchor stays on the pre-disconnect tail.
+        let db = setup_test_db();
+        insert_msg(&db, "net", "#chan", 100, "pre-disconnect"); // ts_ms 100_000
+        insert_msg(&db, "net", "#chan", 500, "reconnect echo"); // ts_ms 500_000
+
+        // No cutoff → newest overall.
+        assert_eq!(
+            newest_anchor(&db, "net", "#chan", None)
+                .unwrap()
+                .map(|(ms, _)| ms),
+            Some(500_000)
+        );
+        // Cutoff above the pre-disconnect row, below the echo → the tail.
+        let anchor = newest_anchor(&db, "net", "#chan", Some(200_000))
+            .unwrap()
+            .expect("anchor");
+        assert_eq!(anchor.0, 100_000);
+        // Cutoff at/below the only remaining row → nothing qualifies (gap-fill
+        // then falls back to LATEST). `< cutoff` is strict.
+        assert_eq!(newest_anchor(&db, "net", "#chan", Some(100_000)).unwrap(), None);
     }
 
     #[test]
@@ -1257,7 +1300,7 @@ mod tests {
             )
             .unwrap();
         }
-        let anchor = newest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
+        let anchor = newest_anchor(&db, "net", "#chan", None).unwrap().expect("anchor");
         // Last inserted shares timestamp 500 but has the greatest id.
         assert_eq!(anchor, (500_000, db.last_insert_rowid()));
     }
@@ -1268,7 +1311,7 @@ mod tests {
         insert_msg(&db, "net", "#chan", 100, "a");
         insert_msg(&db, "net", "#other", 999, "b");
 
-        let anchor = newest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
+        let anchor = newest_anchor(&db, "net", "#chan", None).unwrap().expect("anchor");
         assert_eq!(anchor.0, 100_000);
     }
 
@@ -1285,7 +1328,7 @@ mod tests {
             [],
         )
         .unwrap();
-        let newest = newest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
+        let newest = newest_anchor(&db, "net", "#chan", None).unwrap().expect("anchor");
         assert_eq!(newest.0, 100_000);
     }
 
@@ -1299,7 +1342,7 @@ mod tests {
         insert_msg(&db, "net", "#rust", 100, "a");
         insert_msg(&db, "net", "#rust", 200, "b");
 
-        let newest = newest_anchor(&db, "net", "#Rust").unwrap().expect("anchor");
+        let newest = newest_anchor(&db, "net", "#Rust", None).unwrap().expect("anchor");
         assert_eq!(newest.0, 200_000);
         let oldest = oldest_anchor(&db, "net", "#Rust").unwrap().expect("anchor");
         assert_eq!(oldest.0, 100_000);

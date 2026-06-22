@@ -319,6 +319,16 @@ impl App {
                 let rejoin_channels = crate::irc::events::channels_to_rejoin(&self.state, &conn_id);
                 crate::irc::events::handle_connected(&mut self.state, &conn_id);
 
+                // Stamp the reconnect cutoff now — after handle_connected reset the
+                // chathistory state, but before any JOIN echo or post-reconnect
+                // traffic can be logged. The gap-fill (fired at end-of-MOTD/NAMES)
+                // anchors AFTER the newest row OLDER than this, so it targets the
+                // disconnected gap rather than a reconnect-time row.
+                if let Some(conn) = self.state.connections.get_mut(&conn_id) {
+                    conn.chathistory
+                        .set_gapfill_cutoff(chrono::Utc::now().timestamp_millis());
+                }
+
                 // Broadcast connection status to web clients.
                 if let Some(conn) = self.state.connections.get(&conn_id) {
                     self.broadcast_web(crate::web::protocol::WebEvent::ConnectionStatus {

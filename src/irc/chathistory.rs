@@ -139,6 +139,18 @@ pub struct HistoryState {
     /// reach them. Pagination-exhaustion (`history_fully_paginated`) compares
     /// against THIS so a skipped-only final batch settles instead of looping.
     oldest_ingested: HashMap<String, i64>,
+    /// Local wall-clock (unix **millis**) of the most recent (re)connection. The
+    /// reconnect `AFTER` gap-fill anchors at the newest row OLDER than this so it
+    /// targets the disconnected gap, not a reconnect-time JOIN echo or traffic
+    /// that landed in the log before end-of-NAMES fired the gap-fill. `None`
+    /// before the first connection completes.
+    ///
+    /// Stamped at `IrcEvent::Connected`, ~1–2 s before any reconnect row can be
+    /// logged. Rows carry the server `@time` under the `server-time` cap, so a
+    /// client clock running more than that margin ahead of the server's could let
+    /// a reconnect row slip under the cutoff — acceptable for NTP-synced peers,
+    /// and never worse than the un-cutoffed behavior it replaces.
+    gapfill_cutoff_ms: Option<i64>,
 }
 
 impl HistoryState {
@@ -271,6 +283,18 @@ impl HistoryState {
         self.oldest_ingested
             .get(&target.to_ascii_lowercase())
             .copied()
+    }
+
+    /// Record the moment of (re)connection (unix millis) — the reconnect gap-fill
+    /// cutoff. Set once per connect, before any reconnect-time rows can be logged.
+    pub const fn set_gapfill_cutoff(&mut self, now_ms: i64) {
+        self.gapfill_cutoff_ms = Some(now_ms);
+    }
+
+    /// The reconnect gap-fill cutoff (unix millis), if a connection has completed.
+    #[must_use]
+    pub const fn gapfill_cutoff(&self) -> Option<i64> {
+        self.gapfill_cutoff_ms
     }
 
     /// Complete all in-flight requests for `target` after its batch arrived
@@ -602,6 +626,14 @@ mod tests {
         assert_eq!(st.oldest_ingested("#chan"), Some(3000));
         // Case-insensitive, like the other per-target maps.
         assert_eq!(st.oldest_ingested("#CHAN"), Some(3000));
+    }
+
+    #[test]
+    fn gapfill_cutoff_round_trips() {
+        let mut st = HistoryState::new();
+        assert_eq!(st.gapfill_cutoff(), None);
+        st.set_gapfill_cutoff(1_700_000_000_000);
+        assert_eq!(st.gapfill_cutoff(), Some(1_700_000_000_000));
     }
 
     #[test]
