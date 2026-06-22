@@ -215,12 +215,58 @@ fn migrate_schema(db: &Connection) {
             tracing::info!("migrated messages table: added {col}");
         }
     }
+    // The legacy global-unique `idx_messages_msg_id` only exists on databases
+    // created by `main` (before the composite key). Its presence is our one-shot
+    // signal that this database predates @msgid-keyed logging and needs the
+    // backfill below — once dropped, neither runs again.
+    let upgraded_from_legacy: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_messages_msg_id'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
     // Replace the old global-unique msg_id index with the composite
     // (network, msg_id) one (created by CREATE_MESSAGES_MSG_ID_IDX above). The
     // composite is a weaker constraint, so dropping the global never conflicts
-    // with existing data. No-op once the old index is gone.
+    // with existing data. No-op once the old index is gone. Dropped BEFORE the
+    // backfill so re-keying two same-@msgid rows on different networks isn't
+    // rejected by the stricter global constraint.
     if let Err(e) = db.execute_batch("DROP INDEX IF EXISTS idx_messages_msg_id") {
         tracing::warn!("migration warning dropping idx_messages_msg_id: {e}");
+    }
+
+    if upgraded_from_legacy > 0 {
+        backfill_msgid_keys(db);
+    }
+}
+
+/// One-time backfill for databases upgraded from `main`: live conversational
+/// rows there were stored with a random-UUID `msg_id` even when their server
+/// `@msgid` was already present in the `tags` JSON. CHATHISTORY dedup keys on
+/// `(network, msg_id)` = the server `@msgid`, so without this a replay of
+/// already-logged history inserts duplicate rows after upgrade.
+///
+/// Re-key only conversational rows (`message`/`notice`/`action`) whose stored
+/// `msg_id` differs from `tags.msgid`. Reference/event rows are excluded: fan-out
+/// reference rows deliberately carry fresh UUIDs (siblings share one `@msgid`),
+/// and conversational rows are never a fan-out ref target — so this never breaks
+/// the `ref_id -> msg_id` linkage. `UPDATE OR IGNORE` skips the rare row whose
+/// target key is already taken by a pre-existing duplicate (a message `main`
+/// happened to log twice), leaving it untouched rather than aborting.
+fn backfill_msgid_keys(db: &Connection) {
+    let sql = "UPDATE OR IGNORE messages
+                  SET msg_id = json_extract(tags, '$.msgid')
+                WHERE type IN ('message', 'notice', 'action')
+                  AND ref_id IS NULL
+                  AND tags IS NOT NULL
+                  AND json_extract(tags, '$.msgid') IS NOT NULL
+                  AND json_extract(tags, '$.msgid') <> ''
+                  AND msg_id <> json_extract(tags, '$.msgid')";
+    match db.execute(sql, []) {
+        Ok(n) => tracing::info!("migrated messages table: re-keyed {n} row(s) to their @msgid"),
+        Err(e) => tracing::warn!("migration warning backfilling @msgid keys: {e}"),
     }
 }
 
@@ -421,6 +467,126 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].text, "legacy line");
         assert_eq!(rows[0].ts_ms, 100_000);
+    }
+
+    /// Build an in-memory DB shaped like a non-encrypted one created by `main`:
+    /// the legacy global-unique `idx_messages_msg_id` index, no `ts_ms` column,
+    /// and the external-content FTS (with its triggers) that `main` populated on
+    /// every insert. The FTS is included so inserted rows get indexed — exactly
+    /// like a real upgraded database — so the backfill's `messages_au` trigger
+    /// finds them instead of tripping an FTS "malformed" error on a phantom row.
+    fn legacy_main_db() -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        apply_pragmas(&db).unwrap();
+        db.execute_batch(
+            "CREATE TABLE messages (
+                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                 msg_id    TEXT,
+                 network   TEXT NOT NULL,
+                 buffer    TEXT NOT NULL,
+                 timestamp INTEGER NOT NULL,
+                 type      TEXT NOT NULL,
+                 nick      TEXT,
+                 text      TEXT NOT NULL,
+                 highlight INTEGER DEFAULT 0,
+                 iv        BLOB,
+                 ref_id    TEXT,
+                 tags      TEXT,
+                 event_key TEXT
+             );
+             CREATE UNIQUE INDEX idx_messages_msg_id ON messages (msg_id) WHERE msg_id IS NOT NULL;",
+        )
+        .unwrap();
+        db.execute_batch(CREATE_FTS).unwrap();
+        db.execute_batch(CREATE_FTS_TRIGGERS).unwrap();
+        db
+    }
+
+    #[test]
+    fn migration_backfills_msgid_for_chathistory_dedup() {
+        // A `main` live row: random-UUID msg_id, but the real server @msgid sits
+        // in the tags JSON. After migration its msg_id must become that @msgid so
+        // a later CHATHISTORY replay (keyed on (network, @msgid)) dedups instead
+        // of inserting a duplicate.
+        let db = legacy_main_db();
+        db.execute(
+            "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight, tags) \
+             VALUES ('11111111-2222-3333-4444-555555555555', 'libera', '#rust', 100, 'message', 'ada', 'hi', 0, \
+                     '{\"time\":\"2024-01-01T00:00:00.000Z\",\"msgid\":\"server-abc\"}')",
+            [],
+        )
+        .unwrap();
+
+        create_schema(&db, false).unwrap();
+
+        let keyed: String = db
+            .query_row("SELECT msg_id FROM messages WHERE text = 'hi'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(keyed, "server-abc", "re-keyed to the @msgid from tags");
+
+        // Simulate the CHATHISTORY replay of the same message: INSERT OR IGNORE
+        // under the new (network, msg_id) unique key must be a no-op.
+        db.execute(
+            "INSERT OR IGNORE INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight) \
+             VALUES ('server-abc', 'libera', '#rust', 100, 'message', 'ada', 'hi', 0)",
+            [],
+        )
+        .unwrap();
+        let count: i64 = db
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "replay deduped against the backfilled @msgid");
+    }
+
+    #[test]
+    fn migration_backfill_leaves_reference_and_keyless_rows_alone() {
+        // Fan-out reference rows (ref_id set) keep their fresh UUID so siblings
+        // sharing one @msgid don't collide; a row whose tags lack a msgid keeps
+        // its UUID. Only plain conversational rows are re-keyed.
+        let db = legacy_main_db();
+        db.execute(
+            "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight, ref_id, tags) \
+             VALUES ('ref-uuid', 'libera', '#rust', 100, 'event', 'ada', '', 0, 'primary-1', \
+                     '{\"msgid\":\"shared-q\"}')",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight, tags) \
+             VALUES ('plain-uuid', 'libera', '#go', 100, 'message', 'ada', 'no msgid here', 0, '{\"time\":\"x\"}')",
+            [],
+        )
+        .unwrap();
+
+        create_schema(&db, false).unwrap();
+
+        let ref_key: String = db
+            .query_row("SELECT msg_id FROM messages WHERE ref_id = 'primary-1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ref_key, "ref-uuid", "reference row keeps its UUID");
+        let plain_key: String = db
+            .query_row("SELECT msg_id FROM messages WHERE buffer = '#go'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(plain_key, "plain-uuid", "row without tags.msgid keeps its UUID");
+    }
+
+    #[test]
+    fn migration_backfill_skipped_for_fresh_database() {
+        // A branch-native DB has no legacy index, so the backfill never runs —
+        // and a fresh open is idempotent (the UUID stays put).
+        let db = open_database(false).unwrap();
+        db.execute(
+            "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight, tags) \
+             VALUES ('keep-uuid', 'libera', '#rust', 100, 'message', 'ada', 'hi', 0, '{\"msgid\":\"server-xyz\"}')",
+            [],
+        )
+        .unwrap();
+        // Re-run schema creation (simulates next startup); no legacy index exists.
+        create_schema(&db, false).unwrap();
+        let key: String = db
+            .query_row("SELECT msg_id FROM messages WHERE text = 'hi'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(key, "keep-uuid", "no backfill without the legacy index");
     }
 
     #[test]
