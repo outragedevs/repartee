@@ -893,7 +893,12 @@ pub fn ingest_chathistory_batch(
         };
 
         let (nick, ident, host) = extract_nick_userhost(msg.prefix.as_ref());
-        let is_own = nick == our_nick;
+        // IRC nicks are case-insensitive: CHATHISTORY playback may echo our own
+        // nick in a different case than Connection.nick. A case-sensitive miss here
+        // would treat our own E2E ciphertext echo as a peer's (fail decryption →
+        // silently drop the row) and route our own PM to a buffer named after
+        // ourselves instead of the peer. Match add_message's comparison.
+        let is_own = nick.eq_ignore_ascii_case(&our_nick);
 
         // Decrypt RPE2E ciphertext (same path as live PRIVMSGs) before storing,
         // or skip a line we can't decrypt — see `decrypt_chathistory_text`.

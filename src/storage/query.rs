@@ -410,8 +410,11 @@ pub fn newest_anchor(
     } else {
         String::new()
     };
+    // Select the same millisecond expression the ORDER BY uses, so a row whose
+    // tags lack `@time` falls back to its full-precision `ts_ms`, not a floored
+    // whole second (see `anchor_from_tags`).
     let sql = format!(
-        "SELECT timestamp, tags FROM messages
+        "SELECT {expr} AS anchor_ms, tags FROM messages
          WHERE network = ?1 AND buffer = ?2{cutoff_clause}
          ORDER BY {expr} DESC, id DESC
          LIMIT 1"
@@ -426,9 +429,9 @@ pub fn newest_anchor(
     };
     match rows.next()? {
         Some(row) => {
-            let timestamp: i64 = row.get(0)?;
+            let anchor_ms: i64 = row.get(0)?;
             let tags: Option<String> = row.get(1)?;
-            Ok(Some(anchor_from_tags(tags.as_deref(), timestamp)))
+            Ok(Some(anchor_from_tags(tags.as_deref(), anchor_ms)))
         }
         None => Ok(None),
     }
@@ -466,8 +469,10 @@ pub fn oldest_anchor(
     buffer: &str,
 ) -> rusqlite::Result<Option<(i64, Option<String>)>> {
     let expr = ts_ms_expr(db, "");
+    // Select the ordering expression (not the whole-second `timestamp`) so a row
+    // without an `@time` tag anchors at its full-precision `ts_ms`.
     let sql = format!(
-        "SELECT timestamp, tags FROM messages
+        "SELECT {expr} AS anchor_ms, tags FROM messages
          WHERE network = ?1 AND buffer = ?2
          ORDER BY {expr} ASC, id ASC
          LIMIT 1"
@@ -477,25 +482,32 @@ pub fn oldest_anchor(
     let mut rows = stmt.query(params![network, buffer.to_lowercase()])?;
     match rows.next()? {
         Some(row) => {
-            let timestamp: i64 = row.get(0)?;
+            let anchor_ms: i64 = row.get(0)?;
             let tags: Option<String> = row.get(1)?;
-            Ok(Some(anchor_from_tags(tags.as_deref(), timestamp)))
+            Ok(Some(anchor_from_tags(tags.as_deref(), anchor_ms)))
         }
         None => Ok(None),
     }
 }
 
 /// Build a full-precision `(unix_millis, msgid?)` CHATHISTORY anchor from a
-/// stored row's `IRCv3` `tags` JSON, falling back to `timestamp_secs × 1000` (and
-/// no msgid) when `@time`/`@msgid` are absent or unparseable.
-fn anchor_from_tags(tags_json: Option<&str>, timestamp_secs: i64) -> (i64, Option<String>) {
+/// stored row's `IRCv3` `tags` JSON.
+///
+/// When `@time` is absent or unparseable the millis come from `fallback_ms` —
+/// which callers pass as the row's `COALESCE(ts_ms, timestamp * 1000)`, NOT a
+/// floored `timestamp * 1000`. A row stored without an `@time` tag (e.g. a live
+/// message on a server without `server-time`) still has full-millisecond `ts_ms`,
+/// and flooring it to the whole second here would anchor `AFTER`/`BEFORE` less
+/// precisely than the database actually orders by, re-fetching (or skipping)
+/// same-second rows at the boundary. `@msgid` is dropped (no msgid) when absent.
+fn anchor_from_tags(tags_json: Option<&str>, fallback_ms: i64) -> (i64, Option<String>) {
     let tags: Option<std::collections::HashMap<String, String>> =
         tags_json.and_then(|j| serde_json::from_str(j).ok());
     let millis = tags
         .as_ref()
         .and_then(|t| t.get("time"))
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map_or(timestamp_secs * 1000, |dt| dt.timestamp_millis());
+        .map_or(fallback_ms, |dt| dt.timestamp_millis());
     let msgid = tags
         .as_ref()
         .and_then(|t| t.get("msgid"))
@@ -1456,6 +1468,31 @@ mod tests {
             texts,
             vec!["older"],
             "pre-2001 millis cursor must page older rows, not re-return the cursor row"
+        );
+    }
+
+    #[test]
+    fn anchors_keep_ts_ms_precision_when_tags_lack_time() {
+        // A row with sub-second ts_ms but no parseable @time in tags (e.g. a live
+        // message logged on a server without server-time). The anchor must use the
+        // precise ts_ms the query orders by, not floor to timestamp*1000.
+        let db = setup_test_db();
+        db.execute(
+            "INSERT INTO messages (msg_id, network, buffer, timestamp, ts_ms, type, nick, text, highlight, tags) \
+             VALUES ('m1', 'net', '#chan', 1000, 1000500, 'message', 'ada', 'hi', 0, NULL)",
+            [],
+        )
+        .unwrap();
+
+        let newest = newest_anchor(&db, "net", "#chan", None).unwrap().expect("anchor");
+        assert_eq!(
+            newest.0, 1_000_500,
+            "newest_anchor must keep ts_ms precision when @time is absent"
+        );
+        let oldest = oldest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
+        assert_eq!(
+            oldest.0, 1_000_500,
+            "oldest_anchor must keep ts_ms precision when @time is absent"
         );
     }
 

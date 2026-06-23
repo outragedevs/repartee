@@ -1021,6 +1021,33 @@ mod tests {
     }
 
     #[test]
+    fn chathistory_own_pm_echo_routes_to_peer_despite_nick_casing() {
+        // Our own PM echo in CHATHISTORY carries our nick in the prefix, possibly
+        // in a different case than Connection.nick ("me"). It must route to the
+        // PEER's buffer (the PRIVMSG target), not a buffer named after ourselves —
+        // is_own is case-insensitive.
+        let conn_id = "test";
+        let (mut state, mut rx, _buf_id) = setup_ingest_state(conn_id);
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["bob".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            // Prefix nick "ME" differs in case from the connection nick "me".
+            messages: vec![make_history_privmsg("ME", "bob", "hey bob", "m1")],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        let row = rx.try_recv().expect("own PM echo stored");
+        assert_eq!(
+            row.buffer, "bob",
+            "own PM echo must route to the peer buffer, not our own nick"
+        );
+    }
+
+    #[test]
     fn chathistory_stores_same_second_rows_in_chronological_order() {
         // The DB keeps only whole-second timestamps and breaks ties by insertion
         // id, so a same-second page returned newest-first must be persisted
