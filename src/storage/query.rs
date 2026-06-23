@@ -322,15 +322,22 @@ pub fn get_messages_paginated_subsecond(
 /// keyset that matches the cursor's resolution.
 ///
 /// The current web bundle sends the oldest loaded row's full-millisecond `@time`
-/// (`ts_ms`, always `>= 1e12` for any realistic date) and wants the subsecond
-/// keyset so a CHATHISTORY-backfilled same-second row (larger rowid, smaller
-/// `ts_ms`) is returned rather than hidden. A client still running the *previous*
-/// bundle sends a whole-**second** `before`; routing that through the subsecond
-/// keyset floors it to `.000` and silently drops same-second rows whose `ts_ms`
-/// is past `.000` but whose rowid is smaller than the cursor's. A second-scale
-/// `before` therefore uses the whole-second keyset
+/// (`ts_ms`) and wants the subsecond keyset so a CHATHISTORY-backfilled same-second
+/// row (larger rowid, smaller `ts_ms`) is returned rather than hidden. A client
+/// still running the *previous* bundle sends a whole-**second** `before`; routing
+/// that through the subsecond keyset floors it to `.000` and silently drops
+/// same-second rows whose `ts_ms` is past `.000` but whose rowid is smaller than
+/// the cursor's. A second-scale `before` therefore uses the whole-second keyset
 /// (`timestamp < S OR (timestamp = S AND id < before_id)`), which is lossless for
 /// a seconds cursor. `before = None` is the initial (newest) page.
+///
+/// The seconds/millis split is by magnitude. The cutoff (`1e10`) sits in the gap
+/// where the two ranges cannot overlap for any real IRC log: `1e10` **seconds** is
+/// year 2286 (no plausible seconds timestamp is that large) and `1e10`
+/// **milliseconds** is 1970-04-26 (no plausible log row predates IRC's 1988
+/// origin, let alone that). A higher cutoff like `1e12` would misread a *current*
+/// client's millisecond cursor for a pre-2001 log row (e.g. `946684800000` for
+/// 2000-01-01) as seconds and return the cursor/newer rows again.
 pub fn paginate_web_history(
     db: &Connection,
     network: &str,
@@ -340,9 +347,11 @@ pub fn paginate_web_history(
     encrypt: bool,
     crypto_key: Option<&Key<Aes256Gcm>>,
 ) -> rusqlite::Result<Vec<StoredMessage>> {
-    // `cursor` is `(before, before_id?)`. Below this (≈ year 2001 in millis) a
-    // `before` value must be whole seconds (a previous-bundle client).
-    const SECOND_SCALE_MAX: i64 = 1_000_000_000_000;
+    // `cursor` is `(before, before_id?)`. Below this a `before` value must be whole
+    // seconds (a previous-bundle client): 1e10 s is year 2286 and 1e10 ms is
+    // 1970-04-26, so real seconds timestamps fall below it and real millisecond
+    // timestamps fall on or above it, with no overlap. See the doc comment.
+    const SECOND_SCALE_MAX: i64 = 10_000_000_000;
     match cursor {
         Some((secs, before_id)) if secs < SECOND_SCALE_MAX => get_messages_paginated(
             db,
@@ -1405,6 +1414,48 @@ mod tests {
         assert!(
             skipped.iter().all(|m| m.text != "a"),
             "subsecond keyset floored to .000 would skip a — the regression being fixed"
+        );
+    }
+
+    #[test]
+    fn web_pagination_pre_2001_millis_cursor_is_classified_as_millis() {
+        // A CURRENT web client sends `before` in milliseconds. For a log row before
+        // ~2001-09-09 the ms value is < 1e12 but >= 1e10; it must still be treated
+        // as millis. With the old 1e12 cutoff it was misread as a seconds cursor,
+        // and the whole-second query compared a 9.4e11 value against the seconds
+        // `timestamp` column (~9.4e8), matching every row and re-returning the
+        // cursor/newer rows — duplicate/broken scrollback for old logs.
+        let db = setup_test_db();
+        for (text, secs, ts_ms) in [
+            ("older", 946_684_795_i64, 946_684_795_000_i64),
+            ("cursor", 946_684_800, 946_684_800_000),
+        ] {
+            db.execute(
+                "INSERT INTO messages (msg_id, network, buffer, timestamp, ts_ms, type, nick, text, highlight) \
+                 VALUES (?1, 'net', '#chan', ?2, ?3, 'message', 'ada', ?4, 0)",
+                params![format!("m-{text}"), secs, ts_ms, text],
+            )
+            .unwrap();
+        }
+        let cursor_id: i64 = db
+            .query_row("SELECT id FROM messages WHERE text = 'cursor'", [], |r| r.get(0))
+            .unwrap();
+
+        let page = paginate_web_history(
+            &db,
+            "net",
+            "#chan",
+            Some((946_684_800_000, Some(cursor_id))),
+            10,
+            false,
+            None,
+        )
+        .unwrap();
+        let texts: Vec<&str> = page.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["older"],
+            "pre-2001 millis cursor must page older rows, not re-return the cursor row"
         );
     }
 

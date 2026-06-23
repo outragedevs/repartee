@@ -585,16 +585,17 @@ impl App {
         // Gate once per target per connection. The channel path runs on
         // RPL_ENDOFNAMES, which recurs (manual /names, refresh, part/rejoin); each
         // recurrence would otherwise re-anchor at the original connect cutoff and
-        // refetch the same window. `begin_connect_gapfill` claims the one-shot and
-        // also reads the per-connection state, so take a mutable borrow here.
+        // refetch the same window. Only CHECK the claim here — it is set after the
+        // request is confirmed sent (below), so a recurrence retries if this
+        // attempt is suppressed by an in-flight request or a failed send.
         let (network, cutoff) = {
-            let Some(conn) = self.state.connections.get_mut(conn_id) else {
+            let Some(conn) = self.state.connections.get(conn_id) else {
                 return;
             };
             if !conn.enabled_caps.contains("draft/chathistory") {
                 return;
             }
-            if !conn.chathistory.begin_connect_gapfill(target) {
+            if conn.chathistory.is_connect_gapfilled(target) {
                 return;
             }
             // Exclude reconnect-time rows (JOIN echo, traffic logged during a slow
@@ -612,7 +613,7 @@ impl App {
                 .flatten()
         });
 
-        match anchor {
+        let issued = match anchor {
             Some((anchor_ms, anchor_msgid)) => {
                 // `newest_anchor` returns the full-millisecond `@time` plus the
                 // row's *verified* `@msgid` (from its tags). request_chathistory
@@ -626,11 +627,20 @@ impl App {
                     target,
                     Direction::After,
                     Some((anchor_msgid, anchor_ms)),
-                );
+                )
             }
-            None => {
-                self.request_chathistory(conn_id, target, Direction::Latest, None);
-            }
+            None => self.request_chathistory(conn_id, target, Direction::Latest, None),
+        };
+
+        // Claim the one-shot ONLY now that the request actually went out. If it was
+        // suppressed (another CHATHISTORY in flight for the target — e.g. a BEFORE
+        // scroll-up, or a stale marker after reconnect) or the send failed, leave
+        // the target un-claimed so a later NAMES/end-of-MOTD trigger retries the
+        // gap-fill for this connection.
+        if issued
+            && let Some(conn) = self.state.connections.get_mut(conn_id)
+        {
+            conn.chathistory.mark_connect_gapfilled(target);
         }
     }
 

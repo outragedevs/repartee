@@ -318,7 +318,7 @@ impl HistoryState {
 
     /// Record the moment of (re)connection (unix millis) — the reconnect gap-fill
     /// cutoff. Set once per connect, before any reconnect-time rows can be logged.
-    /// Also re-arms every target's gap-fill (see [`Self::begin_connect_gapfill`]):
+    /// Also re-arms every target's gap-fill (see [`Self::mark_connect_gapfilled`]):
     /// a fresh connection is exactly when refetching the disconnected gap is wanted
     /// again, even for a target already filled on the previous connection.
     pub fn set_gapfill_cutoff(&mut self, now_ms: i64) {
@@ -343,18 +343,26 @@ impl HistoryState {
         self.gapfill_cutoff_ms
     }
 
+    /// Whether `target`'s reconnect gap-fill has already been claimed for the
+    /// current connection (see [`Self::mark_connect_gapfilled`]).
+    #[must_use]
+    pub fn is_connect_gapfilled(&self, target: &str) -> bool {
+        self.gapfilled_targets.contains(&target.to_lowercase())
+    }
+
     /// Claim the one-shot reconnect gap-fill for `target` on the current
-    /// connection: returns `true` the first time it is called for a target since
-    /// the last [`Self::set_gapfill_cutoff`], `false` on every later call.
+    /// connection so a recurring `RPL_ENDOFNAMES` (manual `/names`, a names
+    /// refresh, a part/rejoin) doesn't refetch the same window (and duplicate rows
+    /// where `@msgid` is unstable).
     ///
-    /// The channel gap-fill is driven by `RPL_ENDOFNAMES`, which fires again on a
-    /// manual `/names`, a names refresh, or a part/rejoin — all unrelated to the
-    /// reconnect it is meant to service. Gating here keeps the gap-fill to once per
-    /// target per connection so those recurrences don't refetch the same window
-    /// (and duplicate rows where `@msgid` is unstable). Targets are matched
-    /// case-insensitively, like the rest of `HistoryState`.
-    pub fn begin_connect_gapfill(&mut self, target: &str) -> bool {
-        self.gapfilled_targets.insert(target.to_lowercase())
+    /// Call this only **after** the gap-fill request has actually been issued.
+    /// Claiming before the send would burn the one-shot even when the request was
+    /// suppressed (another `CHATHISTORY` already in flight for the target) or the
+    /// send failed — leaving the disconnected gap unfilled with no retry this
+    /// connection. Targets are matched case-insensitively, and the claim is cleared
+    /// per (re)connect by [`Self::set_gapfill_cutoff`].
+    pub fn mark_connect_gapfilled(&mut self, target: &str) {
+        self.gapfilled_targets.insert(target.to_lowercase());
     }
 
     /// Complete all in-flight requests for `target` after its batch arrived
@@ -714,22 +722,22 @@ mod tests {
     }
 
     #[test]
-    fn connect_gapfill_fires_once_per_target_per_connection() {
+    fn connect_gapfill_claimed_once_per_target_per_connection() {
         let mut st = HistoryState::new();
-        // First NAMES completion arms the gap-fill.
-        assert!(st.begin_connect_gapfill("#rust"));
-        // A later /names, refresh or part/rejoin (another RPL_ENDOFNAMES) must NOT
-        // re-trigger it — that would refetch the same window from the connect
-        // cutoff and duplicate rows where @msgid is unstable.
-        assert!(!st.begin_connect_gapfill("#rust"));
-        // Case-insensitive, like the other per-target tracking.
-        assert!(!st.begin_connect_gapfill("#RUST"));
-        // A different target is independent.
-        assert!(st.begin_connect_gapfill("#linux"));
+        // Not yet claimed before the first gap-fill issues.
+        assert!(!st.is_connect_gapfilled("#rust"));
+        // Claimed only after the request is confirmed sent.
+        st.mark_connect_gapfilled("#rust");
+        assert!(st.is_connect_gapfilled("#rust"));
+        // A later /names, refresh or part/rejoin (another RPL_ENDOFNAMES) sees the
+        // claim and skips — no refetch of the same window. Case-insensitive.
+        assert!(st.is_connect_gapfilled("#RUST"));
+        // A different target is independent (still retriable).
+        assert!(!st.is_connect_gapfilled("#linux"));
         // A new (re)connection re-arms every target.
         st.set_gapfill_cutoff(1_700_000_000_000);
-        assert!(st.begin_connect_gapfill("#rust"));
-        assert!(st.begin_connect_gapfill("#linux"));
+        assert!(!st.is_connect_gapfilled("#rust"));
+        assert!(!st.is_connect_gapfilled("#linux"));
     }
 
     #[test]
