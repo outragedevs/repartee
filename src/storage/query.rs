@@ -321,12 +321,12 @@ pub fn get_messages_paginated_subsecond(
 /// Newest stored row for a buffer, used as the anchor for a
 /// `CHATHISTORY AFTER` gap-fill request after (re)connecting.
 ///
-/// Returns `(unix_millis, id)` for the newest row, or `None` if the buffer has
-/// no stored messages. The timestamp is the full-millisecond `@time`
-/// (`COALESCE(ts_ms, timestamp * 1000)`), NOT the floored whole second: a busy
-/// channel can fit a whole `CHATHISTORY` page inside the boundary second, so an
-/// `AFTER` anchor floored to `.000` could keep refetching already-stored rows
-/// and never reach the messages missed during the disconnect.
+/// Returns `(unix_millis, msgid?)` for the newest row, or `None` if the buffer
+/// has no stored messages. The timestamp is the full-millisecond `@time`,
+/// ordered by `COALESCE(ts_ms, timestamp * 1000)`, NOT the floored whole second:
+/// a busy channel can fit a whole `CHATHISTORY` page inside the boundary second,
+/// so an `AFTER` anchor floored to `.000` could keep refetching already-stored
+/// rows and never reach the messages missed during the disconnect.
 ///
 /// `before_ms` optionally excludes rows at or after a millisecond cutoff. The
 /// reconnect gap-fill passes the moment of (re)connection so the anchor stays on
@@ -335,19 +335,18 @@ pub fn get_messages_paginated_subsecond(
 /// ask only for post-reconnect messages and miss the disconnected gap entirely.
 /// `None` imposes no cutoff (the newest row overall).
 ///
-/// The stored `msg_id` is intentionally NOT returned: live PRIVMSG/NOTICE rows
-/// are logged with a locally-minted UUID (see `state/events::maybe_log`) when no
-/// server `@msgid` was present, and the column can't distinguish the two.
-/// Feeding such a UUID to `CHATHISTORY ... msgid=<uuid>` fails on a
-/// `MSGREFTYPES=msgid` server, so the anchor is always a full-precision
-/// timestamp reference. Only a `@msgid` verified via a chathistory batch (the
-/// per-target watermark) is ever used as a msgid reference.
+/// Like [`oldest_anchor`], the `@msgid` comes from the row's `IRCv3` `tags` (a
+/// *verified* server reference), NOT the ambiguous `msg_id` column (a
+/// locally-minted UUID for live rows). The caller uses it as a `msgid=` anchor
+/// when the server advertises `MSGREFTYPES=msgid` — `CHATHISTORY AFTER
+/// timestamp=...` starts strictly after the second/millisecond, so a `@msgid`
+/// reference avoids skipping rows in the same millisecond as the anchor.
 pub fn newest_anchor(
     db: &Connection,
     network: &str,
     buffer: &str,
     before_ms: Option<i64>,
-) -> rusqlite::Result<Option<(i64, i64)>> {
+) -> rusqlite::Result<Option<(i64, Option<String>)>> {
     let expr = ts_ms_expr(db, "");
     let cutoff_clause = if before_ms.is_some() {
         format!(" AND {expr} < ?3")
@@ -355,7 +354,7 @@ pub fn newest_anchor(
         String::new()
     };
     let sql = format!(
-        "SELECT {expr} AS ts_ms, id FROM messages
+        "SELECT timestamp, tags FROM messages
          WHERE network = ?1 AND buffer = ?2{cutoff_clause}
          ORDER BY {expr} DESC, id DESC
          LIMIT 1"
@@ -370,9 +369,9 @@ pub fn newest_anchor(
     };
     match rows.next()? {
         Some(row) => {
-            let ts_ms: i64 = row.get(0)?;
-            let id: i64 = row.get(1)?;
-            Ok(Some((ts_ms, id)))
+            let timestamp: i64 = row.get(0)?;
+            let tags: Option<String> = row.get(1)?;
+            Ok(Some(anchor_from_tags(tags.as_deref(), timestamp)))
         }
         None => Ok(None),
     }
@@ -1305,15 +1304,20 @@ mod tests {
         let db = setup_test_db();
         for i in 0..3 {
             db.execute(
-                "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight) \
-                 VALUES (?1, 'net', '#chan', 500, 'message', 'ada', ?2, 0)",
-                params![format!("dup-{i}"), format!("t{i}")],
+                "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight, tags) \
+                 VALUES (?1, 'net', '#chan', 500, 'message', 'ada', ?2, 0, ?3)",
+                params![
+                    format!("dup-{i}"),
+                    format!("t{i}"),
+                    format!("{{\"msgid\":\"m{i}\"}}")
+                ],
             )
             .unwrap();
         }
+        // All share whole-second 500 (no ts_ms → 500_000); the greatest id wins,
+        // and its verified @msgid (m2) comes back as the anchor reference.
         let anchor = newest_anchor(&db, "net", "#chan", None).unwrap().expect("anchor");
-        // Last inserted shares timestamp 500 but has the greatest id.
-        assert_eq!(anchor, (500_000, db.last_insert_rowid()));
+        assert_eq!(anchor, (500_000, Some("m2".to_string())));
     }
 
     #[test]
@@ -1329,9 +1333,10 @@ mod tests {
     #[test]
     fn newest_anchor_does_not_expose_stored_msgid_column() {
         // Regression: live rows are logged with a generated UUID in
-        // `messages.msg_id` (state/events::maybe_log), NOT the server @msgid.
-        // newest_anchor surfaces only (timestamp, id) so a caller can never feed
-        // that UUID to `CHATHISTORY ... msgid=<uuid>`.
+        // `messages.msg_id` (state/events::maybe_log), NOT the server @msgid. The
+        // anchor's msgid comes from the verified `tags` column, so a row with no
+        // tags yields `None` — the UUID `msg_id` column is never fed to
+        // `CHATHISTORY ... msgid=<uuid>`.
         let db = setup_test_db();
         db.execute(
             "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight) \
@@ -1340,7 +1345,7 @@ mod tests {
         )
         .unwrap();
         let newest = newest_anchor(&db, "net", "#chan", None).unwrap().expect("anchor");
-        assert_eq!(newest.0, 100_000);
+        assert_eq!(newest, (100_000, None));
     }
 
     #[test]

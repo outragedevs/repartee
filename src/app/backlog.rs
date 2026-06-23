@@ -604,19 +604,19 @@ impl App {
         });
 
         match anchor {
-            Some((anchor_ms, _id)) => {
-                // `newest_anchor` returns the full-millisecond `@time`, so the
-                // AFTER anchor is not floored to `.000` of the boundary second
-                // (which on a busy channel could refetch only already-stored rows
-                // and never reach the disconnected-gap messages). The stored
-                // `msg_id` is not used as a server reference — it may be a
-                // locally-minted UUID rather than a real IRC @msgid, which a
-                // MSGREFTYPES=msgid server cannot resolve.
+            Some((anchor_ms, anchor_msgid)) => {
+                // `newest_anchor` returns the full-millisecond `@time` plus the
+                // row's *verified* `@msgid` (from its tags). request_chathistory
+                // anchors by msgid when the server advertises MSGREFTYPES=msgid —
+                // `AFTER timestamp=...` starts strictly after the millisecond, so a
+                // msgid reference avoids skipping rows in the anchor's millisecond.
+                // The timestamp fallback is still full-precision (not floored to
+                // `.000`), so it never refetches only the boundary second either.
                 self.request_chathistory(
                     conn_id,
                     target,
                     Direction::After,
-                    Some((None, anchor_ms)),
+                    Some((anchor_msgid, anchor_ms)),
                 );
             }
             None => {
