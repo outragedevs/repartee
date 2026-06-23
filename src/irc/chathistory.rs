@@ -151,6 +151,13 @@ pub struct HistoryState {
     /// a reconnect row slip under the cutoff — acceptable for NTP-synced peers,
     /// and never worse than the un-cutoffed behavior it replaces.
     gapfill_cutoff_ms: Option<i64>,
+    /// Targets (lowercased) whose reconnect gap-fill has already fired for the
+    /// *current* connection. The channel gap-fill runs on `RPL_ENDOFNAMES`, which
+    /// recurs (manual `/names`, a names refresh, a part/rejoin) — each recurrence
+    /// would otherwise re-anchor at the original connect cutoff and refetch the
+    /// same window, duplicating rows on servers without stable `@msgid`. Cleared
+    /// by [`set_gapfill_cutoff`] so every (re)connection re-arms all targets.
+    gapfilled_targets: HashSet<String>,
 }
 
 impl HistoryState {
@@ -297,14 +304,32 @@ impl HistoryState {
 
     /// Record the moment of (re)connection (unix millis) — the reconnect gap-fill
     /// cutoff. Set once per connect, before any reconnect-time rows can be logged.
-    pub const fn set_gapfill_cutoff(&mut self, now_ms: i64) {
+    /// Also re-arms every target's gap-fill (see [`Self::begin_connect_gapfill`]):
+    /// a fresh connection is exactly when refetching the disconnected gap is wanted
+    /// again, even for a target already filled on the previous connection.
+    pub fn set_gapfill_cutoff(&mut self, now_ms: i64) {
         self.gapfill_cutoff_ms = Some(now_ms);
+        self.gapfilled_targets.clear();
     }
 
     /// The reconnect gap-fill cutoff (unix millis), if a connection has completed.
     #[must_use]
     pub const fn gapfill_cutoff(&self) -> Option<i64> {
         self.gapfill_cutoff_ms
+    }
+
+    /// Claim the one-shot reconnect gap-fill for `target` on the current
+    /// connection: returns `true` the first time it is called for a target since
+    /// the last [`Self::set_gapfill_cutoff`], `false` on every later call.
+    ///
+    /// The channel gap-fill is driven by `RPL_ENDOFNAMES`, which fires again on a
+    /// manual `/names`, a names refresh, or a part/rejoin — all unrelated to the
+    /// reconnect it is meant to service. Gating here keeps the gap-fill to once per
+    /// target per connection so those recurrences don't refetch the same window
+    /// (and duplicate rows where `@msgid` is unstable). Targets are matched
+    /// case-insensitively, like the rest of `HistoryState`.
+    pub fn begin_connect_gapfill(&mut self, target: &str) -> bool {
+        self.gapfilled_targets.insert(target.to_lowercase())
     }
 
     /// Complete all in-flight requests for `target` after its batch arrived
@@ -644,6 +669,25 @@ mod tests {
         assert_eq!(st.gapfill_cutoff(), None);
         st.set_gapfill_cutoff(1_700_000_000_000);
         assert_eq!(st.gapfill_cutoff(), Some(1_700_000_000_000));
+    }
+
+    #[test]
+    fn connect_gapfill_fires_once_per_target_per_connection() {
+        let mut st = HistoryState::new();
+        // First NAMES completion arms the gap-fill.
+        assert!(st.begin_connect_gapfill("#rust"));
+        // A later /names, refresh or part/rejoin (another RPL_ENDOFNAMES) must NOT
+        // re-trigger it — that would refetch the same window from the connect
+        // cutoff and duplicate rows where @msgid is unstable.
+        assert!(!st.begin_connect_gapfill("#rust"));
+        // Case-insensitive, like the other per-target tracking.
+        assert!(!st.begin_connect_gapfill("#RUST"));
+        // A different target is independent.
+        assert!(st.begin_connect_gapfill("#linux"));
+        // A new (re)connection re-arms every target.
+        st.set_gapfill_cutoff(1_700_000_000_000);
+        assert!(st.begin_connect_gapfill("#rust"));
+        assert!(st.begin_connect_gapfill("#linux"));
     }
 
     #[test]

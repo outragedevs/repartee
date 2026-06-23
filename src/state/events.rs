@@ -581,6 +581,17 @@ impl AppState {
                 buf.messages.insert(pos, msg);
             }
         }
+        // Splicing bypasses add_message, so apply the same scrollback trim live
+        // messages get: a reconnect gap spanning many CHATHISTORY AFTER pages can
+        // splice far more rows than the configured cap, growing the in-memory deque
+        // without bound. enforce_scrollback drops the oldest rows down to the
+        // (pin-aware) limit — and if the user has scrolled this buffer up, the
+        // raised pinned limit preserves the loaded backlog, exactly as for live
+        // traffic.
+        let limit = self.scrollback_limit;
+        if let Some(buf) = self.buffers.get_mut(buffer_id) {
+            enforce_scrollback(buf, limit);
+        }
     }
 
     #[allow(dead_code, reason = "reserved for scripting API; used in tests")]
@@ -1300,6 +1311,66 @@ mod tests {
         }
         let buf = state.buffers.get("libera/#rust").unwrap();
         assert_eq!(buf.messages.len(), 7, "pinned buffer must not trim to limit");
+    }
+
+    #[test]
+    fn spliced_gap_fill_rows_are_trimmed_to_scrollback() {
+        // A reconnect gap spanning many CHATHISTORY AFTER pages splices rows
+        // straight into buf.messages. Like live messages they must honor the
+        // scrollback cap — otherwise a long active-buffer gap grows the deque
+        // without bound.
+        let mut state = make_test_state();
+        state.scrollback_limit = 5;
+        let rows: Vec<Message> = (0..20)
+            .map(|i| {
+                let mut m = make_test_message(&mut state, &format!("gap{i}"));
+                // Distinct increasing timestamps so none dedup against another and
+                // each splices as a separate row.
+                m.timestamp = Utc::now() + chrono::Duration::milliseconds(i);
+                m
+            })
+            .collect();
+
+        state.surface_history_rows("libera/#rust", rows);
+
+        let buf = state.buffers.get("libera/#rust").unwrap();
+        assert_eq!(
+            buf.messages.len(),
+            5,
+            "spliced gap rows must be trimmed to the scrollback limit"
+        );
+        // Trimming keeps the most recent rows (drops the oldest).
+        assert_eq!(buf.messages.back().unwrap().text, "gap19");
+        assert_eq!(buf.messages.front().unwrap().text, "gap15");
+    }
+
+    #[test]
+    fn spliced_gap_fill_rows_survive_when_buffer_pinned() {
+        // If the user has scrolled the buffer up (pinned), the raised limit must
+        // preserve the spliced backlog just as it does for live messages.
+        let mut state = make_test_state();
+        state.scrollback_limit = 5;
+        state
+            .buffers
+            .get_mut("libera/#rust")
+            .unwrap()
+            .pin_backlog = true;
+        let rows: Vec<Message> = (0..20)
+            .map(|i| {
+                let mut m = make_test_message(&mut state, &format!("gap{i}"));
+                m.timestamp = Utc::now() + chrono::Duration::milliseconds(i);
+                m
+            })
+            .collect();
+
+        state.surface_history_rows("libera/#rust", rows);
+
+        let buf = state.buffers.get("libera/#rust").unwrap();
+        assert_eq!(
+            buf.messages.len(),
+            20,
+            "a pinned buffer keeps all spliced rows (loaded backlog is exempt)"
+        );
     }
 
     #[test]

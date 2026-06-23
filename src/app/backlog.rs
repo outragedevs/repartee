@@ -582,17 +582,26 @@ impl App {
     fn request_connect_gapfill(&mut self, conn_id: &str, target: &str) {
         use crate::irc::chathistory::Direction;
 
-        let Some(conn) = self.state.connections.get(conn_id) else {
-            return;
+        // Gate once per target per connection. The channel path runs on
+        // RPL_ENDOFNAMES, which recurs (manual /names, refresh, part/rejoin); each
+        // recurrence would otherwise re-anchor at the original connect cutoff and
+        // refetch the same window. `begin_connect_gapfill` claims the one-shot and
+        // also reads the per-connection state, so take a mutable borrow here.
+        let (network, cutoff) = {
+            let Some(conn) = self.state.connections.get_mut(conn_id) else {
+                return;
+            };
+            if !conn.enabled_caps.contains("draft/chathistory") {
+                return;
+            }
+            if !conn.chathistory.begin_connect_gapfill(target) {
+                return;
+            }
+            // Exclude reconnect-time rows (JOIN echo, traffic logged during a slow
+            // NAMES) so the AFTER anchor stays on the pre-disconnect tail and the
+            // gap-fill targets the actual disconnected gap.
+            (conn.label.clone(), conn.chathistory.gapfill_cutoff())
         };
-        if !conn.enabled_caps.contains("draft/chathistory") {
-            return;
-        }
-        let network = conn.label.clone();
-        // Exclude reconnect-time rows (JOIN echo, traffic logged during a slow
-        // NAMES) so the AFTER anchor stays on the pre-disconnect tail and the
-        // gap-fill targets the actual disconnected gap.
-        let cutoff = conn.chathistory.gapfill_cutoff();
 
         // Newest stored row (older than the reconnect cutoff) → AFTER anchor; if
         // the buffer has no such row, ask for the LATEST page instead.
