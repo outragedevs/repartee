@@ -382,8 +382,17 @@ pub fn newest_anchor(
 /// `CHATHISTORY BEFORE` scroll-back request (before any per-target watermark
 /// has been recorded).
 ///
-/// Returns `(unix_millis, msgid?)` for the row with the least `(timestamp, id)`,
-/// or `None` if the buffer has no stored messages.
+/// Returns `(unix_millis, msgid?)` for the row with the least
+/// `(COALESCE(ts_ms, timestamp * 1000), id)`, or `None` if the buffer has no
+/// stored messages.
+///
+/// Ordered by the full-millisecond time (same key as
+/// [`get_messages_paginated_subsecond`]), NOT `(timestamp, id)`: a
+/// `CHATHISTORY BEFORE` row older in `@time` than a same-second live row is
+/// inserted later, so it carries a larger rowid. A `(timestamp, id)` order would
+/// then pick the live row (lower rowid) as "oldest" and anchor the first BEFORE
+/// at a NEWER point — ingesting store-only rows newer than the buffer's current
+/// oldest, which older-only pagination never surfaces (invisible until reload).
 ///
 /// The anchor is taken from the row's `IRCv3` `tags` (the `@time`/`@msgid` the
 /// server sent), NOT from the second-resolution `messages.timestamp` column or
@@ -400,12 +409,14 @@ pub fn oldest_anchor(
     network: &str,
     buffer: &str,
 ) -> rusqlite::Result<Option<(i64, Option<String>)>> {
-    let mut stmt = db.prepare(
+    let expr = ts_ms_expr(db, "");
+    let sql = format!(
         "SELECT timestamp, tags FROM messages
          WHERE network = ?1 AND buffer = ?2
-         ORDER BY timestamp ASC, id ASC
-         LIMIT 1",
-    )?;
+         ORDER BY {expr} ASC, id ASC
+         LIMIT 1"
+    );
+    let mut stmt = db.prepare(&sql)?;
     // Normalize the buffer key to match how rows are stored (see `newest_anchor`).
     let mut rows = stmt.query(params![network, buffer.to_lowercase()])?;
     match rows.next()? {
@@ -1371,6 +1382,37 @@ mod tests {
 
         let anchor = oldest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
         assert_eq!(anchor, (100_800, Some("server-M".to_string())));
+    }
+
+    #[test]
+    fn oldest_anchor_picks_true_oldest_by_subsecond_not_rowid() {
+        // A live row at .900 (rowid 1) and a CHATHISTORY backfill at .200 inserted
+        // LATER (rowid 2), same whole-second. The first BEFORE anchor must be the
+        // .200 row — a (timestamp, id) order would pick the .900 live row (lower
+        // rowid) and anchor too new, ingesting store-only rows the buffer can't
+        // surface.
+        let db = setup_test_db();
+        db.execute(
+            "INSERT INTO messages (msg_id, network, buffer, timestamp, ts_ms, type, nick, text, highlight, tags) \
+             VALUES ('live', 'net', '#chan', 100, 100900, 'message', 'ada', 'live', 0, \
+             '{\"time\":\"1970-01-01T00:01:40.900Z\",\"msgid\":\"M9\"}')",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO messages (msg_id, network, buffer, timestamp, ts_ms, type, nick, text, highlight, tags) \
+             VALUES ('backfill', 'net', '#chan', 100, 100200, 'message', 'ada', 'older', 0, \
+             '{\"time\":\"1970-01-01T00:01:40.200Z\",\"msgid\":\"M2\"}')",
+            [],
+        )
+        .unwrap();
+
+        let anchor = oldest_anchor(&db, "net", "#chan").unwrap().expect("anchor");
+        assert_eq!(
+            anchor,
+            (100_200, Some("M2".to_string())),
+            "anchor is the true-oldest @time, not the lowest rowid"
+        );
     }
 
     #[test]
