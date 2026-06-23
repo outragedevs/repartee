@@ -1254,6 +1254,71 @@ mod tests {
         assert_eq!(hits[0].ts_ms, 200_000);
     }
 
+    /// Run `EXPLAIN QUERY PLAN` for `sql` and return the joined detail lines.
+    fn explain(db: &Connection, sql: &str, params: &[&dyn rusqlite::ToSql]) -> String {
+        let mut stmt = db.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        stmt.query_map(params, |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join("\n")
+    }
+
+    #[test]
+    fn subsecond_pagination_is_index_backed_not_temp_btree() {
+        // Regression: the scroll-back, web FetchMessages and log-browser hot
+        // paths order by COALESCE(ts_ms, timestamp*1000). Without a matching
+        // index that key forces SQLite to materialize and sort every row in the
+        // buffer (USE TEMP B-TREE FOR ORDER BY) before applying LIMIT — O(N log N)
+        // on large logs. The expression index lets it walk the index in reverse
+        // and stop at LIMIT. Build the exact ORDER BY the production query runs
+        // (via ts_ms_expr) so the assertion tracks the real key.
+        let db = setup_test_db();
+        let order = ts_ms_expr(&db, "m.");
+
+        // Initial page (no cursor).
+        let initial = format!(
+            "SELECT m.id, p.text FROM messages m
+             LEFT JOIN messages p ON p.msg_id = m.ref_id AND p.network = m.network
+             WHERE m.network = ?1 AND m.buffer = ?2
+             ORDER BY {order} DESC, m.id DESC
+             LIMIT 50"
+        );
+        let plan = explain(&db, &initial, &[&"libera", &"#rust"]);
+        assert!(
+            !plan.contains("TEMP B-TREE"),
+            "initial page must be index-backed, got plan:\n{plan}"
+        );
+        assert!(
+            plan.contains("idx_messages_subsecond"),
+            "initial page should use the subsecond index, got plan:\n{plan}"
+        );
+
+        // Cursor page (keyset predicate + same ordering).
+        let cursor = format!(
+            "SELECT m.id, p.text FROM messages m
+             LEFT JOIN messages p ON p.msg_id = m.ref_id AND p.network = m.network
+             WHERE m.network = ?1 AND m.buffer = ?2
+               AND m.timestamp <= ?3
+               AND ({order} < ?4 OR ({order} = ?4 AND m.id < ?5))
+             ORDER BY {order} DESC, m.id DESC
+             LIMIT 50"
+        );
+        let plan = explain(
+            &db,
+            &cursor,
+            &[&"libera", &"#rust", &1700_i64, &1_700_000_i64, &9999_i64],
+        );
+        assert!(
+            !plan.contains("TEMP B-TREE"),
+            "cursor page must be index-backed, got plan:\n{plan}"
+        );
+        assert!(
+            plan.contains("idx_messages_subsecond"),
+            "cursor page should use the subsecond index, got plan:\n{plan}"
+        );
+    }
+
     #[test]
     fn newest_anchor_empty_is_none() {
         let db = setup_test_db();

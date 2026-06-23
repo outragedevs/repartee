@@ -35,6 +35,19 @@ const CREATE_MESSAGES_EVENT_IDX: &str = "
 CREATE INDEX IF NOT EXISTS idx_messages_event_timestamp
 ON messages (timestamp) WHERE type = 'event'";
 
+// Expression index matching the subsecond scroll-back ordering key
+// `COALESCE(ts_ms, timestamp * 1000)` (see `ts_ms_expr`). Without it the
+// scroll-back, web FetchMessages and log-browser hot paths order by an
+// expression no existing index covers, so SQLite materializes and sorts every
+// row in the buffer (USE TEMP B-TREE FOR ORDER BY) before applying LIMIT —
+// O(N log N) on large logs. With it SQLite walks the index in reverse and stops
+// at LIMIT. The trailing `id` matches the `m.id DESC` tiebreaker so the keyset
+// cursor is fully index-satisfied. Created only after the `ts_ms` column is
+// guaranteed present (see `migrate_schema`), since the expression references it.
+const CREATE_MESSAGES_SUBSECOND_IDX: &str = "
+CREATE INDEX IF NOT EXISTS idx_messages_subsecond
+ON messages (network, buffer, COALESCE(ts_ms, timestamp * 1000), id)";
+
 const CREATE_READ_MARKERS: &str = "
 CREATE TABLE IF NOT EXISTS read_markers (
     network   TEXT NOT NULL,
@@ -214,6 +227,13 @@ fn migrate_schema(db: &Connection) {
         } else {
             tracing::info!("migrated messages table: added {col}");
         }
+    }
+
+    // Build the subsecond-ordering index now that `ts_ms` is guaranteed to exist
+    // (the expression references it). Cheap on existing logs — it indexes a
+    // computed key, not a backfill UPDATE. Idempotent via IF NOT EXISTS.
+    if let Err(e) = db.execute_batch(CREATE_MESSAGES_SUBSECOND_IDX) {
+        tracing::warn!("migration warning creating idx_messages_subsecond: {e}");
     }
     // The legacy global-unique `idx_messages_msg_id` only exists on databases
     // created by `main` (before the composite key). Its presence is our one-shot
@@ -422,6 +442,16 @@ mod tests {
             .any(|name| name == column)
     }
 
+    fn index_exists(db: &Connection, name: &str) -> bool {
+        db.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+            params![name],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+            > 0
+    }
+
     #[test]
     fn migration_adds_ts_ms_to_pre_existing_database() {
         // Simulate an old log DB whose `messages` table predates the `ts_ms`
@@ -458,6 +488,14 @@ mod tests {
         create_schema(&db, false).unwrap();
 
         assert!(column_exists(&db, "messages", "ts_ms"), "migration added ts_ms");
+        // The subsecond-ordering index is built once ts_ms exists, so upgraded
+        // logs get the same index-backed scroll-back as fresh ones (no temp
+        // B-tree sort over the whole buffer). It references ts_ms, so it cannot
+        // exist before the column was added above.
+        assert!(
+            index_exists(&db, "idx_messages_subsecond"),
+            "migration created idx_messages_subsecond"
+        );
         // The pre-existing row keeps NULL ts_ms; the read path COALESCEs it to
         // timestamp*1000, so it still paginates with whole-second ordering.
         let rows = crate::storage::query::get_messages_paginated_subsecond(
