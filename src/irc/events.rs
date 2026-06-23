@@ -948,11 +948,19 @@ pub fn ingest_chathistory_batch(
             tags,
         };
 
-        state.ingest_history_message(&buffer_id, &message);
-        ingested += 1;
-        let ingested_ms = message.timestamp.timestamp_millis();
-        if oldest_ingested_ms.is_none_or(|cur| ingested_ms < cur) {
-            oldest_ingested_ms = Some(ingested_ms);
+        // Only count rows the storage layer actually queued. A row dropped by
+        // maybe_log (a `log_exclude_types` type like message/notice/action, or a
+        // full log queue) never reaches SQLite, so counting it would advance the
+        // `oldest_ingested` watermark and clear `history_exhausted` for rows that
+        // never paginate — making BEFORE scroll-up re-request server history while
+        // the visible backlog never grows.
+        let stored = state.ingest_history_message(&buffer_id, &message);
+        if stored {
+            ingested += 1;
+            let ingested_ms = message.timestamp.timestamp_millis();
+            if oldest_ingested_ms.is_none_or(|cur| ingested_ms < cur) {
+                oldest_ingested_ms = Some(ingested_ms);
+            }
         }
         if collect_display {
             display_rows.push((buffer_id, message));

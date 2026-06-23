@@ -453,8 +453,14 @@ impl AppState {
     }
 
     /// Send a message to the storage writer if logging is enabled.
-    fn maybe_log(&self, buffer_id: &str, message: &Message) {
-        let Some(tx) = &self.log_tx else { return };
+    ///
+    /// Returns `true` only when the row was actually enqueued for storage, and
+    /// `false` when it was dropped — logging disabled, the type is filtered by
+    /// `log_exclude_types`, a malformed `buffer_id`, or a full log queue. Callers
+    /// that track storage progress (CHATHISTORY ingest) must not count a dropped
+    /// row as stored.
+    fn maybe_log(&self, buffer_id: &str, message: &Message) -> bool {
+        let Some(tx) = &self.log_tx else { return false };
 
         // Check exclude_types filter (e.g. "event" skips quit/join/nick fan-out)
         let type_str = message.message_type.as_str();
@@ -463,12 +469,12 @@ impl AppState {
             .iter()
             .any(|t| t.eq_ignore_ascii_case(type_str))
         {
-            return;
+            return false;
         }
 
         // buffer_id format: "connection_id/buffer_name"
         let Some((conn_id, buf_name)) = buffer_id.split_once('/') else {
-            return;
+            return false;
         };
 
         // Use the connection label as network name (falls back to conn_id)
@@ -536,7 +542,9 @@ impl AppState {
 
         if let Err(e) = tx.try_send(row) {
             tracing::warn!("log queue full, dropping message: {e}");
+            return false;
         }
+        true
     }
 
     /// Persist a `draft/chathistory` message to the log store WITHOUT
@@ -547,8 +555,13 @@ impl AppState {
     /// (`get_messages_paginated`). Deduplication is handled by the unique
     /// `msg_id` index on the messages table, so re-ingesting an
     /// already-stored message is a no-op at the database layer.
-    pub fn ingest_history_message(&self, buffer_id: &str, message: &Message) {
-        self.maybe_log(buffer_id, message);
+    ///
+    /// Returns whether the row was actually enqueued for storage (see
+    /// [`Self::maybe_log`]); a dropped row (filtered type, full queue, logging
+    /// off) must not be counted toward CHATHISTORY storage progress.
+    #[must_use]
+    pub fn ingest_history_message(&self, buffer_id: &str, message: &Message) -> bool {
+        self.maybe_log(buffer_id, message)
     }
 
     /// Splice reconnect gap-fill rows (from an `AFTER`/`LATEST` CHATHISTORY
@@ -1209,6 +1222,69 @@ mod tests {
     }
 
     #[test]
+    fn ingest_history_message_reports_whether_row_was_stored() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let mut state = make_test_state();
+        state.log_tx = Some(tx);
+
+        let msg = Message {
+            id: 0,
+            timestamp: Utc::now(),
+            message_type: MessageType::Message,
+            nick: Some("dora".to_string()),
+            nick_mode: None,
+            text: "hi".to_string(),
+            highlight: false,
+            event_key: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: None,
+        };
+
+        // Normal config: the row is queued, so ingest reports success.
+        assert!(state.ingest_history_message("libera/#rust", &msg));
+        rx.try_recv().expect("row queued for storage");
+
+        // log_exclude_types filtering a conversational type drops the row in
+        // maybe_log — ingest must report failure so the caller does not count it
+        // as stored (which would advance the oldest_ingested watermark and clear
+        // history_exhausted for a row that never reaches SQLite).
+        state.log_exclude_types = vec!["message".to_string()];
+        assert!(!state.ingest_history_message("libera/#rust", &msg));
+        assert!(rx.try_recv().is_err(), "excluded row must not be queued");
+    }
+
+    #[test]
+    fn ingest_history_message_reports_failure_on_full_queue() {
+        // A full log queue drops the row; ingest must report failure so a busy
+        // CHATHISTORY backfill doesn't book unstored rows as stored.
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut state = make_test_state();
+        state.log_tx = Some(tx);
+        let msg = Message {
+            id: 0,
+            timestamp: Utc::now(),
+            message_type: MessageType::Message,
+            nick: Some("dora".to_string()),
+            nick_mode: None,
+            text: "hi".to_string(),
+            highlight: false,
+            event_key: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: None,
+        };
+        // First fills the single slot (kept unread via _rx), second overflows.
+        assert!(state.ingest_history_message("libera/#rust", &msg));
+        assert!(
+            !state.ingest_history_message("libera/#rust", &msg),
+            "a full queue must report the row as not stored"
+        );
+    }
+
+    #[test]
     fn maybe_log_dedups_msgid_less_live_and_history_via_deterministic_key() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         let mut state = make_test_state();
@@ -1238,7 +1314,7 @@ mod tests {
 
         state.add_message("libera/#rust", build());
         let live = rx.try_recv().expect("live row logged");
-        state.ingest_history_message("libera/#rust", &build());
+        assert!(state.ingest_history_message("libera/#rust", &build()), "history row stored");
         let history = rx.try_recv().expect("history row logged");
 
         assert_eq!(
@@ -1257,7 +1333,7 @@ mod tests {
         // distinct messages are never collapsed.
         let mut other = build();
         other.text = "something else".to_string();
-        state.ingest_history_message("libera/#rust", &other);
+        assert!(state.ingest_history_message("libera/#rust", &other), "other row stored");
         let other_row = rx.try_recv().expect("other row logged");
         assert_ne!(
             other_row.msg_id, live.msg_id,
