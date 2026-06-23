@@ -142,6 +142,16 @@ impl BatchTracker {
     }
 }
 
+/// A reconnect `AFTER` gap-fill that came back full and needs another page. The
+/// App caller issues an `AFTER` from `anchor_ms` to keep filling the gap (see
+/// [`process_completed_batch`]).
+pub struct GapfillContinuation {
+    /// Channel/query whose reconnect gap-fill must continue.
+    pub target: String,
+    /// Anchor (unix millis) for the next `AFTER` — the newest row received so far.
+    pub anchor_ms: i64,
+}
+
 /// Process a completed batch, generating appropriate state changes and messages.
 ///
 /// - NETSPLIT: Produces a single summary line instead of individual QUIT messages.
@@ -152,15 +162,25 @@ impl BatchTracker {
 /// `false` for one force-completed by the timeout purge. It only matters for
 /// CHATHISTORY: a timed-out short `BEFORE` batch must not be mistaken for
 /// genuine end-of-history (see [`crate::irc::chathistory::HistoryState::complete_target`]).
+///
+/// Returns [`GapfillContinuation`] when a reconnect `AFTER` gap-fill page came
+/// back full (the gap is larger than one page); the App caller then issues the
+/// next `AFTER`. `None` for every other case.
 pub fn process_completed_batch(
     state: &mut AppState,
     conn_id: &str,
     batch: &BatchInfo,
     clean_end: bool,
-) {
+) -> Option<GapfillContinuation> {
     match batch.batch_type.as_str() {
-        "NETSPLIT" => process_netsplit_batch(state, conn_id, batch),
-        "NETJOIN" => process_netjoin_batch(state, conn_id, batch),
+        "NETSPLIT" => {
+            process_netsplit_batch(state, conn_id, batch);
+            None
+        }
+        "NETJOIN" => {
+            process_netjoin_batch(state, conn_id, batch);
+            None
+        }
         "CHATHISTORY" => {
             // draft/chathistory: store-only backlog fill. Conversational lines
             // are persisted to SQLite without live display/state mutation; the
@@ -182,9 +202,24 @@ pub fn process_completed_batch(
                     .and_then(|c| c.chathistory.in_flight_direction(target))
             });
             let is_gapfill = matches!(direction, Some(Direction::After | Direction::Latest));
+            let is_after = matches!(direction, Some(Direction::After));
+            // Capture the requested AFTER page size BEFORE complete_target clears
+            // the in-flight entry, so we can tell a full page (more gap to fill)
+            // from a short one.
+            let after_limit = if is_after {
+                batch.params.first().and_then(|target| {
+                    state
+                        .connections
+                        .get(conn_id)
+                        .and_then(|c| c.chathistory.requested_limit(target, Direction::After))
+                })
+            } else {
+                None
+            };
             let outcome =
                 crate::irc::events::ingest_chathistory_batch(state, conn_id, batch, is_gapfill);
             let is_before = matches!(direction, Some(Direction::Before));
+            let mut continuation: Option<GapfillContinuation> = None;
             if let Some(target) = batch.params.first() {
                 if let Some(conn) = state.connections.get_mut(conn_id) {
                     conn.chathistory.complete_target(
@@ -202,6 +237,28 @@ pub fn process_completed_batch(
                         && let Some(ms) = outcome.oldest_ingested_ms
                     {
                         conn.chathistory.note_oldest_ingested(target, ms);
+                    }
+                }
+                // A clean, FULL AFTER page means the reconnect gap is larger than
+                // one CHATHISTORY page. The unsent rows are NEWER than every
+                // spliced row, so older-only scroll-up never reaches them — chain
+                // another AFTER from the newest row received, bounded by the
+                // reconnect cutoff so we stop once the gap is filled to "now".
+                if clean_end
+                    && is_after
+                    && let Some(limit) = after_limit
+                    && batch.messages.len() >= limit
+                    && let Some(newest) = outcome.newest_ms
+                {
+                    let cutoff = state
+                        .connections
+                        .get(conn_id)
+                        .and_then(|c| c.chathistory.gapfill_cutoff());
+                    if cutoff.is_none_or(|c| newest < c) {
+                        continuation = Some(GapfillContinuation {
+                            target: target.clone(),
+                            anchor_ms: newest,
+                        });
                     }
                 }
                 // Older rows just landed in SQLite. A buffer that marked itself
@@ -231,12 +288,14 @@ pub fn process_completed_batch(
                     state.surface_history_rows(&buf_id, msgs);
                 }
             }
+            continuation
         }
         _ => {
             // Unknown batch type — replay messages through the normal handler.
             for msg in &batch.messages {
                 crate::irc::events::handle_irc_message(state, conn_id, msg);
             }
+            None
         }
     }
 }
@@ -1076,6 +1135,88 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "non-ACTION CTCP must be skipped in v1"
+        );
+    }
+
+    #[test]
+    fn full_after_gapfill_returns_continuation_short_does_not() {
+        use crate::irc::chathistory::Direction;
+        let conn_id = "test";
+
+        // A FULL AFTER page (== requested limit) with the gap still open (cutoff
+        // beyond the newest row) yields a continuation anchored at the newest row.
+        let (mut state, _rx, _buf_id) = setup_ingest_state(conn_id);
+        {
+            let hist = &mut state.connections.get_mut(conn_id).unwrap().chathistory;
+            hist.mark_in_flight("#test", Direction::After, 2);
+            hist.set_gapfill_cutoff(1_704_067_203_000); // after both rows
+        }
+        let full = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![
+                make_history_privmsg_at("a", "#test", "1", "g1", "2024-01-01T00:00:01.000Z"),
+                make_history_privmsg_at("b", "#test", "2", "g2", "2024-01-01T00:00:02.000Z"),
+            ],
+        };
+        let cont = process_completed_batch(&mut state, conn_id, &full, true).expect("continuation");
+        assert_eq!(cont.target, "#test");
+        assert_eq!(cont.anchor_ms, 1_704_067_202_000, "anchor is the newest row");
+
+        // A SHORT page (fewer than the limit) means the gap is filled → no chain.
+        let (mut state, _rx, _buf_id) = setup_ingest_state(conn_id);
+        state
+            .connections
+            .get_mut(conn_id)
+            .unwrap()
+            .chathistory
+            .mark_in_flight("#test", Direction::After, 2);
+        let short = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![make_history_privmsg_at(
+                "a",
+                "#test",
+                "1",
+                "g1",
+                "2024-01-01T00:00:01.000Z",
+            )],
+        };
+        assert!(
+            process_completed_batch(&mut state, conn_id, &short, true).is_none(),
+            "a short AFTER page does not chain"
+        );
+    }
+
+    #[test]
+    fn full_after_gapfill_stops_at_reconnect_cutoff() {
+        use crate::irc::chathistory::Direction;
+        let conn_id = "test";
+        let (mut state, _rx, _buf_id) = setup_ingest_state(conn_id);
+        {
+            let hist = &mut state.connections.get_mut(conn_id).unwrap().chathistory;
+            hist.mark_in_flight("#test", Direction::After, 2);
+            // Cutoff falls between the two rows: the page already reached the
+            // reconnect point, so there is nothing left to chain.
+            hist.set_gapfill_cutoff(1_704_067_201_500);
+        }
+        let full = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![
+                make_history_privmsg_at("a", "#test", "1", "g1", "2024-01-01T00:00:01.000Z"),
+                make_history_privmsg_at("b", "#test", "2", "g2", "2024-01-01T00:00:02.000Z"),
+            ],
+        };
+        assert!(
+            process_completed_batch(&mut state, conn_id, &full, true).is_none(),
+            "newest row at/after the reconnect cutoff stops the chain"
         );
     }
 

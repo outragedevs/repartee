@@ -240,6 +240,16 @@ impl HistoryState {
             .map(|(_, dir)| *dir)
     }
 
+    /// The page size requested for the in-flight `(target, dir)` request, if any.
+    /// Read at batch completion (before `complete_target` clears it) to tell a
+    /// full page (`rows >= limit` — more history may follow) from a short one.
+    #[must_use]
+    pub fn requested_limit(&self, target: &str, dir: Direction) -> Option<usize> {
+        self.in_flight
+            .get(&(target.to_ascii_lowercase(), dir))
+            .map(|(limit, _)| *limit)
+    }
+
     /// Mark a target's `BEFORE` history as exhausted (start of history reached,
     /// or a server failure), so we stop requesting older messages for it.
     pub fn mark_before_exhausted(&mut self, target: &str) {

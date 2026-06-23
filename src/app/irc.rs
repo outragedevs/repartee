@@ -591,12 +591,24 @@ impl App {
                                 batch.messages.len()
                             );
                             // Normal close via `BATCH -tag` (`clean_end = true`).
-                            crate::irc::batch::process_completed_batch(
+                            let continuation = crate::irc::batch::process_completed_batch(
                                 &mut self.state,
                                 &conn_id,
                                 &batch,
                                 true,
                             );
+                            // A full reconnect AFTER gap-fill page → chain the next
+                            // AFTER from the newest row so a multi-page gap is
+                            // filled completely (those rows are newer than the
+                            // scroll-up cursor and unreachable otherwise).
+                            if let Some(cont) = continuation {
+                                self.request_chathistory(
+                                    &conn_id,
+                                    &cont.target,
+                                    crate::irc::chathistory::Direction::After,
+                                    Some((None, cont.anchor_ms)),
+                                );
+                            }
                         }
                     }
                     // BATCH commands themselves are not dispatched further
