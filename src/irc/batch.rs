@@ -252,17 +252,28 @@ pub fn process_completed_batch(
                     && let Some(limit) = after_limit
                     && batch.messages.len() >= limit
                     && let Some((newest_ms, newest_msgid)) = outcome.newest
+                    && let Some(conn) = state.connections.get_mut(conn_id)
                 {
-                    let cutoff = state
-                        .connections
-                        .get(conn_id)
-                        .and_then(|c| c.chathistory.gapfill_cutoff());
-                    if cutoff.is_none_or(|c| newest_ms < c) {
-                        continuation = Some(GapfillContinuation {
-                            target: target.clone(),
-                            anchor_ms: newest_ms,
-                            anchor_msgid: newest_msgid,
-                        });
+                    let within_cutoff = conn
+                        .chathistory
+                        .gapfill_cutoff()
+                        .is_none_or(|c| newest_ms < c);
+                    if within_cutoff {
+                        // note_gapfill_page is the runaway backstop: a healthy chain
+                        // stops here once newest_ms reaches the cutoff, but a server
+                        // that never advances the anchor is cut off by the page cap.
+                        if conn.chathistory.note_gapfill_page(target) {
+                            continuation = Some(GapfillContinuation {
+                                target: target.clone(),
+                                anchor_ms: newest_ms,
+                                anchor_msgid: newest_msgid,
+                            });
+                        } else {
+                            tracing::warn!(
+                                "chathistory AFTER gap-fill for {target} hit the page cap; \
+                                 stopping (server is not advancing the anchor)"
+                            );
+                        }
                     }
                 }
                 // Older rows just landed in SQLite. A buffer that marked itself

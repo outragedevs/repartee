@@ -500,7 +500,20 @@ impl AppState {
                 .and_then(|t| t.get("msgid"))
                 .filter(|m| !m.is_empty())
                 .cloned()
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                // No server @msgid (server doesn't support it): derive a
+                // deterministic key from content+time instead of a random UUID, so
+                // a live message and its later CHATHISTORY replay collapse on the
+                // unique (network, msg_id) index rather than storing twice.
+                .unwrap_or_else(|| {
+                    synthetic_msg_id(
+                        &network,
+                        buf_name,
+                        message.timestamp.timestamp_millis(),
+                        message.nick.as_deref(),
+                        type_str,
+                        &message.text,
+                    )
+                }),
         };
         let row = LogRow {
             msg_id,
@@ -736,6 +749,50 @@ const fn effective_scrollback_limit(pinned: bool, limit: usize) -> usize {
 /// Used to dedup CHATHISTORY gap-fill rows against messages already shown live.
 /// Prefers IRC `@msgid` equality (authoritative when both carry one), falling
 /// back to matching timestamp, nick, type and text.
+/// Deterministic fallback `msg_id` for a conversational row with no server
+/// `@msgid`, derived from its identifying content + full-millisecond time.
+///
+/// Replaces a random UUID so a live message and its later CHATHISTORY replay —
+/// which both flow through [`AppState::maybe_log`] and, on a server without
+/// `@msgid`, would otherwise each mint a distinct UUID — collapse on the unique
+/// `(network, msg_id)` index instead of being stored (and paginated) twice.
+///
+/// Uses FNV-1a, which is stable across processes and Rust versions (unlike
+/// `DefaultHasher`), so the two copies key identically even across restarts. The
+/// trade-off is that two genuinely distinct messages with the same network,
+/// buffer, millisecond, nick, type and text collapse to one — indistinguishable
+/// anyway without a server `@msgid`, and vanishingly rare.
+fn synthetic_msg_id(
+    network: &str,
+    buffer: &str,
+    ts_ms: i64,
+    nick: Option<&str>,
+    type_str: &str,
+    text: &str,
+) -> String {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let ts_bytes = ts_ms.to_le_bytes();
+    let mut h = OFFSET;
+    for field in [
+        network.as_bytes(),
+        buffer.as_bytes(),
+        ts_bytes.as_slice(),
+        nick.unwrap_or("").as_bytes(),
+        type_str.as_bytes(),
+        text.as_bytes(),
+    ] {
+        for &b in field {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(PRIME);
+        }
+        // Mix a separator between fields so ("ab","c") and ("a","bc") differ.
+        h ^= 0x00ff;
+        h = h.wrapping_mul(PRIME);
+    }
+    format!("synth:{h:016x}")
+}
+
 fn buffer_contains_history_row(buf: &Buffer, candidate: &Message) -> bool {
     let candidate_msgid = candidate.tags.as_ref().and_then(|t| t.get("msgid"));
     buf.messages.iter().any(|m| {
@@ -1148,6 +1205,63 @@ mod tests {
         assert_eq!(
             row.msg_id, "server-msgid-xyz",
             "live row must be keyed by the server @msgid for dedup"
+        );
+    }
+
+    #[test]
+    fn maybe_log_dedups_msgid_less_live_and_history_via_deterministic_key() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let mut state = make_test_state();
+        state.log_tx = Some(tx);
+
+        // A server that supports draft/chathistory but sends NO @msgid: the live
+        // message and its later CHATHISTORY replay both lack a stable server key.
+        // Both go through maybe_log and must derive the SAME deterministic msg_id
+        // from their content+time, so INSERT OR IGNORE on (network, msg_id)
+        // collapses them. With a random UUID per call they would get two distinct
+        // keys and the same message would be stored — and paginated — twice.
+        let ts = Utc::now();
+        let build = || Message {
+            id: 0,
+            timestamp: ts,
+            message_type: MessageType::Message,
+            nick: Some("carol".to_string()),
+            nick_mode: None,
+            text: "no msgid here".to_string(),
+            highlight: false,
+            event_key: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: None,
+        };
+
+        state.add_message("libera/#rust", build());
+        let live = rx.try_recv().expect("live row logged");
+        state.ingest_history_message("libera/#rust", &build());
+        let history = rx.try_recv().expect("history row logged");
+
+        assert_eq!(
+            live.msg_id, history.msg_id,
+            "msgid-less live and history copies must share a deterministic key"
+        );
+        assert!(!live.msg_id.is_empty(), "synthetic key must be non-empty");
+        // Determinism guard: a random UUID would differ between the two calls.
+        assert_ne!(
+            live.msg_id,
+            uuid::Uuid::new_v4().to_string(),
+            "key must be content-derived, not a random UUID"
+        );
+
+        // A genuinely different message (different text) gets a different key, so
+        // distinct messages are never collapsed.
+        let mut other = build();
+        other.text = "something else".to_string();
+        state.ingest_history_message("libera/#rust", &other);
+        let other_row = rx.try_recv().expect("other row logged");
+        assert_ne!(
+            other_row.msg_id, live.msg_id,
+            "distinct content must not collide on the synthetic key"
         );
     }
 

@@ -788,36 +788,19 @@ impl App {
         // Read-side key so encrypted logs decrypt on web scroll-back (previously
         // `None` => the client received ciphertext).
         let key = storage.crypto_key.as_ref();
-        // `before` is the oldest loaded row's full-millisecond `@time` (the client
-        // sends `ts_ms`). The subsecond keyset orders same-second rows by real
-        // time, so a CHATHISTORY-backfilled row at e.g. `.200` — inserted after an
-        // already-loaded `.500` row in the same second, hence a larger rowid — is
-        // returned instead of being dropped by a whole-second `id < before_id`
-        // comparison. A DB-sourced cursor row supplies its rowid; at the live/DB
-        // boundary (`before_id` None) id 0 makes the keyset "strictly older ms".
-        // `before == None` is the initial load (newest page).
-        //
-        // Back-compat: the WS protocol is not version-gated, so a web client still
-        // running the previous bundle sends whole-SECOND timestamps. A second-scale
-        // value (< year ~2001 in millis) is scaled up to millis, or it would query
-        // around 1970 (ms/1000) and return empty scrollback.
-        let before_ms = before.map(|b| {
-            if b < 1_000_000_000_000 {
-                b.saturating_mul(1000)
-            } else {
-                b
-            }
-        });
-        let cursor: Option<(i64, i64)> = match (before_ms, before_id) {
-            (Some(ms), Some(id)) => Some((ms, id)),
-            (Some(ms), None) => Some((ms, 0)),
-            (None, _) => None,
-        };
-        let messages = crate::storage::query::get_messages_paginated_subsecond(
+        // `before` is the oldest loaded row's full-millisecond `@time` (current
+        // bundle) or a whole-SECOND timestamp (previous bundle — the WS protocol
+        // is not version-gated). `paginate_web_history` picks the matching keyset:
+        // the subsecond keyset for a millis cursor (so a CHATHISTORY-backfilled
+        // same-second row at e.g. `.200`, inserted after an already-loaded `.500`
+        // row and hence a larger rowid, is returned rather than skipped), and the
+        // lossless whole-second keyset for a legacy seconds cursor (flooring it to
+        // `.000` on the subsecond keyset would drop same-second sub-`.000` rows).
+        let messages = crate::storage::query::paginate_web_history(
             &db,
             &network,
             buffer,
-            cursor,
+            before.map(|b| (b, before_id)),
             capped_limit + 1,
             storage.encrypt,
             key,

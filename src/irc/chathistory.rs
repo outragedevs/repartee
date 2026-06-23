@@ -158,7 +158,21 @@ pub struct HistoryState {
     /// same window, duplicating rows on servers without stable `@msgid`. Cleared
     /// by [`set_gapfill_cutoff`] so every (re)connection re-arms all targets.
     gapfilled_targets: HashSet<String>,
+    /// Per-target count of chained `AFTER` gap-fill pages this connection. A
+    /// healthy chain terminates at `gapfill_cutoff_ms` (each page anchors at the
+    /// newest row received and walks forward to "now"), but a server that floors
+    /// the `AFTER` anchor — re-returning a window whose newest row never advances
+    /// — would loop forever re-storing duplicates. This blunt cap abandons such a
+    /// chain. Cleared by [`set_gapfill_cutoff`] on each (re)connect.
+    gapfill_pages: HashMap<String, usize>,
 }
+
+/// Absolute cap on chained `AFTER` gap-fill pages per target per connection. Far
+/// above any realistic reconnect gap (≥1M messages at a 100-row server page), so
+/// it never truncates a legitimate backfill; hitting it means the server is not
+/// advancing the anchor, so the chain is abandoned (with a warning) instead of
+/// spinning.
+const MAX_GAPFILL_PAGES: usize = 10_000;
 
 impl HistoryState {
     #[must_use]
@@ -310,6 +324,17 @@ impl HistoryState {
     pub fn set_gapfill_cutoff(&mut self, now_ms: i64) {
         self.gapfill_cutoff_ms = Some(now_ms);
         self.gapfilled_targets.clear();
+        self.gapfill_pages.clear();
+    }
+
+    /// Count one more chained `AFTER` gap-fill page for `target`; returns `true`
+    /// while the per-connection page cap ([`MAX_GAPFILL_PAGES`]) has not been
+    /// exceeded (keep chaining), `false` once it has (stop — the server is not
+    /// advancing the anchor). Reset per (re)connect by [`Self::set_gapfill_cutoff`].
+    pub fn note_gapfill_page(&mut self, target: &str) -> bool {
+        let n = self.gapfill_pages.entry(target.to_lowercase()).or_default();
+        *n += 1;
+        *n <= MAX_GAPFILL_PAGES
     }
 
     /// The reconnect gap-fill cutoff (unix millis), if a connection has completed.
@@ -669,6 +694,23 @@ mod tests {
         assert_eq!(st.gapfill_cutoff(), None);
         st.set_gapfill_cutoff(1_700_000_000_000);
         assert_eq!(st.gapfill_cutoff(), Some(1_700_000_000_000));
+    }
+
+    #[test]
+    fn gapfill_page_cap_stops_a_nonadvancing_after_chain() {
+        let mut st = HistoryState::new();
+        // A healthy chain stays under the cap.
+        for _ in 0..MAX_GAPFILL_PAGES {
+            assert!(st.note_gapfill_page("#chan"));
+        }
+        // A server that never advances the anchor keeps producing full pages; the
+        // cap eventually tells the chain to stop instead of looping forever.
+        assert!(!st.note_gapfill_page("#chan"));
+        // Per-target: a different channel is unaffected.
+        assert!(st.note_gapfill_page("#other"));
+        // A new (re)connection re-arms the counter.
+        st.set_gapfill_cutoff(1_000);
+        assert!(st.note_gapfill_page("#chan"));
     }
 
     #[test]

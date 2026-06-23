@@ -318,6 +318,54 @@ pub fn get_messages_paginated_subsecond(
     Ok(messages)
 }
 
+/// Paginate older web-client history from its scroll-back cursor, picking the
+/// keyset that matches the cursor's resolution.
+///
+/// The current web bundle sends the oldest loaded row's full-millisecond `@time`
+/// (`ts_ms`, always `>= 1e12` for any realistic date) and wants the subsecond
+/// keyset so a CHATHISTORY-backfilled same-second row (larger rowid, smaller
+/// `ts_ms`) is returned rather than hidden. A client still running the *previous*
+/// bundle sends a whole-**second** `before`; routing that through the subsecond
+/// keyset floors it to `.000` and silently drops same-second rows whose `ts_ms`
+/// is past `.000` but whose rowid is smaller than the cursor's. A second-scale
+/// `before` therefore uses the whole-second keyset
+/// (`timestamp < S OR (timestamp = S AND id < before_id)`), which is lossless for
+/// a seconds cursor. `before = None` is the initial (newest) page.
+pub fn paginate_web_history(
+    db: &Connection,
+    network: &str,
+    buffer: &str,
+    cursor: Option<(i64, Option<i64>)>,
+    limit: usize,
+    encrypt: bool,
+    crypto_key: Option<&Key<Aes256Gcm>>,
+) -> rusqlite::Result<Vec<StoredMessage>> {
+    // `cursor` is `(before, before_id?)`. Below this (≈ year 2001 in millis) a
+    // `before` value must be whole seconds (a previous-bundle client).
+    const SECOND_SCALE_MAX: i64 = 1_000_000_000_000;
+    match cursor {
+        Some((secs, before_id)) if secs < SECOND_SCALE_MAX => get_messages_paginated(
+            db,
+            network,
+            buffer,
+            Some((secs, before_id.unwrap_or(0))),
+            limit,
+            encrypt,
+            crypto_key,
+        ),
+        Some((ms, before_id)) => get_messages_paginated_subsecond(
+            db,
+            network,
+            buffer,
+            Some((ms, before_id.unwrap_or(0))),
+            limit,
+            encrypt,
+            crypto_key,
+        ),
+        None => get_messages_paginated_subsecond(db, network, buffer, None, limit, encrypt, crypto_key),
+    }
+}
+
 /// Newest stored row for a buffer, used as the anchor for a
 /// `CHATHISTORY AFTER` gap-fill request after (re)connecting.
 ///
@@ -1316,6 +1364,47 @@ mod tests {
         assert!(
             plan.contains("idx_messages_subsecond"),
             "cursor page should use the subsecond index, got plan:\n{plan}"
+        );
+    }
+
+    #[test]
+    fn web_pagination_legacy_seconds_cursor_keeps_same_second_subsecond_rows() {
+        // Regression: a web client on the PREVIOUS bundle sends a whole-SECOND
+        // `before`. Three rows share second S=1000: a(.200,id1), b(.500,id2),
+        // c(.800,id3). The client loaded down to b and sends before=1000 (seconds)
+        // + before_id=id_b. The older same-second row `a` must still come back.
+        let db = setup_test_db();
+        for (text, ts_ms) in [("a", 1_000_200_i64), ("b", 1_000_500), ("c", 1_000_800)] {
+            db.execute(
+                "INSERT INTO messages (msg_id, network, buffer, timestamp, ts_ms, type, nick, text, highlight) \
+                 VALUES (?1, 'net', '#chan', 1000, ?2, 'message', 'ada', ?3, 0)",
+                params![format!("m-{text}"), ts_ms, text],
+            )
+            .unwrap();
+        }
+        let id_b: i64 = db
+            .query_row("SELECT id FROM messages WHERE text = 'b'", [], |r| r.get(0))
+            .unwrap();
+
+        // The fix routes a second-scale cursor to the lossless whole-second keyset.
+        let page =
+            paginate_web_history(&db, "net", "#chan", Some((1000, Some(id_b))), 10, false, None)
+                .unwrap();
+        let texts: Vec<&str> = page.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["a"],
+            "legacy seconds cursor must return the same-second older row, not skip it"
+        );
+
+        // Documents the bug: the subsecond keyset with that cursor floored to
+        // `.000` (1_000_000) drops `a` (ts_ms .200 is neither < .000 nor == .000).
+        let skipped =
+            get_messages_paginated_subsecond(&db, "net", "#chan", Some((1_000_000, id_b)), 10, false, None)
+                .unwrap();
+        assert!(
+            skipped.iter().all(|m| m.text != "a"),
+            "subsecond keyset floored to .000 would skip a — the regression being fixed"
         );
     }
 
