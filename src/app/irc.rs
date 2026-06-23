@@ -606,7 +606,7 @@ impl App {
                                     &conn_id,
                                     &cont.target,
                                     crate::irc::chathistory::Direction::After,
-                                    Some((None, cont.anchor_ms)),
+                                    Some((cont.anchor_msgid, cont.anchor_ms)),
                                 );
                             }
                         }

@@ -150,6 +150,9 @@ pub struct GapfillContinuation {
     pub target: String,
     /// Anchor (unix millis) for the next `AFTER` — the newest row received so far.
     pub anchor_ms: i64,
+    /// That row's verified `@msgid`, if any. Anchoring the next `AFTER` by msgid
+    /// (when the server supports it) avoids skipping rows sharing `anchor_ms`.
+    pub anchor_msgid: Option<String>,
 }
 
 /// Process a completed batch, generating appropriate state changes and messages.
@@ -248,16 +251,17 @@ pub fn process_completed_batch(
                     && is_after
                     && let Some(limit) = after_limit
                     && batch.messages.len() >= limit
-                    && let Some(newest) = outcome.newest_ms
+                    && let Some((newest_ms, newest_msgid)) = outcome.newest
                 {
                     let cutoff = state
                         .connections
                         .get(conn_id)
                         .and_then(|c| c.chathistory.gapfill_cutoff());
-                    if cutoff.is_none_or(|c| newest < c) {
+                    if cutoff.is_none_or(|c| newest_ms < c) {
                         continuation = Some(GapfillContinuation {
                             target: target.clone(),
-                            anchor_ms: newest,
+                            anchor_ms: newest_ms,
+                            anchor_msgid: newest_msgid,
                         });
                     }
                 }
@@ -1164,6 +1168,11 @@ mod tests {
         let cont = process_completed_batch(&mut state, conn_id, &full, true).expect("continuation");
         assert_eq!(cont.target, "#test");
         assert_eq!(cont.anchor_ms, 1_704_067_202_000, "anchor is the newest row");
+        assert_eq!(
+            cont.anchor_msgid,
+            Some("g2".to_string()),
+            "carries the newest row's verified @msgid"
+        );
 
         // A SHORT page (fewer than the limit) means the gap is filled → no chain.
         let (mut state, _rx, _buf_id) = setup_ingest_state(conn_id);

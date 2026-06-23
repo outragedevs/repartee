@@ -782,10 +782,11 @@ pub struct IngestOutcome {
     /// scroll-back exhaustion once the buffer has displayed down to it — a
     /// skipped-only batch leaves it `None` and the buffer settles immediately.
     pub oldest_ingested_ms: Option<i64>,
-    /// Newest server-time (unix **millis**) across all batch lines, or `None` if
-    /// none carried a `@time` tag. Used as the next `AFTER` anchor when a reconnect
-    /// gap-fill page comes back full (the gap is larger than one page).
-    pub newest_ms: Option<i64>,
+    /// Newest server-time (unix **millis**) across all batch lines plus that
+    /// line's `@msgid` (if any), or `None` if none carried a `@time` tag. Used as
+    /// the next `AFTER` anchor when a reconnect gap-fill page comes back full (the
+    /// gap is larger than one page) — by msgid when the server supports it.
+    pub newest: Option<(i64, Option<String>)>,
 }
 
 /// Ingest a completed `draft/chathistory` batch into the log store.
@@ -842,10 +843,11 @@ pub fn ingest_chathistory_batch(
     // else by the full-precision timestamp — so scroll-up never floors to the
     // second (skipping same-second messages) or stalls on event-only windows.
     let mut oldest: Option<(i64, Option<String>)> = None;
-    // Newest line seen across the whole batch (events included): the next AFTER
-    // anchor when a reconnect gap-fill page comes back full and the gap spans
-    // more than one page.
-    let mut newest_ms: Option<i64> = None;
+    // Newest line seen across the whole batch (events included): full
+    // millisecond server-time plus its IRC @msgid. The next `AFTER` anchor when a
+    // reconnect gap-fill page comes back full and the gap spans more than one
+    // page — by msgid (no same-millisecond skips) when the server prefers it.
+    let mut newest: Option<(i64, Option<String>)> = None;
 
     // Persist in chronological order. The DB stores only whole-second
     // timestamps and breaks same-second ties by insertion id, so a page the
@@ -871,12 +873,12 @@ pub fn ingest_chathistory_batch(
             .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
         {
             let ms = ts.timestamp_millis();
-            if oldest.as_ref().is_none_or(|(cur, _)| ms < *cur) {
-                let msgid = tags.as_ref().and_then(|t| t.get("msgid").cloned());
-                oldest = Some((ms, msgid));
+            let msgid = tags.as_ref().and_then(|t| t.get("msgid").cloned());
+            if newest.as_ref().is_none_or(|(cur, _)| ms > *cur) {
+                newest = Some((ms, msgid.clone()));
             }
-            if newest_ms.is_none_or(|cur| ms > cur) {
-                newest_ms = Some(ms);
+            if oldest.as_ref().is_none_or(|(cur, _)| ms < *cur) {
+                oldest = Some((ms, msgid));
             }
         }
 
@@ -971,7 +973,7 @@ pub fn ingest_chathistory_batch(
         display_rows,
         ingested,
         oldest_ingested_ms,
-        newest_ms,
+        newest,
     }
 }
 
