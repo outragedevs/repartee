@@ -142,20 +142,175 @@ impl BatchTracker {
     }
 }
 
+/// A reconnect `AFTER` gap-fill that came back full and needs another page. The
+/// App caller issues an `AFTER` from `anchor_ms` to keep filling the gap (see
+/// [`process_completed_batch`]).
+pub struct GapfillContinuation {
+    /// Channel/query whose reconnect gap-fill must continue.
+    pub target: String,
+    /// Anchor (unix millis) for the next `AFTER` — the newest row received so far.
+    pub anchor_ms: i64,
+    /// That row's verified `@msgid`, if any. Anchoring the next `AFTER` by msgid
+    /// (when the server supports it) avoids skipping rows sharing `anchor_ms`.
+    pub anchor_msgid: Option<String>,
+}
+
 /// Process a completed batch, generating appropriate state changes and messages.
 ///
 /// - NETSPLIT: Produces a single summary line instead of individual QUIT messages.
 /// - NETJOIN: Produces a single summary line instead of individual JOIN messages.
 /// - Other batch types: Messages are replayed through the normal handler.
-pub fn process_completed_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo) {
+///
+/// `clean_end` is `true` for a batch closed by its `BATCH -tag` line and
+/// `false` for one force-completed by the timeout purge. It only matters for
+/// CHATHISTORY: a timed-out short `BEFORE` batch must not be mistaken for
+/// genuine end-of-history (see [`crate::irc::chathistory::HistoryState::complete_target`]).
+///
+/// Returns [`GapfillContinuation`] when a reconnect `AFTER` gap-fill page came
+/// back full (the gap is larger than one page); the App caller then issues the
+/// next `AFTER`. `None` for every other case.
+pub fn process_completed_batch(
+    state: &mut AppState,
+    conn_id: &str,
+    batch: &BatchInfo,
+    clean_end: bool,
+) -> Option<GapfillContinuation> {
     match batch.batch_type.as_str() {
-        "NETSPLIT" => process_netsplit_batch(state, conn_id, batch),
-        "NETJOIN" => process_netjoin_batch(state, conn_id, batch),
+        "NETSPLIT" => {
+            process_netsplit_batch(state, conn_id, batch);
+            None
+        }
+        "NETJOIN" => {
+            process_netjoin_batch(state, conn_id, batch);
+            None
+        }
+        "CHATHISTORY" => {
+            // draft/chathistory: store-only backlog fill. Conversational lines
+            // are persisted to SQLite without live display/state mutation; the
+            // UI surfaces them via normal pagination. Bookkeeping (clear
+            // in-flight, advance the BEFORE anchor watermark, mark exhaustion)
+            // runs here so it covers BOTH the normal `BATCH -tag` end path and
+            // the timed-out-batch purge path (app/maintenance.rs).
+            //
+            // A reconnect AFTER/LATEST gap-fill is the exception: its rows fall
+            // between the pre-disconnect tail and post-reconnect live messages,
+            // which scroll-up pagination (OLDER-only) never reaches. For those
+            // directions we also collect the conversational rows and splice
+            // them into the live buffer.
+            use crate::irc::chathistory::Direction;
+            let direction = batch.params.first().and_then(|target| {
+                state
+                    .connections
+                    .get(conn_id)
+                    .and_then(|c| c.chathistory.in_flight_direction(target))
+            });
+            let is_gapfill = matches!(direction, Some(Direction::After | Direction::Latest));
+            let is_after = matches!(direction, Some(Direction::After));
+            // Capture the requested AFTER page size BEFORE complete_target clears
+            // the in-flight entry, so we can tell a full page (more gap to fill)
+            // from a short one.
+            let after_limit = if is_after {
+                batch.params.first().and_then(|target| {
+                    state
+                        .connections
+                        .get(conn_id)
+                        .and_then(|c| c.chathistory.requested_limit(target, Direction::After))
+                })
+            } else {
+                None
+            };
+            let outcome =
+                crate::irc::events::ingest_chathistory_batch(state, conn_id, batch, is_gapfill);
+            let is_before = matches!(direction, Some(Direction::Before));
+            let mut continuation: Option<GapfillContinuation> = None;
+            if let Some(target) = batch.params.first() {
+                if let Some(conn) = state.connections.get_mut(conn_id) {
+                    conn.chathistory.complete_target(
+                        target,
+                        batch.messages.len(),
+                        outcome.oldest,
+                        clean_end,
+                    );
+                    // Advance the pagination watermark only by rows that were
+                    // actually stored (a BEFORE scroll-back fetch). A skipped-only
+                    // batch leaves it untouched so `history_fully_paginated` can
+                    // settle exhaustion instead of waiting for rows that will
+                    // never appear.
+                    if is_before
+                        && let Some(ms) = outcome.oldest_ingested_ms
+                    {
+                        conn.chathistory.note_oldest_ingested(target, ms);
+                    }
+                }
+                // A clean, FULL AFTER page means the reconnect gap is larger than
+                // one CHATHISTORY page. The unsent rows are NEWER than every
+                // spliced row, so older-only scroll-up never reaches them — chain
+                // another AFTER from the newest row received, bounded by the
+                // reconnect cutoff so we stop once the gap is filled to "now".
+                if clean_end
+                    && is_after
+                    && let Some(limit) = after_limit
+                    && batch.messages.len() >= limit
+                    && let Some((newest_ms, newest_msgid)) = outcome.newest
+                    && let Some(conn) = state.connections.get_mut(conn_id)
+                {
+                    let within_cutoff = conn
+                        .chathistory
+                        .gapfill_cutoff()
+                        .is_none_or(|c| newest_ms < c);
+                    if within_cutoff {
+                        // note_gapfill_page is the runaway backstop: a healthy chain
+                        // stops here once newest_ms reaches the cutoff, but a server
+                        // that never advances the anchor is cut off by the page cap.
+                        if conn.chathistory.note_gapfill_page(target) {
+                            continuation = Some(GapfillContinuation {
+                                target: target.clone(),
+                                anchor_ms: newest_ms,
+                                anchor_msgid: newest_msgid,
+                            });
+                        } else {
+                            tracing::warn!(
+                                "chathistory AFTER gap-fill for {target} hit the page cap; \
+                                 stopping (server is not advancing the anchor)"
+                            );
+                        }
+                    }
+                }
+                // Older rows just landed in SQLite. A buffer that marked itself
+                // history-exhausted from a short startup log must re-open so a
+                // later scroll-up paginates the freshly ingested rows. Gate on the
+                // ingested row count, NOT the raw batch size: a batch of only
+                // skipped lines (event-playback, undecryptable, non-ACTION CTCP)
+                // stores nothing, so re-opening would leave scrollback re-querying
+                // unchanged local history every tick with no new rows to surface
+                // (the server is also marked BEFORE-exhausted). Leave the flag set.
+                if outcome.ingested > 0 {
+                    let buf_id = make_buffer_id(conn_id, target);
+                    if let Some(buf) = state.buffers.get_mut(&buf_id) {
+                        buf.history_exhausted = false;
+                    }
+                }
+            }
+            // Splice gap-fill rows into their live buffers, grouped by the
+            // buffer_id resolved during ingest (channel messages and PM echoes
+            // may route to different buffers).
+            if !outcome.display_rows.is_empty() {
+                let mut by_buffer: HashMap<String, Vec<Message>> = HashMap::new();
+                for (buf_id, msg) in outcome.display_rows {
+                    by_buffer.entry(buf_id).or_default().push(msg);
+                }
+                for (buf_id, msgs) in by_buffer {
+                    state.surface_history_rows(&buf_id, msgs);
+                }
+            }
+            continuation
+        }
         _ => {
             // Unknown batch type — replay messages through the normal handler.
             for msg in &batch.messages {
                 crate::irc::events::handle_irc_message(state, conn_id, msg);
             }
+            None
         }
     }
 }
@@ -505,6 +660,7 @@ mod tests {
             joined_channels: vec!["#test".to_string()],
             origin_config: make_test_server_config(),
             enabled_caps: std::collections::HashSet::new(),
+            chathistory: crate::irc::chathistory::HistoryState::new(),
             who_token_counter: 0,
             local_ip: None,
             silent_who_channels: std::collections::HashSet::new(),
@@ -575,7 +731,7 @@ mod tests {
             ],
         };
 
-        process_completed_batch(&mut state, conn_id, &batch);
+        process_completed_batch(&mut state, conn_id, &batch, true);
 
         // Nicks should be removed from the buffer
         let buf = state.buffers.get(&buf_id).expect("buffer should exist");
@@ -722,6 +878,771 @@ mod tests {
         assert_eq!(purged[0].params.len(), 2);
     }
 
+    /// Build a connection + one channel buffer with `alice` present, wired to
+    /// a log channel. Returns `(state, rx, buf_id)`.
+    fn setup_ingest_state(
+        conn_id: &str,
+    ) -> (
+        AppState,
+        tokio::sync::mpsc::Receiver<crate::storage::types::LogRow>,
+        String,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let mut state = AppState::new();
+        state.log_tx = Some(tx);
+        state.add_connection(crate::state::connection::Connection {
+            id: conn_id.to_string(),
+            label: "libera".to_string(),
+            status: crate::state::connection::ConnectionStatus::Connected,
+            nick: "me".to_string(),
+            user_modes: String::new(),
+            isupport: HashMap::new(),
+            isupport_parsed: crate::irc::isupport::Isupport::new(),
+            error: None,
+            lag: None,
+            lag_pending: false,
+            reconnect_attempts: 0,
+            reconnect_delay_secs: 30,
+            next_reconnect: None,
+            should_reconnect: true,
+            joined_channels: vec!["#test".to_string()],
+            origin_config: make_test_server_config(),
+            enabled_caps: std::collections::HashSet::new(),
+            chathistory: crate::irc::chathistory::HistoryState::new(),
+            who_token_counter: 0,
+            local_ip: None,
+            silent_who_channels: std::collections::HashSet::new(),
+            silent_banlist_channels: std::collections::HashSet::new(),
+        });
+        let buf_id = make_buffer_id(conn_id, "#test");
+        state.add_buffer(crate::state::buffer::Buffer {
+            id: buf_id.clone(),
+            connection_id: conn_id.to_string(),
+            buffer_type: crate::state::buffer::BufferType::Channel,
+            name: "#test".to_string(),
+            messages: std::collections::VecDeque::new(),
+            activity: crate::state::buffer::ActivityLevel::None,
+            unread_count: 0,
+            last_read: chrono::Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
+            peer_handle: None,
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
+            log_initial_loaded: false,
+            pin_backlog: false,
+        });
+        state.add_nick(
+            &buf_id,
+            NickEntry {
+                nick: "alice".to_string(),
+                prefix: String::new(),
+                modes: String::new(),
+                away: false,
+                account: None,
+                ident: None,
+                host: None,
+            },
+        );
+        (state, rx, buf_id)
+    }
+
+    fn make_history_privmsg(nick: &str, target: &str, text: &str, msgid: &str) -> IrcMessage {
+        make_history_privmsg_at(nick, target, text, msgid, "2024-01-01T00:00:00.000Z")
+    }
+
+    fn make_history_privmsg_at(
+        nick: &str,
+        target: &str,
+        text: &str,
+        msgid: &str,
+        time: &str,
+    ) -> IrcMessage {
+        IrcMessage {
+            tags: Some(vec![
+                Tag("batch".to_string(), Some("h1".to_string())),
+                Tag("time".to_string(), Some(time.to_string())),
+                Tag("msgid".to_string(), Some(msgid.to_string())),
+            ]),
+            prefix: Some(irc::proto::Prefix::Nickname(
+                nick.to_string(),
+                "u".to_string(),
+                "h.net".to_string(),
+            )),
+            command: Command::PRIVMSG(target.to_string(), text.to_string()),
+        }
+    }
+
+    #[test]
+    fn chathistory_batch_ingests_conversational_store_only() {
+        let conn_id = "test";
+        let (mut state, mut rx, buf_id) = setup_ingest_state(conn_id);
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![
+                make_history_privmsg("bob", "#test", "hello", "m1"),
+                make_history_privmsg("carol", "#test", "hi there", "m2"),
+                // Event-playback line — must be skipped in v1 (no live mutation).
+                make_join_msg("dave", "#test", "h1"),
+            ],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        // Two conversational rows persisted, in order; JOIN not persisted.
+        let r1 = rx.try_recv().expect("first history row");
+        assert_eq!(r1.msg_id, "m1");
+        assert_eq!(r1.text, "hello");
+        assert_eq!(r1.msg_type, MessageType::Message);
+        assert_eq!(r1.timestamp, 1_704_067_200); // 2024-01-01T00:00:00Z
+        let r2 = rx.try_recv().expect("second history row");
+        assert_eq!(r2.msg_id, "m2");
+        assert!(rx.try_recv().is_err(), "JOIN must not be persisted in v1");
+
+        // Store-only: no live display, no nicklist mutation.
+        let buf = state.buffers.get(&buf_id).expect("buffer exists");
+        assert!(buf.messages.is_empty(), "history must not display live");
+        assert!(buf.users.contains_key("alice"), "live nicklist unchanged");
+        assert!(
+            !buf.users.contains_key("dave"),
+            "history JOIN must not mutate live nicklist"
+        );
+    }
+
+    #[test]
+    fn chathistory_own_pm_echo_routes_to_peer_despite_nick_casing() {
+        // Our own PM echo in CHATHISTORY carries our nick in the prefix, possibly
+        // in a different case than Connection.nick ("me"). It must route to the
+        // PEER's buffer (the PRIVMSG target), not a buffer named after ourselves —
+        // is_own is case-insensitive.
+        let conn_id = "test";
+        let (mut state, mut rx, _buf_id) = setup_ingest_state(conn_id);
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["bob".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            // Prefix nick "ME" differs in case from the connection nick "me".
+            messages: vec![make_history_privmsg("ME", "bob", "hey bob", "m1")],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        let row = rx.try_recv().expect("own PM echo stored");
+        assert_eq!(
+            row.buffer, "bob",
+            "own PM echo must route to the peer buffer, not our own nick"
+        );
+    }
+
+    #[test]
+    fn chathistory_stores_same_second_rows_in_chronological_order() {
+        // The DB keeps only whole-second timestamps and breaks ties by insertion
+        // id, so a same-second page returned newest-first must be persisted
+        // oldest-first or it reloads in reverse order within that second.
+        let conn_id = "test";
+        let (mut state, mut rx, _buf_id) = setup_ingest_state(conn_id);
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![
+                make_history_privmsg_at("c", "#test", "third", "m3", "2024-01-01T00:00:05.800Z"),
+                make_history_privmsg_at("b", "#test", "second", "m2", "2024-01-01T00:00:05.500Z"),
+                make_history_privmsg_at("a", "#test", "first", "m1", "2024-01-01T00:00:05.200Z"),
+            ],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        let mut texts = Vec::new();
+        while let Ok(row) = rx.try_recv() {
+            texts.push(row.text);
+        }
+        assert_eq!(texts, vec!["first", "second", "third"]);
+    }
+
+    #[test]
+    fn chathistory_watermark_keeps_millis_and_msgid() {
+        let conn_id = "test";
+        let (mut state, _rx, _buf_id) = setup_ingest_state(conn_id);
+        // A BEFORE request is in flight — only a BEFORE completion advances the
+        // scroll-back watermark.
+        state
+            .connections
+            .get_mut(conn_id)
+            .unwrap()
+            .chathistory
+            .mark_in_flight("#test", crate::irc::chathistory::Direction::Before, 200);
+
+        // Two lines in the same second (batch order newest-first); the oldest
+        // is at .200 with msgid "old". The next-BEFORE watermark must record
+        // its full millisecond time and its msgid — not a floored second.
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![
+                make_history_privmsg_at(
+                    "carol",
+                    "#test",
+                    "second",
+                    "new",
+                    "2024-01-01T00:00:00.800Z",
+                ),
+                make_history_privmsg_at(
+                    "bob",
+                    "#test",
+                    "first",
+                    "old",
+                    "2024-01-01T00:00:00.200Z",
+                ),
+            ],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        let conn = state.connections.get(conn_id).expect("connection exists");
+        let (ms, msgid) = conn
+            .chathistory
+            .oldest_fetched("#test")
+            .expect("watermark recorded");
+        assert_eq!(ms, 1_704_067_200_200, "subsecond precision preserved");
+        assert_eq!(msgid.as_deref(), Some("old"), "oldest line's msgid kept");
+    }
+
+    #[test]
+    fn chathistory_skips_undecryptable_e2e_lines() {
+        // An E2E ciphertext line we can't decrypt (no session) must NOT be
+        // stored as raw +RPE2E01 wire — that would show ciphertext on scroll-up
+        // and poison @msgid dedup against a later live plaintext row.
+        let conn_id = "test";
+        let (mut state, mut rx, _buf_id) = setup_ingest_state(conn_id);
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![
+                make_history_privmsg("bob", "#test", "+RPE2E01ciphertext", "e1"),
+                make_history_privmsg("carol", "#test", "plain text", "p1"),
+            ],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        let mut texts = Vec::new();
+        while let Ok(row) = rx.try_recv() {
+            texts.push(row.text);
+        }
+        assert_eq!(texts, vec!["plain text"], "undecryptable E2E line is skipped");
+    }
+
+    #[test]
+    fn chathistory_batch_strips_ctcp_action() {
+        let conn_id = "test";
+        let (mut state, mut rx, _buf_id) = setup_ingest_state(conn_id);
+
+        let action = make_history_privmsg("bob", "#test", "\u{1}ACTION waves\u{1}", "a1");
+        let other_ctcp = make_history_privmsg("bob", "#test", "\u{1}VERSION\u{1}", "c1");
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![action, other_ctcp],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        let r1 = rx.try_recv().expect("action row");
+        assert_eq!(r1.msg_type, MessageType::Action);
+        assert_eq!(r1.text, "waves");
+        assert!(
+            rx.try_recv().is_err(),
+            "non-ACTION CTCP must be skipped in v1"
+        );
+    }
+
+    #[test]
+    fn full_after_gapfill_returns_continuation_short_does_not() {
+        use crate::irc::chathistory::Direction;
+        let conn_id = "test";
+
+        // A FULL AFTER page (== requested limit) with the gap still open (cutoff
+        // beyond the newest row) yields a continuation anchored at the newest row.
+        let (mut state, _rx, _buf_id) = setup_ingest_state(conn_id);
+        {
+            let hist = &mut state.connections.get_mut(conn_id).unwrap().chathistory;
+            hist.mark_in_flight("#test", Direction::After, 2);
+            hist.set_gapfill_cutoff(1_704_067_203_000); // after both rows
+        }
+        let full = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![
+                make_history_privmsg_at("a", "#test", "1", "g1", "2024-01-01T00:00:01.000Z"),
+                make_history_privmsg_at("b", "#test", "2", "g2", "2024-01-01T00:00:02.000Z"),
+            ],
+        };
+        let cont = process_completed_batch(&mut state, conn_id, &full, true).expect("continuation");
+        assert_eq!(cont.target, "#test");
+        assert_eq!(cont.anchor_ms, 1_704_067_202_000, "anchor is the newest row");
+        assert_eq!(
+            cont.anchor_msgid,
+            Some("g2".to_string()),
+            "carries the newest row's verified @msgid"
+        );
+
+        // A SHORT page (fewer than the limit) means the gap is filled → no chain.
+        let (mut state, _rx, _buf_id) = setup_ingest_state(conn_id);
+        state
+            .connections
+            .get_mut(conn_id)
+            .unwrap()
+            .chathistory
+            .mark_in_flight("#test", Direction::After, 2);
+        let short = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![make_history_privmsg_at(
+                "a",
+                "#test",
+                "1",
+                "g1",
+                "2024-01-01T00:00:01.000Z",
+            )],
+        };
+        assert!(
+            process_completed_batch(&mut state, conn_id, &short, true).is_none(),
+            "a short AFTER page does not chain"
+        );
+    }
+
+    #[test]
+    fn full_after_gapfill_stops_at_reconnect_cutoff() {
+        use crate::irc::chathistory::Direction;
+        let conn_id = "test";
+        let (mut state, _rx, _buf_id) = setup_ingest_state(conn_id);
+        {
+            let hist = &mut state.connections.get_mut(conn_id).unwrap().chathistory;
+            hist.mark_in_flight("#test", Direction::After, 2);
+            // Cutoff falls between the two rows: the page already reached the
+            // reconnect point, so there is nothing left to chain.
+            hist.set_gapfill_cutoff(1_704_067_201_500);
+        }
+        let full = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![
+                make_history_privmsg_at("a", "#test", "1", "g1", "2024-01-01T00:00:01.000Z"),
+                make_history_privmsg_at("b", "#test", "2", "g2", "2024-01-01T00:00:02.000Z"),
+            ],
+        };
+        assert!(
+            process_completed_batch(&mut state, conn_id, &full, true).is_none(),
+            "newest row at/after the reconnect cutoff stops the chain"
+        );
+    }
+
+    #[test]
+    fn gapfill_after_batch_splices_rows_into_live_buffer() {
+        use crate::state::buffer::Message;
+        let conn_id = "test";
+        let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
+
+        // An existing live message sits in the buffer at 00:00:02, tagged with
+        // its server @msgid.
+        let live_ts = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:02.000Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let mut live_tags = HashMap::new();
+        live_tags.insert("msgid".to_string(), "live1".to_string());
+        state
+            .buffers
+            .get_mut(&buf_id)
+            .unwrap()
+            .messages
+            .push_back(Message {
+                id: 1,
+                timestamp: live_ts,
+                message_type: MessageType::Message,
+                nick: Some("bob".to_string()),
+                nick_mode: None,
+                text: "live line".to_string(),
+                highlight: false,
+                event_key: None,
+                event_params: None,
+                log_msg_id: None,
+                log_ref_id: None,
+                tags: Some(live_tags),
+            });
+
+        // A reconnect AFTER gap-fill is in flight for this target.
+        state
+            .connections
+            .get_mut(conn_id)
+            .unwrap()
+            .chathistory
+            .mark_in_flight("#test", crate::irc::chathistory::Direction::After, 200);
+
+        // The batch carries one older missed line, one newer one, and a replay
+        // of the message already shown live (same @msgid → must dedup).
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![
+                make_history_privmsg_at("carol", "#test", "earlier", "gap1", "2024-01-01T00:00:01.000Z"),
+                make_history_privmsg_at("dave", "#test", "later", "gap2", "2024-01-01T00:00:03.000Z"),
+                make_history_privmsg_at("bob", "#test", "live line", "live1", "2024-01-01T00:00:02.000Z"),
+            ],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        let texts: Vec<&str> = state
+            .buffers
+            .get(&buf_id)
+            .unwrap()
+            .messages
+            .iter()
+            .map(|m| m.text.as_str())
+            .collect();
+        // Gap rows spliced in timestamp order; the @msgid duplicate skipped.
+        assert_eq!(texts, vec!["earlier", "live line", "later"]);
+    }
+
+    #[test]
+    fn gapfill_after_batch_broadcasts_web_events() {
+        // Splicing into buf.messages bypasses add_message's web-event queue, so
+        // surface_history_rows must broadcast the row itself — otherwise
+        // connected web clients never see the gap-fill rows (they aren't
+        // reachable by older-only pagination) until a full resync. It uses
+        // InsertMessage (sorted insert), not NewMessage (append).
+        let conn_id = "test";
+        let (mut state, _rx, _buf_id) = setup_ingest_state(conn_id);
+        state
+            .connections
+            .get_mut(conn_id)
+            .unwrap()
+            .chathistory
+            .mark_in_flight("#test", crate::irc::chathistory::Direction::After, 200);
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![make_history_privmsg("bob", "#test", "gap line", "g1")],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        let broadcast = state
+            .pending_web_events
+            .iter()
+            .filter(|e| matches!(e, crate::web::protocol::WebEvent::InsertMessage { .. }))
+            .count();
+        assert_eq!(broadcast, 1, "spliced gap-fill row must be broadcast to web clients");
+    }
+
+    #[test]
+    fn before_batch_does_not_splice_into_live_buffer() {
+        // A BEFORE scroll-back is store-only — its rows surface via pagination,
+        // never spliced live — so the in-memory buffer stays untouched.
+        let conn_id = "test";
+        let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
+        state
+            .connections
+            .get_mut(conn_id)
+            .unwrap()
+            .chathistory
+            .mark_in_flight("#test", crate::irc::chathistory::Direction::Before, 200);
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![make_history_privmsg("bob", "#test", "older line", "b1")],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        assert!(
+            state.buffers.get(&buf_id).unwrap().messages.is_empty(),
+            "BEFORE rows are store-only, not spliced into the live buffer"
+        );
+    }
+
+    #[test]
+    fn chathistory_batch_clears_buffer_history_exhausted() {
+        // A buffer whose tiny local log was exhausted at startup
+        // (history_exhausted = true) must become re-paginable once a
+        // CHATHISTORY batch ingests older rows into SQLite — otherwise the
+        // freshly fetched rows never get pulled into the buffer on scroll-up.
+        let conn_id = "test";
+        let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
+        state
+            .buffers
+            .get_mut(&buf_id)
+            .expect("buffer exists")
+            .history_exhausted = true;
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![make_history_privmsg("bob", "#test", "older line", "m1")],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        assert!(
+            !state
+                .buffers
+                .get(&buf_id)
+                .expect("buffer exists")
+                .history_exhausted,
+            "ingesting older rows must re-open the buffer for pagination"
+        );
+    }
+
+    #[test]
+    fn empty_chathistory_batch_keeps_history_exhausted() {
+        // A batch that ingested nothing leaves history_exhausted untouched, so
+        // we don't trigger a pointless re-pagination of unchanged local rows.
+        let conn_id = "test";
+        let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
+        state
+            .buffers
+            .get_mut(&buf_id)
+            .expect("buffer exists")
+            .history_exhausted = true;
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        assert!(
+            state
+                .buffers
+                .get(&buf_id)
+                .expect("buffer exists")
+                .history_exhausted,
+            "an empty batch must not reset the exhausted flag"
+        );
+    }
+
+    #[test]
+    fn skipped_only_chathistory_batch_keeps_history_exhausted() {
+        // A batch whose lines are ALL skipped (event-playback JOINs, etc.)
+        // ingests zero SQLite rows, so there is nothing new for pagination to
+        // surface. The buffer's `history_exhausted` flag must stay set — basing
+        // the re-open on the raw batch message count instead of the ingested
+        // row count leaves scrollback re-querying unchanged local history every
+        // tick (the server is also marked BEFORE-exhausted, so no new rows ever
+        // arrive). [P2 review]
+        let conn_id = "test";
+        let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
+        state
+            .buffers
+            .get_mut(&buf_id)
+            .expect("buffer exists")
+            .history_exhausted = true;
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![
+                make_join_msg("dave", "#test", "h1"),
+                make_join_msg("erin", "#test", "h1"),
+            ],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        assert!(
+            state
+                .buffers
+                .get(&buf_id)
+                .expect("buffer exists")
+                .history_exhausted,
+            "a batch that ingested no rows must not reset the exhausted flag"
+        );
+    }
+
+    #[test]
+    fn skipped_only_before_batch_leaves_ingested_watermark_unset() {
+        // The pagination-exhaustion watermark (oldest_ingested) must only move
+        // for rows actually stored. A skipped-only BEFORE batch leaves it None so
+        // history_fully_paginated settles instead of waiting forever for rows that
+        // never reach SQLite — even though oldest_fetched DID advance (anchor
+        // progress past the event-playback window). [P2 review]
+        let conn_id = "test";
+        let (mut state, _rx, _buf_id) = setup_ingest_state(conn_id);
+        state
+            .connections
+            .get_mut(conn_id)
+            .expect("connection")
+            .chathistory
+            .mark_in_flight("#test", crate::irc::chathistory::Direction::Before, 200);
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![make_join_msg("dave", "#test", "h1")],
+        };
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        let hist = &state.connections.get(conn_id).expect("connection").chathistory;
+        assert_eq!(
+            hist.oldest_ingested("#test"),
+            None,
+            "skipped-only batch must not advance the ingested watermark"
+        );
+    }
+
+    #[test]
+    fn conversational_before_batch_advances_ingested_watermark() {
+        let conn_id = "test";
+        let (mut state, _rx, _buf_id) = setup_ingest_state(conn_id);
+        state
+            .connections
+            .get_mut(conn_id)
+            .expect("connection")
+            .chathistory
+            .mark_in_flight("#test", crate::irc::chathistory::Direction::Before, 200);
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![make_history_privmsg_at(
+                "bob",
+                "#test",
+                "older line",
+                "m1",
+                "2024-01-01T00:00:01.500Z",
+            )],
+        };
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        let hist = &state.connections.get(conn_id).expect("connection").chathistory;
+        assert_eq!(
+            hist.oldest_ingested("#test"),
+            Some(1_704_067_201_500),
+            "an ingested row advances the watermark to its @time millis"
+        );
+    }
+
+    #[test]
+    fn clean_short_chathistory_batch_marks_before_exhausted() {
+        // Baseline: a normally-closed BEFORE batch shorter than the requested
+        // page is genuine end-of-history and DOES mark the target exhausted.
+        let conn_id = "test";
+        let (mut state, _rx, _buf_id) = setup_ingest_state(conn_id);
+        state
+            .connections
+            .get_mut(conn_id)
+            .expect("connection exists")
+            .chathistory
+            .mark_in_flight("#test", crate::irc::chathistory::Direction::Before, 200);
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![make_history_privmsg("bob", "#test", "only line", "m1")],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        assert!(
+            state
+                .connections
+                .get(conn_id)
+                .expect("connection exists")
+                .chathistory
+                .is_before_exhausted("#test"),
+            "a clean short BEFORE batch is genuine end-of-history"
+        );
+    }
+
+    #[test]
+    fn timed_out_chathistory_batch_does_not_mark_before_exhausted() {
+        // A CHATHISTORY batch force-completed by the timeout purge (its
+        // `BATCH -tag` never arrived) is a transport failure. It must release
+        // the in-flight lock so scroll-up can retry, but must NOT mark BEFORE
+        // exhausted — otherwise the target is wedged until reconnect.
+        let conn_id = "test";
+        let (mut state, _rx, _buf_id) = setup_ingest_state(conn_id);
+        state
+            .connections
+            .get_mut(conn_id)
+            .expect("connection exists")
+            .chathistory
+            .mark_in_flight("#test", crate::irc::chathistory::Direction::Before, 200);
+
+        let batch = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            messages: vec![make_history_privmsg("bob", "#test", "partial line", "m1")],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, false);
+
+        let conn = state.connections.get(conn_id).expect("connection exists");
+        assert!(
+            !conn.chathistory.is_before_exhausted("#test"),
+            "a timed-out batch must not be treated as end-of-history"
+        );
+        assert!(
+            conn.chathistory
+                .should_request("#test", crate::irc::chathistory::Direction::Before, true),
+            "in-flight cleared so a later scroll-up retries the fetch"
+        );
+    }
+
     #[test]
     fn netsplit_batch_removes_nicks_case_insensitive() {
         let mut state = AppState::new();
@@ -745,6 +1666,7 @@ mod tests {
             joined_channels: vec!["#test".to_string()],
             origin_config: make_test_server_config(),
             enabled_caps: std::collections::HashSet::new(),
+            chathistory: crate::irc::chathistory::HistoryState::new(),
             who_token_counter: 0,
             local_ip: None,
             silent_who_channels: std::collections::HashSet::new(),
@@ -815,7 +1737,7 @@ mod tests {
             ],
         };
 
-        process_completed_batch(&mut state, conn_id, &batch);
+        process_completed_batch(&mut state, conn_id, &batch, true);
 
         // Nicks should be removed despite case mismatch between IRC prefix and HashMap key
         let buf = state.buffers.get(&buf_id).expect("buffer should exist");

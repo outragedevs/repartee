@@ -27,6 +27,14 @@ pub enum WebEvent {
         buffer_id: String,
         message: WireMessage,
     },
+    /// A historical row spliced into a buffer (reconnect `CHATHISTORY`
+    /// `AFTER`/`LATEST` gap-fill). Unlike `NewMessage` (which the client
+    /// appends), the client inserts this by `(timestamp, id)` — these rows can
+    /// be older than already-displayed post-reconnect live messages.
+    InsertMessage {
+        buffer_id: String,
+        message: WireMessage,
+    },
     /// Channel topic changed.
     TopicChanged {
         buffer_id: String,
@@ -141,10 +149,13 @@ pub enum WebCommand {
     FetchMessages {
         buffer_id: String,
         limit: u32,
+        /// Oldest loaded message's full-millisecond `@time` (`ts_ms`); the handler
+        /// runs the subsecond keyset against it. `None` for the initial load.
         before: Option<i64>,
         /// Oldest loaded message's id (DB rowid for log-sourced rows), forming a
-        /// `(before, before_id)` keyset cursor so same-second rows aren't dropped.
-        /// Defaulted for forward-compat with clients that don't send it.
+        /// `(before_ms, before_id)` keyset cursor so same-second (including
+        /// CHATHISTORY-backfilled) rows aren't dropped. Defaulted for forward-compat
+        /// with clients that don't send it.
         #[serde(default)]
         before_id: Option<i64>,
     },
@@ -257,6 +268,13 @@ pub struct ConnectionMeta {
 pub struct WireMessage {
     pub id: u64,
     pub timestamp: i64,
+    /// Full-millisecond `@time`. `timestamp` is only whole seconds, which is too
+    /// coarse to order a reconnect gap-fill row against same-second live
+    /// messages (the gap-fill row gets a fresh, larger `id`), so the client sorts
+    /// inserts by this. `#[serde(default)]` → 0 for any sender that omits it; the
+    /// client then falls back to `timestamp * 1000`.
+    #[serde(default)]
+    pub ts_ms: i64,
     pub msg_type: String,
     pub nick: Option<String>,
     pub nick_mode: Option<String>,
@@ -374,6 +392,7 @@ mod tests {
         let msg = WireMessage {
             id: 42,
             timestamp: 1_710_000_000,
+            ts_ms: 1_710_000_000_500,
             msg_type: "message".into(),
             nick: Some("ferris".into()),
             nick_mode: Some("@".into()),
@@ -386,6 +405,7 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: WireMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.id, 42);
+        assert_eq!(decoded.ts_ms, 1_710_000_000_500);
         assert_eq!(decoded.nick.as_deref(), Some("ferris"));
         assert_eq!(decoded.text, "hello 🚀");
     }

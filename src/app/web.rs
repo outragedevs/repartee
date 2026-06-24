@@ -788,35 +788,29 @@ impl App {
         // Read-side key so encrypted logs decrypt on web scroll-back (previously
         // `None` => the client received ciphertext).
         let key = storage.crypto_key.as_ref();
-        let messages = match (before, before_id) {
-            // Lossless keyset cursor when the client sent the oldest row's id
-            // (a DB rowid for log-sourced rows): no same-second drops.
-            (Some(ts), Some(id)) => crate::storage::query::get_messages_paginated(
-                &db,
-                &network,
-                buffer,
-                Some((ts, id)),
-                capped_limit + 1,
-                storage.encrypt,
-                key,
-            ),
-            // Initial load or a boundary with no usable id: timestamp-only.
-            _ => crate::storage::query::get_messages(
-                &db,
-                &network,
-                buffer,
-                before,
-                capped_limit + 1,
-                storage.encrypt,
-                key,
-            ),
-        };
+        // `before` is the oldest loaded row's full-millisecond `@time` (current
+        // bundle) or a whole-SECOND timestamp (previous bundle — the WS protocol
+        // is not version-gated). `paginate_web_history` picks the matching keyset:
+        // the subsecond keyset for a millis cursor (so a CHATHISTORY-backfilled
+        // same-second row at e.g. `.200`, inserted after an already-loaded `.500`
+        // row and hence a larger rowid, is returned rather than skipped), and the
+        // lossless whole-second keyset for a legacy seconds cursor (flooring it to
+        // `.000` on the subsecond keyset would drop same-second sub-`.000` rows).
+        let messages = crate::storage::query::paginate_web_history(
+            &db,
+            &network,
+            buffer,
+            before.map(|b| (b, before_id)),
+            capped_limit + 1,
+            storage.encrypt,
+            key,
+        );
         match messages {
             Ok(msgs) => {
                 let has_more = msgs.len() > capped_limit;
-                // The query fetches `capped_limit + 1` rows `ORDER BY timestamp
-                // DESC` then reverses to chronological order, so the extra
-                // sentinel row sits at the FRONT (oldest). When more history
+                // The query fetches `capped_limit + 1` rows newest-first then
+                // reverses to chronological order, so the extra sentinel row sits
+                // at the FRONT (oldest). When more history
                 // exists, skip that front row — truncating the tail instead
                 // would drop the NEWEST row (the one adjacent to the cursor),
                 // which the next page can never re-fetch, leaving a permanent

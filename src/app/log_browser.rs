@@ -127,6 +127,7 @@ impl App {
                 },
                 local_ip: None,
                 enabled_caps: HashSet::new(),
+                chathistory: crate::irc::chathistory::HistoryState::new(),
                 who_token_counter: 0,
                 silent_who_channels: HashSet::new(),
                 silent_banlist_channels: HashSet::new(),
@@ -249,7 +250,7 @@ impl App {
         let Some(log_db) = &self.log_db else { return };
         let rows_result = {
             let Ok(db) = log_db.db.lock() else { return };
-            crate::storage::query::get_messages_paginated(
+            crate::storage::query::get_messages_paginated_subsecond(
                 &db,
                 &net,
                 &buf,
@@ -319,9 +320,11 @@ impl App {
             self.load_initial_messages(buffer_id);
             return;
         };
-        let oldest_ts = oldest_msg.timestamp.timestamp();
+        // Full-millisecond cursor (the in-memory timestamp is reconstructed from
+        // `ts_ms`), so `get_messages_paginated_subsecond` keeps subsecond order.
+        let oldest_ts = oldest_msg.timestamp.timestamp_millis();
         // `log_msg_id` is the SQLite row id (set in `stored_to_message`).
-        // Composite cursor `(timestamp, id)` lets us page through rows
+        // Composite cursor `(unix_millis, id)` lets us page through rows
         // that share a second without losing any.
         let Some(oldest_id) = oldest_msg
             .log_msg_id
@@ -340,7 +343,7 @@ impl App {
         let Some(log_db) = &self.log_db else { return };
         let rows_result = {
             let Ok(db) = log_db.db.lock() else { return };
-            crate::storage::query::get_messages_paginated(
+            crate::storage::query::get_messages_paginated_subsecond(
                 &db,
                 &net,
                 &buf,
@@ -476,8 +479,11 @@ pub(crate) fn rows_to_buffer_messages(
     let mut out: Vec<Message> = Vec::with_capacity(rows.len() + 4);
     let mut last_date: Option<chrono::NaiveDate> = None;
     for stored in rows {
-        let ts =
-            chrono::DateTime::<Utc>::from_timestamp(stored.timestamp, 0).unwrap_or_else(Utc::now);
+        // Full-millisecond time so the row's in-memory timestamp matches the
+        // `ts_ms` pagination key — a same-second scroll-back cursor built from it
+        // then keeps subsecond ordering instead of flooring to the second.
+        let ts = chrono::DateTime::<Utc>::from_timestamp_millis(stored.ts_ms)
+            .unwrap_or_else(Utc::now);
         let local_date = Local.from_utc_datetime(&ts.naive_utc()).date_naive();
         if last_date.is_none_or(|d| d != local_date) {
             let sep_text = crate::app::backlog::format_date_separator(local_date);
@@ -511,7 +517,11 @@ pub(crate) fn stored_to_message(
     stored: &crate::storage::StoredMessage,
 ) -> crate::state::buffer::Message {
     use crate::state::buffer::{Message, MessageType};
-    let ts = chrono::DateTime::<Utc>::from_timestamp(stored.timestamp, 0).unwrap_or_else(Utc::now);
+    // Reconstruct at full millisecond precision (`ts_ms`) so a scroll-back cursor
+    // built from this row's timestamp keeps subsecond ordering — see
+    // `get_messages_paginated_subsecond`.
+    let ts =
+        chrono::DateTime::<Utc>::from_timestamp_millis(stored.ts_ms).unwrap_or_else(Utc::now);
     let msg_type = match stored.msg_type.as_str() {
         "action" => MessageType::Action,
         "notice" => MessageType::Notice,

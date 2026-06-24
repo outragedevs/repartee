@@ -283,6 +283,10 @@ pub fn handle_connected(state: &mut AppState, conn_id: &str) {
         conn.isupport_parsed = crate::irc::isupport::Isupport::default();
         conn.silent_who_channels.clear();
         conn.silent_banlist_channels.clear();
+        // Fresh connection ⇒ fresh chathistory state. Clears any request left
+        // in-flight by a mid-request disconnect (which would otherwise block
+        // future CHATHISTORY for that target) and re-evaluates exhaustion.
+        conn.chathistory = crate::irc::chathistory::HistoryState::new();
     }
 
     let label = state
@@ -720,6 +724,270 @@ fn message_timestamp(tags: Option<&HashMap<String, String>>) -> DateTime<Utc> {
     tags.and_then(|t| t.get("time"))
         .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
         .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc))
+}
+
+/// Decrypt a CHATHISTORY conversational line's text for storage, mirroring the
+/// live PRIVMSG E2E path. Returns the text to store, or `None` to skip the line.
+///
+/// A non-E2E line passes through unchanged. An `+RPE2E01…` line is decrypted via
+/// the same `decrypt_incoming` the live path uses (without firing a KEYREQ — we
+/// don't chase sessions for backlog). A ciphertext we can't decrypt (no session,
+/// our own echo, or a decrypt error) is skipped rather than stored: persisting
+/// it would show gibberish on scroll-up AND let it win the `@msgid` dedup over a
+/// later live plaintext row.
+fn decrypt_chathistory_text(
+    state: &AppState,
+    target: &str,
+    ident: &str,
+    host: &str,
+    is_own: bool,
+    raw_text: &str,
+) -> Option<String> {
+    if !raw_text.starts_with("+RPE2E01") {
+        return Some(raw_text.to_string());
+    }
+    if is_own {
+        return None;
+    }
+    let sender_handle = format!("{ident}@{host}");
+    let context = crate::e2e::context_key(target, &sender_handle);
+    match state
+        .e2e_manager
+        .as_ref()?
+        .decrypt_incoming(&sender_handle, &context, raw_text)
+    {
+        Ok(crate::e2e::manager::DecryptOutcome::Plaintext(plain)) => Some(plain),
+        _ => None,
+    }
+}
+
+/// Result of [`ingest_chathistory_batch`].
+pub struct IngestOutcome {
+    /// Oldest `(unix_millis, msgid?)` anchor seen across the batch (event lines
+    /// included), or `None` if no line carried a `@time` tag. The caller
+    /// advances its per-target `BEFORE` anchor to this.
+    pub oldest: Option<(i64, Option<String>)>,
+    /// `(buffer_id, Message)` rows to splice into a live buffer; empty unless
+    /// display collection was requested.
+    pub display_rows: Vec<(String, Message)>,
+    /// Count of conversational rows actually persisted to `SQLite` (PRIVMSG /
+    /// NOTICE / ACTION). Skipped lines (event-playback, undecryptable ciphertext,
+    /// non-ACTION CTCP) are excluded. The caller re-opens a buffer's
+    /// `history_exhausted` flag only when this is non-zero — a batch that stored
+    /// nothing has nothing for pagination to surface.
+    pub ingested: usize,
+    /// Oldest server-time (unix **millis**) among the rows actually persisted, or
+    /// `None` if none were. Unlike `oldest` (all lines, for the next anchor) this
+    /// tracks only rows that will surface via pagination, so the caller can settle
+    /// scroll-back exhaustion once the buffer has displayed down to it — a
+    /// skipped-only batch leaves it `None` and the buffer settles immediately.
+    pub oldest_ingested_ms: Option<i64>,
+    /// Newest server-time (unix **millis**) across all batch lines plus that
+    /// line's `@msgid` (if any), or `None` if none carried a `@time` tag. Used as
+    /// the next `AFTER` anchor when a reconnect gap-fill page comes back full (the
+    /// gap is larger than one page) — by msgid when the server supports it.
+    pub newest: Option<(i64, Option<String>)>,
+}
+
+/// Ingest a completed `draft/chathistory` batch into the log store.
+///
+/// chathistory is a background backlog filler: conversational lines
+/// (PRIVMSG / NOTICE, including CTCP ACTION) are persisted **store-only** via
+/// [`AppState::ingest_history_message`] — no live display, no nicklist/topic
+/// mutation, no highlights or notifications. The UI surfaces these rows later
+/// through normal `SQLite` pagination, and the unique `msg_id` index
+/// deduplicates against messages already stored from the live stream.
+///
+/// Returns an [`IngestOutcome`]. `oldest` is the oldest server-time (unix
+/// **millis**) seen across **all** batch lines (conversational and
+/// event-playback) paired with that line's `@msgid`, or `None` if none carried
+/// a `@time` tag; the caller advances its per-target `BEFORE` anchor to this so
+/// scroll-up keeps making progress even through windows that contain only
+/// (un-ingested) event-playback lines.
+///
+/// `display_rows` is `(buffer_id, Message)` for each ingested conversational
+/// line, populated only when `collect_display` is set. The caller uses it to
+/// splice a reconnect `AFTER`/`LATEST` gap-fill into the live buffer (those
+/// rows fall between the pre-disconnect tail and post-reconnect live messages,
+/// so scroll-up pagination — which only fetches OLDER rows — would never reach
+/// them). For `BEFORE` scroll-back the rows surface through normal pagination,
+/// so collection is skipped to avoid cloning whole pages.
+///
+/// `ingested` counts the conversational rows actually persisted (skipped lines
+/// excluded), so the caller can tell a productive batch from one that stored
+/// nothing.
+///
+/// v1 scope: `draft/event-playback` lines (JOIN/PART/QUIT/NICK/TOPIC/MODE) and
+/// non-ACTION CTCP are skipped rather than rendered into stored event rows.
+/// See `docs/superpowers/specs/2026-06-19-draft-chathistory-design.md`.
+#[expect(clippy::too_many_lines, reason = "linear chathistory ingest loop")]
+pub fn ingest_chathistory_batch(
+    state: &AppState,
+    conn_id: &str,
+    batch: &crate::irc::batch::BatchInfo,
+    collect_display: bool,
+) -> IngestOutcome {
+    let our_nick = state
+        .connections
+        .get(conn_id)
+        .map(|c| c.nick.clone())
+        .unwrap_or_default();
+
+    let mut ingested = 0usize;
+    let mut oldest_ingested_ms: Option<i64> = None;
+    let mut skipped = 0usize;
+    let mut display_rows: Vec<(String, Message)> = Vec::new();
+    // Oldest line seen across the whole batch (events included): full
+    // millisecond server-time plus its IRC @msgid (if any). The caller uses
+    // this as the next BEFORE anchor — by msgid when the server prefers it,
+    // else by the full-precision timestamp — so scroll-up never floors to the
+    // second (skipping same-second messages) or stalls on event-only windows.
+    let mut oldest: Option<(i64, Option<String>)> = None;
+    // Newest line seen across the whole batch (events included): full
+    // millisecond server-time plus its IRC @msgid. The next `AFTER` anchor when a
+    // reconnect gap-fill page comes back full and the gap spans more than one
+    // page — by msgid (no same-millisecond skips) when the server prefers it.
+    let mut newest: Option<(i64, Option<String>)> = None;
+
+    // Persist in chronological order. The DB stores only whole-second
+    // timestamps and breaks same-second ties by insertion id, so a page the
+    // server returned newest-first would otherwise reload in reverse order
+    // within that second. Sort by full-precision `@time` (stable, so lines that
+    // share — or lack — a timestamp keep their server order); untimed lines sort
+    // last. Ordering only matters for storage/`oldest`; both are order-robust.
+    let mut ordered: Vec<&IrcMessage> = batch.messages.iter().collect();
+    ordered.sort_by_key(|m| {
+        extract_tags(m)
+            .as_ref()
+            .and_then(|t| t.get("time"))
+            .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+            .map_or(i64::MAX, |dt| dt.timestamp_millis())
+    });
+
+    for msg in ordered {
+        let tags = extract_tags(msg);
+
+        if let Some(ts) = tags
+            .as_ref()
+            .and_then(|t| t.get("time"))
+            .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+        {
+            let ms = ts.timestamp_millis();
+            let msgid = tags.as_ref().and_then(|t| t.get("msgid").cloned());
+            if newest.as_ref().is_none_or(|(cur, _)| ms > *cur) {
+                newest = Some((ms, msgid.clone()));
+            }
+            if oldest.as_ref().is_none_or(|(cur, _)| ms < *cur) {
+                oldest = Some((ms, msgid));
+            }
+        }
+
+        let (base_type, target, raw_text) = match &msg.command {
+            Command::PRIVMSG(target, text) => (MessageType::Message, target, text),
+            Command::NOTICE(target, text) => (MessageType::Notice, target, text),
+            // Event-playback and other commands are not ingested in v1.
+            _ => {
+                skipped += 1;
+                continue;
+            }
+        };
+
+        let (nick, ident, host) = extract_nick_userhost(msg.prefix.as_ref());
+        // IRC nicks are case-insensitive: CHATHISTORY playback may echo our own
+        // nick in a different case than Connection.nick. A case-sensitive miss here
+        // would treat our own E2E ciphertext echo as a peer's (fail decryption →
+        // silently drop the row) and route our own PM to a buffer named after
+        // ourselves instead of the peer. Match add_message's comparison.
+        let is_own = nick.eq_ignore_ascii_case(&our_nick);
+
+        // Decrypt RPE2E ciphertext (same path as live PRIVMSGs) before storing,
+        // or skip a line we can't decrypt — see `decrypt_chathistory_text`.
+        let Some(text) = decrypt_chathistory_text(state, target, &ident, &host, is_own, raw_text)
+        else {
+            skipped += 1;
+            continue;
+        };
+        let text = text.as_str();
+
+        // CTCP ACTION becomes an Action; any other CTCP is skipped in history.
+        let is_ctcp = text.starts_with('\u{1}') && text.ends_with('\u{1}');
+        let is_action =
+            is_ctcp && text.len() > 2 && text[1..text.len() - 1].starts_with("ACTION ");
+        if is_ctcp && !is_action {
+            skipped += 1;
+            continue;
+        }
+        let (msg_type, display_text) = if is_action {
+            let inner = &text[1..text.len() - 1];
+            (MessageType::Action, inner["ACTION ".len()..].to_string())
+        } else {
+            (base_type, text.to_string())
+        };
+
+        // Channel messages route to the channel buffer; PMs route to the
+        // peer's nick buffer (or our own target for echoed history).
+        let buffer_name = if is_channel(target) || is_own {
+            target.as_str()
+        } else {
+            nick.as_str()
+        };
+        let buffer_id = make_buffer_id(conn_id, buffer_name);
+
+        let timestamp = message_timestamp(tags.as_ref());
+
+        let message = Message {
+            id: 0, // store-only: real id assigned if/when spliced into a buffer
+            timestamp,
+            message_type: msg_type,
+            nick: Some(nick),
+            nick_mode: None,
+            text: display_text,
+            highlight: false,
+            event_key: None,
+            event_params: None,
+            // The DB row is keyed by the @msgid carried in `tags` (see
+            // `maybe_log`); leaving `log_msg_id` None keeps a spliced display
+            // copy from being mistaken for a SQLite-row-id pagination cursor.
+            log_msg_id: None,
+            log_ref_id: None,
+            tags,
+        };
+
+        // Only count rows the storage layer actually queued. A row dropped by
+        // maybe_log (a `log_exclude_types` type like message/notice/action, or a
+        // full log queue) never reaches SQLite, so counting it would advance the
+        // `oldest_ingested` watermark and clear `history_exhausted` for rows that
+        // never paginate — making BEFORE scroll-up re-request server history while
+        // the visible backlog never grows.
+        let stored = state.ingest_history_message(&buffer_id, &message);
+        if stored {
+            ingested += 1;
+            let ingested_ms = message.timestamp.timestamp_millis();
+            if oldest_ingested_ms.is_none_or(|cur| ingested_ms < cur) {
+                oldest_ingested_ms = Some(ingested_ms);
+            }
+        }
+        if collect_display {
+            display_rows.push((buffer_id, message));
+        }
+    }
+
+    if skipped > 0 {
+        tracing::debug!(
+            conn_id,
+            ingested,
+            skipped,
+            "chathistory: ingested conversational messages (non-conversational skipped in v1)"
+        );
+    }
+
+    IngestOutcome {
+        oldest,
+        display_rows,
+        ingested,
+        oldest_ingested_ms,
+        newest,
+    }
 }
 
 // === Private handlers ===
@@ -4162,6 +4430,7 @@ mod tests {
             },
             local_ip: None,
             enabled_caps: std::collections::HashSet::new(),
+            chathistory: crate::irc::chathistory::HistoryState::new(),
             who_token_counter: 0,
             silent_who_channels: std::collections::HashSet::new(),
             silent_banlist_channels: std::collections::HashSet::new(),
@@ -7060,6 +7329,7 @@ mod tests {
             origin_config: state.connections.get("test").unwrap().origin_config.clone(),
             local_ip: None,
             enabled_caps: std::collections::HashSet::new(),
+            chathistory: crate::irc::chathistory::HistoryState::new(),
             who_token_counter: 0,
             silent_who_channels: std::collections::HashSet::new(),
             silent_banlist_channels: std::collections::HashSet::new(),

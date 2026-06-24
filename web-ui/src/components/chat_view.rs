@@ -167,12 +167,15 @@ pub fn ChatView() -> impl IntoView {
         if len >= crate::state::PINNED_WEB_CAP {
             return false;
         }
-        // Cursor = oldest real (non-separator) message's timestamp, plus its
-        // `log_id` (the SQLite rowid) when it came from the log. With both, the
-        // server uses a lossless keyset cursor (no same-second drops); at the
-        // live/DB boundary `log_id` is None, so it falls back to a plain
-        // timestamp cursor. Never the in-memory `id` counter (unrelated to
-        // rowids — sending it would corrupt the keyset comparison).
+        // Cursor = oldest real (non-separator) message's full-millisecond `@time`
+        // (`ts_ms`), plus its `log_id` (the SQLite rowid) when it came from the
+        // log. The server runs the subsecond keyset, so same-second
+        // CHATHISTORY-backfilled rows are ordered by real time, not insertion id,
+        // and are no longer skipped. At the live/DB boundary `log_id` is None, so
+        // the server treats it as "strictly older millisecond". Never the
+        // in-memory `id` counter (unrelated to rowids — sending it would corrupt
+        // the keyset comparison). `ts_ms == 0` (field absent) falls back to
+        // whole-seconds × 1000.
         let cursor = state.messages.with_untracked(|m| {
             m.get(&id).and_then(|v| {
                 v.iter()
@@ -181,7 +184,14 @@ pub fn ChatView() -> impl IntoView {
                             && msg.event_key.as_deref() != Some("date_separator")
                             && msg.event_key.as_deref() != Some("backlog_end")
                     })
-                    .map(|msg| (msg.timestamp, msg.log_id))
+                    .map(|msg| {
+                        let ms = if msg.ts_ms != 0 {
+                            msg.ts_ms
+                        } else {
+                            msg.timestamp * 1000
+                        };
+                        (ms, msg.log_id)
+                    })
             })
         });
         let Some((before, before_id)) = cursor else {

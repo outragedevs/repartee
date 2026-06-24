@@ -52,6 +52,7 @@ impl App {
             origin_config: server_config.clone(),
             local_ip: None,
             enabled_caps: HashSet::new(),
+            chathistory: crate::irc::chathistory::HistoryState::new(),
             who_token_counter: 0,
             silent_who_channels: HashSet::new(),
             silent_banlist_channels: HashSet::new(),
@@ -318,6 +319,16 @@ impl App {
                 let rejoin_channels = crate::irc::events::channels_to_rejoin(&self.state, &conn_id);
                 crate::irc::events::handle_connected(&mut self.state, &conn_id);
 
+                // Stamp the reconnect cutoff now — after handle_connected reset the
+                // chathistory state, but before any JOIN echo or post-reconnect
+                // traffic can be logged. The gap-fill (fired at end-of-MOTD/NAMES)
+                // anchors AFTER the newest row OLDER than this, so it targets the
+                // disconnected gap rather than a reconnect-time row.
+                if let Some(conn) = self.state.connections.get_mut(&conn_id) {
+                    conn.chathistory
+                        .set_gapfill_cutoff(chrono::Utc::now().timestamp_millis());
+                }
+
                 // Broadcast connection status to web clients.
                 if let Some(conn) = self.state.connections.get(&conn_id) {
                     self.broadcast_web(crate::web::protocol::WebEvent::ConnectionStatus {
@@ -443,6 +454,12 @@ impl App {
                             .send(::irc::proto::Command::JOIN(chanlist, None, None));
                     }
                 }
+
+                // Reconnect gap-fill is deferred until end-of-MOTD (see the
+                // RPL_ENDOFMOTD/ERR_NOMOTD handling below): at RPL_WELCOME the
+                // 005 ISUPPORT lines haven't been parsed and channels aren't
+                // joined yet, so a CHATHISTORY request here would use default
+                // limits/ref types and could be rejected for non-membership.
             }
             IrcEvent::Disconnected(conn_id, error) => {
                 // DCC connections are peer-to-peer and independent of the IRC
@@ -573,11 +590,25 @@ impl App {
                                 batch.batch_type,
                                 batch.messages.len()
                             );
-                            crate::irc::batch::process_completed_batch(
+                            // Normal close via `BATCH -tag` (`clean_end = true`).
+                            let continuation = crate::irc::batch::process_completed_batch(
                                 &mut self.state,
                                 &conn_id,
                                 &batch,
+                                true,
                             );
+                            // A full reconnect AFTER gap-fill page → chain the next
+                            // AFTER from the newest row so a multi-page gap is
+                            // filled completely (those rows are newer than the
+                            // scroll-up cursor and unreachable otherwise).
+                            if let Some(cont) = continuation {
+                                self.request_chathistory(
+                                    &conn_id,
+                                    &cont.target,
+                                    crate::irc::chathistory::Direction::After,
+                                    Some((cont.anchor_msgid, cont.anchor_ms)),
+                                );
+                            }
                         }
                     }
                     // BATCH commands themselves are not dispatched further
@@ -842,12 +873,36 @@ impl App {
 
                     // Queue channel for batched WHO + MODE after join.
                     if let Some(channel) = endofnames_channel {
+                        // NAMES completing confirms the server has us in the
+                        // channel, so a membership-gated CHATHISTORY won't be
+                        // rejected. Run the active channel's reconnect gap-fill
+                        // here rather than at end-of-MOTD, which races the JOIN.
+                        self.gapfill_active_channel_on_join(&conn_id, &channel);
                         self.queue_channel_query(&conn_id, channel);
                     }
 
                     // Check if a WHO batch completed.
                     if let Some(ref target) = endofwho_target {
                         self.handle_who_batch_complete(&conn_id, target);
+                    }
+
+                    // Reconnect gap-fill for an active QUERY buffer (deferred
+                    // from RPL_WELCOME): by end-of-MOTD the 005 ISUPPORT lines are
+                    // parsed, so CHATHISTORY uses the correct limit/ref types. A
+                    // query needs no channel membership, so this timing is safe.
+                    // Active CHANNEL buffers gap-fill from the end-of-NAMES path
+                    // instead (membership is confirmed there; firing here would
+                    // race the auto-JOIN). Fires on the MOTD terminator (376) or
+                    // its absence (422).
+                    if matches!(
+                        msg.command,
+                        ::irc::proto::Command::Response(
+                            ::irc::proto::Response::RPL_ENDOFMOTD
+                                | ::irc::proto::Response::ERR_NOMOTD,
+                            _
+                        )
+                    ) {
+                        self.gapfill_active_buffer_on_connect(&conn_id);
                     }
                 }
             }

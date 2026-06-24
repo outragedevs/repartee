@@ -1,5 +1,6 @@
 pub mod batch;
 pub mod cap;
+pub mod chathistory;
 pub mod events;
 pub mod extban;
 pub mod flood;

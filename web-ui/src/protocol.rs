@@ -20,6 +20,13 @@ pub enum WebEvent {
         buffer_id: String,
         message: WireMessage,
     },
+    /// A historical gap-fill row (reconnect CHATHISTORY) — inserted by
+    /// `(timestamp, id)` rather than appended, since it may be older than
+    /// already-displayed live messages.
+    InsertMessage {
+        buffer_id: String,
+        message: WireMessage,
+    },
     TopicChanged {
         buffer_id: String,
         topic: Option<String>,
@@ -130,9 +137,12 @@ pub enum WebCommand {
     FetchMessages {
         buffer_id: String,
         limit: u32,
+        /// Oldest loaded message's full-millisecond `@time` (`ts_ms`); the server
+        /// runs the subsecond keyset against it. `None` for the initial load.
         before: Option<i64>,
         /// Oldest loaded message's id (DB rowid for log-sourced rows), forming a
-        /// `(before, before_id)` keyset cursor so same-second rows aren't dropped.
+        /// `(before_ms, before_id)` keyset cursor so same-second (including
+        /// CHATHISTORY-backfilled) rows aren't dropped.
         before_id: Option<i64>,
     },
     FetchNickList {
@@ -237,6 +247,11 @@ pub struct ConnectionMeta {
 pub struct WireMessage {
     pub id: u64,
     pub timestamp: i64,
+    /// Full-millisecond `@time`; the ordering key for sorted gap-fill inserts
+    /// (whole-second `timestamp` is too coarse). `0` when the server omitted it,
+    /// in which case ordering falls back to `timestamp * 1000`.
+    #[serde(default)]
+    pub ts_ms: i64,
     pub msg_type: String,
     pub nick: Option<String>,
     pub nick_mode: Option<String>,

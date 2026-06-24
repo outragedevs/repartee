@@ -141,14 +141,18 @@ fn flush(
             None => (row.text.clone(), None),
         };
 
+        // `OR IGNORE`: a row whose `msg_id` already exists (a live message and
+        // its CHATHISTORY replay share the server @msgid) is silently skipped by
+        // the unique index instead of raising an error we'd log as a failure.
         if let Err(e) = conn.execute(
-            "INSERT INTO messages (msg_id, network, buffer, timestamp, type, nick, text, highlight, iv, ref_id, tags, event_key)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT OR IGNORE INTO messages (msg_id, network, buffer, timestamp, ts_ms, type, nick, text, highlight, iv, ref_id, tags, event_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 row.msg_id,
                 row.network,
                 row.buffer,
                 row.timestamp,
+                row.ts_ms,
                 msg_type_str,
                 row.nick,
                 stored_text,
@@ -193,6 +197,7 @@ mod tests {
             network: "testnet".into(),
             buffer: "#test".into(),
             timestamp: chrono::Utc::now().timestamp(),
+            ts_ms: chrono::Utc::now().timestamp_millis(),
             msg_type: MessageType::Message,
             nick: Some("alice".into()),
             text: text.into(),
@@ -218,6 +223,50 @@ mod tests {
 
         assert_eq!(queue.len(), MAX_PENDING_ROWS);
         assert_eq!(queue.first().unwrap().text, "row-1");
+    }
+
+    #[test]
+    fn flush_deduplicates_rows_sharing_msg_id() {
+        // A live message and its CHATHISTORY echo carry the same server @msgid,
+        // so they reach the writer with identical msg_id. The unique index must
+        // collapse them to a single stored row (no duplicate line on reload),
+        // and the flush must report success rather than treating it as failure.
+        let db = Arc::new(Mutex::new(open_database(false).unwrap()));
+        let mut live = make_row("hello");
+        live.msg_id = "server-msgid-1".to_string();
+        let mut history = make_row("hello");
+        history.msg_id = "server-msgid-1".to_string();
+
+        let remaining = flush(&db, vec![live, history], None);
+
+        assert!(remaining.is_empty(), "flush consumes the queue on success");
+        let conn = db.lock().unwrap();
+        assert_eq!(msg_count(&conn), 1, "duplicate msg_id collapses to one row");
+    }
+
+    #[test]
+    fn flush_keeps_same_msgid_across_networks() {
+        // An IRCv3 @msgid is only unique per network/server. Two different
+        // networks emitting the same @msgid are distinct messages and must both
+        // persist — the unique constraint is composite on (network, msg_id), not
+        // global on msg_id, or INSERT OR IGNORE would silently drop the second.
+        let db = Arc::new(Mutex::new(open_database(false).unwrap()));
+        let mut a = make_row("hi from libera");
+        a.msg_id = "shared-id".to_string();
+        a.network = "libera".to_string();
+        let mut b = make_row("hi from oftc");
+        b.msg_id = "shared-id".to_string();
+        b.network = "oftc".to_string();
+
+        let remaining = flush(&db, vec![a, b], None);
+
+        assert!(remaining.is_empty(), "flush consumes the queue on success");
+        let conn = db.lock().unwrap();
+        assert_eq!(
+            msg_count(&conn),
+            2,
+            "same @msgid on different networks must both be stored"
+        );
     }
 
     #[tokio::test]

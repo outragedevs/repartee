@@ -93,6 +93,7 @@ pub fn message_to_wire(
     WireMessage {
         id: msg.id,
         timestamp: msg.timestamp.timestamp(),
+        ts_ms: msg.timestamp.timestamp_millis(),
         msg_type: msg.message_type.as_str().to_string(),
         nick: msg.nick.clone(),
         nick_mode: msg.nick_mode.clone(),
@@ -114,6 +115,7 @@ pub fn stored_to_wire(
     WireMessage {
         id: u64::try_from(msg.id).unwrap_or(0),
         timestamp: msg.timestamp,
+        ts_ms: msg.ts_ms,
         msg_type: msg.msg_type.clone(),
         nick: msg.nick.clone(),
         nick_mode: None,
@@ -298,6 +300,7 @@ mod tests {
             network: "Libera".to_string(),
             buffer: "#rust".to_string(),
             timestamp: 1_710_000_000,
+            ts_ms: 1_710_000_000_000,
             msg_type: "event".to_string(),
             nick: None,
             text: "You were kicked from #rust by op (behave)".to_string(),
