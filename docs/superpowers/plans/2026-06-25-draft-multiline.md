@@ -71,6 +71,12 @@ Zero runtime risk; everything here is pure and unit-tested. No `AppState`, no I/
 /// Conservative fallback for `draft/multiline` `max-lines` when the server
 /// advertises the cap without that key (spec marks it RECOMMENDED, not required).
 pub const MULTILINE_DEFAULT_MAX_LINES: usize = 24;
+
+/// Runaway backstop for INBOUND reassembly: a reassembled multiline message is
+/// truncated to this many lines (well below `batch::MAX_BATCH_MESSAGES`) so a
+/// hostile/buggy server cannot materialise a single message whose `wrap_line`
+/// output is thousands of visual lines (OOM-class guard; see the v0.8.4 fix).
+pub const MULTILINE_MAX_INBOUND_LINES: usize = 100;
 ```
 Add `pub mod multiline;` alongside the existing `pub mod batch;` / `pub mod cap;` declarations.
 
@@ -174,6 +180,7 @@ pub fn parse_limits(cap_value: Option<&str>) -> Option<MultilineLimits> {
 }
 ```
 > Note: `token.split_once('=')?` returns `None` for a tokenless garbage value like `foo` (no `=`); that aborts the whole parse. The test `parse_limits_ignores_unknown_and_garbage` uses `foo=bar` (has `=`) so it passes. If a real server can send a bare flag token, change `?` to `else { continue }`. Decide and encode one behavior; the tests above assume the `?` form is acceptable because every real key is `k=v`.
+> Note (intentional lurker deviation): lurker defaults `max-bytes` to 4096 when the cap value is empty; we return `None` instead because the spec marks `max-bytes` REQUIRED. Real servers always advertise it, so impact is nil. Add a code comment so a future reviewer does not "fix" this back to lurker's lenient default.
 
 - [ ] **Step 4: Run, verify pass.** `make test 2>&1 | rg multiline` — Expected: PASS.
 - [ ] **Step 5: Commit.** `git add -A && git commit -m "feat(multiline): parse_limits with conservative defaults"`
@@ -281,6 +288,19 @@ fn partition_roundtrip_lossless() {
     assert_eq!(rejoined, text);
 }
 #[test]
+fn partition_roundtrip_exercises_concat_split() {
+    // A logical line LONGER than MESSAGE_MAX_BYTES with embedded spaces forces
+    // word-boundary concat splitting; this proves reassemble(partition(..)) is
+    // lossless against split_irc_message's whitespace trimming.
+    let long_line = "word ".repeat(120); // ~600 bytes, > 350, many spaces
+    let text = format!("intro\n{long_line}\noutro");
+    let b = partition(&text, &lim(8192, 24)).unwrap();
+    let rejoined = b.iter().map(|batch| reassemble(batch)).collect::<Vec<_>>().join("\n");
+    assert_eq!(rejoined, text);
+    // and the long line must have produced at least one concat continuation
+    assert!(b.iter().flatten().any(|w| w.concat));
+}
+#[test]
 fn partition_unrepresentable_single_line_returns_none() {
     // one logical line whose concat pieces exceed max_bytes
     let long = "y".repeat(MESSAGE_MAX_BYTES * 5);
@@ -293,9 +313,25 @@ fn partition_all_blank_returns_none() {
 ```
 
 - [ ] **Step 2: Run, verify fail.** Expected: FAIL.
-- [ ] **Step 3: Implement** (use `crate::irc::split_irc_message`):
+- [ ] **Step 3: Implement.** Over-long logical lines are split with a **byte-exact** char-boundary splitter (NOT `split_irc_message`, which trims whitespace at word boundaries and would make concat-rejoin lossy). `split_lossless` guarantees `pieces.concat() == line`:
 ```rust
-use crate::irc::split_irc_message;
+/// Split `line` at UTF-8 char boundaries so the pieces concatenated with NO
+/// separator reproduce `line` exactly — required for `draft/multiline-concat`,
+/// where the receiver rejoins continuation pieces seamlessly.
+fn split_lossless(line: &str, max_bytes: usize) -> Vec<String> {
+    let mut pieces = Vec::new();
+    let mut cur = String::new();
+    for ch in line.chars() {
+        if !cur.is_empty() && cur.len() + ch.len_utf8() > max_bytes {
+            pieces.push(std::mem::take(&mut cur));
+        }
+        cur.push(ch);
+    }
+    if !cur.is_empty() {
+        pieces.push(cur);
+    }
+    pieces
+}
 
 /// Partition `text` into one or more batches. `None` ⇒ cannot be represented
 /// as multiline (caller must fall back to legacy per-line sending).
@@ -308,7 +344,7 @@ pub fn partition(text: &str, limits: &MultilineLimits) -> Option<Vec<Vec<WireLin
             if line.len() <= MESSAGE_MAX_BYTES {
                 vec![WireLine { text: line.to_string(), concat: false }]
             } else {
-                split_irc_message(line, MESSAGE_MAX_BYTES)
+                split_lossless(line, MESSAGE_MAX_BYTES)
                     .into_iter()
                     .enumerate()
                     .map(|(i, piece)| WireLine { text: piece, concat: i > 0 })
@@ -439,7 +475,7 @@ IrcEvent::Connected(conn_id, enabled_caps, multiline_limits) => {
 
 - [ ] **Step 1: Write a test** (in events.rs test module) that a `CAP NEW draft/multiline=...` followed by ACK sets `conn.multiline`, and `CAP DEL draft/multiline` clears it. Use the existing test-connection helpers.
 - [ ] **Step 2: Run, verify fail.**
-- [ ] **Step 3:** In `handle_cap_new`, before the value-stripping `map` (line 477), capture the raw `draft/multiline` token's value from `caps_str` and, if present and we will request it, store `parse_limits(...)` onto `conn.multiline` (mutable conn is available via `state.connections.get_mut(conn_id)`; mirror how `enabled` is read at 483). In `handle_cap_del`, when `draft/multiline` is removed, set `conn.multiline = None`. In `handle_cap_nak`, if `draft/multiline` was NAKed, set `conn.multiline = None`.
+- [ ] **Step 3:** In `handle_cap_new`, capture the raw `draft/multiline` token's value from `caps_str` into a local `Option<MultilineLimits>` (parse it with `parse_limits`) BEFORE the immutable `enabled = state.connections.get(conn_id)...` borrow at 483. Then, AFTER the `to_request` `.collect()` at line 492 (so the immutable `enabled` borrow has ended), do `state.connections.get_mut(conn_id)` and store it onto `conn.multiline` only if `draft/multiline` is in `to_request`/acked. **Borrow ordering matters** — storing via `get_mut` while `enabled` (an immutable `&` of the same connection) is still alive is a borrow-check error; sequence the `get_mut` store strictly after the collect. In `handle_cap_del`, when `draft/multiline` is removed, set `conn.multiline = None`. In `handle_cap_nak`, if `draft/multiline` was NAKed, set `conn.multiline = None`. Note: gate the OUTBOUND branch on the full `multiline_supported` predicate (Task 4.1) so an advertise-time-but-not-yet-ACK'd window cannot emit BATCH frames.
 - [ ] **Step 4: Run, verify pass; `make clippy`.**
 - [ ] **Step 5: Commit.** `git commit -am "feat(multiline): capture/clear limits on runtime CAP NEW/DEL/NAK"`
 
@@ -470,7 +506,7 @@ tracker.start_batch(tag, &batch_type, batch_params, msg.tags.clone());
 
 Approach: build `WireLine`s from `batch.messages` (text = PRIVMSG last param; `concat` = presence of a `draft/multiline-concat` tag on that fragment), `reassemble`, then synthesise one `irc::proto::Message { tags: opener_tags (fallback first fragment tags), prefix: first fragment prefix, command: PRIVMSG(target, joined) }` and call `crate::irc::events::handle_irc_message(state, conn_id, &synthetic)`. Target = `batch.params.first()` (the batch target), else first fragment's PRIVMSG target.
 
-- [ ] **Step 1: Write tests** in batch.rs: feed a `BatchInfo` of type `"DRAFT/MULTILINE"` with 3 PRIVMSG fragments (one with `draft/multiline-concat`) and assert the buffer ends with ONE message whose `text` equals the reassembled string; assert NOTICE/PRIVMSG fragments map correctly; assert an empty fragment set adds no message. Use the existing test harness pattern (build `AppState`, a `Connection`, call `process_completed_batch`).
+- [ ] **Step 1: Write tests** in batch.rs: feed a `BatchInfo` of type `"DRAFT/MULTILINE"` with 3 PRIVMSG fragments (one with `draft/multiline-concat`) and assert the buffer ends with ONE message whose `text` equals the reassembled string; assert NOTICE/PRIVMSG fragments map correctly; assert an empty fragment set adds no message. Use the existing test harness pattern (build `AppState`, a `Connection`, call `process_completed_batch`). ALSO add: (a) an **E2E-fragment test** — a batch whose fragments are `+RPE2E01…` chunks must produce the SAME per-fragment messages as the legacy default arm (i.e. fall through to per-fragment replay, NOT one joined line); (b) a **runaway test** (under `ulimit -v` + `timeout`) — a batch with > `MULTILINE_MAX_INBOUND_LINES` fragments yields a message capped at `MULTILINE_MAX_INBOUND_LINES` lines; (c) a **tag-merge test** — `@msgid` on the first fragment (not the opener) survives into the reassembled message's `tags`.
 - [ ] **Step 2: Run, verify fail.**
 - [ ] **Step 3: Implement** the arm (insert after the CHATHISTORY arm, before `_ =>` at line 308):
 ```rust
@@ -478,7 +514,20 @@ Approach: build `WireLine`s from `batch.messages` (text = PRIVMSG last param; `c
     if batch.messages.is_empty() {
         return None;
     }
-    let lines: Vec<crate::irc::multiline::WireLine> = batch
+    // E2E guard: if ANY fragment is an RPEE2E ciphertext chunk, do NOT
+    // reassemble — joining multiple +RPE2E01 wires into one string corrupts
+    // decrypt. Replay each fragment through the normal path so every chunk
+    // decrypts independently (matches the legacy default arm). E2E and
+    // multiline are mutually exclusive in practice; this is defensive.
+    if batch.messages.iter().any(|m| matches!(&m.command,
+        Command::PRIVMSG(_, t) | Command::NOTICE(_, t) if t.starts_with("+RPE2E01")))
+    {
+        for m in &batch.messages {
+            crate::irc::events::handle_irc_message(state, conn_id, m);
+        }
+        return None;
+    }
+    let mut lines: Vec<crate::irc::multiline::WireLine> = batch
         .messages
         .iter()
         .filter_map(|m| match &m.command {
@@ -493,6 +542,15 @@ Approach: build `WireLine`s from `batch.messages` (text = PRIVMSG last param; `c
         .collect();
     if lines.is_empty() {
         return None;
+    }
+    // Runaway backstop (OOM guard): bound the reassembled message's line count.
+    if lines.len() > crate::irc::MULTILINE_MAX_INBOUND_LINES {
+        tracing::warn!(
+            "multiline batch had {} lines; truncating to {}",
+            lines.len(),
+            crate::irc::MULTILINE_MAX_INBOUND_LINES
+        );
+        lines.truncate(crate::irc::MULTILINE_MAX_INBOUND_LINES);
     }
     let joined = crate::irc::multiline::reassemble(&lines);
 
@@ -518,12 +576,19 @@ Approach: build `WireLine`s from `batch.messages` (text = PRIVMSG last param; `c
         Command::PRIVMSG(target, joined)
     };
 
-    // metadata: prefer the BATCH opener's tags (@time/@msgid live there per spec),
-    // else the first fragment's tags; prefix from the first fragment (the sender).
-    let tags = batch
-        .opener_tags
-        .clone()
-        .or_else(|| batch.messages.first().and_then(|m| m.tags.clone()));
+    // metadata: @time/@msgid normally ride on the BATCH opener, but a server may
+    // place @msgid on the first fragment. MERGE: start from opener tags, then
+    // fill any key missing from the opener using the first fragment's tags.
+    // Prefix from the first fragment (the sender).
+    let mut tags: Vec<irc::proto::message::Tag> = batch.opener_tags.clone().unwrap_or_default();
+    if let Some(frag_tags) = batch.messages.first().and_then(|m| m.tags.clone()) {
+        for ft in frag_tags {
+            if !tags.iter().any(|t| t.0 == ft.0) {
+                tags.push(ft);
+            }
+        }
+    }
+    let tags = if tags.is_empty() { None } else { Some(tags) };
     let prefix = batch.messages.first().and_then(|m| m.prefix.clone());
 
     let synthetic = IrcMessage { tags, prefix, command };
@@ -581,17 +646,21 @@ fn wrap_line_single_line_unchanged() {
 ```
 - [ ] **Step 2: Run, verify fail.** `make test 2>&1 | rg wrap_line` — Expected: FAIL (current code returns 1 line for "alpha\nbeta").
 - [ ] **Step 3: Implement.** Refactor: extract the current 195-263 wrap body into a private `fn wrap_segment(styled_chars: &[(String, usize, Style)], width: usize, indent: usize) -> Vec<Line<'static>>`. In `wrap_line`, build `styled_chars` as today (180-188), then split it into segments at `(g == "\n")` tuples (dropping the `\n` tuple), and for each segment call `wrap_segment`; an empty segment pushes `Line::default()`. Preserve the `width==0` early return. Remove the old `total_width <= width` early return OR guard it so it only short-circuits when there is no `\n` in `styled_chars` (otherwise a short "a\nb" would wrongly return one line).
+  > **Compile gotcha:** the original fallback at lines 259-261 is `if result.is_empty() { result.push(line); }`, which references the original `line: Line<'static>` binding. That binding does NOT exist inside `wrap_segment` (its param is a `styled_chars` slice). Replace the fallback inside `wrap_segment` with `result.push(crate::ui::build_line_from_styled_chars(styled_chars, false, indent))` (or `Line::default()` defensively, since `wrap_segment` is only called on non-empty segments and the body always yields ≥1 line). Do NOT copy `result.push(line)` verbatim — it will fail to compile.
 - [ ] **Step 4: Run, verify pass** (incl. existing wrap tests for soft-wrap, emoji widths, placeholder runs). Run under memory guard.
 - [ ] **Step 5: `make clippy`.**
 - [ ] **Step 6: Commit.** `git commit -am "feat(multiline): wrap_line treats \\n as a hard line break"`
 
-### Task 3.2: Verify scroll/budget + emote layout with tall messages
+### Task 3.2: Reconcile render budget + emote layout with tall messages
 
-**Files:** Inspect `src/ui/chat_view.rs` (no change expected); update OOM-cap tests only if needed.
+**Files:** `src/ui/chat_view.rs` (reason about / adjust the budget), tests.
 
-- [ ] **Step 1: Add a render test** that a buffer containing one multi-line `Message` (e.g. 5 `\n`s) produces the expected `visual_lines` count and that `scroll`/`skip` math (chat_view.rs:135-138) stays consistent (no panic, correct take/skip). Mirror the existing chat_view tests (172-244).
-- [ ] **Step 2: Run.** If the v0.8.4 OOM-cap tests assert exact products of `MAX_WRAPPED_LINES_PER_MSG`, confirm they still pass (a multi-line message's lines are bounded by `MAX_BATCH_MESSAGES` inbound / `max-lines` outbound / `MAX_PASTE_LINES`). Only if a test breaks: adjust the test expectation, NOT the cap, and document why memory stays bounded (one message overshoots `needed` by at most its bounded line count).
-- [ ] **Step 3: `make clippy` + commit.** `git commit -am "test(multiline): chat_view scroll/budget with multi-line messages"`
+The render budget (`compute_render_budget` = `buffer_len * MAX_WRAPPED_LINES_PER_MSG`, `MAX_WRAPPED_LINES_PER_MSG = 16`) was built on "one Message wraps to ≤16 visual lines" (v0.8.4 OOM guard). A multiline message breaks that assumption. The memory bound is preserved ONLY because a single message's line count is now hard-capped: **inbound** ≤ `MULTILINE_MAX_INBOUND_LINES` (=100, Task 2.2), **outbound echo** ≤ the typed/pasted line count which is bounded by `max-lines` framing and `MAX_PASTE_LINES`. The render loop pushes one message's wrapped lines fully, THEN checks `visual_lines.len() > needed`, so peak memory is `needed + (one message's wrapped lines)` — bounded because the per-message line count is bounded.
+
+- [ ] **Step 1: Decide the budget treatment.** Keep `MAX_WRAPPED_LINES_PER_MSG = 16` (it sizes `needed` for walk-back; correctness of scroll uses the actual `total = visual_lines.len()`, not the cap). Add a doc-comment at `chat_view.rs:13` noting that a single multiline message can exceed 16 visual lines but is hard-bounded by `MULTILINE_MAX_INBOUND_LINES` (inbound) / paste+max-lines (outbound), so the O(buffer_len) + one-message overshoot bound still holds. (Do NOT remove the cap.)
+- [ ] **Step 2: Add a render test** that a buffer containing one multi-line `Message` (e.g. 5 `\n`s) produces the expected `visual_lines` count and that `scroll`/`skip` math (chat_view.rs:135-138) stays consistent (no panic, correct take/skip) — and a **bounded-overshoot test** (under `ulimit -v` + `timeout`): one message of `MULTILINE_MAX_INBOUND_LINES` lines renders without OOM and scroll math is correct. Mirror the existing chat_view tests (172-244).
+- [ ] **Step 3: Run.** If the v0.8.4 OOM-cap tests assert exact products of `MAX_WRAPPED_LINES_PER_MSG`, confirm they still pass; if one breaks, adjust the TEST expectation (not the cap) and document why memory stays bounded.
+- [ ] **Step 4: `make clippy` + commit.** `git commit -am "feat(multiline): reconcile chat_view render budget for tall messages + tests"`
 
 ---
 
@@ -603,12 +672,15 @@ fn wrap_line_single_line_unchanged() {
 
 **Interfaces — Consumes:** `multiline::{needs_multiline, partition, WireLine}`, `conn.multiline`, `conn.next_batch_ref`, `Sender::send`. **Produces:** wire BATCH frames + a single local echo.
 
-Structure (insert after the e2e let-else at 1389; compute `is_e2e_encrypted` BEFORE the branch — move lines 1405-1407 up):
-- **Case A (E2E):** unchanged send loop (1411-1419) + drain rekey; echo as ONE `Message` with `plain_echo` (do NOT byte-split, to preserve `\n`); `return`.
-  - Minimal edit: in the echo block (1431-1461), when `is_e2e_encrypted`, push a single Message with `text: plain_echo` instead of the `local_chunks` loop.
-- **Case B (non-E2E, multiline):** if `conn.multiline` is `Some(limits)` and `needs_multiline(text)` and `partition(text,&limits)` is `Some(batches)`: send each batch (ref via `conn.next_batch_ref()` taken BEFORE borrowing the handle), then (if `!echo_message_enabled`) ONE echo Message with full `text`; `return`.
-- **Case C (non-E2E, has `\n`, no/failed multiline):** for each logical line in `text.split('\n')` (skip empties), run the existing single-line send: `send_privmsg(line)` per byte-chunk + echo per chunk. `return`.
-- **Else (single line, no `\n`):** the EXISTING code (1411-1461) runs unchanged.
+**Step 0 — shrink gate (load-bearing, do first).** Change the shrink gate at `input.rs:1300-1304` to also add `&& !crate::irc::multiline::needs_multiline(text)`. Without it, a SHORT (≤350B) multi-line message that ALSO contains a shrinkable URL passes the existing `text.len() <= MESSAGE_MAX_BYTES` check, enters the async `apply_shrink_deliver` path (NO multiline branch), and is sent as one PRIVMSG truncated at the first `\n` by `IrcCodec::sanitize` — silent data loss. RED test: shrink enabled+outgoing → a short `"a http://<long-url> \n b"` must NOT enqueue to `shrink_outgoing_tx`. (`send_outgoing_substituted` then provably never sees a multiline message; no change there.)
+
+**New helper.** Add `fn multiline_supported(&self, conn_id: &str) -> bool` = `conn.multiline.is_some() && conn.enabled_caps.contains("batch") && conn.enabled_caps.contains("message-tags")`. Gate Case B on it (not just `conn.multiline.is_some()`).
+
+Structure. Insert the branch at **~line 1410** — AFTER `is_e2e_encrypted` (1405-1407), `echo_message_enabled` (1400-1404), `own_mode` (1409) are in scope (no hoist needed; they precede 1410). The branch replaces the existing `for wire in wire_lines {…}` send loop + echo:
+- **Case B (non-E2E, multiline):** `if !is_e2e_encrypted && self.multiline_supported(&conn_id) && needs_multiline(text)` and `partition(text,&limits)` is `Some(batches)`: take ref(s) via `conn.next_batch_ref()` (mut borrow) FIRST, send each batch frame (handle borrow, collect a bool), drop the borrow, then (if `!echo_message_enabled`) add ONE echo `Message` with full `text`; `return`.
+- **Case C (non-E2E, has `\n`, no/failed multiline):** `else if !is_e2e_encrypted && text.contains('\n')`: for each logical line in `text.split('\n')` — **PRESERVE interior blank lines** (send an empty PRIVMSG for a blank line; do NOT trim or skip empties) — run the existing single-line send (`send_privmsg`; `split_irc_message` for a >350 line) + echo per chunk. `return`.
+- **Else (E2E, OR single line no `\n`, OR partition `None` with no `\n`):** the EXISTING send loop (1411-1419) runs over `wire_lines` unchanged, then the echo block (1431-1461) runs with the single Task 4.2 change (E2E → one echo `Message`).
+> **No Case A early-return.** E2E is handled entirely by the existing send loop + the in-place Task 4.2 echo edit. A separate returning E2E branch would risk double-echo. The send loop (1411-1419) and `pending_e2e_sends` drain (1427-1429) stay byte-for-byte.
 
 BATCH send (inside `if let Some(handle) = self.irc_handles.get(&conn_id)`, collecting a `bool` success, dropping the borrow before any `add_local_event`):
 ```rust
@@ -644,35 +716,63 @@ let send_ok = (|| {
 ```rust
 #[test]
 fn frames_have_batch_open_tagged_lines_close() {
-    let batch = vec![WireLine{text:"a".into(),concat:false}, WireLine{text:"b".into(),concat:true}];
+    // NOTE: this proto only emits the trailing ':' when the last param is empty,
+    // contains a space, or starts with ':' (see irc-proto stringify). Use
+    // multi-word line text so the ':' appears and is asserted realistically.
+    let batch = vec![
+        WireLine { text: "hello world".into(), concat: false },
+        WireLine { text: "more text".into(),   concat: true  },
+    ];
     let msgs = multiline_frames("#chan", "ml1", &batch);
     let wire: Vec<String> = msgs.iter().map(|m| m.to_string()).collect();
     assert_eq!(wire[0], "BATCH +ml1 draft/multiline #chan\r\n");
-    assert!(wire[1].starts_with("@batch=ml1 ") && wire[1].contains("PRIVMSG #chan :a"));
-    assert!(wire[2].contains("draft/multiline-concat") && wire[2].contains("PRIVMSG #chan :b"));
+    assert!(wire[1].starts_with("@batch=ml1 ") && wire[1].contains("PRIVMSG #chan :hello world"));
+    assert!(wire[2].contains("draft/multiline-concat") && wire[2].contains("PRIVMSG #chan :more text"));
     assert_eq!(wire[3], "BATCH -ml1\r\n");
 }
 ```
-Put `multiline_frames` in `multiline.rs` (pure, returns `Vec<irc::proto::Message>`); `handle_plain_message` calls it and sends each.
+Put `multiline_frames` in `multiline.rs` as `#[must_use] pub fn multiline_frames(target: &str, batch_ref: &str, batch: &[WireLine]) -> Vec<irc::proto::Message>` (clippy `must_use_candidate` fires on pure public fns returning a value). `multiline.rs` must name the proto types — fully-qualify inline (`irc::proto::Message`, `irc::proto::Command::{BATCH,PRIVMSG}`, `irc::proto::message::Tag`, `irc::proto::command::BatchSubCommand::CUSTOM`) exactly as `batch.rs:14` does; do NOT `use irc::proto::Message` unqualified. `handle_plain_message` calls `multiline_frames` and sends each frame via `handle.sender.send(msg)`.
 - [ ] **Step 2: Run, verify fail.**
 - [ ] **Step 3: Implement** `multiline_frames` in `multiline.rs` and the branch in `handle_plain_message`.
 - [ ] **Step 4: Run, verify pass; `make build`.**
 - [ ] **Step 5: `make clippy`** (watch borrow/clone lints; `redundant_clone=deny`).
 - [ ] **Step 6: Commit.** `git commit -am "feat(multiline): outbound BATCH framing branch in handle_plain_message (E2E-safe)"`
 
-### Task 4.2: Case C fallback + E2E single echo
+### Task 4.2: Case C fallback + E2E single-echo (in-place edit)
 
 **Files:** `src/app/input.rs`.
 
-- [ ] **Step 1: Tests** (or manual reasoning test): when `conn.multiline` is `None` and `text` contains `\n`, each logical line is sent separately (no embedded `\n` reaches the wire); E2E message with `\n` echoes as ONE Message.
-- [ ] **Step 2-4: Implement Case C loop and the E2E single-echo edit; build; clippy.**
-- [ ] **Step 5: Commit.** `git commit -am "feat(multiline): non-cap \\n fallback + single E2E echo"`
+The E2E single-echo is the ONLY edit to the existing echo block (1431-1461) — it is NOT a separate returning branch (avoids double-echo). Replace the body of `if !echo_message_enabled || is_e2e_encrypted { … }`:
+```rust
+if !echo_message_enabled || is_e2e_encrypted {
+    if is_e2e_encrypted {
+        // E2E: echo the full plaintext as ONE Message so newlines render as
+        // one message locally (matches one logical message the user typed).
+        let id = self.state.next_message_id();
+        self.state.add_message(&active_id, /* Message { text: plain_echo, nick, own_mode, .. } */);
+    } else {
+        // unchanged: byte-split echo for the non-multiline single-line path
+        let local_chunks = if plain_echo.len() <= crate::irc::MESSAGE_MAX_BYTES {
+            vec![plain_echo]
+        } else {
+            crate::irc::split_irc_message(&plain_echo, crate::irc::MESSAGE_MAX_BYTES)
+        };
+        for chunk in local_chunks { /* existing add_message per chunk */ }
+    }
+}
+```
+
+- [ ] **Step 1: Tests / reasoning:** non-E2E with `conn.multiline == None` and `text` containing `\n` → each logical line sent separately, NO embedded `\n` on the wire (Case C). E2E message with `\n` echoes as ONE local Message.
+- [ ] **Step 2: Implement** the Case C loop (Task 4.1) and this E2E single-echo edit.
+- [ ] **Step 3: Build + clippy.**
+- [ ] **Step 4: Document the E2E peer asymmetry** (code comment + design §7 note): E2E messages are NOT reassembled on the wire — the E2E chunker splits ciphertext at ≤180B/chunk (`e2e/chunker.rs`) and the receiving peer renders ONE Message per chunk (no E2E reassembly exists; out of scope per non-goals). The single-echo change unifies only the SENDER's local view; the peer still sees N chunk-messages. Newlines inside the plaintext are preserved byte-wise across chunks. This is intentional (E2E reassembly is a separate non-goal).
+- [ ] **Step 5: Commit.** `git commit -am "feat(multiline): non-cap \\n fallback + single E2E echo (no double-display)"`
 
 ### Task 4.3: TUI paste coalescing
 
 **Files:** Modify `src/app/input.rs` (`handle_paste` 377-460).
 
-Behavior: if the active connection has `conn.multiline.is_some()` AND no pasted line starts with `/`, coalesce the whole paste (prepend current input) into ONE `handle_submit(joined_with_\n)` call (which reaches `handle_plain_message` → Case B). Otherwise keep the EXISTING per-line `paste_queue` behavior (backward compatible; required when multiline unsupported so no `\n` hits the wire).
+Behavior: if `self.multiline_supported(&conn_id)` (active connection) AND no pasted line (trimmed) starts with `/`, coalesce the whole paste (prepend current input) into ONE `handle_submit(joined_with_\n)` call (reaches `handle_plain_message` → Case B). When coalescing, **PRESERVE interior blank lines and do NOT trim individual lines** — join the raw lines with `\n` (only strip a trailing `\r` per line from bracketed paste). `partition`'s all-blank guard rejects a fully-blank paste server-side. Otherwise (multiline not supported, or any `/`-line present) keep the EXISTING per-line `paste_queue` behavior with its empty-line filtering (backward compatible; required when multiline unsupported so no `\n` reaches the wire).
 
 - [ ] **Step 1: Test** the decision: pure-plaintext paste + multiline cap → single submit with `\n`-joined text; paste containing a `/`-line OR no multiline cap → existing queued per-line path.
 - [ ] **Step 2-4: Implement; build; clippy.**
@@ -686,7 +786,7 @@ Behavior: if the active connection has `conn.multiline.is_some()` AND no pasted 
 
 **Files:** Modify `web-ui/src/components/input.rs` (`send_text` closure, 257-299).
 
-Behavior: iterate `text.lines()`, accumulate consecutive PLAINTEXT lines into a buffer; when a `/`-line is hit, flush the pending plaintext as ONE `SendMessage { text: pending.join("\n") }` then emit the `RunCommand`; flush remaining plaintext at end. Keep the wizard/emoji early-returns and the `active_buffer` guard above the loop unchanged. (No protocol change — `SendMessage.text` already carries `\n`; server `web_send_message → handle_submit → handle_plain_message` runs the shared multiline branch.)
+Behavior: iterate `text.lines()`, accumulate consecutive PLAINTEXT lines into a buffer; when a line whose TRIMMED form starts with `/` is hit, flush the pending plaintext as ONE `SendMessage { text: pending.join("\n") }` then emit the `RunCommand { text: trimmed }`; flush remaining plaintext at end. **For the plaintext accumulation, push RAW (untrimmed) lines and PRESERVE interior blank lines** — do NOT `trim()` each plaintext line nor `continue` on empty ones (that would diverge from the TUI path, which sends `text` verbatim to `partition`). Only classification uses the trimmed form. Keep the wizard/emoji early-returns and the `active_buffer` guard above the loop unchanged. (No protocol change — `SendMessage.text` already carries `\n`; server `web_send_message → handle_submit → handle_plain_message` runs the shared multiline branch.)
 
 - [ ] **Step 1:** Implement the accumulate/flush closure (the server side is already covered by Phase 4; the web change is purely the client send shape).
 - [ ] **Step 2: Build the web UI.** `make wasm` — Expected: PASS.
@@ -799,8 +899,13 @@ Command::Raw(cmd, args) if cmd == "FAIL" && args.first().map(String::as_str) == 
 
 ## Self-review checklist (run before execution)
 
-- **Spec coverage:** cap request (1.2) ✓; max-bytes/max-lines parse + defaults (0.2) ✓; BATCH framing + concat (0.4, 4.1) ✓; total max-bytes incl. join byte (0.4) ✓; per-PRIVMSG cap via `MESSAGE_MAX_BYTES` (0.4) ✓; reassembly join rules (0.3, 2.2) ✓; target consistency (2.2 uses batch target) ✓; all-blank/blank-concat rules (0.4) ✓; FAIL codes (7.1) ✓; @time/@msgid via opener tags (2.1, 2.2) ✓; echo-message single display (4.1, 7.2) ✓.
-- **E2E safety:** branch gated `!is_e2e_encrypted`; E2E path + `apply_shrink_deliver` untouched; E2E `\n` rides in ciphertext; single E2E echo (4.2) — ✓.
-- **TUI+web parity:** one `Message` with `\n` → both renderers; web send single message (5.1); TUI compose (6); shared `handle_plain_message` (4.1) — ✓.
-- **Type consistency:** `MultilineLimits`/`WireLine` defined in `multiline.rs`, referenced as `crate::irc::multiline::*` everywhere (connection.rs, mod.rs, batch.rs, input.rs); `IrcEvent::Connected` 3-tuple updated at all 3 sites (mod.rs:428,449; app/irc.rs:313); `start_batch` 4th arg updated at all call sites — ✓.
+- **Spec coverage:** cap request (1.2) ✓; max-bytes/max-lines parse + defaults (0.2) ✓; BATCH framing + concat (0.4, 4.1) ✓; total max-bytes incl. join byte (0.4) ✓; per-PRIVMSG cap via `MESSAGE_MAX_BYTES` (0.4) ✓; **lossless concat split via `split_lossless`, not `split_irc_message`** (0.4) ✓; reassembly join rules (0.3, 2.2) ✓; target consistency (2.2 uses batch target) ✓; all-blank/blank-concat rules (0.4) ✓; FAIL codes (7.1) ✓; @time/@msgid via opener tags MERGED with first-fragment tags (2.2) ✓; echo-message single display (4.1, 7.2) ✓.
+- **E2E safety:** branch gated `!is_e2e_encrypted` AND `multiline_supported`; E2E path + `apply_shrink_deliver`/`send_outgoing_substituted` untouched; **shrink gate excludes `needs_multiline`** (4.1 Step 0); E2E `\n` rides in ciphertext; **no Case A early-return — single in-place E2E echo** (4.2); **inbound E2E-fragment guard falls back to per-fragment replay** (2.2); peer-side E2E chunk asymmetry documented (4.2) — ✓.
+- **Robustness:** **inbound runaway cap `MULTILINE_MAX_INBOUND_LINES`** (0.1, 2.2) ✓; render budget reconciled + bounded-overshoot test (3.2) ✓; partition memory-guarded tests (0.4) ✓.
+- **TUI+web parity:** one `Message` with `\n` → both renderers; web send single message preserving interior blank lines (5.1); paste coalescing preserves blank lines (4.3); TUI compose (6); shared `handle_plain_message` (4.1) — ✓.
+- **Type/compile:** `MultilineLimits`/`WireLine` in `multiline.rs`, referenced as `crate::irc::multiline::*`; `IrcEvent::Connected` 3-tuple at all 3 sites (mod.rs:428,449; app/irc.rs:313); `start_batch` 4th arg at all call sites; **`wrap_segment` fallback does not reference the missing `line` binding** (3.1); **frames test uses multi-word lines** (proto omits `:` for single tokens) (4.1); **`#[must_use]` on `multiline_frames`** + fully-qualified proto types (4.1); **cap-new borrow ordering: store after the `to_request` collect** (1.3) — ✓.
 - **Hot path:** single-line no-`\n` message hits the unchanged `else` branch in `handle_plain_message` — ✓.
+
+## Review history
+
+- 2026-06-25 adversarial plan review (3 lenses): spec-compliance, E2E-safety, type/borrow/clippy. All blockers/majors and actionable minors folded in: shrink-gate guard, `MULTILINE_MAX_INBOUND_LINES`, lossless `split_lossless` (concat correctness), inbound E2E-fragment guard, tag merge, no-double-echo E2E single echo, `multiline_supported` gate, blank-line preservation, `wrap_segment` fallback, frames-test colon, `#[must_use]`, cap-new borrow ordering, render-budget reconciliation.
