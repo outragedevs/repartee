@@ -58,6 +58,40 @@ impl App {
             }
         }
         for (conn_id, batch) in to_replay {
+            // A nested `draft/multiline` batch (its opener carried
+            // `@batch=<parent>`, e.g. a multiline message inside a CHATHISTORY
+            // batch) must NEVER be dispatched live as a backlog row. Fold it into
+            // the parent if it is still open; otherwise the parent — which is
+            // OLDER, so it times out and is purged FIRST — is already gone, so
+            // drop the orphan rather than showing a store-only history message
+            // live and out of order. (Clean-end folding is in `app/irc.rs`.)
+            if batch.batch_type == "DRAFT/MULTILINE"
+                && let Some(parent) = batch.opener_tags.as_ref().and_then(|tags| {
+                    tags.iter().find(|t| t.0 == "batch").and_then(|t| t.1.clone())
+                })
+            {
+                if self
+                    .batch_trackers
+                    .get(&conn_id)
+                    .is_some_and(|t| t.is_open(&parent))
+                {
+                    if let crate::irc::batch::MultilineOutcome::Message(mut synthetic) =
+                        crate::irc::batch::build_multiline_message(&self.state, &conn_id, &batch, false)
+                    {
+                        synthetic.tags.get_or_insert_with(Vec::new).push(
+                            ::irc::proto::message::Tag("batch".to_string(), Some(parent)),
+                        );
+                        if let Some(t) = self.batch_trackers.get_mut(&conn_id) {
+                            t.add_message(*synthetic);
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        "dropping timed-out nested multiline batch (parent '{parent}' already completed)"
+                    );
+                }
+                continue;
+            }
             // Force-completed by timeout (`clean_end = false`): a missing
             // `BATCH -tag` is a transport/server failure, so a short CHATHISTORY
             // batch here must not be treated as genuine end-of-history.
