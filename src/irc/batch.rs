@@ -37,6 +37,10 @@ pub struct BatchInfo {
     pub dropped_messages: usize,
     /// When this batch was opened.
     pub started_at: Instant,
+    /// `IRCv3` message tags from the BATCH opener line. For `draft/multiline`
+    /// the server places `@time`/`@msgid` here. `None` when the opener had no
+    /// tags. Other batch types ignore this field.
+    pub opener_tags: Option<Vec<irc::proto::message::Tag>>,
 }
 
 /// Tracks open `IRCv3` batches for a single connection.
@@ -47,8 +51,15 @@ pub struct BatchTracker {
 }
 
 impl BatchTracker {
-    /// Start a new batch with the given reference tag, type, and parameters.
-    pub fn start_batch(&mut self, ref_tag: &str, batch_type: &str, params: Vec<String>) {
+    /// Start a new batch with the given reference tag, type, parameters, and the
+    /// opener line's `IRCv3` tags (used by `draft/multiline` for `@time`/`@msgid`).
+    pub fn start_batch(
+        &mut self,
+        ref_tag: &str,
+        batch_type: &str,
+        params: Vec<String>,
+        opener_tags: Option<Vec<irc::proto::message::Tag>>,
+    ) {
         self.open.insert(
             ref_tag.to_string(),
             BatchInfo {
@@ -57,6 +68,7 @@ impl BatchTracker {
                 messages: Vec::new(),
                 dropped_messages: 0,
                 started_at: Instant::now(),
+                opener_tags,
             },
         );
     }
@@ -169,6 +181,10 @@ pub struct GapfillContinuation {
 /// Returns [`GapfillContinuation`] when a reconnect `AFTER` gap-fill page came
 /// back full (the gap is larger than one page); the App caller then issues the
 /// next `AFTER`. `None` for every other case.
+#[expect(
+    clippy::too_many_lines,
+    reason = "batch-type dispatch; the CHATHISTORY arm is large but cohesive"
+)]
 pub fn process_completed_batch(
     state: &mut AppState,
     conn_id: &str,
@@ -305,6 +321,10 @@ pub fn process_completed_batch(
             }
             continuation
         }
+        "DRAFT/MULTILINE" => {
+            process_multiline_batch(state, conn_id, batch);
+            None
+        }
         _ => {
             // Unknown batch type — replay messages through the normal handler.
             for msg in &batch.messages {
@@ -313,6 +333,116 @@ pub fn process_completed_batch(
             None
         }
     }
+}
+
+/// Reassemble a `draft/multiline` batch into ONE logical message and route it
+/// through the normal incoming-message pipeline (so highlight, mention,
+/// activity, logging, web broadcast, and E2E-decrypt all run exactly once).
+///
+/// Spec: lines join with `\n` unless tagged `draft/multiline-concat` (then no
+/// separator). `@time`/`@msgid` live on the BATCH opener; merge them with the
+/// first fragment's tags. Bounded by [`crate::irc::MULTILINE_MAX_INBOUND_LINES`]
+/// as an OOM backstop.
+fn process_multiline_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo) {
+    if batch.messages.is_empty() {
+        return;
+    }
+
+    // E2E guard: if ANY fragment is an RPEE2E ciphertext chunk, do NOT
+    // reassemble — joining multiple `+RPE2E01` wires into one string corrupts
+    // decrypt. Replay each fragment so every chunk decrypts independently
+    // (matches the default arm). E2E and multiline are mutually exclusive in
+    // practice; this is defensive.
+    let has_e2e = batch.messages.iter().any(|m| {
+        matches!(&m.command,
+            Command::PRIVMSG(_, t) | Command::NOTICE(_, t) if t.starts_with("+RPE2E01"))
+    });
+    if has_e2e {
+        for m in &batch.messages {
+            crate::irc::events::handle_irc_message(state, conn_id, m);
+        }
+        return;
+    }
+
+    let mut lines: Vec<crate::irc::multiline::WireLine> = batch
+        .messages
+        .iter()
+        .filter_map(|m| match &m.command {
+            Command::PRIVMSG(_, text) | Command::NOTICE(_, text) => {
+                let concat = m.tags.as_ref().is_some_and(|tags| {
+                    tags.iter().any(|t| t.0 == "draft/multiline-concat")
+                });
+                Some(crate::irc::multiline::WireLine {
+                    text: text.clone(),
+                    concat,
+                })
+            }
+            _ => None,
+        })
+        .collect();
+    if lines.is_empty() {
+        return;
+    }
+
+    // Runaway backstop (OOM guard): bound the reassembled message's line count.
+    if lines.len() > crate::irc::MULTILINE_MAX_INBOUND_LINES {
+        tracing::warn!(
+            "multiline batch had {} lines; truncating to {}",
+            lines.len(),
+            crate::irc::MULTILINE_MAX_INBOUND_LINES
+        );
+        lines.truncate(crate::irc::MULTILINE_MAX_INBOUND_LINES);
+    }
+
+    let joined = crate::irc::multiline::reassemble(&lines);
+
+    // Target: the BATCH opener param, else the first fragment's target.
+    let Some(target) = batch.params.first().cloned().or_else(|| {
+        batch.messages.iter().find_map(|m| match &m.command {
+            Command::PRIVMSG(t, _) | Command::NOTICE(t, _) => Some(t.clone()),
+            _ => None,
+        })
+    }) else {
+        return;
+    };
+
+    // PRIVMSG vs NOTICE from the first usable fragment.
+    let is_notice = matches!(
+        batch
+            .messages
+            .iter()
+            .find(|m| matches!(&m.command, Command::PRIVMSG(..) | Command::NOTICE(..)))
+            .map(|m| &m.command),
+        Some(Command::NOTICE(..))
+    );
+    let command = if is_notice {
+        Command::NOTICE(target, joined)
+    } else {
+        Command::PRIVMSG(target, joined)
+    };
+
+    // Tags: @time/@msgid normally ride on the opener; a server may place @msgid
+    // on the first fragment. Merge — opener first, then any key the opener lacks
+    // from the first fragment. Prefix from the first fragment (the sender).
+    let mut tags: Vec<irc::proto::message::Tag> = batch.opener_tags.clone().unwrap_or_default();
+    if let Some(frag_tags) = batch.messages.first().and_then(|m| m.tags.clone()) {
+        for ft in frag_tags {
+            if !tags.iter().any(|t| t.0 == ft.0) {
+                tags.push(ft);
+            }
+        }
+    }
+    // Drop batch-transport tags — the reassembled message is not itself batched.
+    tags.retain(|t| t.0 != "batch" && t.0 != "draft/multiline-concat");
+    let tags = if tags.is_empty() { None } else { Some(tags) };
+    let prefix = batch.messages.first().and_then(|m| m.prefix.clone());
+
+    let synthetic = IrcMessage {
+        tags,
+        prefix,
+        command,
+    };
+    crate::irc::events::handle_irc_message(state, conn_id, &synthetic);
 }
 
 /// Process a NETSPLIT batch: remove nicks from channels and produce a summary.
@@ -573,7 +703,12 @@ mod tests {
     #[test]
     fn start_and_end_batch_collects_messages() {
         let mut tracker = BatchTracker::default();
-        tracker.start_batch("abc", "NETSPLIT", vec!["s1.net".into(), "s2.net".into()]);
+        tracker.start_batch(
+            "abc",
+            "NETSPLIT",
+            vec!["s1.net".into(), "s2.net".into()],
+            None,
+        );
 
         let msg1 = make_batched_message("abc", Command::QUIT(Some("split".to_string())));
         let msg2 = make_batched_message("abc", Command::QUIT(Some("split".to_string())));
@@ -590,7 +725,7 @@ mod tests {
     #[test]
     fn batch_message_cap_discards_excess() {
         let mut tracker = BatchTracker::default();
-        tracker.start_batch("abc", "NETSPLIT", vec![]);
+        tracker.start_batch("abc", "NETSPLIT", vec![], None);
 
         for _ in 0..MAX_BATCH_MESSAGES + 2 {
             let msg = make_batched_message("abc", Command::QUIT(Some("split".to_string())));
@@ -605,7 +740,7 @@ mod tests {
     #[test]
     fn is_batched_detects_batch_tag() {
         let mut tracker = BatchTracker::default();
-        tracker.start_batch("ref1", "NETSPLIT", vec![]);
+        tracker.start_batch("ref1", "NETSPLIT", vec![], None);
 
         let batched = make_batched_message("ref1", Command::QUIT(None));
         let unbatched = make_plain_message(Command::QUIT(None));
@@ -726,6 +861,7 @@ mod tests {
             batch_type: "NETSPLIT".to_string(),
             params: vec!["hub.net".to_string(), "leaf.net".to_string()],
             started_at: Instant::now(),
+            opener_tags: None,
             dropped_messages: 0,
             messages: vec![
                 make_quit_msg("alice", "hub.net leaf.net", "ref1"),
@@ -754,7 +890,7 @@ mod tests {
     #[test]
     fn messages_without_batch_tag_are_not_batched() {
         let mut tracker = BatchTracker::default();
-        tracker.start_batch("ref1", "NETSPLIT", vec![]);
+        tracker.start_batch("ref1", "NETSPLIT", vec![], None);
 
         let msg = make_plain_message(Command::PRIVMSG("#test".into(), "hello".into()));
         assert!(!tracker.is_batched(&msg));
@@ -764,8 +900,8 @@ mod tests {
     #[test]
     fn multiple_batches_tracked_independently() {
         let mut tracker = BatchTracker::default();
-        tracker.start_batch("aaa", "NETSPLIT", vec![]);
-        tracker.start_batch("bbb", "NETJOIN", vec![]);
+        tracker.start_batch("aaa", "NETSPLIT", vec![], None);
+        tracker.start_batch("bbb", "NETJOIN", vec![], None);
 
         let msg_a = make_batched_message("aaa", Command::QUIT(None));
         let msg_b = make_batched_message("bbb", Command::JOIN("#test".into(), None, None));
@@ -804,7 +940,7 @@ mod tests {
     #[test]
     fn batch_type_case_normalized() {
         let mut tracker = BatchTracker::default();
-        tracker.start_batch("ref1", "netsplit", vec![]);
+        tracker.start_batch("ref1", "netsplit", vec![], None);
 
         let batch = tracker.end_batch("ref1").expect("batch should exist");
         assert_eq!(batch.batch_type, "NETSPLIT");
@@ -824,10 +960,11 @@ mod tests {
                 started_at: Instant::now()
                     .checked_sub(std::time::Duration::from_mins(2))
                     .unwrap(),
+                opener_tags: None,
             },
         );
         // Fresh batch should survive
-        tracker.start_batch("fresh", "NETJOIN", vec![]);
+        tracker.start_batch("fresh", "NETJOIN", vec![], None);
 
         let purged = tracker.purge_expired();
         assert_eq!(purged.len(), 1);
@@ -839,8 +976,8 @@ mod tests {
     #[test]
     fn purge_expired_keeps_fresh_batches() {
         let mut tracker = BatchTracker::default();
-        tracker.start_batch("a", "NETSPLIT", vec![]);
-        tracker.start_batch("b", "NETJOIN", vec![]);
+        tracker.start_batch("a", "NETSPLIT", vec![], None);
+        tracker.start_batch("b", "NETJOIN", vec![], None);
 
         let purged = tracker.purge_expired();
         assert!(purged.is_empty());
@@ -871,6 +1008,7 @@ mod tests {
                 started_at: Instant::now()
                     .checked_sub(std::time::Duration::from_mins(2))
                     .unwrap(),
+                opener_tags: None,
             },
         );
 
@@ -993,6 +1131,7 @@ mod tests {
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
+            opener_tags: None,
             dropped_messages: 0,
             messages: vec![
                 make_history_privmsg("bob", "#test", "hello", "m1"),
@@ -1037,6 +1176,7 @@ mod tests {
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["bob".to_string()],
             started_at: Instant::now(),
+            opener_tags: None,
             dropped_messages: 0,
             // Prefix nick "ME" differs in case from the connection nick "me".
             messages: vec![make_history_privmsg("ME", "bob", "hey bob", "m1")],
@@ -1063,6 +1203,7 @@ mod tests {
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
+            opener_tags: None,
             dropped_messages: 0,
             messages: vec![
                 make_history_privmsg_at("c", "#test", "third", "m3", "2024-01-01T00:00:05.800Z"),
@@ -1100,6 +1241,7 @@ mod tests {
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
+            opener_tags: None,
             dropped_messages: 0,
             messages: vec![
                 make_history_privmsg_at(
@@ -1142,6 +1284,7 @@ mod tests {
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
+            opener_tags: None,
             dropped_messages: 0,
             messages: vec![
                 make_history_privmsg("bob", "#test", "+RPE2E01ciphertext", "e1"),
@@ -1169,6 +1312,7 @@ mod tests {
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
+            opener_tags: None,
             dropped_messages: 0,
             messages: vec![action, other_ctcp],
         };
@@ -1201,6 +1345,7 @@ mod tests {
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
+            opener_tags: None,
             dropped_messages: 0,
             messages: vec![
                 make_history_privmsg_at("a", "#test", "1", "g1", "2024-01-01T00:00:01.000Z"),
@@ -1228,6 +1373,7 @@ mod tests {
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
+            opener_tags: None,
             dropped_messages: 0,
             messages: vec![make_history_privmsg_at(
                 "a",
@@ -1259,6 +1405,7 @@ mod tests {
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
+            opener_tags: None,
             dropped_messages: 0,
             messages: vec![
                 make_history_privmsg_at("a", "#test", "1", "g1", "2024-01-01T00:00:01.000Z"),
@@ -1318,6 +1465,7 @@ mod tests {
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
+            opener_tags: None,
             dropped_messages: 0,
             messages: vec![
                 make_history_privmsg_at("carol", "#test", "earlier", "gap1", "2024-01-01T00:00:01.000Z"),
@@ -1360,6 +1508,7 @@ mod tests {
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
+            opener_tags: None,
             dropped_messages: 0,
             messages: vec![make_history_privmsg("bob", "#test", "gap line", "g1")],
         };
@@ -1391,6 +1540,7 @@ mod tests {
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
+            opener_tags: None,
             dropped_messages: 0,
             messages: vec![make_history_privmsg("bob", "#test", "older line", "b1")],
         };
@@ -1421,6 +1571,7 @@ mod tests {
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
+            opener_tags: None,
             dropped_messages: 0,
             messages: vec![make_history_privmsg("bob", "#test", "older line", "m1")],
         };
@@ -1453,6 +1604,7 @@ mod tests {
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
+            opener_tags: None,
             dropped_messages: 0,
             messages: vec![],
         };
@@ -1490,6 +1642,7 @@ mod tests {
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
+            opener_tags: None,
             dropped_messages: 0,
             messages: vec![
                 make_join_msg("dave", "#test", "h1"),
@@ -1529,6 +1682,7 @@ mod tests {
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
+            opener_tags: None,
             dropped_messages: 0,
             messages: vec![make_join_msg("dave", "#test", "h1")],
         };
@@ -1557,6 +1711,7 @@ mod tests {
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
+            opener_tags: None,
             dropped_messages: 0,
             messages: vec![make_history_privmsg_at(
                 "bob",
@@ -1593,6 +1748,7 @@ mod tests {
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
+            opener_tags: None,
             dropped_messages: 0,
             messages: vec![make_history_privmsg("bob", "#test", "only line", "m1")],
         };
@@ -1629,6 +1785,7 @@ mod tests {
             batch_type: "CHATHISTORY".to_string(),
             params: vec!["#test".to_string()],
             started_at: Instant::now(),
+            opener_tags: None,
             dropped_messages: 0,
             messages: vec![make_history_privmsg("bob", "#test", "partial line", "m1")],
         };
@@ -1736,6 +1893,7 @@ mod tests {
             batch_type: "NETSPLIT".to_string(),
             params: vec!["hub.net".to_string(), "leaf.net".to_string()],
             started_at: Instant::now(),
+            opener_tags: None,
             dropped_messages: 0,
             messages: vec![
                 make_quit_msg("Alice", "hub.net leaf.net", "ref1"),
@@ -1757,5 +1915,149 @@ mod tests {
         assert!(last_msg.text.contains("Netsplit"));
         assert!(last_msg.text.contains("Alice"));
         assert!(last_msg.text.contains("BOB"));
+    }
+
+    fn multiline_frag(text: &str, concat: bool) -> IrcMessage {
+        let mut tags = vec![Tag("batch".to_string(), Some("b1".to_string()))];
+        if concat {
+            tags.push(Tag("draft/multiline-concat".to_string(), None));
+        }
+        IrcMessage {
+            tags: Some(tags),
+            prefix: Some(irc::proto::Prefix::Nickname(
+                "bob".to_string(),
+                "u".to_string(),
+                "h.net".to_string(),
+            )),
+            command: Command::PRIVMSG("#test".to_string(), text.to_string()),
+        }
+    }
+
+    #[test]
+    fn multiline_reassembles_into_one_message() {
+        let conn_id = "test";
+        let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
+
+        let batch = BatchInfo {
+            batch_type: "DRAFT/MULTILINE".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            // @msgid on the opener must survive into the reassembled message.
+            opener_tags: Some(vec![Tag("msgid".to_string(), Some("xyz".to_string()))]),
+            messages: vec![
+                multiline_frag("hello", false),
+                multiline_frag("world", false),
+                multiline_frag("!!!", true),
+            ],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        let buf = state.buffers.get(&buf_id).unwrap();
+        let msgs: Vec<_> = buf
+            .messages
+            .iter()
+            .filter(|m| m.message_type == MessageType::Message)
+            .collect();
+        assert_eq!(msgs.len(), 1, "exactly one reassembled message");
+        assert_eq!(msgs[0].text, "hello\nworld!!!");
+        assert_eq!(msgs[0].nick.as_deref(), Some("bob"));
+        assert_eq!(
+            msgs[0]
+                .tags
+                .as_ref()
+                .and_then(|t| t.get("msgid"))
+                .map(String::as_str),
+            Some("xyz"),
+            "opener @msgid carried into reassembled message"
+        );
+    }
+
+    #[test]
+    fn multiline_with_e2e_fragments_does_not_reassemble() {
+        let conn_id = "test";
+        let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
+
+        let frag = |text: &str| IrcMessage {
+            tags: Some(vec![Tag("batch".to_string(), Some("b1".to_string()))]),
+            prefix: Some(irc::proto::Prefix::Nickname(
+                "bob".to_string(),
+                "u".to_string(),
+                "h.net".to_string(),
+            )),
+            command: Command::PRIVMSG("#test".to_string(), text.to_string()),
+        };
+        let batch = BatchInfo {
+            batch_type: "DRAFT/MULTILINE".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            opener_tags: None,
+            messages: vec![frag("+RPE2E01AAAA"), frag("+RPE2E01BBBB")],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        let buf = state.buffers.get(&buf_id).unwrap();
+        assert!(
+            !buf.messages
+                .iter()
+                .any(|m| m.text.contains("+RPE2E01AAAA") && m.text.contains("+RPE2E01BBBB")),
+            "E2E ciphertext chunks must not be reassembled into one message"
+        );
+    }
+
+    #[test]
+    fn multiline_caps_inbound_lines() {
+        let conn_id = "test";
+        let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
+
+        let messages: Vec<IrcMessage> = (0..crate::irc::MULTILINE_MAX_INBOUND_LINES + 50)
+            .map(|i| multiline_frag(&format!("line{i}"), false))
+            .collect();
+        let batch = BatchInfo {
+            batch_type: "DRAFT/MULTILINE".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            opener_tags: None,
+            messages,
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        let buf = state.buffers.get(&buf_id).unwrap();
+        let m = buf
+            .messages
+            .iter()
+            .find(|m| m.message_type == MessageType::Message)
+            .expect("one reassembled message");
+        assert_eq!(
+            m.text.lines().count(),
+            crate::irc::MULTILINE_MAX_INBOUND_LINES,
+            "reassembled message is capped at MULTILINE_MAX_INBOUND_LINES lines"
+        );
+    }
+
+    #[test]
+    fn multiline_empty_batch_adds_no_message() {
+        let conn_id = "test";
+        let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
+        let batch = BatchInfo {
+            batch_type: "DRAFT/MULTILINE".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            opener_tags: None,
+            messages: vec![],
+        };
+        process_completed_batch(&mut state, conn_id, &batch, true);
+        let buf = state.buffers.get(&buf_id).unwrap();
+        assert!(
+            buf.messages
+                .iter()
+                .all(|m| m.message_type != MessageType::Message)
+        );
     }
 }

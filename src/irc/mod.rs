@@ -209,8 +209,6 @@ pub const MULTILINE_DEFAULT_MAX_LINES: usize = 24;
 /// `batch.rs`) so a hostile or buggy server cannot materialise a single message
 /// whose wrapped output is thousands of visual lines (an OOM-class regression;
 /// see the v0.8.4 render-budget fix).
-// TEMPORARY allow: consumed by the inbound reassembly arm in Phase 2.
-#[allow(dead_code)]
 pub const MULTILINE_MAX_INBOUND_LINES: usize = 100;
 
 /// Split a message into chunks that each fit within `max_bytes` of UTF-8.

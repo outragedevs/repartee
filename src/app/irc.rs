@@ -583,7 +583,7 @@ impl App {
                             .as_ref()
                             .map_or_else(String::new, |s| s.to_str().to_string());
                         let batch_params = params.clone().unwrap_or_default();
-                        tracker.start_batch(tag, &batch_type, batch_params);
+                        tracker.start_batch(tag, &batch_type, batch_params, msg.tags.clone());
                         tracing::debug!("batch started: tag={tag} type={batch_type}");
                     } else if let Some(tag) = ref_tag.strip_prefix('-') {
                         // End batch
