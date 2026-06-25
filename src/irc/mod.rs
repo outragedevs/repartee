@@ -7,6 +7,7 @@ pub mod flood;
 pub mod formatting;
 pub mod ignore;
 pub mod isupport;
+pub mod multiline;
 pub mod netsplit;
 pub mod sasl_scram;
 
@@ -190,6 +191,18 @@ async fn await_authenticate_plus(stream: &mut irc::client::ClientStream) -> Resu
 /// up to ~160 bytes. Using 350 bytes for the body (matching irc-framework)
 /// leaves safe headroom.
 pub const MESSAGE_MAX_BYTES: usize = 350;
+
+/// Conservative fallback for `draft/multiline` `max-lines` when the server
+/// advertises the cap without that key (the spec marks it RECOMMENDED, not
+/// required).
+pub const MULTILINE_DEFAULT_MAX_LINES: usize = 24;
+
+/// Runaway backstop for INBOUND `draft/multiline` reassembly: a reassembled
+/// message is truncated to this many lines (well below `MAX_BATCH_MESSAGES` in
+/// `batch.rs`) so a hostile or buggy server cannot materialise a single message
+/// whose wrapped output is thousands of visual lines (an OOM-class regression;
+/// see the v0.8.4 render-budget fix).
+pub const MULTILINE_MAX_INBOUND_LINES: usize = 100;
 
 /// Split a message into chunks that each fit within `max_bytes` of UTF-8.
 ///
