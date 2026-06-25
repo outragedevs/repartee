@@ -103,6 +103,13 @@ impl BatchTracker {
         Self::get_batch_tag(msg).is_some_and(|tag| self.open.contains_key(tag))
     }
 
+    /// Whether a batch with `ref_tag` is currently open (used to fold a nested
+    /// sub-batch's result into its still-open parent).
+    #[must_use]
+    pub fn is_open(&self, ref_tag: &str) -> bool {
+        self.open.contains_key(ref_tag)
+    }
+
     /// Add a message to its batch (identified by the `@batch` tag).
     ///
     /// Returns `true` if the message was added to a batch, `false` if no
@@ -335,49 +342,56 @@ pub fn process_completed_batch(
     }
 }
 
-/// Reassemble a `draft/multiline` batch into ONE logical message and route it
-/// through the normal incoming-message pipeline (so highlight, mention,
-/// activity, logging, web broadcast, and E2E-decrypt all run exactly once).
+/// Outcome of assembling a `draft/multiline` batch (see [`build_multiline_message`]).
+pub enum MultilineOutcome {
+    /// One reassembled synthetic message, ready to deliver live or to fold into
+    /// a parent batch (boxed to keep the enum small).
+    Message(Box<IrcMessage>),
+    /// The batch can't be safely merged (RPEE2E ciphertext fragments, or mixed
+    /// sender/target/type) — the caller must handle the fragments individually.
+    Replay,
+    /// Nothing to deliver.
+    Empty,
+}
+
+/// Build the single reassembled message for a `draft/multiline` batch WITHOUT
+/// dispatching it. Pure on `&AppState` (only reads the negotiated `max-lines`).
 ///
 /// Spec: lines join with `\n` unless tagged `draft/multiline-concat` (then no
 /// separator). `@time`/`@msgid` live on the BATCH opener; merge them with the
 /// first fragment's tags. Bounded by [`crate::irc::MULTILINE_MAX_INBOUND_LINES`]
-/// as an OOM backstop.
+/// as an OOM backstop. `clean_end` is `false` when the batch was force-completed
+/// by the timeout purge (no `BATCH -tag`); such a message is marked truncated.
 ///
-/// `clean_end` is `false` when the batch was force-completed by the timeout
-/// purge (the server never sent `BATCH -tag`); such a message is incomplete and
-/// is marked truncated.
-#[expect(
-    clippy::too_many_lines,
-    reason = "sequential guards (E2E, consistency, cap) + reassembly + message build"
-)]
-fn process_multiline_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo, clean_end: bool) {
+/// [`process_multiline_batch`] is the live-delivery wrapper; a nested multiline
+/// batch (opener carries `@batch=<parent>`) instead folds the result into its
+/// parent batch so it follows the parent's completion (e.g. CHATHISTORY ingest).
+pub fn build_multiline_message(
+    state: &AppState,
+    conn_id: &str,
+    batch: &BatchInfo,
+    clean_end: bool,
+) -> MultilineOutcome {
     if batch.messages.is_empty() {
-        return;
+        return MultilineOutcome::Empty;
     }
 
     // E2E guard: if ANY fragment is an RPEE2E ciphertext chunk, do NOT
     // reassemble — joining multiple `+RPE2E01` wires into one string corrupts
-    // decrypt. Replay each fragment so every chunk decrypts independently
-    // (matches the default arm). E2E and multiline are mutually exclusive in
-    // practice; this is defensive.
+    // decrypt. The caller replays fragments so each chunk decrypts independently.
     let has_e2e = batch.messages.iter().any(|m| {
         matches!(&m.command,
             Command::PRIVMSG(_, t) | Command::NOTICE(_, t) if t.starts_with("+RPE2E01"))
     });
     if has_e2e {
-        for m in &batch.messages {
-            crate::irc::events::handle_irc_message(state, conn_id, m);
-        }
-        return;
+        return MultilineOutcome::Replay;
     }
 
     // Consistency guard: a conformant `draft/multiline` batch shares ONE sender,
     // ONE target, and ONE message type across all line fragments (spec MUST).
     // We build the reassembled message from only the first fragment's identity,
     // so a malformed/malicious batch mixing senders/targets/types would be
-    // displayed in the wrong buffer under the wrong nick. Replay such a batch
-    // per-fragment instead, so each line lands in its correct buffer/sender.
+    // displayed in the wrong buffer under the wrong nick — replay per-fragment.
     let mut frags = batch.messages.iter().filter_map(|m| match &m.command {
         Command::PRIVMSG(t, _) => Some((&m.prefix, t, false)),
         Command::NOTICE(t, _) => Some((&m.prefix, t, true)),
@@ -387,10 +401,7 @@ fn process_multiline_batch(state: &mut AppState, conn_id: &str, batch: &BatchInf
         && !frags.all(|f| f == first)
     {
         tracing::warn!("inconsistent multiline batch (mixed sender/target/type); replaying per-fragment");
-        for m in &batch.messages {
-            crate::irc::events::handle_irc_message(state, conn_id, m);
-        }
-        return;
+        return MultilineOutcome::Replay;
     }
 
     let mut lines: Vec<crate::irc::multiline::WireLine> = batch
@@ -410,7 +421,7 @@ fn process_multiline_batch(state: &mut AppState, conn_id: &str, batch: &BatchInf
         })
         .collect();
     if lines.is_empty() {
-        return;
+        return MultilineOutcome::Empty;
     }
 
     // Render-safety cap. Prefer the server's advertised `max-lines` (a
@@ -454,7 +465,7 @@ fn process_multiline_batch(state: &mut AppState, conn_id: &str, batch: &BatchInf
             _ => None,
         })
     }) else {
-        return;
+        return MultilineOutcome::Empty;
     };
 
     // PRIVMSG vs NOTICE from the first usable fragment.
@@ -494,12 +505,29 @@ fn process_multiline_batch(state: &mut AppState, conn_id: &str, batch: &BatchInf
     let tags = if tags.is_empty() { None } else { Some(tags) };
     let prefix = batch.messages.first().and_then(|m| m.prefix.clone());
 
-    let synthetic = IrcMessage {
+    MultilineOutcome::Message(Box::new(IrcMessage {
         tags,
         prefix,
         command,
-    };
-    crate::irc::events::handle_irc_message(state, conn_id, &synthetic);
+    }))
+}
+
+/// Reassemble a (top-level) `draft/multiline` batch and deliver it LIVE through
+/// the normal incoming-message pipeline (highlight, mention, activity, logging,
+/// web broadcast, E2E-decrypt all run exactly once). Nested batches are handled
+/// by the caller (`app/irc.rs`), which folds the result into the parent instead.
+fn process_multiline_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo, clean_end: bool) {
+    match build_multiline_message(state, conn_id, batch, clean_end) {
+        MultilineOutcome::Message(synthetic) => {
+            crate::irc::events::handle_irc_message(state, conn_id, &synthetic);
+        }
+        MultilineOutcome::Replay => {
+            for m in &batch.messages {
+                crate::irc::events::handle_irc_message(state, conn_id, m);
+            }
+        }
+        MultilineOutcome::Empty => {}
+    }
 }
 
 /// Process a NETSPLIT batch: remove nicks from channels and produce a summary.
@@ -2254,6 +2282,78 @@ mod tests {
                 .iter()
                 .any(|m| m.text.contains("hello") && m.text.contains("evil")),
             "mixed-target fragments must not be merged into one message"
+        );
+    }
+
+    #[test]
+    fn nested_multiline_folds_into_parent_chathistory_batch() {
+        // A draft/multiline message nested inside a CHATHISTORY batch must be
+        // reassembled and injected into the OUTER batch (store-only ingest),
+        // not dispatched live. Mirrors the app/irc.rs end-batch handling.
+        let conn_id = "test";
+        let (state, _rx, _buf_id) = setup_ingest_state(conn_id);
+        let mut tracker = BatchTracker::default();
+
+        // Outer CHATHISTORY batch open.
+        tracker.start_batch("hist", "chathistory", vec!["#test".to_string()], None);
+        // Inner draft/multiline opener carries @batch=hist (+ @time/@msgid).
+        tracker.start_batch(
+            "ml",
+            "draft/multiline",
+            vec!["#test".to_string()],
+            Some(vec![
+                Tag("batch".to_string(), Some("hist".to_string())),
+                Tag("time".to_string(), Some("2024-01-01T00:00:00.000Z".to_string())),
+                Tag("msgid".to_string(), Some("m1".to_string())),
+            ]),
+        );
+        let frag = |text: &str| IrcMessage {
+            tags: Some(vec![Tag("batch".to_string(), Some("ml".to_string()))]),
+            prefix: Some(irc::proto::Prefix::Nickname(
+                "bob".to_string(),
+                "u".to_string(),
+                "h.net".to_string(),
+            )),
+            command: Command::PRIVMSG("#test".to_string(), text.to_string()),
+        };
+        tracker.add_message(frag("line1"));
+        tracker.add_message(frag("line2"));
+
+        // Inner `BATCH -ml`: end + fold into the parent (mirrors app/irc.rs).
+        let inner = tracker.end_batch("ml").expect("inner batch open");
+        let parent = inner
+            .opener_tags
+            .as_ref()
+            .and_then(|tags| tags.iter().find(|t| t.0 == "batch").and_then(|t| t.1.clone()))
+            .expect("nested opener carries @batch");
+        assert!(tracker.is_open(&parent));
+        match build_multiline_message(&state, conn_id, &inner, true) {
+            MultilineOutcome::Message(mut synthetic) => {
+                synthetic
+                    .tags
+                    .get_or_insert_with(Vec::new)
+                    .push(Tag("batch".to_string(), Some(parent)));
+                assert!(tracker.add_message(*synthetic), "folded into parent");
+            }
+            _ => panic!("expected a reassembled message"),
+        }
+
+        // Parent ends: it must contain exactly ONE synthetic PRIVMSG with the
+        // joined multi-line text and the @msgid preserved for store-only dedup.
+        let hist = tracker.end_batch("hist").expect("parent batch open");
+        assert_eq!(hist.messages.len(), 1, "synthetic folded into history batch");
+        match &hist.messages[0].command {
+            Command::PRIVMSG(t, text) => {
+                assert_eq!(t, "#test");
+                assert_eq!(text, "line1\nline2");
+            }
+            other => panic!("expected PRIVMSG, got {other:?}"),
+        }
+        let tags = hist.messages[0].tags.as_ref().expect("tags present");
+        assert!(
+            tags.iter()
+                .any(|t| t.0 == "msgid" && t.1.as_deref() == Some("m1")),
+            "msgid preserved for store-only dedup"
         );
     }
 

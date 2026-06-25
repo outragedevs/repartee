@@ -593,24 +593,72 @@ impl App {
                                 batch.batch_type,
                                 batch.messages.len()
                             );
-                            // Normal close via `BATCH -tag` (`clean_end = true`).
-                            let continuation = crate::irc::batch::process_completed_batch(
-                                &mut self.state,
-                                &conn_id,
-                                &batch,
-                                true,
-                            );
-                            // A full reconnect AFTER gap-fill page → chain the next
-                            // AFTER from the newest row so a multi-page gap is
-                            // filled completely (those rows are newer than the
-                            // scroll-up cursor and unreachable otherwise).
-                            if let Some(cont) = continuation {
-                                self.request_chathistory(
+                            // Nested `draft/multiline`: if this batch's opener was
+                            // itself part of another still-open batch (e.g. a
+                            // multiline message inside a CHATHISTORY batch — the
+                            // inner opener carries `@batch=<parent>`), fold the
+                            // reassembled message INTO the parent so it follows the
+                            // parent's completion (store-only ingest, correct
+                            // pagination/dedup) instead of being dispatched live
+                            // and out of order.
+                            let parent_ref = batch.opener_tags.as_ref().and_then(|tags| {
+                                tags.iter().find(|t| t.0 == "batch").and_then(|t| t.1.clone())
+                            });
+                            if batch.batch_type == "DRAFT/MULTILINE"
+                                && let Some(parent) =
+                                    parent_ref.filter(|p| tracker.is_open(p))
+                            {
+                                match crate::irc::batch::build_multiline_message(
+                                    &self.state,
                                     &conn_id,
-                                    &cont.target,
-                                    crate::irc::chathistory::Direction::After,
-                                    Some((cont.anchor_msgid, cont.anchor_ms)),
+                                    &batch,
+                                    true,
+                                ) {
+                                    crate::irc::batch::MultilineOutcome::Message(mut synthetic) => {
+                                        synthetic.tags.get_or_insert_with(Vec::new).push(
+                                            ::irc::proto::message::Tag(
+                                                "batch".to_string(),
+                                                Some(parent),
+                                            ),
+                                        );
+                                        tracker.add_message(*synthetic);
+                                    }
+                                    crate::irc::batch::MultilineOutcome::Replay => {
+                                        // Malformed nested batch (E2E / mixed):
+                                        // fold each fragment into the parent so
+                                        // they're stored individually under it.
+                                        for mut m in batch.messages {
+                                            let t = m.tags.get_or_insert_with(Vec::new);
+                                            t.retain(|tag| tag.0 != "batch");
+                                            t.push(::irc::proto::message::Tag(
+                                                "batch".to_string(),
+                                                Some(parent.clone()),
+                                            ));
+                                            tracker.add_message(m);
+                                        }
+                                    }
+                                    crate::irc::batch::MultilineOutcome::Empty => {}
+                                }
+                            } else {
+                                // Normal close via `BATCH -tag` (`clean_end = true`).
+                                let continuation = crate::irc::batch::process_completed_batch(
+                                    &mut self.state,
+                                    &conn_id,
+                                    &batch,
+                                    true,
                                 );
+                                // A full reconnect AFTER gap-fill page → chain the
+                                // next AFTER from the newest row so a multi-page gap
+                                // is filled completely (those rows are newer than
+                                // the scroll-up cursor and unreachable otherwise).
+                                if let Some(cont) = continuation {
+                                    self.request_chathistory(
+                                        &conn_id,
+                                        &cont.target,
+                                        crate::irc::chathistory::Direction::After,
+                                        Some((cont.anchor_msgid, cont.anchor_ms)),
+                                    );
+                                }
                             }
                         }
                     }
