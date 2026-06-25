@@ -454,11 +454,18 @@ impl App {
         // also required when multiline is unsupported, so no raw `\n` hits wire.
         let active_conn = self.state.active_buffer().map(|b| b.connection_id.clone());
         let any_command = lines.iter().any(|l| l.trim_start().starts_with('/'));
+        // Peek (don't consume) the already-typed input: if it's a command
+        // prefix (e.g. `/msg nick `), coalescing would prepend it and produce a
+        // command string with embedded `\n` that `handle_submit` routes to a
+        // command handler (which drops everything after the first line). Fall to
+        // the legacy queued path in that case.
+        let input_is_command = self.input.value.trim_start().starts_with('/');
         // Count real lines via `text.lines()` (excludes the trailing empty
         // element that `split('\n')` yields for text ending in a newline), so a
         // paste of exactly MAX_PASTE_LINES + a final newline isn't pushed to the
         // legacy path by an off-by-one.
         if !any_command
+            && !input_is_command
             && text.lines().count() <= MAX_PASTE_LINES
             && active_conn
                 .as_deref()

@@ -407,10 +407,14 @@ fn process_multiline_batch(state: &mut AppState, conn_id: &str, batch: &BatchInf
 
     let mut joined = crate::irc::multiline::reassemble(&lines);
 
-    // Never present an incomplete batch as a complete message: mark it when we
-    // clipped for render safety, the tracker dropped tail fragments (oversized
-    // batch), or the batch ended uncleanly (timeout purge — no `BATCH -tag`).
-    if cap_truncated || batch.dropped_messages > 0 || !clean_end {
+    // A batch is incomplete when we clipped for render safety, the tracker
+    // dropped tail fragments (oversized batch), or it ended uncleanly (timeout
+    // purge — no `BATCH -tag`).
+    let truncated = cap_truncated || batch.dropped_messages > 0 || !clean_end;
+
+    // Never present an incomplete batch as a complete message: append a visible
+    // marker and log it rather than silently losing the tail.
+    if truncated {
         tracing::warn!(
             "multiline batch incomplete (cap_truncated={cap_truncated}, dropped={}, clean_end={clean_end}); marking",
             batch.dropped_messages
@@ -456,6 +460,12 @@ fn process_multiline_batch(state: &mut AppState, conn_id: &str, batch: &BatchInf
     }
     // Drop batch-transport tags — the reassembled message is not itself batched.
     tags.retain(|t| t.0 != "batch" && t.0 != "draft/multiline-concat");
+    // For a TRUNCATED message, drop @msgid: `maybe_log` dedups by msgid with
+    // INSERT OR IGNORE, so keeping it would let an incomplete copy permanently
+    // shadow a later intact CHATHISTORY/reconnect replay of the same message.
+    if truncated {
+        tags.retain(|t| t.0 != "msgid");
+    }
     let tags = if tags.is_empty() { None } else { Some(tags) };
     let prefix = batch.messages.first().and_then(|m| m.prefix.clone());
 
@@ -2158,6 +2168,35 @@ mod tests {
         assert!(
             m.text.contains("[multiline message truncated]"),
             "an unclean batch end must mark the message incomplete"
+        );
+    }
+
+    #[test]
+    fn truncated_batch_drops_msgid_to_avoid_dedup() {
+        let conn_id = "test";
+        let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
+        let batch = BatchInfo {
+            batch_type: "DRAFT/MULTILINE".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            opener_tags: Some(vec![Tag("msgid".to_string(), Some("xyz".to_string()))]),
+            messages: vec![multiline_frag("a", false), multiline_frag("b", false)],
+        };
+        // Unclean end → truncated → @msgid must be stripped so a later intact
+        // replay isn't deduplicated (INSERT OR IGNORE) against this partial copy.
+        process_completed_batch(&mut state, conn_id, &batch, false);
+        let buf = state.buffers.get(&buf_id).unwrap();
+        let m = buf
+            .messages
+            .iter()
+            .find(|m| m.message_type == MessageType::Message)
+            .expect("one reassembled message");
+        assert!(m.text.contains("[multiline message truncated]"));
+        assert!(
+            m.tags.as_ref().is_none_or(|t| !t.contains_key("msgid")),
+            "truncated message must not carry @msgid, got {:?}",
+            m.tags
         );
     }
 
