@@ -431,7 +431,36 @@ impl App {
             return;
         }
 
-        // Multiline paste: prepend any existing input to the first line,
+        // draft/multiline: when the active connection supports the cap AND the
+        // paste is pure plaintext (no command lines), coalesce the whole paste
+        // into ONE submit so it goes out as a single multiline batch. Interior
+        // blank lines are preserved; only trailing blank lines are trimmed.
+        // Otherwise fall back to the legacy per-line queued send below — also
+        // required when multiline is unsupported, so no raw `\n` hits the wire.
+        let active_conn = self.state.active_buffer().map(|b| b.connection_id.clone());
+        let any_command = lines.iter().any(|l| l.trim_start().starts_with('/'));
+        if !any_command
+            && active_conn
+                .as_deref()
+                .is_some_and(|c| self.multiline_supported(c))
+        {
+            let mut raw: Vec<&str> = lines.iter().map(|l| l.trim_end_matches('\r')).collect();
+            while raw.last().is_some_and(|l| l.is_empty()) {
+                raw.pop();
+            }
+            let current_input = self.input.submit();
+            let joined = if current_input.is_empty() {
+                raw.join("\n")
+            } else {
+                format!("{current_input}{}", raw.join("\n"))
+            };
+            if !joined.is_empty() {
+                self.handle_submit(&joined);
+            }
+            return;
+        }
+
+        // Multiline paste (legacy): prepend any existing input to the first line,
         // send it immediately, queue the rest with 500ms spacing.
         // Matches kokoirc and erssi behavior.
         self.paste_queue.clear();
@@ -1200,6 +1229,20 @@ impl App {
         (channel, nick, server)
     }
 
+    /// Whether the active connection can send `draft/multiline` batches: the
+    /// limits are negotiated AND the required cap trio (`batch`, `message-tags`,
+    /// and `draft/multiline` itself) is recorded as enabled. Gating on
+    /// `enabled_caps` rather than just `conn.multiline.is_some()` closes the
+    /// advertise-but-not-acknowledged window for a runtime `CAP NEW`.
+    fn multiline_supported(&self, conn_id: &str) -> bool {
+        self.state.connections.get(conn_id).is_some_and(|c| {
+            c.multiline.is_some()
+                && c.enabled_caps.contains("draft/multiline")
+                && c.enabled_caps.contains("batch")
+                && c.enabled_caps.contains("message-tags")
+        })
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "flat dispatch for DCC/channel/query message routing"
@@ -1301,6 +1344,7 @@ impl App {
             && self.config.shrink.outgoing_enabled
             && self.shrink_client.is_some()
             && text.len() <= crate::irc::MESSAGE_MAX_BYTES
+            && !crate::irc::multiline::needs_multiline(text)
             && !pre_extracted_urls.is_empty()
         {
             let captured_nick = self
@@ -1408,6 +1452,117 @@ impl App {
 
         let own_mode = self.state.nick_prefix(&active_id, &nick);
 
+        // --- Case B: draft/multiline outbound ---
+        // Non-E2E plaintext on a connection that fully supports the cap trio,
+        // where the message needs multiline (has `\n` or exceeds the per-PRIVMSG
+        // cap). Frame BATCH(+ref) / @batch-tagged PRIVMSGs / BATCH(-ref). E2E and
+        // the single-line hot path fall through unchanged below.
+        if !is_e2e_encrypted
+            && self.multiline_supported(&conn_id)
+            && crate::irc::multiline::needs_multiline(text)
+            && let Some(limits) = self.state.connections.get(&conn_id).and_then(|c| c.multiline)
+            && let Some(batches) = crate::irc::multiline::partition(text, &limits)
+        {
+            let mut send_failed = false;
+            'batches: for batch in &batches {
+                // Allocate the ref under the mutable conn borrow FIRST, then take
+                // the immutable handle borrow to send (avoids a borrow conflict).
+                let Some(batch_ref) = self
+                    .state
+                    .connections
+                    .get_mut(&conn_id)
+                    .map(crate::state::connection::Connection::next_batch_ref)
+                else {
+                    send_failed = true;
+                    break 'batches;
+                };
+                let frames =
+                    crate::irc::multiline::multiline_frames(&buffer_name, &batch_ref, batch);
+                if let Some(handle) = self.irc_handles.get(&conn_id) {
+                    for frame in frames {
+                        if handle.sender.send(frame).is_err() {
+                            send_failed = true;
+                            break 'batches;
+                        }
+                    }
+                } else {
+                    send_failed = true;
+                    break 'batches;
+                }
+            }
+            if send_failed {
+                crate::commands::helpers::add_local_event(self, "Failed to send message");
+                return;
+            }
+            // One local echo of the full multi-line text — unless echo-message
+            // echoes the batch back (then inbound reassembly displays it once).
+            if !echo_message_enabled {
+                let id = self.state.next_message_id();
+                self.state.add_message(
+                    &active_id,
+                    Message {
+                        id,
+                        timestamp: chrono::Utc::now(),
+                        message_type: MessageType::Message,
+                        nick: Some(nick),
+                        nick_mode: own_mode.map(|c| c.to_string()),
+                        text: text.to_string(),
+                        highlight: false,
+                        event_key: None,
+                        event_params: None,
+                        log_msg_id: None,
+                        log_ref_id: None,
+                        tags: None,
+                    },
+                );
+            }
+            return;
+        }
+
+        // --- Case C: non-E2E plaintext with embedded `\n` but no usable
+        // multiline cap (or an unrepresentable batch). Send each logical line as
+        // a separate PRIVMSG so no raw `\n` reaches the wire (`IrcCodec::sanitize`
+        // truncates at the first `\n`). Interior blank lines are preserved.
+        if !is_e2e_encrypted && text.contains('\n') {
+            for line in text.split('\n') {
+                let chunks = if line.len() <= crate::irc::MESSAGE_MAX_BYTES {
+                    vec![line.to_string()]
+                } else {
+                    crate::irc::split_irc_message(line, crate::irc::MESSAGE_MAX_BYTES)
+                };
+                for chunk in chunks {
+                    if let Some(handle) = self.irc_handles.get(&conn_id)
+                        && handle.sender.send_privmsg(&buffer_name, &chunk).is_err()
+                    {
+                        crate::commands::helpers::add_local_event(self, "Failed to send message");
+                        return;
+                    }
+                    if !echo_message_enabled {
+                        let id = self.state.next_message_id();
+                        self.state.add_message(
+                            &active_id,
+                            Message {
+                                id,
+                                timestamp: chrono::Utc::now(),
+                                message_type: MessageType::Message,
+                                nick: Some(nick.clone()),
+                                nick_mode: own_mode.map(|c| c.to_string()),
+                                text: chunk,
+                                highlight: false,
+                                event_key: None,
+                                event_params: None,
+                                log_msg_id: None,
+                                log_ref_id: None,
+                                tags: None,
+                            },
+                        );
+                    }
+                }
+            }
+            return;
+        }
+
+        // --- Else: E2E, or single-line plaintext (the common hot path). ---
         for wire in wire_lines {
             // Try to send via IRC if connected
             if let Some(handle) = self.irc_handles.get(&conn_id)
@@ -1429,16 +1584,11 @@ impl App {
         }
 
         if !echo_message_enabled || is_e2e_encrypted {
-            // Local echo: show the user what they typed (plaintext), not the
-            // wire format. For non-E2E messages we split at word boundaries
-            // so very long lines wrap in the local buffer the same way they
-            // used to.
-            let local_chunks = if plain_echo.len() <= crate::irc::MESSAGE_MAX_BYTES {
-                vec![plain_echo]
-            } else {
-                crate::irc::split_irc_message(&plain_echo, crate::irc::MESSAGE_MAX_BYTES)
-            };
-            for chunk in local_chunks {
+            if is_e2e_encrypted {
+                // E2E: echo the full plaintext as ONE message so embedded
+                // newlines render as a single local message (matching the one
+                // logical message the user typed). The peer still receives the
+                // E2E chunker's per-chunk wire (no E2E reassembly — out of scope).
                 let id = self.state.next_message_id();
                 self.state.add_message(
                     &active_id,
@@ -1446,9 +1596,9 @@ impl App {
                         id,
                         timestamp: chrono::Utc::now(),
                         message_type: MessageType::Message,
-                        nick: Some(nick.clone()),
+                        nick: Some(nick),
                         nick_mode: own_mode.map(|c| c.to_string()),
-                        text: chunk,
+                        text: plain_echo,
                         highlight: false,
                         event_key: None,
                         event_params: None,
@@ -1457,6 +1607,34 @@ impl App {
                         tags: None,
                     },
                 );
+            } else {
+                // Non-E2E single line: existing byte-split echo so very long
+                // lines wrap in the local buffer the same way they used to.
+                let local_chunks = if plain_echo.len() <= crate::irc::MESSAGE_MAX_BYTES {
+                    vec![plain_echo]
+                } else {
+                    crate::irc::split_irc_message(&plain_echo, crate::irc::MESSAGE_MAX_BYTES)
+                };
+                for chunk in local_chunks {
+                    let id = self.state.next_message_id();
+                    self.state.add_message(
+                        &active_id,
+                        Message {
+                            id,
+                            timestamp: chrono::Utc::now(),
+                            message_type: MessageType::Message,
+                            nick: Some(nick.clone()),
+                            nick_mode: own_mode.map(|c| c.to_string()),
+                            text: chunk,
+                            highlight: false,
+                            event_key: None,
+                            event_params: None,
+                            log_msg_id: None,
+                            log_ref_id: None,
+                            tags: None,
+                        },
+                    );
+                }
             }
         }
     }

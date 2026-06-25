@@ -67,8 +67,6 @@ pub struct Connection {
 
 impl Connection {
     /// Allocate a unique outbound BATCH reference tag for this connection.
-    // TEMPORARY allow: wired into the outbound multiline path in Phase 4.
-    #[allow(dead_code)]
     pub fn next_batch_ref(&mut self) -> String {
         self.batch_ref_counter = self.batch_ref_counter.wrapping_add(1);
         format!("ml{}", self.batch_ref_counter)

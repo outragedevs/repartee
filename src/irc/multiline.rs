@@ -3,11 +3,6 @@
 //!
 //! See <https://ircv3.net/specs/extensions/multiline>.
 
-// TEMPORARY (remove in Phase 4 once partition/multiline_frames are wired into
-// the outbound path): these pure fns are consumed by later phases; until then
-// the binary sees them as dead.
-#![allow(dead_code)]
-
 use crate::irc::{MESSAGE_MAX_BYTES, MULTILINE_DEFAULT_MAX_LINES};
 
 /// Server-advertised per-batch limits from the `draft/multiline` cap value.
