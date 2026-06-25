@@ -1555,9 +1555,16 @@ impl App {
         // --- Case C: non-E2E plaintext with embedded `\n` but no usable
         // multiline cap (or an unrepresentable batch). Send each logical line as
         // a separate PRIVMSG so no raw `\n` reaches the wire (`IrcCodec::sanitize`
-        // truncates at the first `\n`). Interior blank lines are preserved.
+        // truncates at the first `\n`). Blank lines are SKIPPED — a standalone
+        // empty PRIVMSG is rejected by most servers and would locally echo a
+        // blank line; interior blanks are only representable inside a multiline
+        // batch (Case B). This matches the legacy paste path's empty-line filter.
         if !is_e2e_encrypted && text.contains('\n') {
             for line in text.split('\n') {
+                let line = line.trim_end_matches('\r');
+                if line.is_empty() {
+                    continue;
+                }
                 let chunks = if line.len() <= crate::irc::MESSAGE_MAX_BYTES {
                     vec![line.to_string()]
                 } else {
