@@ -187,11 +187,51 @@ pub fn wrap_line(line: Line<'static>, width: usize, indent: usize) -> Vec<Line<'
         })
         .collect();
 
+    // Fast path: a single logical line (no embedded `\n`) that already fits is
+    // returned unchanged — preserves the original span structure and keeps the
+    // common single-line message path allocation-free.
+    let has_newline = styled_chars.iter().any(|(g, _, _)| g == "\n");
     let total_width: usize = styled_chars.iter().map(|(_, w, _)| w).sum();
-    if total_width <= width {
+    if !has_newline && total_width <= width {
         return vec![line];
     }
 
+    // Split on hard `\n` into segments (dropping the newline grapheme) and wrap
+    // each segment independently. A hard break starts a NEW logical line, so each
+    // segment begins un-indented (its own `first_line`); an empty segment (from
+    // consecutive or trailing `\n`) becomes one blank visual line.
+    let mut result: Vec<Line<'static>> = Vec::new();
+    let mut seg_start = 0;
+    let mut i = 0;
+    while i <= styled_chars.len() {
+        let at_newline = i < styled_chars.len() && styled_chars[i].0 == "\n";
+        if at_newline || i == styled_chars.len() {
+            let segment = &styled_chars[seg_start..i];
+            if segment.is_empty() {
+                result.push(Line::default());
+            } else {
+                result.extend(wrap_segment(segment, width, indent));
+            }
+            seg_start = i + 1; // skip the `\n`
+        }
+        i += 1;
+    }
+
+    if result.is_empty() {
+        result.push(line);
+    }
+
+    result
+}
+
+/// Word-wrap a single newline-free segment (a slice of styled graphemes) to
+/// `width` columns. Continuation lines are indented by `indent`. This is the
+/// per-segment body used by [`wrap_line`] after splitting on hard `\n`.
+fn wrap_segment(
+    styled_chars: &[(String, usize, Style)],
+    width: usize,
+    indent: usize,
+) -> Vec<Line<'static>> {
     let mut result: Vec<Line<'static>> = Vec::new();
     let mut pos = 0;
     let mut first_line = true;
@@ -222,7 +262,7 @@ pub fn wrap_line(line: Line<'static>, width: usize, indent: usize) -> Vec<Line<'
         // Guarantee forward progress. An indivisible grapheme wider than the
         // available width (e.g. a 2-cell emoji or CJK char at width 1) fits
         // nowhere, leaving `end == pos`. Emit it anyway (overflowing the line) so
-        // `pos` always advances — otherwise the outer loop spins forever, growing
+        // `pos` always advances — otherwise the loop spins forever, growing
         // `result` until the process is OOM-killed.
         if end == pos {
             end = pos + 1;
@@ -241,7 +281,7 @@ pub fn wrap_line(line: Line<'static>, width: usize, indent: usize) -> Vec<Line<'
 
         let actual_end = break_at.map_or(end, |break_pos| pos + break_pos + 1);
         // Never split a multi-cell emote placeholder run across the boundary.
-        let actual_end = avoid_splitting_placeholder(&styled_chars, pos, actual_end);
+        let actual_end = avoid_splitting_placeholder(styled_chars, pos, actual_end);
 
         let built =
             build_line_from_styled_chars(&styled_chars[pos..actual_end], !first_line, indent);
@@ -257,7 +297,10 @@ pub fn wrap_line(line: Line<'static>, width: usize, indent: usize) -> Vec<Line<'
     }
 
     if result.is_empty() {
-        result.push(line);
+        // Defensive: a non-empty segment always yields ≥1 line above; this only
+        // guards a future regression. Rebuild from the slice rather than
+        // referencing a `line` binding that does not exist here.
+        result.push(build_line_from_styled_chars(styled_chars, false, indent));
     }
 
     result
@@ -437,6 +480,49 @@ mod wrap_tests {
         let line = plain_line("hello");
         let result = wrap_line(line, 0, 0);
         assert_eq!(result.len(), 1);
+    }
+
+    // `Line::from(String)` strips newlines (ratatui's `Line::raw`); the real
+    // render path keeps `\n` because it builds the line from `Span`s
+    // (`styled_spans_to_line` → `Span::styled` → `Line::from(Vec<Span>)`).
+    // Mirror that here so `\n` survives into the line under test.
+    fn nl_line(text: &str) -> Line<'static> {
+        Line::from(vec![Span::raw(text.to_string())])
+    }
+
+    #[test]
+    fn hard_newline_splits_into_segments() {
+        let result = wrap_line(nl_line("alpha\nbeta"), 80, 0);
+        assert_eq!(result.len(), 2);
+        assert_eq!(line_text(&result[0]), "alpha");
+        assert_eq!(line_text(&result[1]), "beta");
+    }
+
+    #[test]
+    fn blank_segment_becomes_blank_line() {
+        let result = wrap_line(nl_line("a\n\nb"), 80, 0);
+        assert_eq!(result.len(), 3);
+        assert_eq!(line_text(&result[0]), "a");
+        assert_eq!(line_text(&result[1]), "");
+        assert_eq!(line_text(&result[2]), "b");
+    }
+
+    #[test]
+    fn trailing_newline_adds_blank_line() {
+        let result = wrap_line(nl_line("text\n"), 80, 0);
+        assert_eq!(result.len(), 2);
+        assert_eq!(line_text(&result[0]), "text");
+        assert_eq!(line_text(&result[1]), "");
+    }
+
+    #[test]
+    fn newline_then_soft_wrap_within_segment() {
+        // First segment short; second segment long enough to soft-wrap at 12.
+        let result = wrap_line(nl_line("short\nhello world foo bar baz"), 12, 0);
+        assert!(result.len() >= 3, "got {result:?}");
+        assert_eq!(line_text(&result[0]), "short");
+        let rest: String = result[1..].iter().map(line_text).collect();
+        assert!(rest.replace(' ', "").contains("helloworldfoobarbaz"));
     }
 
     #[test]
