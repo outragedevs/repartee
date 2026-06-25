@@ -347,6 +347,10 @@ pub fn process_completed_batch(
 /// `clean_end` is `false` when the batch was force-completed by the timeout
 /// purge (the server never sent `BATCH -tag`); such a message is incomplete and
 /// is marked truncated.
+#[expect(
+    clippy::too_many_lines,
+    reason = "sequential guards (E2E, consistency, cap) + reassembly + message build"
+)]
 fn process_multiline_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo, clean_end: bool) {
     if batch.messages.is_empty() {
         return;
@@ -362,6 +366,27 @@ fn process_multiline_batch(state: &mut AppState, conn_id: &str, batch: &BatchInf
             Command::PRIVMSG(_, t) | Command::NOTICE(_, t) if t.starts_with("+RPE2E01"))
     });
     if has_e2e {
+        for m in &batch.messages {
+            crate::irc::events::handle_irc_message(state, conn_id, m);
+        }
+        return;
+    }
+
+    // Consistency guard: a conformant `draft/multiline` batch shares ONE sender,
+    // ONE target, and ONE message type across all line fragments (spec MUST).
+    // We build the reassembled message from only the first fragment's identity,
+    // so a malformed/malicious batch mixing senders/targets/types would be
+    // displayed in the wrong buffer under the wrong nick. Replay such a batch
+    // per-fragment instead, so each line lands in its correct buffer/sender.
+    let mut frags = batch.messages.iter().filter_map(|m| match &m.command {
+        Command::PRIVMSG(t, _) => Some((&m.prefix, t, false)),
+        Command::NOTICE(t, _) => Some((&m.prefix, t, true)),
+        _ => None,
+    });
+    if let Some(first) = frags.next()
+        && !frags.all(|f| f == first)
+    {
+        tracing::warn!("inconsistent multiline batch (mixed sender/target/type); replaying per-fragment");
         for m in &batch.messages {
             crate::irc::events::handle_irc_message(state, conn_id, m);
         }
@@ -2197,6 +2222,38 @@ mod tests {
             m.tags.as_ref().is_none_or(|t| !t.contains_key("msgid")),
             "truncated message must not carry @msgid, got {:?}",
             m.tags
+        );
+    }
+
+    #[test]
+    fn multiline_mixed_targets_not_merged() {
+        let conn_id = "test";
+        let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
+        let frag = |target: &str, text: &str| IrcMessage {
+            tags: Some(vec![Tag("batch".to_string(), Some("b1".to_string()))]),
+            prefix: Some(irc::proto::Prefix::Nickname(
+                "bob".to_string(),
+                "u".to_string(),
+                "h.net".to_string(),
+            )),
+            command: Command::PRIVMSG(target.to_string(), text.to_string()),
+        };
+        // Fragments target different channels — a malformed/malicious batch.
+        let batch = BatchInfo {
+            batch_type: "DRAFT/MULTILINE".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            opener_tags: None,
+            messages: vec![frag("#test", "hello"), frag("#other", "evil")],
+        };
+        process_completed_batch(&mut state, conn_id, &batch, true);
+        let buf = state.buffers.get(&buf_id).unwrap();
+        assert!(
+            !buf.messages
+                .iter()
+                .any(|m| m.text.contains("hello") && m.text.contains("evil")),
+            "mixed-target fragments must not be merged into one message"
         );
     }
 
