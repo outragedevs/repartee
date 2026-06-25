@@ -445,14 +445,17 @@ impl App {
         }
 
         // draft/multiline: when the active connection supports the cap AND the
-        // paste is pure plaintext (no command lines), coalesce the whole paste
-        // into ONE submit so it goes out as a single multiline batch. Interior
-        // blank lines are preserved; only trailing blank lines are trimmed.
-        // Otherwise fall back to the legacy per-line queued send below — also
-        // required when multiline is unsupported, so no raw `\n` hits the wire.
+        // paste is pure plaintext (no command lines) AND it's within the paste
+        // cap, coalesce the whole paste into ONE submit so it goes out as a
+        // single multiline batch. Interior blank lines are preserved; only
+        // trailing blank lines are trimmed. Oversized pastes (> MAX_PASTE_LINES)
+        // fall through to the legacy queued path, which truncates and throttles
+        // (500ms/line) — preserving the memory/flood guard. The legacy path is
+        // also required when multiline is unsupported, so no raw `\n` hits wire.
         let active_conn = self.state.active_buffer().map(|b| b.connection_id.clone());
         let any_command = lines.iter().any(|l| l.trim_start().starts_with('/'));
         if !any_command
+            && lines.len() <= MAX_PASTE_LINES
             && active_conn
                 .as_deref()
                 .is_some_and(|c| self.multiline_supported(c))

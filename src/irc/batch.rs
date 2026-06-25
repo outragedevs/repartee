@@ -384,17 +384,17 @@ fn process_multiline_batch(state: &mut AppState, conn_id: &str, batch: &BatchInf
         return;
     }
 
-    // Render-safety cap. Prefer the server's advertised `max-lines` — a
-    // conformant batch never exceeds it, so legitimate messages are NEVER
-    // truncated — and fall back to the conservative constant only when limits
-    // are unknown. `batch.messages` is already hard-bounded upstream by
-    // `MAX_BATCH_MESSAGES`, so this only ever clips a misbehaving server.
+    // Render-safety cap. Prefer the server's advertised `max-lines` (a
+    // conformant batch never exceeds it, so legitimate messages aren't
+    // truncated), but ALWAYS clamp by the local backstop `MULTILINE_MAX_INBOUND_LINES`
+    // so a hostile/buggy server advertising a huge `max-lines` can't have us
+    // reassemble up to `MAX_BATCH_MESSAGES` fragments into one giant message.
     let cap = state
         .connections
         .get(conn_id)
         .and_then(|c| c.multiline)
         .map_or(crate::irc::MULTILINE_MAX_INBOUND_LINES, |m| m.max_lines)
-        .max(1);
+        .clamp(1, crate::irc::MULTILINE_MAX_INBOUND_LINES);
 
     let cap_truncated = lines.len() > cap;
     if cap_truncated {
@@ -2089,6 +2089,43 @@ mod tests {
         assert!(
             m.text.contains("[multiline message truncated]"),
             "dropped fragments must mark the message incomplete"
+        );
+    }
+
+    #[test]
+    fn multiline_clamps_hostile_max_lines_to_backstop() {
+        let conn_id = "test";
+        let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
+        // A hostile/buggy server advertises an enormous max-lines.
+        if let Some(conn) = state.connections.get_mut(conn_id) {
+            conn.multiline = Some(crate::irc::multiline::MultilineLimits {
+                max_bytes: 100_000,
+                max_lines: 1_000_000,
+            });
+        }
+        let messages: Vec<IrcMessage> = (0..crate::irc::MULTILINE_MAX_INBOUND_LINES + 50)
+            .map(|i| multiline_frag(&format!("line{i}"), false))
+            .collect();
+        let batch = BatchInfo {
+            batch_type: "DRAFT/MULTILINE".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            opener_tags: None,
+            messages,
+        };
+        process_completed_batch(&mut state, conn_id, &batch, true);
+        let buf = state.buffers.get(&buf_id).unwrap();
+        let m = buf
+            .messages
+            .iter()
+            .find(|m| m.message_type == MessageType::Message)
+            .expect("one reassembled message");
+        // Clamped to the local backstop despite the huge advertised max-lines.
+        assert!(m.text.contains("[multiline message truncated]"));
+        assert_eq!(
+            m.text.lines().count(),
+            crate::irc::MULTILINE_MAX_INBOUND_LINES + 1
         );
     }
 
