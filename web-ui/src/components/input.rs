@@ -278,24 +278,36 @@ pub fn InputLine() -> impl IntoView {
         let Some(buffer_id) = state.active_buffer.get() else {
             return;
         };
-        // Split multiline input and send each line.
-        for line in text.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
+        // Coalesce consecutive plaintext lines into ONE SendMessage (preserving
+        // interior blank lines) so the server frames them as a single
+        // draft/multiline batch — matching the TUI paste path. Command lines
+        // (leading '/') flush the pending plaintext first, then dispatch
+        // individually as RunCommand. Trailing blank lines are dropped.
+        let flush = |pending: &mut Vec<&str>| {
+            while pending.last().is_some_and(|l| l.trim().is_empty()) {
+                pending.pop();
             }
-            if trimmed.starts_with('/') {
-                crate::ws::send_command(&WebCommand::RunCommand {
-                    buffer_id: buffer_id.clone(),
-                    text: trimmed.to_string(),
-                });
-            } else {
+            if !pending.is_empty() {
                 crate::ws::send_command(&WebCommand::SendMessage {
                     buffer_id: buffer_id.clone(),
-                    text: trimmed.to_string(),
+                    text: pending.join("\n"),
                 });
             }
+            pending.clear();
+        };
+        let mut pending: Vec<&str> = Vec::new();
+        for line in text.lines() {
+            if line.trim_start().starts_with('/') {
+                flush(&mut pending);
+                crate::ws::send_command(&WebCommand::RunCommand {
+                    buffer_id: buffer_id.clone(),
+                    text: line.trim().to_string(),
+                });
+            } else {
+                pending.push(line);
+            }
         }
+        flush(&mut pending);
     };
 
     let on_keydown = move |ev: web_sys::KeyboardEvent| {
