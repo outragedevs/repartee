@@ -67,10 +67,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             .active_buffer()
             .is_some_and(|b| b.buffer_type == BufferType::Channel);
 
+    // Input grows for multi-line compose (Alt+Enter): one row per `\n`-separated
+    // line, clamped so the chat area (Fill) is never starved. The bottom block is
+    // TOP border (1) + status (1) + N input rows.
+    let input_rows = u16::try_from(app.input.value.matches('\n').count() + 1)
+        .unwrap_or(1)
+        .clamp(1, 6);
+
     let [topic_area, main_area, bottom_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Fill(1),
-        Constraint::Length(3),
+        Constraint::Length(2 + input_rows),
     ])
     .areas(frame.area());
 
@@ -132,7 +139,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     frame.render_widget(bottom_block, bottom_area);
 
     let [status_area, input_area] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(bottom_inner);
+        Layout::vertical([Constraint::Length(1), Constraint::Length(input_rows)]).areas(bottom_inner);
 
     super::status_line::render(frame, status_area, app);
     super::input::render(frame, input_area, app);

@@ -266,6 +266,19 @@ impl App {
                 self.scroll_offset = 0;
                 self.reset_sidepanel_scrolls();
             }
+            // Alt+Enter inserts a literal newline for multi-line compose (sent
+            // as one draft/multiline batch on submit). Must precede the plain
+            // Enter arm, which uses a wildcard for modifiers. Works on terminals
+            // that report Alt+Enter as an ALT-modified key; where they don't, it
+            // degrades to a normal Enter (submit). We deliberately do NOT push
+            // the Kitty keyboard-enhancement protocol to force it, since that
+            // would change reporting for every key (ESC/Alt chords) and risk
+            // regressing existing input handling. Paste is the universal
+            // multi-line entry path.
+            (mods, KeyCode::Enter) if mods.contains(KeyModifiers::ALT) => {
+                self.input.spell_state = None;
+                self.input.insert_newline();
+            }
             // Enter key, or newline chars arriving individually when bracketed
             // paste isn't supported — submit the current input line.
             (_, KeyCode::Enter | KeyCode::Char('\n' | '\r')) => {
