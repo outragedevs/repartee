@@ -203,6 +203,7 @@ pub fn wrap_line(line: Line<'static>, width: usize, indent: usize) -> Vec<Line<'
     let mut result: Vec<Line<'static>> = Vec::new();
     let mut seg_start = 0;
     let mut i = 0;
+    let mut first_segment = true;
     while i <= styled_chars.len() {
         let at_newline = i < styled_chars.len() && styled_chars[i].0 == "\n";
         if at_newline || i == styled_chars.len() {
@@ -210,9 +211,14 @@ pub fn wrap_line(line: Line<'static>, width: usize, indent: usize) -> Vec<Line<'
             if segment.is_empty() {
                 result.push(Line::default());
             } else {
-                result.extend(wrap_segment(segment, width, indent));
+                // Segments after a hard `\n` are continuations of the same chat
+                // message, so their first visual line is indented to the body
+                // column. The first segment keeps its real ts+nick prefix at
+                // column 0.
+                result.extend(wrap_segment(segment, width, indent, !first_segment));
             }
             seg_start = i + 1; // skip the `\n`
+            first_segment = false;
         }
         i += 1;
     }
@@ -231,10 +237,13 @@ fn wrap_segment(
     styled_chars: &[(String, usize, Style)],
     width: usize,
     indent: usize,
+    start_indented: bool,
 ) -> Vec<Line<'static>> {
     let mut result: Vec<Line<'static>> = Vec::new();
     let mut pos = 0;
-    let mut first_line = true;
+    // `start_indented` indents the segment's FIRST visual line too (used for
+    // continuation segments after a hard `\n`).
+    let mut first_line = !start_indented;
 
     while pos < styled_chars.len() {
         let line_width = if first_line {
@@ -523,6 +532,16 @@ mod wrap_tests {
         assert_eq!(line_text(&result[0]), "short");
         let rest: String = result[1..].iter().map(line_text).collect();
         assert!(rest.replace(' ', "").contains("helloworldfoobarbaz"));
+    }
+
+    #[test]
+    fn post_newline_segment_indents_to_body_column() {
+        // indent=4 gutter: first logical line at col 0 (has its real prefix),
+        // the continuation segment after `\n` is indented to align under it.
+        let result = wrap_line(nl_line("first\nsecond"), 80, 4);
+        assert_eq!(result.len(), 2);
+        assert_eq!(line_text(&result[0]), "first");
+        assert_eq!(line_text(&result[1]), "    second");
     }
 
     #[test]

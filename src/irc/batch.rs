@@ -384,17 +384,35 @@ fn process_multiline_batch(state: &mut AppState, conn_id: &str, batch: &BatchInf
         return;
     }
 
-    // Runaway backstop (OOM guard): bound the reassembled message's line count.
-    if lines.len() > crate::irc::MULTILINE_MAX_INBOUND_LINES {
-        tracing::warn!(
-            "multiline batch had {} lines; truncating to {}",
-            lines.len(),
-            crate::irc::MULTILINE_MAX_INBOUND_LINES
-        );
-        lines.truncate(crate::irc::MULTILINE_MAX_INBOUND_LINES);
+    // Render-safety cap. Prefer the server's advertised `max-lines` — a
+    // conformant batch never exceeds it, so legitimate messages are NEVER
+    // truncated — and fall back to the conservative constant only when limits
+    // are unknown. `batch.messages` is already hard-bounded upstream by
+    // `MAX_BATCH_MESSAGES`, so this only ever clips a misbehaving server.
+    let cap = state
+        .connections
+        .get(conn_id)
+        .and_then(|c| c.multiline)
+        .map_or(crate::irc::MULTILINE_MAX_INBOUND_LINES, |m| m.max_lines)
+        .max(1);
+
+    let cap_truncated = lines.len() > cap;
+    if cap_truncated {
+        lines.truncate(cap);
     }
 
-    let joined = crate::irc::multiline::reassemble(&lines);
+    let mut joined = crate::irc::multiline::reassemble(&lines);
+
+    // Never present an incomplete batch as a complete message: if the tracker
+    // dropped tail fragments (oversized batch) or we clipped for render safety,
+    // append a visible marker and log it rather than silently losing the tail.
+    if cap_truncated || batch.dropped_messages > 0 {
+        tracing::warn!(
+            "multiline batch incomplete (cap_truncated={cap_truncated}, dropped={}); marking",
+            batch.dropped_messages
+        );
+        joined.push_str("\n[multiline message truncated]");
+    }
 
     // Target: the BATCH opener param, else the first fragment's target.
     let Some(target) = batch.params.first().cloned().or_else(|| {
@@ -2033,10 +2051,44 @@ mod tests {
             .iter()
             .find(|m| m.message_type == MessageType::Message)
             .expect("one reassembled message");
+        // conn has no negotiated limits → fallback cap = MULTILINE_MAX_INBOUND_LINES,
+        // plus one appended visible truncation marker line.
+        assert!(
+            m.text.contains("[multiline message truncated]"),
+            "truncation must be visible, got: {:?}",
+            m.text
+        );
         assert_eq!(
             m.text.lines().count(),
-            crate::irc::MULTILINE_MAX_INBOUND_LINES,
-            "reassembled message is capped at MULTILINE_MAX_INBOUND_LINES lines"
+            crate::irc::MULTILINE_MAX_INBOUND_LINES + 1,
+            "capped content lines + one marker line"
+        );
+    }
+
+    #[test]
+    fn multiline_dropped_fragments_marks_incomplete() {
+        let conn_id = "test";
+        let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
+        // Tracker reports it dropped tail fragments (oversized batch).
+        let batch = BatchInfo {
+            batch_type: "DRAFT/MULTILINE".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 5,
+            opener_tags: None,
+            messages: vec![multiline_frag("a", false), multiline_frag("b", false)],
+        };
+        process_completed_batch(&mut state, conn_id, &batch, true);
+        let buf = state.buffers.get(&buf_id).unwrap();
+        let m = buf
+            .messages
+            .iter()
+            .find(|m| m.message_type == MessageType::Message)
+            .expect("one reassembled message");
+        assert!(m.text.starts_with("a\nb"));
+        assert!(
+            m.text.contains("[multiline message truncated]"),
+            "dropped fragments must mark the message incomplete"
         );
     }
 

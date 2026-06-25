@@ -1295,14 +1295,11 @@ impl App {
             let dcc_nick = buffer_name.strip_prefix('=').unwrap_or(&buffer_name);
             if let Some(record) = self.dcc.find_connected(dcc_nick) {
                 let record_id = record.id.clone();
-                if let Err(e) = self.dcc.send_chat_line(&record_id, text) {
-                    crate::commands::helpers::add_local_event(
-                        self,
-                        &format!("DCC send error: {e}"),
-                    );
-                    return;
-                }
-                // Display locally
+                // DCC CHAT is a line-based protocol (`send_chat_line` appends LF),
+                // so a multi-line message (from paste coalescing or Alt+Enter)
+                // must be sent and echoed PER logical line — never as one
+                // embedded-`\n` blob, which would desync the peer's line count
+                // from the single local echo.
                 let our_nick = self
                     .state
                     .connections
@@ -1310,24 +1307,33 @@ impl App {
                     .next()
                     .map(|c| c.nick.clone())
                     .unwrap_or_default();
-                let msg_id = self.state.next_message_id();
-                self.state.add_message(
-                    &active_id,
-                    Message {
-                        id: msg_id,
-                        timestamp: chrono::Utc::now(),
-                        message_type: MessageType::Message,
-                        nick: Some(our_nick),
-                        nick_mode: None,
-                        text: text.to_string(),
-                        highlight: false,
-                        event_key: None,
-                        event_params: None,
-                        log_msg_id: None,
-                        log_ref_id: None,
-                        tags: None,
-                    },
-                );
+                for line in text.split('\n') {
+                    if let Err(e) = self.dcc.send_chat_line(&record_id, line) {
+                        crate::commands::helpers::add_local_event(
+                            self,
+                            &format!("DCC send error: {e}"),
+                        );
+                        return;
+                    }
+                    let msg_id = self.state.next_message_id();
+                    self.state.add_message(
+                        &active_id,
+                        Message {
+                            id: msg_id,
+                            timestamp: chrono::Utc::now(),
+                            message_type: MessageType::Message,
+                            nick: Some(our_nick.clone()),
+                            nick_mode: None,
+                            text: line.to_string(),
+                            highlight: false,
+                            event_key: None,
+                            event_params: None,
+                            log_msg_id: None,
+                            log_ref_id: None,
+                            tags: None,
+                        },
+                    );
+                }
             } else {
                 crate::commands::helpers::add_local_event(
                     self,

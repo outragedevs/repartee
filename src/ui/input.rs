@@ -742,7 +742,17 @@ fn render_multiline_input(frame: &mut Frame, area: Rect, app: &App, prompt: &str
         lines.push(Line::from(spans));
     }
 
-    let paragraph = Paragraph::new(lines);
+    // Vertical scroll: the input area is height-clamped by the layout, so for a
+    // compose buffer taller than the area, scroll to keep the cursor row visible
+    // (otherwise rows past the bottom — including the cursor — are clipped).
+    let visible = area.height as usize;
+    let scroll_y = if visible > 0 && cur_row >= visible {
+        u16::try_from(cur_row + 1 - visible).unwrap_or(0)
+    } else {
+        0
+    };
+
+    let paragraph = Paragraph::new(lines).scroll((scroll_y, 0));
     frame.render_widget(paragraph, area);
 }
 
