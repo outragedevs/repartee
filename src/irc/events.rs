@@ -230,6 +230,20 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
         Command::Raw(cmd, args) if cmd == "671" => {
             handle_whois_secure(state, conn_id, args);
         }
+        // IRCv3 standard-reply FAIL for a BATCH command — surface multiline
+        // rejections (MULTILINE_MAX_BYTES / MAX_LINES / INVALID_TARGET / INVALID).
+        // FAIL arrives as a `Command::Raw` (not a numeric), so it isn't caught by
+        // the numeric catch-all below; args = [command, code, [context...], desc].
+        Command::Raw(cmd, args)
+            if cmd == "FAIL" && args.first().map(String::as_str) == Some("BATCH") =>
+        {
+            let code = args.get(1).map_or("", String::as_str);
+            if code.starts_with("MULTILINE_") {
+                let desc = args.last().map_or("multiline error", String::as_str);
+                let buffer_id = active_or_server_buffer(state, conn_id);
+                emit(state, &buffer_id, &format!("%Zff6b6bmultiline: {code} — {desc}%N"));
+            }
+        }
         // Catch-all for unknown numerics that irc-proto doesn't define
         // (e.g. IRCnet's 344/345 for reop list). Display them like the
         // Response catch-all does — errors to active window, info to server.
@@ -6014,6 +6028,31 @@ mod tests {
         assert!(state.connections.get("test").unwrap().multiline.is_some());
         handle_cap_nak(&mut state, "test", Some("draft/multiline"), None);
         assert!(state.connections.get("test").unwrap().multiline.is_none());
+    }
+
+    #[test]
+    fn fail_batch_multiline_surfaces_error() {
+        let mut state = make_test_state();
+        let msg = IrcMessage {
+            tags: None,
+            prefix: None,
+            command: Command::Raw(
+                "FAIL".to_string(),
+                vec![
+                    "BATCH".to_string(),
+                    "MULTILINE_MAX_LINES".to_string(),
+                    "24".to_string(),
+                    "too many lines".to_string(),
+                ],
+            ),
+        };
+        handle_irc_message(&mut state, "test", &msg);
+        let found = state.buffers.values().any(|b| {
+            b.messages
+                .iter()
+                .any(|m| m.text.contains("MULTILINE_MAX_LINES"))
+        });
+        assert!(found, "FAIL BATCH MULTILINE_* should surface a status message");
     }
 
     #[test]
