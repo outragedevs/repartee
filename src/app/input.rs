@@ -454,8 +454,12 @@ impl App {
         // also required when multiline is unsupported, so no raw `\n` hits wire.
         let active_conn = self.state.active_buffer().map(|b| b.connection_id.clone());
         let any_command = lines.iter().any(|l| l.trim_start().starts_with('/'));
+        // Count real lines via `text.lines()` (excludes the trailing empty
+        // element that `split('\n')` yields for text ending in a newline), so a
+        // paste of exactly MAX_PASTE_LINES + a final newline isn't pushed to the
+        // legacy path by an off-by-one.
         if !any_command
-            && lines.len() <= MAX_PASTE_LINES
+            && text.lines().count() <= MAX_PASTE_LINES
             && active_conn
                 .as_deref()
                 .is_some_and(|c| self.multiline_supported(c))

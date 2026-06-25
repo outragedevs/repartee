@@ -322,7 +322,7 @@ pub fn process_completed_batch(
             continuation
         }
         "DRAFT/MULTILINE" => {
-            process_multiline_batch(state, conn_id, batch);
+            process_multiline_batch(state, conn_id, batch, clean_end);
             None
         }
         _ => {
@@ -343,7 +343,11 @@ pub fn process_completed_batch(
 /// separator). `@time`/`@msgid` live on the BATCH opener; merge them with the
 /// first fragment's tags. Bounded by [`crate::irc::MULTILINE_MAX_INBOUND_LINES`]
 /// as an OOM backstop.
-fn process_multiline_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo) {
+///
+/// `clean_end` is `false` when the batch was force-completed by the timeout
+/// purge (the server never sent `BATCH -tag`); such a message is incomplete and
+/// is marked truncated.
+fn process_multiline_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo, clean_end: bool) {
     if batch.messages.is_empty() {
         return;
     }
@@ -403,12 +407,12 @@ fn process_multiline_batch(state: &mut AppState, conn_id: &str, batch: &BatchInf
 
     let mut joined = crate::irc::multiline::reassemble(&lines);
 
-    // Never present an incomplete batch as a complete message: if the tracker
-    // dropped tail fragments (oversized batch) or we clipped for render safety,
-    // append a visible marker and log it rather than silently losing the tail.
-    if cap_truncated || batch.dropped_messages > 0 {
+    // Never present an incomplete batch as a complete message: mark it when we
+    // clipped for render safety, the tracker dropped tail fragments (oversized
+    // batch), or the batch ended uncleanly (timeout purge — no `BATCH -tag`).
+    if cap_truncated || batch.dropped_messages > 0 || !clean_end {
         tracing::warn!(
-            "multiline batch incomplete (cap_truncated={cap_truncated}, dropped={}); marking",
+            "multiline batch incomplete (cap_truncated={cap_truncated}, dropped={}, clean_end={clean_end}); marking",
             batch.dropped_messages
         );
         joined.push_str("\n[multiline message truncated]");
@@ -2126,6 +2130,34 @@ mod tests {
         assert_eq!(
             m.text.lines().count(),
             crate::irc::MULTILINE_MAX_INBOUND_LINES + 1
+        );
+    }
+
+    #[test]
+    fn multiline_unclean_end_marks_truncated() {
+        let conn_id = "test";
+        let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
+        let batch = BatchInfo {
+            batch_type: "DRAFT/MULTILINE".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            opener_tags: None,
+            messages: vec![multiline_frag("a", false), multiline_frag("b", false)],
+        };
+        // clean_end = false: the timeout purge force-completed a batch whose
+        // closing `BATCH -tag` never arrived → the message is incomplete.
+        process_completed_batch(&mut state, conn_id, &batch, false);
+        let buf = state.buffers.get(&buf_id).unwrap();
+        let m = buf
+            .messages
+            .iter()
+            .find(|m| m.message_type == MessageType::Message)
+            .expect("one reassembled message");
+        assert!(m.text.starts_with("a\nb"));
+        assert!(
+            m.text.contains("[multiline message truncated]"),
+            "an unclean batch end must mark the message incomplete"
         );
     }
 
