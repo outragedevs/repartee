@@ -54,6 +54,8 @@ impl App {
             enabled_caps: HashSet::new(),
             chathistory: crate::irc::chathistory::HistoryState::new(),
             who_token_counter: 0,
+            multiline: None,
+            batch_ref_counter: 0,
             silent_who_channels: HashSet::new(),
             silent_banlist_channels: HashSet::new(),
         });
@@ -310,10 +312,11 @@ impl App {
                     crate::irc::events::emit(&mut self.state, &buf_id, &format!("%Z56b6c2{msg}%N"));
                 }
             }
-            IrcEvent::Connected(conn_id, enabled_caps) => {
+            IrcEvent::Connected(conn_id, enabled_caps, multiline_limits) => {
                 // Store negotiated caps on connection
                 if let Some(conn) = self.state.connections.get_mut(&conn_id) {
                     conn.enabled_caps = enabled_caps;
+                    conn.multiline = multiline_limits;
                 }
                 // Collect channels to rejoin before handle_connected resets state
                 let rejoin_channels = crate::irc::events::channels_to_rejoin(&self.state, &conn_id);

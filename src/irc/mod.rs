@@ -28,8 +28,13 @@ const IRC_PING_TIMEOUT_SECS: u32 = 60;
 pub enum IrcEvent {
     /// A raw IRC protocol message from the server.
     Message(String, Box<irc::proto::Message>),
-    /// Registration complete (`RPL_WELCOME` received).
-    Connected(String, HashSet<String>),
+    /// Registration complete (`RPL_WELCOME` received). Carries the negotiated
+    /// caps and the parsed `draft/multiline` limits (when the cap is active).
+    Connected(
+        String,
+        HashSet<String>,
+        Option<crate::irc::multiline::MultilineLimits>,
+    ),
     /// The connection was lost, optionally with an error description.
     Disconnected(String, Option<String>),
     /// An IRC handle (sender) is ready after async connection completes.
@@ -53,6 +58,8 @@ struct NegotiateResult {
     /// Messages consumed during negotiation that must be replayed
     /// (e.g. `RPL_WELCOME` from non-`IRCv3` servers, pre-registration `NOTICE`s).
     early_messages: Vec<irc::proto::Message>,
+    /// Parsed `draft/multiline` limits when the cap was enabled, else `None`.
+    multiline_limits: Option<crate::irc::multiline::MultilineLimits>,
 }
 
 /// Handle to a connected IRC client, holding the connection ID and send-side.
@@ -202,6 +209,8 @@ pub const MULTILINE_DEFAULT_MAX_LINES: usize = 24;
 /// `batch.rs`) so a hostile or buggy server cannot materialise a single message
 /// whose wrapped output is thousands of visual lines (an OOM-class regression;
 /// see the v0.8.4 render-budget fix).
+// TEMPORARY allow: consumed by the inbound reassembly arm in Phase 2.
+#[allow(dead_code)]
 pub const MULTILINE_MAX_INBOUND_LINES: usize = 100;
 
 /// Split a message into chunks that each fit within `max_bytes` of UTF-8.
@@ -438,7 +447,11 @@ pub async fn connect_server(
             {
                 sent_connected = true;
                 let _ = tx
-                    .send(IrcEvent::Connected(id.clone(), neg.enabled_caps.clone()))
+                    .send(IrcEvent::Connected(
+                        id.clone(),
+                        neg.enabled_caps.clone(),
+                        neg.multiline_limits,
+                    ))
                     .await;
             }
             if tx
@@ -459,7 +472,11 @@ pub async fn connect_server(
                     {
                         sent_connected = true;
                         let _ = tx
-                            .send(IrcEvent::Connected(id.clone(), neg.enabled_caps.clone()))
+                            .send(IrcEvent::Connected(
+                        id.clone(),
+                        neg.enabled_caps.clone(),
+                        neg.multiline_limits,
+                    ))
                             .await;
                     }
                     if tx
@@ -714,10 +731,19 @@ async fn negotiate_caps(
 
     // NICK/USER were already sent in step 1 — no need to send them again.
 
+    // The cap value (max-bytes/max-lines) lives on `server_caps`; the ACK loop
+    // only records bare names in `enabled_caps`, so read the limits from there.
+    let multiline_limits = if enabled_caps.contains("draft/multiline") {
+        crate::irc::multiline::parse_limits(server_caps.value("draft/multiline"))
+    } else {
+        None
+    };
+
     Ok(NegotiateResult {
         enabled_caps,
         diagnostics: diag,
         early_messages,
+        multiline_limits,
     })
 }
 

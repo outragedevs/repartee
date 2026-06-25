@@ -478,6 +478,18 @@ pub fn handle_cap_new(
         .map(str::to_ascii_lowercase)
         .collect();
 
+    // Capture the `draft/multiline` cap VALUE (max-bytes/max-lines) before the
+    // immutable `enabled` borrow below; the value-stripping `new_caps` map above
+    // discards it. Stored after the `to_request` collect (borrow ordering).
+    let multiline_limits = caps_str.split_whitespace().find_map(|tok| {
+        let (name, value) = tok.split_once('=').map_or((tok, None), |(n, v)| (n, Some(v)));
+        if name.eq_ignore_ascii_case("draft/multiline") {
+            Some(crate::irc::multiline::parse_limits(value))
+        } else {
+            None
+        }
+    });
+
     tracing::info!("CAP NEW from {conn_id}: {}", new_caps.join(" "));
 
     let enabled = state.connections.get(conn_id).map(|c| &c.enabled_caps);
@@ -490,6 +502,15 @@ pub fn handle_cap_new(
         })
         .cloned()
         .collect();
+
+    // Store the multiline limits (the immutable `enabled` borrow has ended).
+    // `Some(inner)` = draft/multiline was advertised; `inner` (Option) is the
+    // usable limits or None when the advertised value is unusable.
+    if let Some(limits) = multiline_limits
+        && let Some(conn) = state.connections.get_mut(conn_id)
+    {
+        conn.multiline = limits;
+    }
 
     // Log to server status buffer
     let label = state
@@ -558,6 +579,9 @@ pub fn handle_cap_del(
             if conn.enabled_caps.remove(cap) {
                 actually_removed.push(cap.clone());
             }
+        }
+        if removed_caps.iter().any(|c| c == "draft/multiline") {
+            conn.multiline = None;
         }
     }
 
@@ -666,6 +690,14 @@ pub fn handle_cap_nak(
         .collect();
 
     tracing::warn!("CAP NAK from {conn_id}: {}", naked_caps.join(" "));
+
+    // A NAK for draft/multiline (e.g. requested after a CAP NEW) means the
+    // server will not enable it — drop any limits we optimistically stored.
+    if naked_caps.iter().any(|c| c == "draft/multiline")
+        && let Some(conn) = state.connections.get_mut(conn_id)
+    {
+        conn.multiline = None;
+    }
 
     let label = state
         .connections
@@ -4432,6 +4464,8 @@ mod tests {
             enabled_caps: std::collections::HashSet::new(),
             chathistory: crate::irc::chathistory::HistoryState::new(),
             who_token_counter: 0,
+            multiline: None,
+            batch_ref_counter: 0,
             silent_who_channels: std::collections::HashSet::new(),
             silent_banlist_channels: std::collections::HashSet::new(),
         });
@@ -5953,6 +5987,36 @@ mod tests {
     }
 
     #[test]
+    fn cap_new_captures_multiline_limits_and_del_clears() {
+        let mut state = make_test_state();
+        handle_cap_new(
+            &mut state,
+            "test",
+            Some("draft/multiline=max-bytes=4096,max-lines=24"),
+            None,
+        );
+        assert_eq!(
+            state.connections.get("test").unwrap().multiline,
+            Some(crate::irc::multiline::MultilineLimits {
+                max_bytes: 4096,
+                max_lines: 24
+            })
+        );
+
+        handle_cap_del(&mut state, "test", Some("draft/multiline"), None);
+        assert!(state.connections.get("test").unwrap().multiline.is_none());
+    }
+
+    #[test]
+    fn cap_nak_clears_multiline_limits() {
+        let mut state = make_test_state();
+        handle_cap_new(&mut state, "test", Some("draft/multiline=max-bytes=8192"), None);
+        assert!(state.connections.get("test").unwrap().multiline.is_some());
+        handle_cap_nak(&mut state, "test", Some("draft/multiline"), None);
+        assert!(state.connections.get("test").unwrap().multiline.is_none());
+    }
+
+    #[test]
     fn cap_del_for_non_enabled_caps_is_noop() {
         let mut state = make_test_state();
         // No caps enabled
@@ -7331,6 +7395,8 @@ mod tests {
             enabled_caps: std::collections::HashSet::new(),
             chathistory: crate::irc::chathistory::HistoryState::new(),
             who_token_counter: 0,
+            multiline: None,
+            batch_ref_counter: 0,
             silent_who_channels: std::collections::HashSet::new(),
             silent_banlist_channels: std::collections::HashSet::new(),
         });
