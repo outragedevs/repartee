@@ -275,7 +275,16 @@ impl App {
             // would change reporting for every key (ESC/Alt chords) and risk
             // regressing existing input handling. Paste is the universal
             // multi-line entry path.
-            (mods, KeyCode::Enter) if mods.contains(KeyModifiers::ALT) => {
+            // Never insert a newline into a slash command: it would be routed
+            // through parse_command/handlers (not the multiline-safe send path),
+            // where an embedded `\n` is truncated on the wire by the IRC codec
+            // while local echo shows the full text. Commands are single-line, so
+            // when the input is a command this arm's guard fails and Alt+Enter
+            // falls through to the plain Enter arm below (submit).
+            (mods, KeyCode::Enter)
+                if mods.contains(KeyModifiers::ALT)
+                    && !self.input.value.trim_start().starts_with('/') =>
+            {
                 self.input.spell_state = None;
                 self.input.insert_newline();
             }
