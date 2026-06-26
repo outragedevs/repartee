@@ -51,13 +51,68 @@ impl App {
     /// we silently dropped them, channels would carry stale nicks for users
     /// who quit inside a netsplit batch that never closed.
     pub(crate) fn purge_expired_batches(&mut self) {
-        let mut to_replay: Vec<(String, crate::irc::batch::BatchInfo)> = Vec::new();
+        // (conn_id, ref_tag, batch). The ref tag lets us match a nested
+        // `draft/multiline` child to its parent batch within this sweep.
+        let mut to_replay: Vec<(String, String, crate::irc::batch::BatchInfo)> = Vec::new();
         for (conn_id, tracker) in &mut self.batch_trackers {
-            for batch in tracker.purge_expired() {
-                to_replay.push((conn_id.clone(), batch));
+            for (ref_tag, batch) in tracker.purge_expired() {
+                to_replay.push((conn_id.clone(), ref_tag, batch));
             }
         }
-        for (conn_id, batch) in to_replay {
+
+        // Fold expired nested `draft/multiline` children into their parent batch
+        // BEFORE processing parents. A nested multiline (its opener carried
+        // `@batch=<parent>`, e.g. a multiline message inside a CHATHISTORY batch)
+        // must never be dispatched live as a backlog row. The child is YOUNGER
+        // than its parent, so if the child expired its parent did too — they
+        // purge together in THIS sweep — so fold the child's reassembled
+        // (truncated) synthetic into the parent's messages here, where it will be
+        // ingested store-only. If the parent isn't in this sweep (already
+        // completed earlier), drop the orphan rather than showing it live.
+        let mut nested_children: Vec<usize> = Vec::new();
+        for i in 0..to_replay.len() {
+            if to_replay[i].2.batch_type != "DRAFT/MULTILINE" {
+                continue;
+            }
+            let Some(parent_ref) = to_replay[i].2.opener_tags.as_ref().and_then(|tags| {
+                tags.iter().find(|t| t.0 == "batch").and_then(|t| t.1.clone())
+            }) else {
+                continue; // top-level multiline → processed normally below
+            };
+            nested_children.push(i);
+            let conn_id = to_replay[i].0.clone();
+            let synthetic = match crate::irc::batch::build_multiline_message(
+                &self.state,
+                &conn_id,
+                &to_replay[i].2,
+                false,
+            ) {
+                crate::irc::batch::MultilineOutcome::Message(m) => Some(*m),
+                // Malformed (E2E/mixed) or empty nested batch on timeout: drop it
+                // (live per-fragment replay of backlog rows would be wrong).
+                _ => None,
+            };
+            if let Some(synthetic) = synthetic {
+                if let Some(parent) = to_replay
+                    .iter_mut()
+                    .find(|(c, r, _)| *c == conn_id && *r == parent_ref)
+                {
+                    // @time-sorted ingest places it correctly among history rows.
+                    parent.2.messages.push(synthetic);
+                } else {
+                    tracing::warn!(
+                        "dropping timed-out nested multiline batch (parent '{parent_ref}' already completed)"
+                    );
+                }
+            }
+        }
+        // Remove the folded/dropped children (highest index first to stay valid).
+        nested_children.sort_unstable();
+        for i in nested_children.into_iter().rev() {
+            to_replay.remove(i);
+        }
+
+        for (conn_id, _ref, batch) in to_replay {
             // Force-completed by timeout (`clean_end = false`): a missing
             // `BATCH -tag` is a transport/server failure, so a short CHATHISTORY
             // batch here must not be treated as genuine end-of-history.

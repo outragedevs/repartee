@@ -75,6 +75,15 @@ impl InputState {
         self.tab_state = None;
     }
 
+    /// Insert a literal newline at the cursor (multi-line compose via Alt+Enter).
+    /// `insert_char` rejects control chars, so a dedicated method is required.
+    pub fn insert_newline(&mut self) {
+        self.spell_state = None;
+        self.value.insert(self.cursor_pos, '\n');
+        self.cursor_pos += 1;
+        self.tab_state = None;
+    }
+
     pub fn backspace(&mut self) {
         if self.cursor_pos > 0 {
             let prev = self.value[..self.cursor_pos]
@@ -595,6 +604,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .replace("$channel", channel_name)
         .replace("$nick", nick);
 
+    // Multi-line compose (Alt+Enter): render each `\n`-separated row on its own
+    // line with the cursor on its row. The single-line path below is unchanged
+    // (spell highlighting + horizontal scroll) and handles the common case.
+    if app.input.value.contains('\n') {
+        render_multiline_input(frame, area, app, &prompt, fg, fg_muted);
+        return;
+    }
+
     let prompt_width = prompt.chars().count();
     let available_width = (area.width as usize).saturating_sub(prompt_width);
 
@@ -662,6 +679,80 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
     let line = Line::from(spans);
     let paragraph = Paragraph::new(line);
+    frame.render_widget(paragraph, area);
+}
+
+/// Locate the cursor's `(row, byte-col-within-row)` in a multi-line buffer.
+/// `cursor_pos` is a byte offset into `value`.
+fn locate_cursor(value: &str, cursor_pos: usize) -> (usize, usize) {
+    let mut row = 0usize;
+    let mut row_start = 0usize;
+    for (idx, ch) in value.char_indices() {
+        if idx >= cursor_pos {
+            break;
+        }
+        if ch == '\n' {
+            row += 1;
+            row_start = idx + 1;
+        }
+    }
+    (row, cursor_pos.saturating_sub(row_start))
+}
+
+/// Render a multi-line input buffer: one visual row per `\n`-separated logical
+/// line, prompt on the first row, continuation rows indented to align under it,
+/// cursor highlighted on its row. No per-row horizontal scroll or spell
+/// highlighting (multi-line compose is transient); the single-line `render` path
+/// keeps those for the common case.
+fn render_multiline_input(frame: &mut Frame, area: Rect, app: &App, prompt: &str, fg: Color, fg_muted: Color) {
+    let colors = &app.theme.colors;
+    let cursor_color = hex_to_color(&colors.cursor).unwrap_or(Color::Reset);
+    let normal_style = Style::default().fg(fg);
+    let cursor_style = Style::default().fg(Color::Black).bg(cursor_color);
+    let prompt_style = Style::default().fg(fg_muted);
+
+    let prompt_width = prompt.chars().count();
+    let cont_indent = " ".repeat(prompt_width);
+
+    let value = &app.input.value;
+    let (cur_row, cur_col) = locate_cursor(value, app.input.cursor_pos.min(value.len()));
+
+    let rows: Vec<&str> = value.split('\n').collect();
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(rows.len());
+    for (i, row) in rows.iter().enumerate() {
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        if i == 0 {
+            spans.push(Span::styled(prompt.to_string(), prompt_style));
+        } else {
+            spans.push(Span::raw(cont_indent.clone()));
+        }
+
+        if i == cur_row {
+            let col = cur_col.min(row.len());
+            let before = &row[..col];
+            let cur_char = row[col..].chars().next().unwrap_or(' ');
+            let after_start = (col + cur_char.len_utf8()).min(row.len());
+            let after = &row[after_start..];
+            spans.push(Span::styled(before.to_string(), normal_style));
+            spans.push(Span::styled(cur_char.to_string(), cursor_style));
+            spans.push(Span::styled(after.to_string(), normal_style));
+        } else {
+            spans.push(Span::styled((*row).to_string(), normal_style));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    // Vertical scroll: the input area is height-clamped by the layout, so for a
+    // compose buffer taller than the area, scroll to keep the cursor row visible
+    // (otherwise rows past the bottom — including the cursor — are clipped).
+    let visible = area.height as usize;
+    let scroll_y = if visible > 0 && cur_row >= visible {
+        u16::try_from(cur_row + 1 - visible).unwrap_or(0)
+    } else {
+        0
+    };
+
+    let paragraph = Paragraph::new(lines).scroll((scroll_y, 0));
     frame.render_widget(paragraph, area);
 }
 
@@ -857,6 +948,28 @@ pub fn render_spell_popup(frame: &mut Frame, input_area: Rect, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn insert_newline_inserts_literal_newline() {
+        let mut input = InputState::new();
+        input.value = "ab".to_owned();
+        input.cursor_pos = 1; // between 'a' and 'b'
+        input.insert_newline();
+        assert_eq!(input.value, "a\nb");
+        assert_eq!(input.cursor_pos, 2);
+    }
+
+    #[test]
+    fn locate_cursor_rows_and_cols() {
+        // "a\nbb\nccc"  rows: "a"(0..1) "bb"(2..4) "ccc"(5..8)
+        let v = "a\nbb\nccc";
+        assert_eq!(locate_cursor(v, 0), (0, 0)); // start of row 0
+        assert_eq!(locate_cursor(v, 1), (0, 1)); // end of row 0
+        assert_eq!(locate_cursor(v, 2), (1, 0)); // start of row 1 (after first \n)
+        assert_eq!(locate_cursor(v, 4), (1, 2)); // end of row 1
+        assert_eq!(locate_cursor(v, 5), (2, 0)); // start of row 2
+        assert_eq!(locate_cursor(v, 8), (2, 3)); // end of row 2
+    }
 
     #[test]
     fn tab_completes_english_alias() {

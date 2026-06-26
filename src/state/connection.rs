@@ -59,4 +59,16 @@ pub struct Connection {
     /// `367/368` replies for these channels update state silently
     /// without display. Removed on `RPL_ENDOFBANLIST` (368).
     pub silent_banlist_channels: HashSet<String>,
+    /// Negotiated `draft/multiline` limits, or `None` when the cap is not active.
+    pub multiline: Option<crate::irc::multiline::MultilineLimits>,
+    /// Monotonic counter for outbound multiline BATCH reference tags.
+    pub batch_ref_counter: u64,
+}
+
+impl Connection {
+    /// Allocate a unique outbound BATCH reference tag for this connection.
+    pub fn next_batch_ref(&mut self) -> String {
+        self.batch_ref_counter = self.batch_ref_counter.wrapping_add(1);
+        format!("ml{}", self.batch_ref_counter)
+    }
 }

@@ -10,6 +10,15 @@ use crate::theme::hex_to_color;
 // to cap the render loop's work. A ~1000-char NOTICE on an 80-col terminal
 // wraps to ~13 visual lines; 16 is a safe over-estimate for realistic IRC
 // traffic. See docs/superpowers/specs/2026-04-10-v084-oom-fix-design.md.
+//
+// `draft/multiline` note: a multiline message can wrap to MORE than 16 visual
+// lines, so this is a soft budget target, not a per-message truncation — the
+// render loop pushes a message's wrapped lines in full and only then checks the
+// break condition, so a tall message renders completely and scroll math uses the
+// true `visual_lines.len()`. Peak memory stays O(buffer_len * 16) + one
+// message's lines because a single message's line count is HARD-bounded: inbound
+// by `crate::irc::MULTILINE_MAX_INBOUND_LINES`, outbound by the paste cap /
+// `max-lines` framing. That preserves the v0.8.4 OOM invariant.
 const MAX_WRAPPED_LINES_PER_MSG: usize = 16;
 
 // Compute the target size of the render `VecDeque<Line>` for chat view.

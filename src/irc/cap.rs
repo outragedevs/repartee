@@ -15,6 +15,7 @@ pub const DESIRED_CAPS: &[&str] = &[
     "batch",
     "userhost-in-names",
     "message-tags",
+    "draft/multiline",
     "draft/chathistory",
     "draft/event-playback",
     "sasl",
@@ -197,7 +198,7 @@ mod tests {
         let caps = ServerCaps::parse(
             "multi-prefix extended-join server-time account-tag cap-notify \
              away-notify account-notify chghost echo-message invite-notify \
-             batch userhost-in-names message-tags draft/chathistory \
+             batch userhost-in-names message-tags draft/multiline draft/chathistory \
              draft/event-playback sasl=PLAIN,EXTERNAL",
         );
         let result = caps.negotiate(DESIRED_CAPS);
@@ -217,5 +218,23 @@ mod tests {
         assert!(DESIRED_CAPS.contains(&"draft/event-playback"));
         // chathistory requires batch
         assert!(DESIRED_CAPS.contains(&"batch"));
+    }
+
+    #[test]
+    fn desired_caps_include_multiline_prereqs() {
+        assert!(DESIRED_CAPS.contains(&"draft/multiline"));
+        // multiline requires batch + message-tags
+        assert!(DESIRED_CAPS.contains(&"batch"));
+        assert!(DESIRED_CAPS.contains(&"message-tags"));
+    }
+
+    #[test]
+    fn server_caps_retains_multiline_value() {
+        // split_once('=') splits on the FIRST '=', so the whole RHS is kept.
+        let caps = ServerCaps::parse("draft/multiline=max-bytes=4096,max-lines=24 batch");
+        assert_eq!(
+            caps.value("draft/multiline"),
+            Some("max-bytes=4096,max-lines=24")
+        );
     }
 }

@@ -278,24 +278,48 @@ pub fn InputLine() -> impl IntoView {
         let Some(buffer_id) = state.active_buffer.get() else {
             return;
         };
-        // Split multiline input and send each line.
-        for line in text.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
+        // Coalesce consecutive plaintext lines into ONE SendMessage (preserving
+        // interior blank lines) so the server frames them as a single
+        // draft/multiline batch — matching the TUI paste path. Command lines
+        // (leading '/') flush the pending plaintext first, then dispatch
+        // individually as RunCommand. Trailing blank lines are dropped.
+        //
+        // Cap each plaintext run at MAX_PASTE_LINES (mirrors the TUI
+        // `MAX_PASTE_LINES` guard) so a huge web paste can't have the backend
+        // frame thousands of lines into batches and store/render one giant
+        // message, bypassing the flood/render guard the TUI path applies.
+        const MAX_PASTE_LINES: usize = 1000;
+        let flush = |pending: &mut Vec<&str>| {
+            while pending.last().is_some_and(|l| l.trim().is_empty()) {
+                pending.pop();
             }
-            if trimmed.starts_with('/') {
-                crate::ws::send_command(&WebCommand::RunCommand {
-                    buffer_id: buffer_id.clone(),
-                    text: trimmed.to_string(),
-                });
-            } else {
+            if pending.len() > MAX_PASTE_LINES {
+                web_sys::console::warn_1(
+                    &format!("paste truncated to {MAX_PASTE_LINES} lines").into(),
+                );
+                pending.truncate(MAX_PASTE_LINES);
+            }
+            if !pending.is_empty() {
                 crate::ws::send_command(&WebCommand::SendMessage {
                     buffer_id: buffer_id.clone(),
-                    text: trimmed.to_string(),
+                    text: pending.join("\n"),
                 });
             }
+            pending.clear();
+        };
+        let mut pending: Vec<&str> = Vec::new();
+        for line in text.lines() {
+            if line.trim_start().starts_with('/') {
+                flush(&mut pending);
+                crate::ws::send_command(&WebCommand::RunCommand {
+                    buffer_id: buffer_id.clone(),
+                    text: line.trim().to_string(),
+                });
+            } else {
+                pending.push(line);
+            }
         }
+        flush(&mut pending);
     };
 
     let on_keydown = move |ev: web_sys::KeyboardEvent| {

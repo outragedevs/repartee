@@ -230,6 +230,20 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
         Command::Raw(cmd, args) if cmd == "671" => {
             handle_whois_secure(state, conn_id, args);
         }
+        // IRCv3 standard-reply FAIL for a BATCH command — surface multiline
+        // rejections (MULTILINE_MAX_BYTES / MAX_LINES / INVALID_TARGET / INVALID).
+        // FAIL arrives as a `Command::Raw` (not a numeric), so it isn't caught by
+        // the numeric catch-all below; args = [command, code, [context...], desc].
+        Command::Raw(cmd, args)
+            if cmd == "FAIL" && args.first().map(String::as_str) == Some("BATCH") =>
+        {
+            let code = args.get(1).map_or("", String::as_str);
+            if code.starts_with("MULTILINE_") {
+                let desc = args.last().map_or("multiline error", String::as_str);
+                let buffer_id = active_or_server_buffer(state, conn_id);
+                emit(state, &buffer_id, &format!("%Zff6b6bmultiline: {code} — {desc}%N"));
+            }
+        }
         // Catch-all for unknown numerics that irc-proto doesn't define
         // (e.g. IRCnet's 344/345 for reop list). Display them like the
         // Response catch-all does — errors to active window, info to server.
@@ -478,6 +492,18 @@ pub fn handle_cap_new(
         .map(str::to_ascii_lowercase)
         .collect();
 
+    // Capture the `draft/multiline` cap VALUE (max-bytes/max-lines) before the
+    // immutable `enabled` borrow below; the value-stripping `new_caps` map above
+    // discards it. Stored after the `to_request` collect (borrow ordering).
+    let multiline_limits = caps_str.split_whitespace().find_map(|tok| {
+        let (name, value) = tok.split_once('=').map_or((tok, None), |(n, v)| (n, Some(v)));
+        if name.eq_ignore_ascii_case("draft/multiline") {
+            Some(crate::irc::multiline::parse_limits(value))
+        } else {
+            None
+        }
+    });
+
     tracing::info!("CAP NEW from {conn_id}: {}", new_caps.join(" "));
 
     let enabled = state.connections.get(conn_id).map(|c| &c.enabled_caps);
@@ -490,6 +516,15 @@ pub fn handle_cap_new(
         })
         .cloned()
         .collect();
+
+    // Store the multiline limits (the immutable `enabled` borrow has ended).
+    // `Some(inner)` = draft/multiline was advertised; `inner` (Option) is the
+    // usable limits or None when the advertised value is unusable.
+    if let Some(limits) = multiline_limits
+        && let Some(conn) = state.connections.get_mut(conn_id)
+    {
+        conn.multiline = limits;
+    }
 
     // Log to server status buffer
     let label = state
@@ -558,6 +593,9 @@ pub fn handle_cap_del(
             if conn.enabled_caps.remove(cap) {
                 actually_removed.push(cap.clone());
             }
+        }
+        if removed_caps.iter().any(|c| c == "draft/multiline") {
+            conn.multiline = None;
         }
     }
 
@@ -666,6 +704,14 @@ pub fn handle_cap_nak(
         .collect();
 
     tracing::warn!("CAP NAK from {conn_id}: {}", naked_caps.join(" "));
+
+    // A NAK for draft/multiline (e.g. requested after a CAP NEW) means the
+    // server will not enable it — drop any limits we optimistically stored.
+    if naked_caps.iter().any(|c| c == "draft/multiline")
+        && let Some(conn) = state.connections.get_mut(conn_id)
+    {
+        conn.multiline = None;
+    }
 
     let label = state
         .connections
@@ -4432,6 +4478,8 @@ mod tests {
             enabled_caps: std::collections::HashSet::new(),
             chathistory: crate::irc::chathistory::HistoryState::new(),
             who_token_counter: 0,
+            multiline: None,
+            batch_ref_counter: 0,
             silent_who_channels: std::collections::HashSet::new(),
             silent_banlist_channels: std::collections::HashSet::new(),
         });
@@ -5953,6 +6001,61 @@ mod tests {
     }
 
     #[test]
+    fn cap_new_captures_multiline_limits_and_del_clears() {
+        let mut state = make_test_state();
+        handle_cap_new(
+            &mut state,
+            "test",
+            Some("draft/multiline=max-bytes=4096,max-lines=24"),
+            None,
+        );
+        assert_eq!(
+            state.connections.get("test").unwrap().multiline,
+            Some(crate::irc::multiline::MultilineLimits {
+                max_bytes: 4096,
+                max_lines: 24
+            })
+        );
+
+        handle_cap_del(&mut state, "test", Some("draft/multiline"), None);
+        assert!(state.connections.get("test").unwrap().multiline.is_none());
+    }
+
+    #[test]
+    fn cap_nak_clears_multiline_limits() {
+        let mut state = make_test_state();
+        handle_cap_new(&mut state, "test", Some("draft/multiline=max-bytes=8192"), None);
+        assert!(state.connections.get("test").unwrap().multiline.is_some());
+        handle_cap_nak(&mut state, "test", Some("draft/multiline"), None);
+        assert!(state.connections.get("test").unwrap().multiline.is_none());
+    }
+
+    #[test]
+    fn fail_batch_multiline_surfaces_error() {
+        let mut state = make_test_state();
+        let msg = IrcMessage {
+            tags: None,
+            prefix: None,
+            command: Command::Raw(
+                "FAIL".to_string(),
+                vec![
+                    "BATCH".to_string(),
+                    "MULTILINE_MAX_LINES".to_string(),
+                    "24".to_string(),
+                    "too many lines".to_string(),
+                ],
+            ),
+        };
+        handle_irc_message(&mut state, "test", &msg);
+        let found = state.buffers.values().any(|b| {
+            b.messages
+                .iter()
+                .any(|m| m.text.contains("MULTILINE_MAX_LINES"))
+        });
+        assert!(found, "FAIL BATCH MULTILINE_* should surface a status message");
+    }
+
+    #[test]
     fn cap_del_for_non_enabled_caps_is_noop() {
         let mut state = make_test_state();
         // No caps enabled
@@ -7331,6 +7434,8 @@ mod tests {
             enabled_caps: std::collections::HashSet::new(),
             chathistory: crate::irc::chathistory::HistoryState::new(),
             who_token_counter: 0,
+            multiline: None,
+            batch_ref_counter: 0,
             silent_who_channels: std::collections::HashSet::new(),
             silent_banlist_channels: std::collections::HashSet::new(),
         });
