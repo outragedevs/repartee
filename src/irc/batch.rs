@@ -73,8 +73,9 @@ impl BatchTracker {
         );
     }
 
-    /// Remove batches that have been open longer than `BATCH_TIMEOUT_SECS`
-    /// and return them so the caller can replay their collected messages.
+    /// Remove batches that have been open longer than `BATCH_TIMEOUT_SECS` and
+    /// return them (with their reference tags) so the caller can replay their
+    /// collected messages.
     ///
     /// A timed-out batch usually means the server crashed mid-batch or its
     /// `BATCH -tag` line never arrived. Replaying the buffered messages
@@ -82,7 +83,10 @@ impl BatchTracker {
     /// sync — silently dropping them would leave stale nicks behind for QUIT
     /// batches and miss new nicks for JOIN batches. Should be called
     /// periodically (e.g. once per second from the main tick).
-    pub fn purge_expired(&mut self) -> Vec<BatchInfo> {
+    ///
+    /// The reference tag is returned so the caller can match a nested
+    /// `draft/multiline` child to its (co-expired) parent batch.
+    pub fn purge_expired(&mut self) -> Vec<(String, BatchInfo)> {
         let timeout = std::time::Duration::from_secs(BATCH_TIMEOUT_SECS);
         self.open
             .extract_if(|_, info| info.started_at.elapsed() >= timeout)
@@ -92,7 +96,7 @@ impl BatchTracker {
                     info.batch_type,
                     info.messages.len()
                 );
-                info
+                (tag, info)
             })
             .collect()
     }
@@ -1073,7 +1077,8 @@ mod tests {
 
         let purged = tracker.purge_expired();
         assert_eq!(purged.len(), 1);
-        assert_eq!(purged[0].batch_type, "NETSPLIT");
+        assert_eq!(purged[0].0, "old");
+        assert_eq!(purged[0].1.batch_type, "NETSPLIT");
         assert!(tracker.end_batch("old").is_none());
         assert!(tracker.end_batch("fresh").is_some());
     }
@@ -1119,8 +1124,8 @@ mod tests {
 
         let purged = tracker.purge_expired();
         assert_eq!(purged.len(), 1);
-        assert_eq!(purged[0].messages.len(), 1);
-        assert_eq!(purged[0].params.len(), 2);
+        assert_eq!(purged[0].1.messages.len(), 1);
+        assert_eq!(purged[0].1.params.len(), 2);
     }
 
     /// Build a connection + one channel buffer with `alice` present, wired to
@@ -2440,6 +2445,47 @@ mod tests {
                 .any(|t| t.0 == "msgid" && t.1.as_deref() == Some("m1")),
             "msgid preserved for store-only dedup"
         );
+    }
+
+    #[test]
+    fn timeout_nested_multiline_folds_into_parent_history_ingest() {
+        // When a CHATHISTORY parent and its nested multiline child both time out
+        // in the same sweep, the child's synthetic is folded into the parent's
+        // messages (what maintenance.rs does) and ingested store-only — NOT
+        // dispatched live and NOT dropped.
+        let conn_id = "test";
+        let (mut state, mut rx, _buf_id) = setup_ingest_state(conn_id);
+
+        let child = BatchInfo {
+            batch_type: "DRAFT/MULTILINE".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            opener_tags: Some(vec![
+                Tag("batch".to_string(), Some("hist".to_string())),
+                Tag("time".to_string(), Some("2024-01-01T00:00:00.000Z".to_string())),
+            ]),
+            messages: vec![multiline_frag("line1", false), multiline_frag("line2", false)],
+        };
+        // clean_end = false (timeout) → truncated synthetic.
+        let synthetic = match build_multiline_message(&state, conn_id, &child, false) {
+            MultilineOutcome::Message(m) => *m,
+            _ => panic!("expected a reassembled message"),
+        };
+        // Fold into a co-expired CHATHISTORY parent, then process the parent.
+        let parent = BatchInfo {
+            batch_type: "CHATHISTORY".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            opener_tags: None,
+            messages: vec![synthetic],
+        };
+        process_completed_batch(&mut state, conn_id, &parent, false);
+
+        // The multiline row was ingested store-only (logged), not lost.
+        let row = rx.try_recv().expect("multiline history row ingested store-only");
+        assert!(row.text.starts_with("line1\nline2"));
     }
 
     #[test]
