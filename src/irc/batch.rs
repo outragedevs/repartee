@@ -366,6 +366,10 @@ pub enum MultilineOutcome {
 /// [`process_multiline_batch`] is the live-delivery wrapper; a nested multiline
 /// batch (opener carries `@batch=<parent>`) instead folds the result into its
 /// parent batch so it follows the parent's completion (e.g. CHATHISTORY ingest).
+#[expect(
+    clippy::too_many_lines,
+    reason = "sequential guards (E2E, consistency, cap) + reassembly + message build"
+)]
 pub fn build_multiline_message(
     state: &AppState,
     conn_id: &str,
@@ -388,20 +392,29 @@ pub fn build_multiline_message(
     }
 
     // Consistency guard: a conformant `draft/multiline` batch shares ONE sender,
-    // ONE target, and ONE message type across all line fragments (spec MUST).
-    // We build the reassembled message from only the first fragment's identity,
-    // so a malformed/malicious batch mixing senders/targets/types would be
-    // displayed in the wrong buffer under the wrong nick — replay per-fragment.
+    // ONE target, and ONE message type across all line fragments, and every line
+    // MUST match the BATCH opener's declared target (spec). We build the
+    // reassembled message from the first fragment's sender/type and the opener's
+    // declared target, so a malformed/malicious batch that mixes fragments — or
+    // declares one target on the opener while its fragments target another —
+    // would be displayed/logged in the WRONG buffer under the wrong nick. Replay
+    // such a batch per-fragment so each line lands in its real buffer.
     let mut frags = batch.messages.iter().filter_map(|m| match &m.command {
         Command::PRIVMSG(t, _) => Some((&m.prefix, t, false)),
         Command::NOTICE(t, _) => Some((&m.prefix, t, true)),
         _ => None,
     });
-    if let Some(first) = frags.next()
-        && !frags.all(|f| f == first)
-    {
-        tracing::warn!("inconsistent multiline batch (mixed sender/target/type); replaying per-fragment");
-        return MultilineOutcome::Replay;
+    if let Some(first) = frags.next() {
+        let inconsistent = !frags.all(|f| f == first);
+        // first.1 is the fragment target; reject if the opener declares a
+        // different one (the synthetic uses the opener target below).
+        let opener_target_mismatch = batch.params.first().is_some_and(|dt| dt != first.1);
+        if inconsistent || opener_target_mismatch {
+            tracing::warn!(
+                "inconsistent multiline batch (mixed fragments or opener-target mismatch); replaying per-fragment"
+            );
+            return MultilineOutcome::Replay;
+        }
     }
 
     let mut lines: Vec<crate::irc::multiline::WireLine> = batch
@@ -2282,6 +2295,40 @@ mod tests {
                 .iter()
                 .any(|m| m.text.contains("hello") && m.text.contains("evil")),
             "mixed-target fragments must not be merged into one message"
+        );
+    }
+
+    #[test]
+    fn multiline_opener_target_mismatch_not_merged_into_opener_buffer() {
+        let conn_id = "test";
+        let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
+        // Fragments consistently target #other, but the BATCH opener declares
+        // #test. The merged text must NOT land in #test (the opener's buffer).
+        let frag = |text: &str| IrcMessage {
+            tags: Some(vec![Tag("batch".to_string(), Some("b1".to_string()))]),
+            prefix: Some(irc::proto::Prefix::Nickname(
+                "bob".to_string(),
+                "u".to_string(),
+                "h.net".to_string(),
+            )),
+            command: Command::PRIVMSG("#other".to_string(), text.to_string()),
+        };
+        let batch = BatchInfo {
+            batch_type: "DRAFT/MULTILINE".to_string(),
+            params: vec!["#test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            opener_tags: None,
+            messages: vec![frag("hello"), frag("world")],
+        };
+        process_completed_batch(&mut state, conn_id, &batch, true);
+        let test_buf = state.buffers.get(&buf_id).unwrap();
+        assert!(
+            !test_buf
+                .messages
+                .iter()
+                .any(|m| m.text.contains("hello\nworld")),
+            "fragments targeting #other must not be merged into the opener's #test buffer"
         );
     }
 
