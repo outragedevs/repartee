@@ -283,9 +283,21 @@ pub fn InputLine() -> impl IntoView {
         // draft/multiline batch — matching the TUI paste path. Command lines
         // (leading '/') flush the pending plaintext first, then dispatch
         // individually as RunCommand. Trailing blank lines are dropped.
+        //
+        // Cap each plaintext run at MAX_PASTE_LINES (mirrors the TUI
+        // `MAX_PASTE_LINES` guard) so a huge web paste can't have the backend
+        // frame thousands of lines into batches and store/render one giant
+        // message, bypassing the flood/render guard the TUI path applies.
+        const MAX_PASTE_LINES: usize = 1000;
         let flush = |pending: &mut Vec<&str>| {
             while pending.last().is_some_and(|l| l.trim().is_empty()) {
                 pending.pop();
+            }
+            if pending.len() > MAX_PASTE_LINES {
+                web_sys::console::warn_1(
+                    &format!("paste truncated to {MAX_PASTE_LINES} lines").into(),
+                );
+                pending.truncate(MAX_PASTE_LINES);
             }
             if !pending.is_empty() {
                 crate::ws::send_command(&WebCommand::SendMessage {

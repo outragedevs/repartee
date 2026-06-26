@@ -1527,27 +1527,33 @@ impl App {
                 crate::commands::helpers::add_local_event(self, "Failed to send message");
                 return;
             }
-            // One local echo of the full multi-line text — unless echo-message
-            // echoes the batch back (then inbound reassembly displays it once).
+            // Local echo (echo-message off): ONE message PER BATCH so local
+            // history/logging matches the wire. A multi-batch send (text longer
+            // than the server's max-lines) produces several IRC messages that
+            // other clients — and the echo-message path (inbound reassembly per
+            // batch) — both see as separate messages; a single combined echo
+            // would disagree with both.
             if !echo_message_enabled {
-                let id = self.state.next_message_id();
-                self.state.add_message(
-                    &active_id,
-                    Message {
-                        id,
-                        timestamp: chrono::Utc::now(),
-                        message_type: MessageType::Message,
-                        nick: Some(nick),
-                        nick_mode: own_mode.map(|c| c.to_string()),
-                        text: text.to_string(),
-                        highlight: false,
-                        event_key: None,
-                        event_params: None,
-                        log_msg_id: None,
-                        log_ref_id: None,
-                        tags: None,
-                    },
-                );
+                for batch in &batches {
+                    let id = self.state.next_message_id();
+                    self.state.add_message(
+                        &active_id,
+                        Message {
+                            id,
+                            timestamp: chrono::Utc::now(),
+                            message_type: MessageType::Message,
+                            nick: Some(nick.clone()),
+                            nick_mode: own_mode.map(|c| c.to_string()),
+                            text: crate::irc::multiline::reassemble(batch),
+                            highlight: false,
+                            event_key: None,
+                            event_params: None,
+                            log_msg_id: None,
+                            log_ref_id: None,
+                            tags: None,
+                        },
+                    );
+                }
             }
             return;
         }
