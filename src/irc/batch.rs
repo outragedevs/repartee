@@ -405,10 +405,17 @@ pub fn build_multiline_message(
         _ => None,
     });
     if let Some(first) = frags.next() {
-        let inconsistent = !frags.all(|f| f == first);
+        // IRC targets are case-insensitive (RFC 2812 §2.2), so compare targets
+        // with `eq_ignore_ascii_case` — `#Test` and `#test` are the same channel.
+        // Sender prefix and message type still compare exactly.
+        let inconsistent = !frags
+            .all(|f| f.0 == first.0 && f.2 == first.2 && f.1.eq_ignore_ascii_case(first.1));
         // first.1 is the fragment target; reject if the opener declares a
         // different one (the synthetic uses the opener target below).
-        let opener_target_mismatch = batch.params.first().is_some_and(|dt| dt != first.1);
+        let opener_target_mismatch = batch
+            .params
+            .first()
+            .is_some_and(|dt| !dt.eq_ignore_ascii_case(first.1));
         if inconsistent || opener_target_mismatch {
             tracing::warn!(
                 "inconsistent multiline batch (mixed fragments or opener-target mismatch); replaying per-fragment"
@@ -2329,6 +2336,37 @@ mod tests {
                 .iter()
                 .any(|m| m.text.contains("hello\nworld")),
             "fragments targeting #other must not be merged into the opener's #test buffer"
+        );
+    }
+
+    #[test]
+    fn multiline_opener_target_case_insensitive_merges() {
+        let conn_id = "test";
+        let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
+        // Opener declares #Test (capitalized); fragments use #test — IRC targets
+        // are case-insensitive, so this is the same channel and must still merge.
+        let frag = |text: &str| IrcMessage {
+            tags: Some(vec![Tag("batch".to_string(), Some("b1".to_string()))]),
+            prefix: Some(irc::proto::Prefix::Nickname(
+                "bob".to_string(),
+                "u".to_string(),
+                "h.net".to_string(),
+            )),
+            command: Command::PRIVMSG("#test".to_string(), text.to_string()),
+        };
+        let batch = BatchInfo {
+            batch_type: "DRAFT/MULTILINE".to_string(),
+            params: vec!["#Test".to_string()],
+            started_at: Instant::now(),
+            dropped_messages: 0,
+            opener_tags: None,
+            messages: vec![frag("hello"), frag("world")],
+        };
+        process_completed_batch(&mut state, conn_id, &batch, true);
+        let buf = state.buffers.get(&buf_id).unwrap();
+        assert!(
+            buf.messages.iter().any(|m| m.text == "hello\nworld"),
+            "case-only target difference must still merge into one message"
         );
     }
 
