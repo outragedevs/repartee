@@ -711,6 +711,22 @@ impl App {
                         conn.nick.clone_from(confirmed_nick);
                     }
 
+                    // Seed our own ident@host (the recipient-keyed DM E2E
+                    // context) as early as possible — at RPL_WELCOME, so the
+                    // USERHOST reply lands before the end-of-MOTD CHATHISTORY
+                    // gap-fill that decrypts DM backlog under it. echo-message
+                    // + CHGHOST keep it current afterwards. E2E-only.
+                    if self.state.e2e_manager.is_some()
+                        && let Some(nick) =
+                            self.state.connections.get(&conn_id).map(|c| c.nick.clone())
+                        && let Some(handle) = self.irc_handles.get(&conn_id)
+                    {
+                        let _ = handle.sender.send(::irc::proto::Command::Raw(
+                            "USERHOST".to_string(),
+                            vec![nick],
+                        ));
+                    }
+
                     // Emit to scripts before default handling. Suppress semantics:
                     //
                     //   non-state-mutating (PRIVMSG, NOTICE, INVITE, ...)
@@ -955,21 +971,6 @@ impl App {
                         )
                     ) {
                         self.gapfill_active_buffer_on_connect(&conn_id);
-
-                        // Seed our own ident@host (the recipient-keyed DM E2E
-                        // context) so we can decrypt/handshake DMs before
-                        // we've sent anything; echo-message + CHGHOST keep it
-                        // current afterwards. Only needed when E2E is active.
-                        if self.state.e2e_manager.is_some()
-                            && let Some(nick) =
-                                self.state.connections.get(&conn_id).map(|c| c.nick.clone())
-                            && let Some(handle) = self.irc_handles.get(&conn_id)
-                        {
-                            let _ = handle.sender.send(::irc::proto::Command::Raw(
-                                "USERHOST".to_string(),
-                                vec![nick],
-                            ));
-                        }
                     }
                 }
             }

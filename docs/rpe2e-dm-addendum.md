@@ -70,11 +70,16 @@ An unsolicited REKEY is likewise stamped by the recipient with `@<own_handle>`
 ## Volatile handles → re-handshake on miss
 
 `ident@host` can change mid-session (services vhost, oper vhost, CHGHOST). The
-inbound session map keys on the live `ident@host`, so a handle change already
-forces a session miss → auto-KEYREQ → re-handshake → TOFU notice, exactly as a
-peer reconnect does. Implementations must keep both the peer's handle (from the
-prefix / CHGHOST) and their **own** handle current (from an echo-message echo of
-their own line, a self-`USERHOST`, or their own CHGHOST).
+inbound session map keys on the live `ident@host`, so a handle change forces a
+session miss → auto-KEYREQ → re-handshake, exactly as a peer reconnect does.
+Note this re-handshake is **not** silently auto-accepted: a known fingerprint
+arriving under a new handle is classified `HandleChanged` and the session stays
+refused until `/e2e reverify` (the same TOFU gate as any handle change), unless
+an autotrust/auto-accept rule covers it. The point is only that the *transport*
+self-heals — the trust decision still applies. Implementations must keep both
+the peer's handle (from the prefix / CHGHOST) and their **own** handle current
+(from an echo-message echo of their own line, a self-`USERHOST`, or their own
+CHGHOST).
 
 ## AAD format (unchanged)
 

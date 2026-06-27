@@ -1092,7 +1092,11 @@ fn handle_privmsg(
 ) {
     let (nick, ident, host) = extract_nick_userhost(prefix);
     let target_is_channel = is_channel(target);
-    let is_own = nick == our_nick;
+    // IRC nicks are case-insensitive: an echo-message echo may carry our nick
+    // in a different case. Match case-insensitively (as ingest_chathistory_batch
+    // does) so we still recognise our own echo — capture our handle from it and
+    // drop our own ciphertext echo rather than treating it as a peer's.
+    let is_own = nick.eq_ignore_ascii_case(our_nick);
     let sender_handle = format!("{ident}@{host}");
     // echo-message: the server echoes our own outgoing PRIVMSG back with our
     // full server-stamped prefix. Capture it as our own handle — it drives
