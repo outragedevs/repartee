@@ -33,6 +33,7 @@ impl App {
             id: conn_id.to_string(),
             label: server_config.label.clone(),
             status: ConnectionStatus::Connecting,
+            own_handle: None,
             nick: server_config
                 .nick
                 .as_deref()
@@ -954,6 +955,21 @@ impl App {
                         )
                     ) {
                         self.gapfill_active_buffer_on_connect(&conn_id);
+
+                        // Seed our own ident@host (the recipient-keyed DM E2E
+                        // context) so we can decrypt/handshake DMs before
+                        // we've sent anything; echo-message + CHGHOST keep it
+                        // current afterwards. Only needed when E2E is active.
+                        if self.state.e2e_manager.is_some()
+                            && let Some(nick) =
+                                self.state.connections.get(&conn_id).map(|c| c.nick.clone())
+                            && let Some(handle) = self.irc_handles.get(&conn_id)
+                        {
+                            let _ = handle.sender.send(::irc::proto::Command::Raw(
+                                "USERHOST".to_string(),
+                                vec![nick],
+                            ));
+                        }
                     }
                 }
             }

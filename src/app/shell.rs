@@ -70,6 +70,7 @@ impl App {
             id: Self::SHELL_CONN_ID.to_string(),
             label: "Shell".to_string(),
             status: ConnectionStatus::Connected,
+            own_handle: None,
             nick: String::new(),
             user_modes: String::new(),
             isupport: HashMap::new(),

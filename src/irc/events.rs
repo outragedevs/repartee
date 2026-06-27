@@ -1051,6 +1051,19 @@ fn handle_privmsg(
     let (nick, ident, host) = extract_nick_userhost(prefix);
     let target_is_channel = is_channel(target);
     let is_own = nick == our_nick;
+    // echo-message: the server echoes our own outgoing PRIVMSG back with our
+    // full server-stamped prefix. Capture it as our own handle — it drives
+    // the recipient-keyed DM E2E context and tracks vhost changes live.
+    if is_own
+        && !ident.is_empty()
+        && !host.is_empty()
+        && let Some(conn) = state.connections.get_mut(conn_id)
+    {
+        let h = format!("{ident}@{host}");
+        if conn.own_handle.as_deref() != Some(h.as_str()) {
+            conn.own_handle = Some(h);
+        }
+    }
     let flood_exempt =
         !is_own && matches_mask_patterns(&state.flood_exemptions, &nick, Some(&ident), Some(&host));
 
@@ -1865,6 +1878,17 @@ fn handle_chghost(
     };
 
     let nick_lower = nick.to_lowercase();
+
+    // Our own CHGHOST: keep our tracked handle current (vhost from services,
+    // oper, etc.) so the recipient-keyed DM context follows.
+    if state
+        .connections
+        .get(conn_id)
+        .is_some_and(|c| c.nick.eq_ignore_ascii_case(&nick))
+        && let Some(conn) = state.connections.get_mut(conn_id)
+    {
+        conn.own_handle = Some(format!("{new_user}@{new_host}"));
+    }
 
     // Update ident/host in all shared buffers
     for buf in state.buffers.values_mut() {
@@ -4191,10 +4215,26 @@ fn parse_userhost_reply(entry: &str) -> Option<(String, String)> {
 }
 
 fn handle_userhost_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
-    if state.pending_userhost_requests.is_empty() || args.len() < 2 {
+    if args.len() < 2 {
         return;
     }
     let replies = args[1..].join(" ");
+    // Seed our own handle from any reply entry matching our nick, regardless
+    // of pending requests — a self-USERHOST on connect carries no pending
+    // request but must still populate the recipient-keyed DM context.
+    if let Some(our_nick) = state.connections.get(conn_id).map(|c| c.nick.clone()) {
+        for entry in replies.split_whitespace() {
+            if let Some((nick, handle)) = parse_userhost_reply(entry)
+                && nick.eq_ignore_ascii_case(&our_nick)
+                && let Some(conn) = state.connections.get_mut(conn_id)
+            {
+                conn.own_handle = Some(handle);
+            }
+        }
+    }
+    if state.pending_userhost_requests.is_empty() {
+        return;
+    }
     for entry in replies.split_whitespace() {
         let Some((nick, handle)) = parse_userhost_reply(entry) else {
             continue;
@@ -4515,6 +4555,7 @@ mod tests {
             id: "test".to_string(),
             label: "TestServer".to_string(),
             status: ConnectionStatus::Connected,
+            own_handle: None,
             nick: "me".to_string(),
             user_modes: String::new(),
             isupport: HashMap::new(),
@@ -5756,6 +5797,52 @@ mod tests {
 
         let buf = state.buffers.get("test/bob").unwrap();
         assert_eq!(buf.peer_handle.as_deref(), Some("~bob@user/bob"));
+    }
+
+    // === own-handle tracking (for recipient-keyed DM E2E) ===
+
+    #[test]
+    fn own_handle_captured_from_echo_message() {
+        let mut state = make_test_state(); // nick "me", conn "test"
+        // echo-message echoes our own outgoing PM back with our full prefix.
+        let msg = make_irc_msg(
+            Some("me!~me@host.example"),
+            Command::PRIVMSG("bob".into(), "hi".into()),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+        assert_eq!(
+            state.connections.get("test").unwrap().own_handle.as_deref(),
+            Some("~me@host.example")
+        );
+    }
+
+    #[test]
+    fn own_handle_captured_from_own_chghost() {
+        let mut state = make_test_state();
+        let msg = make_irc_msg(
+            Some("me!~me@old.host"),
+            Command::CHGHOST("~me".into(), "user/me".into()),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+        assert_eq!(
+            state.connections.get("test").unwrap().own_handle.as_deref(),
+            Some("~me@user/me")
+        );
+    }
+
+    #[test]
+    fn own_handle_captured_from_self_userhost_reply() {
+        let mut state = make_test_state();
+        // RPL_USERHOST with no pending request must still seed our own handle.
+        handle_userhost_reply(
+            &mut state,
+            "test",
+            &["me".to_string(), "me=+~me@host.example".to_string()],
+        );
+        assert_eq!(
+            state.connections.get("test").unwrap().own_handle.as_deref(),
+            Some("~me@host.example")
+        );
     }
 
     #[test]
@@ -7535,6 +7622,7 @@ mod tests {
             id: "other".into(),
             label: "Other".into(),
             status: ConnectionStatus::Connected,
+            own_handle: None,
             nick: "me".into(),
             user_modes: String::new(),
             isupport: HashMap::new(),

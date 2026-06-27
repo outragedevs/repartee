@@ -881,6 +881,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines, reason = "flat fixture; one line over after own_handle field")]
     fn netsplit_batch_produces_summary() {
         let mut state = AppState::new();
         let conn_id = "test";
@@ -890,6 +891,7 @@ mod tests {
             id: conn_id.to_string(),
             label: "Test".to_string(),
             status: crate::state::connection::ConnectionStatus::Connected,
+            own_handle: None,
             nick: "me".to_string(),
             user_modes: String::new(),
             isupport: HashMap::new(),
@@ -1144,6 +1146,7 @@ mod tests {
             id: conn_id.to_string(),
             label: "libera".to_string(),
             status: crate::state::connection::ConnectionStatus::Connected,
+            own_handle: None,
             nick: "me".to_string(),
             user_modes: String::new(),
             isupport: HashMap::new(),
@@ -1923,6 +1926,7 @@ mod tests {
             id: conn_id.to_string(),
             label: "Test".to_string(),
             status: crate::state::connection::ConnectionStatus::Connected,
+            own_handle: None,
             nick: "me".to_string(),
             user_modes: String::new(),
             isupport: HashMap::new(),

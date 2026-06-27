@@ -853,6 +853,7 @@ mod tests {
             id: "libera".to_string(),
             label: "Libera".to_string(),
             status: ConnectionStatus::Connected,
+            own_handle: None,
             nick: "testuser".to_string(),
             user_modes: String::new(),
             isupport: HashMap::new(),
