@@ -4265,6 +4265,112 @@ fn handle_userhost_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
     }
 }
 
+/// Format the human-readable body for a TOFU/trust change, WITHOUT the
+/// `[E2E] ` banner. Returns `None` for `Known`/`New` (which never surface a
+/// user notice).
+///
+/// The banner is omitted deliberately: the live render path applies the
+/// theme's `e2e_warning` / `e2e_error` template (`%Z..[E2E]%N $*`), which
+/// prepends `[E2E]` itself. [`e2e_event_message`] re-adds the banner to the
+/// stored `text` for the backlog/fallback path, where `event_key` is
+/// stripped and `text` is rendered verbatim.
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "exercised by the ui::message_line render-roundtrip regression test"
+)]
+pub(crate) fn trust_change_body(
+    change: &crate::e2e::manager::TrustChange,
+) -> Option<(String, &'static str)> {
+    use crate::e2e::manager::TrustChange;
+    let pair = match change {
+        TrustChange::FingerprintChanged {
+            handle,
+            old_fp,
+            new_fp,
+        } => {
+            let old_hex = hex::encode(old_fp);
+            let new_hex = hex::encode(new_fp);
+            let short_old = &old_hex[..old_hex.len().min(16)];
+            let short_new = &new_hex[..new_hex.len().min(16)];
+            (
+                format!(
+                    "WARNING: {handle} identity key has CHANGED\n      \
+                     old fp: {short_old}\n      \
+                     new fp: {short_new}\n      \
+                     run /e2e reverify {handle} to accept the new key"
+                ),
+                "e2e_error",
+            )
+        }
+        TrustChange::HandleChanged {
+            old_handle,
+            new_handle,
+            fingerprint,
+        } => {
+            let fp_hex = hex::encode(fingerprint);
+            let short = &fp_hex[..fp_hex.len().min(16)];
+            (
+                format!(
+                    "notice: known key {short} appeared under new handle\n      \
+                     old handle: {old_handle}\n      \
+                     new handle: {new_handle}\n      \
+                     run /e2e reverify {new_handle} to accept"
+                ),
+                "e2e_warning",
+            )
+        }
+        TrustChange::Revoked {
+            handle,
+            fingerprint,
+        } => {
+            let fp_hex = hex::encode(fingerprint);
+            let short = &fp_hex[..fp_hex.len().min(16)];
+            (
+                format!(
+                    "ERROR: peer {handle} (fp={short}) is REVOKED; \
+                     handshake refused. run /e2e unrevoke {handle} to restore"
+                ),
+                "e2e_error",
+            )
+        }
+        TrustChange::Known | TrustChange::New => return None,
+    };
+    Some(pair)
+}
+
+/// Build a themed `[E2E]` event line. `body` must NOT include the `[E2E] `
+/// banner — the theme's `e2e_*` template (`[E2E] $*`) prepends it on the
+/// live render path. We store `text = "[E2E] {body}"` for the
+/// storage/backlog fallback (where `event_key` is stripped and `text` is
+/// rendered verbatim) and pass `body` through `event_params` so the live
+/// template's `$*` expands to the full message instead of collapsing to a
+/// bare `[E2E]`.
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "exercised by the ui::message_line render-roundtrip regression test"
+)]
+pub(crate) fn e2e_event_message(
+    id: u64,
+    body: String,
+    event_key: &str,
+    highlight: bool,
+) -> Message {
+    Message {
+        id,
+        timestamp: Utc::now(),
+        message_type: MessageType::Event,
+        nick: None,
+        nick_mode: None,
+        text: format!("[E2E] {body}"),
+        highlight,
+        event_key: Some(event_key.to_string()),
+        event_params: Some(vec![body]),
+        log_msg_id: None,
+        log_ref_id: None,
+        tags: None,
+    }
+}
+
 /// Drain all pending TOFU warnings from the manager and emit them as
 /// themed `[E2E]` event messages. Each notice targets the channel the
 /// handshake referenced (from the KEYREQ/KEYRSP payload); if that channel
@@ -4275,7 +4381,6 @@ fn surface_pending_trust_changes(
     conn_id: &str,
     mgr: &crate::e2e::E2eManager,
 ) {
-    use crate::e2e::manager::TrustChange;
     let notices = mgr.take_pending_trust_changes();
     if notices.is_empty() {
         return;
@@ -4291,78 +4396,13 @@ fn surface_pending_trust_changes(
                 active_or_server_buffer(state, conn_id)
             }
         };
-        let (text, event_key) = match &notice.change {
-            TrustChange::FingerprintChanged {
-                handle,
-                old_fp,
-                new_fp,
-            } => {
-                let old_hex = hex::encode(old_fp);
-                let new_hex = hex::encode(new_fp);
-                let short_old = &old_hex[..old_hex.len().min(16)];
-                let short_new = &new_hex[..new_hex.len().min(16)];
-                (
-                    format!(
-                        "[E2E] WARNING: {handle} identity key has CHANGED\n      \
-                         old fp: {short_old}\n      \
-                         new fp: {short_new}\n      \
-                         run /e2e reverify {handle} to accept the new key"
-                    ),
-                    "e2e_error",
-                )
-            }
-            TrustChange::HandleChanged {
-                old_handle,
-                new_handle,
-                fingerprint,
-            } => {
-                let fp_hex = hex::encode(fingerprint);
-                let short = &fp_hex[..fp_hex.len().min(16)];
-                (
-                    format!(
-                        "[E2E] notice: known key {short} appeared under new handle\n      \
-                         old handle: {old_handle}\n      \
-                         new handle: {new_handle}\n      \
-                         run /e2e reverify {new_handle} to accept"
-                    ),
-                    "e2e_warning",
-                )
-            }
-            TrustChange::Revoked {
-                handle,
-                fingerprint,
-            } => {
-                let fp_hex = hex::encode(fingerprint);
-                let short = &fp_hex[..fp_hex.len().min(16)];
-                (
-                    format!(
-                        "[E2E] ERROR: peer {handle} (fp={short}) is REVOKED; \
-                         handshake refused. run /e2e unrevoke {handle} to restore"
-                    ),
-                    "e2e_error",
-                )
-            }
-            // Known / New never produce a notice but we match exhaustively.
-            TrustChange::Known | TrustChange::New => continue,
+        // Known / New never produce a notice; everything else carries the
+        // body through event_params so the live theme template renders it.
+        let Some((body, event_key)) = trust_change_body(&notice.change) else {
+            continue;
         };
         let id = state.next_message_id();
-        state.add_message(
-            &target_buffer,
-            Message {
-                id,
-                timestamp: Utc::now(),
-                message_type: MessageType::Event,
-                nick: None,
-                nick_mode: None,
-                text,
-                highlight: true,
-                event_key: Some(event_key.to_string()),
-                event_params: None,
-                log_msg_id: None,
-                log_ref_id: None,
-                tags: None,
-            },
-        );
+        state.add_message(&target_buffer, e2e_event_message(id, body, event_key, true));
     }
 }
 
@@ -4391,8 +4431,8 @@ fn surface_pending_accept_requests(
                 active_or_server_buffer(state, conn_id)
             }
         };
-        let text = format!(
-            "[E2E] Pending key exchange from {who} for {channel}.\n      \
+        let body = format!(
+            "Pending key exchange from {who} for {channel}.\n      \
              Run /e2e accept <nick> or /e2e decline <nick>.",
             who = req.nick.as_ref().map_or_else(
                 || req.handle.clone(),
@@ -4403,20 +4443,7 @@ fn surface_pending_accept_requests(
         let id = state.next_message_id();
         state.add_message(
             &target_buffer,
-            Message {
-                id,
-                timestamp: Utc::now(),
-                message_type: MessageType::Event,
-                nick: None,
-                nick_mode: None,
-                text,
-                highlight: true,
-                event_key: Some("e2e_pending_accept".to_string()),
-                event_params: None,
-                log_msg_id: None,
-                log_ref_id: None,
-                tags: None,
-            },
+            e2e_event_message(id, body, "e2e_pending_accept", true),
         );
     }
 }
@@ -4428,6 +4455,48 @@ mod tests {
     use chrono::{Datelike, Timelike};
     use irc::proto::Prefix;
     use std::collections::HashMap;
+
+    #[test]
+    fn trust_change_body_handle_changed_excludes_banner_and_carries_details() {
+        use crate::e2e::manager::TrustChange;
+        let (body, key) = trust_change_body(&TrustChange::HandleChanged {
+            old_handle: "~r@a.host".to_string(),
+            new_handle: "~r@b.host".to_string(),
+            fingerprint: [0xAB; 16],
+        })
+        .expect("HandleChanged must produce a notice");
+        assert_eq!(key, "e2e_warning");
+        // The theme's e2e_* template prepends "[E2E]"; baking it into the
+        // body would double the banner on the live path.
+        assert!(!body.contains("[E2E]"), "body must not embed banner: {body}");
+        assert!(body.contains("appeared under new handle"));
+        assert!(body.contains("~r@a.host"));
+        assert!(body.contains("~r@b.host"));
+    }
+
+    #[test]
+    fn trust_change_body_known_and_new_produce_no_notice() {
+        use crate::e2e::manager::TrustChange;
+        assert!(trust_change_body(&TrustChange::Known).is_none());
+        assert!(trust_change_body(&TrustChange::New).is_none());
+    }
+
+    #[test]
+    fn e2e_event_message_carries_body_in_event_params() {
+        // Regression guard for the empty-[E2E] live-render bug: the body MUST
+        // be in event_params so the theme template's `$*` expands to it.
+        let msg = e2e_event_message(7, "WARNING: key changed".to_string(), "e2e_error", true);
+        assert!(matches!(msg.message_type, MessageType::Event));
+        assert_eq!(msg.event_key.as_deref(), Some("e2e_error"));
+        assert_eq!(
+            msg.event_params,
+            Some(vec!["WARNING: key changed".to_string()]),
+            "body must travel through event_params for the live theme template"
+        );
+        // Stored text keeps the banner for the backlog/fallback path, where
+        // event_key is stripped and `text` is rendered verbatim.
+        assert_eq!(msg.text, "[E2E] WARNING: key changed");
+    }
 
     #[expect(
         clippy::too_many_lines,

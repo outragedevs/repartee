@@ -443,6 +443,43 @@ mod tests {
     }
 
     #[test]
+    fn e2e_trust_notice_renders_full_body_live() {
+        // End-to-end regression for the empty-[E2E] bug: a trust-change notice
+        // built by the production helper must render its full body on the LIVE
+        // path (theme template `[E2E] $*`), not collapse to a bare "[E2E]".
+        use crate::e2e::manager::TrustChange;
+        let (body, key) = crate::irc::events::trust_change_body(&TrustChange::HandleChanged {
+            old_handle: "~r@a.host".to_string(),
+            new_handle: "~r@b.host".to_string(),
+            fingerprint: [0xCD; 16],
+        })
+        .expect("HandleChanged must produce a notice");
+        let msg = crate::irc::events::e2e_event_message(1, body, key, true);
+        let mut theme = default_theme();
+        // Mirror themes/default.theme: the live path only collapses to a bare
+        // "[E2E]" when the theme actually defines the e2e_* template (which
+        // expands `$*` from event_params). The built-in fallback omits it.
+        theme
+            .formats
+            .events
+            .insert("e2e_warning".to_string(), "%Ze0af68[E2E]%N $*".to_string());
+        let config = default_config();
+        let line = render_message(&msg, false, &theme, &config, None, None);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(
+            text.contains("appeared under new handle"),
+            "live render lost the notice body: {text:?}"
+        );
+        assert!(
+            text.contains("~r@b.host"),
+            "live render lost the new handle: {text:?}"
+        );
+        // The banner must appear exactly once (template prepends it; the body
+        // must not embed a second copy).
+        assert_eq!(text.matches("[E2E]").count(), 1, "banner doubled: {text:?}");
+    }
+
+    #[test]
     fn render_message_with_nick_color_override() {
         let msg = test_message("alice", "hello", MessageType::Message);
         let mut theme = default_theme();
