@@ -876,12 +876,15 @@ fn e2e_status(app: &mut App) {
     let fp_hex = fingerprint_hex(&fp);
     let sas = fingerprint_bip39(&fp).unwrap_or_else(|_| "—".into());
 
-    // Current channel (if any) — used for the per-channel summary row.
+    // Per-channel summary row. The outgoing config is keyed by @<peer>; the
+    // trusted-peer count comes from the incoming sessions, keyed by @<own>
+    // for a DM (recipient-keyed) — must match /e2e list, not the config key.
     let chan = current_e2e_context(app);
+    let own_chan = current_e2e_own_context(app);
     let chan_cfg: Option<ChannelConfig> = chan
         .as_ref()
         .and_then(|c| mgr.keyring().get_channel_config(c).ok().flatten());
-    let peer_count = chan
+    let peer_count = own_chan
         .as_ref()
         .and_then(|c| mgr.keyring().list_trusted_peers_for_channel(c).ok())
         .map_or(0usize, |v| v.len());
