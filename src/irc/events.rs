@@ -1038,6 +1038,18 @@ pub fn ingest_chathistory_batch(
 
 // === Private handlers ===
 
+/// Record our own server-stamped `ident@host` for a connection, de-duplicated.
+/// The per-source "is this us?" gate stays at each call site (echo-message,
+/// self-USERHOST, own CHGHOST); only the store is centralized so the capture
+/// paths stay consistent. Drives the recipient-keyed DM E2E context.
+fn set_own_handle(state: &mut AppState, conn_id: &str, handle: String) {
+    if let Some(conn) = state.connections.get_mut(conn_id)
+        && conn.own_handle.as_deref() != Some(handle.as_str())
+    {
+        conn.own_handle = Some(handle);
+    }
+}
+
 #[expect(clippy::too_many_lines, reason = "linear message handler")]
 fn handle_privmsg(
     state: &mut AppState,
@@ -1051,18 +1063,12 @@ fn handle_privmsg(
     let (nick, ident, host) = extract_nick_userhost(prefix);
     let target_is_channel = is_channel(target);
     let is_own = nick == our_nick;
+    let sender_handle = format!("{ident}@{host}");
     // echo-message: the server echoes our own outgoing PRIVMSG back with our
     // full server-stamped prefix. Capture it as our own handle — it drives
     // the recipient-keyed DM E2E context and tracks vhost changes live.
-    if is_own
-        && !ident.is_empty()
-        && !host.is_empty()
-        && let Some(conn) = state.connections.get_mut(conn_id)
-    {
-        let h = format!("{ident}@{host}");
-        if conn.own_handle.as_deref() != Some(h.as_str()) {
-            conn.own_handle = Some(h);
-        }
+    if is_own && !ident.is_empty() && !host.is_empty() {
+        set_own_handle(state, conn_id, sender_handle.clone());
     }
     let flood_exempt =
         !is_own && matches_mask_patterns(&state.flood_exemptions, &nick, Some(&ident), Some(&host));
@@ -1087,7 +1093,6 @@ fn handle_privmsg(
     // peer's nick), so two peers sharing a nick across different hosts
     // live under separate session rows. For channels we pass the target
     // through unchanged. `context_key` encapsulates both cases.
-    let sender_handle = format!("{ident}@{host}");
     let decrypt_context = crate::e2e::context_key(target, &sender_handle);
     let decrypted_owned = try_decrypt_e2e(
         state,
@@ -1885,9 +1890,8 @@ fn handle_chghost(
         .connections
         .get(conn_id)
         .is_some_and(|c| c.nick.eq_ignore_ascii_case(&nick))
-        && let Some(conn) = state.connections.get_mut(conn_id)
     {
-        conn.own_handle = Some(format!("{new_user}@{new_host}"));
+        set_own_handle(state, conn_id, format!("{new_user}@{new_host}"));
     }
 
     // Update ident/host in all shared buffers
@@ -4226,9 +4230,8 @@ fn handle_userhost_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
         for entry in replies.split_whitespace() {
             if let Some((nick, handle)) = parse_userhost_reply(entry)
                 && nick.eq_ignore_ascii_case(&our_nick)
-                && let Some(conn) = state.connections.get_mut(conn_id)
             {
-                conn.own_handle = Some(handle);
+                set_own_handle(state, conn_id, handle);
             }
         }
     }
