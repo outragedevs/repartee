@@ -95,6 +95,52 @@ fn full_handshake_and_encrypted_exchange() {
 }
 
 #[test]
+fn dm_round_trip_recipient_keyed_both_directions() {
+    // A DM is recipient-keyed: the context for a message is the RECIPIENT's
+    // handle. So Alice->Bob uses @<bob_handle> on BOTH sides and Bob->Alice
+    // uses @<alice_handle>. The recipient stamps the KEYREQ c= with its own
+    // handle; both sides use it verbatim. This proves the manager needs no
+    // change for DMs — only the IRC callers must compute the recipient-keyed
+    // context (own handle on decrypt, peer handle on encrypt).
+    let alice = make_manager();
+    let bob = make_manager();
+    let alice_handle = "~alice@a.host";
+    let bob_handle = "~bob@b.host";
+    let ctx_to_bob = format!("@{bob_handle}"); // recipient = Bob
+    let ctx_to_alice = format!("@{alice_handle}"); // recipient = Alice
+
+    enable_channel(&alice, &ctx_to_bob, ChannelMode::AutoAccept);
+    enable_channel(&bob, &ctx_to_alice, ChannelMode::AutoAccept);
+
+    // Dir Alice->Bob: Bob (the recipient) sends a KEYREQ stamped with his own
+    // handle; Alice responds; Bob installs the incoming session under @<bob>.
+    let req = bob.build_keyreq(&ctx_to_bob).unwrap();
+    let rsp = alice.handle_keyreq(bob_handle, &req).unwrap().unwrap();
+    bob.handle_keyrsp(alice_handle, &rsp).unwrap();
+    let wire = alice.encrypt_outgoing(&ctx_to_bob, "hi bob").unwrap();
+    match bob
+        .decrypt_incoming(alice_handle, &ctx_to_bob, &wire[0])
+        .unwrap()
+    {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "hi bob"),
+        other => panic!("A->B: expected Plaintext, got {other:?}"),
+    }
+
+    // Dir Bob->Alice: symmetric, recipient = Alice.
+    let req2 = alice.build_keyreq(&ctx_to_alice).unwrap();
+    let rsp2 = bob.handle_keyreq(alice_handle, &req2).unwrap().unwrap();
+    alice.handle_keyrsp(bob_handle, &rsp2).unwrap();
+    let wire2 = bob.encrypt_outgoing(&ctx_to_alice, "hey alice").unwrap();
+    match alice
+        .decrypt_incoming(bob_handle, &ctx_to_alice, &wire2[0])
+        .unwrap()
+    {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "hey alice"),
+        other => panic!("B->A: expected Plaintext, got {other:?}"),
+    }
+}
+
+#[test]
 fn strict_handle_check_rejects_wrong_sender() {
     let alice = make_manager();
     let bob = make_manager();
