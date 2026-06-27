@@ -286,15 +286,31 @@ pub(crate) fn cmd_e2e(app: &mut App, args: &[String]) {
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
-/// Pull the active channel name from the current buffer, if it is one.
-fn current_channel(app: &App) -> Option<String> {
+/// Resolve the E2E keyring/handshake context for a buffer. Channels use
+/// their name verbatim; queries (DMs) use the `@<peer_handle>` pseudochannel
+/// (spec §6) so the command layer keys exactly the rows the encrypt/decrypt
+/// path reads — never the bare nick, which never lined up and forced the
+/// "refuse to send if only a bare-nick config exists" band-aid. Returns
+/// `None` for a query whose peer handle isn't known yet (the peer hasn't
+/// spoken), or for a non-channel/query buffer.
+fn e2e_context_for(
+    buffer_type: &crate::state::buffer::BufferType,
+    name: &str,
+    peer_handle: Option<&str>,
+) -> Option<String> {
     use crate::state::buffer::BufferType;
-    let buf = app.state.active_buffer()?;
-    if matches!(buf.buffer_type, BufferType::Channel | BufferType::Query) {
-        Some(buf.name.clone())
-    } else {
-        None
+    match buffer_type {
+        BufferType::Channel => Some(name.to_string()),
+        BufferType::Query => peer_handle.map(|h| crate::e2e::context_key(name, h)),
+        _ => None,
     }
+}
+
+/// E2E keyring/handshake context for the active buffer (see
+/// [`e2e_context_for`]).
+fn current_e2e_context(app: &App) -> Option<String> {
+    let buf = app.state.active_buffer()?;
+    e2e_context_for(&buf.buffer_type, &buf.name, buf.peer_handle.as_deref())
 }
 
 fn require_mgr(app: &mut App) -> Option<std::sync::Arc<crate::e2e::E2eManager>> {
@@ -333,8 +349,8 @@ fn warn(app: &mut App, msg: &str) {
 // ─── on / off / mode ─────────────────────────────────────────────────────────
 
 fn e2e_on(app: &mut App) {
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e on: no active channel");
+    let Some(chan) = current_e2e_context(app) else {
+        err(app, "/e2e on: no active channel or known query peer");
         return;
     };
     let Some(mgr) = require_mgr(app) else { return };
@@ -351,8 +367,8 @@ fn e2e_on(app: &mut App) {
 }
 
 fn e2e_off(app: &mut App) {
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e off: no active channel");
+    let Some(chan) = current_e2e_context(app) else {
+        err(app, "/e2e off: no active channel or known query peer");
         return;
     };
     let Some(mgr) = require_mgr(app) else { return };
@@ -369,8 +385,8 @@ fn e2e_off(app: &mut App) {
 }
 
 fn e2e_mode(app: &mut App, mode_str: &str) {
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e mode: no active channel");
+    let Some(chan) = current_e2e_context(app) else {
+        err(app, "/e2e mode: no active channel or known query peer");
         return;
     };
     let mode = match parse_mode(mode_str) {
@@ -396,8 +412,8 @@ fn e2e_mode(app: &mut App, mode_str: &str) {
 // ─── trust transitions ───────────────────────────────────────────────────────
 
 fn e2e_accept(app: &mut App, nick: &str) {
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e accept: no active channel");
+    let Some(chan) = current_e2e_context(app) else {
+        err(app, "/e2e accept: no active channel or known query peer");
         return;
     };
     // We match by nick — the keyring key is ident@host, but at command
@@ -467,8 +483,8 @@ fn e2e_accept(app: &mut App, nick: &str) {
 }
 
 fn e2e_decline(app: &mut App, nick: &str) {
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e decline: no active channel");
+    let Some(chan) = current_e2e_context(app) else {
+        err(app, "/e2e decline: no active channel or known query peer");
         return;
     };
     let Some(handle) = require_handle_for_nick(app, &chan, nick) else {
@@ -486,8 +502,8 @@ fn e2e_decline(app: &mut App, nick: &str) {
 }
 
 fn e2e_revoke(app: &mut App, nick: &str) {
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e revoke: no active channel");
+    let Some(chan) = current_e2e_context(app) else {
+        err(app, "/e2e revoke: no active channel or known query peer");
         return;
     };
     let Some(handle) = require_handle_for_nick(app, &chan, nick) else {
@@ -519,8 +535,8 @@ fn e2e_revoke(app: &mut App, nick: &str) {
 }
 
 fn e2e_unrevoke(app: &mut App, nick: &str) {
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e unrevoke: no active channel");
+    let Some(chan) = current_e2e_context(app) else {
+        err(app, "/e2e unrevoke: no active channel or known query peer");
         return;
     };
     let Some(handle) = require_handle_for_nick(app, &chan, nick) else {
@@ -539,10 +555,10 @@ fn e2e_unrevoke(app: &mut App, nick: &str) {
 
 fn e2e_forget(app: &mut App, target: &str, all: bool) {
     let channel = if all {
-        current_channel(app)
+        current_e2e_context(app)
     } else {
-        let Some(chan) = current_channel(app) else {
-            err(app, "/e2e forget: no active channel");
+        let Some(chan) = current_e2e_context(app) else {
+            err(app, "/e2e forget: no active channel or known query peer");
             return;
         };
         Some(chan)
@@ -601,7 +617,7 @@ fn perform_e2e_forget(
         mgr.forget_peer_everywhere(handle)
     } else {
         let Some(channel) = channel else {
-            err(app, "/e2e forget: no active channel");
+            err(app, "/e2e forget: no active channel or known query peer");
             app.state.active_buffer_id = current_id;
             return;
         };
@@ -627,8 +643,8 @@ fn perform_e2e_forget(
 // ─── handshake / rotate ──────────────────────────────────────────────────────
 
 fn e2e_handshake(app: &mut App, nick: &str) {
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e handshake: no active channel");
+    let Some(chan) = current_e2e_context(app) else {
+        err(app, "/e2e handshake: no active channel or known query peer");
         return;
     };
     // Grab the connection id before the `require_mgr` mutable borrow
@@ -655,8 +671,8 @@ fn e2e_handshake(app: &mut App, nick: &str) {
 }
 
 fn e2e_rotate(app: &mut App) {
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e rotate: no active channel");
+    let Some(chan) = current_e2e_context(app) else {
+        err(app, "/e2e rotate: no active channel or known query peer");
         return;
     };
     let Some(mgr) = require_mgr(app) else { return };
@@ -674,8 +690,8 @@ fn e2e_list(app: &mut App, all: bool) {
         e2e_list_all(app);
         return;
     }
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e list: no active channel");
+    let Some(chan) = current_e2e_context(app) else {
+        err(app, "/e2e list: no active channel or known query peer");
         return;
     };
     let Some(mgr) = require_mgr(app) else { return };
@@ -781,7 +797,7 @@ fn e2e_status(app: &mut App) {
     let sas = fingerprint_bip39(&fp).unwrap_or_else(|_| "—".into());
 
     // Current channel (if any) — used for the per-channel summary row.
-    let chan = current_channel(app);
+    let chan = current_e2e_context(app);
     let chan_cfg: Option<ChannelConfig> = chan
         .as_ref()
         .and_then(|c| mgr.keyring().get_channel_config(c).ok().flatten());
@@ -814,7 +830,7 @@ fn format_status_line(
     peer_count: usize,
 ) -> String {
     match (chan, cfg) {
-        (None, _) => format!("  {C_CMD}channel{C_RST}      {C_DIM}(no active channel){C_RST}"),
+        (None, _) => format!("  {C_CMD}channel{C_RST}      {C_DIM}(no active channel or known query peer){C_RST}"),
         (Some(c), None) => {
             format!("  {C_CMD}channel{C_RST}      {C_TEXT}{c}{C_RST}  {C_DIM}[off]{C_RST}")
         }
@@ -846,8 +862,8 @@ fn e2e_fingerprint(app: &mut App) {
 }
 
 fn e2e_verify(app: &mut App, nick: &str) {
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e verify: no active channel");
+    let Some(chan) = current_e2e_context(app) else {
+        err(app, "/e2e verify: no active channel or known query peer");
         return;
     };
     let Some(handle) = require_handle_for_nick(app, &chan, nick) else {
@@ -901,8 +917,8 @@ fn format_verify_block(
 }
 
 fn e2e_reverify(app: &mut App, nick: &str) {
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e reverify: no active channel");
+    let Some(chan) = current_e2e_context(app) else {
+        err(app, "/e2e reverify: no active channel or known query peer");
         return;
     };
     // Strict handle resolution — see `require_handle_for_nick` for the
@@ -1204,6 +1220,29 @@ mod tests {
         x.to_string()
     }
 
+    // ---------- DM keying context ----------
+
+    #[test]
+    fn e2e_context_keys_dm_by_peer_handle_not_bare_nick() {
+        use crate::state::buffer::BufferType;
+        // Channel: name verbatim.
+        assert_eq!(
+            e2e_context_for(&BufferType::Channel, "#rust", None).as_deref(),
+            Some("#rust")
+        );
+        // Query with a known peer handle: the `@<peer_handle>` pseudochannel
+        // (matching the encrypt/decrypt path), NOT the bare nick.
+        assert_eq!(
+            e2e_context_for(&BufferType::Query, "bob", Some("~bob@user/bob")).as_deref(),
+            Some("@~bob@user/bob")
+        );
+        // Query whose handle isn't known yet: no context — the command must
+        // refuse rather than write a bare-nick row the hot path never reads.
+        assert_eq!(e2e_context_for(&BufferType::Query, "bob", None), None);
+        // Non-channel/query buffers have no E2E context.
+        assert_eq!(e2e_context_for(&BufferType::Mentions, "Mentions", None), None);
+    }
+
     // ---------- case-insensitive dispatch ----------
 
     #[test]
@@ -1427,7 +1466,7 @@ mod tests {
     #[test]
     fn test_format_status_line_no_channel() {
         let line = format_status_line(None, None, 0);
-        assert!(line.contains("no active channel"));
+        assert!(line.contains("no active channel or known query peer"));
         assert!(line.contains("channel"));
     }
 
