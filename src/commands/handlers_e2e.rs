@@ -290,18 +290,23 @@ pub(crate) fn cmd_e2e(app: &mut App, args: &[String]) {
 /// their name verbatim; queries (DMs) use the `@<peer_handle>` pseudochannel
 /// (spec §6) so the command layer keys exactly the rows the encrypt/decrypt
 /// path reads — never the bare nick, which never lined up and forced the
-/// "refuse to send if only a bare-nick config exists" band-aid. Returns
-/// `None` for a query whose peer handle isn't known yet (the peer hasn't
-/// spoken), or for a non-channel/query buffer.
+/// "refuse to send if only a bare-nick config exists" band-aid. A query
+/// prefers the live `peer_handle`, falling back to `cached_handle` (the
+/// keyring's last-known handle for the nick) so `/e2e` stays usable before
+/// the peer speaks this session. Returns `None` for a query with neither
+/// handle known, or for a non-channel/query buffer.
 fn e2e_context_for(
     buffer_type: &crate::state::buffer::BufferType,
     name: &str,
     peer_handle: Option<&str>,
+    cached_handle: Option<&str>,
 ) -> Option<String> {
     use crate::state::buffer::BufferType;
     match buffer_type {
         BufferType::Channel => Some(name.to_string()),
-        BufferType::Query => peer_handle.map(|h| crate::e2e::context_key(name, h)),
+        BufferType::Query => peer_handle
+            .or(cached_handle)
+            .map(|h| crate::e2e::context_key(name, h)),
         _ => None,
     }
 }
@@ -310,7 +315,22 @@ fn e2e_context_for(
 /// [`e2e_context_for`]).
 fn current_e2e_context(app: &App) -> Option<String> {
     let buf = app.state.active_buffer()?;
-    e2e_context_for(&buf.buffer_type, &buf.name, buf.peer_handle.as_deref())
+    // When the peer hasn't spoken this session (so `peer_handle` is `None`),
+    // fall back to the keyring's last-known handle for this nick — otherwise
+    // `/e2e` would refuse in a query whose E2E rows already exist.
+    let cached = if matches!(buf.buffer_type, crate::state::buffer::BufferType::Query)
+        && buf.peer_handle.is_none()
+    {
+        resolve_cached_handle_by_nick(app, &buf.name).and_then(Result::ok)
+    } else {
+        None
+    };
+    e2e_context_for(
+        &buf.buffer_type,
+        &buf.name,
+        buf.peer_handle.as_deref(),
+        cached.as_deref(),
+    )
 }
 
 fn require_mgr(app: &mut App) -> Option<std::sync::Arc<crate::e2e::E2eManager>> {
@@ -1227,20 +1247,35 @@ mod tests {
         use crate::state::buffer::BufferType;
         // Channel: name verbatim.
         assert_eq!(
-            e2e_context_for(&BufferType::Channel, "#rust", None).as_deref(),
+            e2e_context_for(&BufferType::Channel, "#rust", None, None).as_deref(),
             Some("#rust")
         );
-        // Query with a known peer handle: the `@<peer_handle>` pseudochannel
+        // Query with a live peer handle: the `@<peer_handle>` pseudochannel
         // (matching the encrypt/decrypt path), NOT the bare nick.
         assert_eq!(
-            e2e_context_for(&BufferType::Query, "bob", Some("~bob@user/bob")).as_deref(),
+            e2e_context_for(&BufferType::Query, "bob", Some("~bob@user/bob"), None).as_deref(),
             Some("@~bob@user/bob")
         );
-        // Query whose handle isn't known yet: no context — the command must
-        // refuse rather than write a bare-nick row the hot path never reads.
-        assert_eq!(e2e_context_for(&BufferType::Query, "bob", None), None);
+        // Peer hasn't spoken this session, but the keyring still has a handle
+        // for this nick (existing E2E rows): fall back to it so /e2e stays
+        // usable instead of erroring.
+        assert_eq!(
+            e2e_context_for(&BufferType::Query, "bob", None, Some("~bob@old")).as_deref(),
+            Some("@~bob@old")
+        );
+        // The live handle wins over the cached one.
+        assert_eq!(
+            e2e_context_for(&BufferType::Query, "bob", Some("~bob@new"), Some("~bob@old")).as_deref(),
+            Some("@~bob@new")
+        );
+        // Neither known: no context — the command must refuse rather than
+        // write a bare-nick row the hot path never reads.
+        assert_eq!(e2e_context_for(&BufferType::Query, "bob", None, None), None);
         // Non-channel/query buffers have no E2E context.
-        assert_eq!(e2e_context_for(&BufferType::Mentions, "Mentions", None), None);
+        assert_eq!(
+            e2e_context_for(&BufferType::Mentions, "Mentions", None, None),
+            None
+        );
     }
 
     // ---------- case-insensitive dispatch ----------
