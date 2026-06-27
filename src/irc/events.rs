@@ -1875,6 +1875,13 @@ fn handle_chghost(
             entry.ident = Some(new_user.to_string());
             entry.host = Some(new_host.to_string());
         }
+        // A DM/query buffer caches the peer's handle outside the nicklist.
+        // It drives the E2E encrypt context, so it must track the new host
+        // (otherwise outgoing PMs would key under a stale pseudochannel and
+        // silently re-handshake or fail to decrypt on the peer's side).
+        if buf.buffer_type == BufferType::Query && buf.name.eq_ignore_ascii_case(&nick) {
+            buf.peer_handle = Some(format!("{new_user}@{new_host}"));
+        }
     }
 
     // Log a subtle event in every shared channel
@@ -5707,6 +5714,48 @@ mod tests {
         let entry = buf.users.get("alice").unwrap();
         assert_eq!(entry.ident.as_deref(), Some("newuser"));
         assert_eq!(entry.host.as_deref(), Some("newhost.example.com"));
+    }
+
+    #[test]
+    fn chghost_updates_query_peer_handle() {
+        let mut state = make_test_state();
+        // A DM/query buffer caching the peer's old handle. The peer is not in
+        // a nicklist, so the nicklist update misses it — but the E2E encrypt
+        // context keys on peer_handle and must track the new host.
+        let q_id = make_buffer_id("test", "bob");
+        state.add_buffer(Buffer {
+            id: q_id,
+            connection_id: "test".to_string(),
+            buffer_type: BufferType::Query,
+            name: "bob".to_string(),
+            messages: VecDeque::new(),
+            activity: ActivityLevel::None,
+            unread_count: 0,
+            last_read: Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
+            peer_handle: Some("~bob@old.host".to_string()),
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
+            log_initial_loaded: false,
+            pin_backlog: false,
+        });
+
+        let msg = make_irc_msg(
+            Some("bob!~bob@old.host"),
+            Command::CHGHOST("~bob".into(), "user/bob".into()),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/bob").unwrap();
+        assert_eq!(buf.peer_handle.as_deref(), Some("~bob@user/bob"));
     }
 
     #[test]
