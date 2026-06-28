@@ -4138,8 +4138,8 @@ fn try_dispatch_rpe2e_ctcp(
     let (nick, ident, host) = extract_nick_userhost(prefix);
     let sender_handle = format!("{ident}@{host}");
     // The connection's network label scopes the DM handle cache (so a same-nick
-    // peer on another network keeps its own handle). Cache the sender's handle
-    // under (network, nick) after each handshake handler below.
+    // peer on another network keeps its own handle). Used by the DM
+    // handle-change tracking below, before the handshake policy lookup.
     let network = state.connections.get(conn_id).map(|c| c.label.clone());
     let parsed = match crate::e2e::handshake::parse(inner) {
         Ok(Some(msg)) => msg,
@@ -4159,6 +4159,34 @@ fn try_dispatch_rpe2e_ctcp(
     // carried inside the payload rather than in the IRC target.
     let _ = target;
 
+    // Track the sender's current handle as a DM handle change BEFORE the
+    // handshake policy lookup. A KEYREQ/KEYRSP/REKEY can be the first signal of
+    // a peer's new host: a DM-only reconnect sends no CHGHOST (no shared
+    // channel), and the peer may re-handshake before any PRIVMSG. For a DM the
+    // handshake's `c=` context is `@<sender_handle>`, so unless the enabled DM
+    // config is first migrated from `@<old_handle>`, `effective_channel_mode`
+    // finds nothing under `req.channel` and silently drops the handshake (no
+    // KEYRSP, no trust notice). Migrating here — plus refreshing the open query
+    // buffer's `peer_handle` so the encrypt path stops keying outgoing DMs under
+    // the stale handle — mirrors what PRIVMSG/CHGHOST already do. Caching is
+    // unconditional (covers channel handshakes too), the buffer mutation only
+    // fires on an actual change.
+    if let Some(net) = network {
+        let dm_buffer_id = make_buffer_id(conn_id, &nick);
+        let prev_buffer_handle = state
+            .buffers
+            .get(&dm_buffer_id)
+            .filter(|b| b.buffer_type == BufferType::Query)
+            .and_then(|b| b.peer_handle.clone());
+        track_dm_handle_change(state, &nick, prev_buffer_handle.as_deref(), &sender_handle, &net);
+        if prev_buffer_handle.as_deref() != Some(sender_handle.as_str())
+            && let Some(buf) = state.buffers.get_mut(&dm_buffer_id)
+            && buf.buffer_type == BufferType::Query
+        {
+            buf.peer_handle = Some(sender_handle.clone());
+        }
+    }
+
     match parsed {
         HandshakeMsg::Req(req) => {
             emit_e2e_debug(
@@ -4171,9 +4199,6 @@ fn try_dispatch_rpe2e_ctcp(
                 ),
             );
             let result = mgr.handle_keyreq_with_nick(&sender_handle, Some(&nick), &req);
-            if let Some(net) = &network {
-                let _ = mgr.keyring().cache_dm_handle(net, &nick, &sender_handle);
-            }
             surface_pending_trust_changes(state, conn_id, &mgr);
             surface_pending_accept_requests(state, conn_id, &mgr);
             match result {
@@ -4252,9 +4277,6 @@ fn try_dispatch_rpe2e_ctcp(
                 ),
             );
             let result = mgr.handle_keyrsp(&sender_handle, &rsp);
-            if let Some(net) = &network {
-                let _ = mgr.keyring().cache_dm_handle(net, &nick, &sender_handle);
-            }
             surface_pending_trust_changes(state, conn_id, &mgr);
             if let Err(e) = result {
                 tracing::warn!("handle_keyrsp error: {e}");
@@ -4291,9 +4313,6 @@ fn try_dispatch_rpe2e_ctcp(
                 ),
             );
             let result = mgr.handle_rekey(&sender_handle, &rekey);
-            if let Some(net) = &network {
-                let _ = mgr.keyring().cache_dm_handle(net, &nick, &sender_handle);
-            }
             surface_pending_trust_changes(state, conn_id, &mgr);
             if let Err(e) = result {
                 tracing::warn!("handle_rekey error: {e}");
@@ -5984,6 +6003,102 @@ mod tests {
 
         let buf = state.buffers.get("test/bob").unwrap();
         assert_eq!(buf.peer_handle.as_deref(), Some("~bob@user/bob"));
+    }
+
+    #[test]
+    fn keyreq_first_signal_migrates_dm_handle_before_policy_lookup() {
+        use crate::e2e::keyring::{ChannelConfig, ChannelMode, Keyring};
+        use crate::e2e::manager::E2eManager;
+        use std::sync::{Arc, Mutex};
+
+        // Peer "alice" had an enabled DM E2E config at ~alice@old.host. She
+        // reconnects from ~alice@new.host and — with no shared channel, so no
+        // CHGHOST, and before sending any PRIVMSG — her FIRST signal of the new
+        // host is an RPE2E KEYREQ. Its recipient-keyed context is
+        // @~alice@new.host; unless the enabled config is migrated from
+        // @~alice@old.host BEFORE the policy lookup, `effective_channel_mode`
+        // finds nothing under `req.channel`, the handshake is silently dropped
+        // (no KEYRSP), and the encrypt path keeps keying on the stale handle.
+        let old_handle = "~alice@old.host";
+        let new_handle = "~alice@new.host";
+        let old_ctx = format!("@{old_handle}");
+        let new_ctx = format!("@{new_handle}");
+
+        // Bob (us): manager with the DM enabled under the OLD context only,
+        // AutoAccept so a successful lookup auto-responds with a KEYRSP.
+        let bob_conn = crate::storage::db::open_database(false).unwrap();
+        let bob = E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(bob_conn)))).unwrap();
+        bob.keyring()
+            .set_channel_config(&ChannelConfig {
+                channel: old_ctx,
+                enabled: true,
+                mode: ChannelMode::AutoAccept,
+            })
+            .unwrap();
+
+        // Alice: builds a real, signed, parseable KEYREQ stamped with her NEW
+        // handle (recipient-keyed by her own handle).
+        let alice_conn = crate::storage::db::open_database(false).unwrap();
+        let alice =
+            E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(alice_conn)))).unwrap();
+        let req = alice.build_keyreq(&new_ctx).unwrap();
+        let ctcp = alice.encode_keyreq_ctcp(&req);
+
+        // Bob's AppState: manager attached, an open query buffer for "alice"
+        // still caching her OLD handle.
+        let mut state = make_test_state();
+        state.e2e_manager = Some(Arc::new(bob));
+        state.add_buffer(Buffer {
+            id: make_buffer_id("test", "alice"),
+            connection_id: "test".to_string(),
+            buffer_type: BufferType::Query,
+            name: "alice".to_string(),
+            messages: VecDeque::new(),
+            activity: ActivityLevel::None,
+            unread_count: 0,
+            last_read: Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
+            peer_handle: Some(old_handle.to_string()),
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
+            log_initial_loaded: false,
+            pin_backlog: false,
+        });
+
+        // Deliver the KEYREQ as a NOTICE from alice's NEW host.
+        let msg = make_irc_msg(
+            Some(&format!("alice!{new_handle}")),
+            Command::NOTICE("me".into(), ctcp),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let mgr = state.e2e_manager.as_ref().unwrap();
+        // The enabled DM config followed the handle to the new context...
+        assert!(
+            mgr.keyring()
+                .get_channel_config(&new_ctx)
+                .unwrap()
+                .is_some_and(|c| c.enabled),
+            "KEYREQ-first handle change must migrate the enabled DM config to @<new>"
+        );
+        // ...so the policy lookup succeeds and a KEYRSP is queued (not dropped)...
+        assert!(
+            !state.pending_e2e_sends.is_empty(),
+            "migrated config must let the KEYREQ produce a KEYRSP instead of being silently dropped"
+        );
+        // ...and the query buffer now keys the encrypt path on the new handle.
+        assert_eq!(
+            state.buffers.get("test/alice").unwrap().peer_handle.as_deref(),
+            Some(new_handle)
+        );
     }
 
     #[test]
