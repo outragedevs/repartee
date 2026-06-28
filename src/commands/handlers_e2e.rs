@@ -674,6 +674,16 @@ fn perform_e2e_forget(
 ) {
     let current_id = app.state.active_buffer_id.clone();
     app.state.active_buffer_id = Some(target_buffer);
+    // A DM's incoming session is recipient-keyed under @<own>, while `channel`
+    // (current_e2e_context) is @<peer>. Capture the own context relative to the
+    // target buffer so the non-all path forgets BOTH — otherwise the peer's
+    // trusted incoming session survives and their messages still decrypt. For a
+    // channel own == peer == channel name, so the second forget is a no-op.
+    let own_channel = if all {
+        None
+    } else {
+        current_e2e_own_context(app)
+    };
     let Some(mgr) = require_mgr(app) else {
         app.state.active_buffer_id = current_id;
         return;
@@ -686,7 +696,14 @@ fn perform_e2e_forget(
             app.state.active_buffer_id = current_id;
             return;
         };
-        mgr.forget_peer_on_channel(handle, channel)
+        mgr.forget_peer_on_channel(handle, channel).and_then(|n| {
+            match own_channel.as_deref() {
+                Some(own) if own != channel => {
+                    mgr.forget_peer_on_channel(handle, own).map(|m| n + m)
+                }
+                _ => Ok(n),
+            }
+        })
     };
     match result {
         Ok(deleted) if all => warn(
