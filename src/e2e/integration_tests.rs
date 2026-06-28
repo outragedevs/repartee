@@ -484,6 +484,10 @@ fn import_replaces_existing_keyring_state() {
             created_at: 2_000,
         })
         .unwrap();
+    carol
+        .keyring()
+        .cache_dm_handle("StaleNet", "stale", "~stale@old.host")
+        .unwrap();
 
     let tmp = tempfile::NamedTempFile::new().unwrap();
     crate::e2e::portable::export_to_path(alice.keyring(), tmp.path()).unwrap();
@@ -529,6 +533,15 @@ fn import_replaces_existing_keyring_state() {
             .get_channel_config("#stale")
             .unwrap()
             .is_none()
+    );
+    // The stale DM handle cache from the previous keyring must be cleared, so
+    // an imported keyring can't resolve a DM under the old handle.
+    assert_eq!(
+        carol
+            .keyring()
+            .last_handle_for_nick("stale", "StaleNet")
+            .unwrap(),
+        None
     );
 }
 

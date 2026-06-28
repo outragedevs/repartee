@@ -196,6 +196,11 @@ impl Keyring {
         tx.execute("DELETE FROM e2e_outgoing_sessions", [])?;
         tx.execute("DELETE FROM e2e_incoming_sessions", [])?;
         tx.execute("DELETE FROM e2e_peers", [])?;
+        // The DM handle cache is per-(network, nick) resolution state for the
+        // OLD keyring; the snapshot carries no network, so it can't be rebuilt.
+        // Clear it so an imported keyring can't key a DM under a stale handle
+        // before the peer speaks — it re-populates observationally.
+        tx.execute("DELETE FROM e2e_dm_handle_cache", [])?;
         tx.execute("DELETE FROM e2e_identity", [])?;
 
         let (pubkey, privkey, fingerprint, created_at) = identity;
