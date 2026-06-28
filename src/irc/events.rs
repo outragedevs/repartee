@@ -1232,17 +1232,27 @@ fn handle_privmsg(
 
     // Keep the Query buffer's `peer_handle` in sync with the latest
     // server-stamped userhost. This matters when the peer reconnects from
-    // a new host — later messages will arrive with a different
-    // `ident@host`, and the cached handle must track it so the encrypt
-    // path picks up the new pseudochannel key. Never overwrite with
-    // `is_own` (echo-message) because that carries our own host.
-    if !target_is_channel
-        && !is_own
-        && let Some(buf) = state.buffers.get_mut(&buffer_id)
-    {
+    // a new host — later messages arrive with a different `ident@host`, and
+    // the cached handle must track it so the encrypt path picks up the new
+    // pseudochannel key. Never overwrite with `is_own` (echo-message) because
+    // that carries our own host. On a CHANGE, migrate the DM E2E config to the
+    // new handle (a reconnect/vhost is delivered here, not as CHGHOST) so the
+    // next DM does not silently downgrade to plaintext under the new context.
+    if !target_is_channel && !is_own {
         let new_handle = format!("{ident}@{host}");
-        if buf.peer_handle.as_deref() != Some(new_handle.as_str()) {
-            buf.peer_handle = Some(new_handle);
+        // `Some(old)` only when the handle actually changed (old may be `None`
+        // for a buffer that hadn't cached one yet); `None` = no buffer / no
+        // change → nothing to migrate.
+        let changed_from: Option<Option<String>> = if let Some(buf) =
+            state.buffers.get_mut(&buffer_id)
+            && buf.peer_handle.as_deref() != Some(new_handle.as_str())
+        {
+            Some(buf.peer_handle.replace(new_handle.clone()))
+        } else {
+            None
+        };
+        if let Some(prev) = changed_from {
+            track_dm_handle_change(state, &nick, prev.as_deref(), &new_handle);
         }
     }
 
@@ -1950,6 +1960,47 @@ pub(crate) fn migrate_dm_e2e_config(
     });
 }
 
+/// Observe that DM peer `nick`'s current handle is `new_handle` (learned from a
+/// PRIVMSG prefix or CHGHOST). Migrate an enabled DM E2E config from any
+/// previous context — the buffer's prior handle and/or the keyring's cached
+/// handle — to `@<new_handle>`, then refresh the keyring's last-handle cache so
+/// the encrypt path keys the next DM under `@<new_handle>` and finds the
+/// migrated config. Without this a handle change (reconnect / vhost, delivered
+/// as a new PRIVMSG prefix or CHGHOST) silently downgrades the DM to plaintext.
+fn track_dm_handle_change(
+    state: &AppState,
+    nick: &str,
+    prev_buffer_handle: Option<&str>,
+    new_handle: &str,
+) {
+    let Some(mgr) = state.e2e_manager.clone() else {
+        return;
+    };
+    let new_ctx = crate::e2e::context_key(nick, new_handle);
+    // Old context candidates: the buffer's prior handle and the keyring's
+    // cached handle for this nick (covers `/e2e on` under a cached handle the
+    // buffer never held).
+    let mut sources: Vec<String> = Vec::new();
+    if let Some(h) = prev_buffer_handle
+        && h != new_handle
+    {
+        sources.push(h.to_string());
+    }
+    if let Ok(Some(cached)) = mgr.keyring().last_handle_for_nick(nick)
+        && cached != new_handle
+        && !sources.contains(&cached)
+    {
+        sources.push(cached);
+    }
+    for old_h in sources {
+        let old_ctx = crate::e2e::context_key(nick, &old_h);
+        migrate_dm_e2e_config(&mgr, &old_ctx, &new_ctx);
+    }
+    // Refresh the cache so the encrypt path's peer-not-spoken fallback resolves
+    // @<new>, not a stale @<old> (which migration just disabled).
+    let _ = mgr.keyring().bump_last_handle(nick, new_handle);
+}
+
 /// Handle `IRCv3` `chghost`: `:nick!olduser@oldhost CHGHOST newuser newhost`
 ///
 /// When a user's ident or hostname changes, the server sends CHGHOST to every
@@ -2004,23 +2055,16 @@ fn handle_chghost(
         }
     }
 
-    // Migrate an enabled DM E2E config from the OLD handle (from the CHGHOST
-    // prefix) to the new one — INDEPENDENT of whether the peer's query buffer
-    // is open — so a vhost change never downgrades the next DM to plaintext
-    // (the encrypt path keys by @<new_handle> and would otherwise find no
-    // config). `migrate_dm_e2e_config` is a no-op when there is no enabled
-    // @<old> config, so attempting it unconditionally is safe.
-    if !old_ident.is_empty()
-        && !old_host.is_empty()
-        && let Some(mgr) = state.e2e_manager.clone()
-    {
-        let old_handle = format!("{old_ident}@{old_host}");
-        if old_handle != new_handle {
-            let old_ctx = crate::e2e::context_key(&nick, &old_handle);
-            let new_ctx = crate::e2e::context_key(&nick, &new_handle);
-            migrate_dm_e2e_config(&mgr, &old_ctx, &new_ctx);
-        }
-    }
+    // Migrate the DM E2E config + refresh the handle cache to the new handle —
+    // INDEPENDENT of whether the peer's query buffer is open — using the OLD
+    // handle carried in the CHGHOST prefix. Without this a vhost change
+    // downgrades the next DM to plaintext.
+    let prev_handle = if old_ident.is_empty() || old_host.is_empty() {
+        None
+    } else {
+        Some(format!("{old_ident}@{old_host}"))
+    };
+    track_dm_handle_change(state, &nick, prev_handle.as_deref(), &new_handle);
 
     // Log a subtle event in every shared channel
     let shared_buffers: Vec<String> = state
