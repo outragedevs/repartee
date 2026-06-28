@@ -125,8 +125,20 @@ CREATE TABLE IF NOT EXISTS e2e_peers (
     last_nick     TEXT,
     first_seen    INTEGER NOT NULL,
     last_seen     INTEGER NOT NULL,
-    global_status TEXT NOT NULL DEFAULT 'pending',
-    network       TEXT
+    global_status TEXT NOT NULL DEFAULT 'pending'
+)";
+
+// (network, nick) -> last-seen DM handle, used to resolve a query peer's
+// `ident@host` before they speak this session. Keyed by (network, nick) rather
+// than the fingerprint so the SAME E2E identity seen on two networks gets one
+// cache row per network — `e2e_peers` keeps only one (global-newest) handle per
+// fingerprint and cannot be network-scoped.
+const CREATE_E2E_DM_HANDLE_CACHE: &str = "
+CREATE TABLE IF NOT EXISTS e2e_dm_handle_cache (
+    network TEXT NOT NULL,
+    nick    TEXT NOT NULL COLLATE NOCASE,
+    handle  TEXT NOT NULL,
+    PRIMARY KEY (network, nick)
 )";
 
 const CREATE_E2E_OUTGOING: &str = "
@@ -197,6 +209,7 @@ fn create_schema(db: &Connection, encrypt: bool) -> rusqlite::Result<()> {
     db.execute_batch(CREATE_E2E_CHANNEL_CONFIG)?;
     db.execute_batch(CREATE_E2E_AUTOTRUST)?;
     db.execute_batch(CREATE_E2E_OUTGOING_RECIPIENTS)?;
+    db.execute_batch(CREATE_E2E_DM_HANDLE_CACHE)?;
     if !encrypt {
         db.execute_batch(CREATE_FTS)?;
         db.execute_batch(CREATE_FTS_TRIGGERS)?;
@@ -228,18 +241,6 @@ fn migrate_schema(db: &Connection) {
         } else {
             tracing::info!("migrated messages table: added {col}");
         }
-    }
-
-    // `network` scopes the cached nick->handle lookup (`last_handle_for_nick`)
-    // to the IRC connection, so a peer with the same nick on two networks
-    // can't resolve the other network's ident@host. Left NULL on existing rows
-    // and backfilled observationally; the scoped read prefers a network match.
-    if let Err(e) = db.execute_batch("ALTER TABLE e2e_peers ADD COLUMN network TEXT") {
-        if !e.to_string().contains("duplicate column name") {
-            tracing::warn!("migration warning for e2e_peers.network: {e}");
-        }
-    } else {
-        tracing::info!("migrated e2e_peers table: added network");
     }
 
     // Build the subsecond-ordering index now that `ts_ms` is guaranteed to exist

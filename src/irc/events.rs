@@ -2005,10 +2005,10 @@ fn track_dm_handle_change(
         let old_ctx = crate::e2e::context_key(nick, &old_h);
         migrate_dm_e2e_config(&mgr, &old_ctx, &new_ctx);
     }
-    // Tag the observed handle's peer row with this connection's network, so the
-    // cached nick->handle lookup stays scoped per-network (a same-nick peer on
-    // another network can't resolve this handle).
-    let _ = mgr.keyring().set_peer_network(new_handle, network);
+    // Cache the observed handle under (network, nick), so the cached lookup
+    // stays scoped per-network (a same-nick peer on another network keeps its
+    // own handle).
+    let _ = mgr.keyring().cache_dm_handle(network, nick, new_handle);
     // NB: we deliberately do NOT bump the keyring's `last_handle` here. That
     // field drives TOFU `HandleChanged` classification; updating it on mere
     // observation (before a signed handshake) would bypass the reverify gate.
@@ -4137,9 +4137,9 @@ fn try_dispatch_rpe2e_ctcp(
 
     let (nick, ident, host) = extract_nick_userhost(prefix);
     let sender_handle = format!("{ident}@{host}");
-    // The connection's network label scopes the peer's keyring row (so a
-    // same-nick peer on another network can't resolve this handle). Tag it
-    // after each handshake handler below, where the peer row is created.
+    // The connection's network label scopes the DM handle cache (so a same-nick
+    // peer on another network keeps its own handle). Cache the sender's handle
+    // under (network, nick) after each handshake handler below.
     let network = state.connections.get(conn_id).map(|c| c.label.clone());
     let parsed = match crate::e2e::handshake::parse(inner) {
         Ok(Some(msg)) => msg,
@@ -4172,7 +4172,7 @@ fn try_dispatch_rpe2e_ctcp(
             );
             let result = mgr.handle_keyreq_with_nick(&sender_handle, Some(&nick), &req);
             if let Some(net) = &network {
-                let _ = mgr.keyring().set_peer_network(&sender_handle, net);
+                let _ = mgr.keyring().cache_dm_handle(net, &nick, &sender_handle);
             }
             surface_pending_trust_changes(state, conn_id, &mgr);
             surface_pending_accept_requests(state, conn_id, &mgr);
@@ -4253,7 +4253,7 @@ fn try_dispatch_rpe2e_ctcp(
             );
             let result = mgr.handle_keyrsp(&sender_handle, &rsp);
             if let Some(net) = &network {
-                let _ = mgr.keyring().set_peer_network(&sender_handle, net);
+                let _ = mgr.keyring().cache_dm_handle(net, &nick, &sender_handle);
             }
             surface_pending_trust_changes(state, conn_id, &mgr);
             if let Err(e) = result {
@@ -4292,7 +4292,7 @@ fn try_dispatch_rpe2e_ctcp(
             );
             let result = mgr.handle_rekey(&sender_handle, &rekey);
             if let Some(net) = &network {
-                let _ = mgr.keyring().set_peer_network(&sender_handle, net);
+                let _ = mgr.keyring().cache_dm_handle(net, &nick, &sender_handle);
             }
             surface_pending_trust_changes(state, conn_id, &mgr);
             if let Err(e) = result {

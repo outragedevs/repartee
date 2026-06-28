@@ -940,41 +940,41 @@ impl Keyring {
         Ok(out)
     }
 
-    /// Most-recent server-stamped handle (`ident@host`) remembered for `nick`
-    /// on `network` (case-insensitive nick, by `last_seen`). Resolves a DM
-    /// peer's handle when the live `Buffer.peer_handle` isn't set yet (the peer
-    /// hasn't spoken this session) so the `/e2e` command layer AND the encrypt
-    /// path key the DM under the same `@<cached>` context — avoiding a plaintext
-    /// send after `/e2e on` enabled E2E for that cached context.
+    /// Most-recent server-stamped handle (`ident@host`) cached for `nick` on
+    /// `network` (case-insensitive nick). Resolves a DM peer's handle when the
+    /// live `Buffer.peer_handle` isn't set yet (the peer hasn't spoken this
+    /// session) so the `/e2e` command layer AND the encrypt path key the DM
+    /// under the same `@<cached>` context — avoiding a plaintext send after
+    /// `/e2e on` enabled E2E for that cached context.
     ///
-    /// Scoped to `network`: a peer with the same nick on a *different* network
-    /// is never returned (its `ident@host` would key the DM under the wrong
-    /// `@<handle>`). Rows whose `network` isn't tagged yet (NULL — pre-migration
-    /// or not-yet-observed) are a lower-priority fallback; a network match wins.
+    /// Reads the `(network, nick)` cache, NOT `e2e_peers`: that table keeps only
+    /// one (global-newest) `last_handle` per fingerprint, so the same E2E
+    /// identity seen on two networks would resolve the wrong network's handle.
+    /// A nick we've never observed on `network` returns `None` (never a
+    /// cross-network handle).
     pub fn last_handle_for_nick(&self, nick: &str, network: &str) -> Result<Option<String>> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
         let handle: Option<String> = conn
             .query_row(
-                "SELECT last_handle FROM e2e_peers
-                 WHERE last_nick = ?1 COLLATE NOCASE AND last_handle IS NOT NULL
-                   AND (network = ?2 OR network IS NULL)
-                 ORDER BY (network = ?2) DESC, last_seen DESC LIMIT 1",
-                params![nick, network],
+                "SELECT handle FROM e2e_dm_handle_cache WHERE network = ?1 AND nick = ?2",
+                params![network, nick],
                 |r| r.get(0),
             )
             .optional()?;
         Ok(handle)
     }
 
-    /// Tag a peer row's `network` (scopes [`Self::last_handle_for_nick`]) the
-    /// first time we observe `handle` on a connection. Matches by the
-    /// network-specific `ident@host`; only fills a NULL `network` so it never
-    /// overwrites an existing claim. No-op when no row holds that handle.
-    pub fn set_peer_network(&self, handle: &str, network: &str) -> Result<()> {
+    /// Record that DM peer `nick` was seen as `handle` (`ident@host`) on
+    /// `network`, so [`Self::last_handle_for_nick`] can resolve it later.
+    /// Keyed by `(network, nick)` — one row per network for a given nick, so the
+    /// same identity on two networks keeps independent handles. Latest write
+    /// wins (a CHGHOST / reconnect updates the cached handle).
+    pub fn cache_dm_handle(&self, network: &str, nick: &str, handle: &str) -> Result<()> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
         conn.execute(
-            "UPDATE e2e_peers SET network = ?2 WHERE last_handle = ?1 AND network IS NULL",
-            params![handle, network],
+            "INSERT INTO e2e_dm_handle_cache (network, nick, handle) VALUES (?1, ?2, ?3)
+             ON CONFLICT(network, nick) DO UPDATE SET handle = excluded.handle",
+            params![network, nick, handle],
         )?;
         Ok(())
     }
@@ -1155,8 +1155,13 @@ mod tests {
             last_nick     TEXT,
             first_seen    INTEGER NOT NULL,
             last_seen     INTEGER NOT NULL,
-            global_status TEXT NOT NULL DEFAULT 'pending',
-            network       TEXT
+            global_status TEXT NOT NULL DEFAULT 'pending'
+        );
+        CREATE TABLE e2e_dm_handle_cache (
+            network TEXT NOT NULL,
+            nick    TEXT NOT NULL COLLATE NOCASE,
+            handle  TEXT NOT NULL,
+            PRIMARY KEY (network, nick)
         );
         CREATE TABLE e2e_outgoing_sessions (
             channel           TEXT PRIMARY KEY,
@@ -1475,71 +1480,31 @@ mod tests {
     }
 
     #[test]
-    fn last_handle_for_nick_returns_most_recent_case_insensitive() {
-        let kr = open_mem();
-        kr.upsert_peer(&PeerRecord {
-            fingerprint: [0x11; 16],
-            pubkey: [1; 32],
-            last_handle: Some("~alice@old.host".into()),
-            last_nick: Some("alice".into()),
-            first_seen: 100,
-            last_seen: 110,
-            global_status: TrustStatus::Trusted,
-        })
-        .unwrap();
-        kr.upsert_peer(&PeerRecord {
-            fingerprint: [0x22; 16],
-            pubkey: [2; 32],
-            last_handle: Some("~alice@new.host".into()),
-            last_nick: Some("alice".into()),
-            first_seen: 200,
-            last_seen: 220,
-            global_status: TrustStatus::Trusted,
-        })
-        .unwrap();
-        // Most-recent by last_seen, nick match case-insensitive. Untagged
-        // (NULL network) rows are the fallback for any network.
-        assert_eq!(
-            kr.last_handle_for_nick("ALICE", "Libera").unwrap().as_deref(),
-            Some("~alice@new.host")
-        );
-        // Unknown nick → None (not an error).
-        assert_eq!(kr.last_handle_for_nick("bob", "Libera").unwrap(), None);
-    }
-
-    #[test]
     fn last_handle_for_nick_scopes_by_network() {
         let kr = open_mem();
-        // Same nick on two networks (distinct fingerprints + handles).
-        for (fp, handle, seen) in [
-            ([0x11u8; 16], "~bob@a.host", 200i64),
-            ([0x22u8; 16], "~bob@b.host", 100i64),
-        ] {
-            kr.upsert_peer(&PeerRecord {
-                fingerprint: fp,
-                pubkey: [1; 32],
-                last_handle: Some(handle.into()),
-                last_nick: Some("bob".into()),
-                first_seen: seen,
-                last_seen: seen,
-                global_status: TrustStatus::Trusted,
-            })
-            .unwrap();
-        }
-        kr.set_peer_network("~bob@a.host", "NetA").unwrap();
-        kr.set_peer_network("~bob@b.host", "NetB").unwrap();
-        // Each network resolves its OWN handle, even though NetB's row is older
-        // — the cross-network handle is never returned.
+        // Same nick (same E2E identity) observed on two networks. The cache is
+        // keyed by (network, nick), so caching the NetB handle must NOT clobber
+        // the NetA handle — the exact failure of a single fingerprint-keyed row.
+        kr.cache_dm_handle("NetA", "bob", "~bob@a.host").unwrap();
+        kr.cache_dm_handle("NetB", "bob", "~bob@b.host").unwrap();
         assert_eq!(
             kr.last_handle_for_nick("bob", "NetA").unwrap().as_deref(),
-            Some("~bob@a.host")
+            Some("~bob@a.host"),
+            "NetA must still resolve its own handle after NetB was cached"
         );
         assert_eq!(
-            kr.last_handle_for_nick("bob", "NetB").unwrap().as_deref(),
-            Some("~bob@b.host")
+            kr.last_handle_for_nick("BOB", "NetB").unwrap().as_deref(),
+            Some("~bob@b.host"),
+            "nick lookup is case-insensitive"
         );
-        // A third network with no (untagged) row → None, not a cross-network leak.
+        // A third network with no cache row → None, not a cross-network leak.
         assert_eq!(kr.last_handle_for_nick("bob", "NetC").unwrap(), None);
+        // Latest write wins per (network, nick) — a CHGHOST updates the handle.
+        kr.cache_dm_handle("NetA", "bob", "~bob@cloak").unwrap();
+        assert_eq!(
+            kr.last_handle_for_nick("bob", "NetA").unwrap().as_deref(),
+            Some("~bob@cloak")
+        );
     }
 
     #[test]
