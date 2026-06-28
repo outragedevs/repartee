@@ -898,8 +898,9 @@ impl App {
                     // DM context), re-run the active-query gap-fill: a gap-fill
                     // that ran at end-of-MOTD before the self-USERHOST reply
                     // arrived would have skipped encrypted DM backlog (and the
-                    // batch completes, so it is never retried). Re-fetching now
-                    // decrypts it — CHATHISTORY dedups, so this is safe.
+                    // batch completes, so it is never retried). The retry must
+                    // release the one-shot gap-fill claim the first request took,
+                    // or it would be suppressed — see the helper.
                     if own_handle_before.is_none()
                         && self.state.e2e_manager.is_some()
                         && self
@@ -908,7 +909,7 @@ impl App {
                             .get(&conn_id)
                             .is_some_and(|c| c.own_handle.is_some())
                     {
-                        self.gapfill_active_buffer_on_connect(&conn_id);
+                        self.regapfill_active_query_after_own_handle(&conn_id);
                     }
 
                     // Load backlog for any buffers created by handle_irc_message

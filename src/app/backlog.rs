@@ -553,6 +553,30 @@ impl App {
         self.request_connect_gapfill(conn_id, &target);
     }
 
+    /// Re-run the active query's reconnect gap-fill once our own handle (the
+    /// recipient DM context) is learned. The end-of-MOTD gap-fill may have run
+    /// before the self-`USERHOST` reply and skipped the encrypted DM backlog,
+    /// yet still claimed the one-shot via `request_connect_gapfill` — so we must
+    /// RELEASE that claim first, otherwise the retry is suppressed and the
+    /// skipped backlog is never re-fetched. `CHATHISTORY` dedups, so re-issuing
+    /// is safe.
+    pub(crate) fn regapfill_active_query_after_own_handle(&mut self, conn_id: &str) {
+        let Some(active_id) = self.state.active_buffer_id.clone() else {
+            return;
+        };
+        let Some(buf) = self.state.buffers.get(&active_id) else {
+            return;
+        };
+        if buf.connection_id != conn_id || !matches!(buf.buffer_type, BufferType::Query) {
+            return;
+        }
+        let target = buf.name.clone();
+        if let Some(conn) = self.state.connections.get_mut(conn_id) {
+            conn.chathistory.clear_connect_gapfilled(&target);
+        }
+        self.request_connect_gapfill(conn_id, &target);
+    }
+
     /// On a channel's NAMES completion after (re)connect, gap-fill that channel's
     /// history **if it is the active buffer**. Running here (rather than at
     /// end-of-MOTD) guarantees the server has acknowledged our JOIN — NAMES is
