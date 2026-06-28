@@ -706,25 +706,27 @@ impl App {
                         ref args,
                     ) = msg.command
                         && let Some(confirmed_nick) = args.first()
-                        && let Some(conn) = self.state.connections.get_mut(&conn_id)
                     {
-                        conn.nick.clone_from(confirmed_nick);
-                    }
+                        if let Some(conn) = self.state.connections.get_mut(&conn_id) {
+                            conn.nick.clone_from(confirmed_nick);
+                        }
 
-                    // Seed our own ident@host (the recipient-keyed DM E2E
-                    // context) as early as possible — at RPL_WELCOME, so the
-                    // USERHOST reply lands before the end-of-MOTD CHATHISTORY
-                    // gap-fill that decrypts DM backlog under it. echo-message
-                    // + CHGHOST keep it current afterwards. E2E-only.
-                    if self.state.e2e_manager.is_some()
-                        && let Some(nick) =
-                            self.state.connections.get(&conn_id).map(|c| c.nick.clone())
-                        && let Some(handle) = self.irc_handles.get(&conn_id)
-                    {
-                        let _ = handle.sender.send(::irc::proto::Command::Raw(
-                            "USERHOST".to_string(),
-                            vec![nick],
-                        ));
+                        // Seed our own ident@host (the recipient-keyed DM E2E
+                        // context) with a ONE-SHOT self-USERHOST, gated to
+                        // RPL_WELCOME so it fires exactly once per registration —
+                        // NOT per message (the RPL_USERHOST reply is itself a
+                        // message, which would otherwise loop). Sent early so the
+                        // reply lands before the end-of-MOTD CHATHISTORY gap-fill
+                        // that decrypts DM backlog under it. echo-message + CHGHOST
+                        // keep it current afterwards. E2E-only.
+                        if self.state.e2e_manager.is_some()
+                            && let Some(handle) = self.irc_handles.get(&conn_id)
+                        {
+                            let _ = handle.sender.send(::irc::proto::Command::Raw(
+                                "USERHOST".to_string(),
+                                vec![confirmed_nick.clone()],
+                            ));
+                        }
                     }
 
                     // Emit to scripts before default handling. Suppress semantics:
