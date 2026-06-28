@@ -1967,9 +1967,13 @@ fn handle_chghost(
     new_host: &str,
     tags: Option<HashMap<String, String>>,
 ) {
-    let Some(nick) = extract_nick(prefix) else {
+    // The CHGHOST prefix carries the peer's OLD ident@host
+    // (`nick!olduser@oldhost`), which we need to migrate the DM E2E config
+    // even when no query buffer is open.
+    let (nick, old_ident, old_host) = extract_nick_userhost(prefix);
+    if nick.is_empty() {
         return;
-    };
+    }
 
     let nick_lower = nick.to_lowercase();
     let new_handle = format!("{new_user}@{new_host}");
@@ -1984,10 +1988,7 @@ fn handle_chghost(
         set_own_handle(state, conn_id, new_handle.clone());
     }
 
-    // Update ident/host in all shared buffers. Capture DM (query) handle
-    // changes so we can migrate their E2E config below — once the mutable
-    // buffers borrow is released.
-    let mut dm_ctx_changes: Vec<(String, String)> = Vec::new();
+    // Update ident/host + the cached DM peer_handle in shared buffers.
     for buf in state.buffers.values_mut() {
         if buf.connection_id != conn_id {
             continue;
@@ -1996,32 +1997,27 @@ fn handle_chghost(
             entry.ident = Some(new_user.to_string());
             entry.host = Some(new_host.to_string());
         }
-        // A DM/query buffer caches the peer's handle outside the nicklist.
-        // It drives the E2E encrypt context, so it must track the new host
-        // (otherwise outgoing PMs would key under a stale pseudochannel and
-        // silently re-handshake or fail to decrypt on the peer's side).
-        if buf.buffer_type == BufferType::Query
-            && buf.name.eq_ignore_ascii_case(&nick)
-            && buf.peer_handle.as_deref() != Some(new_handle.as_str())
-        {
-            if let Some(old_h) = &buf.peer_handle {
-                let old_ctx = crate::e2e::context_key(&buf.name, old_h);
-                let new_ctx = crate::e2e::context_key(&buf.name, &new_handle);
-                if old_ctx != new_ctx {
-                    dm_ctx_changes.push((old_ctx, new_ctx));
-                }
-            }
+        // A DM/query buffer caches the peer's handle outside the nicklist; it
+        // drives the E2E encrypt context, so it must track the new host.
+        if buf.buffer_type == BufferType::Query && buf.name.eq_ignore_ascii_case(&nick) {
             buf.peer_handle = Some(new_handle.clone());
         }
     }
 
-    // Migrate an enabled DM E2E config to the new handle's context so a vhost
-    // change does NOT silently downgrade the next DM to plaintext (the encrypt
-    // path keys by @<new_handle> and would otherwise find no config).
-    if !dm_ctx_changes.is_empty()
+    // Migrate an enabled DM E2E config from the OLD handle (from the CHGHOST
+    // prefix) to the new one — INDEPENDENT of whether the peer's query buffer
+    // is open — so a vhost change never downgrades the next DM to plaintext
+    // (the encrypt path keys by @<new_handle> and would otherwise find no
+    // config). `migrate_dm_e2e_config` is a no-op when there is no enabled
+    // @<old> config, so attempting it unconditionally is safe.
+    if !old_ident.is_empty()
+        && !old_host.is_empty()
         && let Some(mgr) = state.e2e_manager.clone()
     {
-        for (old_ctx, new_ctx) in dm_ctx_changes {
+        let old_handle = format!("{old_ident}@{old_host}");
+        if old_handle != new_handle {
+            let old_ctx = crate::e2e::context_key(&nick, &old_handle);
+            let new_ctx = crate::e2e::context_key(&nick, &new_handle);
             migrate_dm_e2e_config(&mgr, &old_ctx, &new_ctx);
         }
     }
