@@ -141,6 +141,38 @@ fn dm_round_trip_recipient_keyed_both_directions() {
 }
 
 #[test]
+fn dm_keyreq_skips_reciprocal_but_channel_keeps_it() {
+    // DM: Alice receives Bob's KEYREQ for the DM context (Bob's own handle).
+    // No reciprocal is queued — the reverse (Alice-receives-from-Bob) direction
+    // is keyed by Alice's OWN handle, which the manager can't derive from
+    // req.channel; it self-heals via the live auto-KEYREQ instead. Building one
+    // under @<bob> would orphan rows and spend the shared rate-limit slot.
+    let alice = make_manager();
+    let bob = make_manager();
+    let bob_handle = "~bob@b.host";
+    let dm_ctx = format!("@{bob_handle}");
+    enable_channel(&alice, &dm_ctx, ChannelMode::AutoAccept);
+    let dm_req = bob.build_keyreq(&dm_ctx).unwrap();
+    alice.handle_keyreq(bob_handle, &dm_req).unwrap();
+    assert!(
+        alice.take_pending_outbound_keyreqs().is_empty(),
+        "a DM KEYREQ must not build a mis-keyed reciprocal"
+    );
+
+    // Channel: the proactive reciprocal IS still built (own == peer == channel).
+    let carol = make_manager();
+    let dave = make_manager();
+    let dave_handle = "~dave@d.host";
+    enable_channel(&carol, "#x", ChannelMode::AutoAccept);
+    let chan_req = dave.build_keyreq("#x").unwrap();
+    carol.handle_keyreq(dave_handle, &chan_req).unwrap();
+    assert!(
+        !carol.take_pending_outbound_keyreqs().is_empty(),
+        "a channel KEYREQ still builds the proactive reciprocal"
+    );
+}
+
+#[test]
 fn strict_handle_check_rejects_wrong_sender() {
     let alice = make_manager();
     let bob = make_manager();

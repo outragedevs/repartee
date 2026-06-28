@@ -1254,7 +1254,15 @@ impl E2eManager {
             .lock()
             .expect("rate limiter mutex poisoned")
             .allow_outgoing(sender_handle);
-        if !already_incoming && allow_out {
+        // Skip the reciprocal for DMs. The reverse (us-receiving) direction is
+        // keyed by OUR own handle, not `req.channel` (= `@<peer>`), which the
+        // manager doesn't know. Building it under `@<peer>` would install
+        // orphan rows AND spend the shared per-peer rate-limit slot, stalling
+        // the correct live auto-KEYREQ (keyed `@<own>`) that establishes the
+        // reverse direction when the peer first messages us. Channels
+        // (own == peer == channel) keep the proactive reciprocal.
+        let is_dm = req.channel.starts_with('@');
+        if !is_dm && !already_incoming && allow_out {
             let reciprocal = self.build_keyreq_for_peer(&req.channel, Some(sender_handle))?;
             self.pending_outbound_keyreqs
                 .lock()
@@ -1383,7 +1391,15 @@ impl E2eManager {
             .lock()
             .expect("rate limiter mutex poisoned")
             .allow_outgoing(sender_handle);
-        if !already_incoming && allow_out {
+        // Skip the reciprocal for DMs. The reverse (us-receiving) direction is
+        // keyed by OUR own handle, not `req.channel` (= `@<peer>`), which the
+        // manager doesn't know. Building it under `@<peer>` would install
+        // orphan rows AND spend the shared per-peer rate-limit slot, stalling
+        // the correct live auto-KEYREQ (keyed `@<own>`) that establishes the
+        // reverse direction when the peer first messages us. Channels
+        // (own == peer == channel) keep the proactive reciprocal.
+        let is_dm = req.channel.starts_with('@');
+        if !is_dm && !already_incoming && allow_out {
             let reciprocal = self.build_keyreq_for_peer(&req.channel, Some(sender_handle))?;
             self.pending_outbound_keyreqs
                 .lock()
