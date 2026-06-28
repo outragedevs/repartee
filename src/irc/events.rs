@@ -1199,7 +1199,8 @@ fn handle_privmsg(
     // find a Query buffer we also stamp `peer_handle` with the raw
     // `ident@host` from the prefix — the E2E layer uses this to key PM
     // session rows under `@<peer_handle>` instead of bare nick (spec §6).
-    if !target_is_channel && !state.buffers.contains_key(&buffer_id) {
+    let buffer_created = !target_is_channel && !state.buffers.contains_key(&buffer_id);
+    if buffer_created {
         state.add_buffer(Buffer {
             id: buffer_id.clone(),
             connection_id: conn_id.to_string(),
@@ -1240,11 +1241,14 @@ fn handle_privmsg(
     // next DM does not silently downgrade to plaintext under the new context.
     if !target_is_channel && !is_own {
         let new_handle = format!("{ident}@{host}");
-        // `Some(old)` only when the handle actually changed (old may be `None`
-        // for a buffer that hadn't cached one yet); `None` = no buffer / no
-        // change → nothing to migrate.
-        let changed_from: Option<Option<String>> = if let Some(buf) =
-            state.buffers.get_mut(&buffer_id)
+        // `Some(old)` only when the handle is new for this buffer (old may be
+        // `None`): a freshly-created buffer is already stamped with @<new>, so
+        // we still migrate from the cached @<old> (prev = `None`); an existing
+        // buffer migrates from its prior handle. `None` = no change → nothing
+        // to migrate.
+        let changed_from: Option<Option<String>> = if buffer_created {
+            Some(None)
+        } else if let Some(buf) = state.buffers.get_mut(&buffer_id)
             && buf.peer_handle.as_deref() != Some(new_handle.as_str())
         {
             Some(buf.peer_handle.replace(new_handle.clone()))
@@ -1922,12 +1926,20 @@ fn handle_away(state: &mut AppState, conn_id: &str, prefix: Option<&Prefix>, rea
     }
 }
 
-/// Move an ENABLED DM E2E config from `old_ctx` to `new_ctx` when a peer's
-/// handle changes (CHGHOST), so the policy follows the peer to its new
-/// pseudochannel. Without this the encrypt path keys the next DM under
-/// `@<new_handle>`, finds no config, and downgrades to plaintext. Re-handshake
-/// re-establishes the session keys under the new context. No-op unless the old
-/// config is enabled and the new context isn't already enabled (don't clobber).
+/// COPY an ENABLED DM E2E config from `old_ctx` to `new_ctx` when a peer's
+/// handle changes, so the policy follows the peer to its new pseudochannel.
+/// Without this the encrypt path keys the next DM under `@<new_handle>`, finds
+/// no config, and downgrades to plaintext. Re-handshake re-establishes the
+/// session keys under the new context.
+///
+/// The old config is intentionally LEFT enabled: the keyring's `last_handle`
+/// (a TOFU field) must NOT be bumped on mere observation — doing so would make
+/// a later handshake under the new handle classify as `Known` instead of
+/// `HandleChanged`, bypassing the reverify gate. Leaving `@<old>` enabled means
+/// the encrypt path's peer-not-spoken fallback (which resolves `@<old>` from
+/// that untouched cache) still encrypts (and re-handshakes) rather than sending
+/// plaintext. No-op unless the old config is enabled and the new context isn't
+/// already enabled (don't clobber).
 #[allow(
     clippy::redundant_pub_crate,
     reason = "exercised by the e2e integration_tests migration test"
@@ -1950,12 +1962,6 @@ pub(crate) fn migrate_dm_e2e_config(
     let _ = mgr.keyring().set_channel_config(&ChannelConfig {
         channel: new_ctx.to_string(),
         enabled: true,
-        mode: old_cfg.mode,
-    });
-    // Disable the stale old-context config so it doesn't linger as enabled.
-    let _ = mgr.keyring().set_channel_config(&ChannelConfig {
-        channel: old_ctx.to_string(),
-        enabled: false,
         mode: old_cfg.mode,
     });
 }
@@ -1996,9 +2002,11 @@ fn track_dm_handle_change(
         let old_ctx = crate::e2e::context_key(nick, &old_h);
         migrate_dm_e2e_config(&mgr, &old_ctx, &new_ctx);
     }
-    // Refresh the cache so the encrypt path's peer-not-spoken fallback resolves
-    // @<new>, not a stale @<old> (which migration just disabled).
-    let _ = mgr.keyring().bump_last_handle(nick, new_handle);
+    // NB: we deliberately do NOT bump the keyring's `last_handle` here. That
+    // field drives TOFU `HandleChanged` classification; updating it on mere
+    // observation (before a signed handshake) would bypass the reverify gate.
+    // The copied config under `@<new>` plus the still-enabled `@<old>` cover
+    // both the live and cached encrypt contexts without it.
 }
 
 /// Handle `IRCv3` `chghost`: `:nick!olduser@oldhost CHGHOST newuser newhost`

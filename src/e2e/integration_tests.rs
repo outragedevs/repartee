@@ -152,7 +152,9 @@ fn chghost_migrates_enabled_dm_config_to_new_context() {
 
     crate::irc::events::migrate_dm_e2e_config(&mgr, old_ctx, new_ctx);
 
-    // New context is now enabled; the stale old context is disabled.
+    // New context is now enabled; the old context stays enabled too (copy,
+    // not move) so the encrypt path's cached @<old> fallback still encrypts
+    // rather than going plaintext — and the TOFU last_handle is left untouched.
     assert!(
         mgr.keyring()
             .get_channel_config(new_ctx)
@@ -161,11 +163,11 @@ fn chghost_migrates_enabled_dm_config_to_new_context() {
         "config must follow the peer to the new handle"
     );
     assert!(
-        !mgr.keyring()
+        mgr.keyring()
             .get_channel_config(old_ctx)
             .unwrap()
             .is_some_and(|c| c.enabled),
-        "stale old-context config must be disabled"
+        "old-context config stays enabled (copy, not move)"
     );
 
     // A disabled old config is NOT migrated (no policy to preserve).

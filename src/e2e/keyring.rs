@@ -960,23 +960,6 @@ impl Keyring {
         Ok(handle)
     }
 
-    /// Refresh the cached `last_handle` for `nick` (the most-recent peer row) to
-    /// `new_handle` after observing a handle change (peer reconnect / CHGHOST),
-    /// so [`Self::last_handle_for_nick`] tracks the migrated DM config instead
-    /// of a stale `@<old>`. No-op when no peer row exists for `nick`.
-    pub fn bump_last_handle(&self, nick: &str, new_handle: &str) -> Result<()> {
-        let conn = self.db.lock().expect("keyring mutex poisoned");
-        conn.execute(
-            "UPDATE e2e_peers SET last_handle = ?2
-             WHERE last_nick = ?1 COLLATE NOCASE
-               AND last_seen = (
-                   SELECT MAX(last_seen) FROM e2e_peers WHERE last_nick = ?1 COLLATE NOCASE
-               )",
-            params![nick, new_handle],
-        )?;
-        Ok(())
-    }
-
     /// Return every row of `e2e_incoming_sessions`, across every channel.
     pub fn list_all_incoming_sessions(&self) -> Result<Vec<IncomingSession>> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
@@ -1501,30 +1484,6 @@ mod tests {
         );
         // Unknown nick → None (not an error).
         assert_eq!(kr.last_handle_for_nick("bob").unwrap(), None);
-    }
-
-    #[test]
-    fn bump_last_handle_updates_most_recent_row() {
-        let kr = open_mem();
-        kr.upsert_peer(&PeerRecord {
-            fingerprint: [0x11; 16],
-            pubkey: [1; 32],
-            last_handle: Some("~bob@old.host".into()),
-            last_nick: Some("bob".into()),
-            first_seen: 100,
-            last_seen: 110,
-            global_status: TrustStatus::Trusted,
-        })
-        .unwrap();
-        // Case-insensitive nick; refreshes the cached handle.
-        kr.bump_last_handle("BOB", "~bob@user/bob").unwrap();
-        assert_eq!(
-            kr.last_handle_for_nick("bob").unwrap().as_deref(),
-            Some("~bob@user/bob")
-        );
-        // Unknown nick → no-op, no error.
-        kr.bump_last_handle("carol", "~carol@x.host").unwrap();
-        assert_eq!(kr.last_handle_for_nick("carol").unwrap(), None);
     }
 
     #[test]
