@@ -1255,8 +1255,10 @@ fn handle_privmsg(
         } else {
             None
         };
-        if let Some(prev) = changed_from {
-            track_dm_handle_change(state, &nick, prev.as_deref(), &new_handle);
+        if let Some(prev) = changed_from
+            && let Some(network) = state.connections.get(conn_id).map(|c| c.label.clone())
+        {
+            track_dm_handle_change(state, &nick, prev.as_deref(), &new_handle, &network);
         }
     }
 
@@ -1978,21 +1980,22 @@ fn track_dm_handle_change(
     nick: &str,
     prev_buffer_handle: Option<&str>,
     new_handle: &str,
+    network: &str,
 ) {
     let Some(mgr) = state.e2e_manager.clone() else {
         return;
     };
     let new_ctx = crate::e2e::context_key(nick, new_handle);
     // Old context candidates: the buffer's prior handle and the keyring's
-    // cached handle for this nick (covers `/e2e on` under a cached handle the
-    // buffer never held).
+    // network-scoped cached handle for this nick (covers `/e2e on` under a
+    // cached handle the buffer never held).
     let mut sources: Vec<String> = Vec::new();
     if let Some(h) = prev_buffer_handle
         && h != new_handle
     {
         sources.push(h.to_string());
     }
-    if let Ok(Some(cached)) = mgr.keyring().last_handle_for_nick(nick)
+    if let Ok(Some(cached)) = mgr.keyring().last_handle_for_nick(nick, network)
         && cached != new_handle
         && !sources.contains(&cached)
     {
@@ -2002,6 +2005,10 @@ fn track_dm_handle_change(
         let old_ctx = crate::e2e::context_key(nick, &old_h);
         migrate_dm_e2e_config(&mgr, &old_ctx, &new_ctx);
     }
+    // Tag the observed handle's peer row with this connection's network, so the
+    // cached nick->handle lookup stays scoped per-network (a same-nick peer on
+    // another network can't resolve this handle).
+    let _ = mgr.keyring().set_peer_network(new_handle, network);
     // NB: we deliberately do NOT bump the keyring's `last_handle` here. That
     // field drives TOFU `HandleChanged` classification; updating it on mere
     // observation (before a signed handshake) would bypass the reverify gate.
@@ -2072,7 +2079,9 @@ fn handle_chghost(
     } else {
         Some(format!("{old_ident}@{old_host}"))
     };
-    track_dm_handle_change(state, &nick, prev_handle.as_deref(), &new_handle);
+    if let Some(network) = state.connections.get(conn_id).map(|c| c.label.clone()) {
+        track_dm_handle_change(state, &nick, prev_handle.as_deref(), &new_handle, &network);
+    }
 
     // Log a subtle event in every shared channel
     let shared_buffers: Vec<String> = state
@@ -4128,6 +4137,10 @@ fn try_dispatch_rpe2e_ctcp(
 
     let (nick, ident, host) = extract_nick_userhost(prefix);
     let sender_handle = format!("{ident}@{host}");
+    // The connection's network label scopes the peer's keyring row (so a
+    // same-nick peer on another network can't resolve this handle). Tag it
+    // after each handshake handler below, where the peer row is created.
+    let network = state.connections.get(conn_id).map(|c| c.label.clone());
     let parsed = match crate::e2e::handshake::parse(inner) {
         Ok(Some(msg)) => msg,
         Ok(None) => return Some(RpEe2eOutcome::NotE2e),
@@ -4158,6 +4171,9 @@ fn try_dispatch_rpe2e_ctcp(
                 ),
             );
             let result = mgr.handle_keyreq_with_nick(&sender_handle, Some(&nick), &req);
+            if let Some(net) = &network {
+                let _ = mgr.keyring().set_peer_network(&sender_handle, net);
+            }
             surface_pending_trust_changes(state, conn_id, &mgr);
             surface_pending_accept_requests(state, conn_id, &mgr);
             match result {
@@ -4236,6 +4252,9 @@ fn try_dispatch_rpe2e_ctcp(
                 ),
             );
             let result = mgr.handle_keyrsp(&sender_handle, &rsp);
+            if let Some(net) = &network {
+                let _ = mgr.keyring().set_peer_network(&sender_handle, net);
+            }
             surface_pending_trust_changes(state, conn_id, &mgr);
             if let Err(e) = result {
                 tracing::warn!("handle_keyrsp error: {e}");
@@ -4272,6 +4291,9 @@ fn try_dispatch_rpe2e_ctcp(
                 ),
             );
             let result = mgr.handle_rekey(&sender_handle, &rekey);
+            if let Some(net) = &network {
+                let _ = mgr.keyring().set_peer_network(&sender_handle, net);
+            }
             surface_pending_trust_changes(state, conn_id, &mgr);
             if let Err(e) = result {
                 tracing::warn!("handle_rekey error: {e}");

@@ -1256,8 +1256,15 @@ fn resolve_cached_handle_by_nick(
 ) -> Option<std::result::Result<String, crate::e2e::error::E2eError>> {
     let mgr = app.state.e2e_manager.as_ref()?;
     // Same keyring resolution the encrypt path uses, so `/e2e on` and the
-    // outbound send key the DM under the identical `@<cached>` context.
-    match mgr.keyring().last_handle_for_nick(nick) {
+    // outbound send key the DM under the identical `@<cached>` context —
+    // scoped to the active connection's network so a same-nick peer on another
+    // network can't be resolved.
+    let network = app
+        .state
+        .active_buffer()
+        .and_then(|b| app.state.connections.get(&b.connection_id))
+        .map(|c| c.label.clone())?;
+    match mgr.keyring().last_handle_for_nick(nick, &network) {
         Ok(Some(handle)) => Some(Ok(handle)),
         Ok(None) => None,
         Err(e) => Some(Err(e)),

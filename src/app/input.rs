@@ -1772,8 +1772,17 @@ impl App {
                 // despite E2E being enabled.
                 let peer_handle = if let Some(h) = live {
                     h
-                } else if let Some(h) =
-                    mgr.keyring().last_handle_for_nick(buffer_name).ok().flatten()
+                } else if let Some(h) = self
+                    .state
+                    .buffers
+                    .get(buffer_id)
+                    .and_then(|b| self.state.connections.get(&b.connection_id))
+                    .map(|c| c.label.clone())
+                    .and_then(|net| {
+                        // Scope the cached lookup to this buffer's network so a
+                        // same-nick peer on another network can't be resolved.
+                        mgr.keyring().last_handle_for_nick(buffer_name, &net).ok().flatten()
+                    })
                 {
                     h
                 } else {

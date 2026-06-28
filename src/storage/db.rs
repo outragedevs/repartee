@@ -125,7 +125,8 @@ CREATE TABLE IF NOT EXISTS e2e_peers (
     last_nick     TEXT,
     first_seen    INTEGER NOT NULL,
     last_seen     INTEGER NOT NULL,
-    global_status TEXT NOT NULL DEFAULT 'pending'
+    global_status TEXT NOT NULL DEFAULT 'pending',
+    network       TEXT
 )";
 
 const CREATE_E2E_OUTGOING: &str = "
@@ -227,6 +228,18 @@ fn migrate_schema(db: &Connection) {
         } else {
             tracing::info!("migrated messages table: added {col}");
         }
+    }
+
+    // `network` scopes the cached nick->handle lookup (`last_handle_for_nick`)
+    // to the IRC connection, so a peer with the same nick on two networks
+    // can't resolve the other network's ident@host. Left NULL on existing rows
+    // and backfilled observationally; the scoped read prefers a network match.
+    if let Err(e) = db.execute_batch("ALTER TABLE e2e_peers ADD COLUMN network TEXT") {
+        if !e.to_string().contains("duplicate column name") {
+            tracing::warn!("migration warning for e2e_peers.network: {e}");
+        }
+    } else {
+        tracing::info!("migrated e2e_peers table: added network");
     }
 
     // Build the subsecond-ordering index now that `ts_ms` is guaranteed to exist
