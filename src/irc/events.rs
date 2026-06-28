@@ -797,7 +797,9 @@ fn decrypt_chathistory_text(
         return None;
     }
     let sender_handle = format!("{ident}@{host}");
-    let context = incoming_e2e_context(target, own_handle, &sender_handle);
+    // A DM whose own handle isn't known yet has no recipient context — skip
+    // the line rather than decrypt under the sender (it would fail anyway).
+    let context = incoming_e2e_context(target, own_handle)?;
     match state
         .e2e_manager
         .as_ref()?
@@ -1066,18 +1068,19 @@ fn set_own_handle(state: &mut AppState, conn_id: &str, handle: String) {
 }
 
 /// Recipient-keyed E2E context for an INCOMING message. A channel uses its
-/// name verbatim; a DM (target is our own nick) is keyed by OUR own handle —
+/// name verbatim. A DM (target is our own nick) is keyed by OUR own handle —
 /// we are the recipient, so this matches the sender's AAD context (the sender
-/// encrypted under `@<our_handle>`). Falls back to the sender handle when our
-/// own handle isn't known yet; the DM then can't decrypt until we learn it
-/// (re-handshake heals), but channels are unaffected.
-fn incoming_e2e_context(target: &str, own_handle: Option<&str>, sender_handle: &str) -> String {
-    let recipient = if is_channel(target) {
-        sender_handle
+/// encrypted under `@<our_handle>`). Returns `None` for a DM when our own
+/// handle isn't known yet: the caller must NOT fall back to the sender handle,
+/// because decrypting/KEYREQ-ing under `@<sender>` negotiates the wrong DM
+/// direction — it must wait until our handle is learned. Channels never
+/// return `None`.
+fn incoming_e2e_context(target: &str, own_handle: Option<&str>) -> Option<String> {
+    if is_channel(target) {
+        Some(target.to_string())
     } else {
-        own_handle.unwrap_or(sender_handle)
-    };
-    crate::e2e::context_key(target, recipient)
+        own_handle.map(|h| crate::e2e::context_key(target, h))
+    }
 }
 
 #[expect(clippy::too_many_lines, reason = "linear message handler")]
@@ -1131,16 +1134,26 @@ fn handle_privmsg(
         .connections
         .get(conn_id)
         .and_then(|c| c.own_handle.clone());
-    let decrypt_context = incoming_e2e_context(target, own_handle.as_deref(), &sender_handle);
-    let decrypted_owned = try_decrypt_e2e(
-        state,
-        conn_id,
-        &nick,
-        &sender_handle,
-        &decrypt_context,
-        text,
-        is_own,
-    );
+    let decrypted_owned = match incoming_e2e_context(target, own_handle.as_deref()) {
+        Some(decrypt_context) => try_decrypt_e2e(
+            state,
+            conn_id,
+            &nick,
+            &sender_handle,
+            &decrypt_context,
+            text,
+            is_own,
+        ),
+        // DM whose own handle isn't known yet: do NOT decrypt or fire a KEYREQ
+        // under the sender's handle (that negotiates the wrong DM direction).
+        // Show a placeholder and wait — the self-USERHOST at RPL_WELCOME, an
+        // echo, or CHGHOST will set our handle and the peer re-handshakes on
+        // the next message. Non-E2E plaintext passes through untouched.
+        None if !is_own && text.starts_with("+RPE2E01") => {
+            Some("[E2E: awaiting our own identity]".to_string())
+        }
+        None => None,
+    };
     // An empty return from `try_decrypt_e2e` means "own echo-message
     // echo of our own encrypted PRIVMSG — already rendered locally by
     // `handle_plain_message`, drop the echo entirely". This path only
@@ -5842,17 +5855,19 @@ mod tests {
 
     #[test]
     fn incoming_e2e_context_is_recipient_keyed_for_dms() {
-        // Channel: name verbatim, handles ignored.
-        assert_eq!(incoming_e2e_context("#x", Some("~me@h"), "~bob@b"), "#x");
-        // DM (target is our own nick): keyed by OUR own handle (recipient),
-        // NOT the sender's — that is what the sender encrypted the AAD under.
+        // Channel: always Some(name), handles irrelevant.
+        assert_eq!(incoming_e2e_context("#x", Some("~me@h")).as_deref(), Some("#x"));
+        assert_eq!(incoming_e2e_context("#x", None).as_deref(), Some("#x"));
+        // DM (target is our own nick) with own handle known: keyed by OUR own
+        // handle (recipient) — what the sender encrypted the AAD under.
         assert_eq!(
-            incoming_e2e_context("me", Some("~me@host"), "~bob@b"),
-            "@~me@host"
+            incoming_e2e_context("me", Some("~me@host")).as_deref(),
+            Some("@~me@host")
         );
-        // Own handle unknown: fall back to sender (won't decrypt cross-client,
-        // but stays safe; re-handshake heals once we learn our handle).
-        assert_eq!(incoming_e2e_context("me", None, "~bob@b"), "@~bob@b");
+        // DM with own handle UNKNOWN: None — must NOT fall back to the sender
+        // (that would fire a KEYREQ for the wrong DM direction); the caller
+        // waits until our handle is learned (USERHOST / echo / CHGHOST).
+        assert_eq!(incoming_e2e_context("me", None), None);
     }
 
     // === own-handle tracking (for recipient-keyed DM E2E) ===

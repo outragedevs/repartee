@@ -709,6 +709,12 @@ impl App {
                     {
                         if let Some(conn) = self.state.connections.get_mut(&conn_id) {
                             conn.nick.clone_from(confirmed_nick);
+                            // Drop any handle from a previous registration —
+                            // the server may assign a different ident/host/cloak
+                            // on (re)connect. The fresh self-USERHOST below
+                            // re-seeds it; until then DM E2E waits rather than
+                            // keying under a stale @<old_handle>.
+                            conn.own_handle = None;
                         }
 
                         // Seed our own ident@host (the recipient-keyed DM E2E

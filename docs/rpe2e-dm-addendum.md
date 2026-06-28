@@ -81,6 +81,14 @@ the peer's handle (from the prefix / CHGHOST) and their **own** handle current
 (from an echo-message echo of their own line, a self-`USERHOST`, or their own
 CHGHOST).
 
+While our own handle is **unknown** (e.g. between registration and the
+self-`USERHOST` reply), an incoming DM has no recipient context. Implementations
+must **not** fall back to keying it by the sender's handle — that would decrypt
+and, worse, send a KEYREQ under `@<sender>`, negotiating the wrong DM direction.
+Wait until the own handle is learned and let the next message re-establish. On
+(re)connect the own handle should be **reset** at registration and re-seeded,
+since the server may assign a different ident/host/cloak.
+
 ## AAD format (unchanged)
 
 `build_aad` is byte-identical to channels; only the channel string differs. DM
