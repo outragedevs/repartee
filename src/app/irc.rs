@@ -874,6 +874,11 @@ impl App {
                     // Snapshot buffer count so we can detect newly created buffers
                     // and feed them with chat history from the log database.
                     let buffers_before = self.state.buffers.len();
+                    let own_handle_before = self
+                        .state
+                        .connections
+                        .get(&conn_id)
+                        .and_then(|c| c.own_handle.clone());
 
                     if suppress_display {
                         self.state.suppress_event_display = true;
@@ -888,6 +893,23 @@ impl App {
                     // Drain queued RPE2E NOTICE sends (handshake replies,
                     // auto-KEYREQ on MissingKey) produced by the handlers.
                     self.drain_pending_e2e_sends();
+
+                    // If we just learned our own ident@host (the recipient-keyed
+                    // DM context), re-run the active-query gap-fill: a gap-fill
+                    // that ran at end-of-MOTD before the self-USERHOST reply
+                    // arrived would have skipped encrypted DM backlog (and the
+                    // batch completes, so it is never retried). Re-fetching now
+                    // decrypts it — CHATHISTORY dedups, so this is safe.
+                    if own_handle_before.is_none()
+                        && self.state.e2e_manager.is_some()
+                        && self
+                            .state
+                            .connections
+                            .get(&conn_id)
+                            .is_some_and(|c| c.own_handle.is_some())
+                    {
+                        self.gapfill_active_buffer_on_connect(&conn_id);
+                    }
 
                     // Load backlog for any buffers created by handle_irc_message
                     // (e.g. query buffer on first PRIVMSG from a new nick)
