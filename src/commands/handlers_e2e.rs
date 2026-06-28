@@ -1255,20 +1255,13 @@ fn resolve_cached_handle_by_nick(
     nick: &str,
 ) -> Option<std::result::Result<String, crate::e2e::error::E2eError>> {
     let mgr = app.state.e2e_manager.as_ref()?;
-    let mut matches = match mgr.keyring().list_all_peers() {
-        Ok(peers) => peers
-            .into_iter()
-            .filter_map(|peer| match (peer.last_nick, peer.last_handle) {
-                (Some(last_nick), Some(last_handle)) if last_nick.eq_ignore_ascii_case(nick) => {
-                    Some((peer.last_seen, last_handle))
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>(),
-        Err(e) => return Some(Err(e)),
-    };
-    matches.sort_by_key(|(last_seen, _)| *last_seen);
-    matches.pop().map(|(_, handle)| Ok(handle))
+    // Same keyring resolution the encrypt path uses, so `/e2e on` and the
+    // outbound send key the DM under the identical `@<cached>` context.
+    match mgr.keyring().last_handle_for_nick(nick) {
+        Ok(Some(handle)) => Some(Ok(handle)),
+        Ok(None) => None,
+        Err(e) => Some(Err(e)),
+    }
 }
 
 /// Wrap `resolve_handle_by_nick` with themed-error surfacing.

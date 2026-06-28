@@ -1754,22 +1754,32 @@ impl App {
         let context: String = match buffer_type {
             BufferType::Channel => buffer_name.to_string(),
             BufferType::Query => {
-                // Prefer a caller-captured peer_handle (deferred
-                // shrink path) over a live state lookup — the buffer
-                // may have been closed during the shrink wait.
-                let handle_from_state = self
-                    .state
-                    .buffers
-                    .get(buffer_id)
-                    .and_then(|b| b.peer_handle.as_deref());
-                let peer_handle = captured_peer_handle.or(handle_from_state);
-                let Some(peer_handle) = peer_handle else {
-                    // No peer handle yet. Check whether E2E was
-                    // (mis)configured under the bare-nick key from an
-                    // earlier version — if a legacy enabled row exists,
-                    // refuse rather than falling back to it. Otherwise
-                    // there is no E2E state at all, so plain passthrough
-                    // is safe.
+                // Prefer a caller-captured peer_handle (deferred shrink path)
+                // over a live state lookup — the buffer may have been closed
+                // during the shrink wait.
+                let live = captured_peer_handle.map(str::to_string).or_else(|| {
+                    self.state
+                        .buffers
+                        .get(buffer_id)
+                        .and_then(|b| b.peer_handle.clone())
+                });
+                // Peer hasn't spoken this session → fall back to the keyring's
+                // last-known handle for this nick (the SAME resolution the
+                // `/e2e` command layer uses) so we key the DM under the
+                // identical `@<cached>` context `/e2e on` wrote its config
+                // under. Without this the config (under `@<cached>`) is
+                // invisible here and the message would go out as plaintext
+                // despite E2E being enabled.
+                let peer_handle = if let Some(h) = live {
+                    h
+                } else if let Some(h) =
+                    mgr.keyring().last_handle_for_nick(buffer_name).ok().flatten()
+                {
+                    h
+                } else {
+                    // Nothing resolvable, so no `@<handle>` config can exist.
+                    // Refuse only if a legacy bare-nick enabled row exists;
+                    // otherwise plain passthrough is safe (no E2E state).
                     let legacy_enabled = mgr
                         .keyring()
                         .get_channel_config(buffer_name)
@@ -1781,7 +1791,7 @@ impl App {
                     }
                     return plain_passthrough();
                 };
-                crate::e2e::context_key(buffer_name, peer_handle)
+                crate::e2e::context_key(buffer_name, &peer_handle)
             }
             // Server/Status/DccChat/Shell/Mentions/Special: E2E does not
             // apply. handle_plain_message already gates messaging on

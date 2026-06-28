@@ -940,6 +940,26 @@ impl Keyring {
         Ok(out)
     }
 
+    /// Most-recent server-stamped handle (`ident@host`) remembered for `nick`
+    /// (case-insensitive, by `last_seen`). Resolves a DM peer's handle when the
+    /// live `Buffer.peer_handle` isn't set yet (the peer hasn't spoken this
+    /// session) so the `/e2e` command layer AND the encrypt path key the DM
+    /// under the same `@<cached>` context — avoiding a plaintext send after
+    /// `/e2e on` enabled E2E for that cached context.
+    pub fn last_handle_for_nick(&self, nick: &str) -> Result<Option<String>> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let handle: Option<String> = conn
+            .query_row(
+                "SELECT last_handle FROM e2e_peers
+                 WHERE last_nick = ?1 COLLATE NOCASE AND last_handle IS NOT NULL
+                 ORDER BY last_seen DESC LIMIT 1",
+                [nick],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(handle)
+    }
+
     /// Return every row of `e2e_incoming_sessions`, across every channel.
     pub fn list_all_incoming_sessions(&self) -> Result<Vec<IncomingSession>> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
@@ -1432,6 +1452,38 @@ mod tests {
         assert_eq!(all[1].last_handle, None);
         assert_eq!(all[2].fingerprint, [0xcc; 16]);
         assert_eq!(all[2].global_status, TrustStatus::Revoked);
+    }
+
+    #[test]
+    fn last_handle_for_nick_returns_most_recent_case_insensitive() {
+        let kr = open_mem();
+        kr.upsert_peer(&PeerRecord {
+            fingerprint: [0x11; 16],
+            pubkey: [1; 32],
+            last_handle: Some("~alice@old.host".into()),
+            last_nick: Some("alice".into()),
+            first_seen: 100,
+            last_seen: 110,
+            global_status: TrustStatus::Trusted,
+        })
+        .unwrap();
+        kr.upsert_peer(&PeerRecord {
+            fingerprint: [0x22; 16],
+            pubkey: [2; 32],
+            last_handle: Some("~alice@new.host".into()),
+            last_nick: Some("alice".into()),
+            first_seen: 200,
+            last_seen: 220,
+            global_status: TrustStatus::Trusted,
+        })
+        .unwrap();
+        // Most-recent by last_seen, nick match case-insensitive.
+        assert_eq!(
+            kr.last_handle_for_nick("ALICE").unwrap().as_deref(),
+            Some("~alice@new.host")
+        );
+        // Unknown nick → None (not an error).
+        assert_eq!(kr.last_handle_for_nick("bob").unwrap(), None);
     }
 
     #[test]
