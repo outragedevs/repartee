@@ -1912,6 +1912,44 @@ fn handle_away(state: &mut AppState, conn_id: &str, prefix: Option<&Prefix>, rea
     }
 }
 
+/// Move an ENABLED DM E2E config from `old_ctx` to `new_ctx` when a peer's
+/// handle changes (CHGHOST), so the policy follows the peer to its new
+/// pseudochannel. Without this the encrypt path keys the next DM under
+/// `@<new_handle>`, finds no config, and downgrades to plaintext. Re-handshake
+/// re-establishes the session keys under the new context. No-op unless the old
+/// config is enabled and the new context isn't already enabled (don't clobber).
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "exercised by the e2e integration_tests migration test"
+)]
+pub(crate) fn migrate_dm_e2e_config(
+    mgr: &crate::e2e::E2eManager,
+    old_ctx: &str,
+    new_ctx: &str,
+) {
+    use crate::e2e::keyring::ChannelConfig;
+    let Ok(Some(old_cfg)) = mgr.keyring().get_channel_config(old_ctx) else {
+        return;
+    };
+    if !old_cfg.enabled {
+        return;
+    }
+    if matches!(mgr.keyring().get_channel_config(new_ctx), Ok(Some(c)) if c.enabled) {
+        return;
+    }
+    let _ = mgr.keyring().set_channel_config(&ChannelConfig {
+        channel: new_ctx.to_string(),
+        enabled: true,
+        mode: old_cfg.mode,
+    });
+    // Disable the stale old-context config so it doesn't linger as enabled.
+    let _ = mgr.keyring().set_channel_config(&ChannelConfig {
+        channel: old_ctx.to_string(),
+        enabled: false,
+        mode: old_cfg.mode,
+    });
+}
+
 /// Handle `IRCv3` `chghost`: `:nick!olduser@oldhost CHGHOST newuser newhost`
 ///
 /// When a user's ident or hostname changes, the server sends CHGHOST to every
@@ -1934,6 +1972,7 @@ fn handle_chghost(
     };
 
     let nick_lower = nick.to_lowercase();
+    let new_handle = format!("{new_user}@{new_host}");
 
     // Our own CHGHOST: keep our tracked handle current (vhost from services,
     // oper, etc.) so the recipient-keyed DM context follows.
@@ -1942,10 +1981,13 @@ fn handle_chghost(
         .get(conn_id)
         .is_some_and(|c| c.nick.eq_ignore_ascii_case(&nick))
     {
-        set_own_handle(state, conn_id, format!("{new_user}@{new_host}"));
+        set_own_handle(state, conn_id, new_handle.clone());
     }
 
-    // Update ident/host in all shared buffers
+    // Update ident/host in all shared buffers. Capture DM (query) handle
+    // changes so we can migrate their E2E config below — once the mutable
+    // buffers borrow is released.
+    let mut dm_ctx_changes: Vec<(String, String)> = Vec::new();
     for buf in state.buffers.values_mut() {
         if buf.connection_id != conn_id {
             continue;
@@ -1958,8 +2000,29 @@ fn handle_chghost(
         // It drives the E2E encrypt context, so it must track the new host
         // (otherwise outgoing PMs would key under a stale pseudochannel and
         // silently re-handshake or fail to decrypt on the peer's side).
-        if buf.buffer_type == BufferType::Query && buf.name.eq_ignore_ascii_case(&nick) {
-            buf.peer_handle = Some(format!("{new_user}@{new_host}"));
+        if buf.buffer_type == BufferType::Query
+            && buf.name.eq_ignore_ascii_case(&nick)
+            && buf.peer_handle.as_deref() != Some(new_handle.as_str())
+        {
+            if let Some(old_h) = &buf.peer_handle {
+                let old_ctx = crate::e2e::context_key(&buf.name, old_h);
+                let new_ctx = crate::e2e::context_key(&buf.name, &new_handle);
+                if old_ctx != new_ctx {
+                    dm_ctx_changes.push((old_ctx, new_ctx));
+                }
+            }
+            buf.peer_handle = Some(new_handle.clone());
+        }
+    }
+
+    // Migrate an enabled DM E2E config to the new handle's context so a vhost
+    // change does NOT silently downgrade the next DM to plaintext (the encrypt
+    // path keys by @<new_handle> and would otherwise find no config).
+    if !dm_ctx_changes.is_empty()
+        && let Some(mgr) = state.e2e_manager.clone()
+    {
+        for (old_ctx, new_ctx) in dm_ctx_changes {
+            migrate_dm_e2e_config(&mgr, &old_ctx, &new_ctx);
         }
     }
 

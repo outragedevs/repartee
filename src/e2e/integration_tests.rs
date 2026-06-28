@@ -141,6 +141,50 @@ fn dm_round_trip_recipient_keyed_both_directions() {
 }
 
 #[test]
+fn chghost_migrates_enabled_dm_config_to_new_context() {
+    // A peer's vhost/host change must carry the E2E policy to the new
+    // pseudochannel, or the next DM would key under @<new>, find no config,
+    // and go plaintext.
+    let mgr = make_manager();
+    let old_ctx = "@~bob@old.host";
+    let new_ctx = "@~bob@user/bob";
+    enable_channel(&mgr, old_ctx, ChannelMode::Normal);
+
+    crate::irc::events::migrate_dm_e2e_config(&mgr, old_ctx, new_ctx);
+
+    // New context is now enabled; the stale old context is disabled.
+    assert!(
+        mgr.keyring()
+            .get_channel_config(new_ctx)
+            .unwrap()
+            .is_some_and(|c| c.enabled),
+        "config must follow the peer to the new handle"
+    );
+    assert!(
+        !mgr.keyring()
+            .get_channel_config(old_ctx)
+            .unwrap()
+            .is_some_and(|c| c.enabled),
+        "stale old-context config must be disabled"
+    );
+
+    // A disabled old config is NOT migrated (no policy to preserve).
+    let mgr2 = make_manager();
+    mgr2.keyring()
+        .set_channel_config(&ChannelConfig {
+            channel: old_ctx.to_string(),
+            enabled: false,
+            mode: ChannelMode::Normal,
+        })
+        .unwrap();
+    crate::irc::events::migrate_dm_e2e_config(&mgr2, old_ctx, new_ctx);
+    assert!(
+        mgr2.keyring().get_channel_config(new_ctx).unwrap().is_none(),
+        "a disabled config must not be migrated"
+    );
+}
+
+#[test]
 fn dm_keyreq_skips_reciprocal_but_channel_keeps_it() {
     // DM: Alice receives Bob's KEYREQ for the DM context (Bob's own handle).
     // No reciprocal is queued — the reverse (Alice-receives-from-Bob) direction
