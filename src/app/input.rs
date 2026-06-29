@@ -1395,11 +1395,15 @@ impl App {
                 .get(&conn_id)
                 .map_or_else(|| nick.clone(), |c| c.nick.clone());
             let captured_own_mode = self.state.nick_prefix(&active_id, &captured_nick);
+            // Resolve the FULL E2E peer handle now, while the buffer still
+            // exists: its live peer_handle OR the network-scoped cached handle
+            // `/e2e on` keyed its config under. Capturing only `b.peer_handle`
+            // (None until the peer speaks) would let a `/close` during the
+            // shrink wait strand `e2e_encrypt_or_passthrough` — it could no
+            // longer recover the network to resolve the cache, falling through
+            // to plaintext for an E2E-enabled DM.
             let captured_peer_handle = if buf_type == BufferType::Query {
-                self.state
-                    .buffers
-                    .get(&active_id)
-                    .and_then(|b| b.peer_handle.clone())
+                self.resolve_query_peer_handle(&active_id, &buffer_name)
             } else {
                 None
             };
@@ -1694,6 +1698,35 @@ impl App {
         }
     }
 
+    /// Resolve a Query buffer's E2E peer handle: the live server-stamped
+    /// `peer_handle` if the peer has spoken this session, otherwise the
+    /// keyring's network-scoped cached handle for the nick — the SAME
+    /// resolution `/e2e on` and [`Self::e2e_encrypt_or_passthrough`] use, so the
+    /// DM keys under the identical `@<handle>` pseudochannel the config was
+    /// written under.
+    ///
+    /// Requires the buffer to still exist (for its connection's network label).
+    /// Captured at shrink dispatch time so a `/close` during the shrink wait
+    /// can't strand the deferred send and leak ciphertext-intended plaintext.
+    /// Returns `None` when nothing resolves (no peer handle and no cache entry),
+    /// in which case no `@<handle>` config can exist for this peer.
+    fn resolve_query_peer_handle(&self, buffer_id: &str, buffer_name: &str) -> Option<String> {
+        let buf = self.state.buffers.get(buffer_id)?;
+        if let Some(h) = buf.peer_handle.clone() {
+            return Some(h);
+        }
+        let mgr = self.state.e2e_manager.as_ref()?;
+        let net = self
+            .state
+            .connections
+            .get(&buf.connection_id)
+            .map(|c| c.label.clone())?;
+        mgr.keyring()
+            .last_handle_for_nick(buffer_name, &net)
+            .ok()
+            .flatten()
+    }
+
     /// Return `Some((wire_lines, local_plain))` where `wire_lines` is what
     /// goes out on IRC (encrypted when e2e is enabled on the conversation,
     /// otherwise the plain text split at IRC byte boundaries) and
@@ -1754,38 +1787,19 @@ impl App {
         let context: String = match buffer_type {
             BufferType::Channel => buffer_name.to_string(),
             BufferType::Query => {
-                // Prefer a caller-captured peer_handle (deferred shrink path)
-                // over a live state lookup — the buffer may have been closed
-                // during the shrink wait.
-                let live = captured_peer_handle.map(str::to_string).or_else(|| {
-                    self.state
-                        .buffers
-                        .get(buffer_id)
-                        .and_then(|b| b.peer_handle.clone())
-                });
-                // Peer hasn't spoken this session → fall back to the keyring's
-                // last-known handle for this nick (the SAME resolution the
-                // `/e2e` command layer uses) so we key the DM under the
-                // identical `@<cached>` context `/e2e on` wrote its config
-                // under. Without this the config (under `@<cached>`) is
-                // invisible here and the message would go out as plaintext
-                // despite E2E being enabled.
-                let peer_handle = if let Some(h) = live {
-                    h
-                } else if let Some(h) = self
-                    .state
-                    .buffers
-                    .get(buffer_id)
-                    .and_then(|b| self.state.connections.get(&b.connection_id))
-                    .map(|c| c.label.clone())
-                    .and_then(|net| {
-                        // Scope the cached lookup to this buffer's network so a
-                        // same-nick peer on another network can't be resolved.
-                        mgr.keyring().last_handle_for_nick(buffer_name, &net).ok().flatten()
-                    })
-                {
-                    h
-                } else {
+                // Prefer a caller-captured peer_handle (deferred shrink path
+                // captures the FULLY-resolved handle at dispatch time, so a
+                // `/close` during the shrink wait can't strand us). Otherwise
+                // resolve live from the buffer — its server-stamped peer_handle,
+                // or the keyring's network-scoped cached handle for the nick
+                // (the SAME resolution `/e2e on` used to write its config under
+                // `@<cached>`). Without the cache fallback the config would be
+                // invisible here and the DM would go out as plaintext despite
+                // E2E being enabled.
+                let peer_handle = captured_peer_handle
+                    .map(str::to_string)
+                    .or_else(|| self.resolve_query_peer_handle(buffer_id, buffer_name));
+                let Some(peer_handle) = peer_handle else {
                     // Nothing resolvable, so no `@<handle>` config can exist.
                     // Refuse only if a legacy bare-nick enabled row exists;
                     // otherwise plain passthrough is safe (no E2E state).
