@@ -1771,4 +1771,56 @@ mod tests {
         assert_eq!(buf.activity, ActivityLevel::Mention);
         assert_eq!(buf.unread_count, 1);
     }
+
+    #[test]
+    fn decrypted_replay_surfaces_past_a_tagless_placeholder() {
+        // The awaiting-own-identity placeholder carries NO @msgid (handle_privmsg
+        // strips it). The later decrypted CHATHISTORY replay carries the server
+        // @msgid; buffer_contains_history_row must NOT dedup it against the
+        // tagless placeholder, so the real message surfaces instead of staying
+        // hidden behind "[E2E: awaiting our own identity]".
+        let mut state = make_test_state();
+        let mut placeholder = make_test_message(&mut state, "[E2E: awaiting our own identity]");
+        placeholder.tags = None; // as handle_privmsg now builds it
+        state.add_transient_message_with_activity(
+            "libera/#rust",
+            placeholder,
+            ActivityLevel::Mention,
+        );
+
+        let mut decrypted = make_test_message(&mut state, "secret plaintext");
+        decrypted.tags = Some(HashMap::from([("msgid".to_string(), "abc".to_string())]));
+        state.surface_history_rows("libera/#rust", vec![decrypted]);
+
+        let buf = state.buffers.get("libera/#rust").unwrap();
+        assert!(
+            buf.messages.iter().any(|m| m.text == "secret plaintext"),
+            "decrypted replay must surface — a tagless placeholder must not dedup it"
+        );
+    }
+
+    #[test]
+    fn replay_is_still_deduped_when_placeholder_kept_the_msgid() {
+        // Guard the regression direction: if the placeholder HAD kept the server
+        // @msgid, the same-@msgid replay would be deduped and the real message
+        // lost. This documents exactly why handle_privmsg must strip the tags.
+        let mut state = make_test_state();
+        let mut placeholder = make_test_message(&mut state, "[E2E: awaiting our own identity]");
+        placeholder.tags = Some(HashMap::from([("msgid".to_string(), "abc".to_string())]));
+        state.add_transient_message_with_activity(
+            "libera/#rust",
+            placeholder,
+            ActivityLevel::Mention,
+        );
+
+        let mut decrypted = make_test_message(&mut state, "secret plaintext");
+        decrypted.tags = Some(HashMap::from([("msgid".to_string(), "abc".to_string())]));
+        state.surface_history_rows("libera/#rust", vec![decrypted]);
+
+        let buf = state.buffers.get("libera/#rust").unwrap();
+        assert!(
+            !buf.messages.iter().any(|m| m.text == "secret plaintext"),
+            "same-@msgid replay is deduped — proves the tag-strip in handle_privmsg is required"
+        );
+    }
 }

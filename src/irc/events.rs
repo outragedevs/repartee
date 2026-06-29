@@ -1469,11 +1469,16 @@ fn handle_privmsg(
         event_params: None,
         log_msg_id: None,
         log_ref_id: None,
-        tags,
+        // The awaiting-own-identity placeholder must carry NO @msgid: it keeps
+        // the server tags off so (a) the transient line never occupies the
+        // (network, @msgid) storage row, and (b) `buffer_contains_history_row`
+        // can't dedup the later decrypted CHATHISTORY replay (same @msgid)
+        // against it — which would skip the real message and leave the
+        // placeholder showing until restart. Real messages keep their tags.
+        tags: if e2e_awaiting_own_handle { None } else { tags },
     };
-    // The "awaiting our own identity" placeholder is delivered transiently so it
-    // never occupies the server @msgid row that the post-handle CHATHISTORY
-    // replay needs to persist the decrypted message under.
+    // The placeholder is delivered transiently (never logged) so it doesn't
+    // persist; the decrypted replay is logged + surfaced under the real @msgid.
     if e2e_awaiting_own_handle {
         state.add_transient_message_with_activity(&buffer_id, msg, activity);
     } else {
@@ -6140,13 +6145,18 @@ mod tests {
 
         // The placeholder is rendered live in the query buffer...
         let buf = state.buffers.get("test/alice").unwrap();
+        let placeholder = buf
+            .messages
+            .iter()
+            .find(|m| m.text == "[E2E: awaiting our own identity]")
+            .expect("placeholder must be rendered live");
+        // ...carrying NO @msgid, so the later decrypted CHATHISTORY replay (same
+        // server @msgid) isn't deduped against it in surface_history_rows.
         assert!(
-            buf.messages
-                .iter()
-                .any(|m| m.text == "[E2E: awaiting our own identity]"),
-            "placeholder must be rendered live"
+            placeholder.tags.is_none(),
+            "placeholder must drop the server tags/@msgid so the decrypted replay can surface"
         );
-        // ...but is NOT persisted, so the server @msgid stays free for the
+        // ...and is NOT persisted, so the server @msgid stays free for the
         // post-handle decrypted replay.
         assert!(
             rx.try_recv().is_err(),

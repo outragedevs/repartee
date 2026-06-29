@@ -945,28 +945,51 @@ impl Keyring {
         Ok(out)
     }
 
-    /// Most-recent server-stamped handle (`ident@host`) cached for `nick` on
-    /// `network` (case-insensitive nick). Resolves a DM peer's handle when the
-    /// live `Buffer.peer_handle` isn't set yet (the peer hasn't spoken this
-    /// session) so the `/e2e` command layer AND the encrypt path key the DM
-    /// under the same `@<cached>` context — avoiding a plaintext send after
-    /// `/e2e on` enabled E2E for that cached context.
+    /// Most-recent server-stamped handle (`ident@host`) for `nick` on `network`
+    /// (case-insensitive nick). Resolves a DM peer's handle when the live
+    /// `Buffer.peer_handle` isn't set yet (the peer hasn't spoken this session)
+    /// so the `/e2e` command layer AND the encrypt path key the DM under the same
+    /// `@<handle>` context — avoiding a plaintext send when `/e2e on` enabled E2E
+    /// for that context.
     ///
-    /// Reads the `(network, nick)` cache, NOT `e2e_peers`: that table keeps only
-    /// one (global-newest) `last_handle` per fingerprint, so the same E2E
-    /// identity seen on two networks would resolve the wrong network's handle.
-    /// A nick we've never observed on `network` returns `None` (never a
-    /// cross-network handle).
+    /// Resolution order:
+    /// 1. The `(network, nick)` cache — authoritative and network-scoped, so the
+    ///    same E2E identity seen on two networks keeps independent handles. This
+    ///    is the source for all keyrings once a peer has been observed.
+    /// 2. Legacy fallback to `e2e_peers.last_handle` by nick, for keyrings created
+    ///    BEFORE the cache table existed: on upgrade the cache starts empty while
+    ///    `e2e_peers` still holds last-seen handles. Without this an enabled
+    ///    `@<handle>` config would be invisible here and the DM would go out in
+    ///    PLAINTEXT. This fallback is network-AGNOSTIC (`e2e_peers` has no network
+    ///    column), so the only imperfect case is the SAME nick being an E2E peer
+    ///    on two networks while the cache hasn't been populated for `network`
+    ///    yet — that yields a wrong-context but still-ENCRYPTED (never plaintext)
+    ///    send that self-heals the instant the peer speaks (which writes the
+    ///    network-scoped cache via `cache_dm_handle`).
     pub fn last_handle_for_nick(&self, nick: &str, network: &str) -> Result<Option<String>> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
-        let handle: Option<String> = conn
+        let cached: Option<String> = conn
             .query_row(
                 "SELECT handle FROM e2e_dm_handle_cache WHERE network = ?1 AND nick = ?2",
                 params![network, nick],
                 |r| r.get(0),
             )
             .optional()?;
-        Ok(handle)
+        if cached.is_some() {
+            return Ok(cached);
+        }
+        // Pre-cache keyring (upgrade): resolve from e2e_peers so an existing
+        // enabled @<handle> config is reachable instead of leaking plaintext.
+        let legacy: Option<String> = conn
+            .query_row(
+                "SELECT last_handle FROM e2e_peers
+                 WHERE last_nick = ?1 COLLATE NOCASE AND last_handle IS NOT NULL
+                 ORDER BY last_seen DESC LIMIT 1",
+                params![nick],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(legacy)
     }
 
     /// Record that DM peer `nick` was seen as `handle` (`ident@host`) on
@@ -1509,6 +1532,39 @@ mod tests {
         assert_eq!(
             kr.last_handle_for_nick("bob", "NetA").unwrap().as_deref(),
             Some("~bob@cloak")
+        );
+    }
+
+    #[test]
+    fn last_handle_for_nick_falls_back_to_e2e_peers_when_cache_empty() {
+        // Upgrade scenario: a pre-cache keyring has e2e_peers rows (last-seen
+        // handles) but an empty e2e_dm_handle_cache. Without a fallback, a DM to
+        // a peer who hasn't spoken this session would resolve None and go out in
+        // PLAINTEXT despite an enabled @<handle> config. The fallback resolves
+        // the handle from e2e_peers so the config is reachable.
+        let kr = open_mem();
+        kr.upsert_peer(&PeerRecord {
+            fingerprint: [7u8; 16],
+            pubkey: [1; 32],
+            last_handle: Some("~bob@legacy.host".into()),
+            last_nick: Some("bob".into()),
+            first_seen: 100,
+            last_seen: 200,
+            global_status: TrustStatus::Trusted,
+        })
+        .unwrap();
+        // Cache is empty → fall back to e2e_peers (case-insensitive nick).
+        assert_eq!(
+            kr.last_handle_for_nick("BOB", "AnyNet").unwrap().as_deref(),
+            Some("~bob@legacy.host"),
+            "must resolve the legacy e2e_peers handle when the cache is empty"
+        );
+        // Once the cache is populated it is authoritative and wins over e2e_peers.
+        kr.cache_dm_handle("AnyNet", "bob", "~bob@fresh.host").unwrap();
+        assert_eq!(
+            kr.last_handle_for_nick("bob", "AnyNet").unwrap().as_deref(),
+            Some("~bob@fresh.host"),
+            "network-scoped cache must take precedence over the legacy fallback"
         );
     }
 
