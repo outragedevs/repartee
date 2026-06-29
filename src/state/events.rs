@@ -418,6 +418,41 @@ impl AppState {
             return;
         }
         self.maybe_log(buffer_id, &message);
+        self.deliver_message_to_buffer(buffer_id, message, level);
+    }
+
+    /// Add a TRANSIENT message: delivered to the in-memory buffer and broadcast
+    /// to web clients (with activity escalation), but NEVER persisted to storage.
+    ///
+    /// For session-only notices that must not occupy a `(network, @msgid)` row —
+    /// notably the "awaiting our own identity" E2E placeholder. That placeholder's
+    /// real ciphertext is re-fetched and decrypted via CHATHISTORY once our own
+    /// handle is learned (see `regapfill_active_query_after_own_handle`);
+    /// persisting the placeholder under the server `@msgid` would make the
+    /// decryptable replay collapse into `INSERT OR IGNORE` on the unique
+    /// `(network, msg_id)` index and be lost forever.
+    pub fn add_transient_message_with_activity(
+        &mut self,
+        buffer_id: &str,
+        message: Message,
+        level: ActivityLevel,
+    ) {
+        if !self.buffers.contains_key(buffer_id) {
+            return;
+        }
+        self.deliver_message_to_buffer(buffer_id, message, level);
+    }
+
+    /// Shared tail of [`AppState::add_message_with_activity_unshrunk`] and
+    /// [`AppState::add_transient_message_with_activity`]: queue web events,
+    /// append to the in-memory buffer, and escalate activity. Does NOT log to
+    /// storage — the caller decides whether to `maybe_log` first.
+    fn deliver_message_to_buffer(
+        &mut self,
+        buffer_id: &str,
+        message: Message,
+        level: ActivityLevel,
+    ) {
         // Queue web events for broadcast.
         let wire =
             crate::web::snapshot::message_to_wire(&message, self.web_preview_extractor.as_deref());
@@ -1707,5 +1742,33 @@ mod tests {
 
         // add_message SHOULD send to log channel.
         assert!(rx.try_recv().is_ok(), "add_message must send to log_tx");
+    }
+
+    #[test]
+    fn add_transient_message_with_activity_does_not_log_but_escalates() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let mut state = make_test_state();
+        state.log_tx = Some(tx);
+        state.set_active_buffer("libera/#linux");
+
+        let msg = make_test_message(&mut state, "transient placeholder");
+        state.add_transient_message_with_activity(
+            "libera/#rust",
+            msg,
+            ActivityLevel::Mention,
+        );
+
+        // Transient: never persisted — it must not occupy a (network, @msgid)
+        // row that a later decryptable CHATHISTORY replay needs.
+        assert!(
+            rx.try_recv().is_err(),
+            "add_transient_message_with_activity must not send to log_tx"
+        );
+        // Delivered to the buffer, and (unlike add_local_message) escalates
+        // activity on the inactive buffer so the user is still notified.
+        let buf = state.buffers.get("libera/#rust").unwrap();
+        assert_eq!(buf.messages.back().unwrap().text, "transient placeholder");
+        assert_eq!(buf.activity, ActivityLevel::Mention);
+        assert_eq!(buf.unread_count, 1);
     }
 }

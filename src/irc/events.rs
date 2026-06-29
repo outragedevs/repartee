@@ -1134,6 +1134,10 @@ fn handle_privmsg(
         .connections
         .get(conn_id)
         .and_then(|c| c.own_handle.clone());
+    // A DM ciphertext that arrived before we learned our own handle yields a
+    // transient, non-logged placeholder (see below) rather than a stored
+    // message — set when the matching arm fires.
+    let mut e2e_awaiting_own_handle = false;
     let decrypted_owned = match incoming_e2e_context(target, own_handle.as_deref()) {
         Some(decrypt_context) => try_decrypt_e2e(
             state,
@@ -1148,8 +1152,13 @@ fn handle_privmsg(
         // under the sender's handle (that negotiates the wrong DM direction).
         // Show a placeholder and wait — the self-USERHOST at RPL_WELCOME, an
         // echo, or CHGHOST will set our handle and the peer re-handshakes on
-        // the next message. Non-E2E plaintext passes through untouched.
+        // the next message. The handle-learned hook re-fetches this exact line
+        // via CHATHISTORY and decrypts it, so the placeholder MUST stay
+        // transient (non-logged): persisting it under the server @msgid would
+        // block that decryptable replay on the unique (network, msg_id) index.
+        // Non-E2E plaintext passes through untouched.
         None if !is_own && text.starts_with("+RPE2E01") => {
+            e2e_awaiting_own_handle = true;
             Some("[E2E: awaiting our own identity]".to_string())
         }
         None => None,
@@ -1448,24 +1457,28 @@ fn handle_privmsg(
     let ts = message_timestamp(tags.as_ref());
     // Save nick before moving into Message — needed for mentions buffer below.
     let nick_saved = if is_mention { Some(nick.clone()) } else { None };
-    state.add_message_with_activity(
-        &buffer_id,
-        Message {
-            id,
-            timestamp: ts,
-            message_type: MessageType::Message,
-            nick: Some(nick),
-            nick_mode: mode_prefix.map(String::from),
-            text: text.to_string(),
-            highlight: is_mention,
-            event_key: None,
-            event_params: None,
-            log_msg_id: None,
-            log_ref_id: None,
-            tags,
-        },
-        activity,
-    );
+    let msg = Message {
+        id,
+        timestamp: ts,
+        message_type: MessageType::Message,
+        nick: Some(nick),
+        nick_mode: mode_prefix.map(String::from),
+        text: text.to_string(),
+        highlight: is_mention,
+        event_key: None,
+        event_params: None,
+        log_msg_id: None,
+        log_ref_id: None,
+        tags,
+    };
+    // The "awaiting our own identity" placeholder is delivered transiently so it
+    // never occupies the server @msgid row that the post-handle CHATHISTORY
+    // replay needs to persist the decrypted message under.
+    if e2e_awaiting_own_handle {
+        state.add_transient_message_with_activity(&buffer_id, msg, activity);
+    } else {
+        state.add_message_with_activity(&buffer_id, msg, activity);
+    }
 
     // Push to mentions buffer — channel highlights only (not PMs/queries).
     if is_mention && target_is_channel && state.buffers.contains_key("_mentions") {
@@ -4458,6 +4471,7 @@ fn handle_userhost_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
                     buffer_id,
                     target,
                     channel,
+                    own_channel,
                     all,
                 } => {
                     let Some(mgr) = state.e2e_manager.clone() else {
@@ -4473,7 +4487,9 @@ fn handle_userhost_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
                     let result = if all {
                         mgr.forget_peer_everywhere(&handle)
                     } else if let Some(channel) = channel.as_deref() {
-                        mgr.forget_peer_on_channel(&handle, channel)
+                        // DM: also clears the recipient-keyed @<own> incoming
+                        // session, matching the direct perform_e2e_forget path.
+                        mgr.forget_peer_on_dm_contexts(&handle, channel, own_channel.as_deref())
                     } else {
                         emit_e2e_message(
                             state,
@@ -6098,6 +6114,113 @@ mod tests {
         assert_eq!(
             state.buffers.get("test/alice").unwrap().peer_handle.as_deref(),
             Some(new_handle)
+        );
+    }
+
+    #[test]
+    fn e2e_awaiting_own_identity_placeholder_is_transient_not_logged() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let mut state = make_test_state();
+        state.log_tx = Some(tx);
+        // own_handle is None (make_test_state default), so an encrypted DM can't
+        // be decrypted yet: handle_privmsg shows the "awaiting our own identity"
+        // placeholder. The handle-learned hook re-fetches and decrypts this exact
+        // line via CHATHISTORY, so the placeholder must NOT be logged under the
+        // server @msgid — otherwise the decryptable replay collapses into
+        // INSERT OR IGNORE on the unique (network, msg_id) index and is lost.
+        let mut msg = make_irc_msg(
+            Some("alice!~alice@her.host"),
+            Command::PRIVMSG("me".into(), "+RPE2E01 c=@~me@my.host m=ciphertext".into()),
+        );
+        msg.tags = Some(vec![irc::proto::message::Tag(
+            "msgid".to_string(),
+            Some("server-msgid-1".to_string()),
+        )]);
+        handle_irc_message(&mut state, "test", &msg);
+
+        // The placeholder is rendered live in the query buffer...
+        let buf = state.buffers.get("test/alice").unwrap();
+        assert!(
+            buf.messages
+                .iter()
+                .any(|m| m.text == "[E2E: awaiting our own identity]"),
+            "placeholder must be rendered live"
+        );
+        // ...but is NOT persisted, so the server @msgid stays free for the
+        // post-handle decrypted replay.
+        assert!(
+            rx.try_recv().is_err(),
+            "awaiting-own-identity placeholder must not be logged under the server @msgid"
+        );
+    }
+
+    #[test]
+    fn userhost_deferred_forget_clears_own_context_incoming_session() {
+        use crate::e2e::keyring::{IncomingSession, Keyring, TrustStatus};
+        use crate::e2e::manager::E2eManager;
+        use std::sync::{Arc, Mutex};
+
+        // DM with peer "alice". Recipient-keyed: alice's TRUSTED incoming session
+        // (her messages → us) lives under OUR own context @<own>, not @<alice>.
+        // `/e2e forget alice` (a bare nick) defers to USERHOST; the reply handler
+        // must forget BOTH contexts, else alice's messages keep decrypting after
+        // the user was told she was forgotten.
+        let own_handle = "~me@my.host";
+        let alice_handle = "~alice@her.host";
+        let own_ctx = format!("@{own_handle}");
+        let peer_ctx = format!("@{alice_handle}");
+
+        let conn = crate::storage::db::open_database(false).unwrap();
+        let mgr = E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(conn)))).unwrap();
+        mgr.keyring()
+            .install_incoming_session_strict(&IncomingSession {
+                handle: alice_handle.to_string(),
+                channel: own_ctx.clone(),
+                fingerprint: [0x11; 16],
+                sk: [0x22; 32],
+                status: TrustStatus::Trusted,
+                created_at: 0,
+            })
+            .unwrap();
+        assert!(
+            mgr.keyring()
+                .get_incoming_session(alice_handle, &own_ctx)
+                .unwrap()
+                .is_some(),
+            "precondition: incoming session installed under @<own>"
+        );
+
+        let mut state = make_test_state();
+        state.e2e_manager = Some(Arc::new(mgr));
+        // Queue the deferred forget exactly as e2e_forget does, carrying @<own>.
+        state
+            .pending_userhost_requests
+            .push(crate::state::PendingUserhostRequest {
+                connection_id: "test".to_string(),
+                nick: "alice".to_string(),
+                action: crate::state::PendingUserhostAction::E2eForget {
+                    buffer_id: make_buffer_id("test", "alice"),
+                    target: "alice".to_string(),
+                    channel: Some(peer_ctx),
+                    own_channel: Some(own_ctx.clone()),
+                    all: false,
+                },
+            });
+
+        // USERHOST reply resolving alice's handle.
+        handle_userhost_reply(
+            &mut state,
+            "test",
+            &["me".to_string(), format!("alice=+{alice_handle}")],
+        );
+
+        let mgr = state.e2e_manager.as_ref().unwrap();
+        assert!(
+            mgr.keyring()
+                .get_incoming_session(alice_handle, &own_ctx)
+                .unwrap()
+                .is_none(),
+            "deferred forget must delete the recipient-keyed @<own> incoming session"
         );
     }
 

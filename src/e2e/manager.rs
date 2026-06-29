@@ -749,6 +749,28 @@ impl E2eManager {
         Ok(deleted)
     }
 
+    /// Forget a DM peer across BOTH of its recipient-keyed contexts: the peer
+    /// context `@<peer>` (where our outgoing-recipient + their pending state
+    /// live) and our own context `@<own>` (where their TRUSTED INCOMING session
+    /// lives — recipient-keyed, see `docs/rpe2e-dm-addendum.md`). Without the
+    /// own-context delete the peer's messages keep decrypting after the user was
+    /// told they were forgotten. For a channel `own == peer == channel`, so the
+    /// second delete is skipped. Returns the total rows/entries removed.
+    pub fn forget_peer_on_dm_contexts(
+        &self,
+        handle: &str,
+        peer_channel: &str,
+        own_channel: Option<&str>,
+    ) -> Result<usize> {
+        let n = self.forget_peer_on_channel(handle, peer_channel)?;
+        match own_channel {
+            Some(own) if own != peer_channel => {
+                self.forget_peer_on_channel(handle, own).map(|m| n + m)
+            }
+            _ => Ok(n),
+        }
+    }
+
     pub fn forget_peer_everywhere(&self, handle: &str) -> Result<usize> {
         let mut deleted = 0usize;
         if let Some(peer) = self.keyring.get_peer_by_handle(handle)? {
