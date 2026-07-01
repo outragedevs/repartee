@@ -427,7 +427,7 @@ impl AppState {
     /// For session-only notices that must not occupy a `(network, @msgid)` row —
     /// notably the "awaiting our own identity" E2E placeholder. That placeholder's
     /// real ciphertext is re-fetched and decrypted via CHATHISTORY once our own
-    /// handle is learned (see `regapfill_active_query_after_own_handle`);
+    /// handle is learned (see `regapfill_queries_after_own_handle`);
     /// persisting the placeholder under the server `@msgid` would make the
     /// decryptable replay collapse into `INSERT OR IGNORE` on the unique
     /// `(network, msg_id)` index and be lost forever.

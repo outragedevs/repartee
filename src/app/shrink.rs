@@ -505,26 +505,21 @@ impl App {
             self.deliver_outgoing_error(out, "Failed to send message — connection unavailable");
             return;
         }
-        let Some((wire_lines, plain_echo)) = self.e2e_encrypt_or_passthrough(
+        let (wire_lines, plain_echo) = match self.e2e_encrypt_or_passthrough(
             &out.buffer_id,
             &out.buffer_name,
             &out.buffer_type,
             &out.substituted_text,
             out.peer_handle.as_deref(),
-        ) else {
-            // Mirror handle_plain_message's themed error event so
-            // the user knows the PM didn't go out (no peer handle
-            // yet). Without this the message vanished silently.
-            self.deliver_outgoing_error(
-                out,
-                &format!(
-                    "{err}[E2E] cannot encrypt PM without peer handle \
-                     — wait for a message from them first{rst}",
-                    err = crate::commands::types::C_ERR,
-                    rst = crate::commands::types::C_RST,
-                ),
-            );
-            return;
+        ) {
+            Ok(v) => v,
+            Err(reason) => {
+                // Surface the reason-specific refusal so the user knows why
+                // the PM didn't go out (and never silently drops or downgrades
+                // to plaintext). Without this the message vanished silently.
+                self.deliver_outgoing_error(out, &reason.user_message());
+                return;
+            }
         };
         let echo_message_enabled = self
             .state

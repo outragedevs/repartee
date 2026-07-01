@@ -42,11 +42,6 @@ pub enum PendingUserhostAction {
         target: String,
         /// Peer context `@<peer>` (resolved from the active buffer at queue time).
         channel: Option<String>,
-        /// Our own recipient-keyed context `@<own>` for a DM (the incoming
-        /// session lives here); `None` for `all` or when our handle is unknown.
-        /// Carried so the USERHOST reply forgets both contexts, like the direct
-        /// `perform_e2e_forget` path.
-        own_channel: Option<String>,
         all: bool,
     },
 }

@@ -638,15 +638,12 @@ fn e2e_forget(app: &mut App, target: &str, all: bool) {
         perform_e2e_forget(app, buffer_id, target, target, channel.as_deref(), all);
         return;
     }
-    // Capture the own context now (active buffer == the DM), so the deferred
-    // USERHOST reply can forget the recipient-keyed @<own> incoming session too,
-    // matching perform_e2e_forget. `None` for `all` (forget_peer_everywhere
-    // covers every context) or when our handle isn't known yet.
-    let own_channel = if all {
-        None
-    } else {
-        current_e2e_own_context(app)
-    };
+    // The recipient-keyed @<own> context is NOT captured here: a CHGHOST can
+    // move our own handle between this command and the USERHOST reply, so the
+    // deferred handler recomputes @<own> from our current handle at execution
+    // (mirroring perform_e2e_forget, which recomputes it too). Capturing it now
+    // would forget under a stale @<own> and leave the peer's live incoming
+    // session intact.
     let Some(sender) = app.active_irc_sender().cloned() else {
         err(app, "/e2e forget: not connected");
         return;
@@ -667,7 +664,6 @@ fn e2e_forget(app: &mut App, target: &str, all: bool) {
                 buffer_id,
                 target: target.to_string(),
                 channel,
-                own_channel,
                 all,
             },
         });

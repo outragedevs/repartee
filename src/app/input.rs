@@ -12,6 +12,44 @@ use crate::ui::layout::UiRegions;
 
 use super::{App, MAX_ALIAS_DEPTH, MAX_PASTE_LINES, expand_alias_template};
 
+/// Why [`App::e2e_encrypt_or_passthrough`] refused to put a message on the
+/// wire. Each variant renders a distinct `[E2E]` line so the user knows
+/// whether to wait, retry, or `/e2e off` — an E2E-enabled DM is never
+/// silently dropped or downgraded to plaintext.
+pub enum E2eRefusal {
+    /// PM has E2E enabled but the peer's `ident@host` isn't known yet — they
+    /// have not spoken this session and nothing is cached.
+    NoPeerHandle,
+    /// The keyring read failed while resolving the DM context. An enabled
+    /// `@<handle>` config may exist, so we refuse rather than risk plaintext.
+    KeyringRead,
+    /// Encryption itself failed on an already-enabled context — refuse rather
+    /// than fall back to cleartext.
+    EncryptFailed,
+}
+
+impl E2eRefusal {
+    /// The themed `[E2E]` line shown to the user when a send is refused.
+    pub fn user_message(&self) -> String {
+        let body = match self {
+            Self::NoPeerHandle => {
+                "cannot encrypt PM without peer handle — wait for a message from them first"
+            }
+            Self::KeyringRead => {
+                "cannot encrypt PM — keyring read failed; message NOT sent (E2E stays on)"
+            }
+            Self::EncryptFailed => {
+                "encryption failed — message NOT sent as plaintext (use /e2e off to send cleartext)"
+            }
+        };
+        format!(
+            "{err}[E2E] {body}{rst}",
+            err = crate::commands::types::C_ERR,
+            rst = crate::commands::types::C_RST,
+        )
+    }
+}
+
 /// Derive the terminal's cell pixel size (font width/height) from a window-size
 /// report. Returns `None` when any dimension is zero — many terminals leave the
 /// pixel fields unset, in which case we must keep the previously detected size
@@ -1403,7 +1441,16 @@ impl App {
             // longer recover the network to resolve the cache, falling through
             // to plaintext for an E2E-enabled DM.
             let captured_peer_handle = if buf_type == BufferType::Query {
+                // A keyring read error here is logged and treated as "unresolved"
+                // for the capture; the authoritative refuse-vs-plaintext decision
+                // is re-made in `e2e_encrypt_or_passthrough` at send time.
                 self.resolve_query_peer_handle(&active_id, &buffer_name)
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(
+                            "e2e: failed to resolve DM peer handle for {buffer_name}: {e}"
+                        );
+                        None
+                    })
             } else {
                 None
             };
@@ -1458,25 +1505,18 @@ impl App {
         // For PMs the context key is `@<peer_handle>` (spec §6), so we
         // pass the buffer type through — the helper derives the
         // pseudochannel from the Query buffer's cached `peer_handle`.
-        // When E2E is configured for a Query buffer but the peer's
-        // `ident@host` has not been captured yet (the user has never
-        // received a message from them), the helper returns `None` and
-        // we surface a themed refusal rather than leaking cleartext
-        // under a weak key.
-        let Some((wire_lines, plain_echo)) =
-            self.e2e_encrypt_or_passthrough(&active_id, &buffer_name, &buf_type, text, None)
-        else {
-            crate::commands::helpers::add_local_event(
-                self,
-                &format!(
-                    "{err}[E2E] cannot encrypt PM without peer handle \
-                     — wait for a message from them first{rst}",
-                    err = crate::commands::types::C_ERR,
-                    rst = crate::commands::types::C_RST,
-                ),
-            );
-            return;
-        };
+        // When E2E is configured for a Query buffer but we can't safely
+        // encrypt (peer `ident@host` not known yet, keyring read failed, or
+        // encryption failed), the helper returns `Err(reason)` and we surface
+        // the reason-specific refusal rather than leaking cleartext.
+        let (wire_lines, plain_echo) =
+            match self.e2e_encrypt_or_passthrough(&active_id, &buffer_name, &buf_type, text, None) {
+                Ok(v) => v,
+                Err(reason) => {
+                    crate::commands::helpers::add_local_event(self, &reason.user_message());
+                    return;
+                }
+            };
 
         // When echo-message is enabled, the server will echo our message back
         // with authoritative server-time — skip local display and wait for echo.
@@ -1708,23 +1748,35 @@ impl App {
     /// Requires the buffer to still exist (for its connection's network label).
     /// Captured at shrink dispatch time so a `/close` during the shrink wait
     /// can't strand the deferred send and leak ciphertext-intended plaintext.
-    /// Returns `None` when nothing resolves (no peer handle and no cache entry),
-    /// in which case no `@<handle>` config can exist for this peer.
-    fn resolve_query_peer_handle(&self, buffer_id: &str, buffer_name: &str) -> Option<String> {
-        let buf = self.state.buffers.get(buffer_id)?;
+    /// Returns `Ok(None)` when nothing resolves (no peer handle and no cache
+    /// entry), in which case no `@<handle>` config can exist for this peer.
+    /// Returns `Err` only when the keyring read itself fails — callers on the
+    /// send path MUST treat that as a refusal, never as "no E2E state", so a
+    /// transient DB error cannot silently downgrade an E2E-enabled DM to
+    /// plaintext.
+    fn resolve_query_peer_handle(
+        &self,
+        buffer_id: &str,
+        buffer_name: &str,
+    ) -> color_eyre::Result<Option<String>> {
+        let Some(buf) = self.state.buffers.get(buffer_id) else {
+            return Ok(None);
+        };
         if let Some(h) = buf.peer_handle.clone() {
-            return Some(h);
+            return Ok(Some(h));
         }
-        let mgr = self.state.e2e_manager.as_ref()?;
-        let net = self
+        let Some(mgr) = self.state.e2e_manager.as_ref() else {
+            return Ok(None);
+        };
+        let Some(net) = self
             .state
             .connections
             .get(&buf.connection_id)
-            .map(|c| c.label.clone())?;
-        mgr.keyring()
-            .last_handle_for_nick(buffer_name, &net)
-            .ok()
-            .flatten()
+            .map(|c| c.label.clone())
+        else {
+            return Ok(None);
+        };
+        Ok(mgr.keyring().last_handle_for_nick(buffer_name, &net)?)
     }
 
     /// Return `Some((wire_lines, local_plain))` where `wire_lines` is what
@@ -1732,13 +1784,14 @@ impl App {
     /// otherwise the plain text split at IRC byte boundaries) and
     /// `local_plain` is what is echoed into the local buffer for the user.
     ///
-    /// Returns `None` to signal a hard refusal: the conversation is a PM
-    /// with an E2E config enabled under the `@<peer_handle>` pseudochannel
-    /// (spec §6), but the peer's `ident@host` has not been captured yet
-    /// (the user has never received a message from this peer in this
-    /// buffer). The caller must surface a themed error and drop the
-    /// message. This prevents silently encrypting under a nick-keyed row
-    /// that would collide with other peers sharing the same nick.
+    /// Returns `Err(E2eRefusal)` to signal a hard refusal: the conversation
+    /// is a PM with an E2E config enabled under the `@<peer_handle>`
+    /// pseudochannel (spec §6), but we could not safely encrypt — the peer's
+    /// `ident@host` isn't known yet, a keyring read failed, or encryption
+    /// itself failed. The caller must surface `reason.user_message()` and
+    /// drop the message. This prevents silently encrypting under a nick-keyed
+    /// row that would collide with other peers sharing the same nick, and —
+    /// critically — never downgrades an E2E-enabled DM to plaintext.
     ///
     /// For real IRC channels (`#&!+`) the context is the channel name,
     /// unchanged. For Query buffers the context is `@<peer_handle>`
@@ -1757,9 +1810,9 @@ impl App {
         // make this fall through to plain_passthrough() and leak
         // ciphertext-intended plaintext on the wire.
         captured_peer_handle: Option<&str>,
-    ) -> Option<(Vec<String>, String)> {
-        let plain_passthrough = || {
-            Some((
+    ) -> Result<(Vec<String>, String), E2eRefusal> {
+        let plain_passthrough = || -> Result<(Vec<String>, String), E2eRefusal> {
+            Ok((
                 crate::irc::split_irc_message(text, crate::irc::MESSAGE_MAX_BYTES),
                 text.to_string(),
             ))
@@ -1796,9 +1849,24 @@ impl App {
                 // `@<cached>`). Without the cache fallback the config would be
                 // invisible here and the DM would go out as plaintext despite
                 // E2E being enabled.
-                let peer_handle = captured_peer_handle
-                    .map(str::to_string)
-                    .or_else(|| self.resolve_query_peer_handle(buffer_id, buffer_name));
+                let peer_handle = match captured_peer_handle {
+                    Some(h) => Some(h.to_string()),
+                    None => match self.resolve_query_peer_handle(buffer_id, buffer_name) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            // Keyring read failed — an enabled `@<handle>` config
+                            // may well exist, so refusing (dropping the message)
+                            // is the only safe choice. Never fall through to
+                            // plaintext on a read error.
+                            tracing::warn!(
+                                "e2e: keyring read failed resolving DM handle for \
+                                 {buffer_name}: {e}; refusing to send rather than \
+                                 risk plaintext"
+                            );
+                            return Err(E2eRefusal::KeyringRead);
+                        }
+                    },
+                };
                 let Some(peer_handle) = peer_handle else {
                     // Nothing resolvable, so no `@<handle>` config can exist.
                     // Refuse only if a legacy bare-nick enabled row exists;
@@ -1810,7 +1878,7 @@ impl App {
                         .flatten()
                         .is_some_and(|c| c.enabled);
                     if legacy_enabled {
-                        return None;
+                        return Err(E2eRefusal::NoPeerHandle);
                     }
                     return plain_passthrough();
                 };
@@ -1904,10 +1972,14 @@ impl App {
         }
 
         match result {
-            Ok(wires) => Some((wires, text.to_string())),
+            Ok(wires) => Ok((wires, text.to_string())),
             Err(e) => {
-                tracing::warn!("e2e encrypt failed on {context}: {e}; sending cleartext");
-                plain_passthrough()
+                // E2E is enabled for this context (checked above), so a failed
+                // encrypt must NOT downgrade to cleartext — refuse and let the
+                // caller tell the user. The message stays unsent unless they
+                // explicitly `/e2e off`.
+                tracing::warn!("e2e encrypt failed on {context}: {e}; refusing to send plaintext");
+                Err(E2eRefusal::EncryptFailed)
             }
         }
     }
@@ -2133,6 +2205,28 @@ fn key_event_to_bytes(key: &event::KeyEvent, app_cursor: bool) -> Vec<u8> {
 mod tests {
     use super::*;
     use crossterm::event;
+
+    // ── E2eRefusal messaging ──
+
+    #[test]
+    fn e2e_refusal_messages_are_distinct_and_never_leak_intent() {
+        let variants = [
+            E2eRefusal::NoPeerHandle,
+            E2eRefusal::KeyringRead,
+            E2eRefusal::EncryptFailed,
+        ];
+        let msgs: Vec<String> = variants.iter().map(E2eRefusal::user_message).collect();
+        // Every reason renders a themed `[E2E]` line...
+        assert!(msgs.iter().all(|m| m.contains("[E2E]")));
+        // ...and each cause produces a different message, so the user can tell
+        // "peer hasn't spoken" from a keyring/encrypt failure.
+        assert_ne!(msgs[0], msgs[1]);
+        assert_ne!(msgs[1], msgs[2]);
+        assert_ne!(msgs[0], msgs[2]);
+        // The failure reasons make clear the message was NOT downgraded.
+        assert!(msgs[1].contains("NOT sent"));
+        assert!(msgs[2].contains("NOT sent"));
+    }
 
     // ── font_size_from_window_px tests ──
 
