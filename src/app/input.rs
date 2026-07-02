@@ -29,6 +29,46 @@ pub enum E2eRefusal {
     EncryptFailed,
 }
 
+/// Resolve the NOTICE target (a nick) for one pending REKEY distribution
+/// entry produced by a lazy key rotation inside `encrypt_outgoing`.
+///
+/// - **Channel**: the recipient is looked up by server-stamped `ident@host`
+///   in the buffer's users map (`None` when the peer left the channel between
+///   handshake and rotation — the caller drops the entry with a warning).
+/// - **Query (DM)**: the users map is EMPTY for queries, so the map lookup
+///   can never resolve — but a DM context (`@<peer_handle>`) has exactly one
+///   legitimate recipient: the peer the context is keyed under. Match the
+///   entry's handle against the encrypt context and address the NOTICE to
+///   the buffer name (the peer's nick). Without this arm every `/e2e rotate`
+///   in a query silently dropped the REKEY, leaving the peer on the old
+///   incoming key — all subsequent DM ciphertext failed AEAD until a manual
+///   re-handshake.
+fn rekey_notice_target(
+    buf: Option<&Buffer>,
+    buffer_type: &BufferType,
+    buffer_name: &str,
+    context: &str,
+    target_handle: &str,
+) -> Option<String> {
+    if *buffer_type == BufferType::Query {
+        // `context_key(nick, handle)` yields `@<handle>` for a non-channel
+        // name, so this holds exactly when the entry targets the DM peer.
+        return (crate::e2e::context_key(buffer_name, target_handle) == context)
+            .then(|| buffer_name.to_string());
+    }
+    buf.and_then(|b| {
+        b.users.values().find_map(|u| {
+            let ident = u.ident.as_deref().unwrap_or("");
+            let host = u.host.as_deref().unwrap_or("");
+            if format!("{ident}@{host}") == target_handle {
+                Some(u.nick.clone())
+            } else {
+                None
+            }
+        })
+    })
+}
+
 impl E2eRefusal {
     /// The themed `[E2E]` line shown to the user when a send is refused.
     pub fn user_message(&self) -> String {
@@ -1939,10 +1979,11 @@ impl App {
 
         // Drain any REKEY CTCPs produced by a lazy rotate that happened
         // inside `encrypt_outgoing`. These must go out as NOTICEs to the
-        // remaining trusted peers on this channel. We resolve peer handle
-        // → nick via the active buffer's user list; if the nick can't be
-        // resolved (peer left the channel between handshake and rotation)
-        // the distribution entry is dropped with a warning — the peer
+        // remaining trusted peers on this conversation. Recipient → nick
+        // resolution is per buffer type (see `rekey_notice_target`): channel
+        // members via the users map, a DM's single peer via the encrypt
+        // context. An unresolvable entry (peer left the channel between
+        // handshake and rotation) is dropped with a warning — the peer
         // will re-handshake on next ciphertext if they come back.
         let rekey_sends = mgr.take_pending_rekey_sends();
         if !rekey_sends.is_empty() {
@@ -1972,18 +2013,13 @@ impl App {
                 // `make_buffer_id(&conn_id, &context)` would always miss
                 // and silently drop REKEY NOTICEs for every E2E PM.
                 for rk in rekey_sends {
-                    let nick = self.state.buffers.get(buffer_id).and_then(|b| {
-                        b.users.values().find_map(|u| {
-                            let ident = u.ident.as_deref().unwrap_or("");
-                            let host = u.host.as_deref().unwrap_or("");
-                            let handle = format!("{ident}@{host}");
-                            if handle == rk.target_handle {
-                                Some(u.nick.clone())
-                            } else {
-                                None
-                            }
-                        })
-                    });
+                    let nick = rekey_notice_target(
+                        self.state.buffers.get(buffer_id),
+                        buffer_type,
+                        buffer_name,
+                        &context,
+                        &rk.target_handle,
+                    );
                     let Some(nick) = nick else {
                         tracing::warn!(
                             target_handle = %rk.target_handle,
@@ -2260,6 +2296,110 @@ mod tests {
         // The failure reasons make clear the message was NOT downgraded.
         assert!(msgs[1].contains("NOT sent"));
         assert!(msgs[2].contains("NOT sent"));
+    }
+
+    // ── rekey_notice_target ──
+
+    fn make_buf(buffer_type: BufferType, name: &str) -> Buffer {
+        Buffer {
+            id: make_buffer_id("test", name),
+            connection_id: "test".to_string(),
+            buffer_type,
+            name: name.to_string(),
+            messages: std::collections::VecDeque::new(),
+            activity: ActivityLevel::None,
+            unread_count: 0,
+            last_read: chrono::Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
+            peer_handle: None,
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
+            log_initial_loaded: false,
+            pin_backlog: false,
+        }
+    }
+
+    #[test]
+    fn rekey_target_dm_resolves_peer_from_context_despite_empty_users() {
+        // Regression: /e2e rotate in a query rotated the real @<peer> context,
+        // but the users-map lookup (empty for queries) dropped the REKEY —
+        // the peer kept the old incoming key and all further DM ciphertext
+        // failed AEAD until a manual re-handshake.
+        let buf = make_buf(BufferType::Query, "bob");
+        assert_eq!(
+            rekey_notice_target(
+                Some(&buf),
+                &BufferType::Query,
+                "bob",
+                "@~bob@b.host",
+                "~bob@b.host",
+            ),
+            Some("bob".to_string()),
+            "the DM peer must be addressed by the query buffer's name"
+        );
+        // Works even when the buffer is gone (closed during a shrink wait) —
+        // the context alone identifies the recipient.
+        assert_eq!(
+            rekey_notice_target(None, &BufferType::Query, "bob", "@~bob@b.host", "~bob@b.host"),
+            Some("bob".to_string()),
+        );
+        // A stray entry for some OTHER handle must not be misdirected to bob.
+        assert_eq!(
+            rekey_notice_target(
+                Some(&buf),
+                &BufferType::Query,
+                "bob",
+                "@~bob@b.host",
+                "~mallory@m.host",
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn rekey_target_channel_resolves_via_users_map() {
+        let mut buf = make_buf(BufferType::Channel, "#rust");
+        buf.users.insert(
+            "carol".to_string(),
+            crate::state::buffer::NickEntry {
+                nick: "carol".to_string(),
+                prefix: String::new(),
+                modes: String::new(),
+                away: false,
+                account: None,
+                ident: Some("~carol".to_string()),
+                host: Some("c.host".to_string()),
+            },
+        );
+        assert_eq!(
+            rekey_notice_target(
+                Some(&buf),
+                &BufferType::Channel,
+                "#rust",
+                "#rust",
+                "~carol@c.host",
+            ),
+            Some("carol".to_string()),
+        );
+        // Peer left the channel between handshake and rotation → dropped.
+        assert_eq!(
+            rekey_notice_target(
+                Some(&buf),
+                &BufferType::Channel,
+                "#rust",
+                "#rust",
+                "~dave@d.host",
+            ),
+            None,
+        );
     }
 
     // ── font_size_from_window_px tests ──
