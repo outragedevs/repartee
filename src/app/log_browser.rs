@@ -90,6 +90,7 @@ impl App {
                 id: conn_id.clone(),
                 label: net_label.clone(),
                 status: ConnectionStatus::Connected,
+                own_handle: None,
                 nick: String::new(),
                 user_modes: String::new(),
                 isupport: HashMap::new(),

@@ -286,15 +286,84 @@ pub(crate) fn cmd_e2e(app: &mut App, args: &[String]) {
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
-/// Pull the active channel name from the current buffer, if it is one.
-fn current_channel(app: &App) -> Option<String> {
+/// Resolve the E2E keyring/handshake context for a buffer. Channels use
+/// their name verbatim; queries (DMs) use the `@<peer_handle>` pseudochannel
+/// (spec §6) so the command layer keys exactly the rows the encrypt/decrypt
+/// path reads — never the bare nick, which never lined up and forced the
+/// "refuse to send if only a bare-nick config exists" band-aid. A query
+/// prefers the live `peer_handle`, falling back to `cached_handle` (the
+/// keyring's last-known handle for the nick) so `/e2e` stays usable before
+/// the peer speaks this session. Returns `None` for a query with neither
+/// handle known, or for a non-channel/query buffer.
+fn e2e_context_for(
+    buffer_type: &crate::state::buffer::BufferType,
+    name: &str,
+    peer_handle: Option<&str>,
+    cached_handle: Option<&str>,
+) -> Option<String> {
     use crate::state::buffer::BufferType;
+    match buffer_type {
+        BufferType::Channel => Some(name.to_string()),
+        BufferType::Query => peer_handle
+            .or(cached_handle)
+            .map(|h| crate::e2e::context_key(name, h)),
+        _ => None,
+    }
+}
+
+/// E2E keyring/handshake context for the active buffer (see
+/// [`e2e_context_for`]).
+fn current_e2e_context(app: &App) -> Option<String> {
     let buf = app.state.active_buffer()?;
-    if matches!(buf.buffer_type, BufferType::Channel | BufferType::Query) {
-        Some(buf.name.clone())
+    // When the peer hasn't spoken this session (so `peer_handle` is `None`),
+    // fall back to the keyring's last-known handle for this nick — otherwise
+    // `/e2e` would refuse in a query whose E2E rows already exist.
+    let cached = if matches!(buf.buffer_type, crate::state::buffer::BufferType::Query)
+        && buf.peer_handle.is_none()
+    {
+        resolve_cached_handle_by_nick(app, &buf.name).and_then(Result::ok)
     } else {
         None
+    };
+    e2e_context_for(
+        &buf.buffer_type,
+        &buf.name,
+        buf.peer_handle.as_deref(),
+        cached.as_deref(),
+    )
+}
+
+/// Recipient-keyed E2E context for INCOMING-session operations: the channel
+/// name for a channel, or OUR own `@<own_handle>` for a DM. Incoming DM
+/// sessions, the trusted-peer listing, our outgoing-receive KEYREQ, and the
+/// incoming-trust flips (`revoke`/`unrevoke`/`verify`) all key by this — they
+/// live under our own handle, not the peer's (see docs/rpe2e-dm-addendum.md).
+/// For channels it equals [`current_e2e_context`] (own == peer == channel),
+/// so channel behaviour is unchanged. `None` for a DM whose own handle isn't
+/// known yet.
+fn e2e_own_context_for(
+    buffer_type: &crate::state::buffer::BufferType,
+    name: &str,
+    own_handle: Option<&str>,
+) -> Option<String> {
+    use crate::state::buffer::BufferType;
+    match buffer_type {
+        BufferType::Channel => Some(name.to_string()),
+        BufferType::Query => own_handle.map(|h| crate::e2e::context_key(name, h)),
+        _ => None,
     }
+}
+
+/// [`e2e_own_context_for`] for the active buffer, resolving our own handle from
+/// the active buffer's connection.
+fn current_e2e_own_context(app: &App) -> Option<String> {
+    let buf = app.state.active_buffer()?;
+    let own = app
+        .state
+        .connections
+        .get(&buf.connection_id)
+        .and_then(|c| c.own_handle.clone());
+    e2e_own_context_for(&buf.buffer_type, &buf.name, own.as_deref())
 }
 
 fn require_mgr(app: &mut App) -> Option<std::sync::Arc<crate::e2e::E2eManager>> {
@@ -333,8 +402,8 @@ fn warn(app: &mut App, msg: &str) {
 // ─── on / off / mode ─────────────────────────────────────────────────────────
 
 fn e2e_on(app: &mut App) {
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e on: no active channel");
+    let Some(chan) = current_e2e_context(app) else {
+        err(app, "/e2e on: no active channel or known query peer");
         return;
     };
     let Some(mgr) = require_mgr(app) else { return };
@@ -351,8 +420,8 @@ fn e2e_on(app: &mut App) {
 }
 
 fn e2e_off(app: &mut App) {
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e off: no active channel");
+    let Some(chan) = current_e2e_context(app) else {
+        err(app, "/e2e off: no active channel or known query peer");
         return;
     };
     let Some(mgr) = require_mgr(app) else { return };
@@ -369,8 +438,8 @@ fn e2e_off(app: &mut App) {
 }
 
 fn e2e_mode(app: &mut App, mode_str: &str) {
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e mode: no active channel");
+    let Some(chan) = current_e2e_context(app) else {
+        err(app, "/e2e mode: no active channel or known query peer");
         return;
     };
     let mode = match parse_mode(mode_str) {
@@ -396,8 +465,8 @@ fn e2e_mode(app: &mut App, mode_str: &str) {
 // ─── trust transitions ───────────────────────────────────────────────────────
 
 fn e2e_accept(app: &mut App, nick: &str) {
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e accept: no active channel");
+    let Some(chan) = current_e2e_context(app) else {
+        err(app, "/e2e accept: no active channel or known query peer");
         return;
     };
     // We match by nick — the keyring key is ident@host, but at command
@@ -448,7 +517,37 @@ fn e2e_accept(app: &mut App, nick: &str) {
             return;
         }
         Ok(None) => {
-            // Fall through to the existing status-flip path.
+            // Fall through to the status-flip path below — but only for a
+            // session with REAL key material (e.g. a HandleChanged/refused
+            // session being re-trusted). A Normal-mode KEYREQ persists a
+            // zero-key `Pending` placeholder row while the KEYREQ itself
+            // lives only in memory; after a restart the map is empty, so
+            // flipping the placeholder to Trusted would report success while
+            // never sending a KEYRSP and leaving an undecryptable all-zero
+            // session. Detect that and tell the user what actually happened.
+        }
+        Err(e) => {
+            err(app, &format!("/e2e accept: {e}"));
+            return;
+        }
+    }
+
+    match mgr.keyring().get_incoming_session(&handle, &chan) {
+        Ok(Some(sess)) => {
+            if sess.status == TrustStatus::Pending && sess.sk == [0u8; 32] {
+                err(
+                    app,
+                    &format!(
+                        "/e2e accept: the pending key request from {nick} was lost \
+                         (restart?) — ask them to re-run the handshake"
+                    ),
+                );
+                return;
+            }
+        }
+        Ok(None) => {
+            err(app, &format!("/e2e accept: nothing to accept for {nick} on {chan}"));
+            return;
         }
         Err(e) => {
             err(app, &format!("/e2e accept: {e}"));
@@ -467,8 +566,8 @@ fn e2e_accept(app: &mut App, nick: &str) {
 }
 
 fn e2e_decline(app: &mut App, nick: &str) {
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e decline: no active channel");
+    let Some(chan) = current_e2e_context(app) else {
+        err(app, "/e2e decline: no active channel or known query peer");
         return;
     };
     let Some(handle) = require_handle_for_nick(app, &chan, nick) else {
@@ -486,17 +585,24 @@ fn e2e_decline(app: &mut App, nick: &str) {
 }
 
 fn e2e_revoke(app: &mut App, nick: &str) {
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e revoke: no active channel");
+    // A DM splits: the outgoing side (stop sending to the peer) keys by
+    // @<peer>, the incoming side (revoke trust in the peer's messages to us)
+    // keys by @<own>. For a channel both collapse to the channel name.
+    let Some(peer_chan) = current_e2e_context(app) else {
+        err(app, "/e2e revoke: no active channel or known query peer");
         return;
     };
-    let Some(handle) = require_handle_for_nick(app, &chan, nick) else {
+    let Some(own_chan) = current_e2e_own_context(app) else {
+        err(app, "/e2e revoke: own handle not yet known");
+        return;
+    };
+    let Some(handle) = require_handle_for_nick(app, &peer_chan, nick) else {
         return;
     };
     let Some(mgr) = require_mgr(app) else { return };
     if let Err(e) = mgr
         .keyring()
-        .update_incoming_status(&handle, &chan, TrustStatus::Revoked)
+        .update_incoming_status(&handle, &own_chan, TrustStatus::Revoked)
     {
         err(app, &format!("/e2e revoke: {e}"));
         return;
@@ -504,23 +610,28 @@ fn e2e_revoke(app: &mut App, nick: &str) {
     // Drop the peer from the outgoing-recipient list so the subsequent
     // lazy rotate (triggered by mark_outgoing_pending_rotation) does NOT
     // redistribute the fresh key to them.
-    if let Err(e) = mgr.keyring().remove_outgoing_recipient(&chan, &handle) {
+    if let Err(e) = mgr.keyring().remove_outgoing_recipient(&peer_chan, &handle) {
         err(app, &format!("/e2e revoke (drop recipient): {e}"));
         return;
     }
-    if let Err(e) = mgr.keyring().mark_outgoing_pending_rotation(&chan) {
+    if let Err(e) = mgr.keyring().mark_outgoing_pending_rotation(&peer_chan) {
         err(app, &format!("/e2e revoke (mark rotation): {e}"));
         return;
     }
     warn(
         app,
-        &format!("revoked {nick} on {chan} — key will rotate on next message"),
+        &format!("revoked {nick} — key will rotate on next message"),
     );
 }
 
 fn e2e_unrevoke(app: &mut App, nick: &str) {
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e unrevoke: no active channel");
+    // Trust in the peer's incoming messages lives under our own handle
+    // (recipient-keyed); for a channel this is the channel name.
+    let Some(chan) = current_e2e_own_context(app) else {
+        err(
+            app,
+            "/e2e unrevoke: no active channel, or own handle not yet known",
+        );
         return;
     };
     let Some(handle) = require_handle_for_nick(app, &chan, nick) else {
@@ -534,15 +645,15 @@ fn e2e_unrevoke(app: &mut App, nick: &str) {
         err(app, &format!("/e2e unrevoke: {e}"));
         return;
     }
-    ok(app, &format!("unrevoked {nick} on {chan}"));
+    ok(app, &format!("unrevoked {nick}"));
 }
 
 fn e2e_forget(app: &mut App, target: &str, all: bool) {
     let channel = if all {
-        current_channel(app)
+        current_e2e_context(app)
     } else {
-        let Some(chan) = current_channel(app) else {
-            err(app, "/e2e forget: no active channel");
+        let Some(chan) = current_e2e_context(app) else {
+            err(app, "/e2e forget: no active channel or known query peer");
             return;
         };
         Some(chan)
@@ -557,6 +668,12 @@ fn e2e_forget(app: &mut App, target: &str, all: bool) {
         perform_e2e_forget(app, buffer_id, target, target, channel.as_deref(), all);
         return;
     }
+    // The recipient-keyed @<own> context is NOT captured here: a CHGHOST can
+    // move our own handle between this command and the USERHOST reply, so the
+    // deferred handler recomputes @<own> from our current handle at execution
+    // (mirroring perform_e2e_forget, which recomputes it too). Capturing it now
+    // would forget under a stale @<own> and leave the peer's live incoming
+    // session intact.
     let Some(sender) = app.active_irc_sender().cloned() else {
         err(app, "/e2e forget: not connected");
         return;
@@ -593,6 +710,16 @@ fn perform_e2e_forget(
 ) {
     let current_id = app.state.active_buffer_id.clone();
     app.state.active_buffer_id = Some(target_buffer);
+    // A DM's incoming session is recipient-keyed under @<own>, while `channel`
+    // (current_e2e_context) is @<peer>. Capture the own context relative to the
+    // target buffer so the non-all path forgets BOTH — otherwise the peer's
+    // trusted incoming session survives and their messages still decrypt. For a
+    // channel own == peer == channel name, so the second forget is a no-op.
+    let own_channel = if all {
+        None
+    } else {
+        current_e2e_own_context(app)
+    };
     let Some(mgr) = require_mgr(app) else {
         app.state.active_buffer_id = current_id;
         return;
@@ -601,11 +728,22 @@ fn perform_e2e_forget(
         mgr.forget_peer_everywhere(handle)
     } else {
         let Some(channel) = channel else {
-            err(app, "/e2e forget: no active channel");
+            err(app, "/e2e forget: no active channel or known query peer");
             app.state.active_buffer_id = current_id;
             return;
         };
-        mgr.forget_peer_on_channel(handle, channel)
+        // For a DM the incoming session lives under @<own>; if our own handle
+        // is unknown (reset at every registration until the self-USERHOST
+        // reply) a partial forget would clear only @<peer> while REPORTING
+        // success — the peer's trusted incoming session would survive and
+        // their messages would keep decrypting. Refuse instead, exactly like
+        // revoke/unrevoke/verify do in the same state.
+        if channel.starts_with('@') && own_channel.is_none() {
+            err(app, "/e2e forget: own handle not yet known — retry in a moment");
+            app.state.active_buffer_id = current_id;
+            return;
+        }
+        mgr.forget_peer_on_dm_contexts(handle, channel, own_channel.as_deref())
     };
     match result {
         Ok(deleted) if all => warn(
@@ -627,8 +765,14 @@ fn perform_e2e_forget(
 // ─── handshake / rotate ──────────────────────────────────────────────────────
 
 fn e2e_handshake(app: &mut App, nick: &str) {
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e handshake: no active channel");
+    // A KEYREQ establishes the direction where WE receive, so it keys (and
+    // stamps c=) by our own handle (recipient-keyed); for a channel this is
+    // the channel name.
+    let Some(chan) = current_e2e_own_context(app) else {
+        err(
+            app,
+            "/e2e handshake: no active channel, or own handle not yet known",
+        );
         return;
     };
     // Grab the connection id before the `require_mgr` mutable borrow
@@ -648,15 +792,15 @@ fn e2e_handshake(app: &mut App, nick: &str) {
                     target: nick.to_string(),
                     notice_text: ctcp,
                 });
-            ok(app, &format!("KEYREQ sent to {nick} for {chan}"));
+            ok(app, &format!("KEYREQ sent to {nick}"));
         }
         Err(e) => err(app, &format!("handshake error: {e}")),
     }
 }
 
 fn e2e_rotate(app: &mut App) {
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e rotate: no active channel");
+    let Some(chan) = current_e2e_context(app) else {
+        err(app, "/e2e rotate: no active channel or known query peer");
         return;
     };
     let Some(mgr) = require_mgr(app) else { return };
@@ -674,10 +818,19 @@ fn e2e_list(app: &mut App, all: bool) {
         e2e_list_all(app);
         return;
     }
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e list: no active channel");
+    // Trusted incoming peers live under our own handle (recipient-keyed);
+    // for a channel this is the channel name. Display uses the buffer label.
+    let Some(chan) = current_e2e_own_context(app) else {
+        err(
+            app,
+            "/e2e list: no active channel, or own handle not yet known",
+        );
         return;
     };
+    let label = app
+        .state
+        .active_buffer()
+        .map_or_else(String::new, |b| b.name.clone());
     let Some(mgr) = require_mgr(app) else { return };
     let peers = match mgr.keyring().list_trusted_peers_for_channel(&chan) {
         Ok(p) => p,
@@ -688,7 +841,7 @@ fn e2e_list(app: &mut App, all: bool) {
     };
 
     if peers.is_empty() {
-        add_local_event(app, &divider(&format!("E2E Peers on {chan}")));
+        add_local_event(app, &divider(&format!("E2E Peers on {label}")));
         add_local_event(
             app,
             &format!("  {C_DIM}(no trusted peers — use /e2e accept <nick>){C_RST}"),
@@ -696,7 +849,7 @@ fn e2e_list(app: &mut App, all: bool) {
         return;
     }
 
-    let mut lines = vec![divider(&format!("E2E Peers on {chan}"))];
+    let mut lines = vec![divider(&format!("E2E Peers on {label}"))];
     for p in &peers {
         lines.push(format_peer_line(p));
     }
@@ -780,12 +933,15 @@ fn e2e_status(app: &mut App) {
     let fp_hex = fingerprint_hex(&fp);
     let sas = fingerprint_bip39(&fp).unwrap_or_else(|_| "—".into());
 
-    // Current channel (if any) — used for the per-channel summary row.
-    let chan = current_channel(app);
+    // Per-channel summary row. The outgoing config is keyed by @<peer>; the
+    // trusted-peer count comes from the incoming sessions, keyed by @<own>
+    // for a DM (recipient-keyed) — must match /e2e list, not the config key.
+    let chan = current_e2e_context(app);
+    let own_chan = current_e2e_own_context(app);
     let chan_cfg: Option<ChannelConfig> = chan
         .as_ref()
         .and_then(|c| mgr.keyring().get_channel_config(c).ok().flatten());
-    let peer_count = chan
+    let peer_count = own_chan
         .as_ref()
         .and_then(|c| mgr.keyring().list_trusted_peers_for_channel(c).ok())
         .map_or(0usize, |v| v.len());
@@ -814,7 +970,7 @@ fn format_status_line(
     peer_count: usize,
 ) -> String {
     match (chan, cfg) {
-        (None, _) => format!("  {C_CMD}channel{C_RST}      {C_DIM}(no active channel){C_RST}"),
+        (None, _) => format!("  {C_CMD}channel{C_RST}      {C_DIM}(no active channel or known query peer){C_RST}"),
         (Some(c), None) => {
             format!("  {C_CMD}channel{C_RST}      {C_TEXT}{c}{C_RST}  {C_DIM}[off]{C_RST}")
         }
@@ -846,8 +1002,13 @@ fn e2e_fingerprint(app: &mut App) {
 }
 
 fn e2e_verify(app: &mut App, nick: &str) {
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e verify: no active channel");
+    // The incoming session whose fingerprint we display lives under our own
+    // handle (recipient-keyed); for a channel this is the channel name.
+    let Some(chan) = current_e2e_own_context(app) else {
+        err(
+            app,
+            "/e2e verify: no active channel, or own handle not yet known",
+        );
         return;
     };
     let Some(handle) = require_handle_for_nick(app, &chan, nick) else {
@@ -862,7 +1023,7 @@ fn e2e_verify(app: &mut App, nick: &str) {
                 add_local_event(app, &line);
             }
         }
-        Ok(None) => err(app, &format!("no session for {nick} on {chan}")),
+        Ok(None) => err(app, &format!("no session for {nick}")),
         Err(e) => err(app, &format!("/e2e verify: {e}")),
     }
 }
@@ -901,8 +1062,8 @@ fn format_verify_block(
 }
 
 fn e2e_reverify(app: &mut App, nick: &str) {
-    let Some(chan) = current_channel(app) else {
-        err(app, "/e2e reverify: no active channel");
+    let Some(chan) = current_e2e_context(app) else {
+        err(app, "/e2e reverify: no active channel or known query peer");
         return;
     };
     // Strict handle resolution — see `require_handle_for_nick` for the
@@ -1151,20 +1312,20 @@ fn resolve_cached_handle_by_nick(
     nick: &str,
 ) -> Option<std::result::Result<String, crate::e2e::error::E2eError>> {
     let mgr = app.state.e2e_manager.as_ref()?;
-    let mut matches = match mgr.keyring().list_all_peers() {
-        Ok(peers) => peers
-            .into_iter()
-            .filter_map(|peer| match (peer.last_nick, peer.last_handle) {
-                (Some(last_nick), Some(last_handle)) if last_nick.eq_ignore_ascii_case(nick) => {
-                    Some((peer.last_seen, last_handle))
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>(),
-        Err(e) => return Some(Err(e)),
-    };
-    matches.sort_by_key(|(last_seen, _)| *last_seen);
-    matches.pop().map(|(_, handle)| Ok(handle))
+    // Same keyring resolution the encrypt path uses, so `/e2e on` and the
+    // outbound send key the DM under the identical `@<cached>` context —
+    // scoped to the active connection's network so a same-nick peer on another
+    // network can't be resolved.
+    let network = app
+        .state
+        .active_buffer()
+        .and_then(|b| app.state.connections.get(&b.connection_id))
+        .map(|c| c.label.clone())?;
+    match mgr.keyring().last_handle_for_nick(nick, &network) {
+        Ok(Some(handle)) => Some(Ok(handle)),
+        Ok(None) => None,
+        Err(e) => Some(Err(e)),
+    }
 }
 
 /// Wrap `resolve_handle_by_nick` with themed-error surfacing.
@@ -1202,6 +1363,62 @@ mod tests {
 
     fn s(x: &str) -> String {
         x.to_string()
+    }
+
+    // ---------- DM keying context ----------
+
+    #[test]
+    fn e2e_context_keys_dm_by_peer_handle_not_bare_nick() {
+        use crate::state::buffer::BufferType;
+        // Channel: name verbatim.
+        assert_eq!(
+            e2e_context_for(&BufferType::Channel, "#rust", None, None).as_deref(),
+            Some("#rust")
+        );
+        // Query with a live peer handle: the `@<peer_handle>` pseudochannel
+        // (matching the encrypt/decrypt path), NOT the bare nick.
+        assert_eq!(
+            e2e_context_for(&BufferType::Query, "bob", Some("~bob@user/bob"), None).as_deref(),
+            Some("@~bob@user/bob")
+        );
+        // Peer hasn't spoken this session, but the keyring still has a handle
+        // for this nick (existing E2E rows): fall back to it so /e2e stays
+        // usable instead of erroring.
+        assert_eq!(
+            e2e_context_for(&BufferType::Query, "bob", None, Some("~bob@old")).as_deref(),
+            Some("@~bob@old")
+        );
+        // The live handle wins over the cached one.
+        assert_eq!(
+            e2e_context_for(&BufferType::Query, "bob", Some("~bob@new"), Some("~bob@old")).as_deref(),
+            Some("@~bob@new")
+        );
+        // Neither known: no context — the command must refuse rather than
+        // write a bare-nick row the hot path never reads.
+        assert_eq!(e2e_context_for(&BufferType::Query, "bob", None, None), None);
+        // Non-channel/query buffers have no E2E context.
+        assert_eq!(
+            e2e_context_for(&BufferType::Mentions, "Mentions", None, None),
+            None
+        );
+    }
+
+    #[test]
+    fn e2e_own_context_keys_dm_by_own_handle() {
+        use crate::state::buffer::BufferType;
+        // Channel: name verbatim (own == peer == channel name).
+        assert_eq!(
+            e2e_own_context_for(&BufferType::Channel, "#rust", None).as_deref(),
+            Some("#rust")
+        );
+        // Query: OUR own handle (we are the recipient of incoming DMs), keyed
+        // independently of the peer's nick.
+        assert_eq!(
+            e2e_own_context_for(&BufferType::Query, "bob", Some("~me@host")).as_deref(),
+            Some("@~me@host")
+        );
+        // Own handle unknown: no context — incoming-session ops must refuse.
+        assert_eq!(e2e_own_context_for(&BufferType::Query, "bob", None), None);
     }
 
     // ---------- case-insensitive dispatch ----------
@@ -1427,7 +1644,7 @@ mod tests {
     #[test]
     fn test_format_status_line_no_channel() {
         let line = format_status_line(None, None, 0);
-        assert!(line.contains("no active channel"));
+        assert!(line.contains("no active channel or known query peer"));
         assert!(line.contains("channel"));
     }
 

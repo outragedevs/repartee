@@ -786,6 +786,7 @@ fn decrypt_chathistory_text(
     target: &str,
     ident: &str,
     host: &str,
+    own_handle: Option<&str>,
     is_own: bool,
     raw_text: &str,
 ) -> Option<String> {
@@ -796,7 +797,9 @@ fn decrypt_chathistory_text(
         return None;
     }
     let sender_handle = format!("{ident}@{host}");
-    let context = crate::e2e::context_key(target, &sender_handle);
+    // A DM whose own handle isn't known yet has no recipient context — skip
+    // the line rather than decrypt under the sender (it would fail anyway).
+    let context = incoming_e2e_context(target, own_handle)?;
     match state
         .e2e_manager
         .as_ref()?
@@ -910,6 +913,13 @@ pub fn ingest_chathistory_batch(
             .map_or(i64::MAX, |dt| dt.timestamp_millis())
     });
 
+    // Our own handle is constant for the batch; resolve it once for the
+    // recipient-keyed DM decrypt context.
+    let own_handle = state
+        .connections
+        .get(conn_id)
+        .and_then(|c| c.own_handle.clone());
+
     for msg in ordered {
         let tags = extract_tags(msg);
 
@@ -948,8 +958,15 @@ pub fn ingest_chathistory_batch(
 
         // Decrypt RPE2E ciphertext (same path as live PRIVMSGs) before storing,
         // or skip a line we can't decrypt — see `decrypt_chathistory_text`.
-        let Some(text) = decrypt_chathistory_text(state, target, &ident, &host, is_own, raw_text)
-        else {
+        let Some(text) = decrypt_chathistory_text(
+            state,
+            target,
+            &ident,
+            &host,
+            own_handle.as_deref(),
+            is_own,
+            raw_text,
+        ) else {
             skipped += 1;
             continue;
         };
@@ -1038,6 +1055,34 @@ pub fn ingest_chathistory_batch(
 
 // === Private handlers ===
 
+/// Record our own server-stamped `ident@host` for a connection, de-duplicated.
+/// The per-source "is this us?" gate stays at each call site (echo-message,
+/// self-USERHOST, own CHGHOST); only the store is centralized so the capture
+/// paths stay consistent. Drives the recipient-keyed DM E2E context.
+fn set_own_handle(state: &mut AppState, conn_id: &str, handle: String) {
+    if let Some(conn) = state.connections.get_mut(conn_id)
+        && conn.own_handle.as_deref() != Some(handle.as_str())
+    {
+        conn.own_handle = Some(handle);
+    }
+}
+
+/// Recipient-keyed E2E context for an INCOMING message. A channel uses its
+/// name verbatim. A DM (target is our own nick) is keyed by OUR own handle —
+/// we are the recipient, so this matches the sender's AAD context (the sender
+/// encrypted under `@<our_handle>`). Returns `None` for a DM when our own
+/// handle isn't known yet: the caller must NOT fall back to the sender handle,
+/// because decrypting/KEYREQ-ing under `@<sender>` negotiates the wrong DM
+/// direction — it must wait until our handle is learned. Channels never
+/// return `None`.
+fn incoming_e2e_context(target: &str, own_handle: Option<&str>) -> Option<String> {
+    if is_channel(target) {
+        Some(target.to_string())
+    } else {
+        own_handle.map(|h| crate::e2e::context_key(target, h))
+    }
+}
+
 #[expect(clippy::too_many_lines, reason = "linear message handler")]
 fn handle_privmsg(
     state: &mut AppState,
@@ -1050,7 +1095,18 @@ fn handle_privmsg(
 ) {
     let (nick, ident, host) = extract_nick_userhost(prefix);
     let target_is_channel = is_channel(target);
-    let is_own = nick == our_nick;
+    // IRC nicks are case-insensitive: an echo-message echo may carry our nick
+    // in a different case. Match case-insensitively (as ingest_chathistory_batch
+    // does) so we still recognise our own echo — capture our handle from it and
+    // drop our own ciphertext echo rather than treating it as a peer's.
+    let is_own = nick.eq_ignore_ascii_case(our_nick);
+    let sender_handle = format!("{ident}@{host}");
+    // echo-message: the server echoes our own outgoing PRIVMSG back with our
+    // full server-stamped prefix. Capture it as our own handle — it drives
+    // the recipient-keyed DM E2E context and tracks vhost changes live.
+    if is_own && !ident.is_empty() && !host.is_empty() {
+        set_own_handle(state, conn_id, sender_handle.clone());
+    }
     let flood_exempt =
         !is_own && matches_mask_patterns(&state.flood_exemptions, &nick, Some(&ident), Some(&host));
 
@@ -1070,21 +1126,49 @@ fn handle_privmsg(
     // check uses the raw server-stamped `ident@host`, so attackers cannot
     // decrypt by spoofing a nick.
     //
-    // Spec §6: the keyring context for a PM is `@<peer_handle>` (not the
-    // peer's nick), so two peers sharing a nick across different hosts
-    // live under separate session rows. For channels we pass the target
-    // through unchanged. `context_key` encapsulates both cases.
-    let sender_handle = format!("{ident}@{host}");
-    let decrypt_context = crate::e2e::context_key(target, &sender_handle);
-    let decrypted_owned = try_decrypt_e2e(
-        state,
-        conn_id,
-        &nick,
-        &sender_handle,
-        &decrypt_context,
-        text,
-        is_own,
-    );
+    // Recipient-keyed (spec §6 + DM addendum): an incoming DM is keyed by OUR
+    // own handle (we are the recipient), matching the sender's AAD; a channel
+    // passes through unchanged. The auto-KEYREQ fired on a missing session
+    // inherits this context, so its `c=` is our own handle too.
+    let own_handle = state
+        .connections
+        .get(conn_id)
+        .and_then(|c| c.own_handle.clone());
+    // A DM ciphertext that arrived before we learned our own handle yields a
+    // transient, non-logged placeholder (see below) rather than a stored
+    // message — set when the matching arm fires.
+    let mut e2e_awaiting_own_handle = false;
+    let decrypted_owned = match incoming_e2e_context(target, own_handle.as_deref()) {
+        Some(decrypt_context) => try_decrypt_e2e(
+            state,
+            conn_id,
+            &nick,
+            &sender_handle,
+            &decrypt_context,
+            text,
+            is_own,
+        ),
+        // DM whose own handle isn't known yet: do NOT decrypt or fire a KEYREQ
+        // under the sender's handle (that negotiates the wrong DM direction).
+        // Show a placeholder and wait — the self-USERHOST at RPL_WELCOME, an
+        // echo, or CHGHOST will set our handle and the peer re-handshakes on
+        // the next message. The handle-learned hook re-fetches this exact line
+        // via CHATHISTORY and decrypts it, so the placeholder MUST stay
+        // transient (non-logged): persisting it under the server @msgid would
+        // block that decryptable replay on the unique (network, msg_id) index.
+        // Non-E2E plaintext passes through untouched.
+        None if !is_own && text.starts_with("+RPE2E01") => {
+            e2e_awaiting_own_handle = true;
+            Some(crate::e2e::AWAITING_OWN_IDENTITY_PLACEHOLDER.to_string())
+        }
+        // Our OWN ciphertext echo while our handle is still unknown (a
+        // nick-only prefix carries no ident@host to seed it): swallow, same
+        // as try_decrypt_e2e's is_own branch — the plaintext was already
+        // echoed locally at send time. Falling through would render and log
+        // the raw +RPE2E01 wire line as a normal message.
+        None if is_own && text.starts_with("+RPE2E01") => Some(String::new()),
+        None => None,
+    };
     // An empty return from `try_decrypt_e2e` means "own echo-message
     // echo of our own encrypted PRIVMSG — already rendered locally by
     // `handle_plain_message`, drop the echo entirely". This path only
@@ -1130,7 +1214,8 @@ fn handle_privmsg(
     // find a Query buffer we also stamp `peer_handle` with the raw
     // `ident@host` from the prefix — the E2E layer uses this to key PM
     // session rows under `@<peer_handle>` instead of bare nick (spec §6).
-    if !target_is_channel && !state.buffers.contains_key(&buffer_id) {
+    let buffer_created = !target_is_channel && !state.buffers.contains_key(&buffer_id);
+    if buffer_created {
         state.add_buffer(Buffer {
             id: buffer_id.clone(),
             connection_id: conn_id.to_string(),
@@ -1163,17 +1248,39 @@ fn handle_privmsg(
 
     // Keep the Query buffer's `peer_handle` in sync with the latest
     // server-stamped userhost. This matters when the peer reconnects from
-    // a new host — later messages will arrive with a different
-    // `ident@host`, and the cached handle must track it so the encrypt
-    // path picks up the new pseudochannel key. Never overwrite with
-    // `is_own` (echo-message) because that carries our own host.
-    if !target_is_channel
-        && !is_own
-        && let Some(buf) = state.buffers.get_mut(&buffer_id)
-    {
+    // a new host — later messages arrive with a different `ident@host`, and
+    // the cached handle must track it so the encrypt path picks up the new
+    // pseudochannel key. Never overwrite with `is_own` (echo-message) because
+    // that carries our own host. On a CHANGE, migrate the DM E2E config to the
+    // new handle (a reconnect/vhost is delivered here, not as CHGHOST) so the
+    // next DM does not silently downgrade to plaintext under the new context.
+    // An RPE2E handshake delivered as a PRIVMSG (fallback for servers that strip
+    // CTCP framing from NOTICEs) is routed to `try_dispatch_rpe2e_ctcp` below,
+    // which performs its own DM handle migration. Skip it here so the migration
+    // (and its keyring cache write) does not run twice for the same message.
+    let is_rpe2e_handshake = {
+        let stripped = text.strip_prefix('\x01').unwrap_or(text);
+        let stripped = stripped.strip_suffix('\x01').unwrap_or(stripped);
+        stripped.starts_with(crate::e2e::handshake::CTCP_TAG)
+    };
+    if !target_is_channel && !is_own && !is_rpe2e_handshake {
         let new_handle = format!("{ident}@{host}");
-        if buf.peer_handle.as_deref() != Some(new_handle.as_str()) {
-            buf.peer_handle = Some(new_handle);
+        // `Some(old)` only when the handle is new for this buffer (old may be
+        // `None`): a freshly-created buffer is already stamped with @<new>, so
+        // we still migrate from the cached @<old> (prev = `None`); an existing
+        // buffer migrates from its prior handle. `None` = no change → nothing
+        // to migrate.
+        let changed_from: Option<Option<String>> = if buffer_created {
+            Some(None)
+        } else if let Some(buf) = state.buffers.get_mut(&buffer_id)
+            && buf.peer_handle.as_deref() != Some(new_handle.as_str())
+        {
+            Some(buf.peer_handle.replace(new_handle.clone()))
+        } else {
+            None
+        };
+        if let Some(prev) = changed_from {
+            track_dm_handle_change(state, conn_id, &nick, prev.as_deref(), &new_handle);
         }
     }
 
@@ -1295,6 +1402,21 @@ fn handle_privmsg(
         return;
     }
 
+    // RPE2E handshake WITHOUT full CTCP framing: some servers strip the
+    // trailing (or even leading) \x01 from relayed CTCPs — the very case the
+    // PRIVMSG fallback exists for — but `is_ctcp` above demands BOTH bytes,
+    // so the dispatch inside that branch never sees the stripped form. The
+    // generic peer-handle tracking earlier was also suppressed for every
+    // handshake-looking text; without this branch a half-framed handshake
+    // would neither negotiate nor update the DM handle, and would render as
+    // a raw RPEE2E blob. The dispatcher itself strips framing leniently.
+    if is_rpe2e_handshake
+        && try_dispatch_rpe2e_ctcp(state, conn_id, prefix, target, text)
+            == Some(RpEe2eOutcome::Handled)
+    {
+        return;
+    }
+
     // --- Flood checks for regular messages ---
     if state.flood_protection && nick != our_nick && !flood_exempt {
         let now = Instant::now();
@@ -1363,24 +1485,33 @@ fn handle_privmsg(
     let ts = message_timestamp(tags.as_ref());
     // Save nick before moving into Message — needed for mentions buffer below.
     let nick_saved = if is_mention { Some(nick.clone()) } else { None };
-    state.add_message_with_activity(
-        &buffer_id,
-        Message {
-            id,
-            timestamp: ts,
-            message_type: MessageType::Message,
-            nick: Some(nick),
-            nick_mode: mode_prefix.map(String::from),
-            text: text.to_string(),
-            highlight: is_mention,
-            event_key: None,
-            event_params: None,
-            log_msg_id: None,
-            log_ref_id: None,
-            tags,
-        },
-        activity,
-    );
+    let msg = Message {
+        id,
+        timestamp: ts,
+        message_type: MessageType::Message,
+        nick: Some(nick),
+        nick_mode: mode_prefix.map(String::from),
+        text: text.to_string(),
+        highlight: is_mention,
+        event_key: None,
+        event_params: None,
+        log_msg_id: None,
+        log_ref_id: None,
+        // The awaiting-own-identity placeholder must carry NO @msgid: it keeps
+        // the server tags off so (a) the transient line never occupies the
+        // (network, @msgid) storage row, and (b) `buffer_contains_history_row`
+        // can't dedup the later decrypted CHATHISTORY replay (same @msgid)
+        // against it — which would skip the real message and leave the
+        // placeholder showing until restart. Real messages keep their tags.
+        tags: if e2e_awaiting_own_handle { None } else { tags },
+    };
+    // The placeholder is delivered transiently (never logged) so it doesn't
+    // persist; the decrypted replay is logged + surfaced under the real @msgid.
+    if e2e_awaiting_own_handle {
+        state.add_transient_message_with_activity(&buffer_id, msg, activity);
+    } else {
+        state.add_message_with_activity(&buffer_id, msg, activity);
+    }
 
     // Push to mentions buffer — channel highlights only (not PMs/queries).
     if is_mention && target_is_channel && state.buffers.contains_key("_mentions") {
@@ -1843,6 +1974,171 @@ fn handle_away(state: &mut AppState, conn_id: &str, prefix: Option<&Prefix>, rea
     }
 }
 
+/// COPY an ENABLED DM E2E config from `old_ctx` to `new_ctx` when a peer's
+/// handle changes, so the policy follows the peer to its new pseudochannel.
+/// Without this the encrypt path keys the next DM under `@<new_handle>`, finds
+/// no config, and downgrades to plaintext. Re-handshake re-establishes the
+/// session keys under the new context.
+///
+/// The old config is intentionally LEFT enabled: the keyring's `last_handle`
+/// (a TOFU field) must NOT be bumped on mere observation — doing so would make
+/// a later handshake under the new handle classify as `Known` instead of
+/// `HandleChanged`, bypassing the reverify gate. Leaving `@<old>` enabled means
+/// the encrypt path's peer-not-spoken fallback (which resolves `@<old>` from
+/// that untouched cache) still encrypts (and re-handshakes) rather than sending
+/// plaintext. No-op unless the old config is enabled and the new context isn't
+/// already enabled (don't clobber).
+/// Returns `true` when a config was actually copied to `new_ctx`.
+///
+/// `cap_autotrust` is set when the OLD context was resolved via the legacy
+/// network-agnostic nick fallback (`legacy_handle_for_nick`): the enabled
+/// config may belong to a same-nick peer on a DIFFERENT network, so an
+/// `AutoAccept` mode must not carry across — it is capped to `Normal` so a
+/// handshake from the (possibly unrelated) peer still prompts the user
+/// instead of being silently trusted.
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "exercised by the e2e integration_tests migration test"
+)]
+pub(crate) fn migrate_dm_e2e_config(
+    mgr: &crate::e2e::E2eManager,
+    old_ctx: &str,
+    new_ctx: &str,
+    cap_autotrust: bool,
+) -> bool {
+    use crate::e2e::keyring::{ChannelConfig, ChannelMode};
+    let Ok(Some(old_cfg)) = mgr.keyring().get_channel_config(old_ctx) else {
+        return false;
+    };
+    if !old_cfg.enabled {
+        return false;
+    }
+    if matches!(mgr.keyring().get_channel_config(new_ctx), Ok(Some(c)) if c.enabled) {
+        return false;
+    }
+    let mode = if cap_autotrust && old_cfg.mode == ChannelMode::AutoAccept {
+        ChannelMode::Normal
+    } else {
+        old_cfg.mode
+    };
+    mgr.keyring()
+        .set_channel_config(&ChannelConfig {
+            channel: new_ctx.to_string(),
+            enabled: true,
+            mode,
+        })
+        .is_ok()
+}
+
+/// Observe that DM peer `nick`'s current handle is `new_handle` (learned from a
+/// PRIVMSG prefix or CHGHOST). Migrate an enabled DM E2E config from any
+/// previous context — the buffer's prior handle and/or the keyring's cached
+/// handle — to `@<new_handle>`, then refresh the keyring's last-handle cache so
+/// the encrypt path keys the next DM under `@<new_handle>` and finds the
+/// migrated config. Without this a handle change (reconnect / vhost, delivered
+/// as a new PRIVMSG prefix or CHGHOST) silently downgrades the DM to plaintext.
+/// No-op when the connection's network label is unknown.
+fn track_dm_handle_change(
+    state: &mut AppState,
+    conn_id: &str,
+    nick: &str,
+    prev_buffer_handle: Option<&str>,
+    new_handle: &str,
+) {
+    let Some(network) = state.connections.get(conn_id).map(|c| c.label.clone()) else {
+        return;
+    };
+    let Some(mgr) = state.e2e_manager.clone() else {
+        return;
+    };
+    let new_ctx = crate::e2e::context_key(nick, new_handle);
+    // Old-context candidates, in decreasing trust: the buffer's prior handle
+    // (observed on THIS connection) and the keyring's network-scoped cache
+    // row. Only when BOTH are absent (pre-cache keyring, upgrade path) fall
+    // back to the legacy `e2e_peers` nick match — that lookup is
+    // network-AGNOSTIC, so its result may belong to a same-nick peer on a
+    // different network and is flagged (`from_legacy`) so the migration caps
+    // AutoAccept and the enable is surfaced to the user rather than silent.
+    let cached = mgr
+        .keyring()
+        .cached_dm_handle(nick, &network)
+        .unwrap_or_default();
+    let mut sources: Vec<(String, bool)> = Vec::new();
+    if let Some(h) = prev_buffer_handle
+        && h != new_handle
+    {
+        sources.push((h.to_string(), false));
+    }
+    if let Some(c) = cached.clone() {
+        if c != new_handle && !sources.iter().any(|(s, _)| *s == c) {
+            sources.push((c, false));
+        }
+    } else if sources.is_empty()
+        && let Ok(Some(legacy)) = mgr.keyring().legacy_handle_for_nick(nick)
+        && legacy != new_handle
+    {
+        sources.push((legacy, true));
+    }
+    for (old_h, from_legacy) in sources {
+        let old_ctx = crate::e2e::context_key(nick, &old_h);
+        let migrated = migrate_dm_e2e_config(&mgr, &old_ctx, &new_ctx, from_legacy);
+        if migrated && from_legacy {
+            // The legacy fallback matched by nick alone across ALL networks —
+            // the enabled config may belong to someone else entirely. Never
+            // enable E2E for a peer silently on that evidence: tell the user
+            // so they can veto with /e2e off.
+            let dm_buffer_id = make_buffer_id(conn_id, nick);
+            emit_e2e_message(
+                state,
+                &dm_buffer_id,
+                "e2e_warning",
+                false,
+                format!(
+                    "E2E enabled for {nick} ({new_ctx}) — carried over from a \
+                     pre-upgrade nick match ({old_ctx}); if this is a different \
+                     {nick}, run /e2e off"
+                ),
+            );
+        }
+    }
+    // Cache the observed handle under (network, nick), so the cached lookup
+    // stays scoped per-network (a same-nick peer on another network keeps its
+    // own handle). Skip the write when the row already holds this handle —
+    // this runs per received handshake notice and per query-buffer creation.
+    if cached.as_deref() != Some(new_handle) {
+        let _ = mgr.keyring().cache_dm_handle(&network, nick, new_handle);
+    }
+    // NB: we deliberately do NOT bump the keyring's `last_handle` here. That
+    // field drives TOFU `HandleChanged` classification; updating it on mere
+    // observation (before a signed handshake) would bypass the reverify gate.
+    // The copied config under `@<new>` plus the still-enabled `@<old>` cover
+    // both the live and cached encrypt contexts without it.
+}
+
+/// Observe a DM peer's current server-stamped handle for `(conn_id, nick)` —
+/// learned from a PRIVMSG prefix or an RPE2E handshake — deriving the previous
+/// handle from the open query buffer. Migrates the DM E2E config + refreshes the
+/// network-scoped handle cache via [`track_dm_handle_change`], then refreshes the
+/// query buffer's `peer_handle` so the encrypt path stops keying outgoing DMs
+/// under a stale handle. No-op when the connection's network label is unknown.
+/// The buffer mutation only fires on an actual change; caching is unconditional
+/// (it also covers channel handshakes).
+fn observe_dm_peer_handle(state: &mut AppState, conn_id: &str, nick: &str, new_handle: &str) {
+    let dm_buffer_id = make_buffer_id(conn_id, nick);
+    let prev_buffer_handle = state
+        .buffers
+        .get(&dm_buffer_id)
+        .filter(|b| b.buffer_type == BufferType::Query)
+        .and_then(|b| b.peer_handle.clone());
+    track_dm_handle_change(state, conn_id, nick, prev_buffer_handle.as_deref(), new_handle);
+    if prev_buffer_handle.as_deref() != Some(new_handle)
+        && let Some(buf) = state.buffers.get_mut(&dm_buffer_id)
+        && buf.buffer_type == BufferType::Query
+    {
+        buf.peer_handle = Some(new_handle.to_string());
+    }
+}
+
 /// Handle `IRCv3` `chghost`: `:nick!olduser@oldhost CHGHOST newuser newhost`
 ///
 /// When a user's ident or hostname changes, the server sends CHGHOST to every
@@ -1860,13 +2156,31 @@ fn handle_chghost(
     new_host: &str,
     tags: Option<HashMap<String, String>>,
 ) {
-    let Some(nick) = extract_nick(prefix) else {
+    // The CHGHOST prefix carries the peer's OLD ident@host
+    // (`nick!olduser@oldhost`), which we need to migrate the DM E2E config
+    // even when no query buffer is open.
+    let (nick, old_ident, old_host) = extract_nick_userhost(prefix);
+    if nick.is_empty() {
         return;
-    };
+    }
 
     let nick_lower = nick.to_lowercase();
+    let new_handle = format!("{new_user}@{new_host}");
 
-    // Update ident/host in all shared buffers
+    // Our own CHGHOST: keep our tracked handle current (vhost from services,
+    // oper, etc.) so the recipient-keyed DM context follows. Own-handle flows
+    // exclusively through `set_own_handle`; the peer-handle cache + DM-config
+    // migration below must NOT run for our own nick (it would cache our handle
+    // under our own nick in the PEER cache and drive a spurious peer migration).
+    let is_own = state
+        .connections
+        .get(conn_id)
+        .is_some_and(|c| c.nick.eq_ignore_ascii_case(&nick));
+    if is_own {
+        set_own_handle(state, conn_id, new_handle.clone());
+    }
+
+    // Update ident/host + the cached DM peer_handle in shared buffers.
     for buf in state.buffers.values_mut() {
         if buf.connection_id != conn_id {
             continue;
@@ -1875,6 +2189,28 @@ fn handle_chghost(
             entry.ident = Some(new_user.to_string());
             entry.host = Some(new_host.to_string());
         }
+        // A DM/query buffer caches the peer's handle outside the nicklist; it
+        // drives the E2E encrypt context, so it must track the new host. Skip
+        // for our own nick — a query named after ourselves is not a peer DM.
+        if !is_own
+            && buf.buffer_type == BufferType::Query
+            && buf.name.eq_ignore_ascii_case(&nick)
+        {
+            buf.peer_handle = Some(new_handle.clone());
+        }
+    }
+
+    // Migrate the DM E2E config + refresh the handle cache to the new handle —
+    // INDEPENDENT of whether the peer's query buffer is open — using the OLD
+    // handle carried in the CHGHOST prefix. Without this a vhost change
+    // downgrades the next DM to plaintext. Never for our own nick (see above).
+    let prev_handle = if old_ident.is_empty() || old_host.is_empty() {
+        None
+    } else {
+        Some(format!("{old_ident}@{old_host}"))
+    };
+    if !is_own {
+        track_dm_handle_change(state, conn_id, &nick, prev_handle.as_deref(), &new_handle);
     }
 
     // Log a subtle event in every shared channel
@@ -3931,6 +4267,37 @@ fn try_dispatch_rpe2e_ctcp(
 
     let (nick, ident, host) = extract_nick_userhost(prefix);
     let sender_handle = format!("{ident}@{host}");
+
+    // echo-message: the server echoes our own KEYREQ/KEYRSP/REKEY NOTICEs back
+    // with OUR full prefix, and this dispatch runs before any is_own check in
+    // the callers. Processing the echo would cache our own nick→handle in the
+    // PEER handle cache — exactly the pollution handle_chghost's is_own guard
+    // prevents — and feed our own handshake into the KEYREQ handler. Swallow
+    // it: the echo is not user-renderable CTCP either.
+    if state
+        .connections
+        .get(conn_id)
+        .is_some_and(|c| c.nick.eq_ignore_ascii_case(&nick))
+    {
+        return Some(RpEe2eOutcome::Handled);
+    }
+
+    // Track the sender's current handle BEFORE parsing: even a handshake that
+    // fails to parse (truncated relay, newer protocol revision) carries a
+    // server-stamped prefix, and handle_privmsg's generic peer-handle tracking
+    // is suppressed for every handshake-looking text on the assumption that
+    // THIS function performs the update. A KEYREQ/KEYRSP/REKEY can be the
+    // first signal of a peer's new host: a DM-only reconnect sends no CHGHOST
+    // (no shared channel), and the peer may re-handshake before any PRIVMSG.
+    // For a DM the handshake's `c=` context is `@<sender_handle>`, so unless
+    // the enabled DM config is first migrated from `@<old_handle>`,
+    // `effective_channel_mode` finds nothing under `req.channel` and silently
+    // drops the handshake (no KEYRSP, no trust notice). Server prefixes carry
+    // no ident@host — skip those.
+    if !ident.is_empty() && !host.is_empty() {
+        observe_dm_peer_handle(state, conn_id, &nick, &sender_handle);
+    }
+
     let parsed = match crate::e2e::handshake::parse(inner) {
         Ok(Some(msg)) => msg,
         Ok(None) => return Some(RpEe2eOutcome::NotE2e),
@@ -4183,11 +4550,30 @@ fn parse_userhost_reply(entry: &str) -> Option<(String, String)> {
     Some((nick.to_string(), format!("{ident}@{host}")))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear reply handler — one arm per deferred USERHOST action"
+)]
 fn handle_userhost_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
-    if state.pending_userhost_requests.is_empty() || args.len() < 2 {
+    if args.len() < 2 {
         return;
     }
     let replies = args[1..].join(" ");
+    // Seed our own handle from any reply entry matching our nick, regardless
+    // of pending requests — a self-USERHOST on connect carries no pending
+    // request but must still populate the recipient-keyed DM context.
+    if let Some(our_nick) = state.connections.get(conn_id).map(|c| c.nick.clone()) {
+        for entry in replies.split_whitespace() {
+            if let Some((nick, handle)) = parse_userhost_reply(entry)
+                && nick.eq_ignore_ascii_case(&our_nick)
+            {
+                set_own_handle(state, conn_id, handle);
+            }
+        }
+    }
+    if state.pending_userhost_requests.is_empty() {
+        return;
+    }
     for entry in replies.split_whitespace() {
         let Some((nick, handle)) = parse_userhost_reply(entry) else {
             continue;
@@ -4220,7 +4606,45 @@ fn handle_userhost_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
                     let result = if all {
                         mgr.forget_peer_everywhere(&handle)
                     } else if let Some(channel) = channel.as_deref() {
-                        mgr.forget_peer_on_channel(&handle, channel)
+                        // DM: also clears the recipient-keyed @<own> incoming
+                        // session, matching the direct perform_e2e_forget path.
+                        // Recompute @<own> from our CURRENT own handle rather
+                        // than a value captured at command time — a CHGHOST
+                        // between the command and this reply moves our handle,
+                        // and the live incoming session is keyed under the
+                        // current @<own>. Only DMs (peer context `@<peer>`) have
+                        // a distinct own context; a channel forget has own==peer.
+                        let own_channel = if channel.starts_with('@') {
+                            let own = state
+                                .connections
+                                .get(conn_id)
+                                .and_then(|c| c.own_handle.as_deref())
+                                .map(|h| format!("@{h}"));
+                            if own.is_none() {
+                                // Our own handle is unknown (reset at every
+                                // registration until the self-USERHOST reply).
+                                // Forgetting only @<peer> would leave the
+                                // peer's TRUSTED incoming session under @<own>
+                                // alive while reporting success — their
+                                // messages would keep decrypting as trusted.
+                                // Refuse, like every sibling /e2e command.
+                                emit_e2e_message(
+                                    state,
+                                    &buffer_id,
+                                    "e2e_error",
+                                    true,
+                                    format!(
+                                        "/e2e forget {target}: own handle not yet \
+                                         known — nothing removed; retry in a moment"
+                                    ),
+                                );
+                                continue;
+                            }
+                            own
+                        } else {
+                            None
+                        };
+                        mgr.forget_peer_on_dm_contexts(&handle, channel, own_channel.as_deref())
                     } else {
                         emit_e2e_message(
                             state,
@@ -4265,6 +4689,112 @@ fn handle_userhost_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
     }
 }
 
+/// Format the human-readable body for a TOFU/trust change, WITHOUT the
+/// `[E2E] ` banner. Returns `None` for `Known`/`New` (which never surface a
+/// user notice).
+///
+/// The banner is omitted deliberately: the live render path applies the
+/// theme's `e2e_warning` / `e2e_error` template (`%Z..[E2E]%N $*`), which
+/// prepends `[E2E]` itself. [`e2e_event_message`] re-adds the banner to the
+/// stored `text` for the backlog/fallback path, where `event_key` is
+/// stripped and `text` is rendered verbatim.
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "exercised by the ui::message_line render-roundtrip regression test"
+)]
+pub(crate) fn trust_change_body(
+    change: &crate::e2e::manager::TrustChange,
+) -> Option<(String, &'static str)> {
+    use crate::e2e::manager::TrustChange;
+    let pair = match change {
+        TrustChange::FingerprintChanged {
+            handle,
+            old_fp,
+            new_fp,
+        } => {
+            let old_hex = hex::encode(old_fp);
+            let new_hex = hex::encode(new_fp);
+            let short_old = &old_hex[..old_hex.len().min(16)];
+            let short_new = &new_hex[..new_hex.len().min(16)];
+            (
+                format!(
+                    "WARNING: {handle} identity key has CHANGED\n      \
+                     old fp: {short_old}\n      \
+                     new fp: {short_new}\n      \
+                     run /e2e reverify {handle} to accept the new key"
+                ),
+                "e2e_error",
+            )
+        }
+        TrustChange::HandleChanged {
+            old_handle,
+            new_handle,
+            fingerprint,
+        } => {
+            let fp_hex = hex::encode(fingerprint);
+            let short = &fp_hex[..fp_hex.len().min(16)];
+            (
+                format!(
+                    "notice: known key {short} appeared under new handle\n      \
+                     old handle: {old_handle}\n      \
+                     new handle: {new_handle}\n      \
+                     run /e2e reverify {new_handle} to accept"
+                ),
+                "e2e_warning",
+            )
+        }
+        TrustChange::Revoked {
+            handle,
+            fingerprint,
+        } => {
+            let fp_hex = hex::encode(fingerprint);
+            let short = &fp_hex[..fp_hex.len().min(16)];
+            (
+                format!(
+                    "ERROR: peer {handle} (fp={short}) is REVOKED; \
+                     handshake refused. run /e2e unrevoke {handle} to restore"
+                ),
+                "e2e_error",
+            )
+        }
+        TrustChange::Known | TrustChange::New => return None,
+    };
+    Some(pair)
+}
+
+/// Build a themed `[E2E]` event line. `body` must NOT include the `[E2E] `
+/// banner — the theme's `e2e_*` template (`[E2E] $*`) prepends it on the
+/// live render path. We store `text = "[E2E] {body}"` for the
+/// storage/backlog fallback (where `event_key` is stripped and `text` is
+/// rendered verbatim) and pass `body` through `event_params` so the live
+/// template's `$*` expands to the full message instead of collapsing to a
+/// bare `[E2E]`.
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "exercised by the ui::message_line render-roundtrip regression test"
+)]
+pub(crate) fn e2e_event_message(
+    id: u64,
+    body: String,
+    event_key: &str,
+    highlight: bool,
+) -> Message {
+    Message {
+        id,
+        timestamp: Utc::now(),
+        message_type: MessageType::Event,
+        nick: None,
+        nick_mode: None,
+        text: format!("[E2E] {body}"),
+        highlight,
+        event_key: Some(event_key.to_string()),
+        event_params: Some(vec![body]),
+        log_msg_id: None,
+        log_ref_id: None,
+        tags: None,
+    }
+}
+
 /// Drain all pending TOFU warnings from the manager and emit them as
 /// themed `[E2E]` event messages. Each notice targets the channel the
 /// handshake referenced (from the KEYREQ/KEYRSP payload); if that channel
@@ -4275,7 +4805,6 @@ fn surface_pending_trust_changes(
     conn_id: &str,
     mgr: &crate::e2e::E2eManager,
 ) {
-    use crate::e2e::manager::TrustChange;
     let notices = mgr.take_pending_trust_changes();
     if notices.is_empty() {
         return;
@@ -4291,78 +4820,13 @@ fn surface_pending_trust_changes(
                 active_or_server_buffer(state, conn_id)
             }
         };
-        let (text, event_key) = match &notice.change {
-            TrustChange::FingerprintChanged {
-                handle,
-                old_fp,
-                new_fp,
-            } => {
-                let old_hex = hex::encode(old_fp);
-                let new_hex = hex::encode(new_fp);
-                let short_old = &old_hex[..old_hex.len().min(16)];
-                let short_new = &new_hex[..new_hex.len().min(16)];
-                (
-                    format!(
-                        "[E2E] WARNING: {handle} identity key has CHANGED\n      \
-                         old fp: {short_old}\n      \
-                         new fp: {short_new}\n      \
-                         run /e2e reverify {handle} to accept the new key"
-                    ),
-                    "e2e_error",
-                )
-            }
-            TrustChange::HandleChanged {
-                old_handle,
-                new_handle,
-                fingerprint,
-            } => {
-                let fp_hex = hex::encode(fingerprint);
-                let short = &fp_hex[..fp_hex.len().min(16)];
-                (
-                    format!(
-                        "[E2E] notice: known key {short} appeared under new handle\n      \
-                         old handle: {old_handle}\n      \
-                         new handle: {new_handle}\n      \
-                         run /e2e reverify {new_handle} to accept"
-                    ),
-                    "e2e_warning",
-                )
-            }
-            TrustChange::Revoked {
-                handle,
-                fingerprint,
-            } => {
-                let fp_hex = hex::encode(fingerprint);
-                let short = &fp_hex[..fp_hex.len().min(16)];
-                (
-                    format!(
-                        "[E2E] ERROR: peer {handle} (fp={short}) is REVOKED; \
-                         handshake refused. run /e2e unrevoke {handle} to restore"
-                    ),
-                    "e2e_error",
-                )
-            }
-            // Known / New never produce a notice but we match exhaustively.
-            TrustChange::Known | TrustChange::New => continue,
+        // Known / New never produce a notice; everything else carries the
+        // body through event_params so the live theme template renders it.
+        let Some((body, event_key)) = trust_change_body(&notice.change) else {
+            continue;
         };
         let id = state.next_message_id();
-        state.add_message(
-            &target_buffer,
-            Message {
-                id,
-                timestamp: Utc::now(),
-                message_type: MessageType::Event,
-                nick: None,
-                nick_mode: None,
-                text,
-                highlight: true,
-                event_key: Some(event_key.to_string()),
-                event_params: None,
-                log_msg_id: None,
-                log_ref_id: None,
-                tags: None,
-            },
-        );
+        state.add_message(&target_buffer, e2e_event_message(id, body, event_key, true));
     }
 }
 
@@ -4391,8 +4855,8 @@ fn surface_pending_accept_requests(
                 active_or_server_buffer(state, conn_id)
             }
         };
-        let text = format!(
-            "[E2E] Pending key exchange from {who} for {channel}.\n      \
+        let body = format!(
+            "Pending key exchange from {who} for {channel}.\n      \
              Run /e2e accept <nick> or /e2e decline <nick>.",
             who = req.nick.as_ref().map_or_else(
                 || req.handle.clone(),
@@ -4403,20 +4867,7 @@ fn surface_pending_accept_requests(
         let id = state.next_message_id();
         state.add_message(
             &target_buffer,
-            Message {
-                id,
-                timestamp: Utc::now(),
-                message_type: MessageType::Event,
-                nick: None,
-                nick_mode: None,
-                text,
-                highlight: true,
-                event_key: Some("e2e_pending_accept".to_string()),
-                event_params: None,
-                log_msg_id: None,
-                log_ref_id: None,
-                tags: None,
-            },
+            e2e_event_message(id, body, "e2e_pending_accept", true),
         );
     }
 }
@@ -4429,6 +4880,48 @@ mod tests {
     use irc::proto::Prefix;
     use std::collections::HashMap;
 
+    #[test]
+    fn trust_change_body_handle_changed_excludes_banner_and_carries_details() {
+        use crate::e2e::manager::TrustChange;
+        let (body, key) = trust_change_body(&TrustChange::HandleChanged {
+            old_handle: "~r@a.host".to_string(),
+            new_handle: "~r@b.host".to_string(),
+            fingerprint: [0xAB; 16],
+        })
+        .expect("HandleChanged must produce a notice");
+        assert_eq!(key, "e2e_warning");
+        // The theme's e2e_* template prepends "[E2E]"; baking it into the
+        // body would double the banner on the live path.
+        assert!(!body.contains("[E2E]"), "body must not embed banner: {body}");
+        assert!(body.contains("appeared under new handle"));
+        assert!(body.contains("~r@a.host"));
+        assert!(body.contains("~r@b.host"));
+    }
+
+    #[test]
+    fn trust_change_body_known_and_new_produce_no_notice() {
+        use crate::e2e::manager::TrustChange;
+        assert!(trust_change_body(&TrustChange::Known).is_none());
+        assert!(trust_change_body(&TrustChange::New).is_none());
+    }
+
+    #[test]
+    fn e2e_event_message_carries_body_in_event_params() {
+        // Regression guard for the empty-[E2E] live-render bug: the body MUST
+        // be in event_params so the theme template's `$*` expands to it.
+        let msg = e2e_event_message(7, "WARNING: key changed".to_string(), "e2e_error", true);
+        assert!(matches!(msg.message_type, MessageType::Event));
+        assert_eq!(msg.event_key.as_deref(), Some("e2e_error"));
+        assert_eq!(
+            msg.event_params,
+            Some(vec!["WARNING: key changed".to_string()]),
+            "body must travel through event_params for the live theme template"
+        );
+        // Stored text keeps the banner for the backlog/fallback path, where
+        // event_key is stripped and `text` is rendered verbatim.
+        assert_eq!(msg.text, "[E2E] WARNING: key changed");
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "flat fixture used by every test in this module"
@@ -4439,6 +4932,7 @@ mod tests {
             id: "test".to_string(),
             label: "TestServer".to_string(),
             status: ConnectionStatus::Connected,
+            own_handle: None,
             nick: "me".to_string(),
             user_modes: String::new(),
             isupport: HashMap::new(),
@@ -5638,6 +6132,606 @@ mod tests {
         let entry = buf.users.get("alice").unwrap();
         assert_eq!(entry.ident.as_deref(), Some("newuser"));
         assert_eq!(entry.host.as_deref(), Some("newhost.example.com"));
+    }
+
+    #[test]
+    fn chghost_updates_query_peer_handle() {
+        let mut state = make_test_state();
+        // A DM/query buffer caching the peer's old handle. The peer is not in
+        // a nicklist, so the nicklist update misses it — but the E2E encrypt
+        // context keys on peer_handle and must track the new host.
+        let q_id = make_buffer_id("test", "bob");
+        state.add_buffer(Buffer {
+            id: q_id,
+            connection_id: "test".to_string(),
+            buffer_type: BufferType::Query,
+            name: "bob".to_string(),
+            messages: VecDeque::new(),
+            activity: ActivityLevel::None,
+            unread_count: 0,
+            last_read: Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
+            peer_handle: Some("~bob@old.host".to_string()),
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
+            log_initial_loaded: false,
+            pin_backlog: false,
+        });
+
+        let msg = make_irc_msg(
+            Some("bob!~bob@old.host"),
+            Command::CHGHOST("~bob".into(), "user/bob".into()),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/bob").unwrap();
+        assert_eq!(buf.peer_handle.as_deref(), Some("~bob@user/bob"));
+    }
+
+    #[test]
+    fn keyreq_first_signal_migrates_dm_handle_before_policy_lookup() {
+        use crate::e2e::keyring::{ChannelConfig, ChannelMode, Keyring};
+        use crate::e2e::manager::E2eManager;
+        use std::sync::{Arc, Mutex};
+
+        // Peer "alice" had an enabled DM E2E config at ~alice@old.host. She
+        // reconnects from ~alice@new.host and — with no shared channel, so no
+        // CHGHOST, and before sending any PRIVMSG — her FIRST signal of the new
+        // host is an RPE2E KEYREQ. Its recipient-keyed context is
+        // @~alice@new.host; unless the enabled config is migrated from
+        // @~alice@old.host BEFORE the policy lookup, `effective_channel_mode`
+        // finds nothing under `req.channel`, the handshake is silently dropped
+        // (no KEYRSP), and the encrypt path keeps keying on the stale handle.
+        let old_handle = "~alice@old.host";
+        let new_handle = "~alice@new.host";
+        let old_ctx = format!("@{old_handle}");
+        let new_ctx = format!("@{new_handle}");
+
+        // Bob (us): manager with the DM enabled under the OLD context only,
+        // AutoAccept so a successful lookup auto-responds with a KEYRSP.
+        let bob_conn = crate::storage::db::open_database(false).unwrap();
+        let bob = E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(bob_conn)))).unwrap();
+        bob.keyring()
+            .set_channel_config(&ChannelConfig {
+                channel: old_ctx,
+                enabled: true,
+                mode: ChannelMode::AutoAccept,
+            })
+            .unwrap();
+
+        // Alice: builds a real, signed, parseable KEYREQ stamped with her NEW
+        // handle (recipient-keyed by her own handle).
+        let alice_conn = crate::storage::db::open_database(false).unwrap();
+        let alice =
+            E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(alice_conn)))).unwrap();
+        let req = alice.build_keyreq(&new_ctx).unwrap();
+        let ctcp = alice.encode_keyreq_ctcp(&req);
+
+        // Bob's AppState: manager attached, an open query buffer for "alice"
+        // still caching her OLD handle.
+        let mut state = make_test_state();
+        state.e2e_manager = Some(Arc::new(bob));
+        state.add_buffer(Buffer {
+            id: make_buffer_id("test", "alice"),
+            connection_id: "test".to_string(),
+            buffer_type: BufferType::Query,
+            name: "alice".to_string(),
+            messages: VecDeque::new(),
+            activity: ActivityLevel::None,
+            unread_count: 0,
+            last_read: Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
+            peer_handle: Some(old_handle.to_string()),
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
+            log_initial_loaded: false,
+            pin_backlog: false,
+        });
+
+        // Deliver the KEYREQ as a NOTICE from alice's NEW host.
+        let msg = make_irc_msg(
+            Some(&format!("alice!{new_handle}")),
+            Command::NOTICE("me".into(), ctcp),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let mgr = state.e2e_manager.as_ref().unwrap();
+        // The enabled DM config followed the handle to the new context...
+        assert!(
+            mgr.keyring()
+                .get_channel_config(&new_ctx)
+                .unwrap()
+                .is_some_and(|c| c.enabled),
+            "KEYREQ-first handle change must migrate the enabled DM config to @<new>"
+        );
+        // ...so the policy lookup succeeds and a KEYRSP is queued (not dropped)...
+        assert!(
+            !state.pending_e2e_sends.is_empty(),
+            "migrated config must let the KEYREQ produce a KEYRSP instead of being silently dropped"
+        );
+        // ...and the query buffer now keys the encrypt path on the new handle.
+        assert_eq!(
+            state.buffers.get("test/alice").unwrap().peer_handle.as_deref(),
+            Some(new_handle)
+        );
+    }
+
+    #[test]
+    fn e2e_awaiting_own_identity_placeholder_is_transient_not_logged() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let mut state = make_test_state();
+        state.log_tx = Some(tx);
+        // own_handle is None (make_test_state default), so an encrypted DM can't
+        // be decrypted yet: handle_privmsg shows the "awaiting our own identity"
+        // placeholder. The handle-learned hook re-fetches and decrypts this exact
+        // line via CHATHISTORY, so the placeholder must NOT be logged under the
+        // server @msgid — otherwise the decryptable replay collapses into
+        // INSERT OR IGNORE on the unique (network, msg_id) index and is lost.
+        let mut msg = make_irc_msg(
+            Some("alice!~alice@her.host"),
+            Command::PRIVMSG("me".into(), "+RPE2E01 c=@~me@my.host m=ciphertext".into()),
+        );
+        msg.tags = Some(vec![irc::proto::message::Tag(
+            "msgid".to_string(),
+            Some("server-msgid-1".to_string()),
+        )]);
+        handle_irc_message(&mut state, "test", &msg);
+
+        // The placeholder is rendered live in the query buffer...
+        let buf = state.buffers.get("test/alice").unwrap();
+        let placeholder = buf
+            .messages
+            .iter()
+            .find(|m| m.text == "[E2E: awaiting our own identity]")
+            .expect("placeholder must be rendered live");
+        // ...carrying NO @msgid, so the later decrypted CHATHISTORY replay (same
+        // server @msgid) isn't deduped against it in surface_history_rows.
+        assert!(
+            placeholder.tags.is_none(),
+            "placeholder must drop the server tags/@msgid so the decrypted replay can surface"
+        );
+        // ...and is NOT persisted, so the server @msgid stays free for the
+        // post-handle decrypted replay.
+        assert!(
+            rx.try_recv().is_err(),
+            "awaiting-own-identity placeholder must not be logged under the server @msgid"
+        );
+    }
+
+    #[test]
+    fn userhost_deferred_forget_clears_own_context_incoming_session() {
+        use crate::e2e::keyring::{IncomingSession, Keyring, TrustStatus};
+        use crate::e2e::manager::E2eManager;
+        use std::sync::{Arc, Mutex};
+
+        // DM with peer "alice". Recipient-keyed: alice's TRUSTED incoming session
+        // (her messages → us) lives under OUR own context @<own>, not @<alice>.
+        // `/e2e forget alice` (a bare nick) defers to USERHOST; the reply handler
+        // must forget BOTH contexts, else alice's messages keep decrypting after
+        // the user was told she was forgotten.
+        let own_handle = "~me@my.host";
+        let alice_handle = "~alice@her.host";
+        let own_ctx = format!("@{own_handle}");
+        let peer_ctx = format!("@{alice_handle}");
+
+        let conn = crate::storage::db::open_database(false).unwrap();
+        let mgr = E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(conn)))).unwrap();
+        mgr.keyring()
+            .install_incoming_session_strict(&IncomingSession {
+                handle: alice_handle.to_string(),
+                channel: own_ctx.clone(),
+                fingerprint: [0x11; 16],
+                sk: [0x22; 32],
+                status: TrustStatus::Trusted,
+                created_at: 0,
+            })
+            .unwrap();
+        assert!(
+            mgr.keyring()
+                .get_incoming_session(alice_handle, &own_ctx)
+                .unwrap()
+                .is_some(),
+            "precondition: incoming session installed under @<own>"
+        );
+
+        let mut state = make_test_state();
+        state.e2e_manager = Some(Arc::new(mgr));
+        // Our own handle must be known so the deferred handler can recompute the
+        // recipient-keyed @<own> context at execution time.
+        if let Some(conn) = state.connections.get_mut("test") {
+            conn.own_handle = Some(own_handle.to_string());
+        }
+        // Queue the deferred forget exactly as e2e_forget does. No @<own> is
+        // captured — the reply handler derives it from the current own handle.
+        state
+            .pending_userhost_requests
+            .push(crate::state::PendingUserhostRequest {
+                connection_id: "test".to_string(),
+                nick: "alice".to_string(),
+                action: crate::state::PendingUserhostAction::E2eForget {
+                    buffer_id: make_buffer_id("test", "alice"),
+                    target: "alice".to_string(),
+                    channel: Some(peer_ctx),
+                    all: false,
+                },
+            });
+
+        // USERHOST reply resolving alice's handle.
+        handle_userhost_reply(
+            &mut state,
+            "test",
+            &["me".to_string(), format!("alice=+{alice_handle}")],
+        );
+
+        let mgr = state.e2e_manager.as_ref().unwrap();
+        assert!(
+            mgr.keyring()
+                .get_incoming_session(alice_handle, &own_ctx)
+                .unwrap()
+                .is_none(),
+            "deferred forget must delete the recipient-keyed @<own> incoming session"
+        );
+    }
+
+    #[test]
+    fn deferred_e2e_forget_uses_current_own_handle_after_chghost() {
+        // Regression: a CHGHOST that moves OUR own handle between `/e2e forget`
+        // and the USERHOST reply must not strand the forget under a stale @<own>.
+        // The peer's live incoming session lives under the CURRENT @<own>; the
+        // deferred handler recomputes that context rather than using a value
+        // captured at command time.
+        use crate::e2e::keyring::{IncomingSession, Keyring, TrustStatus};
+        use crate::e2e::manager::E2eManager;
+        use std::sync::{Arc, Mutex};
+
+        let new_own = "~me@new.host";
+        let alice_handle = "~alice@her.host";
+        let new_own_ctx = format!("@{new_own}");
+
+        let conn = crate::storage::db::open_database(false).unwrap();
+        let mgr = E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(conn)))).unwrap();
+        // Alice's live incoming session is keyed under our NEW own context.
+        mgr.keyring()
+            .install_incoming_session_strict(&IncomingSession {
+                handle: alice_handle.to_string(),
+                channel: new_own_ctx.clone(),
+                fingerprint: [0x11; 16],
+                sk: [0x22; 32],
+                status: TrustStatus::Trusted,
+                created_at: 0,
+            })
+            .unwrap();
+
+        let mut state = make_test_state();
+        state.e2e_manager = Some(Arc::new(mgr));
+        // CHGHOST already moved our handle to the new value by the time the
+        // reply is processed.
+        if let Some(conn) = state.connections.get_mut("test") {
+            conn.own_handle = Some(new_own.to_string());
+        }
+        state
+            .pending_userhost_requests
+            .push(crate::state::PendingUserhostRequest {
+                connection_id: "test".to_string(),
+                nick: "alice".to_string(),
+                action: crate::state::PendingUserhostAction::E2eForget {
+                    buffer_id: make_buffer_id("test", "alice"),
+                    target: "alice".to_string(),
+                    channel: Some(format!("@{alice_handle}")),
+                    all: false,
+                },
+            });
+
+        handle_userhost_reply(
+            &mut state,
+            "test",
+            &["me".to_string(), format!("alice=+{alice_handle}")],
+        );
+
+        let mgr = state.e2e_manager.as_ref().unwrap();
+        assert!(
+            mgr.keyring()
+                .get_incoming_session(alice_handle, &new_own_ctx)
+                .unwrap()
+                .is_none(),
+            "deferred forget must clear the session under the CURRENT @<own>, not a stale one"
+        );
+    }
+
+    #[test]
+    fn deferred_e2e_forget_refuses_when_own_handle_unknown() {
+        // Regression: with our own handle unknown (reset at every registration
+        // until the self-USERHOST reply), a DM forget cannot reach the
+        // recipient-keyed @<own> incoming session. It must REFUSE — a partial
+        // forget that clears only @<peer> while reporting success leaves the
+        // peer's trusted session decrypting their messages.
+        use crate::e2e::keyring::{IncomingSession, Keyring, TrustStatus};
+        use crate::e2e::manager::E2eManager;
+        use std::sync::{Arc, Mutex};
+
+        let own_handle = "~me@my.host";
+        let alice_handle = "~alice@her.host";
+        let own_ctx = format!("@{own_handle}");
+
+        let conn = crate::storage::db::open_database(false).unwrap();
+        let mgr = E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(conn)))).unwrap();
+        mgr.keyring()
+            .install_incoming_session_strict(&IncomingSession {
+                handle: alice_handle.to_string(),
+                channel: own_ctx.clone(),
+                fingerprint: [0x11; 16],
+                sk: [0x22; 32],
+                status: TrustStatus::Trusted,
+                created_at: 0,
+            })
+            .unwrap();
+
+        let mut state = make_test_state();
+        state.e2e_manager = Some(Arc::new(mgr));
+        // own_handle stays None (make_test_state default) — the reconnect gap.
+        state
+            .pending_userhost_requests
+            .push(crate::state::PendingUserhostRequest {
+                connection_id: "test".to_string(),
+                nick: "alice".to_string(),
+                action: crate::state::PendingUserhostAction::E2eForget {
+                    buffer_id: make_buffer_id("test", "alice"),
+                    target: "alice".to_string(),
+                    channel: Some(format!("@{alice_handle}")),
+                    all: false,
+                },
+            });
+
+        handle_userhost_reply(
+            &mut state,
+            "test",
+            &["me".to_string(), format!("alice=+{alice_handle}")],
+        );
+
+        let mgr = state.e2e_manager.as_ref().unwrap();
+        assert!(
+            mgr.keyring()
+                .get_incoming_session(alice_handle, &own_ctx)
+                .unwrap()
+                .is_some(),
+            "refused forget must leave the @<own> session intact (no partial forget)"
+        );
+    }
+
+    #[test]
+    fn rpe2e_dispatch_swallows_own_echo_without_caching_own_handle() {
+        // echo-message: the server echoes our own KEYREQ/KEYRSP NOTICEs back
+        // with our full prefix. The dispatch must swallow the echo WITHOUT
+        // caching our own nick→handle in the PEER handle cache (that row would
+        // later resolve a stranger who takes our old nick to OUR handle) and
+        // without feeding our own handshake into the KEYREQ handler.
+        use crate::e2e::keyring::Keyring;
+        use crate::e2e::manager::E2eManager;
+        use std::sync::{Arc, Mutex};
+
+        let conn = crate::storage::db::open_database(false).unwrap();
+        let mgr = E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(conn)))).unwrap();
+        let mut state = make_test_state();
+        state.e2e_manager = Some(Arc::new(mgr));
+
+        let prefix = Prefix::new_from_str("me!~me@my.host");
+        let text = format!("\x01{} KEYREQ v=1 c=@x garbage\x01", crate::e2e::handshake::CTCP_TAG);
+        let outcome = try_dispatch_rpe2e_ctcp(&mut state, "test", Some(&prefix), "bob", &text);
+
+        assert_eq!(
+            outcome,
+            Some(RpEe2eOutcome::Handled),
+            "own echo must be swallowed, not rendered or re-processed"
+        );
+        let mgr = state.e2e_manager.as_ref().unwrap();
+        assert_eq!(
+            mgr.keyring().cached_dm_handle("me", "TestServer").unwrap(),
+            None,
+            "own nick must never enter the PEER handle cache"
+        );
+    }
+
+    #[test]
+    fn rpe2e_dispatch_tracks_peer_handle_even_when_parse_fails() {
+        // A handshake-looking message that fails to parse (truncated relay,
+        // newer protocol revision) still carries a server-stamped prefix — and
+        // handle_privmsg's generic tracking is suppressed for handshake-looking
+        // texts on the assumption that the dispatcher updates the handle. The
+        // observation must therefore happen BEFORE the parse early-returns.
+        use crate::e2e::keyring::Keyring;
+        use crate::e2e::manager::E2eManager;
+        use std::sync::{Arc, Mutex};
+
+        let conn = crate::storage::db::open_database(false).unwrap();
+        let mgr = E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(conn)))).unwrap();
+        let mut state = make_test_state();
+        state.e2e_manager = Some(Arc::new(mgr));
+
+        let prefix = Prefix::new_from_str("bob!~bob@new.host");
+        let text = format!("\x01{} KEYREQ truncated-garbage\x01", crate::e2e::handshake::CTCP_TAG);
+        let _ = try_dispatch_rpe2e_ctcp(&mut state, "test", Some(&prefix), "me", &text);
+
+        let mgr = state.e2e_manager.as_ref().unwrap();
+        assert_eq!(
+            mgr.keyring()
+                .cached_dm_handle("bob", "TestServer")
+                .unwrap()
+                .as_deref(),
+            Some("~bob@new.host"),
+            "peer handle must be tracked even when the handshake body fails to parse"
+        );
+    }
+
+    #[test]
+    fn legacy_nick_match_migration_caps_autotrust_and_warns() {
+        // The legacy e2e_peers fallback matches by nick alone across ALL
+        // networks. When it is the ONLY migration source (fresh cache, upgrade
+        // path), the enabled config may belong to a same-nick peer elsewhere:
+        // the migration must not carry AutoAccept across (a stranger's
+        // handshake would be silently trusted) and must tell the user.
+        use crate::e2e::keyring::{
+            ChannelConfig, ChannelMode, Keyring, PeerRecord, TrustStatus,
+        };
+        use crate::e2e::manager::E2eManager;
+        use std::sync::{Arc, Mutex};
+
+        let old_net_handle = "~bob@neta.host";
+        let new_net_handle = "~bob@netb.host";
+
+        let conn = crate::storage::db::open_database(false).unwrap();
+        let mgr = E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(conn)))).unwrap();
+        // Pre-upgrade keyring: bob is an enabled AutoAccept E2E peer on NetA,
+        // recorded only in e2e_peers; the network-scoped cache is empty.
+        mgr.keyring()
+            .upsert_peer(&PeerRecord {
+                fingerprint: [0x33; 16],
+                pubkey: [0x44; 32],
+                last_handle: Some(old_net_handle.to_string()),
+                last_nick: Some("bob".to_string()),
+                first_seen: 0,
+                last_seen: 100,
+                global_status: TrustStatus::Trusted,
+            })
+            .unwrap();
+        mgr.keyring()
+            .set_channel_config(&ChannelConfig {
+                channel: format!("@{old_net_handle}"),
+                enabled: true,
+                mode: ChannelMode::AutoAccept,
+            })
+            .unwrap();
+
+        let mut state = make_test_state();
+        state.e2e_manager = Some(Arc::new(mgr));
+        // Open query buffer for bob so the warning lands somewhere visible.
+        let bob_buf = make_buffer_id("test", "bob");
+        let mut buf = make_channel_buffer("test", "bob");
+        buf.buffer_type = BufferType::Query;
+        state.add_buffer(buf);
+
+        // First DM from a "bob" on this network (prev buffer handle: none).
+        track_dm_handle_change(&mut state, "test", "bob", None, new_net_handle);
+
+        let mgr = state.e2e_manager.as_ref().unwrap();
+        let migrated = mgr
+            .keyring()
+            .get_channel_config(&format!("@{new_net_handle}"))
+            .unwrap()
+            .expect("config must migrate so the DM never downgrades to plaintext");
+        assert!(migrated.enabled);
+        assert_eq!(
+            migrated.mode,
+            ChannelMode::Normal,
+            "AutoAccept must be capped to Normal for a network-agnostic nick match"
+        );
+        let buf = state.buffers.get(&bob_buf).expect("bob query buffer");
+        assert!(
+            buf.messages
+                .iter()
+                .any(|m| m.text.contains("pre-upgrade nick match")),
+            "the legacy-sourced enable must be surfaced to the user"
+        );
+    }
+
+    #[test]
+    fn own_ciphertext_echo_without_own_handle_is_swallowed() {
+        // A nick-only prefix on our own echoed E2E DM (no ident@host to seed
+        // own_handle) must not render the raw +RPE2E01 wire line: the
+        // plaintext was already echoed locally at send time.
+        let mut state = make_test_state();
+        let prefix = Prefix::new_from_str("me");
+        handle_privmsg(
+            &mut state,
+            "test",
+            "me",
+            Some(&prefix),
+            "bob",
+            "+RPE2E01 AAAA BBBB",
+            None,
+        );
+        assert!(
+            !state.buffers.contains_key(&make_buffer_id("test", "bob")),
+            "swallowed echo must not create a buffer with raw ciphertext"
+        );
+    }
+
+    #[test]
+    fn incoming_e2e_context_is_recipient_keyed_for_dms() {
+        // Channel: always Some(name), handles irrelevant.
+        assert_eq!(incoming_e2e_context("#x", Some("~me@h")).as_deref(), Some("#x"));
+        assert_eq!(incoming_e2e_context("#x", None).as_deref(), Some("#x"));
+        // DM (target is our own nick) with own handle known: keyed by OUR own
+        // handle (recipient) — what the sender encrypted the AAD under.
+        assert_eq!(
+            incoming_e2e_context("me", Some("~me@host")).as_deref(),
+            Some("@~me@host")
+        );
+        // DM with own handle UNKNOWN: None — must NOT fall back to the sender
+        // (that would fire a KEYREQ for the wrong DM direction); the caller
+        // waits until our handle is learned (USERHOST / echo / CHGHOST).
+        assert_eq!(incoming_e2e_context("me", None), None);
+    }
+
+    // === own-handle tracking (for recipient-keyed DM E2E) ===
+
+    #[test]
+    fn own_handle_captured_from_echo_message() {
+        let mut state = make_test_state(); // nick "me", conn "test"
+        // echo-message echoes our own outgoing PM back with our full prefix.
+        let msg = make_irc_msg(
+            Some("me!~me@host.example"),
+            Command::PRIVMSG("bob".into(), "hi".into()),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+        assert_eq!(
+            state.connections.get("test").unwrap().own_handle.as_deref(),
+            Some("~me@host.example")
+        );
+    }
+
+    #[test]
+    fn own_handle_captured_from_own_chghost() {
+        let mut state = make_test_state();
+        let msg = make_irc_msg(
+            Some("me!~me@old.host"),
+            Command::CHGHOST("~me".into(), "user/me".into()),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+        assert_eq!(
+            state.connections.get("test").unwrap().own_handle.as_deref(),
+            Some("~me@user/me")
+        );
+    }
+
+    #[test]
+    fn own_handle_captured_from_self_userhost_reply() {
+        let mut state = make_test_state();
+        // RPL_USERHOST with no pending request must still seed our own handle.
+        handle_userhost_reply(
+            &mut state,
+            "test",
+            &["me".to_string(), "me=+~me@host.example".to_string()],
+        );
+        assert_eq!(
+            state.connections.get("test").unwrap().own_handle.as_deref(),
+            Some("~me@host.example")
+        );
     }
 
     #[test]
@@ -7417,6 +8511,7 @@ mod tests {
             id: "other".into(),
             label: "Other".into(),
             status: ConnectionStatus::Connected,
+            own_handle: None,
             nick: "me".into(),
             user_modes: String::new(),
             isupport: HashMap::new(),

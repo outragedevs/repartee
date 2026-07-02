@@ -109,6 +109,14 @@ pub fn context_key(target: &str, peer_handle: &str) -> String {
     }
 }
 
+/// Transient line shown in a query buffer for a DM ciphertext that arrived
+/// before our own handle (the recipient-keyed decrypt context) was learned.
+/// Never persisted; once the handle is known the real line is re-fetched via
+/// CHATHISTORY, decrypted, and spliced in — at which point the placeholder is
+/// removed (`AppState::surface_history_rows`). One constant so the creation
+/// site (`irc::events::handle_privmsg`) and the removal site match exactly.
+pub const AWAITING_OWN_IDENTITY_PLACEHOLDER: &str = "[E2E: awaiting our own identity]";
+
 #[cfg(test)]
 mod context_key_tests {
     use super::context_key;

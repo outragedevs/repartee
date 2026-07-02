@@ -18,6 +18,7 @@ use crate::e2e::manager::{DecryptOutcome, E2eManager, ReverifyOutcome, TrustChan
 const SCHEMA: &str = "
 CREATE TABLE e2e_identity (id INTEGER PRIMARY KEY CHECK (id = 1), pubkey BLOB NOT NULL, privkey BLOB NOT NULL, fingerprint BLOB NOT NULL, created_at INTEGER NOT NULL);
 CREATE TABLE e2e_peers (fingerprint BLOB PRIMARY KEY, pubkey BLOB NOT NULL, last_handle TEXT, last_nick TEXT, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, global_status TEXT NOT NULL DEFAULT 'pending');
+CREATE TABLE e2e_dm_handle_cache (network TEXT NOT NULL, nick TEXT NOT NULL COLLATE NOCASE, handle TEXT NOT NULL, PRIMARY KEY (network, nick));
 CREATE TABLE e2e_outgoing_sessions (channel TEXT PRIMARY KEY, sk BLOB NOT NULL, created_at INTEGER NOT NULL, pending_rotation INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE e2e_incoming_sessions (handle TEXT NOT NULL, channel TEXT NOT NULL, fingerprint BLOB NOT NULL, sk BLOB NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, PRIMARY KEY (handle, channel));
 CREATE TABLE e2e_channel_config (channel TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, mode TEXT NOT NULL DEFAULT 'normal');
@@ -92,6 +93,136 @@ fn full_handshake_and_encrypted_exchange() {
         DecryptOutcome::Plaintext(s) => assert_eq!(s, "hello bob"),
         other => panic!("expected Plaintext, got {other:?}"),
     }
+}
+
+#[test]
+fn dm_round_trip_recipient_keyed_both_directions() {
+    // A DM is recipient-keyed: the context for a message is the RECIPIENT's
+    // handle. So Alice->Bob uses @<bob_handle> on BOTH sides and Bob->Alice
+    // uses @<alice_handle>. The recipient stamps the KEYREQ c= with its own
+    // handle; both sides use it verbatim. This proves the manager needs no
+    // change for DMs — only the IRC callers must compute the recipient-keyed
+    // context (own handle on decrypt, peer handle on encrypt).
+    let alice = make_manager();
+    let bob = make_manager();
+    let alice_handle = "~alice@a.host";
+    let bob_handle = "~bob@b.host";
+    let ctx_to_bob = format!("@{bob_handle}"); // recipient = Bob
+    let ctx_to_alice = format!("@{alice_handle}"); // recipient = Alice
+
+    enable_channel(&alice, &ctx_to_bob, ChannelMode::AutoAccept);
+    enable_channel(&bob, &ctx_to_alice, ChannelMode::AutoAccept);
+
+    // Dir Alice->Bob: Bob (the recipient) sends a KEYREQ stamped with his own
+    // handle; Alice responds; Bob installs the incoming session under @<bob>.
+    let req = bob.build_keyreq(&ctx_to_bob).unwrap();
+    let rsp = alice.handle_keyreq(bob_handle, &req).unwrap().unwrap();
+    bob.handle_keyrsp(alice_handle, &rsp).unwrap();
+    let wire = alice.encrypt_outgoing(&ctx_to_bob, "hi bob").unwrap();
+    match bob
+        .decrypt_incoming(alice_handle, &ctx_to_bob, &wire[0])
+        .unwrap()
+    {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "hi bob"),
+        other => panic!("A->B: expected Plaintext, got {other:?}"),
+    }
+
+    // Dir Bob->Alice: symmetric, recipient = Alice.
+    let req2 = alice.build_keyreq(&ctx_to_alice).unwrap();
+    let rsp2 = bob.handle_keyreq(alice_handle, &req2).unwrap().unwrap();
+    alice.handle_keyrsp(bob_handle, &rsp2).unwrap();
+    let wire2 = bob.encrypt_outgoing(&ctx_to_alice, "hey alice").unwrap();
+    match alice
+        .decrypt_incoming(bob_handle, &ctx_to_alice, &wire2[0])
+        .unwrap()
+    {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "hey alice"),
+        other => panic!("B->A: expected Plaintext, got {other:?}"),
+    }
+}
+
+#[test]
+fn chghost_migrates_enabled_dm_config_to_new_context() {
+    // A peer's vhost/host change must carry the E2E policy to the new
+    // pseudochannel, or the next DM would key under @<new>, find no config,
+    // and go plaintext.
+    let mgr = make_manager();
+    let old_ctx = "@~bob@old.host";
+    let new_ctx = "@~bob@user/bob";
+    enable_channel(&mgr, old_ctx, ChannelMode::Normal);
+
+    assert!(
+        crate::irc::events::migrate_dm_e2e_config(&mgr, old_ctx, new_ctx, false),
+        "an enabled config must report as migrated"
+    );
+
+    // New context is now enabled; the old context stays enabled too (copy,
+    // not move) so the encrypt path's cached @<old> fallback still encrypts
+    // rather than going plaintext — and the TOFU last_handle is left untouched.
+    assert!(
+        mgr.keyring()
+            .get_channel_config(new_ctx)
+            .unwrap()
+            .is_some_and(|c| c.enabled),
+        "config must follow the peer to the new handle"
+    );
+    assert!(
+        mgr.keyring()
+            .get_channel_config(old_ctx)
+            .unwrap()
+            .is_some_and(|c| c.enabled),
+        "old-context config stays enabled (copy, not move)"
+    );
+
+    // A disabled old config is NOT migrated (no policy to preserve).
+    let mgr2 = make_manager();
+    mgr2.keyring()
+        .set_channel_config(&ChannelConfig {
+            channel: old_ctx.to_string(),
+            enabled: false,
+            mode: ChannelMode::Normal,
+        })
+        .unwrap();
+    assert!(
+        !crate::irc::events::migrate_dm_e2e_config(&mgr2, old_ctx, new_ctx, false),
+        "a disabled config must report as not migrated"
+    );
+    assert!(
+        mgr2.keyring().get_channel_config(new_ctx).unwrap().is_none(),
+        "a disabled config must not be migrated"
+    );
+}
+
+#[test]
+fn dm_keyreq_skips_reciprocal_but_channel_keeps_it() {
+    // DM: Alice receives Bob's KEYREQ for the DM context (Bob's own handle).
+    // No reciprocal is queued — the reverse (Alice-receives-from-Bob) direction
+    // is keyed by Alice's OWN handle, which the manager can't derive from
+    // req.channel; it self-heals via the live auto-KEYREQ instead. Building one
+    // under @<bob> would orphan rows and spend the shared rate-limit slot.
+    let alice = make_manager();
+    let bob = make_manager();
+    let bob_handle = "~bob@b.host";
+    let dm_ctx = format!("@{bob_handle}");
+    enable_channel(&alice, &dm_ctx, ChannelMode::AutoAccept);
+    let dm_req = bob.build_keyreq(&dm_ctx).unwrap();
+    alice.handle_keyreq(bob_handle, &dm_req).unwrap();
+    assert!(
+        alice.take_pending_outbound_keyreqs().is_empty(),
+        "a DM KEYREQ must not build a mis-keyed reciprocal"
+    );
+
+    // Channel: the proactive reciprocal IS still built (own == peer == channel).
+    let carol = make_manager();
+    let dave = make_manager();
+    let dave_handle = "~dave@d.host";
+    enable_channel(&carol, "#x", ChannelMode::AutoAccept);
+    let chan_req = dave.build_keyreq("#x").unwrap();
+    carol.handle_keyreq(dave_handle, &chan_req).unwrap();
+    assert!(
+        !carol.take_pending_outbound_keyreqs().is_empty(),
+        "a channel KEYREQ still builds the proactive reciprocal"
+    );
 }
 
 #[test]
@@ -359,6 +490,10 @@ fn import_replaces_existing_keyring_state() {
             created_at: 2_000,
         })
         .unwrap();
+    carol
+        .keyring()
+        .cache_dm_handle("StaleNet", "stale", "~stale@old.host")
+        .unwrap();
 
     let tmp = tempfile::NamedTempFile::new().unwrap();
     crate::e2e::portable::export_to_path(alice.keyring(), tmp.path()).unwrap();
@@ -404,6 +539,15 @@ fn import_replaces_existing_keyring_state() {
             .get_channel_config("#stale")
             .unwrap()
             .is_none()
+    );
+    // The stale DM handle cache from the previous keyring must be cleared, so
+    // an imported keyring can't resolve a DM under the old handle.
+    assert_eq!(
+        carol
+            .keyring()
+            .last_handle_for_nick("stale", "StaleNet")
+            .unwrap(),
+        None
     );
 }
 

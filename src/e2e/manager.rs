@@ -749,6 +749,28 @@ impl E2eManager {
         Ok(deleted)
     }
 
+    /// Forget a DM peer across BOTH of its recipient-keyed contexts: the peer
+    /// context `@<peer>` (where our outgoing-recipient + their pending state
+    /// live) and our own context `@<own>` (where their TRUSTED INCOMING session
+    /// lives — recipient-keyed, see `docs/rpe2e-dm-addendum.md`). Without the
+    /// own-context delete the peer's messages keep decrypting after the user was
+    /// told they were forgotten. For a channel `own == peer == channel`, so the
+    /// second delete is skipped. Returns the total rows/entries removed.
+    pub fn forget_peer_on_dm_contexts(
+        &self,
+        handle: &str,
+        peer_channel: &str,
+        own_channel: Option<&str>,
+    ) -> Result<usize> {
+        let n = self.forget_peer_on_channel(handle, peer_channel)?;
+        match own_channel {
+            Some(own) if own != peer_channel => {
+                self.forget_peer_on_channel(handle, own).map(|m| n + m)
+            }
+            _ => Ok(n),
+        }
+    }
+
     pub fn forget_peer_everywhere(&self, handle: &str) -> Result<usize> {
         let mut deleted = 0usize;
         if let Some(peer) = self.keyring.get_peer_by_handle(handle)? {
@@ -1254,7 +1276,15 @@ impl E2eManager {
             .lock()
             .expect("rate limiter mutex poisoned")
             .allow_outgoing(sender_handle);
-        if !already_incoming && allow_out {
+        // Skip the reciprocal for DMs. The reverse (us-receiving) direction is
+        // keyed by OUR own handle, not `req.channel` (= `@<peer>`), which the
+        // manager doesn't know. Building it under `@<peer>` would install
+        // orphan rows AND spend the shared per-peer rate-limit slot, stalling
+        // the correct live auto-KEYREQ (keyed `@<own>`) that establishes the
+        // reverse direction when the peer first messages us. Channels
+        // (own == peer == channel) keep the proactive reciprocal.
+        let is_dm = req.channel.starts_with('@');
+        if !is_dm && !already_incoming && allow_out {
             let reciprocal = self.build_keyreq_for_peer(&req.channel, Some(sender_handle))?;
             self.pending_outbound_keyreqs
                 .lock()
@@ -1383,7 +1413,15 @@ impl E2eManager {
             .lock()
             .expect("rate limiter mutex poisoned")
             .allow_outgoing(sender_handle);
-        if !already_incoming && allow_out {
+        // Skip the reciprocal for DMs. The reverse (us-receiving) direction is
+        // keyed by OUR own handle, not `req.channel` (= `@<peer>`), which the
+        // manager doesn't know. Building it under `@<peer>` would install
+        // orphan rows AND spend the shared per-peer rate-limit slot, stalling
+        // the correct live auto-KEYREQ (keyed `@<own>`) that establishes the
+        // reverse direction when the peer first messages us. Channels
+        // (own == peer == channel) keep the proactive reciprocal.
+        let is_dm = req.channel.starts_with('@');
+        if !is_dm && !already_incoming && allow_out {
             let reciprocal = self.build_keyreq_for_peer(&req.channel, Some(sender_handle))?;
             self.pending_outbound_keyreqs
                 .lock()

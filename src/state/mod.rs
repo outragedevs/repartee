@@ -40,6 +40,7 @@ pub enum PendingUserhostAction {
     E2eForget {
         buffer_id: String,
         target: String,
+        /// Peer context `@<peer>` (resolved from the active buffer at queue time).
         channel: Option<String>,
         all: bool,
     },

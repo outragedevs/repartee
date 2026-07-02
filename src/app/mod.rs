@@ -931,6 +931,7 @@ impl App {
             id: Self::DEFAULT_CONN_ID.to_string(),
             label: "Status".to_string(),
             status: ConnectionStatus::Disconnected,
+            own_handle: None,
             nick: String::new(),
             user_modes: String::new(),
             isupport: HashMap::new(),

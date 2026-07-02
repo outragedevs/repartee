@@ -418,6 +418,41 @@ impl AppState {
             return;
         }
         self.maybe_log(buffer_id, &message);
+        self.deliver_message_to_buffer(buffer_id, message, level);
+    }
+
+    /// Add a TRANSIENT message: delivered to the in-memory buffer and broadcast
+    /// to web clients (with activity escalation), but NEVER persisted to storage.
+    ///
+    /// For session-only notices that must not occupy a `(network, @msgid)` row —
+    /// notably the "awaiting our own identity" E2E placeholder. That placeholder's
+    /// real ciphertext is re-fetched and decrypted via CHATHISTORY once our own
+    /// handle is learned (see `regapfill_queries_after_own_handle`);
+    /// persisting the placeholder under the server `@msgid` would make the
+    /// decryptable replay collapse into `INSERT OR IGNORE` on the unique
+    /// `(network, msg_id)` index and be lost forever.
+    pub fn add_transient_message_with_activity(
+        &mut self,
+        buffer_id: &str,
+        message: Message,
+        level: ActivityLevel,
+    ) {
+        if !self.buffers.contains_key(buffer_id) {
+            return;
+        }
+        self.deliver_message_to_buffer(buffer_id, message, level);
+    }
+
+    /// Shared tail of [`AppState::add_message_with_activity_unshrunk`] and
+    /// [`AppState::add_transient_message_with_activity`]: queue web events,
+    /// append to the in-memory buffer, and escalate activity. Does NOT log to
+    /// storage — the caller decides whether to `maybe_log` first.
+    fn deliver_message_to_buffer(
+        &mut self,
+        buffer_id: &str,
+        message: Message,
+        level: ActivityLevel,
+    ) {
         // Queue web events for broadcast.
         let wire =
             crate::web::snapshot::message_to_wire(&message, self.web_preview_extractor.as_deref());
@@ -573,6 +608,16 @@ impl AppState {
     /// fresh in-memory id; rows are inserted before the first existing message
     /// with a strictly greater timestamp so ordering is preserved.
     pub(crate) fn surface_history_rows(&mut self, buffer_id: &str, rows: Vec<Message>) {
+        // Timestamps of rows actually spliced in — used to clear any matching
+        // "[E2E: awaiting our own identity]" placeholder afterwards. The
+        // placeholder is transient (no @msgid, deliberately un-dedupable so
+        // the decrypted replay is never skipped), so nothing else ever removes
+        // it; without this sweep the user sees BOTH the placeholder and the
+        // decrypted line for the rest of the session. Matching on the exact
+        // timestamp (both lines carry the same server @time) keeps unrelated
+        // placeholders — ones whose ciphertext was NOT part of this replay —
+        // intact.
+        let mut spliced_ts: Vec<chrono::DateTime<chrono::Utc>> = Vec::new();
         for mut msg in rows {
             let already_present = match self.buffers.get(buffer_id) {
                 Some(buf) => buffer_contains_history_row(buf, &msg),
@@ -581,6 +626,7 @@ impl AppState {
             if already_present {
                 continue;
             }
+            spliced_ts.push(msg.timestamp);
             msg.id = self.next_message_id();
             // Splicing into buf.messages bypasses add_message's web-event queue,
             // so broadcast the row ourselves — these gap-fill rows are not
@@ -616,6 +662,15 @@ impl AppState {
         // traffic.
         let limit = self.scrollback_limit;
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
+            // Sweep placeholders whose real (decrypted) line just surfaced.
+            // The placeholder was delivered transiently, so the web client
+            // heals on its next resync — no removal event exists to send.
+            if !spliced_ts.is_empty() {
+                buf.messages.retain(|m| {
+                    m.text != crate::e2e::AWAITING_OWN_IDENTITY_PLACEHOLDER
+                        || !spliced_ts.contains(&m.timestamp)
+                });
+            }
             enforce_scrollback(buf, limit);
         }
     }
@@ -853,6 +908,7 @@ mod tests {
             id: "libera".to_string(),
             label: "Libera".to_string(),
             status: ConnectionStatus::Connected,
+            own_handle: None,
             nick: "testuser".to_string(),
             user_modes: String::new(),
             isupport: HashMap::new(),
@@ -1706,5 +1762,127 @@ mod tests {
 
         // add_message SHOULD send to log channel.
         assert!(rx.try_recv().is_ok(), "add_message must send to log_tx");
+    }
+
+    #[test]
+    fn add_transient_message_with_activity_does_not_log_but_escalates() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let mut state = make_test_state();
+        state.log_tx = Some(tx);
+        state.set_active_buffer("libera/#linux");
+
+        let msg = make_test_message(&mut state, "transient placeholder");
+        state.add_transient_message_with_activity(
+            "libera/#rust",
+            msg,
+            ActivityLevel::Mention,
+        );
+
+        // Transient: never persisted — it must not occupy a (network, @msgid)
+        // row that a later decryptable CHATHISTORY replay needs.
+        assert!(
+            rx.try_recv().is_err(),
+            "add_transient_message_with_activity must not send to log_tx"
+        );
+        // Delivered to the buffer, and (unlike add_local_message) escalates
+        // activity on the inactive buffer so the user is still notified.
+        let buf = state.buffers.get("libera/#rust").unwrap();
+        assert_eq!(buf.messages.back().unwrap().text, "transient placeholder");
+        assert_eq!(buf.activity, ActivityLevel::Mention);
+        assert_eq!(buf.unread_count, 1);
+    }
+
+    #[test]
+    fn decrypted_replay_surfaces_past_a_tagless_placeholder() {
+        // The awaiting-own-identity placeholder carries NO @msgid (handle_privmsg
+        // strips it). The later decrypted CHATHISTORY replay carries the server
+        // @msgid; buffer_contains_history_row must NOT dedup it against the
+        // tagless placeholder, so the real message surfaces instead of staying
+        // hidden behind "[E2E: awaiting our own identity]".
+        let mut state = make_test_state();
+        let mut placeholder = make_test_message(&mut state, "[E2E: awaiting our own identity]");
+        placeholder.tags = None; // as handle_privmsg now builds it
+        let placeholder_ts = placeholder.timestamp;
+        state.add_transient_message_with_activity(
+            "libera/#rust",
+            placeholder,
+            ActivityLevel::Mention,
+        );
+
+        let mut decrypted = make_test_message(&mut state, "secret plaintext");
+        // The replay carries the SAME server @time as the placeholder — both
+        // originate from the one wire line.
+        decrypted.timestamp = placeholder_ts;
+        decrypted.tags = Some(HashMap::from([("msgid".to_string(), "abc".to_string())]));
+        state.surface_history_rows("libera/#rust", vec![decrypted]);
+
+        let buf = state.buffers.get("libera/#rust").unwrap();
+        assert!(
+            buf.messages.iter().any(|m| m.text == "secret plaintext"),
+            "decrypted replay must surface — a tagless placeholder must not dedup it"
+        );
+        // And the placeholder must be swept once its real line surfaced —
+        // otherwise the user sees both for the rest of the session (the
+        // placeholder is transient, so nothing else ever removes it).
+        assert!(
+            !buf.messages
+                .iter()
+                .any(|m| m.text == crate::e2e::AWAITING_OWN_IDENTITY_PLACEHOLDER),
+            "placeholder must be removed when its decrypted replay surfaces"
+        );
+    }
+
+    #[test]
+    fn unrelated_placeholder_survives_a_replay_of_other_lines() {
+        // The sweep matches on the wire line's timestamp: a placeholder whose
+        // ciphertext was NOT part of this replay (still undecryptable) must
+        // stay visible — it is the only hint the user has that a message is
+        // pending.
+        let mut state = make_test_state();
+        let placeholder =
+            make_test_message(&mut state, crate::e2e::AWAITING_OWN_IDENTITY_PLACEHOLDER);
+        state.add_transient_message_with_activity(
+            "libera/#rust",
+            placeholder,
+            ActivityLevel::Mention,
+        );
+
+        // A gap-fill replay of some OTHER line (different timestamp).
+        let mut other = make_test_message(&mut state, "unrelated backlog line");
+        other.tags = Some(HashMap::from([("msgid".to_string(), "zzz".to_string())]));
+        state.surface_history_rows("libera/#rust", vec![other]);
+
+        let buf = state.buffers.get("libera/#rust").unwrap();
+        assert!(
+            buf.messages
+                .iter()
+                .any(|m| m.text == crate::e2e::AWAITING_OWN_IDENTITY_PLACEHOLDER),
+            "a placeholder for a still-pending ciphertext must not be swept"
+        );
+    }
+
+    #[test]
+    fn replay_is_still_deduped_when_placeholder_kept_the_msgid() {
+        // Guard the regression direction: if the placeholder HAD kept the server
+        // @msgid, the same-@msgid replay would be deduped and the real message
+        // lost. This documents exactly why handle_privmsg must strip the tags.
+        let mut state = make_test_state();
+        let mut placeholder = make_test_message(&mut state, "[E2E: awaiting our own identity]");
+        placeholder.tags = Some(HashMap::from([("msgid".to_string(), "abc".to_string())]));
+        state.add_transient_message_with_activity(
+            "libera/#rust",
+            placeholder,
+            ActivityLevel::Mention,
+        );
+
+        let mut decrypted = make_test_message(&mut state, "secret plaintext");
+        decrypted.tags = Some(HashMap::from([("msgid".to_string(), "abc".to_string())]));
+        state.surface_history_rows("libera/#rust", vec![decrypted]);
+
+        let buf = state.buffers.get("libera/#rust").unwrap();
+        assert!(
+            !buf.messages.iter().any(|m| m.text == "secret plaintext"),
+            "same-@msgid replay is deduped — proves the tag-strip in handle_privmsg is required"
+        );
     }
 }

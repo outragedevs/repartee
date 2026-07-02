@@ -33,6 +33,7 @@ impl App {
             id: conn_id.to_string(),
             label: server_config.label.clone(),
             status: ConnectionStatus::Connecting,
+            own_handle: None,
             nick: server_config
                 .nick
                 .as_deref()
@@ -705,9 +706,33 @@ impl App {
                         ref args,
                     ) = msg.command
                         && let Some(confirmed_nick) = args.first()
-                        && let Some(conn) = self.state.connections.get_mut(&conn_id)
                     {
-                        conn.nick.clone_from(confirmed_nick);
+                        if let Some(conn) = self.state.connections.get_mut(&conn_id) {
+                            conn.nick.clone_from(confirmed_nick);
+                            // Drop any handle from a previous registration —
+                            // the server may assign a different ident/host/cloak
+                            // on (re)connect. The fresh self-USERHOST below
+                            // re-seeds it; until then DM E2E waits rather than
+                            // keying under a stale @<old_handle>.
+                            conn.own_handle = None;
+                        }
+
+                        // Seed our own ident@host (the recipient-keyed DM E2E
+                        // context) with a ONE-SHOT self-USERHOST, gated to
+                        // RPL_WELCOME so it fires exactly once per registration —
+                        // NOT per message (the RPL_USERHOST reply is itself a
+                        // message, which would otherwise loop). Sent early so the
+                        // reply lands before the end-of-MOTD CHATHISTORY gap-fill
+                        // that decrypts DM backlog under it. echo-message + CHGHOST
+                        // keep it current afterwards. E2E-only.
+                        if self.state.e2e_manager.is_some()
+                            && let Some(handle) = self.irc_handles.get(&conn_id)
+                        {
+                            let _ = handle.sender.send(::irc::proto::Command::Raw(
+                                "USERHOST".to_string(),
+                                vec![confirmed_nick.clone()],
+                            ));
+                        }
                     }
 
                     // Emit to scripts before default handling. Suppress semantics:
@@ -849,6 +874,11 @@ impl App {
                     // Snapshot buffer count so we can detect newly created buffers
                     // and feed them with chat history from the log database.
                     let buffers_before = self.state.buffers.len();
+                    let own_handle_before = self
+                        .state
+                        .connections
+                        .get(&conn_id)
+                        .and_then(|c| c.own_handle.clone());
 
                     if suppress_display {
                         self.state.suppress_event_display = true;
@@ -863,6 +893,24 @@ impl App {
                     // Drain queued RPE2E NOTICE sends (handshake replies,
                     // auto-KEYREQ on MissingKey) produced by the handlers.
                     self.drain_pending_e2e_sends();
+
+                    // If we just learned our own ident@host (the recipient-keyed
+                    // DM context), re-run the query gap-fill: a gap-fill that ran
+                    // at end-of-MOTD before the self-USERHOST reply arrived would
+                    // have skipped encrypted DM backlog (and the batch completes,
+                    // so it is never retried). The retry must release the one-shot
+                    // gap-fill claim the first request took, or it would be
+                    // suppressed — see the helper.
+                    if own_handle_before.is_none()
+                        && self.state.e2e_manager.is_some()
+                        && self
+                            .state
+                            .connections
+                            .get(&conn_id)
+                            .is_some_and(|c| c.own_handle.is_some())
+                    {
+                        self.regapfill_queries_after_own_handle(&conn_id);
+                    }
 
                     // Load backlog for any buffers created by handle_irc_message
                     // (e.g. query buffer on first PRIVMSG from a new nick)
