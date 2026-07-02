@@ -141,6 +141,14 @@ CREATE TABLE IF NOT EXISTS e2e_dm_handle_cache (
     PRIMARY KEY (network, nick)
 )";
 
+// The legacy nick→handle fallback (`legacy_handle_for_nick`) filters on
+// `last_nick = ? COLLATE NOCASE`; the index must carry the same collation or
+// SQLite cannot use it and falls back to a full table scan on every DM-handle
+// cache miss (the steady state for peers who haven't spoken this session).
+const CREATE_E2E_PEERS_NICK_INDEX: &str = "
+CREATE INDEX IF NOT EXISTS idx_e2e_peers_last_nick
+    ON e2e_peers(last_nick COLLATE NOCASE)";
+
 const CREATE_E2E_OUTGOING: &str = "
 CREATE TABLE IF NOT EXISTS e2e_outgoing_sessions (
     channel           TEXT PRIMARY KEY,
@@ -210,6 +218,7 @@ fn create_schema(db: &Connection, encrypt: bool) -> rusqlite::Result<()> {
     db.execute_batch(CREATE_E2E_AUTOTRUST)?;
     db.execute_batch(CREATE_E2E_OUTGOING_RECIPIENTS)?;
     db.execute_batch(CREATE_E2E_DM_HANDLE_CACHE)?;
+    db.execute_batch(CREATE_E2E_PEERS_NICK_INDEX)?;
     if !encrypt {
         db.execute_batch(CREATE_FTS)?;
         db.execute_batch(CREATE_FTS_TRIGGERS)?;

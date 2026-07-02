@@ -151,7 +151,10 @@ fn chghost_migrates_enabled_dm_config_to_new_context() {
     let new_ctx = "@~bob@user/bob";
     enable_channel(&mgr, old_ctx, ChannelMode::Normal);
 
-    crate::irc::events::migrate_dm_e2e_config(&mgr, old_ctx, new_ctx);
+    assert!(
+        crate::irc::events::migrate_dm_e2e_config(&mgr, old_ctx, new_ctx, false),
+        "an enabled config must report as migrated"
+    );
 
     // New context is now enabled; the old context stays enabled too (copy,
     // not move) so the encrypt path's cached @<old> fallback still encrypts
@@ -180,7 +183,10 @@ fn chghost_migrates_enabled_dm_config_to_new_context() {
             mode: ChannelMode::Normal,
         })
         .unwrap();
-    crate::irc::events::migrate_dm_e2e_config(&mgr2, old_ctx, new_ctx);
+    assert!(
+        !crate::irc::events::migrate_dm_e2e_config(&mgr2, old_ctx, new_ctx, false),
+        "a disabled config must report as not migrated"
+    );
     assert!(
         mgr2.keyring().get_channel_config(new_ctx).unwrap().is_none(),
         "a disabled config must not be migrated"

@@ -517,7 +517,37 @@ fn e2e_accept(app: &mut App, nick: &str) {
             return;
         }
         Ok(None) => {
-            // Fall through to the existing status-flip path.
+            // Fall through to the status-flip path below — but only for a
+            // session with REAL key material (e.g. a HandleChanged/refused
+            // session being re-trusted). A Normal-mode KEYREQ persists a
+            // zero-key `Pending` placeholder row while the KEYREQ itself
+            // lives only in memory; after a restart the map is empty, so
+            // flipping the placeholder to Trusted would report success while
+            // never sending a KEYRSP and leaving an undecryptable all-zero
+            // session. Detect that and tell the user what actually happened.
+        }
+        Err(e) => {
+            err(app, &format!("/e2e accept: {e}"));
+            return;
+        }
+    }
+
+    match mgr.keyring().get_incoming_session(&handle, &chan) {
+        Ok(Some(sess)) => {
+            if sess.status == TrustStatus::Pending && sess.sk == [0u8; 32] {
+                err(
+                    app,
+                    &format!(
+                        "/e2e accept: the pending key request from {nick} was lost \
+                         (restart?) — ask them to re-run the handshake"
+                    ),
+                );
+                return;
+            }
+        }
+        Ok(None) => {
+            err(app, &format!("/e2e accept: nothing to accept for {nick} on {chan}"));
+            return;
         }
         Err(e) => {
             err(app, &format!("/e2e accept: {e}"));
@@ -702,6 +732,17 @@ fn perform_e2e_forget(
             app.state.active_buffer_id = current_id;
             return;
         };
+        // For a DM the incoming session lives under @<own>; if our own handle
+        // is unknown (reset at every registration until the self-USERHOST
+        // reply) a partial forget would clear only @<peer> while REPORTING
+        // success — the peer's trusted incoming session would survive and
+        // their messages would keep decrypting. Refuse instead, exactly like
+        // revoke/unrevoke/verify do in the same state.
+        if channel.starts_with('@') && own_channel.is_none() {
+            err(app, "/e2e forget: own handle not yet known — retry in a moment");
+            app.state.active_buffer_id = current_id;
+            return;
+        }
         mgr.forget_peer_on_dm_contexts(handle, channel, own_channel.as_deref())
     };
     match result {

@@ -967,20 +967,39 @@ impl Keyring {
     ///    send that self-heals the instant the peer speaks (which writes the
     ///    network-scoped cache via `cache_dm_handle`).
     pub fn last_handle_for_nick(&self, nick: &str, network: &str) -> Result<Option<String>> {
+        let cached = self.cached_dm_handle(nick, network)?;
+        if cached.is_some() {
+            return Ok(cached);
+        }
+        self.legacy_handle_for_nick(nick)
+    }
+
+    /// The network-scoped `(network, nick)` cache row ONLY — no legacy
+    /// fallback. This is the source [`crate::irc::events`]' DM handle-change
+    /// tracking uses to pick a MIGRATION source: the legacy fallback is
+    /// network-agnostic, so treating its result as "the peer's previous
+    /// context" would copy an enabled config from a same-nick peer on another
+    /// network onto a stranger (see [`Self::legacy_handle_for_nick`]).
+    pub fn cached_dm_handle(&self, nick: &str, network: &str) -> Result<Option<String>> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
-        let cached: Option<String> = conn
+        Ok(conn
             .query_row(
                 "SELECT handle FROM e2e_dm_handle_cache WHERE network = ?1 AND nick = ?2",
                 params![network, nick],
                 |r| r.get(0),
             )
-            .optional()?;
-        if cached.is_some() {
-            return Ok(cached);
-        }
-        // Pre-cache keyring (upgrade): resolve from e2e_peers so an existing
-        // enabled @<handle> config is reachable instead of leaking plaintext.
-        let legacy: Option<String> = conn
+            .optional()?)
+    }
+
+    /// Pre-cache keyring (upgrade) fallback: resolve the nick's last-seen
+    /// handle from `e2e_peers` so an existing enabled `@<handle>` config is
+    /// reachable instead of leaking plaintext. Network-AGNOSTIC (`e2e_peers`
+    /// has no network column) — safe for the SEND path (worst case is a
+    /// wrong-context but still-encrypted send that self-heals when the peer
+    /// speaks), but callers must NOT trust it as a config-migration source.
+    pub fn legacy_handle_for_nick(&self, nick: &str) -> Result<Option<String>> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        Ok(conn
             .query_row(
                 "SELECT last_handle FROM e2e_peers
                  WHERE last_nick = ?1 COLLATE NOCASE AND last_handle IS NOT NULL
@@ -988,8 +1007,7 @@ impl Keyring {
                 params![nick],
                 |r| r.get(0),
             )
-            .optional()?;
-        Ok(legacy)
+            .optional()?)
     }
 
     /// Record that DM peer `nick` was seen as `handle` (`ident@host`) on

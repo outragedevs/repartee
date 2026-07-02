@@ -20,8 +20,9 @@ pub enum E2eRefusal {
     /// PM has E2E enabled but the peer's `ident@host` isn't known yet — they
     /// have not spoken this session and nothing is cached.
     NoPeerHandle,
-    /// The keyring read failed while resolving the DM context. An enabled
-    /// `@<handle>` config may exist, so we refuse rather than risk plaintext.
+    /// A keyring read failed while resolving the DM context or checking
+    /// whether the context is enabled. An enabled config may exist, so we
+    /// refuse rather than risk plaintext.
     KeyringRead,
     /// Encryption itself failed on an already-enabled context — refuse rather
     /// than fall back to cleartext.
@@ -36,7 +37,7 @@ impl E2eRefusal {
                 "cannot encrypt PM without peer handle — wait for a message from them first"
             }
             Self::KeyringRead => {
-                "cannot encrypt PM — keyring read failed; message NOT sent (E2E stays on)"
+                "cannot encrypt — keyring read failed; message NOT sent (E2E stays on)"
             }
             Self::EncryptFailed => {
                 "encryption failed — message NOT sent as plaintext (use /e2e off to send cleartext)"
@@ -1745,9 +1746,11 @@ impl App {
     /// DM keys under the identical `@<handle>` pseudochannel the config was
     /// written under.
     ///
-    /// Requires the buffer to still exist (for its connection's network label).
-    /// Captured at shrink dispatch time so a `/close` during the shrink wait
-    /// can't strand the deferred send and leak ciphertext-intended plaintext.
+    /// Works even when the buffer no longer exists (a `/close` during a shrink
+    /// wait): the connection is recovered from the buffer id itself
+    /// (`make_buffer_id` joins as `conn_id/name`), so the keyring cache is
+    /// STILL consulted and an enabled `@<handle>` config cannot be silently
+    /// missed — missing it would downgrade the deferred send to plaintext.
     /// Returns `Ok(None)` when nothing resolves (no peer handle and no cache
     /// entry), in which case no `@<handle>` config can exist for this peer.
     /// Returns `Err` only when the keyring read itself fails — callers on the
@@ -1759,19 +1762,29 @@ impl App {
         buffer_id: &str,
         buffer_name: &str,
     ) -> color_eyre::Result<Option<String>> {
-        let Some(buf) = self.state.buffers.get(buffer_id) else {
-            return Ok(None);
-        };
-        if let Some(h) = buf.peer_handle.clone() {
+        if let Some(h) = self
+            .state
+            .buffers
+            .get(buffer_id)
+            .and_then(|b| b.peer_handle.clone())
+        {
             return Ok(Some(h));
         }
         let Some(mgr) = self.state.e2e_manager.as_ref() else {
             return Ok(None);
         };
-        let Some(net) = self
+        let conn_id = self
             .state
-            .connections
-            .get(&buf.connection_id)
+            .buffers
+            .get(buffer_id)
+            .map(|b| b.connection_id.clone())
+            .or_else(|| {
+                buffer_id
+                    .split_once('/')
+                    .map(|(conn_id, _)| conn_id.to_string())
+            });
+        let Some(net) = conn_id
+            .and_then(|c| self.state.connections.get(&c))
             .map(|c| c.label.clone())
         else {
             return Ok(None);
@@ -1840,43 +1853,56 @@ impl App {
         let context: String = match buffer_type {
             BufferType::Channel => buffer_name.to_string(),
             BufferType::Query => {
-                // Prefer a caller-captured peer_handle (deferred shrink path
-                // captures the FULLY-resolved handle at dispatch time, so a
-                // `/close` during the shrink wait can't strand us). Otherwise
-                // resolve live from the buffer — its server-stamped peer_handle,
-                // or the keyring's network-scoped cached handle for the nick
-                // (the SAME resolution `/e2e on` used to write its config under
-                // `@<cached>`). Without the cache fallback the config would be
-                // invisible here and the DM would go out as plaintext despite
-                // E2E being enabled.
-                let peer_handle = match captured_peer_handle {
-                    Some(h) => Some(h.to_string()),
-                    None => match self.resolve_query_peer_handle(buffer_id, buffer_name) {
-                        Ok(h) => h,
-                        Err(e) => {
-                            // Keyring read failed — an enabled `@<handle>` config
-                            // may well exist, so refusing (dropping the message)
-                            // is the only safe choice. Never fall through to
-                            // plaintext on a read error.
-                            tracing::warn!(
-                                "e2e: keyring read failed resolving DM handle for \
-                                 {buffer_name}: {e}; refusing to send rather than \
-                                 risk plaintext"
-                            );
-                            return Err(E2eRefusal::KeyringRead);
-                        }
-                    },
+                // Resolve LIVE first — the buffer's server-stamped peer_handle
+                // or the keyring's network-scoped cached handle (the SAME
+                // resolution `/e2e on` used to write its config under
+                // `@<cached>`; works even after a `/close`, see the helper).
+                // Live state is authoritative: a handle migration during a
+                // shrink wait moves the config to `@<new>`, and encrypting
+                // under a dispatch-time capture of `@<old>` would produce
+                // ciphertext the peer can no longer decrypt. The captured
+                // handle is only a fallback for when the live resolution
+                // finds nothing (e.g. `/e2e forget` or a keyring import
+                // cleared the cache row mid-wait) or the retry read fails.
+                let peer_handle = match self.resolve_query_peer_handle(buffer_id, buffer_name) {
+                    Ok(live) => live.or_else(|| captured_peer_handle.map(str::to_string)),
+                    Err(e) if captured_peer_handle.is_some() => {
+                        tracing::warn!(
+                            "e2e: keyring read failed resolving DM handle for \
+                             {buffer_name}: {e}; using the dispatch-time capture"
+                        );
+                        captured_peer_handle.map(str::to_string)
+                    }
+                    Err(e) => {
+                        // Keyring read failed — an enabled `@<handle>` config
+                        // may well exist, so refusing (dropping the message)
+                        // is the only safe choice. Never fall through to
+                        // plaintext on a read error.
+                        tracing::warn!(
+                            "e2e: keyring read failed resolving DM handle for \
+                             {buffer_name}: {e}; refusing to send rather than \
+                             risk plaintext"
+                        );
+                        return Err(E2eRefusal::KeyringRead);
+                    }
                 };
                 let Some(peer_handle) = peer_handle else {
                     // Nothing resolvable, so no `@<handle>` config can exist.
                     // Refuse only if a legacy bare-nick enabled row exists;
                     // otherwise plain passthrough is safe (no E2E state).
-                    let legacy_enabled = mgr
-                        .keyring()
-                        .get_channel_config(buffer_name)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|c| c.enabled);
+                    let legacy_enabled = match mgr.keyring().get_channel_config(buffer_name) {
+                        Ok(cfg) => cfg.is_some_and(|c| c.enabled),
+                        Err(e) => {
+                            // Same fail-closed rule as the resolution above: a
+                            // read error is NOT "no config" — refuse rather
+                            // than risk plaintext.
+                            tracing::warn!(
+                                "e2e: keyring read failed on legacy config for \
+                                 {buffer_name}: {e}; refusing to send"
+                            );
+                            return Err(E2eRefusal::KeyringRead);
+                        }
+                    };
                     if legacy_enabled {
                         return Err(E2eRefusal::NoPeerHandle);
                     }
@@ -1892,12 +1918,20 @@ impl App {
             _ => return plain_passthrough(),
         };
 
-        let enabled = mgr
-            .keyring()
-            .get_channel_config(&context)
-            .ok()
-            .flatten()
-            .is_some_and(|c| c.enabled);
+        // The enabled check is as load-bearing as the handle resolution: an
+        // Err here does NOT mean "not enabled". Swallowing it would send an
+        // E2E-enabled conversation as plaintext on a transient DB fault —
+        // refuse instead (same rule as `resolve_query_peer_handle`).
+        let enabled = match mgr.keyring().get_channel_config(&context) {
+            Ok(cfg) => cfg.is_some_and(|c| c.enabled),
+            Err(e) => {
+                tracing::warn!(
+                    "e2e: keyring read failed checking enabled for {context}: {e}; \
+                     refusing to send rather than risk plaintext"
+                );
+                return Err(E2eRefusal::KeyringRead);
+            }
+        };
         if !enabled {
             return plain_passthrough();
         }
