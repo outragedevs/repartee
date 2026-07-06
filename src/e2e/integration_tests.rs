@@ -20,7 +20,8 @@ CREATE TABLE e2e_identity (id INTEGER PRIMARY KEY CHECK (id = 1), pubkey BLOB NO
 CREATE TABLE e2e_peers (fingerprint BLOB PRIMARY KEY, pubkey BLOB NOT NULL, last_handle TEXT, last_nick TEXT, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, global_status TEXT NOT NULL DEFAULT 'pending');
 CREATE TABLE e2e_dm_handle_cache (network TEXT NOT NULL, nick TEXT NOT NULL COLLATE NOCASE, handle TEXT NOT NULL, PRIMARY KEY (network, nick));
 CREATE TABLE e2e_outgoing_sessions (channel TEXT PRIMARY KEY, sk BLOB NOT NULL, created_at INTEGER NOT NULL, pending_rotation INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE e2e_incoming_sessions (handle TEXT NOT NULL, channel TEXT NOT NULL, fingerprint BLOB NOT NULL, sk BLOB NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, PRIMARY KEY (handle, channel));
+CREATE TABLE e2e_incoming_sessions (handle TEXT NOT NULL, channel TEXT NOT NULL, fingerprint BLOB NOT NULL, sk BLOB NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, prev_sk BLOB, prev_created_at INTEGER, PRIMARY KEY (handle, channel));
+CREATE TABLE e2e_seen_rekeys (fingerprint BLOB NOT NULL, channel TEXT NOT NULL, nonce BLOB NOT NULL, seen_at INTEGER NOT NULL, PRIMARY KEY (fingerprint, channel, nonce));
 CREATE TABLE e2e_channel_config (channel TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, mode TEXT NOT NULL DEFAULT 'normal');
 CREATE TABLE e2e_autotrust (id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, handle_pattern TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(scope, handle_pattern));
 CREATE TABLE e2e_outgoing_recipients (channel TEXT NOT NULL, handle TEXT NOT NULL, fingerprint BLOB NOT NULL, first_sent_at INTEGER NOT NULL, PRIMARY KEY (channel, handle));
@@ -1782,5 +1783,105 @@ fn load_identity_detects_corrupted_fingerprint() {
         ),
         Err(e) => panic!("expected Err(Crypto), got different Err: {e:?}"),
         Ok(_) => panic!("expected Err(Crypto), got Ok"),
+    }
+}
+
+// === Phase C: REKEY replay protection + previous-key retention ===
+
+/// Handshake carol→alice on `#x` and return the parsed REKEY produced by
+/// alice's next lazy rotation, plus the pre-rotation ciphertext `w1`.
+fn setup_rotation(alice: &E2eManager, carol: &E2eManager) -> (String, crate::e2e::handshake::KeyRekey, Vec<String>) {
+    enable_channel(alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(carol, "#x", ChannelMode::AutoAccept);
+    let req = carol.build_keyreq("#x").unwrap();
+    let rsp = alice.handle_keyreq("~carol@c.host", &req).unwrap().unwrap();
+    carol.handle_keyrsp("~alice@a.host", &rsp).unwrap();
+
+    // Message sent under the CURRENT (soon to be previous) key.
+    let w1 = alice.encrypt_outgoing("#x", "in-flight under old key").unwrap();
+
+    // Rotate: the next send regenerates the key and queues a REKEY to carol.
+    alice.keyring().mark_outgoing_pending_rotation("#x").unwrap();
+    let _w2 = alice.encrypt_outgoing("#x", "first under new key").unwrap();
+    let rekeys = alice.take_pending_rekey_sends();
+    assert_eq!(rekeys.len(), 1);
+    let inner = rekeys[0]
+        .notice_text
+        .strip_prefix('\x01')
+        .and_then(|s| s.strip_suffix('\x01'))
+        .unwrap()
+        .to_string();
+    let parsed = crate::e2e::handshake::parse(&inner).unwrap().unwrap();
+    let rk = match parsed {
+        crate::e2e::handshake::HandshakeMsg::Rekey(r) => r,
+        other => panic!("expected Rekey, got {other:?}"),
+    };
+    (inner, rk, w1)
+}
+
+#[test]
+fn rekey_replay_is_rejected() {
+    // A captured REKEY replayed later must not overwrite the current
+    // incoming session (rollback/DoS): the signed nonce is single-use.
+    let alice = make_manager();
+    let carol = make_manager();
+    let (_inner, rk, _w1) = setup_rotation(&alice, &carol);
+
+    carol.handle_rekey("~alice@a.host", &rk).unwrap();
+    let err = carol
+        .handle_rekey("~alice@a.host", &rk)
+        .expect_err("replayed REKEY must be rejected");
+    assert!(
+        err.to_string().to_lowercase().contains("replay"),
+        "error should name the replay: {err}"
+    );
+}
+
+#[test]
+fn in_flight_ciphertext_under_previous_key_decrypts_after_rekey() {
+    // NOTICE (REKEY) can overtake PRIVMSG ciphertext already sent under the
+    // superseded key. The receiver must keep the previous key for a grace
+    // window so the in-flight message still decrypts instead of failing AEAD
+    // until a manual re-handshake.
+    let alice = make_manager();
+    let carol = make_manager();
+    let (_inner, rk, w1) = setup_rotation(&alice, &carol);
+
+    // REKEY arrives FIRST (reorder), replacing carol's incoming session…
+    carol.handle_rekey("~alice@a.host", &rk).unwrap();
+
+    // …then the older ciphertext lands. It must still decrypt.
+    match carol.decrypt_incoming("~alice@a.host", "#x", &w1[0]).unwrap() {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "in-flight under old key"),
+        other => panic!("in-flight message must decrypt under the previous key, got {other:?}"),
+    }
+}
+
+#[test]
+fn previous_key_grace_window_expires() {
+    // The previous key is a short reorder tolerance, not a second long-lived
+    // key: once the grace window has passed, old-key ciphertext is rejected.
+    let alice = make_manager();
+    let carol_conn = Connection::open_in_memory().unwrap();
+    carol_conn.execute_batch(SCHEMA).unwrap();
+    let carol_db = Arc::new(Mutex::new(carol_conn));
+    let carol = E2eManager::load_or_init(Keyring::new(Arc::clone(&carol_db))).unwrap();
+    let (_inner, rk, w1) = setup_rotation(&alice, &carol);
+
+    carol.handle_rekey("~alice@a.host", &rk).unwrap();
+
+    // Age the retained previous key far past the grace window.
+    carol_db
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE e2e_incoming_sessions SET prev_created_at = 1 WHERE channel = '#x'",
+            [],
+        )
+        .unwrap();
+
+    match carol.decrypt_incoming("~alice@a.host", "#x", &w1[0]).unwrap() {
+        DecryptOutcome::Rejected(_) => {}
+        other => panic!("expired previous key must not decrypt, got {other:?}"),
     }
 }

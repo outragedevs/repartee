@@ -559,26 +559,46 @@ impl Keyring {
     pub fn install_incoming_session_strict(&self, s: &IncomingSession) -> Result<()> {
         let enc_sk = self.encode_secret(&s.sk)?;
         let conn = self.db.lock().expect("keyring mutex poisoned");
-        let existing: Option<Vec<u8>> = conn
+        let existing: Option<(Vec<u8>, Vec<u8>, String)> = conn
             .query_row(
-                "SELECT fingerprint FROM e2e_incoming_sessions
+                "SELECT fingerprint, sk, status FROM e2e_incoming_sessions
                  WHERE handle = ?1 AND channel = ?2",
                 params![s.handle, s.channel],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        if let Some(existing_fp) = existing
+        if let Some((existing_fp, _, _)) = &existing
             && existing_fp.as_slice() != s.fingerprint.as_slice()
         {
             return Err(crate::e2e::error::E2eError::HandleMismatch {
-                expected: format!("fp={}", hex::encode(&existing_fp)),
+                expected: format!("fp={}", hex::encode(existing_fp)),
                 got: format!("fp={}", hex::encode(s.fingerprint)),
             });
         }
+        // Retain the key this install supersedes: a REKEY NOTICE can overtake
+        // PRIVMSG ciphertext already sent under the old key, and without the
+        // previous key those in-flight lines fail AEAD until a manual
+        // re-handshake. Only a Trusted, non-placeholder key that actually
+        // changed is worth keeping; `prev_created_at` records the replacement
+        // time so decrypt can enforce the grace window
+        // (`manager::REKEY_PREV_KEY_GRACE_SECS`). The blob is copied as
+        // stored — already encrypted when the keyring is.
+        let prev: Option<(Vec<u8>, i64)> = existing.and_then(|(_, old_enc, old_status)| {
+            if old_status != TrustStatus::Trusted.as_str() {
+                return None;
+            }
+            let old_sk = self
+                .decode_secret::<32>(&old_enc, "e2e_incoming_sessions sk")
+                .ok()?;
+            if old_sk == s.sk || old_sk == [0u8; 32] {
+                return None;
+            }
+            Some((old_enc, now_unix()))
+        });
         conn.execute(
             "INSERT OR REPLACE INTO e2e_incoming_sessions
-                (handle, channel, fingerprint, sk, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (handle, channel, fingerprint, sk, status, created_at, prev_sk, prev_created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 s.handle,
                 s.channel,
@@ -586,9 +606,56 @@ impl Keyring {
                 enc_sk,
                 s.status.as_str(),
                 s.created_at,
+                prev.as_ref().map(|(blob, _)| blob.as_slice()),
+                prev.as_ref().map(|(_, at)| *at),
             ],
         )?;
         Ok(())
+    }
+
+    /// The previous session key for `(handle, channel)` plus the unix time it
+    /// was superseded, when one is retained. Decrypt-side reorder tolerance
+    /// only — see [`Self::install_incoming_session_strict`].
+    pub fn get_incoming_prev_key(
+        &self,
+        handle: &str,
+        channel: &str,
+    ) -> Result<Option<(SessionKey, i64)>> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let row: Option<(Option<Vec<u8>>, Option<i64>)> = conn
+            .query_row(
+                "SELECT prev_sk, prev_created_at FROM e2e_incoming_sessions
+                 WHERE handle = ?1 AND channel = ?2",
+                params![handle, channel],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((Some(enc), Some(replaced_at))) = row else {
+            return Ok(None);
+        };
+        let sk = self.decode_secret::<32>(&enc, "e2e_incoming_sessions prev_sk")?;
+        Ok(Some((sk, replaced_at)))
+    }
+
+    /// Record a REKEY nonce as consumed. Returns `false` when the exact nonce
+    /// was already seen for this `(fingerprint, channel)` — a replay. The
+    /// `INSERT OR IGNORE` makes check-and-record one atomic statement under
+    /// the keyring lock, and the nonce is covered by the REKEY signature, so
+    /// single-use enforcement here is complete replay protection without a
+    /// wire-format change.
+    pub fn record_rekey_nonce(
+        &self,
+        fingerprint: &Fingerprint,
+        channel: &str,
+        nonce: &[u8],
+    ) -> Result<bool> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO e2e_seen_rekeys (fingerprint, channel, nonce, seen_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![fingerprint.as_slice(), channel, nonce, now_unix()],
+        )?;
+        Ok(inserted == 1)
     }
 
     pub fn get_incoming_session(
@@ -1135,6 +1202,15 @@ impl Keyring {
     }
 }
 
+/// Unix time for keyring bookkeeping rows (`prev_created_at`, `seen_at`).
+/// Same clock policy as `manager::now_unix`: a pre-epoch clock degrades to 0
+/// rather than panicking — the values gate relative windows, not authenticity.
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
 /// Minimal case-insensitive glob matcher used by `autotrust_matches`.
 ///
 /// Supports:
@@ -1216,13 +1292,22 @@ mod tests {
             pending_rotation  INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE e2e_incoming_sessions (
-            handle       TEXT NOT NULL,
-            channel      TEXT NOT NULL,
-            fingerprint  BLOB NOT NULL,
-            sk           BLOB NOT NULL,
-            status       TEXT NOT NULL DEFAULT 'pending',
-            created_at   INTEGER NOT NULL,
+            handle           TEXT NOT NULL,
+            channel          TEXT NOT NULL,
+            fingerprint      BLOB NOT NULL,
+            sk               BLOB NOT NULL,
+            status           TEXT NOT NULL DEFAULT 'pending',
+            created_at       INTEGER NOT NULL,
+            prev_sk          BLOB,
+            prev_created_at  INTEGER,
             PRIMARY KEY (handle, channel)
+        );
+        CREATE TABLE e2e_seen_rekeys (
+            fingerprint  BLOB NOT NULL,
+            channel      TEXT NOT NULL,
+            nonce        BLOB NOT NULL,
+            seen_at      INTEGER NOT NULL,
+            PRIMARY KEY (fingerprint, channel, nonce)
         );
         CREATE TABLE e2e_channel_config (
             channel  TEXT PRIMARY KEY,

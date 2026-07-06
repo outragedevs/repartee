@@ -66,6 +66,13 @@ struct PendingInboundKeyReq {
     req: KeyReq,
 }
 
+/// How long a superseded incoming session key stays usable for decrypt after
+/// a REKEY replaces it. This is a reorder-tolerance window (a REKEY NOTICE
+/// can overtake PRIVMSG ciphertext already sent under the old key), NOT a
+/// second long-lived key — after it lapses, old-key ciphertext is rejected
+/// like any other AEAD failure.
+const REKEY_PREV_KEY_GRACE_SECS: i64 = 300;
+
 /// An outbound REKEY CTCP ready to ship, paired with the target IRC handle
 /// it must go to. Drained by `take_pending_rekey_sends` right after
 /// `encrypt_outgoing` triggers a lazy rotation, so the caller can enqueue
@@ -833,6 +840,22 @@ impl E2eManager {
             }
         }
 
+        // Freshness: the signed nonce is single-use. A captured REKEY stays
+        // decryptable forever (its wrap targets our long-term key), so
+        // without this check an on-path attacker could replay an old REKEY
+        // and roll the session back to a stale key — silently breaking
+        // decryption of everything the peer sends under the current one.
+        // The nonce is consumed even if the unwrap below fails: a legitimate
+        // sender never reuses nonces, so burning it loses nothing.
+        if !self
+            .keyring
+            .record_rekey_nonce(&new_fp, &rekey.channel, &rekey.nonce)?
+        {
+            return Err(E2eError::Handshake(
+                "REKEY replay detected (nonce already consumed); ignoring".into(),
+            ));
+        }
+
         // Derive our X25519 secret from our Ed25519 seed and complete ECDH.
         let my_seed = self.identity.secret_bytes();
         let my_x25519_scalar = ecdh::ed25519_seed_to_x25519(&my_seed);
@@ -914,12 +937,30 @@ impl E2eManager {
         }
 
         let aad = build_aad(channel, wire.msgid, wire.ts, wire.part, wire.total);
+        let utf8_or_reject = |pt: Vec<u8>| match String::from_utf8(pt) {
+            Ok(s) => DecryptOutcome::Plaintext(s),
+            Err(e) => DecryptOutcome::Rejected(format!("utf8: {e}")),
+        };
         match aead::decrypt(&sess.sk, &wire.nonce, &aad, &wire.ciphertext) {
-            Ok(pt) => match String::from_utf8(pt) {
-                Ok(s) => Ok(DecryptOutcome::Plaintext(s)),
-                Err(e) => Ok(DecryptOutcome::Rejected(format!("utf8: {e}"))),
-            },
-            Err(e) => Ok(DecryptOutcome::Rejected(format!("aead failed: {e}"))),
+            Ok(pt) => Ok(utf8_or_reject(pt)),
+            Err(e) => {
+                // Reorder tolerance: a REKEY NOTICE can overtake PRIVMSG
+                // ciphertext already sent under the key it replaced. Inside
+                // the grace window, fall back to the retained previous key
+                // (see install_incoming_session_strict) before rejecting.
+                if let Some((prev_sk, replaced_at)) =
+                    self.keyring.get_incoming_prev_key(sender_handle, channel)?
+                    && now - replaced_at <= REKEY_PREV_KEY_GRACE_SECS
+                    && let Ok(pt) = aead::decrypt(&prev_sk, &wire.nonce, &aad, &wire.ciphertext)
+                {
+                    tracing::debug!(
+                        channel,
+                        "decrypted under the previous session key (post-REKEY reorder)"
+                    );
+                    return Ok(utf8_or_reject(pt));
+                }
+                Ok(DecryptOutcome::Rejected(format!("aead failed: {e}")))
+            }
         }
     }
 
