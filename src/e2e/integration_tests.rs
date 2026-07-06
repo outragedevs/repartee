@@ -2136,3 +2136,44 @@ fn rotation_recipients_union_scoped_and_legacy_rows() {
         .unwrap();
     assert_eq!(both_fp, [0xdd; 16], "the scoped row wins the dedup");
 }
+
+#[test]
+fn trusted_peer_listing_unions_scoped_and_legacy_rows() {
+    // /e2e list and the /e2e status peer count read
+    // list_trusted_peers_for_channel — after the upgrade it must show BOTH
+    // generations (dedup by handle, scoped wins), like the REKEY
+    // recipient list.
+    let mgr = make_manager();
+    let scoped = crate::e2e::scoped_context("NetA", "#x");
+    for (channel, handle, fpb) in [
+        ("#x", "~legacy@old.host", 0xaau8),
+        (scoped.as_str(), "~new@new.host", 0xbb),
+        ("#x", "~both@dual.host", 0xcc),
+        (scoped.as_str(), "~both@dual.host", 0xdd),
+    ] {
+        mgr.keyring()
+            .set_incoming_session(&IncomingSession {
+                handle: handle.to_string(),
+                channel: channel.to_string(),
+                fingerprint: [fpb; 16],
+                sk: [1u8; 32],
+                status: TrustStatus::Trusted,
+                created_at: 100,
+            })
+            .unwrap();
+    }
+
+    let peers = mgr
+        .keyring()
+        .list_trusted_peers_for_channel(&scoped)
+        .unwrap();
+    let handles: Vec<&str> = peers.iter().map(|p| p.handle.as_str()).collect();
+    assert!(handles.contains(&"~legacy@old.host"), "legacy peer hidden: {handles:?}");
+    assert!(handles.contains(&"~new@new.host"));
+    assert_eq!(
+        handles.iter().filter(|h| **h == "~both@dual.host").count(),
+        1
+    );
+    let both = peers.iter().find(|p| p.handle == "~both@dual.host").unwrap();
+    assert_eq!(both.fingerprint, [0xdd; 16], "scoped row wins the dedup");
+}

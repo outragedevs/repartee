@@ -817,6 +817,23 @@ impl Keyring {
 
     /// List all incoming sessions on `channel` whose status is `trusted`.
     pub fn list_trusted_peers_for_channel(&self, channel: &str) -> Result<Vec<IncomingSession>> {
+        let mut peers = self.list_trusted_peers_for_channel_exact(channel)?;
+        // UNION with the legacy unscoped rows — same transition rule as
+        // list_outgoing_recipients: dedup by handle, the scoped row wins.
+        if let Some(wire) = legacy_wire_fallback(channel) {
+            for sess in self.list_trusted_peers_for_channel_exact(wire)? {
+                if !peers.iter().any(|p| p.handle == sess.handle) {
+                    peers.push(sess);
+                }
+            }
+        }
+        Ok(peers)
+    }
+
+    fn list_trusted_peers_for_channel_exact(
+        &self,
+        channel: &str,
+    ) -> Result<Vec<IncomingSession>> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT handle, fingerprint, sk, status, created_at
