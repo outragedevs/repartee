@@ -901,7 +901,10 @@ impl App {
                     // re-fetched via CHATHISTORY and decrypted for real.
                     let e2e_gapfills = std::mem::take(&mut self.state.pending_e2e_gapfills);
                     for gapfill in e2e_gapfills {
-                        self.regapfill_query_after_session(&gapfill.connection_id, &gapfill.nick);
+                        self.regapfill_conversation_after_session(
+                            &gapfill.connection_id,
+                            &gapfill.target,
+                        );
                     }
 
                     // If we just learned our own ident@host (the recipient-keyed

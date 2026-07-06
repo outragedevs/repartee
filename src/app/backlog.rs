@@ -581,18 +581,19 @@ impl App {
         }
     }
 
-    /// Re-run one query's `CHATHISTORY` gap-fill after a KEYRSP installed its
-    /// DM session (drained from `state.pending_e2e_gapfills`). The ciphertext
-    /// that triggered the handshake was shown only as the transient
-    /// "[E2E: awaiting session with …]" placeholder; the re-fetch decrypts it
-    /// under the fresh session and the splice sweeps the placeholder. The
-    /// one-shot connect-gapfill claim must be released first, same as
-    /// `regapfill_queries_after_own_handle`.
-    pub(crate) fn regapfill_query_after_session(&mut self, conn_id: &str, nick: &str) {
+    /// Re-run one conversation's `CHATHISTORY` gap-fill after a KEYRSP
+    /// installed its session (drained from `state.pending_e2e_gapfills`;
+    /// `target` is the peer nick for a DM, the channel name for a channel).
+    /// The ciphertext that triggered the handshake was shown only as the
+    /// transient "[E2E: awaiting session with …]" placeholder; the re-fetch
+    /// decrypts it under the fresh session and the splice sweeps the
+    /// placeholder. The one-shot connect-gapfill claim must be released
+    /// first, same as `regapfill_queries_after_own_handle`.
+    pub(crate) fn regapfill_conversation_after_session(&mut self, conn_id: &str, target: &str) {
         if let Some(conn) = self.state.connections.get_mut(conn_id) {
-            conn.chathistory.clear_connect_gapfilled(nick);
+            conn.chathistory.clear_connect_gapfilled(target);
         }
-        self.request_connect_gapfill(conn_id, nick);
+        self.request_connect_gapfill(conn_id, target);
     }
 
     /// On a channel's NAMES completion after (re)connect, gap-fill that channel's

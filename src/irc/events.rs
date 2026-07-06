@@ -4506,21 +4506,27 @@ fn try_dispatch_rpe2e_ctcp(
                         rsp.channel
                     ),
                 );
-                // A DM session just came up. The ciphertext that TRIGGERED
-                // the handshake was rendered only as the transient
-                // "[E2E: awaiting session with …]" placeholder — queue a
-                // CHATHISTORY gap-fill of the query so that line is
-                // re-fetched, decrypted under the fresh session, and spliced
-                // in (the splice sweeps the placeholder). Channels don't
-                // need this: their backlog decrypts lazily on focus.
-                if crate::e2e::wire_context(&rsp.channel).starts_with('@') {
-                    state
-                        .pending_e2e_gapfills
-                        .push(crate::state::PendingE2eGapfill {
-                            connection_id: conn_id.to_string(),
-                            nick: nick.clone(),
-                        });
-                }
+                // A session just came up. The ciphertext that TRIGGERED the
+                // handshake was rendered only as the transient
+                // "[E2E: awaiting session with …]" placeholder (DM and
+                // channel alike) — queue a CHATHISTORY gap-fill of the
+                // conversation so that line is re-fetched, decrypted under
+                // the fresh session, and spliced in (the splice sweeps the
+                // placeholder). Without this the first encrypted line of a
+                // new session is neither replaced nor recoverable from
+                // local history.
+                let wire = crate::e2e::wire_context(&rsp.channel);
+                let gapfill_target = if wire.starts_with('@') {
+                    nick.clone()
+                } else {
+                    wire.to_string()
+                };
+                state
+                    .pending_e2e_gapfills
+                    .push(crate::state::PendingE2eGapfill {
+                        connection_id: conn_id.to_string(),
+                        target: gapfill_target,
+                    });
             }
             Some(RpEe2eOutcome::Handled)
         }
@@ -8876,8 +8882,57 @@ mod tests {
             state
                 .pending_e2e_gapfills
                 .iter()
-                .any(|g| g.connection_id == "test" && g.nick == "alice"),
+                .any(|g| g.connection_id == "test" && g.target == "alice"),
             "a successful DM session install must queue a query gap-fill"
+        );
+    }
+
+    #[test]
+    fn keyrsp_install_queues_channel_gapfill_too() {
+        // The MissingKey placeholder is transient for channels as well — a
+        // KEYRSP that installs a CHANNEL session must queue the same
+        // CHATHISTORY re-fetch, or the first encrypted channel line is
+        // neither replaced nor recoverable from local history.
+        use crate::e2e::keyring::{ChannelConfig, ChannelMode, Keyring};
+        use crate::e2e::manager::E2eManager;
+        use std::sync::{Arc, Mutex};
+
+        let mut state = make_test_state();
+        let ours_conn = crate::storage::db::open_database(false).unwrap();
+        let ours = Arc::new(
+            E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(ours_conn)))).unwrap(),
+        );
+        state.e2e_manager = Some(Arc::clone(&ours));
+
+        let scoped = crate::e2e::scoped_context("TestServer", "#test");
+        let req = ours.build_keyreq(&scoped).unwrap();
+
+        let alice_conn = crate::storage::db::open_database(false).unwrap();
+        let alice =
+            E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(alice_conn)))).unwrap();
+        alice
+            .keyring()
+            .set_channel_config(&ChannelConfig {
+                channel: "#test".to_string(),
+                enabled: true,
+                mode: ChannelMode::AutoAccept,
+            })
+            .unwrap();
+        let rsp = alice
+            .handle_keyreq_with_nick("~me@host", Some("me"), &req)
+            .unwrap()
+            .expect("AutoAccept responds with a KEYRSP");
+        let body = alice.encode_keyrsp_ctcp(&rsp);
+
+        let prefix = Prefix::new_from_str("alice!~alice@a.host");
+        let outcome = try_dispatch_rpe2e_ctcp(&mut state, "test", Some(&prefix), "me", &body);
+        assert_eq!(outcome, Some(RpEe2eOutcome::Handled));
+        assert!(
+            state
+                .pending_e2e_gapfills
+                .iter()
+                .any(|g| g.connection_id == "test" && g.target == "#test"),
+            "a channel session install must queue a channel gap-fill"
         );
     }
 

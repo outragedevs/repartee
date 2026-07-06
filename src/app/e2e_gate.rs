@@ -506,6 +506,23 @@ impl super::App {
     ) -> bool {
         use crate::state::buffer::{Message, MessageType};
 
+        // Precheck the connection BEFORE running the gate: planning may call
+        // encrypt_outgoing, which creates/rotates the outgoing session and
+        // queues REKEY NOTICEs — and drain_pending_e2e_sends DROPS queued
+        // entries whose connection has no IRC handle. Planning first and
+        // failing the send after would advance our key past a pending
+        // /e2e rotate or revoke while the peers never receive the new one.
+        // (A send that fails mid-loop below is different: the handle exists,
+        // the REKEYs stay queued in state, and the app loop retries the
+        // drain on the next IRC event.)
+        if !self.irc_handles.contains_key(conn_id) {
+            crate::commands::helpers::add_local_event(
+                self,
+                "Failed to send message: connection unavailable",
+            );
+            return false;
+        }
+
         let plan = match self.state.e2e_send_plan_for_target(conn_id, target, wire_text) {
             Ok(p) => p,
             Err(reason) => {
