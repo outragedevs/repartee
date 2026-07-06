@@ -18,6 +18,44 @@
 > Weryfikacja: `make clippy` 0 warnings, `make test` 1470 passed (6 nowych
 > testów regresyjnych).
 
+> **STATUS 2 (2026-07-06): AUDYT KOMPLETNOŚCI E2E DM — NAPRAWIONE.**
+> Pełny czteroagentowy audyt (zgodność ze spec, ścieżki wysyłki, ścieżki
+> odbioru, cykl życia kluczy + storage) po domknięciu znalezisk #1–#8.
+> Zgodność z `docs/rpe2e-dm-addendum.md`: pełna (13/13 wymagań, złoty wektor
+> AAD DM przechodzi). Naprawione w fazach A–E (commity `99a8770`, `1b8c091`,
+> `f3510b7`, `cc7c570`, `3375f92`, `d9f44a6`):
+>
+> - **A (krytyczne, fail-closed):** `/msg`, `/query <nick> <tekst>`, `/me`
+>   oraz Lua `say()/action()/ctcp()` szły `send_privmsg` wprost, omijając
+>   bramkę E2E — plaintext do peera z włączonym E2E. Bramka przeniesiona na
+>   `AppState` (`src/app/e2e_gate.rs`, testowalna), wszystkie ścieżki
+>   by-target przez `e2e_send_plan_for_target`/`send_gated_message`.
+>   `/notice`, Lua `notice()` i DCC CHAT dostają jawne ostrzeżenie cleartext.
+> - **B (odbiór):** uszkodzona linia `+RPE2E01` renderowała się (i logowała)
+>   surowa → teraz `[E2E rejected: malformed…]`; ciphertext w NOTICE
+>   tłumiony; placeholder `[E2E: awaiting session with …]` był logowany pod
+>   prawdziwym @msgid i blokował replay (pierwszy DM sesji tracony na
+>   zawsze) → transient+tagless, KEYRSP kolejkuje gap-fill query,
+>   splice sprząta placeholder.
+> - **C (rotacja):** REKEY bez ochrony przed replay (wrap do klucza
+>   długoterminowego = wieczna ważność) → nonce single-use w
+>   `e2e_seen_rekeys` (bez zmiany wire — interop zachowany); brak retencji
+>   starego klucza → `prev_sk`/`prev_created_at` + fallback deszyfrowania
+>   w oknie 300 s (reorder REKEY↔PRIVMSG).
+> - **D (higiena):** `~/.repartee/logs` 0700 + `messages.db` 0600 (unix,
+>   naprawiane przy każdym starcie); TTL pending handshake'ów (initiator
+>   15 min, inbound accept 6 h) — mapy nie rosną bez ograniczeń.
+> - **E (izolacja sieci):** konteksty keyringa scope'owane per-sieć
+>   (`{network}\x1F{wire}`) — `#rust` na dwóch sieciach nie dzieli już
+>   configu/kluczy. Wire/AAD/sygnatury/c= zawsze z części wire → interop
+>   z lurkerem bajt-w-bajt. Odczyty z fallbackiem do wierszy legacy
+>   (scoped wygrywa), mutacje destrukcyjne (revoke/forget/rotate) trafiają
+>   w oba wiersze, autotrust honoruje legacy scope.
+>
+> Weryfikacja końcowa: `make clippy` 0 warnings, `cargo test` 1493 passed.
+> Świadomie odłożone: unifikacja resolverów (refactor, osobny PR);
+> `KEYRING_KEY` w `.env` obok bazy (wymaga decyzji o keychain/OS-store).
+
 - **Data review:** 2026-07-01
 - **Zakres:** pełny diff PR #29 (`main...fix/various-improvements`, stan po commicie `96580de`)
 - **Metoda:** 8 niezależnych kątów wyszukiwania (line-by-line, removed-behavior, cross-file, reuse, simplification, efficiency, altitude, conventions) → dedup → 12 osobnych weryfikatorów (po jednym na kandydata, verdict CONFIRMED/PLAUSIBLE/REFUTED z cytatami z kodu)
