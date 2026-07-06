@@ -129,6 +129,13 @@ pub struct ChannelConfig {
 pub struct Keyring {
     db: Arc<Mutex<Connection>>,
     secret_key: Option<Key<Aes256Gcm>>,
+    /// Labels of the servers currently configured, shared across clones.
+    /// Gates the renamed-label heal in [`Self::get_channel_config`]: a
+    /// scoped sibling row is only adopted when its label is NOT configured
+    /// anymore (a true rename signal) — never when the other network still
+    /// exists (cross-network isolation). Empty (e.g. tests) disables the
+    /// heal entirely.
+    configured_networks: Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
 }
 
 impl Keyring {
@@ -138,6 +145,7 @@ impl Keyring {
         Self {
             db,
             secret_key: None,
+            configured_networks: Arc::default(),
         }
     }
 
@@ -149,6 +157,7 @@ impl Keyring {
         Ok(Self {
             db,
             secret_key: Some(secret_key),
+            configured_networks: Arc::default(),
         })
     }
 
@@ -573,7 +582,7 @@ impl Keyring {
     pub fn install_incoming_session_strict(&self, s: &IncomingSession) -> Result<()> {
         let enc_sk = self.encode_secret(&s.sk)?;
         let conn = self.db.lock().expect("keyring mutex poisoned");
-        let existing: Option<(Vec<u8>, Vec<u8>, String)> = conn
+        let mut existing: Option<(Vec<u8>, Vec<u8>, String)> = conn
             .query_row(
                 "SELECT fingerprint, sk, status FROM e2e_incoming_sessions
                  WHERE handle = ?1 AND channel = ?2",
@@ -581,6 +590,23 @@ impl Keyring {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
+        // Upgraded keyring: the established session may still live under the
+        // legacy unscoped row. The FIRST scoped install (post-upgrade REKEY)
+        // must consult it too, or that install skips the TOFU
+        // fingerprint-continuity check and drops the superseded key that the
+        // prev-key grace window exists to retain.
+        if existing.is_none()
+            && let Some(wire) = legacy_wire_fallback(&s.channel)
+        {
+            existing = conn
+                .query_row(
+                    "SELECT fingerprint, sk, status FROM e2e_incoming_sessions
+                     WHERE handle = ?1 AND channel = ?2",
+                    params![s.handle, wire],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+        }
         if let Some((existing_fp, _, _)) = &existing
             && existing_fp.as_slice() != s.fingerprint.as_slice()
         {
@@ -891,8 +917,91 @@ impl Keyring {
         // Network-scoped read over a pre-scoping database: fall back to the
         // legacy unscoped row so existing setups survive the upgrade. A
         // scoped row always wins when present (all writes are scoped).
-        legacy_wire_fallback(channel)
-            .map_or_else(|| Ok(None), |wire| self.get_channel_config_exact(wire))
+        if let Some(wire) = legacy_wire_fallback(channel) {
+            if let Some(cfg) = self.get_channel_config_exact(wire)? {
+                return Ok(Some(cfg));
+            }
+            // Renamed-label heal: a config.toml `label` change orphans every
+            // scoped row, and the enabled check is the FAIL-OPEN point — a
+            // miss here sends an explicitly-encrypted conversation as
+            // plaintext. When exactly ONE other network's row shares the
+            // wire part, the rename is unambiguous and its config is used
+            // (erring toward encryption); two or more candidates keep the
+            // cross-network isolation and return nothing. Sessions do NOT
+            // heal — the send generates a fresh key and peers re-handshake,
+            // which is recoverable, unlike a plaintext send.
+            if let Some(healed) = self.unique_scoped_config_sibling(wire)? {
+                // Adopt the sibling ONLY when its label vanished from the
+                // config (true rename); a still-configured network keeps its
+                // rows to itself — that is the isolation this scoping exists
+                // for. An empty configured set (tests, pre-init reads)
+                // disables the heal.
+                let healed_net = healed
+                    .split_once(crate::e2e::CONTEXT_NET_SEPARATOR)
+                    .map(|(net, _)| net.to_string())
+                    .unwrap_or_default();
+                let configured = self
+                    .configured_networks
+                    .read()
+                    .expect("configured networks lock poisoned");
+                if !configured.is_empty() && !configured.contains(&healed_net) {
+                    tracing::warn!(
+                        "e2e: config for {channel} healed from a renamed network's row — \
+                         re-run /e2e on to migrate it to the current label"
+                    );
+                    return self.get_channel_config_exact(&healed);
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Record the labels of the currently configured servers — see the
+    /// `configured_networks` field. Called once at startup.
+    pub fn set_configured_networks<I: IntoIterator<Item = String>>(&self, labels: I) {
+        let mut guard = self
+            .configured_networks
+            .write()
+            .expect("configured networks lock poisoned");
+        *guard = labels.into_iter().collect();
+    }
+
+    /// The single scoped `e2e_channel_config` row whose wire part equals
+    /// `wire`, or `None` when zero or several networks have one — see the
+    /// renamed-label heal in [`Self::get_channel_config`].
+    fn unique_scoped_config_sibling(&self, wire: &str) -> Result<Option<String>> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT channel FROM e2e_channel_config
+             WHERE instr(channel, char(31)) > 0
+               AND substr(channel, instr(channel, char(31)) + 1) = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![wire], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(match rows.as_slice() {
+            [only] => Some(only.clone()),
+            _ => None,
+        })
+    }
+
+    /// Distinct network labels embedded in scoped keyring rows (config +
+    /// sessions). Startup compares them with the configured server labels
+    /// and warns about orphans — a renamed `label` silently detaches every
+    /// scoped row from its conversations.
+    pub fn list_scoped_networks(&self) -> Result<Vec<String>> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT substr(channel, 1, instr(channel, char(31)) - 1) FROM (
+                 SELECT channel FROM e2e_channel_config
+                 UNION SELECT channel FROM e2e_outgoing_sessions
+                 UNION SELECT channel FROM e2e_incoming_sessions
+             ) WHERE instr(channel, char(31)) > 0",
+        )?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     fn get_channel_config_exact(&self, channel: &str) -> Result<Option<ChannelConfig>> {
@@ -1460,6 +1569,7 @@ mod tests {
         Keyring {
             db: Arc::new(Mutex::new(conn)),
             secret_key: Some(secret_key),
+            configured_networks: Arc::default(),
         }
     }
 

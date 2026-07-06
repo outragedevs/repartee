@@ -573,6 +573,8 @@ impl App {
             && let Some(storage_ref) = storage.as_ref()
         {
             let keyring = crate::e2e::keyring::Keyring::new_encrypted(storage_ref.db.clone())?;
+            // Gates the renamed-label read heal — see Keyring::get_channel_config.
+            keyring.set_configured_networks(config.servers.values().map(|s| s.label.clone()));
             match crate::e2e::E2eManager::load_or_init_with_config(keyring, &config.e2e) {
                 Ok(mgr) => {
                     let fp = mgr.fingerprint();
@@ -926,6 +928,63 @@ impl App {
         (self.cached_term_cols, self.cached_term_rows)
     }
 
+    /// Warn — loudly, in a buffer — when the keyring holds E2E state scoped
+    /// to a network label that no configured server uses. A `label` rename in
+    /// config.toml orphans every scoped row: conversations the user
+    /// explicitly encrypted would silently lose their config (reads heal only
+    /// the unambiguous single-candidate case — see
+    /// `Keyring::get_channel_config`). Called once at startup.
+    fn warn_orphaned_e2e_networks(&mut self) {
+        let Some(mgr) = self.state.e2e_manager.clone() else {
+            return;
+        };
+        let scoped_networks = match mgr.keyring().list_scoped_networks() {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("e2e: orphaned-network scan failed: {e}");
+                return;
+            }
+        };
+        let configured: std::collections::HashSet<&str> = self
+            .config
+            .servers
+            .values()
+            .map(|s| s.label.as_str())
+            .collect();
+        for network in scoped_networks {
+            if configured.contains(network.as_str()) {
+                continue;
+            }
+            tracing::warn!("e2e: keyring holds state for unconfigured network '{network}'");
+            let text = format!(
+                "[E2E] warning: encrypted-conversation state exists for network                  '{network}', which no configured server uses — if you renamed                  the server's label, E2E may be OFF for those conversations;                  run /e2e status in each and /e2e on to re-enable"
+            );
+            let buffer_id = self
+                .state
+                .active_buffer_id
+                .clone()
+                .unwrap_or_else(|| make_buffer_id(Self::DEFAULT_CONN_ID, "Status"));
+            let id = self.state.next_message_id();
+            self.state.add_local_message(
+                &buffer_id,
+                Message {
+                    id,
+                    timestamp: Utc::now(),
+                    message_type: MessageType::Event,
+                    nick: None,
+                    nick_mode: None,
+                    text: text.clone(),
+                    highlight: true,
+                    event_key: Some("e2e_warning".to_string()),
+                    event_params: Some(vec![text]),
+                    log_msg_id: None,
+                    log_ref_id: None,
+                    tags: None,
+                },
+            );
+        }
+    }
+
     fn create_default_status(state: &mut AppState) {
         let buf_id = make_buffer_id(Self::DEFAULT_CONN_ID, "Status");
         state.add_connection(Connection {
@@ -1077,6 +1136,8 @@ impl App {
         if !self.log_browser_mode && self.state.buffers.is_empty() {
             Self::create_default_status(&mut self.state);
         }
+
+        self.warn_orphaned_e2e_networks();
 
         if !self.log_browser_mode {
             self.autoload_scripts();

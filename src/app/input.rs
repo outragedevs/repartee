@@ -1366,6 +1366,18 @@ impl App {
             return;
         }
 
+        // Same precheck as send_gated_message: the E2E gate below may
+        // rotate the outgoing session and queue REKEYs, which the drain
+        // DROPS without an IRC handle — and the local echo would render a
+        // message that never left. Refuse up front.
+        if !self.irc_handles.contains_key(&conn_id) {
+            crate::commands::helpers::add_local_event(
+                self,
+                "Failed to send message: connection unavailable",
+            );
+            return;
+        }
+
         // Outgoing shrink is the FIRST step for any message that
         // qualifies — by the time we reach E2E encrypt / IRC send /
         // local echo, the text is already shortened (or the original

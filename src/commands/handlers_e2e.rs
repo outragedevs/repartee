@@ -1023,9 +1023,11 @@ fn format_status_line(
     match (chan, cfg) {
         (None, _) => format!("  {C_CMD}channel{C_RST}      {C_DIM}(no active channel or known query peer){C_RST}"),
         (Some(c), None) => {
+            let c = crate::e2e::display_context(c);
             format!("  {C_CMD}channel{C_RST}      {C_TEXT}{c}{C_RST}  {C_DIM}[off]{C_RST}")
         }
         (Some(c), Some(cfg)) => {
+            let c = crate::e2e::display_context(c);
             let state_label = if cfg.enabled { "on" } else { "off" };
             format!(
                 "  {C_CMD}channel{C_RST}      {C_TEXT}{c}{C_RST}  \

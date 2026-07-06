@@ -2177,3 +2177,108 @@ fn trusted_peer_listing_unions_scoped_and_legacy_rows() {
     let both = peers.iter().find(|p| p.handle == "~both@dual.host").unwrap();
     assert_eq!(both.fingerprint, [0xdd; 16], "scoped row wins the dedup");
 }
+
+#[test]
+fn first_scoped_rekey_retains_legacy_key_and_fingerprint_check() {
+    // Upgraded keyring: the established Trusted session lives under the
+    // legacy unscoped row. The FIRST scoped install (post-upgrade REKEY)
+    // must consult that row — both for the fingerprint-continuity check
+    // and as the prev-key source, or the reorder grace window is lost
+    // exactly once per conversation after the upgrade.
+    let kr_conn = Connection::open_in_memory().unwrap();
+    kr_conn.execute_batch(SCHEMA).unwrap();
+    let kr = Keyring::new(Arc::new(Mutex::new(kr_conn)));
+    kr.set_incoming_session(&IncomingSession {
+        handle: "~alice@a.host".into(),
+        channel: "#x".into(),
+        fingerprint: [0xaa; 16],
+        sk: [1u8; 32],
+        status: TrustStatus::Trusted,
+        created_at: 100,
+    })
+    .unwrap();
+
+    let scoped = crate::e2e::scoped_context("NetA", "#x");
+    // Same fingerprint, new key → allowed, legacy key retained as prev.
+    kr.install_incoming_session_strict(&IncomingSession {
+        handle: "~alice@a.host".into(),
+        channel: scoped.clone(),
+        fingerprint: [0xaa; 16],
+        sk: [2u8; 32],
+        status: TrustStatus::Trusted,
+        created_at: 200,
+    })
+    .unwrap();
+    let (prev_sk, _) = kr
+        .get_incoming_prev_key("~alice@a.host", &scoped)
+        .unwrap()
+        .expect("legacy key must be retained as prev on the first scoped install");
+    assert_eq!(prev_sk, [1u8; 32]);
+
+    // Different fingerprint under another scoped context with only a legacy
+    // row → must be rejected like any TOFU fingerprint change.
+    let fresh_conn = Connection::open_in_memory().unwrap();
+    fresh_conn.execute_batch(SCHEMA).unwrap();
+    let kr2 = Keyring::new(Arc::new(Mutex::new(fresh_conn)));
+    kr2.set_incoming_session(&IncomingSession {
+        handle: "~alice@a.host".into(),
+        channel: "#x".into(),
+        fingerprint: [0xaa; 16],
+        sk: [1u8; 32],
+        status: TrustStatus::Trusted,
+        created_at: 100,
+    })
+    .unwrap();
+    let err = kr2
+        .install_incoming_session_strict(&IncomingSession {
+            handle: "~alice@a.host".into(),
+            channel: crate::e2e::scoped_context("NetA", "#x"),
+            fingerprint: [0xbb; 16],
+            sk: [2u8; 32],
+            status: TrustStatus::Trusted,
+            created_at: 200,
+        })
+        .expect_err("fingerprint change vs the legacy row must be rejected");
+    assert!(err.to_string().contains("fp="), "unexpected error: {err}");
+}
+
+#[test]
+fn renamed_network_label_heals_unambiguous_config_read() {
+    // config.toml label rename ("Libera" → "LiberaChat") orphans every
+    // scoped row. The enabled check is the fail-open point: it must find
+    // the config when EXACTLY ONE other network's row shares the wire part
+    // (unambiguous rename) — never when two networks both have one (real
+    // cross-network isolation).
+    let mgr = make_manager();
+    let old_ctx = crate::e2e::scoped_context("Libera", "@~bob@b.host");
+    enable_channel(&mgr, &old_ctx, ChannelMode::Normal);
+
+    // The heal fires only when the sibling's label is no longer configured
+    // (true rename signal) — declare the post-rename server set.
+    mgr.keyring()
+        .set_configured_networks(["LiberaChat".to_string(), "Rizon".to_string()]);
+
+    let renamed = crate::e2e::scoped_context("LiberaChat", "@~bob@b.host");
+    assert!(
+        mgr.keyring()
+            .get_channel_config(&renamed)
+            .unwrap()
+            .is_some_and(|c| c.enabled),
+        "unambiguous rename must heal the enabled read (fail-open otherwise)"
+    );
+
+    // Ambiguous: a second network has its own row for the same wire part →
+    // NO heal (isolation wins).
+    enable_channel(
+        &mgr,
+        &crate::e2e::scoped_context("OFTC", "@~bob@b.host"),
+        ChannelMode::Normal,
+    );
+    assert!(
+        mgr.keyring()
+            .get_channel_config(&crate::e2e::scoped_context("Rizon", "@~bob@b.host"))
+            .unwrap()
+            .is_none(),
+        "two candidate networks → ambiguous → no heal"
+    );
+}

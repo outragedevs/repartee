@@ -1141,10 +1141,14 @@ fn handle_privmsg(
         .connections
         .get(conn_id)
         .and_then(|c| c.own_handle.clone());
-    // A DM ciphertext that arrived before we learned our own handle yields a
-    // transient, non-logged placeholder (see below) rather than a stored
-    // message — set when the matching arm fires.
-    let mut e2e_awaiting_own_handle = false;
+    // Set for lines that must NOT be logged under the server @msgid (the
+    // two E2E placeholders and Err-arm rejections): a later CHATHISTORY
+    // replay of the same wire line may decrypt for real, and a logged row
+    // would win the unique (network, msg_id) index forever. The flag comes
+    // out-of-band from try_decrypt_e2e — classifying by text prefix would
+    // misfile a peer's legitimate message that happens to START with the
+    // placeholder text.
+    let mut e2e_transient_line = false;
     let e2e_network = state
         .connections
         .get(conn_id)
@@ -1159,7 +1163,11 @@ fn handle_privmsg(
             &decrypt_context,
             text,
             is_own,
-        ),
+        )
+        .map(|(decrypted, transient)| {
+            e2e_transient_line = transient;
+            decrypted
+        }),
         // DM whose own handle isn't known yet: do NOT decrypt or fire a KEYREQ
         // under the sender's handle (that negotiates the wrong DM direction).
         // Show a placeholder and wait — the self-USERHOST at RPL_WELCOME, an
@@ -1170,7 +1178,7 @@ fn handle_privmsg(
         // block that decryptable replay on the unique (network, msg_id) index.
         // Non-E2E plaintext passes through untouched.
         None if !is_own && text.starts_with("+RPE2E01") => {
-            e2e_awaiting_own_handle = true;
+            e2e_transient_line = true;
             Some(crate::e2e::AWAITING_OWN_IDENTITY_PLACEHOLDER.to_string())
         }
         // Our OWN ciphertext echo while our handle is still unknown (a
@@ -1188,15 +1196,6 @@ fn handle_privmsg(
     if decrypted_owned.as_deref() == Some("") {
         return;
     }
-    // The awaiting-SESSION placeholder (MissingKey) follows the same
-    // transient/tagless lifecycle as the awaiting-own-identity one: the
-    // post-KEYRSP gap-fill re-fetches its wire line under the real @msgid,
-    // and a logged placeholder would win the unique (network, msg_id) row
-    // forever — silently losing the first DM of every new session.
-    let e2e_transient_placeholder = e2e_awaiting_own_handle
-        || decrypted_owned
-            .as_deref()
-            .is_some_and(|t| t.starts_with(crate::e2e::AWAITING_SESSION_PLACEHOLDER_PREFIX));
     let text: &str = decrypted_owned.as_deref().unwrap_or(text);
 
     // Check if this is a CTCP (ACTION or other)
@@ -1525,11 +1524,11 @@ fn handle_privmsg(
         // CHATHISTORY replay (same @msgid) against it — which would skip the
         // real message and leave the placeholder showing until restart. Real
         // messages keep their tags.
-        tags: if e2e_transient_placeholder { None } else { tags },
+        tags: if e2e_transient_line { None } else { tags },
     };
     // Placeholders are delivered transiently (never logged) so they don't
     // persist; the decrypted replay is logged + surfaced under the real @msgid.
-    if e2e_transient_placeholder {
+    if e2e_transient_line {
         state.add_transient_message_with_activity(&buffer_id, msg, activity);
     } else {
         state.add_message_with_activity(&buffer_id, msg, activity);
@@ -4204,6 +4203,9 @@ fn handle_whox_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
 /// per-peer rate limiter) addressed back to `sender_nick` so the
 /// initiator-side handshake starts automatically the first time an
 /// encrypted line arrives from an unknown peer.
+/// Returns `(display_text, transient)`. `transient = true` marks lines that
+/// must never be logged under the server @msgid (the awaiting-session
+/// placeholder, Err-arm rejections) — see `handle_privmsg`.
 fn try_decrypt_e2e(
     state: &mut AppState,
     conn_id: &str,
@@ -4212,7 +4214,7 @@ fn try_decrypt_e2e(
     channel: &str,
     text: &str,
     is_own: bool,
-) -> Option<String> {
+) -> Option<(String, bool)> {
     let mgr = state.e2e_manager.clone()?;
     if !text.starts_with("+RPE2E01") {
         return None;
@@ -4228,10 +4230,10 @@ fn try_decrypt_e2e(
     // ciphertext entirely. Returning `Some("")` suppresses the raw
     // wire from leaking into the buffer.
     if is_own {
-        return Some(String::new());
+        return Some((String::new(), false));
     }
     match mgr.decrypt_incoming(sender_handle, channel, text) {
-        Ok(crate::e2e::manager::DecryptOutcome::Plaintext(s)) => Some(s),
+        Ok(crate::e2e::manager::DecryptOutcome::Plaintext(s)) => Some((s, false)),
         Ok(crate::e2e::manager::DecryptOutcome::MissingKey {
             handle,
             channel: ch,
@@ -4254,13 +4256,18 @@ fn try_decrypt_e2e(
                     Err(e) => tracing::warn!("build_keyreq failed for {ch}: {e}"),
                 }
             }
-            Some(format!(
-                "{}{handle}]",
-                crate::e2e::AWAITING_SESSION_PLACEHOLDER_PREFIX
+            Some((
+                format!(
+                    "{}{handle}]",
+                    crate::e2e::AWAITING_SESSION_PLACEHOLDER_PREFIX
+                ),
+                true,
             ))
         }
         Ok(crate::e2e::manager::DecryptOutcome::Rejected(reason)) => {
-            Some(format!("[E2E rejected: {reason}]"))
+            // Deterministic rejections (wrong key, replay window, untrusted)
+            // stay logged: a replay of the same line rejects identically.
+            Some((format!("[E2E rejected: {reason}]"), false))
         }
         Err(e) => {
             tracing::warn!("e2e decrypt error on {channel}: {e}");
@@ -4271,8 +4278,15 @@ fn try_decrypt_e2e(
             // (`decrypt_chathistory_text`) skips such rows for the same
             // reason. Non-ciphertext text (impossible today: parse succeeds
             // before any fallible read) still passes through untouched.
-            text.starts_with("+RPE2E01")
-                .then(|| "[E2E rejected: malformed or undecryptable ciphertext]".to_string())
+            // Transient: this arm also fires on a TRANSIENT keyring fault
+            // over a perfectly valid ciphertext — a logged row would
+            // permanently block the decryptable CHATHISTORY replay.
+            text.starts_with("+RPE2E01").then(|| {
+                (
+                    "[E2E rejected: malformed or undecryptable ciphertext]".to_string(),
+                    true,
+                )
+            })
         }
     }
 }
@@ -8884,6 +8898,105 @@ mod tests {
                 .iter()
                 .any(|g| g.connection_id == "test" && g.target == "alice"),
             "a successful DM session install must queue a query gap-fill"
+        );
+    }
+
+    #[test]
+    fn decrypted_message_looking_like_placeholder_keeps_its_tags() {
+        // A peer's legitimate message whose PLAINTEXT starts with the
+        // placeholder text must not be misfiled as transient/tagless —
+        // transiency is signaled out-of-band, not sniffed from the text.
+        use crate::e2e::keyring::{ChannelConfig, ChannelMode, Keyring};
+        use crate::e2e::manager::E2eManager;
+        use std::sync::{Arc, Mutex};
+
+        let mut state = make_test_state();
+        let ours_conn = crate::storage::db::open_database(false).unwrap();
+        let ours = Arc::new(
+            E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(ours_conn)))).unwrap(),
+        );
+        state.e2e_manager = Some(Arc::clone(&ours));
+        state.connections.get_mut("test").unwrap().own_handle = Some("~me@host".to_string());
+
+        // Establish the incoming session: we KEYREQ, bob KEYRSPs.
+        let scoped = crate::e2e::scoped_context("TestServer", "@~me@host");
+        let req = ours.build_keyreq(&scoped).unwrap();
+        let bob_conn = crate::storage::db::open_database(false).unwrap();
+        let bob = E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(bob_conn)))).unwrap();
+        bob.keyring()
+            .set_channel_config(&ChannelConfig {
+                channel: "@~me@host".to_string(),
+                enabled: true,
+                mode: ChannelMode::AutoAccept,
+            })
+            .unwrap();
+        let rsp = bob
+            .handle_keyreq_with_nick("~me@host", Some("me"), &req)
+            .unwrap()
+            .unwrap();
+        let mut scoped_rsp = rsp;
+        scoped_rsp.channel = crate::e2e::scoped_context("TestServer", &scoped_rsp.channel);
+        ours.handle_keyrsp("~bob@b.host", &scoped_rsp).unwrap();
+
+        let tricky = format!(
+            "{}~mallory@m.host] just kidding",
+            crate::e2e::AWAITING_SESSION_PLACEHOLDER_PREFIX
+        );
+        let wire = bob.encrypt_outgoing("@~me@host", &tricky).unwrap().remove(0);
+        let mut tags = HashMap::new();
+        tags.insert("msgid".to_string(), "REAL-MSGID".to_string());
+        let prefix = Prefix::new_from_str("bob!~bob@b.host");
+        handle_privmsg(&mut state, "test", "me", Some(&prefix), "me", &wire, Some(tags));
+
+        let buf = state
+            .buffers
+            .get(&make_buffer_id("test", "bob"))
+            .expect("query buffer");
+        let last = buf.messages.back().expect("a rendered line");
+        assert_eq!(last.text, tricky, "the decrypted plaintext must render as-is");
+        assert!(
+            last.tags.is_some(),
+            "a legitimate decrypted message must keep its server tags"
+        );
+    }
+
+    #[test]
+    fn malformed_ciphertext_rejection_is_tagless() {
+        // The Err arm also fires on a transient keyring fault over a valid
+        // ciphertext — logging the rejection under the real @msgid would
+        // permanently block the decryptable CHATHISTORY replay.
+        use crate::e2e::keyring::Keyring;
+        use crate::e2e::manager::E2eManager;
+        use std::sync::{Arc, Mutex};
+
+        let mut state = make_test_state();
+        let conn = crate::storage::db::open_database(false).unwrap();
+        let mgr = E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(conn)))).unwrap();
+        state.e2e_manager = Some(Arc::new(mgr));
+        state.connections.get_mut("test").unwrap().own_handle = Some("~me@host".to_string());
+
+        let mut tags = HashMap::new();
+        tags.insert("msgid".to_string(), "MSGID-MALFORMED".to_string());
+        let prefix = Prefix::new_from_str("bob!~bob@b.host");
+        handle_privmsg(
+            &mut state,
+            "test",
+            "me",
+            Some(&prefix),
+            "me",
+            "+RPE2E01 truncated-garbage",
+            Some(tags),
+        );
+
+        let buf = state
+            .buffers
+            .get(&make_buffer_id("test", "bob"))
+            .expect("query buffer");
+        let last = buf.messages.back().expect("a rendered line");
+        assert!(last.text.starts_with("[E2E rejected"));
+        assert!(
+            last.tags.is_none(),
+            "an Err-arm rejection must not occupy the (network, msg_id) row"
         );
     }
 
