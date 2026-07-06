@@ -1943,3 +1943,128 @@ fn stale_pending_inbound_keyreqs_are_evicted() {
         "the evicted inbound KEYREQ must be gone"
     );
 }
+
+// === Phase E: network-scoped keyring contexts ===
+
+#[test]
+fn scoped_context_keeps_wire_fields_unscoped() {
+    // Everything that leaves the process must carry the WIRE context —
+    // the network label is a local storage detail. A scoped KEYREQ must
+    // stamp c= with the bare channel and sign over it (interop with
+    // clients that never scope).
+    let alice = make_manager();
+    let ctx = crate::e2e::scoped_context("NetA", "#x");
+    let req = alice.build_keyreq(&ctx).unwrap();
+    assert_eq!(req.channel, "#x", "c= must carry the wire context");
+
+    // The signature must verify against the wire channel, exactly as an
+    // unscoped peer would compute it.
+    let payload = crate::e2e::handshake::signed_keyreq_payload(
+        "#x",
+        &req.pubkey,
+        &req.eph_x25519,
+        &req.nonce,
+    );
+    crate::e2e::crypto::sig::verify(&req.pubkey, &payload, &req.sig)
+        .expect("signature must be over the wire channel");
+}
+
+#[test]
+fn scoped_handshake_round_trip_and_network_isolation() {
+    // Both sides key their storage under their own network label while the
+    // wire carries only "#x". After the handshake, the session exists under
+    // NetA's scoped context — and NOT under NetB's, even though the channel
+    // name is identical.
+    let alice = make_manager();
+    let carol = make_manager();
+    let a_ctx = crate::e2e::scoped_context("NetA", "#x");
+    enable_channel(&alice, &a_ctx, ChannelMode::AutoAccept);
+    enable_channel(&carol, &a_ctx, ChannelMode::AutoAccept);
+
+    let req = carol.build_keyreq(&a_ctx).unwrap();
+    assert_eq!(req.channel, "#x");
+    // The receiving side scopes the wire channel with ITS network before
+    // handing the message to the manager (what events.rs does).
+    let mut scoped_req = req.clone();
+    scoped_req.channel = crate::e2e::scoped_context("NetA", &req.channel);
+    let rsp = alice
+        .handle_keyreq("~carol@c.host", &scoped_req)
+        .unwrap()
+        .expect("AutoAccept must answer");
+    assert_eq!(rsp.channel, "#x", "KEYRSP echoes the wire c= verbatim");
+
+    let mut scoped_rsp = rsp.clone();
+    scoped_rsp.channel = crate::e2e::scoped_context("NetA", &rsp.channel);
+    carol.handle_keyrsp("~alice@a.host", &scoped_rsp).unwrap();
+
+    // Encrypt/decrypt round trip under the scoped context.
+    let wires = alice.encrypt_outgoing(&a_ctx, "scoped secret").unwrap();
+    match carol
+        .decrypt_incoming("~alice@a.host", &a_ctx, &wires[0])
+        .unwrap()
+    {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "scoped secret"),
+        other => panic!("scoped decrypt failed: {other:?}"),
+    }
+
+    // Isolation: the same channel name on another network has NO session
+    // and NO config.
+    let b_ctx = crate::e2e::scoped_context("NetB", "#x");
+    assert!(
+        carol
+            .keyring()
+            .get_incoming_session("~alice@a.host", &b_ctx)
+            .unwrap()
+            .is_none(),
+        "NetB must not inherit NetA's session"
+    );
+    assert!(
+        alice.keyring().get_channel_config(&b_ctx).unwrap().is_none(),
+        "NetB must not inherit NetA's config"
+    );
+}
+
+#[test]
+fn legacy_unscoped_rows_still_resolve_after_upgrade() {
+    // Pre-upgrade databases hold unscoped rows ("#x"). Scoped reads must
+    // fall back to them so an existing E2E setup keeps decrypting and
+    // keeps its config after the upgrade; scoped rows win when present.
+    let alice = make_manager();
+    let carol = make_manager();
+    // Legacy handshake — everything stored unscoped.
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&carol, "#x", ChannelMode::AutoAccept);
+    let req = carol.build_keyreq("#x").unwrap();
+    let rsp = alice.handle_keyreq("~carol@c.host", &req).unwrap().unwrap();
+    carol.handle_keyrsp("~alice@a.host", &rsp).unwrap();
+    let wires = alice.encrypt_outgoing("#x", "legacy msg").unwrap();
+
+    // Post-upgrade the caller passes scoped contexts.
+    let scoped = crate::e2e::scoped_context("NetA", "#x");
+    assert!(
+        carol
+            .keyring()
+            .get_channel_config(&scoped)
+            .unwrap()
+            .is_some_and(|c| c.enabled),
+        "scoped config read must fall back to the legacy row"
+    );
+    match carol
+        .decrypt_incoming("~alice@a.host", &scoped, &wires[0])
+        .unwrap()
+    {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "legacy msg"),
+        other => panic!("legacy session must decrypt under a scoped read: {other:?}"),
+    }
+    // Our own outgoing key must also fall back — otherwise the first
+    // post-upgrade send generates a fresh key without a REKEY and every
+    // legacy peer fails AEAD.
+    let post = alice.encrypt_outgoing(&scoped, "post-upgrade msg").unwrap();
+    match carol
+        .decrypt_incoming("~alice@a.host", "#x", &post[0])
+        .unwrap()
+    {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "post-upgrade msg"),
+        other => panic!("post-upgrade send must reuse the legacy outgoing key: {other:?}"),
+    }
+}

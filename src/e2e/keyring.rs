@@ -484,6 +484,17 @@ impl Keyring {
     }
 
     pub fn get_outgoing_session(&self, channel: &str) -> Result<Option<OutgoingSession>> {
+        if let Some(sess) = self.get_outgoing_session_exact(channel)? {
+            return Ok(Some(sess));
+        }
+        // Legacy-row fallback (see get_channel_config). Critical here: a
+        // scoped miss that generated a FRESH key would look like a rotation
+        // without a REKEY — every pre-upgrade peer would fail AEAD.
+        legacy_wire_fallback(channel)
+            .map_or_else(|| Ok(None), |wire| self.get_outgoing_session_exact(wire))
+    }
+
+    fn get_outgoing_session_exact(&self, channel: &str) -> Result<Option<OutgoingSession>> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
         let row: Option<(Vec<u8>, i64, i64)> = conn
             .query_row(
@@ -507,9 +518,12 @@ impl Keyring {
 
     pub fn mark_outgoing_pending_rotation(&self, channel: &str) -> Result<()> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
+        // Mutations hit the legacy unscoped row too: before the first scoped
+        // write, the read fallback serves the legacy row — a rotate/revoke
+        // that only touched the scoped key would silently not apply.
         conn.execute(
-            "UPDATE e2e_outgoing_sessions SET pending_rotation = 1 WHERE channel = ?1",
-            params![channel],
+            "UPDATE e2e_outgoing_sessions SET pending_rotation = 1 WHERE channel = ?1 OR channel = ?2",
+            params![channel, crate::e2e::wire_context(channel)],
         )?;
         Ok(())
     }
@@ -517,8 +531,8 @@ impl Keyring {
     pub fn clear_outgoing_pending_rotation(&self, channel: &str) -> Result<()> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
         conn.execute(
-            "UPDATE e2e_outgoing_sessions SET pending_rotation = 0 WHERE channel = ?1",
-            params![channel],
+            "UPDATE e2e_outgoing_sessions SET pending_rotation = 0 WHERE channel = ?1 OR channel = ?2",
+            params![channel, crate::e2e::wire_context(channel)],
         )?;
         Ok(())
     }
@@ -621,6 +635,20 @@ impl Keyring {
         handle: &str,
         channel: &str,
     ) -> Result<Option<(SessionKey, i64)>> {
+        if let Some(prev) = self.get_incoming_prev_key_exact(handle, channel)? {
+            return Ok(Some(prev));
+        }
+        legacy_wire_fallback(channel).map_or_else(
+            || Ok(None),
+            |wire| self.get_incoming_prev_key_exact(handle, wire),
+        )
+    }
+
+    fn get_incoming_prev_key_exact(
+        &self,
+        handle: &str,
+        channel: &str,
+    ) -> Result<Option<(SessionKey, i64)>> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
         let row: Option<(Option<Vec<u8>>, Option<i64>)> = conn
             .query_row(
@@ -663,6 +691,22 @@ impl Keyring {
         handle: &str,
         channel: &str,
     ) -> Result<Option<IncomingSession>> {
+        if let Some(sess) = self.get_incoming_session_exact(handle, channel)? {
+            return Ok(Some(sess));
+        }
+        // Legacy-row fallback (see get_channel_config): sessions installed
+        // before network scoping keep decrypting.
+        legacy_wire_fallback(channel).map_or_else(
+            || Ok(None),
+            |wire| self.get_incoming_session_exact(handle, wire),
+        )
+    }
+
+    fn get_incoming_session_exact(
+        &self,
+        handle: &str,
+        channel: &str,
+    ) -> Result<Option<IncomingSession>> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
         let row: Option<(Vec<u8>, Vec<u8>, String, i64)> = conn
             .query_row(
@@ -701,18 +745,27 @@ impl Keyring {
         status: TrustStatus,
     ) -> Result<()> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
+        // Legacy row included — see mark_outgoing_pending_rotation.
         conn.execute(
-            "UPDATE e2e_incoming_sessions SET status = ?1 WHERE handle = ?2 AND channel = ?3",
-            params![status.as_str(), handle, channel],
+            "UPDATE e2e_incoming_sessions SET status = ?1
+             WHERE handle = ?2 AND (channel = ?3 OR channel = ?4)",
+            params![
+                status.as_str(),
+                handle,
+                channel,
+                crate::e2e::wire_context(channel)
+            ],
         )?;
         Ok(())
     }
 
     pub fn delete_incoming_session(&self, handle: &str, channel: &str) -> Result<()> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
+        // Legacy row included — see mark_outgoing_pending_rotation.
         conn.execute(
-            "DELETE FROM e2e_incoming_sessions WHERE handle = ?1 AND channel = ?2",
-            params![handle, channel],
+            "DELETE FROM e2e_incoming_sessions
+             WHERE handle = ?1 AND (channel = ?2 OR channel = ?3)",
+            params![handle, channel, crate::e2e::wire_context(channel)],
         )?;
         Ok(())
     }
@@ -815,6 +868,17 @@ impl Keyring {
     }
 
     pub fn get_channel_config(&self, channel: &str) -> Result<Option<ChannelConfig>> {
+        if let Some(cfg) = self.get_channel_config_exact(channel)? {
+            return Ok(Some(cfg));
+        }
+        // Network-scoped read over a pre-scoping database: fall back to the
+        // legacy unscoped row so existing setups survive the upgrade. A
+        // scoped row always wins when present (all writes are scoped).
+        legacy_wire_fallback(channel)
+            .map_or_else(|| Ok(None), |wire| self.get_channel_config_exact(wire))
+    }
+
+    fn get_channel_config_exact(&self, channel: &str) -> Result<Option<ChannelConfig>> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
         let row: Option<(i64, String)> = conn
             .query_row(
@@ -862,10 +926,16 @@ impl Keyring {
         let conn = self.db.lock().expect("keyring mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT handle_pattern FROM e2e_autotrust
-             WHERE scope = 'global' OR scope = ?1",
+             WHERE scope = 'global' OR scope = ?1 OR scope = ?2",
         )?;
+        // ?2 is the legacy unscoped scope (see get_channel_config's
+        // fallback): autotrust rows written before network scoping keep
+        // matching scoped lookups.
         let rows = stmt
-            .query_map(params![channel], |r| r.get::<_, String>(0))?
+            .query_map(
+                params![channel, crate::e2e::wire_context(channel)],
+                |r| r.get::<_, String>(0),
+            )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         for pat in rows {
             if glob_matches_ci(&pat, handle) {
@@ -914,10 +984,11 @@ impl Keyring {
     /// the fresh key to the revoked peer.
     pub fn remove_outgoing_recipient(&self, channel: &str, handle: &str) -> Result<()> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
+        // Legacy row included — see mark_outgoing_pending_rotation.
         conn.execute(
             "DELETE FROM e2e_outgoing_recipients
-             WHERE channel = ?1 AND handle = ?2",
-            params![channel, handle],
+             WHERE (channel = ?1 OR channel = ?3) AND handle = ?2",
+            params![channel, handle, crate::e2e::wire_context(channel)],
         )?;
         Ok(())
     }
@@ -925,6 +996,22 @@ impl Keyring {
     /// Return every recipient of our outgoing session key for `channel`.
     /// The returned tuples are `(handle, fingerprint)`.
     pub fn list_outgoing_recipients(&self, channel: &str) -> Result<Vec<(String, Fingerprint)>> {
+        let scoped = self.list_outgoing_recipients_exact(channel)?;
+        if !scoped.is_empty() {
+            return Ok(scoped);
+        }
+        // Legacy-row fallback (see get_channel_config): rotation REKEYs must
+        // still reach peers recorded before network scoping.
+        legacy_wire_fallback(channel).map_or_else(
+            || Ok(scoped),
+            |wire| self.list_outgoing_recipients_exact(wire),
+        )
+    }
+
+    fn list_outgoing_recipients_exact(
+        &self,
+        channel: &str,
+    ) -> Result<Vec<(String, Fingerprint)>> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT handle, fingerprint
@@ -1200,6 +1287,14 @@ impl Keyring {
         }
         Ok(out)
     }
+}
+
+/// For a network-scoped context, the legacy (wire) key to retry a read
+/// under; `None` for already-unscoped contexts. See `get_channel_config`
+/// for the fallback rule (scoped row wins, legacy fills the gap).
+fn legacy_wire_fallback(channel: &str) -> Option<&str> {
+    let wire = crate::e2e::wire_context(channel);
+    (wire != channel).then_some(wire)
 }
 
 /// Unix time for keyring bookkeeping rows (`prev_created_at`, `seen_at`).

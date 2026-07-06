@@ -296,17 +296,20 @@ pub(crate) fn cmd_e2e(app: &mut App, args: &[String]) {
 /// the peer speaks this session. Returns `None` for a query with neither
 /// handle known, or for a non-channel/query buffer.
 fn e2e_context_for(
+    network: &str,
     buffer_type: &crate::state::buffer::BufferType,
     name: &str,
     peer_handle: Option<&str>,
     cached_handle: Option<&str>,
 ) -> Option<String> {
     use crate::state::buffer::BufferType;
+    // Contexts are network-scoped for keyring storage (see
+    // `e2e::scoped_context`); the manager re-derives the wire form.
     match buffer_type {
-        BufferType::Channel => Some(name.to_string()),
+        BufferType::Channel => Some(crate::e2e::scoped_context(network, name)),
         BufferType::Query => peer_handle
             .or(cached_handle)
-            .map(|h| crate::e2e::context_key(name, h)),
+            .map(|h| crate::e2e::scoped_context(network, &crate::e2e::context_key(name, h))),
         _ => None,
     }
 }
@@ -325,7 +328,14 @@ fn current_e2e_context(app: &App) -> Option<String> {
     } else {
         None
     };
+    let network = app
+        .state
+        .connections
+        .get(&buf.connection_id)
+        .map(|c| c.label.clone())
+        .unwrap_or_default();
     e2e_context_for(
+        &network,
         &buf.buffer_type,
         &buf.name,
         buf.peer_handle.as_deref(),
@@ -342,14 +352,16 @@ fn current_e2e_context(app: &App) -> Option<String> {
 /// so channel behaviour is unchanged. `None` for a DM whose own handle isn't
 /// known yet.
 fn e2e_own_context_for(
+    network: &str,
     buffer_type: &crate::state::buffer::BufferType,
     name: &str,
     own_handle: Option<&str>,
 ) -> Option<String> {
     use crate::state::buffer::BufferType;
     match buffer_type {
-        BufferType::Channel => Some(name.to_string()),
-        BufferType::Query => own_handle.map(|h| crate::e2e::context_key(name, h)),
+        BufferType::Channel => Some(crate::e2e::scoped_context(network, name)),
+        BufferType::Query => own_handle
+            .map(|h| crate::e2e::scoped_context(network, &crate::e2e::context_key(name, h))),
         _ => None,
     }
 }
@@ -363,7 +375,13 @@ fn current_e2e_own_context(app: &App) -> Option<String> {
         .connections
         .get(&buf.connection_id)
         .and_then(|c| c.own_handle.clone());
-    e2e_own_context_for(&buf.buffer_type, &buf.name, own.as_deref())
+    let network = app
+        .state
+        .connections
+        .get(&buf.connection_id)
+        .map(|c| c.label.clone())
+        .unwrap_or_default();
+    e2e_own_context_for(&network, &buf.buffer_type, &buf.name, own.as_deref())
 }
 
 fn require_mgr(app: &mut App) -> Option<std::sync::Arc<crate::e2e::E2eManager>> {
@@ -416,7 +434,7 @@ fn e2e_on(app: &mut App) {
         err(app, &format!("/e2e on: {e}"));
         return;
     }
-    ok(app, &format!("enabled on {chan} (mode=normal)"));
+    ok(app, &format!("enabled on {} (mode=normal)", crate::e2e::display_context(&chan)));
 }
 
 fn e2e_off(app: &mut App) {
@@ -434,7 +452,7 @@ fn e2e_off(app: &mut App) {
         err(app, &format!("/e2e off: {e}"));
         return;
     }
-    ok(app, &format!("disabled on {chan}"));
+    ok(app, &format!("disabled on {}", crate::e2e::display_context(&chan)));
 }
 
 fn e2e_mode(app: &mut App, mode_str: &str) {
@@ -459,7 +477,14 @@ fn e2e_mode(app: &mut App, mode_str: &str) {
         err(app, &format!("/e2e mode: {e}"));
         return;
     }
-    ok(app, &format!("mode={} on {chan}", mode.as_str()));
+    ok(
+        app,
+        &format!(
+            "mode={} on {}",
+            mode.as_str(),
+            crate::e2e::display_context(&chan)
+        ),
+    );
 }
 
 // ─── trust transitions ───────────────────────────────────────────────────────
@@ -512,7 +537,10 @@ fn e2e_accept(app: &mut App, nick: &str) {
             }
             ok(
                 app,
-                &format!("accepted {nick} ({handle}) on {chan} — KEYRSP sent"),
+                &format!(
+                    "accepted {nick} ({handle}) on {} — KEYRSP sent",
+                    crate::e2e::display_context(&chan)
+                ),
             );
             return;
         }
@@ -546,7 +574,13 @@ fn e2e_accept(app: &mut App, nick: &str) {
             }
         }
         Ok(None) => {
-            err(app, &format!("/e2e accept: nothing to accept for {nick} on {chan}"));
+            err(
+                app,
+                &format!(
+                    "/e2e accept: nothing to accept for {nick} on {}",
+                    crate::e2e::display_context(&chan)
+                ),
+            );
             return;
         }
         Err(e) => {
@@ -562,7 +596,13 @@ fn e2e_accept(app: &mut App, nick: &str) {
         err(app, &format!("/e2e accept: {e}"));
         return;
     }
-    ok(app, &format!("accepted {nick} ({handle}) on {chan}"));
+    ok(
+        app,
+        &format!(
+            "accepted {nick} ({handle}) on {}",
+            crate::e2e::display_context(&chan)
+        ),
+    );
 }
 
 fn e2e_decline(app: &mut App, nick: &str) {
@@ -581,7 +621,10 @@ fn e2e_decline(app: &mut App, nick: &str) {
         err(app, &format!("/e2e decline: {e}"));
         return;
     }
-    warn(app, &format!("declined {nick} on {chan}"));
+    warn(
+        app,
+        &format!("declined {nick} on {}", crate::e2e::display_context(&chan)),
+    );
 }
 
 fn e2e_revoke(app: &mut App, nick: &str) {
@@ -808,7 +851,13 @@ fn e2e_rotate(app: &mut App) {
         err(app, &format!("/e2e rotate: {e}"));
         return;
     }
-    ok(app, &format!("rotation scheduled for {chan}"));
+    ok(
+        app,
+        &format!(
+            "rotation scheduled for {}",
+            crate::e2e::display_context(&chan)
+        ),
+    );
 }
 
 // ─── listings ────────────────────────────────────────────────────────────────
@@ -904,7 +953,7 @@ fn e2e_list_all(app: &mut App) {
                 lines.push(format!(
                     "  {C_CMD}{handle}{C_RST}  {C_TEXT}{channel}{C_RST}  {C_TEXT}[{status}]{C_RST}  {C_DIM}fp={fp_short}{C_RST}",
                     handle = sess.handle,
-                    channel = sess.channel,
+                    channel = crate::e2e::display_context(&sess.channel),
                     status = sess.status.as_str(),
                 ));
             }
@@ -1370,35 +1419,45 @@ mod tests {
     #[test]
     fn e2e_context_keys_dm_by_peer_handle_not_bare_nick() {
         use crate::state::buffer::BufferType;
-        // Channel: name verbatim.
+        let sc = |wire: &str| crate::e2e::scoped_context("Net", wire);
+        // Channel: name scoped to the network (the wire part stays verbatim).
         assert_eq!(
-            e2e_context_for(&BufferType::Channel, "#rust", None, None).as_deref(),
-            Some("#rust")
+            e2e_context_for("Net", &BufferType::Channel, "#rust", None, None),
+            Some(sc("#rust"))
         );
         // Query with a live peer handle: the `@<peer_handle>` pseudochannel
         // (matching the encrypt/decrypt path), NOT the bare nick.
         assert_eq!(
-            e2e_context_for(&BufferType::Query, "bob", Some("~bob@user/bob"), None).as_deref(),
-            Some("@~bob@user/bob")
+            e2e_context_for("Net", &BufferType::Query, "bob", Some("~bob@user/bob"), None),
+            Some(sc("@~bob@user/bob"))
         );
         // Peer hasn't spoken this session, but the keyring still has a handle
         // for this nick (existing E2E rows): fall back to it so /e2e stays
         // usable instead of erroring.
         assert_eq!(
-            e2e_context_for(&BufferType::Query, "bob", None, Some("~bob@old")).as_deref(),
-            Some("@~bob@old")
+            e2e_context_for("Net", &BufferType::Query, "bob", None, Some("~bob@old")),
+            Some(sc("@~bob@old"))
         );
         // The live handle wins over the cached one.
         assert_eq!(
-            e2e_context_for(&BufferType::Query, "bob", Some("~bob@new"), Some("~bob@old")).as_deref(),
-            Some("@~bob@new")
+            e2e_context_for(
+                "Net",
+                &BufferType::Query,
+                "bob",
+                Some("~bob@new"),
+                Some("~bob@old")
+            ),
+            Some(sc("@~bob@new"))
         );
         // Neither known: no context — the command must refuse rather than
         // write a bare-nick row the hot path never reads.
-        assert_eq!(e2e_context_for(&BufferType::Query, "bob", None, None), None);
+        assert_eq!(
+            e2e_context_for("Net", &BufferType::Query, "bob", None, None),
+            None
+        );
         // Non-channel/query buffers have no E2E context.
         assert_eq!(
-            e2e_context_for(&BufferType::Mentions, "Mentions", None, None),
+            e2e_context_for("Net", &BufferType::Mentions, "Mentions", None, None),
             None
         );
     }
@@ -1406,19 +1465,23 @@ mod tests {
     #[test]
     fn e2e_own_context_keys_dm_by_own_handle() {
         use crate::state::buffer::BufferType;
-        // Channel: name verbatim (own == peer == channel name).
+        let sc = |wire: &str| crate::e2e::scoped_context("Net", wire);
+        // Channel: name scoped to the network (own == peer == channel name).
         assert_eq!(
-            e2e_own_context_for(&BufferType::Channel, "#rust", None).as_deref(),
-            Some("#rust")
+            e2e_own_context_for("Net", &BufferType::Channel, "#rust", None),
+            Some(sc("#rust"))
         );
         // Query: OUR own handle (we are the recipient of incoming DMs), keyed
         // independently of the peer's nick.
         assert_eq!(
-            e2e_own_context_for(&BufferType::Query, "bob", Some("~me@host")).as_deref(),
-            Some("@~me@host")
+            e2e_own_context_for("Net", &BufferType::Query, "bob", Some("~me@host")),
+            Some(sc("@~me@host"))
         );
         // Own handle unknown: no context — incoming-session ops must refuse.
-        assert_eq!(e2e_own_context_for(&BufferType::Query, "bob", None), None);
+        assert_eq!(
+            e2e_own_context_for("Net", &BufferType::Query, "bob", None),
+            None
+        );
     }
 
     // ---------- case-insensitive dispatch ----------

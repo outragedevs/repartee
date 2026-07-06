@@ -783,9 +783,9 @@ fn message_timestamp(tags: Option<&HashMap<String, String>>) -> DateTime<Utc> {
 /// later live plaintext row.
 fn decrypt_chathistory_text(
     state: &AppState,
+    network: &str,
     target: &str,
-    ident: &str,
-    host: &str,
+    sender_handle: &str,
     own_handle: Option<&str>,
     is_own: bool,
     raw_text: &str,
@@ -796,14 +796,13 @@ fn decrypt_chathistory_text(
     if is_own {
         return None;
     }
-    let sender_handle = format!("{ident}@{host}");
     // A DM whose own handle isn't known yet has no recipient context — skip
     // the line rather than decrypt under the sender (it would fail anyway).
-    let context = incoming_e2e_context(target, own_handle)?;
+    let context = incoming_e2e_context(network, target, own_handle)?;
     match state
         .e2e_manager
         .as_ref()?
-        .decrypt_incoming(&sender_handle, &context, raw_text)
+        .decrypt_incoming(sender_handle, &context, raw_text)
     {
         Ok(crate::e2e::manager::DecryptOutcome::Plaintext(plain)) => Some(plain),
         _ => None,
@@ -880,6 +879,11 @@ pub fn ingest_chathistory_batch(
         .connections
         .get(conn_id)
         .map(|c| c.nick.clone())
+        .unwrap_or_default();
+    let network = state
+        .connections
+        .get(conn_id)
+        .map(|c| c.label.clone())
         .unwrap_or_default();
 
     let mut ingested = 0usize;
@@ -960,9 +964,9 @@ pub fn ingest_chathistory_batch(
         // or skip a line we can't decrypt — see `decrypt_chathistory_text`.
         let Some(text) = decrypt_chathistory_text(
             state,
+            &network,
             target,
-            &ident,
-            &host,
+            &format!("{ident}@{host}"),
             own_handle.as_deref(),
             is_own,
             raw_text,
@@ -1075,11 +1079,14 @@ fn set_own_handle(state: &mut AppState, conn_id: &str, handle: String) {
 /// because decrypting/KEYREQ-ing under `@<sender>` negotiates the wrong DM
 /// direction — it must wait until our handle is learned. Channels never
 /// return `None`.
-fn incoming_e2e_context(target: &str, own_handle: Option<&str>) -> Option<String> {
+/// The returned context is scoped to `network` for keyring storage (see
+/// `e2e::scoped_context`) — the wire/AAD part is recovered inside the
+/// manager, so this changes nothing on the wire.
+fn incoming_e2e_context(network: &str, target: &str, own_handle: Option<&str>) -> Option<String> {
     if is_channel(target) {
-        Some(target.to_string())
+        Some(crate::e2e::scoped_context(network, target))
     } else {
-        own_handle.map(|h| crate::e2e::context_key(target, h))
+        own_handle.map(|h| crate::e2e::scoped_context(network, &crate::e2e::context_key(target, h)))
     }
 }
 
@@ -1138,7 +1145,12 @@ fn handle_privmsg(
     // transient, non-logged placeholder (see below) rather than a stored
     // message — set when the matching arm fires.
     let mut e2e_awaiting_own_handle = false;
-    let decrypted_owned = match incoming_e2e_context(target, own_handle.as_deref()) {
+    let e2e_network = state
+        .connections
+        .get(conn_id)
+        .map(|c| c.label.clone())
+        .unwrap_or_default();
+    let decrypted_owned = match incoming_e2e_context(&e2e_network, target, own_handle.as_deref()) {
         Some(decrypt_context) => try_decrypt_e2e(
             state,
             conn_id,
@@ -2074,7 +2086,8 @@ fn track_dm_handle_change(
     let Some(mgr) = state.e2e_manager.clone() else {
         return;
     };
-    let new_ctx = crate::e2e::context_key(nick, new_handle);
+    let new_ctx =
+        crate::e2e::scoped_context(&network, &crate::e2e::context_key(nick, new_handle));
     // Old-context candidates, in decreasing trust: the buffer's prior handle
     // (observed on THIS connection) and the keyring's network-scoped cache
     // row. Only when BOTH are absent (pre-cache keyring, upgrade path) fall
@@ -2103,7 +2116,11 @@ fn track_dm_handle_change(
         sources.push((legacy, true));
     }
     for (old_h, from_legacy) in sources {
-        let old_ctx = crate::e2e::context_key(nick, &old_h);
+        // Migrate from BOTH the scoped and the legacy-unscoped old context:
+        // a pre-scoping database keeps its enabled flag under the bare
+        // `@<handle>` row, and only the scoped-or-fallback read sees it.
+        let old_ctx =
+            crate::e2e::scoped_context(&network, &crate::e2e::context_key(nick, &old_h));
         let migrated = migrate_dm_e2e_config(&mgr, &old_ctx, &new_ctx, from_legacy);
         if migrated && from_legacy {
             // The legacy fallback matched by nick alone across ALL networks —
@@ -4346,6 +4363,33 @@ fn try_dispatch_rpe2e_ctcp(
             return Some(RpEe2eOutcome::Handled); // suppress bad body
         }
     };
+    // Scope the wire c= to this connection's network before any keyring
+    // access (see `e2e::scoped_context`): `#rust` on two networks — or two
+    // peers behind identical handles — must not share config or session
+    // rows. The manager re-derives the wire form for everything that goes
+    // back out, so the scope prefix never leaves the process.
+    let network = state
+        .connections
+        .get(conn_id)
+        .map(|c| c.label.clone())
+        .unwrap_or_default();
+    let parsed = {
+        use crate::e2e::handshake::HandshakeMsg as HM;
+        match parsed {
+            HM::Req(mut req) => {
+                req.channel = crate::e2e::scoped_context(&network, &req.channel);
+                HM::Req(req)
+            }
+            HM::Rsp(mut rsp) => {
+                rsp.channel = crate::e2e::scoped_context(&network, &rsp.channel);
+                HM::Rsp(rsp)
+            }
+            HM::Rekey(mut rk) => {
+                rk.channel = crate::e2e::scoped_context(&network, &rk.channel);
+                HM::Rekey(rk)
+            }
+        }
+    };
     // RPEE2E target is always us — the channel being negotiated is
     // carried inside the payload rather than in the IRC target.
     let _ = target;
@@ -4469,7 +4513,7 @@ fn try_dispatch_rpe2e_ctcp(
                 // re-fetched, decrypted under the fresh session, and spliced
                 // in (the splice sweeps the placeholder). Channels don't
                 // need this: their backlog decrypts lazily on focus.
-                if rsp.channel.starts_with('@') {
+                if crate::e2e::wire_context(&rsp.channel).starts_with('@') {
                     state
                         .pending_e2e_gapfills
                         .push(crate::state::PendingE2eGapfill {
@@ -4537,7 +4581,9 @@ fn emit_e2e_debug(
     }
     let text = text.into();
     let target_buffer = channel
-        .map(|channel| make_buffer_id(conn_id, channel))
+        // Contexts may carry a network-scope prefix — buffers key by the
+        // wire name.
+        .map(|channel| make_buffer_id(conn_id, crate::e2e::wire_context(channel)))
         .filter(|id| state.buffers.contains_key(id))
         .unwrap_or_else(|| active_or_server_buffer(state, conn_id));
     let id = state.next_message_id();
@@ -4663,12 +4709,19 @@ fn handle_userhost_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
                         // and the live incoming session is keyed under the
                         // current @<own>. Only DMs (peer context `@<peer>`) have
                         // a distinct own context; a channel forget has own==peer.
-                        let own_channel = if channel.starts_with('@') {
+                        // The captured context may be network-scoped — the
+                        // DM test looks at its wire part.
+                        let own_channel = if crate::e2e::wire_context(channel).starts_with('@') {
+                            let network = state
+                                .connections
+                                .get(conn_id)
+                                .map(|c| c.label.clone())
+                                .unwrap_or_default();
                             let own = state
                                 .connections
                                 .get(conn_id)
                                 .and_then(|c| c.own_handle.as_deref())
-                                .map(|h| format!("@{h}"));
+                                .map(|h| crate::e2e::scoped_context(&network, &format!("@{h}")));
                             if own.is_none() {
                                 // Our own handle is unknown (reset at every
                                 // registration until the self-USERHOST reply).
@@ -4721,7 +4774,9 @@ fn handle_userhost_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
                             false,
                             format!(
                                 "forgot {target} ({handle}) on {} — removed {deleted} row(s)",
-                                channel.unwrap_or_default()
+                                channel
+                                    .as_deref()
+                                    .map_or_else(String::new, crate::e2e::display_context)
                             ),
                         ),
                         Err(e) => emit_e2e_message(
@@ -4862,7 +4917,8 @@ fn surface_pending_trust_changes(
         let target_buffer = if notice.channel.is_empty() {
             active_or_server_buffer(state, conn_id)
         } else {
-            let cand = make_buffer_id(conn_id, &notice.channel);
+            // Contexts may be network-scoped; buffers key by the wire name.
+            let cand = make_buffer_id(conn_id, crate::e2e::wire_context(&notice.channel));
             if state.buffers.contains_key(&cand) {
                 cand
             } else {
@@ -4897,7 +4953,8 @@ fn surface_pending_accept_requests(
         let target_buffer = if req.channel.is_empty() {
             active_or_server_buffer(state, conn_id)
         } else {
-            let cand = make_buffer_id(conn_id, &req.channel);
+            // Contexts may be network-scoped; buffers key by the wire name.
+            let cand = make_buffer_id(conn_id, crate::e2e::wire_context(&req.channel));
             if state.buffers.contains_key(&cand) {
                 cand
             } else {
@@ -4911,7 +4968,7 @@ fn surface_pending_accept_requests(
                 || req.handle.clone(),
                 |nick| format!("{nick} ({})", req.handle)
             ),
-            channel = req.channel,
+            channel = crate::e2e::display_context(&req.channel),
         );
         let id = state.next_message_id();
         state.add_message(
@@ -6301,10 +6358,11 @@ mod tests {
         handle_irc_message(&mut state, "test", &msg);
 
         let mgr = state.e2e_manager.as_ref().unwrap();
-        // The enabled DM config followed the handle to the new context...
+        // The enabled DM config followed the handle to the new context —
+        // written network-scoped (the test connection's label).
         assert!(
             mgr.keyring()
-                .get_channel_config(&new_ctx)
+                .get_channel_config(&crate::e2e::scoped_context("TestServer", &new_ctx))
                 .unwrap()
                 .is_some_and(|c| c.enabled),
             "KEYREQ-first handle change must migrate the enabled DM config to @<new>"
@@ -6680,7 +6738,10 @@ mod tests {
         let mgr = state.e2e_manager.as_ref().unwrap();
         let migrated = mgr
             .keyring()
-            .get_channel_config(&format!("@{new_net_handle}"))
+            .get_channel_config(&crate::e2e::scoped_context(
+                "TestServer",
+                &format!("@{new_net_handle}"),
+            ))
             .unwrap()
             .expect("config must migrate so the DM never downgrades to plaintext");
         assert!(migrated.enabled);
@@ -6723,18 +6784,22 @@ mod tests {
     #[test]
     fn incoming_e2e_context_is_recipient_keyed_for_dms() {
         // Channel: always Some(name), handles irrelevant.
-        assert_eq!(incoming_e2e_context("#x", Some("~me@h")).as_deref(), Some("#x"));
-        assert_eq!(incoming_e2e_context("#x", None).as_deref(), Some("#x"));
+        let sc = |wire: &str| crate::e2e::scoped_context("Net", wire);
+        assert_eq!(
+            incoming_e2e_context("Net", "#x", Some("~me@h")),
+            Some(sc("#x"))
+        );
+        assert_eq!(incoming_e2e_context("Net", "#x", None), Some(sc("#x")));
         // DM (target is our own nick) with own handle known: keyed by OUR own
         // handle (recipient) — what the sender encrypted the AAD under.
         assert_eq!(
-            incoming_e2e_context("me", Some("~me@host")).as_deref(),
-            Some("@~me@host")
+            incoming_e2e_context("Net", "me", Some("~me@host")),
+            Some(sc("@~me@host"))
         );
         // DM with own handle UNKNOWN: None — must NOT fall back to the sender
         // (that would fire a KEYREQ for the wrong DM direction); the caller
         // waits until our handle is learned (USERHOST / echo / CHGHOST).
-        assert_eq!(incoming_e2e_context("me", None), None);
+        assert_eq!(incoming_e2e_context("Net", "me", None), None);
     }
 
     // === own-handle tracking (for recipient-keyed DM E2E) ===
@@ -8780,8 +8845,11 @@ mod tests {
         );
         state.e2e_manager = Some(Arc::clone(&ours));
 
-        // We (recipient) issued the KEYREQ for our own decrypt context.
-        let req = ours.build_keyreq("@~me@host").unwrap();
+        // We (recipient) issued the KEYREQ for our own decrypt context —
+        // network-scoped, as every production caller does now.
+        let req = ours
+            .build_keyreq(&crate::e2e::scoped_context("TestServer", "@~me@host"))
+            .unwrap();
 
         // Alice answers with a KEYRSP (AutoAccept so the reply is immediate).
         let alice_conn = crate::storage::db::open_database(false).unwrap();

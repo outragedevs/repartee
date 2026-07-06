@@ -610,7 +610,9 @@ impl E2eManager {
         for (idx, plain) in chunks.iter().enumerate() {
             // idx is in 0..total, so idx+1 fits in u8 because total ≤ u8::MAX.
             let part = u8::try_from(idx + 1).map_err(|_| E2eError::ChunkLimit(u8::MAX))?;
-            let aad = build_aad(channel, msgid, ts, part, total);
+            // AAD uses the WIRE context — the network-scope prefix (if any)
+            // is a local storage detail the peer never sees.
+            let aad = build_aad(crate::e2e::wire_context(channel), msgid, ts, part, total);
             let (nonce, ct) = aead::encrypt(&sk, &aad, plain)?;
             let wire = WireChunk {
                 msgid,
@@ -713,7 +715,10 @@ impl E2eManager {
         // HKDF → 32-byte wrap key (same labels as the handshake path so
         // libsodium-based peers can reuse their existing wrap helpers,
         // with the `REKEY` info string acting as the domain separator).
-        let info = rekey_info(channel);
+        // Everything on the wire (HKDF info, signed payload, c=) uses the
+        // WIRE context so unscoped peers derive identical bytes.
+        let wire_channel = crate::e2e::wire_context(channel);
+        let info = rekey_info(wire_channel);
         let hk = Hkdf::<Sha256>::new(Some(b"RPE2E01-WRAP"), shared.as_bytes());
         let mut wrap_key = [0u8; 32];
         hk.expand(info.as_bytes(), &mut wrap_key)
@@ -724,12 +729,18 @@ impl E2eManager {
         let mut nonce = [0u8; 16];
         rand::fill(&mut nonce);
         let pubkey = self.identity.public_bytes();
-        let sig_payload =
-            signed_keyrekey_payload(channel, &pubkey, &eph_pub, &wrap_nonce, &wrap_ct, &nonce);
+        let sig_payload = signed_keyrekey_payload(
+            wire_channel,
+            &pubkey,
+            &eph_pub,
+            &wrap_nonce,
+            &wrap_ct,
+            &nonce,
+        );
         let sig_bytes = sig::sign(self.identity.signing_key(), &sig_payload);
 
         Ok(KeyRekey {
-            channel: channel.to_string(),
+            channel: wire_channel.to_string(),
             pubkey,
             eph_pub,
             wrap_nonce,
@@ -855,8 +866,10 @@ impl E2eManager {
     pub fn handle_rekey(&self, sender_handle: &str, rekey: &KeyRekey) -> Result<()> {
         // Verify signature first — no state touched until we're sure the
         // message is authentic against the pubkey it carries.
+        // The caller may have scoped rekey.channel to its network for
+        // storage; the sender signed (and derived) over the WIRE context.
         let sig_payload = signed_keyrekey_payload(
-            &rekey.channel,
+            crate::e2e::wire_context(&rekey.channel),
             &rekey.pubkey,
             &rekey.eph_pub,
             &rekey.wrap_nonce,
@@ -919,7 +932,7 @@ impl E2eManager {
         let my_x25519_scalar = ecdh::ed25519_seed_to_x25519(&my_seed);
         let my_sk = StaticSecret::from(my_x25519_scalar);
         let shared = my_sk.diffie_hellman(&XPub::from(rekey.eph_pub));
-        let info = rekey_info(&rekey.channel);
+        let info = rekey_info(crate::e2e::wire_context(&rekey.channel));
         let hk = Hkdf::<Sha256>::new(Some(b"RPE2E01-WRAP"), shared.as_bytes());
         let mut wrap_key = [0u8; 32];
         hk.expand(info.as_bytes(), &mut wrap_key)
@@ -994,7 +1007,14 @@ impl E2eManager {
             )));
         }
 
-        let aad = build_aad(channel, wire.msgid, wire.ts, wire.part, wire.total);
+        // AAD uses the WIRE context — see encrypt_outgoing.
+        let aad = build_aad(
+            crate::e2e::wire_context(channel),
+            wire.msgid,
+            wire.ts,
+            wire.part,
+            wire.total,
+        );
         let utf8_or_reject = |pt: Vec<u8>| match String::from_utf8(pt) {
             Ok(s) => DecryptOutcome::Plaintext(s),
             Err(e) => DecryptOutcome::Rejected(format!("utf8: {e}")),
@@ -1065,7 +1085,12 @@ impl E2eManager {
         };
 
         let pubkey = self.identity.public_bytes();
-        let sig_payload = signed_keyreq_payload(channel, &pubkey, &eph_pub, &nonce);
+        // Sign and stamp the WIRE context: the peer (possibly an unscoped
+        // client) verifies against the c= it receives. The pending map keeps
+        // the caller's (possibly network-scoped) storage context — the
+        // KEYRSP consumer re-scopes the reply before looking it up.
+        let wire_channel = crate::e2e::wire_context(channel);
+        let sig_payload = signed_keyreq_payload(wire_channel, &pubkey, &eph_pub, &nonce);
         let sig_bytes = sig::sign(self.identity.signing_key(), &sig_payload);
 
         self.pending
@@ -1082,7 +1107,7 @@ impl E2eManager {
             );
 
         Ok(KeyReq {
-            channel: channel.to_string(),
+            channel: wire_channel.to_string(),
             pubkey,
             eph_x25519: eph_pub,
             nonce,
@@ -1280,8 +1305,14 @@ impl E2eManager {
         }
 
         // Verify signature over the full KEYREQ payload, binding `eph_x25519`.
-        let sig_payload =
-            signed_keyreq_payload(&req.channel, &req.pubkey, &req.eph_x25519, &req.nonce);
+        // The sender signed the WIRE channel; the caller may have scoped
+        // req.channel to its network for storage.
+        let sig_payload = signed_keyreq_payload(
+            crate::e2e::wire_context(&req.channel),
+            &req.pubkey,
+            &req.eph_x25519,
+            &req.nonce,
+        );
         sig::verify(&req.pubkey, &sig_payload, &req.sig)?;
 
         // Channel config + autotrust mode promotion.
@@ -1342,7 +1373,7 @@ impl E2eManager {
         // initiator does not know its own server-assigned handle at the
         // point it calls `handle_keyrsp`. The ephemeral X25519 keypairs
         // themselves bind the exchange to a specific peer.
-        let info = wrap_info(&req.channel);
+        let info = wrap_info(crate::e2e::wire_context(&req.channel));
         let wrap_key = derive_wrap_key(&our_eph_sec, &req.eph_x25519, info.as_bytes());
         let (wrap_nonce, wrap_ct) = aead::encrypt(&wrap_key, info.as_bytes(), &our_sk)?;
 
@@ -1354,7 +1385,7 @@ impl E2eManager {
         let mut rsp_nonce = [0u8; 16];
         rand::fill(&mut rsp_nonce);
         let sig_payload = signed_keyrsp_payload(
-            &req.channel,
+            crate::e2e::wire_context(&req.channel),
             &our_pubkey,
             &our_eph_pub,
             &wrap_nonce,
@@ -1403,7 +1434,9 @@ impl E2eManager {
         }
 
         Ok(Some(KeyRsp {
-            channel: req.channel.clone(),
+            // Echo the WIRE c= verbatim (spec: verbatim echo) — the storage
+            // scope prefix never leaves the process.
+            channel: crate::e2e::wire_context(&req.channel).to_string(),
             pubkey: our_pubkey,
             ephemeral_pub: our_eph_pub,
             wrap_nonce,
@@ -1482,7 +1515,7 @@ impl E2eManager {
         let our_eph_sec = StaticSecret::from(our_eph_secret);
         let our_eph_pub = XPub::from(&our_eph_sec).to_bytes();
 
-        let info = wrap_info(&req.channel);
+        let info = wrap_info(crate::e2e::wire_context(&req.channel));
         let wrap_key = derive_wrap_key(&our_eph_sec, &req.eph_x25519, info.as_bytes());
         let (wrap_nonce, wrap_ct) = aead::encrypt(&wrap_key, info.as_bytes(), &our_sk)?;
 
@@ -1490,7 +1523,7 @@ impl E2eManager {
         let mut rsp_nonce = [0u8; 16];
         rand::fill(&mut rsp_nonce);
         let sig_payload = signed_keyrsp_payload(
-            &req.channel,
+            crate::e2e::wire_context(&req.channel),
             &our_pubkey,
             &our_eph_pub,
             &wrap_nonce,
@@ -1540,7 +1573,8 @@ impl E2eManager {
         }
 
         Ok(KeyRsp {
-            channel: req.channel.clone(),
+            // Echo the WIRE c= verbatim — see handle_keyreq_with_nick.
+            channel: crate::e2e::wire_context(&req.channel).to_string(),
             pubkey: our_pubkey,
             ephemeral_pub: our_eph_pub,
             wrap_nonce,
@@ -1586,7 +1620,7 @@ impl E2eManager {
     /// Unrelated entries for the same channel stay in the map; they
     /// are still awaiting their own KEYRSPs.
     fn consume_matching_pending_for_keyrsp(&self, rsp: &KeyRsp) -> Result<[u8; 32]> {
-        let info = wrap_info(&rsp.channel);
+        let info = wrap_info(crate::e2e::wire_context(&rsp.channel));
         let candidate_keys: Vec<(String, [u8; 16])> = {
             let pending = self.pending.lock().expect("e2e pending mutex poisoned");
             pending
@@ -1645,7 +1679,7 @@ impl E2eManager {
 
         // Verify signature first, before touching any state.
         let sig_payload = signed_keyrsp_payload(
-            &rsp.channel,
+            crate::e2e::wire_context(&rsp.channel),
             &sender_pubkey,
             &rsp.ephemeral_pub,
             &rsp.wrap_nonce,

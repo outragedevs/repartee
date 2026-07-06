@@ -84,8 +84,11 @@ fn rekey_notice_target(
     if *buffer_type == BufferType::Query {
         // `context_key(nick, handle)` yields `@<handle>` for a non-channel
         // name, so this holds exactly when the entry targets the DM peer.
-        return (crate::e2e::context_key(buffer_name, target_handle) == context)
-            .then(|| buffer_name.to_string());
+        // The encrypt context may carry a network-scope prefix — compare
+        // against its wire part.
+        return (crate::e2e::context_key(buffer_name, target_handle)
+            == crate::e2e::wire_context(context))
+        .then(|| buffer_name.to_string());
     }
     buf.and_then(|b| {
         b.users.values().find_map(|u| {
@@ -210,8 +213,31 @@ impl AppState {
         // moved on. Resolving peer_handle from the active buffer would
         // encrypt under the WRONG peer's session key (or fall back to
         // plain) and produce a confidentiality regression.
+        // Network label for scoping the keyring context (see
+        // `e2e::scoped_context`) — resolved like the REKEY drain below:
+        // live buffer first, then the conn id recoverable from buffer_id.
+        // A vanished connection degrades to the legacy unscoped context;
+        // the read fallback still sees pre-scoping rows, and with the
+        // connection gone nothing can reach the wire anyway.
+        let network = self
+            .buffers
+            .get(buffer_id)
+            .map(|b| b.connection_id.clone())
+            .or_else(|| {
+                buffer_id
+                    .split_once('/')
+                    .map(|(conn_id, _)| conn_id.to_string())
+            })
+            .and_then(|c| self.connections.get(&c))
+            .map(|c| c.label.clone());
+        let scope = |wire: &str| -> String {
+            network.as_deref().map_or_else(
+                || wire.to_string(),
+                |net| crate::e2e::scoped_context(net, wire),
+            )
+        };
         let context: String = match buffer_type {
-            BufferType::Channel => buffer_name.to_string(),
+            BufferType::Channel => scope(buffer_name),
             BufferType::Query => {
                 // Resolve LIVE first — the buffer's server-stamped peer_handle
                 // or the keyring's network-scoped cached handle (the SAME
@@ -268,7 +294,7 @@ impl AppState {
                     }
                     return plain_passthrough();
                 };
-                crate::e2e::context_key(buffer_name, &peer_handle)
+                scope(&crate::e2e::context_key(buffer_name, &peer_handle))
             }
             // Server/Status/DccChat/Shell/Mentions/Special: E2E does not
             // apply. handle_plain_message already gates messaging on
@@ -411,12 +437,20 @@ impl AppState {
         let Some(mgr) = self.e2e_manager.as_ref() else {
             return false;
         };
+        let network = self
+            .connections
+            .get(conn_id)
+            .map(|c| c.label.clone())
+            .unwrap_or_default();
         let context = if crate::e2e::is_channel_target(target) {
-            target.to_string()
+            crate::e2e::scoped_context(&network, target)
         } else {
             let buffer_id = make_buffer_id(conn_id, target);
             match self.resolve_query_peer_handle(&buffer_id, target) {
-                Ok(Some(handle)) => crate::e2e::context_key(target, &handle),
+                Ok(Some(handle)) => crate::e2e::scoped_context(
+                    &network,
+                    &crate::e2e::context_key(target, &handle),
+                ),
                 Ok(None) => return false,
                 Err(e) => {
                     tracing::warn!("e2e: advisory handle resolution failed for {target}: {e}");
