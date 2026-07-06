@@ -781,7 +781,9 @@ fn perform_e2e_forget(
         // success — the peer's trusted incoming session would survive and
         // their messages would keep decrypting. Refuse instead, exactly like
         // revoke/unrevoke/verify do in the same state.
-        if channel.starts_with('@') && own_channel.is_none() {
+        // The context may be network-scoped — the DM test looks at its
+        // wire part.
+        if crate::e2e::wire_context(channel).starts_with('@') && own_channel.is_none() {
             err(app, "/e2e forget: own handle not yet known — retry in a moment");
             app.state.active_buffer_id = current_id;
             return;
@@ -797,7 +799,7 @@ fn perform_e2e_forget(
             app,
             &format!(
                 "forgot {target} ({handle}) on {} — removed {deleted} row(s)",
-                channel.unwrap_or_default()
+                channel.map_or_else(String::new, crate::e2e::display_context)
             ),
         ),
         Err(e) => err(app, &format!("/e2e forget: {e}")),

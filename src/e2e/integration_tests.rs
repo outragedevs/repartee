@@ -2068,3 +2068,27 @@ fn legacy_unscoped_rows_still_resolve_after_upgrade() {
         other => panic!("post-upgrade send must reuse the legacy outgoing key: {other:?}"),
     }
 }
+
+#[test]
+fn scoped_dm_keyreq_still_skips_reciprocal() {
+    // The DM test inside handle_keyreq must look at the WIRE part of a
+    // scoped context — 'Net\x1F@handle' does not start with '@', and
+    // treating it as a channel would fire a reciprocal KEYREQ keyed under
+    // the wrong DM direction (the G13 bug all over again).
+    let alice = make_manager();
+    let dm_ctx = crate::e2e::scoped_context("NetA", "@~me@host");
+    enable_channel(&alice, &dm_ctx, ChannelMode::AutoAccept);
+
+    let bob = make_manager();
+    let mut req = bob.build_keyreq(&dm_ctx).unwrap();
+    assert_eq!(req.channel, "@~me@host");
+    req.channel = dm_ctx;
+    alice
+        .handle_keyreq("~bob@b.host", &req)
+        .unwrap()
+        .expect("AutoAccept answers the DM KEYREQ");
+    assert!(
+        alice.take_pending_outbound_keyreqs().is_empty(),
+        "a DM KEYREQ must not queue a reciprocal (per-direction handshakes)"
+    );
+}
