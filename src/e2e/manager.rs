@@ -54,6 +54,10 @@ struct PendingHandshake {
     channel: String,
     peer_handle: Option<String>,
     eph_x25519_secret: [u8; 32],
+    /// Unix time the KEYREQ was built — drives TTL eviction
+    /// (`PENDING_KEYREQ_TTL_SECS`); a KEYRSP that never arrives must not
+    /// pin the ephemeral secret in memory forever.
+    created_at: i64,
 }
 
 /// Inbound KEYREQ cached in Normal mode for a yet-unknown peer, so that a
@@ -64,7 +68,23 @@ struct PendingHandshake {
 #[derive(Debug, Clone)]
 struct PendingInboundKeyReq {
     req: KeyReq,
+    /// Unix time the KEYREQ was cached — drives TTL eviction
+    /// (`PENDING_INBOUND_TTL_SECS`).
+    created_at: i64,
 }
+
+/// TTL for the initiator's in-memory pending handshakes (ephemeral secrets
+/// awaiting a KEYRSP). A KEYRSP normally arrives within seconds; after the
+/// TTL the entry is pruned and recovery is simply the next auto-KEYREQ on
+/// inbound ciphertext. Bounds `E2eManager::pending` across long sessions
+/// with unanswered KEYREQs.
+const PENDING_KEYREQ_TTL_SECS: i64 = 900;
+
+/// TTL for Normal-mode inbound KEYREQs cached for `/e2e accept`. Much longer
+/// than the initiator TTL — the user may be away from the keyboard — but
+/// still bounded: after eviction the zero-key accept guard explains what
+/// happened and the peer just re-handshakes.
+const PENDING_INBOUND_TTL_SECS: i64 = 21_600;
 
 /// How long a superseded incoming session key stays usable for decrypt after
 /// a REKEY replaces it. This is a reorder-tolerance window (a REKEY NOTICE
@@ -237,6 +257,44 @@ pub enum DecryptOutcome {
 }
 
 impl E2eManager {
+    /// Evict pending handshake entries past their TTL. Called from the
+    /// insert paths (every new handshake build / inbound cache), which
+    /// bounds both maps without a timer: a session that stops handshaking
+    /// stops growing them, and one that keeps handshaking keeps pruning.
+    fn prune_expired_pending(&self) {
+        let now = now_unix();
+        self.pending
+            .lock()
+            .expect("e2e pending mutex poisoned")
+            .retain(|_, ph| now - ph.created_at <= PENDING_KEYREQ_TTL_SECS);
+        self.pending_inbound
+            .lock()
+            .expect("e2e pending inbound mutex poisoned")
+            .retain(|_, p| now - p.created_at <= PENDING_INBOUND_TTL_SECS);
+    }
+
+    /// Test clock control: shift every pending entry's `created_at` into the
+    /// past so TTL eviction can be exercised without sleeping.
+    #[cfg(test)]
+    pub(crate) fn age_pending_entries_for_test(&self, secs: i64) {
+        for ph in self
+            .pending
+            .lock()
+            .expect("e2e pending mutex poisoned")
+            .values_mut()
+        {
+            ph.created_at -= secs;
+        }
+        for p in self
+            .pending_inbound
+            .lock()
+            .expect("e2e pending inbound mutex poisoned")
+            .values_mut()
+        {
+            p.created_at -= secs;
+        }
+    }
+
     fn clear_pending_state_for_handle(&self, handle: &str) -> usize {
         let mut deleted = 0usize;
 
@@ -994,6 +1052,8 @@ impl E2eManager {
         //    `handle_privmsg`, but even if something else leaks a
         //    stale entry in the future, the match-by-unwrap in
         //    `handle_keyrsp` makes it harmless.
+        self.prune_expired_pending();
+
         let mut nonce = [0u8; 16];
         rand::fill(&mut nonce);
 
@@ -1017,6 +1077,7 @@ impl E2eManager {
                     channel: channel.to_string(),
                     peer_handle: peer_handle.map(ToOwned::to_owned),
                     eph_x25519_secret: eph_secret,
+                    created_at: now_unix(),
                 },
             );
 
@@ -1175,12 +1236,16 @@ impl E2eManager {
         if let Err(e) = self.keyring.install_incoming_session_strict(&pending_sess) {
             tracing::warn!("normal-mode pending session install failed: {e}");
         }
+        self.prune_expired_pending();
         self.pending_inbound
             .lock()
             .expect("e2e pending inbound mutex poisoned")
             .insert(
                 (sender_handle.to_string(), req.channel.clone()),
-                PendingInboundKeyReq { req: req.clone() },
+                PendingInboundKeyReq {
+                    req: req.clone(),
+                    created_at: now_unix(),
+                },
             );
         self.pending_accept_requests
             .lock()
@@ -1367,7 +1432,7 @@ impl E2eManager {
                 .expect("e2e pending inbound mutex poisoned");
             guard.remove(&(sender_handle.to_string(), channel.to_string()))
         };
-        let Some(PendingInboundKeyReq { req }) = cached else {
+        let Some(PendingInboundKeyReq { req, .. }) = cached else {
             return Ok(None);
         };
 
@@ -1824,13 +1889,19 @@ mod tests {
     fn forget_peer_everywhere_clears_handle_scoped_pending_state() {
         let mgr = make_manager();
         let _ = mgr.build_keyreq_for_peer("#x", Some("~bob@host")).unwrap();
+        // Build the KeyReq BEFORE taking the pending_inbound lock:
+        // build_keyreq prunes expired pending entries, which locks
+        // pending_inbound itself — building it inside the insert expression
+        // (guard alive for the whole statement) deadlocks.
+        let inbound_req = mgr.build_keyreq("#x").unwrap();
         mgr.pending_inbound
             .lock()
             .expect("pending inbound mutex poisoned in test")
             .insert(
                 ("~bob@host".to_string(), "#x".to_string()),
                 PendingInboundKeyReq {
-                    req: mgr.build_keyreq("#x").unwrap(),
+                    req: inbound_req,
+                    created_at: now_unix(),
                 },
             );
         mgr.pending_accept_requests

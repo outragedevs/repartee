@@ -1885,3 +1885,61 @@ fn previous_key_grace_window_expires() {
         other => panic!("expired previous key must not decrypt, got {other:?}"),
     }
 }
+
+// === Phase D: pending-handshake TTL ===
+
+#[test]
+fn stale_pending_handshakes_are_evicted() {
+    // The initiator's in-memory pending map (ephemeral secrets awaiting a
+    // KEYRSP) must not grow without bound across a long session: entries
+    // past the TTL are pruned on the next handshake build, and a KEYRSP for
+    // an evicted entry fails like any unknown handshake.
+    let bob = make_manager();
+    let alice = make_manager();
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+
+    let req = bob.build_keyreq("#x").unwrap();
+    let rsp = alice.handle_keyreq("~bob@b.host", &req).unwrap().unwrap();
+
+    // Age bob's pending entry far past the TTL; the next build prunes.
+    bob.age_pending_entries_for_test(1_000_000);
+    let _ = bob.build_keyreq("#other").unwrap();
+
+    let err = bob
+        .handle_keyrsp("~alice@a.host", &rsp)
+        .expect_err("KEYRSP for an evicted pending entry must fail");
+    assert!(
+        err.to_string().contains("no pending handshake"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn stale_pending_inbound_keyreqs_are_evicted() {
+    // Normal-mode inbound KEYREQs cached for /e2e accept get the same TTL
+    // treatment (a much longer window — the user may be away). After
+    // eviction, accept finds nothing; the peer simply re-handshakes.
+    let alice = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::Normal);
+    let bob = make_manager();
+    let req = bob.build_keyreq("#x").unwrap();
+    assert!(
+        alice.handle_keyreq("~bob@b.host", &req).unwrap().is_none(),
+        "normal mode caches the KEYREQ instead of answering"
+    );
+
+    alice.age_pending_entries_for_test(1_000_000);
+    // Any new inbound handshake triggers the prune.
+    let carol = make_manager();
+    let req2 = carol.build_keyreq("#x").unwrap();
+    let _ = alice.handle_keyreq("~carol@c.host", &req2).unwrap();
+
+    assert!(
+        alice
+            .accept_pending_inbound("~bob@b.host", "#x")
+            .unwrap()
+            .is_none(),
+        "the evicted inbound KEYREQ must be gone"
+    );
+}

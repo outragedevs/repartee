@@ -50,6 +50,9 @@ impl Storage {
             config.encrypt,
         )
         .map_err(|e| format!("failed to open log database: {e}"))?;
+        // After open, so a freshly created database file is covered too.
+        // SQLite creates -wal/-shm siblings with the database's permissions.
+        harden_storage_permissions(&db_dir, &db_path);
 
         let crypto_key = if config.encrypt {
             let hex_key = crypto::load_or_create_key()?;
@@ -149,4 +152,58 @@ pub fn load_log_db(config: &LoggingConfig) -> Result<LogDb, String> {
         crypto_key,
         has_fts: !config.encrypt,
     })
+}
+
+/// Restrict the log directory and database file to the owning user
+/// (`0700`/`0600`). The database holds decrypted message logs and — when E2E
+/// is enabled — the keyring tables, and its at-rest encryption key lives in a
+/// sibling dotfile, so group/world access to either half defeats it. Applied
+/// on every startup (not just creation) to heal pre-existing permissive
+/// installs. Failures are logged, never fatal: a read-only or exotic
+/// filesystem must not brick startup. No-op off unix.
+fn harden_storage_permissions(dir: &std::path::Path, db_path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for (path, mode) in [(dir, 0o700), (db_path, 0o600)] {
+            if !path.exists() {
+                continue;
+            }
+            if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) {
+                tracing::warn!("failed to set {mode:o} on {}: {e}", path.display());
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (dir, db_path);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    #![allow(clippy::unwrap_used, reason = "test code")]
+
+    use super::harden_storage_permissions;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn harden_storage_permissions_sets_0700_dir_0600_db() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("logs");
+        std::fs::create_dir(&dir).unwrap();
+        let db = dir.join("messages.db");
+        std::fs::write(&db, b"x").unwrap();
+        // Start permissive, as create_dir_all/File::create leave them under
+        // a default umask.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        harden_storage_permissions(&dir, &db);
+
+        let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        let db_mode = std::fs::metadata(&db).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "log dir must be owner-only");
+        assert_eq!(db_mode, 0o600, "db file must be owner-only");
+    }
 }
