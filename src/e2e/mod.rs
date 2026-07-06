@@ -102,11 +102,20 @@ pub const DEFAULT_TS_TOLERANCE_SECS: i64 = 300;
 /// to prevent.
 #[must_use]
 pub fn context_key(target: &str, peer_handle: &str) -> String {
-    if target.starts_with(['#', '&', '!', '+']) {
+    if is_channel_target(target) {
         target.to_string()
     } else {
         format!("@{peer_handle}")
     }
+}
+
+/// `true` when TARGET names an IRC channel by prefix (`#&!+`) — the single
+/// classification `context_key` and every outbound gate caller share, so a
+/// target can never be a channel for context derivation but a DM for gating
+/// (or vice versa).
+#[must_use]
+pub fn is_channel_target(target: &str) -> bool {
+    target.starts_with(['#', '&', '!', '+'])
 }
 
 /// Transient line shown in a query buffer for a DM ciphertext that arrived

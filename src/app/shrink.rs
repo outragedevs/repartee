@@ -505,7 +505,7 @@ impl App {
             self.deliver_outgoing_error(out, "Failed to send message — connection unavailable");
             return;
         }
-        let (wire_lines, plain_echo) = match self.e2e_encrypt_or_passthrough(
+        let (wire_lines, plain_echo) = match self.state.e2e_encrypt_or_passthrough(
             &out.buffer_id,
             &out.buffer_name,
             &out.buffer_type,

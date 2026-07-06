@@ -384,13 +384,25 @@ impl App {
                 text,
                 conn_id,
             } => {
-                if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
-                    && let Some(sender) = self.irc_sender_for(&cid)
-                {
-                    for chunk in crate::irc::split_irc_message(&text, crate::irc::MESSAGE_MAX_BYTES)
-                    {
-                        let _ = sender.send_privmsg(&target, &chunk);
-                    }
+                // Script sends go through the same outbound E2E gate as user
+                // input: a `say()` to an E2E-enabled conversation encrypts or
+                // refuses (fail-closed) — a script must never downgrade an
+                // E2E DM to plaintext. Encrypted sends echo the plaintext
+                // locally (the ciphertext server echo is swallowed); plain
+                // sends keep the historical no-local-echo behavior.
+                if let Some(cid) = self.resolve_conn_id(conn_id.as_deref()) {
+                    let buffer_id = crate::state::buffer::make_buffer_id(&cid, &target);
+                    self.send_gated_message(
+                        &cid,
+                        &target,
+                        &text,
+                        Some(crate::app::e2e_gate::GatedEcho {
+                            buffer_id: &buffer_id,
+                            text: &text,
+                            message_type: crate::state::buffer::MessageType::Message,
+                            even_without_encryption: false,
+                        }),
+                    );
                 }
             }
             ScriptAction::Action {
@@ -398,13 +410,22 @@ impl App {
                 text,
                 conn_id,
             } => {
-                if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
-                    && let Some(sender) = self.irc_sender_for(&cid)
-                {
-                    let _ = sender.send(::irc::proto::Command::Raw(
-                        "PRIVMSG".to_string(),
-                        vec![target, format!("\x01ACTION {text}\x01")],
-                    ));
+                // Same gate as `/me`: the whole `\x01ACTION …\x01` CTCP is
+                // encrypted for an E2E-enabled target, sent unsplit otherwise.
+                if let Some(cid) = self.resolve_conn_id(conn_id.as_deref()) {
+                    let buffer_id = crate::state::buffer::make_buffer_id(&cid, &target);
+                    let ctcp = format!("\x01ACTION {text}\x01");
+                    self.send_gated_message(
+                        &cid,
+                        &target,
+                        &ctcp,
+                        Some(crate::app::e2e_gate::GatedEcho {
+                            buffer_id: &buffer_id,
+                            text: &text,
+                            message_type: crate::state::buffer::MessageType::Action,
+                            even_without_encryption: false,
+                        }),
+                    );
                 }
             }
             ScriptAction::Notice {
@@ -412,10 +433,14 @@ impl App {
                 text,
                 conn_id,
             } => {
-                if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
-                    && let Some(sender) = self.irc_sender_for(&cid)
-                {
-                    let _ = sender.send_notice(&target, &text);
+                // NOTICE stays cleartext by protocol design (RPE2E reserves
+                // it for the handshake) — advise the user when the target is
+                // E2E-enabled, then send unchanged.
+                if let Some(cid) = self.resolve_conn_id(conn_id.as_deref()) {
+                    self.warn_cleartext_to_e2e_target(&cid, &target, "script notice()");
+                    if let Some(sender) = self.irc_sender_for(&cid) {
+                        let _ = sender.send_notice(&target, &text);
+                    }
                 }
             }
             ScriptAction::Raw { line, conn_id } => {
@@ -493,14 +518,16 @@ impl App {
                 message,
                 conn_id,
             } => {
-                if let Some(cid) = self.resolve_conn_id(conn_id.as_deref())
-                    && let Some(sender) = self.irc_sender_for(&cid)
-                {
+                // Gated like every other PRIVMSG payload: `ctcp("ACTION", …)`
+                // to an E2E peer must not be a plaintext side door. For an
+                // E2E-enabled target the whole CTCP is encrypted (the peer
+                // decrypts back to a CTCP); otherwise it goes out verbatim.
+                if let Some(cid) = self.resolve_conn_id(conn_id.as_deref()) {
                     let ctcp_text = message.map_or_else(
                         || format!("\x01{ctcp_type}\x01"),
                         |msg| format!("\x01{ctcp_type} {msg}\x01"),
                     );
-                    let _ = sender.send_privmsg(&target, &ctcp_text);
+                    self.send_gated_message(&cid, &target, &ctcp_text, None);
                 }
             }
             ScriptAction::LocalEvent { text } => {

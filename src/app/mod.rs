@@ -4,6 +4,7 @@
 )]
 pub(crate) mod backlog;
 mod dcc;
+pub mod e2e_gate;
 #[allow(
     clippy::redundant_pub_crate,
     reason = "ui::layout calls emote_anim::composite"

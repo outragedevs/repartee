@@ -1056,62 +1056,29 @@ pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
         return;
     }
 
-    let (conn_id, nick) = {
-        let Some(conn_id) = app.active_conn_id().map(str::to_owned) else {
-            add_local_event(app, "No active connection");
-            return;
-        };
-        let nick = app
-            .state
-            .connections
-            .get(&conn_id)
-            .map(|c| c.nick.clone())
-            .unwrap_or_default();
-        (conn_id, nick)
+    let Some(conn_id) = app.active_conn_id().map(str::to_owned) else {
+        add_local_event(app, "No active connection");
+        return;
     };
 
     // Create query buffer if needed (skip channels for /msg)
     let buffer_id = ensure_query_buffer(app, &conn_id, target, true);
 
-    // When echo-message is enabled, skip local display — the server echo is authoritative.
-    let echo_message_enabled = app
-        .state
-        .connections
-        .get(&conn_id)
-        .is_some_and(|c| c.enabled_caps.contains("echo-message"));
-
-    // Split long messages at word boundaries to stay within IRC byte limits.
-    let chunks = crate::irc::split_irc_message(text, crate::irc::MESSAGE_MAX_BYTES);
-    let own_mode = app.state.nick_prefix(&buffer_id, &nick);
-    for chunk in chunks {
-        if let Some(handle) = app.irc_handles.get(&conn_id)
-            && let Err(e) = handle.sender.send_privmsg(target, &chunk)
-        {
-            add_local_event(app, &format!("Failed to send message: {e}"));
-            return;
-        }
-
-        if !echo_message_enabled {
-            let id = app.state.next_message_id();
-            app.state.add_message(
-                &buffer_id,
-                crate::state::buffer::Message {
-                    id,
-                    timestamp: chrono::Utc::now(),
-                    message_type: crate::state::buffer::MessageType::Message,
-                    nick: Some(nick.clone()),
-                    nick_mode: own_mode.map(|c| c.to_string()),
-                    text: chunk,
-                    highlight: false,
-                    event_key: None,
-                    event_params: None,
-                    log_msg_id: None,
-                    log_ref_id: None,
-                    tags: None,
-                },
-            );
-        }
-    }
+    // Route through the outbound E2E gate — `/msg <peer> <text>` to an
+    // E2E-enabled conversation must encrypt (or refuse, fail-closed)
+    // exactly like text typed in the query buffer. The helper also
+    // handles the IRC byte-split, REKEY drain, and local echo.
+    app.send_gated_message(
+        &conn_id,
+        target,
+        text,
+        Some(crate::app::e2e_gate::GatedEcho {
+            buffer_id: &buffer_id,
+            text,
+            message_type: crate::state::buffer::MessageType::Message,
+            even_without_encryption: true,
+        }),
+    );
     // /msg stays in the current window — buffer is created but not switched to.
     // Use /query to open and switch to a conversation.
 }
@@ -1134,51 +1101,21 @@ pub(crate) fn cmd_query(app: &mut App, args: &[String]) {
     // Switch to the query buffer
     app.state.set_active_buffer(&buffer_id);
 
-    // If a message was provided, send it
+    // If a message was provided, send it through the outbound E2E gate —
+    // same fail-closed rules as /msg and the query-buffer input path.
     if args.len() >= 2 {
         let text = &args[1];
-        let nick = app
-            .state
-            .connections
-            .get(&conn_id)
-            .map(|c| c.nick.clone())
-            .unwrap_or_default();
-
-        if let Some(handle) = app.irc_handles.get(&conn_id)
-            && let Err(e) = handle.sender.send_privmsg(target, text)
-        {
-            add_local_event(app, &format!("Failed to send message: {e}"));
-            return;
-        }
-
-        // When echo-message is enabled, skip local display — the server echo is authoritative.
-        let echo_message_enabled = app
-            .state
-            .connections
-            .get(&conn_id)
-            .is_some_and(|c| c.enabled_caps.contains("echo-message"));
-
-        if !echo_message_enabled {
-            let own_mode = app.state.nick_prefix(&buffer_id, &nick);
-            let id = app.state.next_message_id();
-            app.state.add_message(
-                &buffer_id,
-                crate::state::buffer::Message {
-                    id,
-                    timestamp: chrono::Utc::now(),
-                    message_type: crate::state::buffer::MessageType::Message,
-                    nick: Some(nick),
-                    nick_mode: own_mode.map(|c| c.to_string()),
-                    text: text.clone(),
-                    highlight: false,
-                    event_key: None,
-                    event_params: None,
-                    log_msg_id: None,
-                    log_ref_id: None,
-                    tags: None,
-                },
-            );
-        }
+        app.send_gated_message(
+            &conn_id,
+            target,
+            text,
+            Some(crate::app::e2e_gate::GatedEcho {
+                buffer_id: &buffer_id,
+                text,
+                message_type: crate::state::buffer::MessageType::Message,
+                even_without_encryption: true,
+            }),
+        );
     }
 }
 
@@ -1239,52 +1176,24 @@ pub(crate) fn cmd_me(app: &mut App, args: &[String]) {
         return;
     }
 
-    let nick = app
-        .state
-        .connections
-        .get(&conn_id)
-        .map(|c| c.nick.clone())
-        .unwrap_or_default();
-
-    let Some(handle) = app.irc_handles.get(&conn_id) else {
-        add_local_event(app, "Not connected");
-        return;
-    };
+    // Route the CTCP ACTION through the outbound E2E gate: a `/me` typed in
+    // an E2E-enabled query (or channel) must encrypt the whole
+    // `\x01ACTION …\x01` string — the peer decrypts it back into a CTCP and
+    // renders it as an action. A plaintext send stays a single unsplit CTCP,
+    // exactly like the legacy path.
+    let buffer_id = app.state.active_buffer_id.clone().unwrap_or_default();
     let ctcp = format!("\x01ACTION {action_text}\x01");
-    if let Err(e) = handle.sender.send_privmsg(&target, &ctcp) {
-        add_local_event(app, &format!("Failed to send action: {e}"));
-        return;
-    }
-
-    // When echo-message is enabled, skip local display — the server echo is authoritative.
-    let echo_message_enabled = app
-        .state
-        .connections
-        .get(&conn_id)
-        .is_some_and(|c| c.enabled_caps.contains("echo-message"));
-
-    if !echo_message_enabled {
-        let buffer_id = app.state.active_buffer_id.clone().unwrap_or_default();
-        let own_mode = app.state.nick_prefix(&buffer_id, &nick);
-        let id = app.state.next_message_id();
-        app.state.add_message(
-            &buffer_id,
-            crate::state::buffer::Message {
-                id,
-                timestamp: chrono::Utc::now(),
-                message_type: crate::state::buffer::MessageType::Action,
-                nick: Some(nick),
-                nick_mode: own_mode.map(|c| c.to_string()),
-                text: action_text.clone(),
-                highlight: false,
-                event_key: None,
-                event_params: None,
-                log_msg_id: None,
-                log_ref_id: None,
-                tags: None,
-            },
-        );
-    }
+    app.send_gated_message(
+        &conn_id,
+        &target,
+        &ctcp,
+        Some(crate::app::e2e_gate::GatedEcho {
+            buffer_id: &buffer_id,
+            text: action_text,
+            message_type: crate::state::buffer::MessageType::Action,
+            even_without_encryption: true,
+        }),
+    );
 }
 
 pub(crate) fn cmd_nick(app: &mut App, args: &[String]) {
@@ -1313,6 +1222,14 @@ pub(crate) fn cmd_notice(app: &mut App, args: &[String]) {
 
     let target = &args[0];
     let text = &args[1];
+
+    // RPE2E deliberately keeps NOTICE cleartext (the frame is reserved for
+    // the KEYREQ/KEYRSP/REKEY handshake) — warn, don't block, when the
+    // target's conversation is E2E-enabled so confidential text doesn't end
+    // up in a notice by accident.
+    if let Some(conn_id) = app.active_conn_id().map(str::to_owned) {
+        app.warn_cleartext_to_e2e_target(&conn_id, target, "/notice");
+    }
 
     if let Some(sender) = app.active_irc_sender() {
         if let Err(e) = sender.send_notice(target, text) {
