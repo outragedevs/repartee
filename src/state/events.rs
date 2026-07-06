@@ -27,6 +27,7 @@ impl AppState {
             scrollback_limit: 2000,
             pending_web_events: Vec::new(),
             pending_e2e_sends: Vec::new(),
+            pending_e2e_gapfills: Vec::new(),
             pending_userhost_requests: Vec::new(),
             nick_color_sat: 0.65,
             nick_color_lit: 0.65,
@@ -667,8 +668,11 @@ impl AppState {
             // heals on its next resync — no removal event exists to send.
             if !spliced_ts.is_empty() {
                 buf.messages.retain(|m| {
-                    m.text != crate::e2e::AWAITING_OWN_IDENTITY_PLACEHOLDER
-                        || !spliced_ts.contains(&m.timestamp)
+                    let is_e2e_placeholder = m.text
+                        == crate::e2e::AWAITING_OWN_IDENTITY_PLACEHOLDER
+                        || m.text
+                            .starts_with(crate::e2e::AWAITING_SESSION_PLACEHOLDER_PREFIX);
+                    !is_e2e_placeholder || !spliced_ts.contains(&m.timestamp)
                 });
             }
             enforce_scrollback(buf, limit);
@@ -1829,6 +1833,43 @@ mod tests {
                 .iter()
                 .any(|m| m.text == crate::e2e::AWAITING_OWN_IDENTITY_PLACEHOLDER),
             "placeholder must be removed when its decrypted replay surfaces"
+        );
+    }
+
+    #[test]
+    fn session_placeholder_swept_by_replay_splice() {
+        // The awaiting-SESSION placeholder ("[E2E: awaiting session with …]",
+        // shown for the DM that triggered a handshake) follows the same
+        // lifecycle as the awaiting-own-identity one: tagless + transient, and
+        // swept when the decrypted replay of its wire line splices in.
+        let mut state = make_test_state();
+        let mut placeholder =
+            make_test_message(&mut state, "[E2E: awaiting session with ~bob@b.host]");
+        placeholder.tags = None;
+        let placeholder_ts = placeholder.timestamp;
+        state.add_transient_message_with_activity(
+            "libera/#rust",
+            placeholder,
+            ActivityLevel::Mention,
+        );
+
+        let mut decrypted = make_test_message(&mut state, "the lost first message");
+        decrypted.timestamp = placeholder_ts;
+        decrypted.tags = Some(HashMap::from([("msgid".to_string(), "abc".to_string())]));
+        state.surface_history_rows("libera/#rust", vec![decrypted]);
+
+        let buf = state.buffers.get("libera/#rust").unwrap();
+        assert!(
+            buf.messages
+                .iter()
+                .any(|m| m.text == "the lost first message"),
+            "decrypted replay must surface"
+        );
+        assert!(
+            !buf.messages
+                .iter()
+                .any(|m| m.text.starts_with("[E2E: awaiting session with")),
+            "session placeholder must be removed when its decrypted replay surfaces"
         );
     }
 

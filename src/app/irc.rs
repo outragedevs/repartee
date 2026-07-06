@@ -894,6 +894,16 @@ impl App {
                     // auto-KEYREQ on MissingKey) produced by the handlers.
                     self.drain_pending_e2e_sends();
 
+                    // Drain post-handshake DM gap-fills: a KEYRSP that just
+                    // installed a query's session queued its nick here so the
+                    // message that triggered the handshake (transient
+                    // "[E2E: awaiting session with …]" placeholder) is
+                    // re-fetched via CHATHISTORY and decrypted for real.
+                    let e2e_gapfills = std::mem::take(&mut self.state.pending_e2e_gapfills);
+                    for gapfill in e2e_gapfills {
+                        self.regapfill_query_after_session(&gapfill.connection_id, &gapfill.nick);
+                    }
+
                     // If we just learned our own ident@host (the recipient-keyed
                     // DM context), re-run the query gap-fill: a gap-fill that ran
                     // at end-of-MOTD before the self-USERHOST reply arrived would

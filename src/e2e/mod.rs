@@ -126,6 +126,16 @@ pub fn is_channel_target(target: &str) -> bool {
 /// site (`irc::events::handle_privmsg`) and the removal site match exactly.
 pub const AWAITING_OWN_IDENTITY_PLACEHOLDER: &str = "[E2E: awaiting our own identity]";
 
+/// Prefix of the transient line shown for a DM ciphertext that arrived before
+/// a session with the sender existed (`"[E2E: awaiting session with <handle>]"`).
+/// Like the own-identity placeholder it is never persisted: once the KEYRSP
+/// installs the session, the query is gap-filled via CHATHISTORY, the line is
+/// decrypted for real, and `AppState::surface_history_rows` sweeps any message
+/// starting with this prefix at the replayed timestamp. One constant so the
+/// creation site (`irc::events::try_decrypt_e2e`), the transiency check
+/// (`irc::events::handle_privmsg`), and the sweep match exactly.
+pub const AWAITING_SESSION_PLACEHOLDER_PREFIX: &str = "[E2E: awaiting session with ";
+
 #[cfg(test)]
 mod context_key_tests {
     use super::context_key;

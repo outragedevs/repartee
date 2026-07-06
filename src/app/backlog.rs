@@ -581,6 +581,20 @@ impl App {
         }
     }
 
+    /// Re-run one query's `CHATHISTORY` gap-fill after a KEYRSP installed its
+    /// DM session (drained from `state.pending_e2e_gapfills`). The ciphertext
+    /// that triggered the handshake was shown only as the transient
+    /// "[E2E: awaiting session with …]" placeholder; the re-fetch decrypts it
+    /// under the fresh session and the splice sweeps the placeholder. The
+    /// one-shot connect-gapfill claim must be released first, same as
+    /// `regapfill_queries_after_own_handle`.
+    pub(crate) fn regapfill_query_after_session(&mut self, conn_id: &str, nick: &str) {
+        if let Some(conn) = self.state.connections.get_mut(conn_id) {
+            conn.chathistory.clear_connect_gapfilled(nick);
+        }
+        self.request_connect_gapfill(conn_id, nick);
+    }
+
     /// On a channel's NAMES completion after (re)connect, gap-fill that channel's
     /// history **if it is the active buffer**. Running here (rather than at
     /// end-of-MOTD) guarantees the server has acknowledged our JOIN — NAMES is

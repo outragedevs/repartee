@@ -1176,6 +1176,15 @@ fn handle_privmsg(
     if decrypted_owned.as_deref() == Some("") {
         return;
     }
+    // The awaiting-SESSION placeholder (MissingKey) follows the same
+    // transient/tagless lifecycle as the awaiting-own-identity one: the
+    // post-KEYRSP gap-fill re-fetches its wire line under the real @msgid,
+    // and a logged placeholder would win the unique (network, msg_id) row
+    // forever — silently losing the first DM of every new session.
+    let e2e_transient_placeholder = e2e_awaiting_own_handle
+        || decrypted_owned
+            .as_deref()
+            .is_some_and(|t| t.starts_with(crate::e2e::AWAITING_SESSION_PLACEHOLDER_PREFIX));
     let text: &str = decrypted_owned.as_deref().unwrap_or(text);
 
     // Check if this is a CTCP (ACTION or other)
@@ -1497,17 +1506,18 @@ fn handle_privmsg(
         event_params: None,
         log_msg_id: None,
         log_ref_id: None,
-        // The awaiting-own-identity placeholder must carry NO @msgid: it keeps
-        // the server tags off so (a) the transient line never occupies the
-        // (network, @msgid) storage row, and (b) `buffer_contains_history_row`
-        // can't dedup the later decrypted CHATHISTORY replay (same @msgid)
-        // against it — which would skip the real message and leave the
-        // placeholder showing until restart. Real messages keep their tags.
-        tags: if e2e_awaiting_own_handle { None } else { tags },
+        // E2E placeholders (awaiting-own-identity, awaiting-session) must
+        // carry NO @msgid: keeping the server tags off means (a) the transient
+        // line never occupies the (network, @msgid) storage row, and (b)
+        // `buffer_contains_history_row` can't dedup the later decrypted
+        // CHATHISTORY replay (same @msgid) against it — which would skip the
+        // real message and leave the placeholder showing until restart. Real
+        // messages keep their tags.
+        tags: if e2e_transient_placeholder { None } else { tags },
     };
-    // The placeholder is delivered transiently (never logged) so it doesn't
+    // Placeholders are delivered transiently (never logged) so they don't
     // persist; the decrypted replay is logged + surfaced under the real @msgid.
-    if e2e_awaiting_own_handle {
+    if e2e_transient_placeholder {
         state.add_transient_message_with_activity(&buffer_id, msg, activity);
     } else {
         state.add_message_with_activity(&buffer_id, msg, activity);
@@ -1588,6 +1598,19 @@ fn handle_notice(
     // user-visible buffer line so the raw CTCP never leaks into the UI.
     if try_dispatch_rpe2e_ctcp(state, conn_id, prefix, target, text) == Some(RpEe2eOutcome::Handled)
     {
+        return;
+    }
+
+    // RPE2E never ships ciphertext in NOTICE (the frame is reserved for the
+    // handshake), so a `+RPE2E01` notice is a buggy or malicious peer — there
+    // is no decrypt path for it, and rendering it would put a raw wire line
+    // in the buffer. Suppress it (E2E users only; for everyone else the
+    // prefix is ordinary text).
+    if state.e2e_manager.is_some() && text.starts_with("+RPE2E01") {
+        tracing::warn!(
+            target = %target,
+            "suppressing RPE2E ciphertext delivered in a NOTICE (protocol violation)"
+        );
         return;
     }
 
@@ -4214,14 +4237,25 @@ fn try_decrypt_e2e(
                     Err(e) => tracing::warn!("build_keyreq failed for {ch}: {e}"),
                 }
             }
-            Some(format!("[E2E: awaiting session with {handle}]"))
+            Some(format!(
+                "{}{handle}]",
+                crate::e2e::AWAITING_SESSION_PLACEHOLDER_PREFIX
+            ))
         }
         Ok(crate::e2e::manager::DecryptOutcome::Rejected(reason)) => {
             Some(format!("[E2E rejected: {reason}]"))
         }
         Err(e) => {
             tracing::warn!("e2e decrypt error on {channel}: {e}");
-            None
+            // A malformed +RPE2E01 line (truncated relay, corrupted base64,
+            // DB fault mid-decrypt) must NOT fall through to rendering — and
+            // logging — the raw wire line; surface a rejection like every
+            // other decrypt failure. The CHATHISTORY sibling
+            // (`decrypt_chathistory_text`) skips such rows for the same
+            // reason. Non-ciphertext text (impossible today: parse succeeds
+            // before any fallible read) still passes through untouched.
+            text.starts_with("+RPE2E01")
+                .then(|| "[E2E rejected: malformed or undecryptable ciphertext]".to_string())
         }
     }
 }
@@ -4428,6 +4462,21 @@ fn try_dispatch_rpe2e_ctcp(
                         rsp.channel
                     ),
                 );
+                // A DM session just came up. The ciphertext that TRIGGERED
+                // the handshake was rendered only as the transient
+                // "[E2E: awaiting session with …]" placeholder — queue a
+                // CHATHISTORY gap-fill of the query so that line is
+                // re-fetched, decrypted under the fresh session, and spliced
+                // in (the splice sweeps the placeholder). Channels don't
+                // need this: their backlog decrypts lazily on focus.
+                if rsp.channel.starts_with('@') {
+                    state
+                        .pending_e2e_gapfills
+                        .push(crate::state::PendingE2eGapfill {
+                            connection_id: conn_id.to_string(),
+                            nick: nick.clone(),
+                        });
+                }
             }
             Some(RpEe2eOutcome::Handled)
         }
@@ -8620,5 +8669,179 @@ mod tests {
 
         assert!(state.buffers.contains_key(&chan_id));
         assert_eq!(state.active_buffer_id.as_deref(), Some(chan_id.as_str()));
+    }
+
+    // === Phase B: receive-path robustness ===
+
+    #[test]
+    fn malformed_ciphertext_renders_e2e_rejection_not_raw() {
+        // A truncated/corrupted +RPE2E01 line makes WireChunk::parse return
+        // Err; the old code fell through to rendering (and logging) the RAW
+        // wire line. It must surface an [E2E] rejection instead.
+        use crate::e2e::keyring::Keyring;
+        use crate::e2e::manager::E2eManager;
+        use std::sync::{Arc, Mutex};
+
+        let mut state = make_test_state();
+        let conn = crate::storage::db::open_database(false).unwrap();
+        let mgr = E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(conn)))).unwrap();
+        state.e2e_manager = Some(Arc::new(mgr));
+        state.connections.get_mut("test").unwrap().own_handle = Some("~me@host".to_string());
+
+        let prefix = Prefix::new_from_str("bob!~bob@b.host");
+        handle_privmsg(
+            &mut state,
+            "test",
+            "me",
+            Some(&prefix),
+            "me",
+            "+RPE2E01 truncated-garbage",
+            None,
+        );
+
+        let buf = state
+            .buffers
+            .get(&make_buffer_id("test", "bob"))
+            .expect("query buffer for the sender");
+        let last = buf.messages.back().expect("a rendered line");
+        assert!(
+            last.text.starts_with("[E2E"),
+            "must render an [E2E] rejection, got: {}",
+            last.text
+        );
+        assert!(
+            !last.text.contains("+RPE2E01"),
+            "raw ciphertext must never render: {}",
+            last.text
+        );
+    }
+
+    #[test]
+    fn missing_session_placeholder_is_transient_and_tagless() {
+        // The first DM from a peer with no installed session shows the
+        // "[E2E: awaiting session with …]" placeholder. It must NOT keep the
+        // server @msgid tags: persisting it under the real @msgid blocks the
+        // decrypted CHATHISTORY replay (unique (network, msg_id) index) —
+        // losing the message forever. Same rule as the awaiting-own-identity
+        // placeholder.
+        use crate::e2e::keyring::Keyring;
+        use crate::e2e::manager::E2eManager;
+        use std::sync::{Arc, Mutex};
+
+        let mut state = make_test_state();
+        let ours_conn = crate::storage::db::open_database(false).unwrap();
+        let ours = E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(ours_conn)))).unwrap();
+        state.e2e_manager = Some(Arc::new(ours));
+        state.connections.get_mut("test").unwrap().own_handle = Some("~me@host".to_string());
+
+        // Peer encrypts a valid wire line to our decrypt context; we have no
+        // incoming session for them -> MissingKey.
+        let peer_conn = crate::storage::db::open_database(false).unwrap();
+        let peer = E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(peer_conn)))).unwrap();
+        let wire = peer
+            .encrypt_outgoing("@~me@host", "the lost first message")
+            .unwrap()
+            .remove(0);
+
+        let mut tags = HashMap::new();
+        tags.insert("msgid".to_string(), "MSGID-FIRST".to_string());
+        let prefix = Prefix::new_from_str("bob!~bob@b.host");
+        handle_privmsg(&mut state, "test", "me", Some(&prefix), "me", &wire, Some(tags));
+
+        let buf = state
+            .buffers
+            .get(&make_buffer_id("test", "bob"))
+            .expect("query buffer for the sender");
+        let last = buf.messages.back().expect("a rendered line");
+        assert!(
+            last.text.starts_with("[E2E: awaiting session with"),
+            "expected the awaiting-session placeholder, got: {}",
+            last.text
+        );
+        assert!(
+            last.tags.is_none(),
+            "placeholder must be tagless so the decrypted replay can splice under the real @msgid"
+        );
+    }
+
+    #[test]
+    fn keyrsp_install_queues_dm_gapfill() {
+        // When a KEYRSP installs the DM incoming session, the query must be
+        // queued for a CHATHISTORY re-fetch: the message that TRIGGERED the
+        // handshake was replaced by a placeholder and is otherwise lost.
+        use crate::e2e::keyring::{ChannelConfig, ChannelMode, Keyring};
+        use crate::e2e::manager::E2eManager;
+        use std::sync::{Arc, Mutex};
+
+        let mut state = make_test_state();
+        let ours_conn = crate::storage::db::open_database(false).unwrap();
+        let ours = Arc::new(
+            E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(ours_conn)))).unwrap(),
+        );
+        state.e2e_manager = Some(Arc::clone(&ours));
+
+        // We (recipient) issued the KEYREQ for our own decrypt context.
+        let req = ours.build_keyreq("@~me@host").unwrap();
+
+        // Alice answers with a KEYRSP (AutoAccept so the reply is immediate).
+        let alice_conn = crate::storage::db::open_database(false).unwrap();
+        let alice =
+            E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(alice_conn)))).unwrap();
+        alice
+            .keyring()
+            .set_channel_config(&ChannelConfig {
+                channel: "@~me@host".to_string(),
+                enabled: true,
+                mode: ChannelMode::AutoAccept,
+            })
+            .unwrap();
+        let rsp = alice
+            .handle_keyreq_with_nick("~me@host", Some("me"), &req)
+            .unwrap()
+            .expect("AutoAccept responds with a KEYRSP");
+        let body = alice.encode_keyrsp_ctcp(&rsp);
+
+        let prefix = Prefix::new_from_str("alice!~alice@a.host");
+        let outcome = try_dispatch_rpe2e_ctcp(&mut state, "test", Some(&prefix), "me", &body);
+        assert_eq!(outcome, Some(RpEe2eOutcome::Handled));
+        assert!(
+            state
+                .pending_e2e_gapfills
+                .iter()
+                .any(|g| g.connection_id == "test" && g.nick == "alice"),
+            "a successful DM session install must queue a query gap-fill"
+        );
+    }
+
+    #[test]
+    fn ciphertext_in_notice_is_suppressed() {
+        // RPE2E never ships ciphertext in NOTICE; a peer that does anyway
+        // (buggy or malicious) must not get the raw wire rendered.
+        use crate::e2e::keyring::Keyring;
+        use crate::e2e::manager::E2eManager;
+        use std::sync::{Arc, Mutex};
+
+        let mut state = make_test_state();
+        let conn = crate::storage::db::open_database(false).unwrap();
+        let mgr = E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(conn)))).unwrap();
+        state.e2e_manager = Some(Arc::new(mgr));
+
+        let prefix = Prefix::new_from_str("bob!~bob@b.host");
+        handle_notice(
+            &mut state,
+            "test",
+            Some(&prefix),
+            "me",
+            "+RPE2E01 AAAA BBBB CCCC",
+            None,
+        );
+
+        for buf in state.buffers.values() {
+            assert!(
+                buf.messages.iter().all(|m| !m.text.contains("+RPE2E01")),
+                "raw ciphertext leaked into buffer {}",
+                buf.id
+            );
+        }
     }
 }

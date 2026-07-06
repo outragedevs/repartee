@@ -24,6 +24,16 @@ use crate::storage::LogRow;
 /// `handle_irc_message`, mirroring the `pending_web_events` pattern so
 /// event handlers can produce outbound traffic without holding a mutable
 /// borrow of `App`.
+/// A DM query needing a post-handshake `CHATHISTORY` gap-fill — see
+/// `AppState::pending_e2e_gapfills`.
+#[derive(Debug, Clone)]
+pub struct PendingE2eGapfill {
+    /// Connection the query lives on.
+    pub connection_id: String,
+    /// The peer's nick — the query buffer name and `CHATHISTORY` target.
+    pub nick: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct PendingE2eSend {
     /// Connection the NOTICE must be shipped over.
@@ -97,6 +107,14 @@ pub struct AppState {
     /// Drained by `App::drain_pending_e2e_sends` right after
     /// `drain_pending_web_events`. Same pattern as `pending_web_events`.
     pub pending_e2e_sends: Vec<PendingE2eSend>,
+    /// DM queries whose incoming E2E session was just installed by a KEYRSP.
+    /// Drained by the app loop right after `drain_pending_e2e_sends`: each
+    /// entry re-runs the query's `CHATHISTORY` gap-fill so the message that
+    /// TRIGGERED the handshake (shown only as the transient
+    /// "[E2E: awaiting session with …]" placeholder) is re-fetched, decrypted
+    /// under the fresh session, and spliced in — without this the first DM of
+    /// every new session is lost.
+    pub pending_e2e_gapfills: Vec<PendingE2eGapfill>,
     pub pending_userhost_requests: Vec<PendingUserhostRequest>,
     /// Nick color HSL saturation (synced from config for mention line formatting).
     pub nick_color_sat: f32,
