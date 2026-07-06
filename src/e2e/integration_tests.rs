@@ -2092,3 +2092,47 @@ fn scoped_dm_keyreq_still_skips_reciprocal() {
         "a DM KEYREQ must not queue a reciprocal (per-direction handshakes)"
     );
 }
+
+#[test]
+fn rotation_recipients_union_scoped_and_legacy_rows() {
+    // Upgraded keyrings hold pre-scoping recipients under the legacy
+    // unscoped channel while new handshakes record under the scoped one.
+    // A rotate must REKEY the UNION of both — dropping the legacy list
+    // would leave every pre-upgrade peer on the old key.
+    let alice = make_manager();
+    let scoped = crate::e2e::scoped_context("NetA", "#x");
+    alice
+        .keyring()
+        .record_outgoing_recipient("#x", "~legacy@old.host", &[0xaa; 16], 100)
+        .unwrap();
+    alice
+        .keyring()
+        .record_outgoing_recipient(&scoped, "~new@new.host", &[0xbb; 16], 200)
+        .unwrap();
+    // The same peer present in both generations must appear once, with the
+    // scoped row winning.
+    alice
+        .keyring()
+        .record_outgoing_recipient("#x", "~both@dual.host", &[0xcc; 16], 100)
+        .unwrap();
+    alice
+        .keyring()
+        .record_outgoing_recipient(&scoped, "~both@dual.host", &[0xdd; 16], 200)
+        .unwrap();
+
+    let recipients = alice.keyring().list_outgoing_recipients(&scoped).unwrap();
+    let handles: Vec<&str> = recipients.iter().map(|(h, _)| h.as_str()).collect();
+    assert!(handles.contains(&"~legacy@old.host"), "legacy peer dropped: {handles:?}");
+    assert!(handles.contains(&"~new@new.host"));
+    assert_eq!(
+        handles.iter().filter(|h| **h == "~both@dual.host").count(),
+        1,
+        "same peer in both generations must be deduped"
+    );
+    let both_fp = recipients
+        .iter()
+        .find(|(h, _)| h == "~both@dual.host")
+        .map(|(_, fp)| *fp)
+        .unwrap();
+    assert_eq!(both_fp, [0xdd; 16], "the scoped row wins the dedup");
+}

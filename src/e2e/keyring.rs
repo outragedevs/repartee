@@ -996,16 +996,20 @@ impl Keyring {
     /// Return every recipient of our outgoing session key for `channel`.
     /// The returned tuples are `(handle, fingerprint)`.
     pub fn list_outgoing_recipients(&self, channel: &str) -> Result<Vec<(String, Fingerprint)>> {
-        let scoped = self.list_outgoing_recipients_exact(channel)?;
-        if !scoped.is_empty() {
-            return Ok(scoped);
+        let mut recipients = self.list_outgoing_recipients_exact(channel)?;
+        // UNION with the legacy unscoped rows, not a fallback: on an upgraded
+        // keyring pre-scoping peers stay recorded under the wire channel
+        // while new handshakes record under the scoped one — a rotate must
+        // REKEY both generations or every pre-upgrade peer is left on the
+        // old key. Dedup by handle; the scoped row wins.
+        if let Some(wire) = legacy_wire_fallback(channel) {
+            for (handle, fp) in self.list_outgoing_recipients_exact(wire)? {
+                if !recipients.iter().any(|(h, _)| *h == handle) {
+                    recipients.push((handle, fp));
+                }
+            }
         }
-        // Legacy-row fallback (see get_channel_config): rotation REKEYs must
-        // still reach peers recorded before network scoping.
-        legacy_wire_fallback(channel).map_or_else(
-            || Ok(scoped),
-            |wire| self.list_outgoing_recipients_exact(wire),
-        )
+        Ok(recipients)
     }
 
     fn list_outgoing_recipients_exact(

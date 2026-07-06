@@ -1346,7 +1346,10 @@ fn resolve_handle_by_nick(app: &App, channel: &str, nick: &str) -> Option<String
     use crate::state::buffer::make_buffer_id;
     // We need to know the connection id. Use the active buffer's.
     let conn_id = app.state.active_buffer()?.connection_id.clone();
-    let buf_id = make_buffer_id(&conn_id, channel);
+    // Contexts are network-scoped; buffers key by the wire name — a lookup
+    // with the scoped string would miss every channel buffer and break the
+    // nick resolution for /e2e accept, revoke, verify, ….
+    let buf_id = make_buffer_id(&conn_id, crate::e2e::wire_context(channel));
     let buf = app.state.buffers.get(&buf_id)?;
     let entry = buf.users.get(&nick.to_lowercase())?;
     let ident = entry.ident.as_deref().unwrap_or("");
