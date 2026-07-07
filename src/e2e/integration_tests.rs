@@ -2498,19 +2498,35 @@ fn adoption_never_attributes_channel_contexts_from_chat_logs() {
 
 #[test]
 fn nick_rename_carries_dm_handle_cache() {
-    // An IRC NICK must re-key the (network, nick) handle cache row — and
-    // refresh the network-agnostic e2e_peers.last_nick hint — or a
+    // An IRC NICK must re-key the (network, nick) handle cache row, or a
     // `/msg <new_nick>` with no live query buffer resolves no handle and
     // downgrades an E2E-enabled DM to plaintext. Scoped per network: the
     // same nick on another network is untouched, and a stale row already
-    // holding the new nick is replaced (NICK is authoritative).
+    // holding the new nick is replaced (NICK is authoritative). The
+    // network-agnostic e2e_peers.last_nick hint must NOT be rewritten: a
+    // rename on NetA says nothing about a same-nick peer on NetB, and
+    // moving their hint off the nick they still hold would break the
+    // legacy_handle_for_nick fallback there (plaintext passthrough).
     let mgr = make_manager();
     let kr = mgr.keyring();
     kr.cache_dm_handle("NetA", "bob", "~bob@b.host").unwrap();
     kr.cache_dm_handle("NetA", "bobby", "~stale@old.host").unwrap();
     kr.cache_dm_handle("NetB", "bob", "~otherbob@x.host").unwrap();
+    // A same-nick peer on ANOTHER network, resolvable only via the
+    // legacy last_nick hint (no cache row for them on NetB).
+    kr.upsert_peer(&crate::e2e::keyring::PeerRecord {
+        fingerprint: [7u8; 16],
+        pubkey: [9u8; 32],
+        last_handle: Some("~carol@b.net".to_string()),
+        last_nick: Some("carol".to_string()),
+        first_seen: 0,
+        last_seen: 1,
+        global_status: crate::e2e::keyring::TrustStatus::Trusted,
+    })
+    .unwrap();
 
     kr.rename_dm_nick("NetA", "bob", "bobby").unwrap();
+    kr.rename_dm_nick("NetA", "carol", "dave").unwrap();
 
     assert_eq!(
         kr.last_handle_for_nick("bobby", "NetA").unwrap().as_deref(),
@@ -2525,6 +2541,12 @@ fn nick_rename_carries_dm_handle_cache() {
         kr.last_handle_for_nick("bob", "NetB").unwrap().as_deref(),
         Some("~otherbob@x.host"),
         "another network's row for the same nick must be untouched"
+    );
+    assert_eq!(
+        kr.legacy_handle_for_nick("carol").unwrap().as_deref(),
+        Some("~carol@b.net"),
+        "a rename on one network must not clobber the last_nick hint of a \
+         same-nick peer elsewhere — that hint is their only resolution path"
     );
 }
 
@@ -2550,5 +2572,36 @@ fn adoption_keeps_existing_scoped_row_on_conflict() {
     assert!(
         mgr.keyring().list_legacy_contexts().unwrap().is_empty(),
         "the colliding legacy row must be dropped, not kept"
+    );
+}
+
+#[test]
+fn adoption_skips_bare_nick_dm_rows() {
+    // Pre-handle bare-nick DM rows (neither `#…` nor `@handle`) must stay
+    // unscoped: the send gate consults them UNSCOPED for its fail-closed
+    // NoPeerHandle refusal, and scoping them would move the row out of the
+    // gate's reach — turning the refusal into a plaintext send. They are
+    // also not reported as unattributed leftovers: the unscoped read path
+    // still serves them, so warning "ignored" would be false.
+    let mgr = make_manager();
+    enable_channel(&mgr, "bob", ChannelMode::Normal);
+
+    mgr.keyring().set_configured_networks(["NetA".to_string()]);
+    let unattributed = mgr.keyring().adopt_legacy_contexts().unwrap();
+
+    assert!(
+        unattributed.is_empty(),
+        "bare-nick rows are skipped, not reported as unattributed"
+    );
+    assert!(
+        mgr.keyring()
+            .get_channel_config("bob")
+            .unwrap()
+            .is_some_and(|c| c.enabled),
+        "the bare-nick row must remain readable under its unscoped key"
+    );
+    assert!(
+        mgr.keyring().list_legacy_contexts().unwrap().is_empty(),
+        "bare-nick rows must not appear in the startup-warning listing"
     );
 }

@@ -1289,18 +1289,30 @@ fn handle_privmsg(
         // `None`): a freshly-created buffer is already stamped with @<new>, so
         // we still migrate from the cached @<old> (prev = `None`); an existing
         // buffer migrates from its prior handle. `None` = no change → nothing
-        // to migrate.
+        // to migrate. The buffer's `peer_handle` moves to @<new> only AFTER
+        // the observation succeeds: on a postponed observation (keyring read
+        // fault) the buffer must keep — or, for a freshly-stamped buffer,
+        // revert to — the previous value, so the encrypt path keeps keying
+        // under the still-enabled old context instead of missing the config
+        // under `@<new>` and passing plaintext through.
         let changed_from: Option<Option<String>> = if buffer_created {
             Some(None)
-        } else if let Some(buf) = state.buffers.get_mut(&buffer_id)
+        } else if let Some(buf) = state.buffers.get(&buffer_id)
             && buf.peer_handle.as_deref() != Some(new_handle.as_str())
         {
-            Some(buf.peer_handle.replace(new_handle.clone()))
+            Some(buf.peer_handle.clone())
         } else {
             None
         };
         if let Some(prev) = changed_from {
-            track_dm_handle_change(state, conn_id, &nick, prev.as_deref(), &new_handle);
+            let observed = track_dm_handle_change(state, conn_id, &nick, prev.as_deref(), &new_handle);
+            if let Some(buf) = state.buffers.get_mut(&buffer_id) {
+                buf.peer_handle = if observed {
+                    Some(new_handle.clone())
+                } else {
+                    prev
+                };
+            }
         }
     }
 
@@ -2072,18 +2084,26 @@ pub(crate) fn migrate_dm_e2e_config(
 /// migrated config. Without this a handle change (reconnect / vhost, delivered
 /// as a new PRIVMSG prefix or CHGHOST) silently downgrades the DM to plaintext.
 /// No-op when the connection's network label is unknown.
+///
+/// Returns `false` when the observation was POSTPONED because the cached-handle
+/// read failed: a read fault is NOT "no previous handle", and migrating without
+/// it could strand the enabled config under `@<old>` while the next send keys
+/// `@<new>` — plaintext. Callers must then leave the buffer's `peer_handle`
+/// untouched too, so the encrypt path keeps keying under the old (still
+/// decryptable) context until a later sighting retries. `true` in every other
+/// case, including the E2E-not-active no-ops.
 fn track_dm_handle_change(
     state: &mut AppState,
     conn_id: &str,
     nick: &str,
     prev_buffer_handle: Option<&str>,
     new_handle: &str,
-) {
+) -> bool {
     let Some(network) = state.connections.get(conn_id).map(|c| c.label.clone()) else {
-        return;
+        return true;
     };
     let Some(mgr) = state.e2e_manager.clone() else {
-        return;
+        return true;
     };
     let new_ctx =
         crate::e2e::scoped_context(&network, &crate::e2e::context_key(nick, new_handle));
@@ -2094,10 +2114,16 @@ fn track_dm_handle_change(
     // network-AGNOSTIC, so its result may belong to a same-nick peer on a
     // different network and is flagged (`from_legacy`) so the migration caps
     // AutoAccept and the enable is surfaced to the user rather than silent.
-    let cached = mgr
-        .keyring()
-        .cached_dm_handle(nick, &network)
-        .unwrap_or_default();
+    let cached = match mgr.keyring().cached_dm_handle(nick, &network) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                "e2e: cached handle read failed for {nick} on {network}: {e}; \
+                 postponing the handle-change observation"
+            );
+            return false;
+        }
+    };
     let mut sources: Vec<(String, bool)> = Vec::new();
     if let Some(h) = prev_buffer_handle
         && h != new_handle
@@ -2152,6 +2178,7 @@ fn track_dm_handle_change(
     // observation (before a signed handshake) would bypass the reverify gate.
     // The copied config under `@<new>` plus the still-enabled `@<old>` cover
     // both the live and cached encrypt contexts without it.
+    true
 }
 
 /// Observe a DM peer's current server-stamped handle for `(conn_id, nick)` —
@@ -2169,8 +2196,10 @@ fn observe_dm_peer_handle(state: &mut AppState, conn_id: &str, nick: &str, new_h
         .get(&dm_buffer_id)
         .filter(|b| b.buffer_type == BufferType::Query)
         .and_then(|b| b.peer_handle.clone());
-    track_dm_handle_change(state, conn_id, nick, prev_buffer_handle.as_deref(), new_handle);
-    if prev_buffer_handle.as_deref() != Some(new_handle)
+    // A postponed observation (keyring read fault) must not move the
+    // buffer's handle either — see `track_dm_handle_change`.
+    if track_dm_handle_change(state, conn_id, nick, prev_buffer_handle.as_deref(), new_handle)
+        && prev_buffer_handle.as_deref() != Some(new_handle)
         && let Some(buf) = state.buffers.get_mut(&dm_buffer_id)
         && buf.buffer_type == BufferType::Query
     {
@@ -2219,6 +2248,21 @@ fn handle_chghost(
         set_own_handle(state, conn_id, new_handle.clone());
     }
 
+    // Migrate the DM E2E config + refresh the handle cache to the new handle —
+    // INDEPENDENT of whether the peer's query buffer is open — using the OLD
+    // handle carried in the CHGHOST prefix. Without this a vhost change
+    // downgrades the next DM to plaintext. Never for our own nick (see above).
+    // Runs BEFORE the buffer updates: a postponed observation (keyring read
+    // fault) must leave the query buffer's peer_handle on the old (still
+    // decryptable) context too — see `track_dm_handle_change`.
+    let prev_handle = if old_ident.is_empty() || old_host.is_empty() {
+        None
+    } else {
+        Some(format!("{old_ident}@{old_host}"))
+    };
+    let observed = is_own
+        || track_dm_handle_change(state, conn_id, &nick, prev_handle.as_deref(), &new_handle);
+
     // Update ident/host + the cached DM peer_handle in shared buffers.
     for buf in state.buffers.values_mut() {
         if buf.connection_id != conn_id {
@@ -2232,24 +2276,12 @@ fn handle_chghost(
         // drives the E2E encrypt context, so it must track the new host. Skip
         // for our own nick — a query named after ourselves is not a peer DM.
         if !is_own
+            && observed
             && buf.buffer_type == BufferType::Query
             && buf.name.eq_ignore_ascii_case(&nick)
         {
             buf.peer_handle = Some(new_handle.clone());
         }
-    }
-
-    // Migrate the DM E2E config + refresh the handle cache to the new handle —
-    // INDEPENDENT of whether the peer's query buffer is open — using the OLD
-    // handle carried in the CHGHOST prefix. Without this a vhost change
-    // downgrades the next DM to plaintext. Never for our own nick (see above).
-    let prev_handle = if old_ident.is_empty() || old_host.is_empty() {
-        None
-    } else {
-        Some(format!("{old_ident}@{old_host}"))
-    };
-    if !is_own {
-        track_dm_handle_change(state, conn_id, &nick, prev_handle.as_deref(), &new_handle);
     }
 
     // Log a subtle event in every shared channel
@@ -2532,8 +2564,11 @@ fn handle_nick_change(
     // still changes nick). Otherwise a later `/msg <new_nick>` with no live
     // query buffer resolves no handle, misses the peer's enabled
     // `@<handle>` config, and downgrades to plaintext — the exact fail-open
-    // the send gate exists to prevent.
+    // the send gate exists to prevent. Never for our OWN rename: the cache
+    // holds PEER handles, and a stale row under our old nick (a previous
+    // holder) would get mislabeled as the new nick's peer.
     if !old_nick.is_empty()
+        && old_nick != our_nick
         && let Some(mgr) = state.e2e_manager.as_ref()
         && let Some(conn) = state.connections.get(conn_id)
         && let Err(e) = mgr

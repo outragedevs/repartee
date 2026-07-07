@@ -981,8 +981,19 @@ impl App {
         // (`Keyring::adopt_legacy_contexts`): on a multi-network config the
         // read fallback is denied, so those conversations behave as if no
         // session exists (fresh handshakes re-establish them fail-closed) —
-        // say so instead of letting E2E state vanish silently.
-        if self.config.servers.len() > 1 {
+        // say so instead of letting E2E state vanish silently. "Multi-
+        // network" must mean what the keyring's gate means: DISTINCT labels,
+        // not server entries — two bouncer entries sharing one label are one
+        // network there, and warning "ignored" about state the fallback
+        // still serves would be false.
+        let distinct_networks = self
+            .config
+            .servers
+            .values()
+            .map(|s| s.label.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        if distinct_networks > 1 {
             match mgr.keyring().list_legacy_contexts() {
                 Ok(contexts) => {
                     for context in contexts {

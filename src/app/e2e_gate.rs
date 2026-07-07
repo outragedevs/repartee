@@ -195,6 +195,13 @@ impl AppState {
         };
 
         if text.starts_with(['.', '!']) {
+            // Deliberate bot-command bypass (mirrored by the companion
+            // irssi/weechat RPE2E scripts): `.cmd`/`!cmd` lines go out
+            // unencrypted so channel bots can parse them. The downgrade
+            // must stay VISIBLE in an E2E-enabled conversation — an
+            // ellipsis or an emphatic `!` at the start of prose is easy to
+            // type without meaning a bot command.
+            self.warn_e2e_bot_bypass(buffer_id, buffer_name);
             return plain_passthrough();
         }
 
@@ -237,7 +244,26 @@ impl AppState {
             )
         };
         let context: String = match buffer_type {
-            BufferType::Channel => scope(buffer_name),
+            BufferType::Channel => {
+                // IRC channel names are case-insensitive; the config row
+                // carries whatever case `/e2e on` saw. Canonicalize to the
+                // stored row so a by-target send (`/msg #Chan …`) cannot
+                // miss an enabled `#chan` — a miss here is a silent
+                // plaintext PRIVMSG to the whole channel. Fail closed on a
+                // read error, same rule as the enabled check below.
+                let context = scope(buffer_name);
+                match mgr.keyring().canonical_channel_context(&context) {
+                    Ok(Some(canonical)) => canonical,
+                    Ok(None) => context,
+                    Err(e) => {
+                        tracing::warn!(
+                            "e2e: keyring read failed canonicalizing {context}: {e}; \
+                             refusing to send rather than risk plaintext"
+                        );
+                        return Err(E2eRefusal::KeyringRead);
+                    }
+                }
+            }
             BufferType::Query => {
                 // Resolve LIVE first — the buffer's server-stamped peer_handle
                 // or the keyring's network-scoped cached handle (the SAME
@@ -443,7 +469,14 @@ impl AppState {
             .map(|c| c.label.clone())
             .unwrap_or_default();
         let context = if crate::e2e::is_channel_target(target) {
-            crate::e2e::scoped_context(&network, target)
+            // Same case canonicalization as the gate proper — the advisory
+            // must fire for `/notice #Chan` when E2E is enabled on `#chan`.
+            let context = crate::e2e::scoped_context(&network, target);
+            mgr.keyring()
+                .canonical_channel_context(&context)
+                .ok()
+                .flatten()
+                .unwrap_or(context)
         } else {
             let buffer_id = make_buffer_id(conn_id, target);
             match self.resolve_query_peer_handle(&buffer_id, target) {
@@ -463,6 +496,53 @@ impl AppState {
             .ok()
             .flatten()
             .is_some_and(|c| c.enabled)
+    }
+
+    /// Themed `[E2E]` line in the conversation buffer noting that a
+    /// bot-style `.`/`!` message left in CLEARTEXT despite E2E being enabled
+    /// there — the visibility half of the bot-command bypass in
+    /// [`Self::e2e_encrypt_or_passthrough`]. Advisory only; never blocks.
+    /// Read errors resolve to silence, matching `e2e_enabled_for_target`.
+    fn warn_e2e_bot_bypass(&mut self, buffer_id: &str, buffer_name: &str) {
+        use crate::state::buffer::{Message, MessageType};
+
+        let Some(conn_id) = self
+            .buffers
+            .get(buffer_id)
+            .map(|b| b.connection_id.clone())
+            .or_else(|| {
+                buffer_id
+                    .split_once('/')
+                    .map(|(conn_id, _)| conn_id.to_string())
+            })
+        else {
+            return;
+        };
+        if !self.e2e_enabled_for_target(&conn_id, buffer_name) {
+            return;
+        }
+        let text = format!(
+            "[E2E] bot-style message to {buffer_name} sent in CLEARTEXT — \
+             lines starting with '.' or '!' bypass encryption for bots"
+        );
+        let id = self.next_message_id();
+        self.add_local_message(
+            buffer_id,
+            Message {
+                id,
+                timestamp: chrono::Utc::now(),
+                message_type: MessageType::Event,
+                nick: None,
+                nick_mode: None,
+                text: text.clone(),
+                highlight: false,
+                event_key: Some("e2e_warning".to_string()),
+                event_params: Some(vec![text]),
+                log_msg_id: None,
+                log_ref_id: None,
+                tags: None,
+            },
+        );
     }
 }
 
@@ -828,9 +908,16 @@ mod tests {
     #[test]
     fn send_plan_refuses_dm_when_enabled_but_handle_unknown() {
         // A legacy bare-nick enabled row with no resolvable handle must
-        // refuse (fail-closed), not fall through to plaintext.
+        // refuse (fail-closed), not fall through to plaintext — INCLUDING
+        // after the startup legacy adoption ran: bare-nick rows are
+        // deliberately left unscoped (`Keyring::legacy_context_values`),
+        // because scoping them would move the row out of this check's
+        // reach and turn the refusal into a plaintext send.
         let mut state = make_state_with_manager();
         enable(&state, "bob");
+        let keyring = state.e2e_manager.as_ref().unwrap().keyring().clone();
+        keyring.set_configured_networks(["TestServer".to_string()]);
+        keyring.adopt_legacy_contexts().unwrap();
 
         let refusal = state
             .e2e_send_plan_for_target("test", "bob", "secret")
@@ -862,6 +949,71 @@ mod tests {
             .unwrap_or_else(|e| panic!("expected ciphertext plan, got refusal: {}", e.user_message()));
         assert!(plan.encrypted);
         assert!(plan.wire_lines.iter().all(|w| w.starts_with("+RPE2E01")));
+    }
+
+    #[test]
+    fn send_plan_encrypts_channel_case_insensitively() {
+        // `/msg #SEC …` must land on the config `/e2e on` wrote in `#sec` —
+        // IRC channel names are case-insensitive, and a case miss here is a
+        // silent plaintext PRIVMSG to the whole E2E-enabled channel.
+        let mut state = make_state_with_manager();
+        state.add_buffer(make_buf(BufferType::Channel, "#sec"));
+        enable(&state, &crate::e2e::scoped_context("TestServer", "#sec"));
+
+        let plan = state
+            .e2e_send_plan_for_target("test", "#SEC", "channel secret")
+            .unwrap_or_else(|e| panic!("expected ciphertext plan, got refusal: {}", e.user_message()));
+        assert!(plan.encrypted);
+        assert!(plan.wire_lines.iter().all(|w| w.starts_with("+RPE2E01")));
+        assert!(
+            plan.wire_lines.iter().all(|w| !w.contains("channel secret")),
+            "plaintext must never appear in a wire line"
+        );
+    }
+
+    #[test]
+    fn bot_prefix_bypass_is_visible_in_e2e_conversation() {
+        // `.cmd`/`!cmd` deliberately bypass encryption (channel bots must be
+        // able to parse them) — but in an E2E-enabled conversation the
+        // downgrade must be VISIBLE, and outside one it must stay silent.
+        let mut state = make_state_with_manager();
+        let mut buf = make_buf(BufferType::Query, "bob");
+        buf.peer_handle = Some("~bob@b.host".to_string());
+        state.add_buffer(buf);
+        enable(&state, "@~bob@b.host");
+        state.add_buffer(make_buf(BufferType::Query, "carol"));
+
+        let plan = state
+            .e2e_send_plan_for_target("test", "bob", "!roll 2d6")
+            .unwrap_or_else(|e| panic!("bypass must never refuse: {}", e.user_message()));
+        assert!(!plan.encrypted, "bot-style messages bypass encryption by design");
+        let bob_id = make_buffer_id("test", "bob");
+        assert!(
+            state
+                .buffers
+                .get(&bob_id)
+                .unwrap()
+                .messages
+                .iter()
+                .any(|m| m.text.contains("CLEARTEXT")),
+            "the downgrade must be visible in the E2E conversation buffer"
+        );
+
+        let plan = state
+            .e2e_send_plan_for_target("test", "carol", ".status")
+            .unwrap_or_else(|e| panic!("bypass must never refuse: {}", e.user_message()));
+        assert!(!plan.encrypted);
+        let carol_id = make_buffer_id("test", "carol");
+        assert!(
+            state
+                .buffers
+                .get(&carol_id)
+                .unwrap()
+                .messages
+                .iter()
+                .all(|m| !m.text.contains("CLEARTEXT")),
+            "no advisory noise in conversations without E2E"
+        );
     }
 
     // ── e2e_enabled_for_target (advisory) ──

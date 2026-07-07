@@ -139,6 +139,58 @@
 >
 > Weryfikacja: `make clippy` 0 warnings, `make test` 1507 passed.
 
+> **STATUS 6 (2026-07-07): WEWNĘTRZNY SELF-REVIEW ADWERSARYJNY — NAPRAWIONE.**
+> Po rundzie #5 przepuściłem cały kod z rund 3–5 przez dwóch niezależnych
+> recenzentów z konkretnymi kątami ataku (case-sensitivity, swap nicków,
+> atomowość migracji, kompletność hardeningu, ścieżki fail-open bramy).
+> Wynik: 4 realne findingi naprawione + 2 mniejsze.
+>
+> - **[P1] REGRESJA z rundy #4: `rename_dm_nick` czyścił hint `last_nick`
+>   peerom na INNYCH sieciach** (`keyring.rs`): `UPDATE e2e_peers SET
+>   last_nick=? WHERE last_nick=?` był network-agnostyczny — NICK carol→dave
+>   na NetA przenosił hint carol z NetB, jedyną ścieżkę rezolucji jej
+>   handle'a przed pierwszym odezwaniem → `/msg carol` na NetB = plaintext.
+>   Fix: UPDATE na `e2e_peers` usunięty w całości (rename cache per-network
+>   wystarcza; `last_nick` odświeżają realne sightingi). Dodatkowo rename
+>   pomija WŁASNĄ zmianę nicka (cache trzyma handle peerów). Test rozszerzony
+>   o izolację hinta.
+> - **[P1] Konteksty kanałowe case-sensitive** (`e2e_gate.rs`/`keyring.rs`):
+>   config zapisany pod `#sec`, `/msg #SEC …` budował kontekst z case'em
+>   użytkownika → BINARY miss → plaintext na cały kanał z włączonym E2E,
+>   bez żadnego sygnału. Fix: `Keyring::canonical_channel_context` (NOCASE,
+>   preferencja exact) — brama kanonizuje kontekst RAZ, więc sesje/odbiorcy
+>   niżej zostają spójni; błąd odczytu = odmowa (fail-closed); advisory twin
+>   (`e2e_enabled_for_target`) kanonizuje tak samo. Test regresyjny.
+> - **[P1] Adopcja legacy przenosiła bare-nickowe wiersze DM poza zasięg
+>   odmowy NoPeerHandle** (`keyring.rs`): single-network `[only]` migrował
+>   też wiersze typu `bob` (sprzed handle'i) do `net␟bob`, a brama sprawdza
+>   je NIESKOPOWANE — po pierwszym starcie po upgradzie odmowa fail-closed
+>   zamieniała się w plaintext. Fix: `legacy_context_values` pomija konteksty
+>   niebędące ani `#…` ani `@…` (obsługuje je nieskopowana ścieżka bramy +
+>   migracja na `@<handle>` przy pierwszym kontakcie); test bramy odtwarza
+>   scenariusz z adopcją, test adopcji pilnuje filtra.
+> - **[P1→advisory] Bypass botowy `.`/`!` był niewidoczny** (`e2e_gate.rs`):
+>   celowy bypass (kompatybilny ze skryptami irssi/weechat) wysyłał
+>   plaintext w rozmowie E2E bez śladu — echo wyglądało jak zaszyfrowane.
+>   Semantyka bez zmian (bypass zostaje), ale rozmowa E2E dostaje widoczną
+>   linię `[E2E] … CLEARTEXT` (jak przy `/notice`); poza E2E cisza. Test.
+>   (Ewentualne ograniczenie bypassu do kanałów = decyzja produktowa,
+>   odnotowana do dyskusji.)
+> - **[P2] Err ≠ brak przy obserwacji zmiany handle'a** (`events.rs`):
+>   `cached_dm_handle(...).unwrap_or_default()` traktował błąd odczytu jak
+>   „brak poprzedniego handle'a" — migracja configu pomijana po cichu, a
+>   bufor i tak przestawiany na `@<new>` → następna wiadomość plaintext.
+>   Fix: `track_dm_handle_change` zwraca bool; przy błędzie odczytu CAŁA
+>   obserwacja odroczona (wszystkie 3 call sites zostawiają `peer_handle`
+>   na starym, wciąż deszyfrowalnym kontekście; kolejny PRIVMSG/CHGHOST
+>   ponawia).
+> - **[P2] Warunek ostrzeżenia startowego liczył wpisy serwerów, nie sieci**
+>   (`app/mod.rs`): dwa wpisy bouncera z tym samym `label` to dla keyringa
+>   JEDNA sieć (fallback aktywny), a ostrzeżenie „ignored" kłamało. Fix:
+>   licznik po DISTINCT labelach, spójnie z `set_configured_networks`.
+>
+> Weryfikacja: `make clippy` 0 warnings, `make test` 1510 passed (3 nowe).
+
 - **Data review:** 2026-07-01
 - **Zakres:** pełny diff PR #29 (`main...fix/various-improvements`, stan po commicie `96580de`)
 - **Metoda:** 8 niezależnych kątów wyszukiwania (line-by-line, removed-behavior, cross-file, reuse, simplification, efficiency, altitude, conventions) → dedup → 12 osobnych weryfikatorów (po jednym na kandydata, verdict CONFIRMED/PLAUSIBLE/REFUTED z cytatami z kodu)

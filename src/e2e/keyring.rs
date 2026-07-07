@@ -1046,6 +1046,13 @@ impl Keyring {
     /// Distinct unscoped context values across every context-keyed table.
     /// (`e2e_seen_rekeys` and `prev_sk` are excluded: both were introduced
     /// together with scoping, so they can never hold legacy rows.)
+    ///
+    /// Bare-nick rows — neither a `#…` channel nor an `@handle` DM — are
+    /// excluded too: they predate DM handles, the send gate consults them
+    /// UNSCOPED for its fail-closed `NoPeerHandle` refusal, and the first
+    /// observed handle migrates them to `@<handle>` contexts. Scoping them
+    /// here would move the row out of the gate's reach and turn that
+    /// refusal into a plaintext send.
     fn legacy_context_values(conn: &Connection) -> Result<Vec<String>> {
         let mut stmt = conn.prepare(
             "SELECT DISTINCT ctx FROM (
@@ -1056,9 +1063,10 @@ impl Keyring {
                  UNION SELECT scope FROM e2e_autotrust WHERE scope <> 'global'
              ) WHERE instr(ctx, char(31)) = 0",
         )?;
-        let rows = stmt
+        let mut rows = stmt
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows.retain(|ctx| ctx.starts_with('@') || crate::e2e::is_channel_target(ctx));
         Ok(rows)
     }
 
@@ -1156,6 +1164,30 @@ impl Keyring {
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// The stored `e2e_channel_config` row key matching `context`
+    /// case-insensitively, preferring an exact match. IRC channel names are
+    /// case-insensitive, but contexts are written with the conversation
+    /// buffer's case — a by-target send (`/msg #Chan …`) must land on the
+    /// same row as `/e2e on` did in `#chan`, or the enabled channel would
+    /// silently downgrade to plaintext. The send gate canonicalizes its
+    /// context through this ONCE, so sessions/recipients (keyed by the same
+    /// string, BINARY) stay consistent downstream. `NOCASE` folds ASCII
+    /// only; rfc1459's `[]\~`↔`{}|^` pairs are not folded — that needs the
+    /// server itself to present both spellings, which none do in practice.
+    pub fn canonical_channel_context(&self, context: &str) -> Result<Option<String>> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT channel FROM e2e_channel_config
+                 WHERE channel = ?1 COLLATE NOCASE
+                 ORDER BY (channel = ?1) DESC
+                 LIMIT 1",
+                params![context],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
 
     fn get_channel_config_exact(&self, channel: &str) -> Result<Option<ChannelConfig>> {
@@ -1464,29 +1496,25 @@ impl Keyring {
     }
 
     /// Carry the DM handle cache across an IRC nick change: the row keyed
-    /// `(network, old_nick)` is re-keyed to `new_nick`, and the
-    /// network-agnostic `e2e_peers.last_nick` hint is refreshed the same
-    /// way. Without this a rename orphans the cached `ident@host`: a
-    /// `/msg <new_nick>` with no live query buffer resolves no handle,
-    /// misses the peer's enabled `@<handle>` config, and falls through to
-    /// PLAINTEXT. A row already keyed `new_nick` (a previous holder of that
-    /// nick) is replaced — the NICK event is authoritative for who owns the
-    /// nick now.
+    /// `(network, old_nick)` is re-keyed to `new_nick`. Without this a
+    /// rename orphans the cached `ident@host`: a `/msg <new_nick>` with no
+    /// live query buffer resolves no handle, misses the peer's enabled
+    /// `@<handle>` config, and falls through to PLAINTEXT. A row already
+    /// keyed `new_nick` (a previous holder of that nick) is replaced — the
+    /// NICK event is authoritative for who owns the nick now.
+    ///
+    /// The network-agnostic `e2e_peers.last_nick` hint is deliberately NOT
+    /// rewritten here: a NICK on one network says nothing about a same-nick
+    /// peer on another, and moving their hint off the nick they still hold
+    /// would break `legacy_handle_for_nick` resolution for them — turning
+    /// an E2E-enabled DM there into a plaintext passthrough. `last_nick`
+    /// keeps being refreshed by actual sightings (handshakes, PRIVMSGs).
     pub fn rename_dm_nick(&self, network: &str, old_nick: &str, new_nick: &str) -> Result<()> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
         conn.execute(
             "UPDATE OR REPLACE e2e_dm_handle_cache SET nick = ?1
              WHERE network = ?2 AND nick = ?3",
             params![new_nick, network, old_nick],
-        )?;
-        // Same freshness rule as an observe: `last_nick` means "last seen
-        // nick", and the rename is the newest sighting. Send-path use of
-        // this hint is safe even cross-network — worst case is a
-        // wrong-context but still-ENCRYPTED send (see
-        // `legacy_handle_for_nick`).
-        conn.execute(
-            "UPDATE e2e_peers SET last_nick = ?1 WHERE last_nick = ?2 COLLATE NOCASE",
-            params![new_nick, old_nick],
         )?;
         Ok(())
     }
