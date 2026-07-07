@@ -2455,11 +2455,15 @@ fn adoption_attributes_dm_context_via_handle_cache() {
 }
 
 #[test]
-fn adoption_attributes_channel_context_via_message_log() {
-    // Multi-network config; the shared database's message log shows the
-    // channel was only ever active on one configured network — that is the
-    // unambiguous owner. A channel logged on BOTH networks stays legacy
-    // (ambiguous) and is reported to the caller for the startup warning.
+fn adoption_never_attributes_channel_contexts_from_chat_logs() {
+    // Multi-network config; the shared database's message log shows '#only'
+    // active solely on NetA — but chat logs prove activity, not key
+    // ownership: the pre-upgrade E2E rows could belong to a network whose
+    // history is empty, excluded, or purged, and migrating on that evidence
+    // would reuse the keys cross-network. Channel contexts therefore always
+    // stay legacy on multi-network configs and are reported for the startup
+    // warning; the read gate keeps them inert (fresh handshakes
+    // re-establish sessions fail-closed).
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(SCHEMA).unwrap();
     conn.execute_batch(
@@ -2467,39 +2471,29 @@ fn adoption_attributes_channel_context_via_message_log() {
                                 buffer TEXT NOT NULL, timestamp INTEGER NOT NULL DEFAULT 0)",
     )
     .unwrap();
-    conn.execute_batch(
-        "INSERT INTO messages (network, buffer) VALUES ('NetA', '#only');
-         INSERT INTO messages (network, buffer) VALUES ('NetA', '#both');
-         INSERT INTO messages (network, buffer) VALUES ('NetB', '#both');",
-    )
-    .unwrap();
+    conn.execute_batch("INSERT INTO messages (network, buffer) VALUES ('NetA', '#only');")
+        .unwrap();
     let kr = Keyring::new(Arc::new(Mutex::new(conn)));
     let mgr = E2eManager::load_or_init(kr).unwrap();
     enable_channel(&mgr, "#only", ChannelMode::AutoAccept);
-    enable_channel(&mgr, "#both", ChannelMode::AutoAccept);
 
     mgr.keyring()
         .set_configured_networks(["NetA".to_string(), "NetB".to_string()]);
     let unattributed = mgr.keyring().adopt_legacy_contexts().unwrap();
     assert_eq!(
         unattributed,
-        vec!["#both".to_string()],
-        "a channel logged on both networks is ambiguous and stays legacy"
+        vec!["#only".to_string()],
+        "channel contexts must never be attributed from the message log"
     );
-    assert!(
-        mgr.keyring()
-            .get_channel_config(&crate::e2e::scoped_context("NetA", "#only"))
-            .unwrap()
-            .is_some_and(|c| c.enabled),
-        "the single-network channel must migrate to its logged network"
-    );
-    assert!(
-        mgr.keyring()
-            .get_channel_config(&crate::e2e::scoped_context("NetB", "#only"))
-            .unwrap()
-            .is_none(),
-        "the migrated channel must not leak to the other network"
-    );
+    for network in ["NetA", "NetB"] {
+        assert!(
+            mgr.keyring()
+                .get_channel_config(&crate::e2e::scoped_context(network, "#only"))
+                .unwrap()
+                .is_none(),
+            "the legacy channel config must not migrate to '{network}'"
+        );
+    }
 }
 
 #[test]

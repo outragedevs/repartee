@@ -51,7 +51,6 @@ impl Storage {
         )
         .map_err(|e| format!("failed to open log database: {e}"))?;
         // After open, so a freshly created database file is covered too.
-        // SQLite creates -wal/-shm siblings with the database's permissions.
         harden_storage_permissions(&db_dir, &db_path);
 
         let crypto_key = if config.encrypt {
@@ -165,7 +164,24 @@ fn harden_storage_permissions(dir: &std::path::Path, db_path: &std::path::Path) 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        for (path, mode) in [(dir, 0o700), (db_path, 0o600)] {
+        // The -wal/-shm siblings hold recent plaintext pages. SQLite creates
+        // them with the main db file's permissions, but any created before
+        // this heal runs (first startup opens the database — and its WAL —
+        // before hardening; pre-upgrade installs never hardened at all)
+        // carry the process umask, so chmod them explicitly too.
+        let sibling = |suffix: &str| {
+            let mut p = db_path.as_os_str().to_owned();
+            p.push(suffix);
+            std::path::PathBuf::from(p)
+        };
+        let wal = sibling("-wal");
+        let shm = sibling("-shm");
+        for (path, mode) in [
+            (dir, 0o700),
+            (db_path, 0o600),
+            (wal.as_path(), 0o600),
+            (shm.as_path(), 0o600),
+        ] {
             if !path.exists() {
                 continue;
             }
@@ -193,17 +209,25 @@ mod tests {
         let dir = tmp.path().join("logs");
         std::fs::create_dir(&dir).unwrap();
         let db = dir.join("messages.db");
-        std::fs::write(&db, b"x").unwrap();
+        let wal = dir.join("messages.db-wal");
+        let shm = dir.join("messages.db-shm");
+        for file in [&db, &wal, &shm] {
+            std::fs::write(file, b"x").unwrap();
+        }
         // Start permissive, as create_dir_all/File::create leave them under
         // a default umask.
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).unwrap();
+        for file in [&db, &wal, &shm] {
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
 
         harden_storage_permissions(&dir, &db);
 
         let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
-        let db_mode = std::fs::metadata(&db).unwrap().permissions().mode() & 0o777;
         assert_eq!(dir_mode, 0o700, "log dir must be owner-only");
-        assert_eq!(db_mode, 0o600, "db file must be owner-only");
+        for file in [&db, &wal, &shm] {
+            let mode = std::fs::metadata(file).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{} must be owner-only", file.display());
+        }
     }
 }

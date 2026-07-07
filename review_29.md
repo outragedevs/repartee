@@ -110,6 +110,35 @@
 >
 > Weryfikacja: `make clippy` 0 warnings, `make test` 1507 passed.
 
+> **STATUS 5 (2026-07-07): RUNDA ZEWNĘTRZNA #5 — NAPRAWIONE.** Oba
+> findings [P2] potwierdzone i naprawione.
+>
+> - **[P2] Hardening uprawnień pomijał pliki WAL/SHM** (`storage/mod.rs`):
+>   `harden_storage_permissions` chmodował tylko katalog (0700) i
+>   `messages.db` (0600). SQLite tworzy `-wal`/`-shm` z uprawnieniami
+>   pliku bazy — ale pierwszy start otwiera bazę (i WAL) PRZED
+>   hardeningiem, a instalacje sprzed hardeningu nigdy go nie miały, więc
+>   istniejące siblingi zostawały z umask (np. 0644) ze świeżymi
+>   plaintextowymi stronami logu/keyringa. Fix: pętla hardeningu chmoduje
+>   też `messages.db-wal` i `messages.db-shm` (istniejące; przyszłe
+>   dziedziczą już 0600 po głównym pliku). Test rozszerzony o oba pliki.
+> - **[P2] Atrybucja legacy kluczy z logów czatu — usunięta**
+>   (`keyring.rs` `attribute_legacy_context`): wiersz w `messages` dla
+>   `#chan` na NetA to dowód AKTYWNOŚCI, nie własności kluczy — legacy
+>   wiersz E2E mógł należeć do NetB, której historia jest pusta,
+>   wykluczona albo wyczyszczona; migracja na tej podstawie = cross-network
+>   key reuse na NetA + utrata fallbacku na NetB. Fix: gałąź `messages`
+>   usunięta w całości (wraz z `messages_table_exists`); na multi-network
+>   atrybutowalne są wyłącznie konteksty DM (`@handle`) przez
+>   `e2e_dm_handle_cache` — stan zapisywany przez samą maszynerię E2E, więc
+>   pojedyncza sieć w cache to bezpośredni dowód własności. Konteksty
+>   kanałowe na multi-network zostają legacy → ostrzeżenie startowe,
+>   read-gate trzyma je martwe, świeże handshaki odtwarzają sesje
+>   fail-closed. Single-network bez zmian (skrót `[only]`). Test
+>   przepisany: log wskazujący jedną sieć NIE migruje kanału.
+>
+> Weryfikacja: `make clippy` 0 warnings, `make test` 1507 passed.
+
 - **Data review:** 2026-07-01
 - **Zakres:** pełny diff PR #29 (`main...fix/various-improvements`, stan po commicie `96580de`)
 - **Metoda:** 8 niezależnych kątów wyszukiwania (line-by-line, removed-behavior, cross-file, reuse, simplification, efficiency, altitude, conventions) → dedup → 12 osobnych weryfikatorów (po jednym na kandydata, verdict CONFIRMED/PLAUSIBLE/REFUTED z cytatami z kodu)

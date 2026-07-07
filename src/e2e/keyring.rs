@@ -1000,10 +1000,14 @@ impl Keyring {
     ///
     /// Ownership is resolved per context:
     /// - exactly one configured network → it owns everything (unambiguous);
-    /// - otherwise a DM context (`@handle`) is attributed via the
-    ///   network-keyed `e2e_dm_handle_cache`, and a channel context via the
-    ///   message log's `(network, buffer)` pairs — but only when exactly one
-    ///   configured network matches.
+    /// - otherwise only a DM context (`@handle`) can be attributed, via the
+    ///   network-keyed `e2e_dm_handle_cache` — E2E state written by the DM
+    ///   machinery itself, so a single matching network is direct proof of
+    ///   ownership. Channel contexts stay unattributed on multi-network
+    ///   configs: chat logs only prove activity, not key ownership — the
+    ///   pre-upgrade keys could belong to a network whose history is empty,
+    ///   excluded, or purged, and migrating on that evidence would reuse
+    ///   keys cross-network.
     ///
     /// Contexts that cannot be attributed are left in place and returned so
     /// the caller can warn; the read-side [`Self::legacy_fallback`] gate
@@ -1066,44 +1070,26 @@ impl Keyring {
         Self::legacy_context_values(&conn)
     }
 
-    /// The single configured network that `wire` can be attributed to, or
-    /// `None` when zero or several match (ambiguity keeps the row legacy).
+    /// The single configured network that DM context `wire` can be
+    /// attributed to, or `None` when it is a channel context or when zero
+    /// or several networks match (ambiguity keeps the row legacy).
     fn attribute_legacy_context(
         conn: &Connection,
         wire: &str,
         configured: &[String],
     ) -> Result<Option<String>> {
-        let networks: Vec<String> = if let Some(handle) = wire.strip_prefix('@') {
-            let mut stmt = conn
-                .prepare("SELECT DISTINCT network FROM e2e_dm_handle_cache WHERE handle = ?1")?;
-            stmt.query_map(params![handle], |r| r.get(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?
-        } else if Self::messages_table_exists(conn)? {
-            // The keyring shares its database with message storage in
-            // production; the buffer column is stored lowercased.
-            let mut stmt =
-                conn.prepare("SELECT DISTINCT network FROM messages WHERE buffer = lower(?1)")?;
-            stmt.query_map(params![wire], |r| r.get(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?
-        } else {
-            Vec::new()
+        let Some(handle) = wire.strip_prefix('@') else {
+            return Ok(None);
         };
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT network FROM e2e_dm_handle_cache WHERE handle = ?1")?;
+        let networks: Vec<String> = stmt
+            .query_map(params![handle], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(match networks.as_slice() {
             [only] if configured.contains(only) => Some(only.clone()),
             _ => None,
         })
-    }
-
-    /// Standalone keyring databases (tests, tooling) have no message log.
-    fn messages_table_exists(conn: &Connection) -> Result<bool> {
-        let row: Option<i64> = conn
-            .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?;
-        Ok(row.is_some())
     }
 
     /// Rename every row keyed by the unscoped `wire` context to
