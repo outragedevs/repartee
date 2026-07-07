@@ -2503,6 +2503,38 @@ fn adoption_attributes_channel_context_via_message_log() {
 }
 
 #[test]
+fn nick_rename_carries_dm_handle_cache() {
+    // An IRC NICK must re-key the (network, nick) handle cache row — and
+    // refresh the network-agnostic e2e_peers.last_nick hint — or a
+    // `/msg <new_nick>` with no live query buffer resolves no handle and
+    // downgrades an E2E-enabled DM to plaintext. Scoped per network: the
+    // same nick on another network is untouched, and a stale row already
+    // holding the new nick is replaced (NICK is authoritative).
+    let mgr = make_manager();
+    let kr = mgr.keyring();
+    kr.cache_dm_handle("NetA", "bob", "~bob@b.host").unwrap();
+    kr.cache_dm_handle("NetA", "bobby", "~stale@old.host").unwrap();
+    kr.cache_dm_handle("NetB", "bob", "~otherbob@x.host").unwrap();
+
+    kr.rename_dm_nick("NetA", "bob", "bobby").unwrap();
+
+    assert_eq!(
+        kr.last_handle_for_nick("bobby", "NetA").unwrap().as_deref(),
+        Some("~bob@b.host"),
+        "the renamed peer must resolve under the new nick"
+    );
+    assert!(
+        kr.last_handle_for_nick("bob", "NetA").unwrap().is_none(),
+        "the old nick no longer belongs to the peer"
+    );
+    assert_eq!(
+        kr.last_handle_for_nick("bob", "NetB").unwrap().as_deref(),
+        Some("~otherbob@x.host"),
+        "another network's row for the same nick must be untouched"
+    );
+}
+
+#[test]
 fn adoption_keeps_existing_scoped_row_on_conflict() {
     // A legacy row whose scoped twin already exists loses: every scoped
     // write postdates any pre-upgrade row, so the scoped one is kept and

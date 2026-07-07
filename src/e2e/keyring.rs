@@ -1477,6 +1477,34 @@ impl Keyring {
         Ok(())
     }
 
+    /// Carry the DM handle cache across an IRC nick change: the row keyed
+    /// `(network, old_nick)` is re-keyed to `new_nick`, and the
+    /// network-agnostic `e2e_peers.last_nick` hint is refreshed the same
+    /// way. Without this a rename orphans the cached `ident@host`: a
+    /// `/msg <new_nick>` with no live query buffer resolves no handle,
+    /// misses the peer's enabled `@<handle>` config, and falls through to
+    /// PLAINTEXT. A row already keyed `new_nick` (a previous holder of that
+    /// nick) is replaced — the NICK event is authoritative for who owns the
+    /// nick now.
+    pub fn rename_dm_nick(&self, network: &str, old_nick: &str, new_nick: &str) -> Result<()> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        conn.execute(
+            "UPDATE OR REPLACE e2e_dm_handle_cache SET nick = ?1
+             WHERE network = ?2 AND nick = ?3",
+            params![new_nick, network, old_nick],
+        )?;
+        // Same freshness rule as an observe: `last_nick` means "last seen
+        // nick", and the rename is the newest sighting. Send-path use of
+        // this hint is safe even cross-network — worst case is a
+        // wrong-context but still-ENCRYPTED send (see
+        // `legacy_handle_for_nick`).
+        conn.execute(
+            "UPDATE e2e_peers SET last_nick = ?1 WHERE last_nick = ?2 COLLATE NOCASE",
+            params![new_nick, old_nick],
+        )?;
+        Ok(())
+    }
+
     /// Return every row of `e2e_incoming_sessions`, across every channel.
     pub fn list_all_incoming_sessions(&self) -> Result<Vec<IncomingSession>> {
         let conn = self.db.lock().expect("keyring mutex poisoned");

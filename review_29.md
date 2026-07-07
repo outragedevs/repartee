@@ -88,6 +88,28 @@
 >
 > Weryfikacja: `make clippy` 0 warnings, `make test` 1505 passed.
 
+> **STATUS 4 (2026-07-07): RUNDA ZEWNĘTRZNA #4 — NAPRAWIONE.**
+>
+> - **[P1] NICK osierocał cache handle'a DM → plaintext** (`events.rs`
+>   `handle_nick_change` / `e2e_gate.rs:155`): handler NICK zmieniał nazwy
+>   buforów query, ale nie przepisywał wiersza `e2e_dm_handle_cache`
+>   (klucz `(network, nick)`) ani hintu `e2e_peers.last_nick`. Przy
+>   zamkniętym (lub nieotwartym w tej sesji) query `/msg <nowy_nick>`
+>   rezolwował handle po nowym nicku → miss → brak configu `@<handle>`
+>   → plaintext mimo włączonego E2E. Fix: `Keyring::rename_dm_nick()` —
+>   re-key wiersza cache na nowy nick (`UPDATE OR REPLACE`; NICK jest
+>   autorytatywny, więc stary wiersz pod nowym nickiem jest zastępowany;
+>   inne sieci nietknięte) + odświeżenie network-agnostycznego
+>   `last_nick` (semantyka „ostatnio widziany", ścieżka wysyłki jest na
+>   nim bezpieczna — najgorszy przypadek to wrong-context, ale wciąż
+>   ZASZYFROWANY send). Wywołane w `handle_nick_change` PRZED early
+>   returnem ścieżki ignore (ignorowany nick też zmienia nick). Otwarte
+>   query było odporne już wcześniej (`rename_query_buffers` przenosi
+>   `peer_handle` z buforem). 2 nowe testy (keyring + regresja
+>   event-level na pełnym scenariuszu).
+>
+> Weryfikacja: `make clippy` 0 warnings, `make test` 1507 passed.
+
 - **Data review:** 2026-07-01
 - **Zakres:** pełny diff PR #29 (`main...fix/various-improvements`, stan po commicie `96580de`)
 - **Metoda:** 8 niezależnych kątów wyszukiwania (line-by-line, removed-behavior, cross-file, reuse, simplification, efficiency, altitude, conventions) → dedup → 12 osobnych weryfikatorów (po jednym na kandydata, verdict CONFIRMED/PLAUSIBLE/REFUTED z cytatami z kodu)

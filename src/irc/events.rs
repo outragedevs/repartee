@@ -2527,6 +2527,22 @@ fn handle_nick_change(
             });
     }
 
+    // A DM peer's cached `ident@host` is keyed by (network, nick) — carry
+    // it across the rename BEFORE any early return below (an ignored nick
+    // still changes nick). Otherwise a later `/msg <new_nick>` with no live
+    // query buffer resolves no handle, misses the peer's enabled
+    // `@<handle>` config, and downgrades to plaintext — the exact fail-open
+    // the send gate exists to prevent.
+    if !old_nick.is_empty()
+        && let Some(mgr) = state.e2e_manager.as_ref()
+        && let Some(conn) = state.connections.get(conn_id)
+        && let Err(e) = mgr
+            .keyring()
+            .rename_dm_nick(&conn.label, &old_nick, new_nick)
+    {
+        tracing::warn!("e2e: dm handle cache rename '{old_nick}' -> '{new_nick}' failed: {e}");
+    }
+
     // --- Ignore check (never ignore our own nick changes) ---
     if old_nick != our_nick {
         let (_, ident, host) = extract_nick_userhost(prefix);
@@ -5473,6 +5489,40 @@ mod tests {
                 .unwrap()
                 .text
                 .contains("frank is now known as frankie")
+        );
+    }
+
+    #[test]
+    fn nick_change_carries_e2e_dm_handle_cache() {
+        // Regression: an E2E peer renames while their query buffer is NOT
+        // open. The send gate resolves the peer handle by nick via the
+        // keyring cache — if the NICK handler leaves the cache keyed under
+        // the old nick, `/msg <new_nick>` resolves no handle, misses the
+        // enabled `@<handle>` config, and downgrades to PLAINTEXT.
+        use crate::e2e::keyring::Keyring;
+        use crate::e2e::manager::E2eManager;
+        use std::sync::{Arc, Mutex};
+
+        let conn = crate::storage::db::open_database(false).unwrap();
+        let mgr = E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(conn)))).unwrap();
+        mgr.keyring()
+            .cache_dm_handle("TestServer", "frank", "~frank@f.host")
+            .unwrap();
+
+        let mut state = make_test_state();
+        state.e2e_manager = Some(Arc::new(mgr));
+        // No open query buffer for frank — resolution must come from the
+        // keyring cache alone.
+        let msg = make_irc_msg(Some("frank!user@host"), Command::NICK("frankie".into()));
+        handle_irc_message(&mut state, "test", &msg);
+
+        assert_eq!(
+            state
+                .resolve_query_peer_handle("test/frankie", "frankie")
+                .unwrap()
+                .as_deref(),
+            Some("~frank@f.host"),
+            "the send gate must still resolve the peer's handle after the rename"
         );
     }
 
