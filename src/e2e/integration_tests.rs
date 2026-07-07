@@ -2282,3 +2282,247 @@ fn renamed_network_label_heals_unambiguous_config_read() {
         "two candidate networks → ambiguous → no heal"
     );
 }
+
+#[test]
+fn multi_network_config_denies_legacy_fallback() {
+    // With two networks configured, a legacy unscoped row has no
+    // determinable owner. Serving it to every scoped miss would hand one
+    // network's keys to ANY network sharing the wire name (`#x` on NetA
+    // and NetB) — the reads must fail closed instead.
+    let alice = make_manager();
+    let carol = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&carol, "#x", ChannelMode::AutoAccept);
+    let req = carol.build_keyreq("#x").unwrap();
+    let rsp = alice.handle_keyreq("~carol@c.host", &req).unwrap().unwrap();
+    carol.handle_keyrsp("~alice@a.host", &rsp).unwrap();
+    carol
+        .keyring()
+        .record_outgoing_recipient("#x", "~legacy@old.host", &[0xaa; 16], 100)
+        .unwrap();
+    carol.keyring().add_autotrust("#x", "*", 100).unwrap();
+
+    carol
+        .keyring()
+        .set_configured_networks(["NetA".to_string(), "NetB".to_string()]);
+
+    let net_b = crate::e2e::scoped_context("NetB", "#x");
+    assert!(
+        carol.keyring().get_channel_config(&net_b).unwrap().is_none(),
+        "NetB must not inherit NetA's legacy config"
+    );
+    assert!(
+        carol
+            .keyring()
+            .get_incoming_session("~alice@a.host", &net_b)
+            .unwrap()
+            .is_none(),
+        "NetB must not decrypt with the legacy session"
+    );
+    assert!(
+        carol.keyring().get_outgoing_session(&net_b).unwrap().is_none(),
+        "NetB must not encrypt with the legacy outgoing key"
+    );
+    assert!(
+        carol
+            .keyring()
+            .list_outgoing_recipients(&net_b)
+            .unwrap()
+            .is_empty(),
+        "NetB must not REKEY the legacy recipient list"
+    );
+    assert!(
+        carol
+            .keyring()
+            .list_trusted_peers_for_channel(&net_b)
+            .unwrap()
+            .is_empty(),
+        "NetB must not list the legacy trusted peers"
+    );
+    assert!(
+        !carol
+            .keyring()
+            .autotrust_matches("~mallory@m.host", &net_b)
+            .unwrap(),
+        "a legacy autotrust rule must not auto-trust peers on another network"
+    );
+}
+
+#[test]
+fn single_network_startup_migrates_legacy_rows() {
+    // Exactly one configured network is the unambiguous owner: startup
+    // migration renames every context-keyed legacy row to its scope, so
+    // scoped reads resolve exactly and nothing is left for the fallback.
+    let alice = make_manager();
+    let carol = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&carol, "#x", ChannelMode::AutoAccept);
+    let req = carol.build_keyreq("#x").unwrap();
+    let rsp = alice.handle_keyreq("~carol@c.host", &req).unwrap().unwrap();
+    carol.handle_keyrsp("~alice@a.host", &rsp).unwrap();
+    let wires = alice.encrypt_outgoing("#x", "pre-upgrade msg").unwrap();
+    carol
+        .keyring()
+        .record_outgoing_recipient("#x", "~alice@a.host", &[0xaa; 16], 100)
+        .unwrap();
+    carol.keyring().add_autotrust("#x", "~alice*", 100).unwrap();
+
+    carol.keyring().set_configured_networks(["NetA".to_string()]);
+    let unattributed = carol.keyring().adopt_legacy_contexts().unwrap();
+    assert!(unattributed.is_empty(), "single network is never ambiguous");
+    assert!(
+        carol.keyring().list_legacy_contexts().unwrap().is_empty(),
+        "migration must leave no unscoped rows behind"
+    );
+
+    let scoped = crate::e2e::scoped_context("NetA", "#x");
+    assert!(
+        carol
+            .keyring()
+            .get_channel_config(&scoped)
+            .unwrap()
+            .is_some_and(|c| c.enabled),
+        "config must resolve under the scoped key after migration"
+    );
+    match carol
+        .decrypt_incoming("~alice@a.host", &scoped, &wires[0])
+        .unwrap()
+    {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "pre-upgrade msg"),
+        other => panic!("migrated session must keep decrypting: {other:?}"),
+    }
+    assert_eq!(
+        carol
+            .keyring()
+            .list_outgoing_recipients(&scoped)
+            .unwrap()
+            .len(),
+        1,
+        "recipient rows must migrate with the context"
+    );
+    assert!(
+        carol
+            .keyring()
+            .autotrust_matches("~alice@a.host", &scoped)
+            .unwrap(),
+        "autotrust rules must migrate with the context"
+    );
+    // A different network's scoped read finds nothing — the migrated rows
+    // belong to NetA now.
+    assert!(
+        carol
+            .keyring()
+            .get_channel_config(&crate::e2e::scoped_context("NetB", "#x"))
+            .unwrap()
+            .is_none(),
+        "migrated rows must not leak to another network"
+    );
+}
+
+#[test]
+fn adoption_attributes_dm_context_via_handle_cache() {
+    // Multi-network config, but the DM handle cache (network-keyed) has
+    // seen the peer's handle on exactly one configured network — that
+    // attribution is unambiguous, so the DM context migrates to it.
+    let mgr = make_manager();
+    let dm_wire = "@~bob@b.host";
+    enable_channel(&mgr, dm_wire, ChannelMode::AutoAccept);
+    mgr.keyring()
+        .cache_dm_handle("NetA", "bob", "~bob@b.host")
+        .unwrap();
+
+    mgr.keyring()
+        .set_configured_networks(["NetA".to_string(), "NetB".to_string()]);
+    let unattributed = mgr.keyring().adopt_legacy_contexts().unwrap();
+    assert!(
+        unattributed.is_empty(),
+        "cache-attributed DM context must migrate: {unattributed:?}"
+    );
+    assert!(
+        mgr.keyring()
+            .get_channel_config(&crate::e2e::scoped_context("NetA", dm_wire))
+            .unwrap()
+            .is_some_and(|c| c.enabled),
+        "the DM config must now live under the cache's network"
+    );
+    assert!(
+        mgr.keyring()
+            .get_channel_config(&crate::e2e::scoped_context("NetB", dm_wire))
+            .unwrap()
+            .is_none(),
+        "the other network must not see the migrated DM config"
+    );
+}
+
+#[test]
+fn adoption_attributes_channel_context_via_message_log() {
+    // Multi-network config; the shared database's message log shows the
+    // channel was only ever active on one configured network — that is the
+    // unambiguous owner. A channel logged on BOTH networks stays legacy
+    // (ambiguous) and is reported to the caller for the startup warning.
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(SCHEMA).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY, network TEXT NOT NULL,
+                                buffer TEXT NOT NULL, timestamp INTEGER NOT NULL DEFAULT 0)",
+    )
+    .unwrap();
+    conn.execute_batch(
+        "INSERT INTO messages (network, buffer) VALUES ('NetA', '#only');
+         INSERT INTO messages (network, buffer) VALUES ('NetA', '#both');
+         INSERT INTO messages (network, buffer) VALUES ('NetB', '#both');",
+    )
+    .unwrap();
+    let kr = Keyring::new(Arc::new(Mutex::new(conn)));
+    let mgr = E2eManager::load_or_init(kr).unwrap();
+    enable_channel(&mgr, "#only", ChannelMode::AutoAccept);
+    enable_channel(&mgr, "#both", ChannelMode::AutoAccept);
+
+    mgr.keyring()
+        .set_configured_networks(["NetA".to_string(), "NetB".to_string()]);
+    let unattributed = mgr.keyring().adopt_legacy_contexts().unwrap();
+    assert_eq!(
+        unattributed,
+        vec!["#both".to_string()],
+        "a channel logged on both networks is ambiguous and stays legacy"
+    );
+    assert!(
+        mgr.keyring()
+            .get_channel_config(&crate::e2e::scoped_context("NetA", "#only"))
+            .unwrap()
+            .is_some_and(|c| c.enabled),
+        "the single-network channel must migrate to its logged network"
+    );
+    assert!(
+        mgr.keyring()
+            .get_channel_config(&crate::e2e::scoped_context("NetB", "#only"))
+            .unwrap()
+            .is_none(),
+        "the migrated channel must not leak to the other network"
+    );
+}
+
+#[test]
+fn adoption_keeps_existing_scoped_row_on_conflict() {
+    // A legacy row whose scoped twin already exists loses: every scoped
+    // write postdates any pre-upgrade row, so the scoped one is kept and
+    // the legacy one dropped (never the reverse, and never an error).
+    let mgr = make_manager();
+    enable_channel(&mgr, "#x", ChannelMode::AutoAccept); // legacy
+    let scoped = crate::e2e::scoped_context("NetA", "#x");
+    enable_channel(&mgr, &scoped, ChannelMode::Normal); // newer scoped twin
+
+    mgr.keyring().set_configured_networks(["NetA".to_string()]);
+    mgr.keyring().adopt_legacy_contexts().unwrap();
+
+    let cfg = mgr.keyring().get_channel_config(&scoped).unwrap().unwrap();
+    assert_eq!(
+        cfg.mode,
+        ChannelMode::Normal,
+        "the existing scoped row must win the collision"
+    );
+    assert!(
+        mgr.keyring().list_legacy_contexts().unwrap().is_empty(),
+        "the colliding legacy row must be dropped, not kept"
+    );
+}

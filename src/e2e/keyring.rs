@@ -499,7 +499,7 @@ impl Keyring {
         // Legacy-row fallback (see get_channel_config). Critical here: a
         // scoped miss that generated a FRESH key would look like a rotation
         // without a REKEY — every pre-upgrade peer would fail AEAD.
-        legacy_wire_fallback(channel)
+        self.legacy_fallback(channel)
             .map_or_else(|| Ok(None), |wire| self.get_outgoing_session_exact(wire))
     }
 
@@ -596,7 +596,7 @@ impl Keyring {
         // fingerprint-continuity check and drops the superseded key that the
         // prev-key grace window exists to retain.
         if existing.is_none()
-            && let Some(wire) = legacy_wire_fallback(&s.channel)
+            && let Some(wire) = self.legacy_fallback(&s.channel)
         {
             existing = conn
                 .query_row(
@@ -664,7 +664,7 @@ impl Keyring {
         if let Some(prev) = self.get_incoming_prev_key_exact(handle, channel)? {
             return Ok(Some(prev));
         }
-        legacy_wire_fallback(channel).map_or_else(
+        self.legacy_fallback(channel).map_or_else(
             || Ok(None),
             |wire| self.get_incoming_prev_key_exact(handle, wire),
         )
@@ -722,7 +722,7 @@ impl Keyring {
         }
         // Legacy-row fallback (see get_channel_config): sessions installed
         // before network scoping keep decrypting.
-        legacy_wire_fallback(channel).map_or_else(
+        self.legacy_fallback(channel).map_or_else(
             || Ok(None),
             |wire| self.get_incoming_session_exact(handle, wire),
         )
@@ -846,7 +846,7 @@ impl Keyring {
         let mut peers = self.list_trusted_peers_for_channel_exact(channel)?;
         // UNION with the legacy unscoped rows — same transition rule as
         // list_outgoing_recipients: dedup by handle, the scoped row wins.
-        if let Some(wire) = legacy_wire_fallback(channel) {
+        if let Some(wire) = self.legacy_fallback(channel) {
             for sess in self.list_trusted_peers_for_channel_exact(wire)? {
                 if !peers.iter().any(|p| p.handle == sess.handle) {
                     peers.push(sess);
@@ -916,9 +916,14 @@ impl Keyring {
         }
         // Network-scoped read over a pre-scoping database: fall back to the
         // legacy unscoped row so existing setups survive the upgrade. A
-        // scoped row always wins when present (all writes are scoped).
+        // scoped row always wins when present (all writes are scoped), and
+        // the fallback is denied on multi-network configs — see
+        // `legacy_fallback` (the renamed-label heal below stays available
+        // regardless: it reads scoped siblings, not the legacy row).
         if let Some(wire) = legacy_wire_fallback(channel) {
-            if let Some(cfg) = self.get_channel_config_exact(wire)? {
+            if self.legacy_adoption_allowed()
+                && let Some(cfg) = self.get_channel_config_exact(wire)?
+            {
                 return Ok(Some(cfg));
             }
             // Renamed-label heal: a config.toml `label` change orphans every
@@ -964,6 +969,169 @@ impl Keyring {
             .write()
             .expect("configured networks lock poisoned");
         *guard = labels.into_iter().collect();
+    }
+
+    /// Whether a scoped miss may consult the legacy (unscoped, pre-upgrade)
+    /// row at all. With more than one configured network the legacy row has
+    /// no determinable owner, and serving it to every scoped lookup would
+    /// hand ONE network's keys to ANY network sharing the wire name — the
+    /// exact cross-network reuse the scoping exists to prevent. Zero or one
+    /// configured network is unambiguous (and startup migration via
+    /// [`Self::adopt_legacy_contexts`] usually empties the legacy rows
+    /// first; the read fallback then remains as a safety net).
+    fn legacy_adoption_allowed(&self) -> bool {
+        self.configured_networks
+            .read()
+            .expect("configured networks lock poisoned")
+            .len()
+            <= 1
+    }
+
+    /// The legacy unscoped row key to consult for a scoped `channel`, or
+    /// `None` when `channel` is already unscoped or legacy adoption is
+    /// denied — see [`Self::legacy_adoption_allowed`].
+    fn legacy_fallback<'a>(&self, channel: &'a str) -> Option<&'a str> {
+        let wire = legacy_wire_fallback(channel)?;
+        self.legacy_adoption_allowed().then_some(wire)
+    }
+
+    /// Migrate pre-scoping (unscoped) keyring rows to network-scoped ones.
+    /// Called once at startup, after [`Self::set_configured_networks`].
+    ///
+    /// Ownership is resolved per context:
+    /// - exactly one configured network → it owns everything (unambiguous);
+    /// - otherwise a DM context (`@handle`) is attributed via the
+    ///   network-keyed `e2e_dm_handle_cache`, and a channel context via the
+    ///   message log's `(network, buffer)` pairs — but only when exactly one
+    ///   configured network matches.
+    ///
+    /// Contexts that cannot be attributed are left in place and returned so
+    /// the caller can warn; the read-side [`Self::legacy_fallback`] gate
+    /// keeps them inert on multi-network configs (fail-closed: fresh
+    /// handshakes re-establish sessions instead of reusing another
+    /// network's keys). When a scoped row already exists for the same key,
+    /// the scoped row wins and the legacy one is dropped.
+    pub fn adopt_legacy_contexts(&self) -> Result<Vec<String>> {
+        let configured: Vec<String> = {
+            let guard = self
+                .configured_networks
+                .read()
+                .expect("configured networks lock poisoned");
+            guard.iter().cloned().collect()
+        };
+        if configured.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let legacy = Self::legacy_context_values(&conn)?;
+        let mut unattributed = Vec::new();
+        for wire in legacy {
+            let owner = if let [only] = configured.as_slice() {
+                Some(only.clone())
+            } else {
+                Self::attribute_legacy_context(&conn, &wire, &configured)?
+            };
+            match owner {
+                Some(network) => Self::migrate_legacy_context(&conn, &wire, &network)?,
+                None => unattributed.push(wire),
+            }
+        }
+        Ok(unattributed)
+    }
+
+    /// Distinct unscoped context values across every context-keyed table.
+    /// (`e2e_seen_rekeys` and `prev_sk` are excluded: both were introduced
+    /// together with scoping, so they can never hold legacy rows.)
+    fn legacy_context_values(conn: &Connection) -> Result<Vec<String>> {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT ctx FROM (
+                 SELECT channel AS ctx FROM e2e_channel_config
+                 UNION SELECT channel FROM e2e_outgoing_sessions
+                 UNION SELECT channel FROM e2e_incoming_sessions
+                 UNION SELECT channel FROM e2e_outgoing_recipients
+                 UNION SELECT scope FROM e2e_autotrust WHERE scope <> 'global'
+             ) WHERE instr(ctx, char(31)) = 0",
+        )?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Legacy contexts still present after [`Self::adopt_legacy_contexts`] —
+    /// startup warns about them on multi-network configs, where the read
+    /// fallback is denied and the state is effectively dormant.
+    pub fn list_legacy_contexts(&self) -> Result<Vec<String>> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        Self::legacy_context_values(&conn)
+    }
+
+    /// The single configured network that `wire` can be attributed to, or
+    /// `None` when zero or several match (ambiguity keeps the row legacy).
+    fn attribute_legacy_context(
+        conn: &Connection,
+        wire: &str,
+        configured: &[String],
+    ) -> Result<Option<String>> {
+        let networks: Vec<String> = if let Some(handle) = wire.strip_prefix('@') {
+            let mut stmt = conn
+                .prepare("SELECT DISTINCT network FROM e2e_dm_handle_cache WHERE handle = ?1")?;
+            stmt.query_map(params![handle], |r| r.get(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        } else if Self::messages_table_exists(conn)? {
+            // The keyring shares its database with message storage in
+            // production; the buffer column is stored lowercased.
+            let mut stmt =
+                conn.prepare("SELECT DISTINCT network FROM messages WHERE buffer = lower(?1)")?;
+            stmt.query_map(params![wire], |r| r.get(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
+        Ok(match networks.as_slice() {
+            [only] if configured.contains(only) => Some(only.clone()),
+            _ => None,
+        })
+    }
+
+    /// Standalone keyring databases (tests, tooling) have no message log.
+    fn messages_table_exists(conn: &Connection) -> Result<bool> {
+        let row: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(row.is_some())
+    }
+
+    /// Rename every row keyed by the unscoped `wire` context to
+    /// `{network}\x1F{wire}`, atomically. A rename that would collide with
+    /// an existing scoped row is skipped and the legacy row deleted — every
+    /// scoped write is newer than any pre-upgrade row, so scoped wins.
+    fn migrate_legacy_context(conn: &Connection, wire: &str, network: &str) -> Result<()> {
+        let scoped = crate::e2e::scoped_context(network, wire);
+        let tx = conn.unchecked_transaction()?;
+        for (table, column) in [
+            ("e2e_channel_config", "channel"),
+            ("e2e_outgoing_sessions", "channel"),
+            ("e2e_incoming_sessions", "channel"),
+            ("e2e_outgoing_recipients", "channel"),
+            ("e2e_autotrust", "scope"),
+        ] {
+            tx.execute(
+                &format!("UPDATE OR IGNORE {table} SET {column} = ?1 WHERE {column} = ?2"),
+                params![scoped, wire],
+            )?;
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE {column} = ?1"),
+                params![wire],
+            )?;
+        }
+        tx.commit()?;
+        tracing::info!("e2e: migrated legacy context '{wire}' to network '{network}'");
+        Ok(())
     }
 
     /// The single scoped `e2e_channel_config` row whose wire part equals
@@ -1049,19 +1217,19 @@ impl Keyring {
     /// (possibly empty), `?` matches exactly one character, everything
     /// else is a literal. No bracket expressions. This mirrors spec §7.
     pub fn autotrust_matches(&self, handle: &str, channel: &str) -> Result<bool> {
+        // ?2 is the legacy unscoped scope (see get_channel_config's
+        // fallback): autotrust rows written before network scoping keep
+        // matching scoped lookups. Denied on multi-network configs like
+        // every legacy adoption — a pre-upgrade rule for `#chan` must not
+        // auto-trust peers on a DIFFERENT network's `#chan`.
+        let legacy_scope = self.legacy_fallback(channel).unwrap_or(channel);
         let conn = self.db.lock().expect("keyring mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT handle_pattern FROM e2e_autotrust
              WHERE scope = 'global' OR scope = ?1 OR scope = ?2",
         )?;
-        // ?2 is the legacy unscoped scope (see get_channel_config's
-        // fallback): autotrust rows written before network scoping keep
-        // matching scoped lookups.
         let rows = stmt
-            .query_map(
-                params![channel, crate::e2e::wire_context(channel)],
-                |r| r.get::<_, String>(0),
-            )?
+            .query_map(params![channel, legacy_scope], |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         for pat in rows {
             if glob_matches_ci(&pat, handle) {
@@ -1128,7 +1296,7 @@ impl Keyring {
         // while new handshakes record under the scoped one — a rotate must
         // REKEY both generations or every pre-upgrade peer is left on the
         // old key. Dedup by handle; the scoped row wins.
-        if let Some(wire) = legacy_wire_fallback(channel) {
+        if let Some(wire) = self.legacy_fallback(channel) {
             for (handle, fp) in self.list_outgoing_recipients_exact(wire)? {
                 if !recipients.iter().any(|(h, _)| *h == handle) {
                     recipients.push((handle, fp));

@@ -894,17 +894,25 @@ impl App {
                     // auto-KEYREQ on MissingKey) produced by the handlers.
                     self.drain_pending_e2e_sends();
 
-                    // Drain post-handshake DM gap-fills: a KEYRSP that just
-                    // installed a query's session queued its nick here so the
+                    // Drain post-handshake gap-fills: a KEYRSP that just
+                    // installed a session queued its conversation here so the
                     // message that triggered the handshake (transient
                     // "[E2E: awaiting session with …]" placeholder) is
-                    // re-fetched via CHATHISTORY and decrypted for real.
+                    // re-fetched via CHATHISTORY and decrypted for real. A
+                    // gap-fill suppressed by an in-flight CHATHISTORY for the
+                    // same target is re-queued: its batch END is itself an
+                    // IRC event, so the retry fires exactly when the conflict
+                    // clears (dropping it instead would strand the
+                    // placeholder until reconnect).
                     let e2e_gapfills = std::mem::take(&mut self.state.pending_e2e_gapfills);
                     for gapfill in e2e_gapfills {
-                        self.regapfill_conversation_after_session(
+                        if !self.regapfill_conversation_after_session(
                             &gapfill.connection_id,
                             &gapfill.target,
-                        );
+                        ) && !self.state.pending_e2e_gapfills.contains(&gapfill)
+                        {
+                            self.state.pending_e2e_gapfills.push(gapfill);
+                        }
                     }
 
                     // If we just learned our own ident@host (the recipient-keyed

@@ -56,6 +56,38 @@
 > Świadomie odłożone: unifikacja resolverów (refactor, osobny PR);
 > `KEYRING_KEY` w `.env` obok bazy (wymaga decyzji o keychain/OS-store).
 
+> **STATUS 3 (2026-07-07): RUNDA ZEWNĘTRZNA #3 — NAPRAWIONE.** Oba
+> znaleziska zweryfikowane jako realne i naprawione:
+>
+> - **[P1] Globalny legacy fallback łamał izolację sieci** (`keyring.rs`):
+>   każdy scoped miss spadał do niescope'owanego wiersza pre-upgrade
+>   niezależnie od sieci — `#chan` na drugiej sieci przejmował klucze
+>   pierwszej. Teraz: (1) startowa migracja `adopt_legacy_contexts()` —
+>   przy JEDNEJ skonfigurowanej sieci wszystko przechodzi na jej scope;
+>   przy wielu sieciach kontekst DM atrybuowany przez network-keyed
+>   `e2e_dm_handle_cache`, kanał przez pary `(network, buffer)` z logu
+>   wiadomości (ta sama baza) — migracja tylko przy dokładnie jednym
+>   dopasowaniu; kolizja ze scoped wierszem → scoped wygrywa, legacy
+>   znika. (2) Read-fallback, uniony list, konsultacja TOFU w
+>   `install_incoming_session_strict` i legacy scope autotrustu są
+>   ODMAWIANE przy >1 skonfigurowanej sieci (`legacy_fallback()` —
+>   fail-closed: świeży handshake zamiast cudzych kluczy). (3)
+>   Nieatrybuowalne konteksty zgłaszane głośnym `[E2E] warning` przy
+>   starcie. Heal po rename labela bez zmian (czyta scoped siblings,
+>   nie legacy). 5 nowych testów integracyjnych.
+> - **[P2] Gap-fill po KEYRSP ginął przy zajętym CHATHISTORY**
+>   (`backlog.rs`/`app/irc.rs`): jednorazowy wpis `pending_e2e_gapfills`
+>   był zużywany nawet gdy `should_request` stłumił żądanie przez
+>   in-flight batch dla tego celu — placeholder „awaiting session"
+>   zostawał do reconnectu. Teraz `regapfill_conversation_after_session`
+>   zwraca wynik; stłumienie przez in-flight (transient) → wpis wraca do
+>   kolejki i ponawia się przy następnym evencie IRC (batch END
+>   in-flight'a JEST takim eventem, więc retry odpala dokładnie gdy
+>   konflikt znika); przyczyny trwałe (brak capa/połączenia) → drop.
+>   Enqueue dedupowane.
+>
+> Weryfikacja: `make clippy` 0 warnings, `make test` 1505 passed.
+
 - **Data review:** 2026-07-01
 - **Zakres:** pełny diff PR #29 (`main...fix/various-improvements`, stan po commicie `96580de`)
 - **Metoda:** 8 niezależnych kątów wyszukiwania (line-by-line, removed-behavior, cross-file, reuse, simplification, efficiency, altitude, conventions) → dedup → 12 osobnych weryfikatorów (po jednym na kandydata, verdict CONFIRMED/PLAUSIBLE/REFUTED z cytatami z kodu)

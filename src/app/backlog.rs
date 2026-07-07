@@ -589,11 +589,30 @@ impl App {
     /// decrypts it under the fresh session and the splice sweeps the
     /// placeholder. The one-shot connect-gapfill claim must be released
     /// first, same as `regapfill_queries_after_own_handle`.
-    pub(crate) fn regapfill_conversation_after_session(&mut self, conn_id: &str, target: &str) {
+    ///
+    /// Returns `false` when the request was suppressed by another
+    /// `CHATHISTORY` for the same target already in flight — the caller
+    /// must re-queue the gap-fill and retry, because that in-flight batch
+    /// may neither contain nor decrypt the placeholder line, and nothing
+    /// else re-issues this fetch. Any other failure (connection gone, no
+    /// `draft/chathistory`, dead send) returns `true`: there is no later
+    /// signal worth waiting for, and reconnect flows re-run their own
+    /// gap-fills anyway.
+    pub(crate) fn regapfill_conversation_after_session(
+        &mut self,
+        conn_id: &str,
+        target: &str,
+    ) -> bool {
         if let Some(conn) = self.state.connections.get_mut(conn_id) {
             conn.chathistory.clear_connect_gapfilled(target);
         }
-        self.request_connect_gapfill(conn_id, target);
+        if self.request_connect_gapfill(conn_id, target) {
+            return true;
+        }
+        let transiently_busy = self.state.connections.get(conn_id).is_some_and(|conn| {
+            conn.enabled_caps.contains("draft/chathistory") && conn.chathistory.any_in_flight(target)
+        });
+        !transiently_busy
     }
 
     /// On a channel's NAMES completion after (re)connect, gap-fill that channel's
@@ -621,8 +640,9 @@ impl App {
     /// Shared gap-fill request: anchor `AFTER` the newest stored row (so we pull
     /// only what we missed while disconnected), or `LATEST` when the buffer has
     /// no stored history yet. No-op unless the connection negotiated
-    /// `draft/chathistory`.
-    fn request_connect_gapfill(&mut self, conn_id: &str, target: &str) {
+    /// `draft/chathistory`. Returns `true` only when a request actually
+    /// went out (and the one-shot claim was taken).
+    fn request_connect_gapfill(&mut self, conn_id: &str, target: &str) -> bool {
         use crate::irc::chathistory::Direction;
 
         // Gate once per target per connection. The channel path runs on
@@ -633,13 +653,13 @@ impl App {
         // attempt is suppressed by an in-flight request or a failed send.
         let (network, cutoff) = {
             let Some(conn) = self.state.connections.get(conn_id) else {
-                return;
+                return false;
             };
             if !conn.enabled_caps.contains("draft/chathistory") {
-                return;
+                return false;
             }
             if conn.chathistory.is_connect_gapfilled(target) {
-                return;
+                return false;
             }
             // Exclude reconnect-time rows (JOIN echo, traffic logged during a slow
             // NAMES) so the AFTER anchor stays on the pre-disconnect tail and the
@@ -685,6 +705,7 @@ impl App {
         {
             conn.chathistory.mark_connect_gapfilled(target);
         }
+        issued
     }
 
     /// Pin the active live-chat buffer so loaded backlog survives trimming. Called

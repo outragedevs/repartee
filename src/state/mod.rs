@@ -26,7 +26,7 @@ use crate::storage::LogRow;
 /// borrow of `App`.
 /// A conversation needing a post-handshake `CHATHISTORY` gap-fill — see
 /// `AppState::pending_e2e_gapfills`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingE2eGapfill {
     /// Connection the conversation lives on.
     pub connection_id: String,

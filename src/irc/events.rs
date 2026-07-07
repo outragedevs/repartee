@@ -4535,12 +4535,16 @@ fn try_dispatch_rpe2e_ctcp(
                 } else {
                     wire.to_string()
                 };
-                state
-                    .pending_e2e_gapfills
-                    .push(crate::state::PendingE2eGapfill {
-                        connection_id: conn_id.to_string(),
-                        target: gapfill_target,
-                    });
+                let gapfill = crate::state::PendingE2eGapfill {
+                    connection_id: conn_id.to_string(),
+                    target: gapfill_target,
+                };
+                // Dedup: a second KEYRSP for the same conversation (peer
+                // retry, multi-peer channel) must not stack a duplicate
+                // fetch behind the retry loop in `App::handle_irc_event`.
+                if !state.pending_e2e_gapfills.contains(&gapfill) {
+                    state.pending_e2e_gapfills.push(gapfill);
+                }
             }
             Some(RpEe2eOutcome::Handled)
         }
