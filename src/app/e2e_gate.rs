@@ -194,13 +194,14 @@ impl AppState {
             ))
         };
 
-        if text.starts_with(['.', '!']) {
+        if matches!(buffer_type, BufferType::Channel) && text.starts_with(['.', '!']) {
             // Deliberate bot-command bypass (mirrored by the companion
             // irssi/weechat RPE2E scripts): `.cmd`/`!cmd` lines go out
-            // unencrypted so channel bots can parse them. The downgrade
-            // must stay VISIBLE in an E2E-enabled conversation — an
-            // ellipsis or an emphatic `!` at the start of prose is easy to
-            // type without meaning a bot command.
+            // unencrypted so channel bots can parse them. CHANNEL-ONLY —
+            // bots live in channels, and in a DM an ellipsis or an emphatic
+            // `!` at the start of prose is ordinary conversation, so DMs
+            // take the full E2E gate below. The channel downgrade must
+            // still stay VISIBLE when E2E is enabled there.
             self.warn_e2e_bot_bypass(buffer_id, buffer_name);
             return plain_passthrough();
         }
@@ -498,9 +499,9 @@ impl AppState {
             .is_some_and(|c| c.enabled)
     }
 
-    /// Themed `[E2E]` line in the conversation buffer noting that a
-    /// bot-style `.`/`!` message left in CLEARTEXT despite E2E being enabled
-    /// there — the visibility half of the bot-command bypass in
+    /// Themed `[E2E]` line in the channel buffer noting that a bot-style
+    /// `.`/`!` message left in CLEARTEXT despite E2E being enabled there —
+    /// the visibility half of the channel-only bot-command bypass in
     /// [`Self::e2e_encrypt_or_passthrough`]. Advisory only; never blocks.
     /// Read errors resolve to silence, matching `e2e_enabled_for_target`.
     fn warn_e2e_bot_bypass(&mut self, buffer_id: &str, buffer_name: &str) {
@@ -523,7 +524,7 @@ impl AppState {
         }
         let text = format!(
             "[E2E] bot-style message to {buffer_name} sent in CLEARTEXT — \
-             lines starting with '.' or '!' bypass encryption for bots"
+             channel lines starting with '.' or '!' bypass encryption for bots"
         );
         let id = self.next_message_id();
         self.add_local_message(
@@ -972,48 +973,61 @@ mod tests {
     }
 
     #[test]
-    fn bot_prefix_bypass_is_visible_in_e2e_conversation() {
-        // `.cmd`/`!cmd` deliberately bypass encryption (channel bots must be
-        // able to parse them) — but in an E2E-enabled conversation the
-        // downgrade must be VISIBLE, and outside one it must stay silent.
+    fn bot_prefix_bypass_is_channel_only_and_visible() {
+        // `.cmd`/`!cmd` deliberately bypass encryption in CHANNELS (bots
+        // must be able to parse them) — visibly when E2E is enabled there,
+        // silently otherwise. DMs never bypass: an ellipsis or an emphatic
+        // `!` at the start of prose is ordinary conversation, so an
+        // E2E-enabled DM encrypts it like any other message.
         let mut state = make_state_with_manager();
+        state.add_buffer(make_buf(BufferType::Channel, "#sec"));
+        enable(&state, &crate::e2e::scoped_context("TestServer", "#sec"));
+        state.add_buffer(make_buf(BufferType::Channel, "#open"));
         let mut buf = make_buf(BufferType::Query, "bob");
         buf.peer_handle = Some("~bob@b.host".to_string());
         state.add_buffer(buf);
         enable(&state, "@~bob@b.host");
-        state.add_buffer(make_buf(BufferType::Query, "carol"));
 
+        // E2E channel: bypass, visibly.
         let plan = state
-            .e2e_send_plan_for_target("test", "bob", "!roll 2d6")
-            .unwrap_or_else(|e| panic!("bypass must never refuse: {}", e.user_message()));
-        assert!(!plan.encrypted, "bot-style messages bypass encryption by design");
-        let bob_id = make_buffer_id("test", "bob");
+            .e2e_send_plan_for_target("test", "#sec", "!roll 2d6")
+            .unwrap_or_else(|e| panic!("channel bypass must never refuse: {}", e.user_message()));
+        assert!(!plan.encrypted, "channel bot commands bypass encryption by design");
+        let sec_id = make_buffer_id("test", "#sec");
         assert!(
             state
                 .buffers
-                .get(&bob_id)
+                .get(&sec_id)
                 .unwrap()
                 .messages
                 .iter()
                 .any(|m| m.text.contains("CLEARTEXT")),
-            "the downgrade must be visible in the E2E conversation buffer"
+            "the channel downgrade must be visible in the buffer"
         );
 
+        // Non-E2E channel: bypass, silently.
         let plan = state
-            .e2e_send_plan_for_target("test", "carol", ".status")
-            .unwrap_or_else(|e| panic!("bypass must never refuse: {}", e.user_message()));
+            .e2e_send_plan_for_target("test", "#open", ".status")
+            .unwrap_or_else(|e| panic!("channel bypass must never refuse: {}", e.user_message()));
         assert!(!plan.encrypted);
-        let carol_id = make_buffer_id("test", "carol");
+        let open_id = make_buffer_id("test", "#open");
         assert!(
             state
                 .buffers
-                .get(&carol_id)
+                .get(&open_id)
                 .unwrap()
                 .messages
                 .iter()
                 .all(|m| !m.text.contains("CLEARTEXT")),
-            "no advisory noise in conversations without E2E"
+            "no advisory noise in channels without E2E"
         );
+
+        // E2E DM: NO bypass — the message encrypts like any other.
+        let plan = state
+            .e2e_send_plan_for_target("test", "bob", "!important — new address")
+            .unwrap_or_else(|e| panic!("expected ciphertext plan, got refusal: {}", e.user_message()));
+        assert!(plan.encrypted, "DMs never take the bot bypass");
+        assert!(plan.wire_lines.iter().all(|w| w.starts_with("+RPE2E01")));
     }
 
     // ── e2e_enabled_for_target (advisory) ──

@@ -191,6 +191,19 @@
 >
 > Weryfikacja: `make clippy` 0 warnings, `make test` 1510 passed (3 nowe).
 
+> **STATUS 7 (2026-07-07): DECYZJA PRODUKTOWA — bypass botowy `.`/`!`
+> ograniczony do KANAŁÓW.** Na polecenie użytkownika („komendy . ! mają
+> być ograniczone do kanałów"): w DM-ach linie zaczynające się od `.`/`!`
+> przechodzą przez pełną bramę E2E jak każda inna wiadomość (szyfrowane
+> przy włączonym E2E, fail-closed przy błędach); na kanałach bypass
+> zostaje, z widoczną linią `[E2E] … CLEARTEXT` gdy kanał ma włączone
+> E2E. Spójnie zaktualizowane wszystkie trzy implementacje: brama w
+> repartee (`e2e_gate.rs`), skrypt weechat (`scripts/weechat/rpe2e.py`)
+> i skrypt irssi (`scripts/irssi/rpe2e.pl`). Test bramy przepisany na
+> nową semantykę (kanał E2E: bypass+advisory; kanał bez E2E: cisza;
+> DM E2E: szyfruje). Weryfikacja: clippy 0, 1510 testów, `perl -c` /
+> `py_compile` na skryptach OK.
+
 - **Data review:** 2026-07-01
 - **Zakres:** pełny diff PR #29 (`main...fix/various-improvements`, stan po commicie `96580de`)
 - **Metoda:** 8 niezależnych kątów wyszukiwania (line-by-line, removed-behavior, cross-file, reuse, simplification, efficiency, altitude, conventions) → dedup → 12 osobnych weryfikatorów (po jednym na kandydata, verdict CONFIRMED/PLAUSIBLE/REFUTED z cytatami z kodu)
