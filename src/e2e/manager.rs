@@ -1493,6 +1493,12 @@ impl E2eManager {
         sender_handle: &str,
         channel: &str,
     ) -> Result<Option<KeyRsp>> {
+        // Enforce the inbound TTL on the ACCEPT side, not only on insert: a
+        // Normal-mode KEYREQ that has sat longer than
+        // `PENDING_INBOUND_TTL_SECS` with no intervening handshake to trigger
+        // pruning must not be accepted. Pruning first evicts the stale entry
+        // so the removal below naturally returns "nothing to accept".
+        self.prune_expired_pending();
         let cached = {
             let mut guard = self
                 .pending_inbound
@@ -1655,6 +1661,12 @@ impl E2eManager {
     /// Unrelated entries for the same channel stay in the map; they
     /// are still awaiting their own KEYRSPs.
     fn consume_matching_pending_for_keyrsp(&self, rsp: &KeyRsp) -> Result<[u8; 32]> {
+        // Enforce the TTL on the CONSUMER side, not only on insert: a KEYRSP
+        // arriving after `PENDING_KEYREQ_TTL_SECS` with no intervening
+        // handshake to trigger pruning must not complete an arbitrarily old
+        // handshake (nor keep its ephemeral secret past the TTL). Pruning
+        // first drops the stale candidate so it is never even tried.
+        self.prune_expired_pending();
         let info = wrap_info(crate::e2e::wire_context(&rsp.channel));
         let candidate_keys: Vec<(String, [u8; 16])> = {
             let pending = self.pending.lock().expect("e2e pending mutex poisoned");

@@ -247,6 +247,37 @@
 >
 > Weryfikacja: `make clippy` 0 warnings, `make test` 1512 passed.
 
+> **STATUS 10 (2026-07-08): RUNDA ZEWNĘTRZNA #8 — NAPRAWIONE.** Oba
+> findingi [P2] potwierdzone i naprawione.
+>
+> TTL dla pending-handshake'ów były egzekwowane WYŁĄCZNIE na ścieżce
+> insertu (`prune_expired_pending` wołany z `build_keyreq` /
+> `cache_pending_inbound_normal_mode`). W bezczynnej sesji, gdy między
+> stworzeniem wpisu a jego konsumpcją nie zdarzył się żaden kolejny
+> handshake, przeterminowany wpis przeżywał i konsument go akceptował.
+>
+> - **[P2] KEYRSP kończył przeterminowany handshake** (`manager.rs:1657`
+>   `consume_matching_pending_for_keyrsp`): KEYRSP przychodzący po
+>   `PENDING_KEYREQ_TTL_SECS` (900 s) bez insertu w międzyczasie nadal
+>   dopasowywał stary wpis i kończył handshake, trzymając sekret
+>   efemeryczny ponad TTL. Fix: `prune_expired_pending()` na początku
+>   konsumenta — stary kandydat wypada, zanim zostanie choćby spróbowany.
+> - **[P2] `/e2e accept` akceptował przeterminowany KEYREQ**
+>   (`manager.rs:1495` `accept_pending_inbound`): Normal-mode KEYREQ
+>   wiszący ponad `PENDING_INBOUND_TTL_SECS` (21 600 s) był akceptowany
+>   przy `/e2e accept` bez insertu wyzwalającego prune. Fix:
+>   `prune_expired_pending()` przed `remove` — przeterminowany wpis jest
+>   eksmitowany, więc `remove` naturalnie zwraca `Ok(None)` („nic do
+>   zaakceptowania"); peer po prostu ponawia handshake.
+>
+> Istniejące testy TTL (`stale_pending_*_are_evicted`) przechodziły tylko
+> dzięki *jawnemu* insertowi po postarzeniu wpisu — dokładnie ta luka.
+> Dodane 2 testy egzekwujące TTL po stronie konsumenta BEZ insertu
+> (`stale_pending_handshake_rejected_by_keyrsp_consumer_without_insert`,
+> `stale_pending_inbound_rejected_by_accept_without_insert`).
+>
+> Weryfikacja: `make clippy` 0 warnings, `make test` 1514 passed (2 nowe).
+
 - **Data review:** 2026-07-01
 - **Zakres:** pełny diff PR #29 (`main...fix/various-improvements`, stan po commicie `96580de`)
 - **Metoda:** 8 niezależnych kątów wyszukiwania (line-by-line, removed-behavior, cross-file, reuse, simplification, efficiency, altitude, conventions) → dedup → 12 osobnych weryfikatorów (po jednym na kandydata, verdict CONFIRMED/PLAUSIBLE/REFUTED z cytatami z kodu)

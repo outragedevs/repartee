@@ -1996,6 +1996,59 @@ fn stale_pending_inbound_keyreqs_are_evicted() {
     );
 }
 
+#[test]
+fn stale_pending_handshake_rejected_by_keyrsp_consumer_without_insert() {
+    // Consumer-side TTL enforcement: a KEYRSP arriving after the TTL with NO
+    // intervening handshake build (so nothing pruned on insert) must still
+    // be rejected, and the stale ephemeral secret must not complete the
+    // handshake. This is the gap the insert-only prune leaves open.
+    let bob = make_manager();
+    let alice = make_manager();
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+
+    let req = bob.build_keyreq("#x").unwrap();
+    let rsp = alice.handle_keyreq("~bob@b.host", &req).unwrap().unwrap();
+
+    // Age bob's pending entry past the TTL — and do NOT build another
+    // handshake, so the only thing that can evict it is the KEYRSP consumer.
+    bob.age_pending_entries_for_test(1_000_000);
+
+    let err = bob
+        .handle_keyrsp("~alice@a.host", &rsp)
+        .expect_err("a KEYRSP past the TTL must not complete a stale handshake");
+    assert!(
+        err.to_string().contains("no pending handshake"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn stale_pending_inbound_rejected_by_accept_without_insert() {
+    // Consumer-side TTL enforcement for the inbound cache: /e2e accept on a
+    // KEYREQ that has sat past the inbound TTL, with NO intervening inbound
+    // handshake to trigger pruning, must find nothing to accept.
+    let alice = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::Normal);
+    let bob = make_manager();
+    let req = bob.build_keyreq("#x").unwrap();
+    assert!(
+        alice.handle_keyreq("~bob@b.host", &req).unwrap().is_none(),
+        "normal mode caches the KEYREQ instead of answering"
+    );
+
+    // Age it past the inbound TTL; accept alone must evict + refuse.
+    alice.age_pending_entries_for_test(1_000_000);
+
+    assert!(
+        alice
+            .accept_pending_inbound("~bob@b.host", "#x")
+            .unwrap()
+            .is_none(),
+        "a stale inbound KEYREQ must not be accepted"
+    );
+}
+
 // === Phase E: network-scoped keyring contexts ===
 
 #[test]
