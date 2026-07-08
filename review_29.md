@@ -336,6 +336,61 @@
 >
 > Weryfikacja: `make clippy` 0 warnings, `make test` 1515 passed.
 
+> **STATUS 13 (2026-07-08): PROAKTYWNY SWEEP ADWERSARYJNY (3 agenty) —
+> NAPRAWIONE 3, ZGŁOSZONE do decyzji.** Zamiast czekać na kolejną rundę
+> zewnętrzną, przeczesano CAŁĄ powierzchnię fail-open trzema niezależnymi
+> agentami (kąt 1: połykanie błędów keyringu; kąt 2: ścieżki send/render;
+> kąt 3: cross-network scoping + skrypty towarzyszące).
+>
+> **Naprawione (klient Rust):**
+> - **[MED] Legacy nick-fallback połykał błąd odczytu** (`events.rs:2151`):
+>   trzeci brat w `track_dm_handle_change` — `if let Ok(Some(legacy)) =
+>   legacy_handle_for_nick(nick)` traktował `Err` jak „brak legacy handle",
+>   podczas gdy dwaj bracia (cached read, cache write) już odkładają na
+>   `Err`. W DB po upgrade config mógł zostać uwięziony pod `@<old>`, bufor
+>   przesunięty na `@<new>` → plaintext. Fix: `match { Err => warn; return
+>   false }`. Teraz WSZYSTKIE 4 ścieżki keyringu w tej funkcji fail-closed.
+> - **[MED] Wielolinijkowy paste z wiodącym `.`/`!` obchodził E2E dla
+>   CAŁEGO bloku** (`e2e_gate.rs:197`): bramka sprawdzała `starts_with(['.',
+>   '!'])` na całym sklejonym tekście; `plain_passthrough` + caller
+>   dzieliły go per-linia → każda kolejna (tajna) linia szła cleartextem.
+>   Fix: bypass botowy TYLKO dla pojedynczej linii (`!text.contains('\n')`);
+>   każdy newline → pełna bramka E2E (szyfruje całość). Pokrywa obie ścieżki
+>   (`e2e_encrypt_or_passthrough` i `e2e_send_plan_for_target`). Test:
+>   `multiline_paste_with_bot_prefix_does_not_bypass_e2e`.
+> - **[MED] Skracarka URL wyciekała treść E2E do usługi trzeciej**
+>   (`input.rs:1397`): worker shrink POST-ował surowy URL do zewnętrznego
+>   API PRZED bramką E2E — treść chronionej rozmowy trafiała do osoby
+>   trzeciej cleartextem. Fix: `if !e2e_enabled_for_target(...)` przed
+>   dispatchem — przy włączonym E2E shrink jest pomijany, oryginalny URL
+>   szyfrowany na drucie jak reszta.
+>
+> **Zweryfikowane jako bezpieczne (bez zmian):** rdzeń bramki
+> (`e2e_encrypt_or_passthrough`/`e2e_send_plan_for_target`) fail-closed;
+> `try_decrypt_e2e` nigdy nie renderuje surowego `+RPE2E01`; scoping
+> `{network}\x1F{wire}` szczelny (legacy fallback re-scope'owany do bieżącej
+> sieci, adopcja wielosieciowa strzeżona, AutoAccept→Normal + warning);
+> reassembly batch/multiline; `.ok()` w `e2e_enabled_for_target` dotyczy
+> tylko advisory, nie decyzji szyfrowania.
+>
+> **Świadome escape-hatche (NIE naprawiane — plaintext z założenia):** Lua
+> `raw()`, `/quote`, CTCP `/version` — analogiczne do `/quote`, wysyłają
+> surowo bez treści użytkownika lub jako jawna furtka. (Do rozważenia:
+> advisory `[E2E]` dla Lua `raw()`.)
+>
+> **DO DECYZJI UŻYTKOWNIKA — skrypty towarzyszące (Perl/Python), osobny
+> workstream:** agent #3 potwierdził, że `scripts/weechat/rpe2e.py` i
+> `scripts/irssi/rpe2e.pl` przepuszczają `/me`, `/msg`, `/say` (każda linia
+> zaczynająca się od `/`) jako PLAINTEXT do rozmów E2E — jedyna bramka
+> wychodząca bailuje na `^/`. To realny cichy wyciek [HIGH] po stronie
+> skryptów, ale wymaga dodania hooków wychodzących w obu skryptach (duża,
+> osobna zmiana). Dodatkowo: irssi mis-renderuje przychodzące zaszyfrowane
+> ACTION-y (dekrypcja po CTCP-split) [MED, PLAUSIBLE]; skrypty nie
+> scope'ują kontekstów per-sieć [LOW-MED, PLAUSIBLE]. NIE ruszane bez
+> zgody — patrz rozmowa.
+>
+> Weryfikacja: `make clippy` 0 warnings, `make test` 1516 passed (1 nowy).
+
 - **Data review:** 2026-07-01
 - **Zakres:** pełny diff PR #29 (`main...fix/various-improvements`, stan po commicie `96580de`)
 - **Metoda:** 8 niezależnych kątów wyszukiwania (line-by-line, removed-behavior, cross-file, reuse, simplification, efficiency, altitude, conventions) → dedup → 12 osobnych weryfikatorów (po jednym na kandydata, verdict CONFIRMED/PLAUSIBLE/REFUTED z cytatami z kodu)

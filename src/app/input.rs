@@ -1394,7 +1394,15 @@ impl App {
         // path); per-chunk substitution accounting is out of scope.
         let pre_extracted_urls =
             crate::shrink::find_long_urls(text, self.state.shrink_min_url_length as usize);
-        if self.config.shrink.enabled
+        // Never hand an E2E conversation's content to the external shortener:
+        // the URL is part of the end-to-end-protected message, and the shrink
+        // worker POSTs it in cleartext to a third-party API before the E2E gate
+        // ever runs. When E2E is enabled for this target, skip outgoing shrink
+        // entirely and fall through to the synchronous path, where the original
+        // URL is encrypted on the wire like the rest of the message.
+        let e2e_active = self.state.e2e_enabled_for_target(&conn_id, &buffer_name);
+        if !e2e_active
+            && self.config.shrink.enabled
             && self.config.shrink.outgoing_enabled
             && self.shrink_client.is_some()
             && text.len() <= crate::irc::MESSAGE_MAX_BYTES

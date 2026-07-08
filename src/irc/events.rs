@@ -2147,11 +2147,24 @@ fn track_dm_handle_change(
         if c != new_handle && !sources.iter().any(|(s, _)| *s == c) {
             sources.push((c, false));
         }
-    } else if sources.is_empty()
-        && let Ok(Some(legacy)) = mgr.keyring().legacy_handle_for_nick(nick)
-        && legacy != new_handle
-    {
-        sources.push((legacy, true));
+    } else if sources.is_empty() {
+        // Legacy network-agnostic nick fallback. A read fault here is NOT "no
+        // legacy handle": the enabled config may live under an @<old> context
+        // reachable only via this lookup, so swallowing the error and skipping
+        // migration would strand it while the buffer moves to @<new> — the same
+        // plaintext downgrade the cached-read and cache-write siblings above
+        // postpone on. Fail closed: postpone and retry on the next sighting.
+        match mgr.keyring().legacy_handle_for_nick(nick) {
+            Ok(Some(legacy)) if legacy != new_handle => sources.push((legacy, true)),
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    "e2e: legacy handle read failed for {nick}: {e}; \
+                     postponing the handle-change observation"
+                );
+                return false;
+            }
+        }
     }
     for (old_h, from_legacy) in sources {
         // Migrate from BOTH the scoped and the legacy-unscoped old context:

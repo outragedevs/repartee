@@ -194,7 +194,10 @@ impl AppState {
             ))
         };
 
-        if matches!(buffer_type, BufferType::Channel) && text.starts_with(['.', '!']) {
+        if matches!(buffer_type, BufferType::Channel)
+            && text.starts_with(['.', '!'])
+            && !text.contains('\n')
+        {
             // Deliberate bot-command bypass (mirrored by the companion
             // irssi/weechat RPE2E scripts): `.cmd`/`!cmd` lines go out
             // unencrypted so channel bots can parse them. CHANNEL-ONLY —
@@ -202,6 +205,13 @@ impl AppState {
             // `!` at the start of prose is ordinary conversation, so DMs
             // take the full E2E gate below. The channel downgrade must
             // still stay VISIBLE when E2E is enabled there.
+            //
+            // SINGLE-LINE ONLY: a bot command is one line. A multi-line paste
+            // whose FIRST line happens to start with `.`/`!` must NOT downgrade
+            // the whole blob — the caller byte-splits `plain_passthrough`'s
+            // output back into per-line PRIVMSGs, so bypassing here would leak
+            // every subsequent (non-command) line in cleartext. Fail closed:
+            // any newline sends the whole paste through the full E2E gate below.
             self.warn_e2e_bot_bypass(buffer_id, buffer_name);
             return plain_passthrough();
         }
@@ -1035,6 +1045,32 @@ mod tests {
             .unwrap_or_else(|e| panic!("expected ciphertext plan, got refusal: {}", e.user_message()));
         assert!(plan.encrypted, "DMs never take the bot bypass");
         assert!(plan.wire_lines.iter().all(|w| w.starts_with("+RPE2E01")));
+    }
+
+    #[test]
+    fn multiline_paste_with_bot_prefix_does_not_bypass_e2e() {
+        // A bot command is a single line. A multi-line paste whose FIRST line
+        // starts with `.`/`!` must NOT downgrade the whole blob: the caller
+        // byte-splits the passthrough output back into per-line PRIVMSGs, so a
+        // whole-blob bypass would leak every subsequent (secret) line in
+        // cleartext. Only single-line `.cmd`/`!cmd` take the bot bypass.
+        let mut state = make_state_with_manager();
+        state.add_buffer(make_buf(BufferType::Channel, "#sec"));
+        enable(&state, &crate::e2e::scoped_context("TestServer", "#sec"));
+
+        let plan = state
+            .e2e_send_plan_for_target("test", "#sec", "!roll 2d6\nthe password is hunter2")
+            .unwrap_or_else(|e| {
+                panic!("multi-line E2E send must not refuse: {}", e.user_message())
+            });
+        assert!(
+            plan.encrypted,
+            "a multi-line paste must be encrypted, not bot-bypassed"
+        );
+        assert!(
+            plan.wire_lines.iter().all(|w| !w.contains("hunter2")),
+            "no plaintext secret may appear on the wire"
+        );
     }
 
     #[test]
