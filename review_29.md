@@ -278,6 +278,34 @@
 >
 > Weryfikacja: `make clippy` 0 warnings, `make test` 1514 passed (2 nowe).
 
+> **STATUS 11 (2026-07-08): RUNDA ZEWNĘTRZNA #9 — NAPRAWIONE.** Finding
+> [P2] potwierdzony i naprawiony.
+>
+> - **[P2] Zamiecione placeholdery E2E nie znikały u klienta web**
+>   (`state/events.rs:663-666` `surface_history_rows`): transientny
+>   placeholder (`AWAITING_OWN_IDENTITY_PLACEHOLDER` /
+>   `AWAITING_SESSION_PLACEHOLDER_PREFIX`) był rozgłaszany do żywych
+>   klientów web przez `NewMessage` w chwili dostarczenia. Gdy pojawiała
+>   się odszyfrowana linia z CHATHISTORY, serwerowy `retain` usuwał
+>   placeholder TYLKO z `AppState` — nie było żadnego zdarzenia usuwającego
+>   go u klienta. Klient web pokazywał więc DWIE linie na ten sam
+>   ciphertext (placeholder + odszyfrowany `InsertMessage`) aż do pełnego
+>   resyncu/reconnectu. Fix: nowy wariant `WebEvent::DeleteMessages {
+>   buffer_id, message_ids }` (serwer `src/web/protocol.rs` + mirror
+>   `web-ui/src/protocol.rs`); `surface_history_rows` zbiera in-memory id
+>   zamiatanych placeholderów i emituje `DeleteMessages` PO
+>   `InsertMessage`; handler w `web-ui/src/state.rs` usuwa je po `id`
+>   (`entry.retain(|m| !message_ids.contains(&m.id))`). Nieaktualny komentarz
+>   „no removal event exists to send" poprawiony.
+>
+> Dodane testy: `swept_placeholder_emits_delete_web_event` (emituje
+> `DeleteMessages` z id placeholdera) oraz negatywny guard w
+> `unrelated_placeholder_survives_a_replay_of_other_lines` (brak
+> `DeleteMessages`, gdy nic nie zamieciono).
+>
+> Weryfikacja: `make clippy` 0 warnings, `make test` 1515 passed (1 nowy),
+> `make wasm` OK (web-ui się kompiluje).
+
 - **Data review:** 2026-07-01
 - **Zakres:** pełny diff PR #29 (`main...fix/various-improvements`, stan po commicie `96580de`)
 - **Metoda:** 8 niezależnych kątów wyszukiwania (line-by-line, removed-behavior, cross-file, reuse, simplification, efficiency, altitude, conventions) → dedup → 12 osobnych weryfikatorów (po jednym na kandydata, verdict CONFIRMED/PLAUSIBLE/REFUTED z cytatami z kodu)

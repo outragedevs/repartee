@@ -27,6 +27,14 @@ pub enum WebEvent {
         buffer_id: String,
         message: WireMessage,
     },
+    /// Remove already-delivered messages from a buffer by in-memory `id`.
+    /// Sent when a transient E2E placeholder is swept after its decrypted line
+    /// surfaces — without it the placeholder and the decrypted `InsertMessage`
+    /// both stay visible until a full resync.
+    DeleteMessages {
+        buffer_id: String,
+        message_ids: Vec<u64>,
+    },
     TopicChanged {
         buffer_id: String,
         topic: Option<String>,

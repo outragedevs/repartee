@@ -662,20 +662,36 @@ impl AppState {
         // raised pinned limit preserves the loaded backlog, exactly as for live
         // traffic.
         let limit = self.scrollback_limit;
+        // In-memory ids of the placeholders swept below. The placeholder was
+        // broadcast to live web clients via `NewMessage` when it was delivered,
+        // so a server-side retain alone leaves the client showing BOTH the
+        // placeholder and the decrypted `InsertMessage` until a full resync.
+        // Collect the ids and emit a `DeleteMessages` event so the client drops
+        // the stale line in place.
+        let mut swept_ids: Vec<u64> = Vec::new();
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
             // Sweep placeholders whose real (decrypted) line just surfaced.
-            // The placeholder was delivered transiently, so the web client
-            // heals on its next resync — no removal event exists to send.
             if !spliced_ts.is_empty() {
                 buf.messages.retain(|m| {
                     let is_e2e_placeholder = m.text
                         == crate::e2e::AWAITING_OWN_IDENTITY_PLACEHOLDER
                         || m.text
                             .starts_with(crate::e2e::AWAITING_SESSION_PLACEHOLDER_PREFIX);
-                    !is_e2e_placeholder || !spliced_ts.contains(&m.timestamp)
+                    let sweep = is_e2e_placeholder && spliced_ts.contains(&m.timestamp);
+                    if sweep {
+                        swept_ids.push(m.id);
+                    }
+                    !sweep
                 });
             }
             enforce_scrollback(buf, limit);
+        }
+        if !swept_ids.is_empty() {
+            self.pending_web_events
+                .push(crate::web::protocol::WebEvent::DeleteMessages {
+                    buffer_id: buffer_id.to_string(),
+                    message_ids: swept_ids,
+                });
         }
     }
 
@@ -1874,6 +1890,45 @@ mod tests {
     }
 
     #[test]
+    fn swept_placeholder_emits_delete_web_event() {
+        // A live web client received the placeholder via a NewMessage event when
+        // it was delivered; sweeping it server-side must ALSO emit a
+        // DeleteMessages event so the client drops the stale line instead of
+        // showing both it and the decrypted replay until a full resync.
+        let mut state = make_test_state();
+        let mut placeholder =
+            make_test_message(&mut state, crate::e2e::AWAITING_OWN_IDENTITY_PLACEHOLDER);
+        placeholder.tags = None;
+        let placeholder_id = placeholder.id;
+        let placeholder_ts = placeholder.timestamp;
+        state.add_transient_message_with_activity(
+            "libera/#rust",
+            placeholder,
+            ActivityLevel::Mention,
+        );
+        // Drop the NewMessage/activity events queued by delivery so we assert
+        // only on what surfacing the decrypted replay emits.
+        state.pending_web_events.clear();
+
+        let mut decrypted = make_test_message(&mut state, "the lost first message");
+        decrypted.timestamp = placeholder_ts;
+        decrypted.tags = Some(HashMap::from([("msgid".to_string(), "abc".to_string())]));
+        state.surface_history_rows("libera/#rust", vec![decrypted]);
+
+        let delete = state.pending_web_events.iter().find_map(|e| match e {
+            crate::web::protocol::WebEvent::DeleteMessages {
+                buffer_id,
+                message_ids,
+            } => Some((buffer_id.clone(), message_ids.clone())),
+            _ => None,
+        });
+        let (buffer_id, ids) =
+            delete.expect("sweeping a placeholder must emit a DeleteMessages web event");
+        assert_eq!(buffer_id, "libera/#rust");
+        assert_eq!(ids, vec![placeholder_id]);
+    }
+
+    #[test]
     fn unrelated_placeholder_survives_a_replay_of_other_lines() {
         // The sweep matches on the wire line's timestamp: a placeholder whose
         // ciphertext was NOT part of this replay (still undecryptable) must
@@ -1899,6 +1954,13 @@ mod tests {
                 .iter()
                 .any(|m| m.text == crate::e2e::AWAITING_OWN_IDENTITY_PLACEHOLDER),
             "a placeholder for a still-pending ciphertext must not be swept"
+        );
+        assert!(
+            !state.pending_web_events.iter().any(|e| matches!(
+                e,
+                crate::web::protocol::WebEvent::DeleteMessages { .. }
+            )),
+            "no DeleteMessages must be emitted when nothing is swept"
         );
     }
 
