@@ -1037,6 +1037,84 @@ mod tests {
         assert!(plan.wire_lines.iter().all(|w| w.starts_with("+RPE2E01")));
     }
 
+    #[test]
+    fn by_target_channel_send_case_variant_still_drains_rekeys() {
+        // Reviewer scenario: `/msg #SEC …` while the open buffer is `#sec`
+        // and a lazy rotation is pending. `make_buffer_id` lowercases, so
+        // the REKEY drain resolves the SAME open buffer, and channel
+        // recipients match by `ident@host` in its users map — the rotation
+        // REKEY NOTICE must be queued for the member, not dropped (a drop
+        // leaves peers unable to decrypt after /e2e rotate or revoke).
+        let mut state = make_state_with_manager();
+        let mut buf = make_buf(BufferType::Channel, "#sec");
+        buf.users.insert(
+            "bob".to_string(),
+            crate::state::buffer::NickEntry {
+                nick: "bob".to_string(),
+                prefix: String::new(),
+                modes: String::new(),
+                away: false,
+                account: None,
+                ident: Some("~bob".to_string()),
+                host: Some("b.host".to_string()),
+            },
+        );
+        state.add_buffer(buf);
+        let scoped = crate::e2e::scoped_context("TestServer", "#sec");
+        let mgr = state.e2e_manager.as_ref().unwrap().clone();
+        mgr.keyring()
+            .set_channel_config(&crate::e2e::keyring::ChannelConfig {
+                channel: scoped.clone(),
+                enabled: true,
+                mode: crate::e2e::keyring::ChannelMode::AutoAccept,
+            })
+            .unwrap();
+
+        // Bob handshakes; the events layer scopes `req.channel` before the
+        // manager sees it (see `handle_rpe2e_ctcp`), so build the KEYREQ
+        // against the scoped context directly, like the events tests do.
+        // Handling it records bob as a trusted outgoing recipient.
+        let bob = make_manager();
+        bob.keyring()
+            .set_channel_config(&crate::e2e::keyring::ChannelConfig {
+                channel: scoped.clone(),
+                enabled: true,
+                mode: crate::e2e::keyring::ChannelMode::AutoAccept,
+            })
+            .unwrap();
+        let mut req = bob.build_keyreq(&scoped).unwrap();
+        // `build_keyreq` emits the WIRE channel; the events layer re-scopes
+        // it for storage before the manager sees it (`handle_rpe2e_ctcp`).
+        req.channel = scoped.clone();
+        mgr.handle_keyreq("~bob@b.host", &req)
+            .unwrap()
+            .expect("auto-accept should produce a KEYRSP");
+
+        // First send establishes the outgoing session; then flag it for
+        // lazy rotation, as /e2e rotate (or revoke) does.
+        let plan = state
+            .e2e_send_plan_for_target("test", "#sec", "warmup")
+            .unwrap_or_else(|e| panic!("expected ciphertext plan, got refusal: {}", e.user_message()));
+        assert!(plan.encrypted);
+        let mgr = state.e2e_manager.as_ref().unwrap().clone();
+        mgr.keyring()
+            .mark_outgoing_pending_rotation(&scoped)
+            .unwrap();
+
+        let plan = state
+            .e2e_send_plan_for_target("test", "#SEC", "after rotate")
+            .unwrap_or_else(|e| panic!("expected ciphertext plan, got refusal: {}", e.user_message()));
+        assert!(plan.encrypted);
+        assert_eq!(
+            state.pending_e2e_sends.len(),
+            1,
+            "the lazy-rotation REKEY NOTICE must be queued despite the \
+             case-variant target"
+        );
+        assert_eq!(state.pending_e2e_sends[0].target, "bob");
+        assert_eq!(state.pending_e2e_sends[0].connection_id, "test");
+    }
+
     // ── e2e_enabled_for_target (advisory) ──
 
     #[test]

@@ -226,6 +226,27 @@
 >
 > Weryfikacja: `make clippy` 0 warnings, `make test` 1511 passed.
 
+> **STATUS 9 (2026-07-08): RUNDA ZEWNĘTRZNA #7 — FINDING OBALONY (test
+> regresyjny dodany).**
+>
+> - **[P2] „By-target send z innym casem gubi REKEY-e" — NIEPRAWDA.**
+>   Przesłanka findingu („constructs conn/#SEC") jest błędna:
+>   `make_buffer_id` LOWERCASE'UJE nazwę (`state/buffer.rs:214`, test
+>   `make_buffer_id_lowercases`), więc `/msg #SEC` daje `conn/#sec` i
+>   `self.buffers.get(buffer_id)` trafia w otwarty bufor `#sec`. Rezolucja
+>   odbiorców REKEY w kanale idzie po `ident@host` z users-mapy tego
+>   bufora (`rekey_notice_target`), a w DM po równości
+>   `context_key == wire_context` — case targetu nie uczestniczy w żadnym
+>   kroku drain'u. Dowód empiryczny: nowy test
+>   `by_target_channel_send_case_variant_still_drains_rekeys` odtwarza
+>   scenariusz reviewera 1:1 (bufor `#sec` z userem bob, handshake
+>   AutoAccept, `mark_outgoing_pending_rotation`, wysyłka `/msg #SEC`) i
+>   przechodzi BEZ zmian produkcyjnych — REKEY NOTICE ląduje w
+>   `pending_e2e_sends` z targetem `bob`. Test zostaje jako regresja
+>   chroniąca ten łańcuch przy przyszłych refaktorach.
+>
+> Weryfikacja: `make clippy` 0 warnings, `make test` 1512 passed.
+
 - **Data review:** 2026-07-01
 - **Zakres:** pełny diff PR #29 (`main...fix/various-improvements`, stan po commicie `96580de`)
 - **Metoda:** 8 niezależnych kątów wyszukiwania (line-by-line, removed-behavior, cross-file, reuse, simplification, efficiency, altitude, conventions) → dedup → 12 osobnych weryfikatorów (po jednym na kandydata, verdict CONFIRMED/PLAUSIBLE/REFUTED z cytatami z kodu)
