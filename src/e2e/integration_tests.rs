@@ -205,7 +205,7 @@ fn chghost_migrates_enabled_dm_config_to_new_context() {
     enable_channel(&mgr, old_ctx, ChannelMode::Normal);
 
     assert!(
-        crate::irc::events::migrate_dm_e2e_config(&mgr, old_ctx, new_ctx, false),
+        crate::irc::events::migrate_dm_e2e_config(&mgr, old_ctx, new_ctx, false).unwrap(),
         "an enabled config must report as migrated"
     );
 
@@ -237,7 +237,7 @@ fn chghost_migrates_enabled_dm_config_to_new_context() {
         })
         .unwrap();
     assert!(
-        !crate::irc::events::migrate_dm_e2e_config(&mgr2, old_ctx, new_ctx, false),
+        !crate::irc::events::migrate_dm_e2e_config(&mgr2, old_ctx, new_ctx, false).unwrap(),
         "a disabled config must report as not migrated"
     );
     assert!(

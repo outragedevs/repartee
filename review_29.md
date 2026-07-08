@@ -306,6 +306,36 @@
 > Weryfikacja: `make clippy` 0 warnings, `make test` 1515 passed (1 nowy),
 > `make wasm` OK (web-ui się kompiluje).
 
+> **STATUS 12 (2026-07-08): RUNDA ZEWNĘTRZNA #10 — NAPRAWIONE.** Oba
+> findingi [P2] potwierdzone i naprawione. Kontrakt
+> `track_dm_handle_change` = „zwraca `false` ⇒ obserwacja ODŁOŻONA (bufor
+> zostaje na starym, wciąż odszyfrowywalnym kontekście)". Dwie wewnętrzne
+> ścieżki błędu keyringu zwracały `true` (sukces) zamiast odłożyć.
+>
+> - **[P2] Błąd odczytu configu ≠ „wyłączone"** (`events.rs:2056`
+>   `migrate_dm_e2e_config`): `let Ok(Some(cfg)) = get_channel_config(old)`
+>   traktował `Err` identycznie jak brak configu → `false`. Pętla w
+>   `track_dm_handle_change` szła dalej, cache'owała `@<new>` i zwracała
+>   `true`; enabled config uwięziony pod `@<old>` stawał się nieosiągalny,
+>   następny send keyował `@<new>` bez configu → plaintext. Fix: funkcja
+>   zwraca teraz `Result<bool>` (`Ok(true)` migrated / `Ok(false)` nic do
+>   migracji / `Err` = fault keyringu); `set_channel_config` też
+>   propaguje `?` zamiast `.is_ok()` (poprzednio cichy `false`). Caller na
+>   `Err` loguje i `return false` (odkłada).
+> - **[P2] Błąd zapisu cache handle fail-closed** (`events.rs:2174`
+>   `cache_dm_handle`): `let _ = ...` połykał błąd, funkcja zwracała
+>   `true`; callerzy przesuwali `peer_handle` na `@<new>`. Po zamknięciu
+>   bufora `/msg <nick>` rozwiązywał kontekst z cache (stary/pusty), mijał
+>   zmigrowany enabled `@<new>` → plaintext. Fix: `if let Err(e) =
+>   cache_dm_handle(...) { warn; return false; }` — odłożenie; `@<old>`
+>   zostaje enabled i odszyfrowywalny, następne spostrzeżenie ponawia zapis.
+>
+> Wszystkie 3 call-sites już poprawnie odkładają na `false` (runda #5), więc
+> zmiana domyka lukę bez dotykania callerów. Docstringi zaktualizowane.
+> Testy migracji przełączone na `.unwrap()` (typ się zmienił).
+>
+> Weryfikacja: `make clippy` 0 warnings, `make test` 1515 passed.
+
 - **Data review:** 2026-07-01
 - **Zakres:** pełny diff PR #29 (`main...fix/various-improvements`, stan po commicie `96580de`)
 - **Metoda:** 8 niezależnych kątów wyszukiwania (line-by-line, removed-behavior, cross-file, reuse, simplification, efficiency, altitude, conventions) → dedup → 12 osobnych weryfikatorów (po jednym na kandydata, verdict CONFIRMED/PLAUSIBLE/REFUTED z cytatami z kodu)

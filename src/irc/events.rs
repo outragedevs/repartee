@@ -2034,7 +2034,15 @@ fn handle_away(state: &mut AppState, conn_id: &str, prefix: Option<&Prefix>, rea
 /// that untouched cache) still encrypts (and re-handshakes) rather than sending
 /// plaintext. No-op unless the old config is enabled and the new context isn't
 /// already enabled (don't clobber).
-/// Returns `true` when a config was actually copied to `new_ctx`.
+/// Returns `Ok(true)` when a config was actually copied to `new_ctx`,
+/// `Ok(false)` when there was nothing to migrate (old context not enabled, or
+/// `new_ctx` already enabled), and `Err` when a keyring read/write FAULTED. A
+/// fault must NOT be conflated with "no config to migrate": on a read error the
+/// enabled config may still be stored under `@<old>` and simply unreadable, and
+/// on a write error the copy did not land. The caller propagates the fault as a
+/// postponed observation so the peer keeps keying under the old (still
+/// decryptable) context instead of moving to an unconfigured `@<new>` that would
+/// send plaintext.
 ///
 /// `cap_autotrust` is set when the OLD context was resolved via the legacy
 /// network-agnostic nick fallback (`legacy_handle_for_nick`): the enabled
@@ -2051,29 +2059,32 @@ pub(crate) fn migrate_dm_e2e_config(
     old_ctx: &str,
     new_ctx: &str,
     cap_autotrust: bool,
-) -> bool {
+) -> crate::e2e::error::Result<bool> {
     use crate::e2e::keyring::{ChannelConfig, ChannelMode};
-    let Ok(Some(old_cfg)) = mgr.keyring().get_channel_config(old_ctx) else {
-        return false;
+    let Some(old_cfg) = mgr.keyring().get_channel_config(old_ctx)? else {
+        return Ok(false);
     };
     if !old_cfg.enabled {
-        return false;
+        return Ok(false);
     }
-    if matches!(mgr.keyring().get_channel_config(new_ctx), Ok(Some(c)) if c.enabled) {
-        return false;
+    if mgr
+        .keyring()
+        .get_channel_config(new_ctx)?
+        .is_some_and(|c| c.enabled)
+    {
+        return Ok(false);
     }
     let mode = if cap_autotrust && old_cfg.mode == ChannelMode::AutoAccept {
         ChannelMode::Normal
     } else {
         old_cfg.mode
     };
-    mgr.keyring()
-        .set_channel_config(&ChannelConfig {
-            channel: new_ctx.to_string(),
-            enabled: true,
-            mode,
-        })
-        .is_ok()
+    mgr.keyring().set_channel_config(&ChannelConfig {
+        channel: new_ctx.to_string(),
+        enabled: true,
+        mode,
+    })?;
+    Ok(true)
 }
 
 /// Observe that DM peer `nick`'s current handle is `new_handle` (learned from a
@@ -2085,13 +2096,15 @@ pub(crate) fn migrate_dm_e2e_config(
 /// as a new PRIVMSG prefix or CHGHOST) silently downgrades the DM to plaintext.
 /// No-op when the connection's network label is unknown.
 ///
-/// Returns `false` when the observation was POSTPONED because the cached-handle
-/// read failed: a read fault is NOT "no previous handle", and migrating without
-/// it could strand the enabled config under `@<old>` while the next send keys
-/// `@<new>` — plaintext. Callers must then leave the buffer's `peer_handle`
-/// untouched too, so the encrypt path keeps keying under the old (still
-/// decryptable) context until a later sighting retries. `true` in every other
-/// case, including the E2E-not-active no-ops.
+/// Returns `false` when the observation was POSTPONED because a keyring
+/// operation FAULTED — the cached-handle read, the config migration, or the
+/// handle-cache write. A fault is NOT "no previous handle" / "nothing to
+/// migrate": migrating (or moving the buffer) past it could strand the enabled
+/// config under `@<old>` while the next send keys an unconfigured `@<new>` —
+/// plaintext. Callers must then leave the buffer's `peer_handle` untouched too,
+/// so the encrypt path keeps keying under the old (still decryptable) context
+/// until a later sighting retries. `true` in every other case, including the
+/// E2E-not-active no-ops.
 fn track_dm_handle_change(
     state: &mut AppState,
     conn_id: &str,
@@ -2146,7 +2159,21 @@ fn track_dm_handle_change(
         // `@<handle>` row, and only the scoped-or-fallback read sees it.
         let old_ctx =
             crate::e2e::scoped_context(&network, &crate::e2e::context_key(nick, &old_h));
-        let migrated = migrate_dm_e2e_config(&mgr, &old_ctx, &new_ctx, from_legacy);
+        let migrated = match migrate_dm_e2e_config(&mgr, &old_ctx, &new_ctx, from_legacy) {
+            Ok(m) => m,
+            Err(e) => {
+                // A keyring fault is NOT "nothing to migrate": the enabled
+                // config may be stranded (unreadable) under @<old>, or the copy
+                // to @<new> may not have landed. Postpone so callers keep the
+                // buffer on the old (still decryptable) context rather than
+                // moving to an unconfigured @<new> that would send plaintext.
+                tracing::warn!(
+                    "e2e: DM config migration failed for {nick} on {network} \
+                     ({old_ctx} -> {new_ctx}): {e}; postponing the handle-change observation"
+                );
+                return false;
+            }
+        };
         if migrated && from_legacy {
             // The legacy fallback matched by nick alone across ALL networks —
             // the enabled config may belong to someone else entirely. Never
@@ -2170,8 +2197,22 @@ fn track_dm_handle_change(
     // stays scoped per-network (a same-nick peer on another network keeps its
     // own handle). Skip the write when the row already holds this handle —
     // this runs per received handshake notice and per query-buffer creation.
-    if cached.as_deref() != Some(new_handle) {
-        let _ = mgr.keyring().cache_dm_handle(&network, nick, new_handle);
+    //
+    // A write fault must fail CLOSED: the config was migrated to @<new>, but
+    // the resolver used by a later `/msg <nick>` (after the query buffer is
+    // closed) reads this cache to rebuild the context. If the write is lost the
+    // cache still points at @<old> (or nothing), so moving the buffer's handle
+    // to @<new> now would leave the reopened DM keying a context the cache can't
+    // reproduce — a plaintext downgrade. Postpone instead; @<old> stays enabled
+    // and decryptable, and the next sighting retries the cache write.
+    if cached.as_deref() != Some(new_handle)
+        && let Err(e) = mgr.keyring().cache_dm_handle(&network, nick, new_handle)
+    {
+        tracing::warn!(
+            "e2e: DM handle cache write failed for {nick} on {network}: {e}; \
+             postponing the handle-change observation"
+        );
+        return false;
     }
     // NB: we deliberately do NOT bump the keyring's `last_handle` here. That
     // field drives TOFU `HandleChanged` classification; updating it on mere
