@@ -348,7 +348,14 @@ impl AppState {
         if !enabled {
             return plain_passthrough();
         }
-        let result = mgr.encrypt_outgoing(&context, text);
+        // CTCP frames (`/me`, Lua `ctcp()`) take the framing-aware encrypt:
+        // an overlong ACTION splits into complete per-piece frames instead
+        // of fragmenting the `\x01…\x01` envelope across standalone chunks.
+        let result = if text.starts_with('\x01') {
+            mgr.encrypt_outgoing_ctcp(&context, text)
+        } else {
+            mgr.encrypt_outgoing(&context, text)
+        };
 
         // Drain any REKEY CTCPs produced by a lazy rotate that happened
         // inside `encrypt_outgoing`. These must go out as NOTICEs to the

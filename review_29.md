@@ -204,6 +204,28 @@
 > DM E2E: szyfruje). Weryfikacja: clippy 0, 1510 testów, `perl -c` /
 > `py_compile` na skryptach OK.
 
+> **STATUS 8 (2026-07-08): RUNDA ZEWNĘTRZNA #6 — NAPRAWIONE.**
+>
+> - **[P2] Długie szyfrowane `/me` łamało ramkowanie CTCP** (`e2e_gate.rs`
+>   / `manager.rs`): chunki RPE2E01 deszyfrują się i renderują STANDALONE
+>   (bez reasemblacji, spec §6), a `/me` szyfrował całą ramkę
+>   `\x01ACTION …\x01` generycznym `encrypt_outgoing` — ciało dłuższe niż
+>   ~171 B rozpadało się w środku ramki i u peera renderowało jako surowe
+>   fragmenty ze znakami kontrolnymi. Fix: nowy
+>   `E2eManager::encrypt_outgoing_ctcp` — ramka mieszcząca się w jednym
+>   chunku idzie jak dotąd; dłuższy ACTION jest dzielony na NIEZALEŻNE,
+>   osobno opakowane ramki `\x01ACTION kawałek\x01` (peer renderuje
+>   sekwencję akcji, analogicznie do wieloliniowego plaintextu; limit
+>   MAX_CHUNKS obowiązuje dla kawałków); inna za długa ramka CTCP (np.
+>   z Lua `ctcp()`) jest ODMAWIANA zamiast cicho wysyłana połamana.
+>   Brama kieruje każdy tekst zaczynający się od `\x01` przez ten wariant.
+>   Chunker dostał `split_plaintext_budget` (budżet per-kawałek z miejscem
+>   na ramkowanie). Test roundtrip: multi-byte ciało ≫ 1 chunk → każdy
+>   kawałek deszyfruje się do kompletnej ramki ACTION, bajty bez strat;
+>   krótki ACTION = 1 ramka; za długi VERSION = błąd.
+>
+> Weryfikacja: `make clippy` 0 warnings, `make test` 1511 passed.
+
 - **Data review:** 2026-07-01
 - **Zakres:** pełny diff PR #29 (`main...fix/various-improvements`, stan po commicie `96580de`)
 - **Metoda:** 8 niezależnych kątów wyszukiwania (line-by-line, removed-behavior, cross-file, reuse, simplification, efficiency, altitude, conventions) → dedup → 12 osobnych weryfikatorów (po jednym na kandydata, verdict CONFIRMED/PLAUSIBLE/REFUTED z cytatami z kodu)

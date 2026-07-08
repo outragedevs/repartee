@@ -585,6 +585,41 @@ impl E2eManager {
 
     // ---------- encrypt outgoing ----------
 
+    /// Encrypt a full `\x01…\x01` CTCP frame for `channel`. Frames must
+    /// survive chunking: every RPE2E01 chunk decrypts and renders standalone
+    /// (no reassembly, architecture §6), so a frame longer than one chunk
+    /// would arrive as unframed fragments with raw `\x01` bytes. A frame
+    /// that fits one chunk encrypts as-is; a longer ACTION is split into
+    /// independent, individually-wrapped `\x01ACTION …\x01` pieces (the
+    /// peer renders a sequence of actions, just as long plain text renders
+    /// as several lines); any other overlong frame is refused — silently
+    /// shipping broken framing is worse than a visible failure.
+    pub fn encrypt_outgoing_ctcp(&self, channel: &str, frame: &str) -> Result<Vec<String>> {
+        const ACTION_PREFIX: &str = "\x01ACTION ";
+        const ACTION_FRAMING: usize = ACTION_PREFIX.len() + 1;
+
+        if frame.len() <= crate::e2e::MAX_PLAINTEXT_PER_CHUNK {
+            return self.encrypt_outgoing(channel, frame);
+        }
+        let body = frame
+            .strip_prefix(ACTION_PREFIX)
+            .and_then(|f| f.strip_suffix('\x01'))
+            .ok_or_else(|| {
+                E2eError::Wire("CTCP frame exceeds one encrypted chunk and cannot be split".into())
+            })?;
+        let budget = crate::e2e::MAX_PLAINTEXT_PER_CHUNK - ACTION_FRAMING;
+        let pieces = crate::e2e::chunker::split_plaintext_budget(body, budget)?;
+        let mut out = Vec::with_capacity(pieces.len());
+        for piece in pieces {
+            // The chunker splits on UTF-8 char boundaries, so this cannot
+            // fail for the valid-UTF-8 input `body` is.
+            let piece = String::from_utf8(piece)
+                .map_err(|_| E2eError::Wire("chunker split off a UTF-8 boundary".into()))?;
+            out.extend(self.encrypt_outgoing(channel, &format!("{ACTION_PREFIX}{piece}\x01"))?);
+        }
+        Ok(out)
+    }
+
     /// Encrypt `plaintext` for `channel` and return one wire-format line per
     /// chunk. Callers send these verbatim via PRIVMSG. Honors lazy rotation:
     /// if the outgoing session is flagged `pending_rotation`, a fresh key is

@@ -23,6 +23,14 @@ use crate::e2e::{MAX_CHUNKS, MAX_PLAINTEXT_PER_CHUNK};
 /// might generate a blank line (empty /say, trimmed whitespace, etc.)
 /// must guard before calling `encrypt_outgoing`.
 pub fn split_plaintext(plaintext: &str) -> Result<Vec<Vec<u8>>> {
+    split_plaintext_budget(plaintext, MAX_PLAINTEXT_PER_CHUNK)
+}
+
+/// [`split_plaintext`] with a caller-chosen per-chunk byte budget — used by
+/// the CTCP ACTION splitter, whose per-piece budget must leave room for the
+/// `\x01ACTION …\x01` framing each piece gets wrapped in afterwards. The
+/// `MAX_CHUNKS` cap applies to the produced pieces regardless of budget.
+pub fn split_plaintext_budget(plaintext: &str, max_per_chunk: usize) -> Result<Vec<Vec<u8>>> {
     if plaintext.is_empty() {
         return Err(E2eError::Wire("empty plaintext".into()));
     }
@@ -32,7 +40,7 @@ pub fn split_plaintext(plaintext: &str) -> Result<Vec<Vec<u8>>> {
     let mut cursor = 0usize;
 
     while cursor < bytes.len() {
-        let mut end = (cursor + MAX_PLAINTEXT_PER_CHUNK).min(bytes.len());
+        let mut end = (cursor + max_per_chunk).min(bytes.len());
         // Walk back to a UTF-8 char boundary if we're in the middle of a
         // multi-byte sequence.
         while end > cursor && !plaintext.is_char_boundary(end) {

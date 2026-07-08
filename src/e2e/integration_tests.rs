@@ -97,6 +97,58 @@ fn full_handshake_and_encrypted_exchange() {
 }
 
 #[test]
+fn long_encrypted_action_splits_into_complete_ctcp_frames() {
+    // Chunks decrypt and render STANDALONE (no reassembly, spec §6), so a
+    // `\x01ACTION …\x01` frame longer than one chunk must be split into
+    // independent, individually-framed ACTIONs before encryption — never
+    // fragmented mid-frame, which would render as raw \x01 garbage on the
+    // peer. A short action stays a single frame; an overlong non-ACTION
+    // CTCP is refused rather than silently shipped broken.
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+    let alice_handle = "~alice@a.host";
+    let bob_handle = "~bob@b.host";
+    let req = bob.build_keyreq("#x").unwrap();
+    let rsp = alice.handle_keyreq(bob_handle, &req).unwrap().unwrap();
+    bob.handle_keyrsp(alice_handle, &rsp).unwrap();
+
+    let body = "zażółć gęślą jaźń ".repeat(30); // multi-byte, ≫ one chunk
+    let frame = format!("\x01ACTION {body}\x01");
+    let wire_lines = alice.encrypt_outgoing_ctcp("#x", &frame).unwrap();
+    assert!(wire_lines.len() > 1, "an overlong action must split");
+
+    let mut reassembled = String::new();
+    for wire in &wire_lines {
+        let DecryptOutcome::Plaintext(plain) =
+            bob.decrypt_incoming(alice_handle, "#x", wire).unwrap()
+        else {
+            panic!("every piece must decrypt standalone");
+        };
+        let piece_body = plain
+            .strip_prefix("\x01ACTION ")
+            .and_then(|p| p.strip_suffix('\x01'))
+            .unwrap_or_else(|| panic!("piece is not a complete CTCP ACTION frame: {plain:?}"));
+        assert!(
+            !piece_body.contains('\x01'),
+            "no stray CTCP framing inside a piece"
+        );
+        reassembled.push_str(piece_body);
+    }
+    assert_eq!(reassembled, body, "no bytes lost or duplicated across pieces");
+
+    let short = alice.encrypt_outgoing_ctcp("#x", "\x01ACTION waves\x01").unwrap();
+    assert_eq!(short.len(), 1, "a short action stays a single frame");
+
+    let overlong_other = format!("\x01VERSION {}\x01", "x".repeat(300));
+    assert!(
+        alice.encrypt_outgoing_ctcp("#x", &overlong_other).is_err(),
+        "an overlong non-ACTION CTCP must refuse, not fragment"
+    );
+}
+
+#[test]
 fn dm_round_trip_recipient_keyed_both_directions() {
     // A DM is recipient-keyed: the context for a message is the RECIPIENT's
     // handle. So Alice->Bob uses @<bob_handle> on BOTH sides and Bob->Alice
