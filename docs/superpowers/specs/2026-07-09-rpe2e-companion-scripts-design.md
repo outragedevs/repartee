@@ -164,8 +164,20 @@ Tooling present locally: `python3`, `perl` (+ `Crypt::NaCl::Sodium`), `weechat`,
 
 ## Phasing (separate commits, per-phase code review)
 
-1. **F1 weechat** — `irc_out1_privmsg` gate + CTCP ACTION splitter.
-2. **F1 irssi** — `server sending command` gate + CTCP ACTION splitter.
-3. **F2 irssi** — move decryption to `server incoming`.
-4. **F3 both** — per-network scoping (interop-critical, isolated, own review).
-5. PR to `outrage/main`. No merge without approval.
+1. **F1 weechat** — `irc_out1_privmsg` gate + CTCP ACTION splitter. ✅ done
+   (+ a pre-existing `db_conn` commit fix without which the gate could never
+   see an enabled config; + 6 review findings fixed).
+2. **F1 irssi** — `server sending command` gate + CTCP ACTION splitter. ✅ done
+   (+ 7 review findings fixed, incl. removing `signal_send_text` so the gate is
+   the single chokepoint; live+cache DM handle resolution; STATUSMSG handling).
+3. **F2 irssi** — decrypt on `event privmsg` (pre-CTCP-split). ✅ done.
+   Consistency sweep applied the STATUSMSG + incoming non-ACTION-CTCP-drop +
+   refusal-wording findings to weechat too.
+4. **F3 both** — per-network scoping. **Deferred to a dedicated follow-up**
+   (decision 2026-07-09): it is interop-critical and has a real migration
+   sharp-edge the current scripts are not equipped for (no "configured
+   networks" list like the Rust client's `legacy_adoption_allowed`). Doing it
+   hastily risks a fail-open downgrade-after-upgrade or a cross-network leak —
+   both worse than the LOW-MED issue it fixes. Design + full change-surface map
+   captured in `2026-07-09-rpe2e-f3-network-scoping-followup.md`.
+5. **PR to `outrage/main` with F1+F2** (this branch). No merge without approval.
