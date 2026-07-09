@@ -2128,7 +2128,13 @@ def hook_irc_in_privmsg(data, modifier, server, msg):
         skew = abs(int(time.time()) - wire["ts"])
         if skew > TS_TOLERANCE:
             return ""
-        ctx = context_key(target, handle)
+        # STATUSMSG delivery (`@#chan`, `+#chan`): the decrypt context is the
+        # underlying channel, mirroring the outbound gate. Keep the original
+        # `target` for the reconstructed PRIVMSG line so weechat routes it
+        # unchanged; only the context key is stripped. Without this, ciphertext
+        # sent to `@#chan` would be keyed as a DM (`@<handle>`) and fail to
+        # decrypt (drop + spurious KEYREQ).
+        ctx = context_key(_strip_statusmsg(target), handle)
         with db_conn() as c:
             row = c.execute(
                 "SELECT sk, status FROM incoming WHERE handle = ? AND channel = ?",
