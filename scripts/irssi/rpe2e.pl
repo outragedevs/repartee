@@ -1011,20 +1011,6 @@ sub _send_raw_privmsg {
     $server->send_raw_now("PRIVMSG $target :$body");
 }
 
-sub _emit_own_message {
-    my ($server, $witem, $target, $plain) = @_;
-    return unless $server && $witem;
-    if ($target =~ $CHANNEL_PREFIX_RE) {
-        eval { Irssi::signal_emit('message own_public', $server, $plain, $target) };
-    } else {
-        eval { Irssi::signal_emit('message own_private', $server, $plain, $target, $target) };
-    }
-    if ($@) {
-        my $nick = $server->{nick} // '';
-        $witem->print("<$nick> $plain", Irssi::MSGLEVEL_PUBLIC());
-    }
-}
-
 sub _resolve_ctx_for_command {
     my ($kr, $witem, $nick) = @_;
     return undef unless $witem;
@@ -1557,8 +1543,8 @@ my $REFUSE_ENCRYPT   = "encryption failed — message NOT sent as plaintext (use
 my $BOT_BYPASS_WARN  = "bot-style message to %s sent in CLEARTEXT — channel lines starting with '.' or '!' bypass encryption for bots";
 
 # Encrypt plaintext under session key $sk for wire context $ctx; returns an
-# arrayref of wire lines (one per chunk). Shared by the gate and signal_send_text
-# so the wire framing has a single source of truth.
+# arrayref of wire lines (one per chunk). Shared by the plain and ACTION gate
+# paths so the wire framing has a single source of truth.
 sub _encrypt_plain_wire {
     my ($sk, $ctx, $plain) = @_;
     my $chunks = split_plaintext($plain);
@@ -1617,9 +1603,44 @@ sub _distribute_rekey_safe {
 #   ('cipher', [wire, …])  send these encrypted lines, drop the original
 #   ('refuse', reason)     drop; caller shows the [E2E] reason
 #   ('bypass', warn|undef) channel bot bypass; send plaintext, maybe warn
+# Strip a leading STATUSMSG prefix (@#chan, +#chan, %#chan, …): a message to a
+# channel subset is still that channel for E2E purposes. The lookahead keeps a
+# real channel name whose first char is itself a channel prefix (#, &, !, +)
+# untouched — only a non-channel char sitting in front of a channel prefix is
+# stripped. Without this, `/msg @#secret …` classified as a DM to a bogus nick
+# and leaked plaintext to the channel ops on an E2E-enabled channel.
+sub _strip_statusmsg {
+    my ($target) = @_;
+    $target =~ s/^[\@%+&~]+(?=[#&!+])//;
+    return $target;
+}
+
+# Resolve a DM peer's ident@host: LIVE first (an open query or a shared channel
+# carries the peer's current ident@host, which a nick change does NOT alter),
+# then the persisted cache by last_nick. Live resolution is what stops a renamed
+# E2E peer from falling through to a plaintext send — the cache's last_nick can
+# be stale (there is no 'event nick' handler), but the handle is unchanged and
+# the live query/channel record still has it. Mirrors weechat's nicklist/query
+# resolution.
+sub _resolve_dm_handle {
+    my ($server, $kr, $nick) = @_;
+    if ($server) {
+        my $q = eval { $server->query_find($nick) };
+        return $q->{address} if $q && $q->{address};
+        for my $ch (eval { $server->channels() }) {
+            my $n = eval { $ch->nick_find($nick) };
+            return $n->{host} if $n && $n->{host};
+        }
+    }
+    return _find_handle_by_nick($kr, $nick);
+}
+
 sub _gate_decide {
     my ($server, $target, $body) = @_;
-    my $is_channel = $target =~ $CHANNEL_PREFIX_RE;
+    # STATUSMSG targets (@#chan, +#chan) address a channel subset — classify and
+    # key them by the underlying channel, never as a DM.
+    my $chan = _strip_statusmsg($target);
+    my $is_channel = $chan =~ $CHANNEL_PREFIX_RE;
 
     # Non-ACTION CTCP (VERSION, PING, …) is a deliberate plaintext escape hatch,
     # exactly as the Rust client leaves /ctcp and /version cleartext.
@@ -1634,8 +1655,8 @@ sub _gate_decide {
     # we cannot POSITIVELY rule E2E out (enabled OR a keyring read error) so the
     # cleartext is never a silent surprise.
     if ($is_channel && $body =~ /^[.!]/ && index($body, "\n") < 0) {
-        my $enabled = $kr->{channels}{$target} && ($kr->{channels}{$target}{enabled} // 0);
-        my $warn = (!$ok || $enabled) ? sprintf($BOT_BYPASS_WARN, $target) : undef;
+        my $enabled = $kr->{channels}{$chan} && ($kr->{channels}{$chan}{enabled} // 0);
+        my $warn = (!$ok || $enabled) ? sprintf($BOT_BYPASS_WARN, $chan) : undef;
         return ('bypass', $warn);
     }
 
@@ -1645,13 +1666,14 @@ sub _gate_decide {
 
     my $ctx;
     if ($is_channel) {
-        $ctx = $target;
+        $ctx = $chan;
     } else {
-        my $handle = _find_handle_by_nick($kr, $target);
-        unless (defined $handle) {
-            # No cached handle → no `@<handle>` config can exist for this nick.
-            # Refuse only if an enabled legacy bare-nick row exists; otherwise
-            # plaintext passthrough is safe (genuinely no E2E state).
+        my $handle = _resolve_dm_handle($server, $kr, $target);
+        unless (defined $handle && length $handle) {
+            # Nothing resolvable → no `@<handle>` config can exist for this nick
+            # (a handshake would have cached one, and live resolution catches a
+            # rename). Refuse only if an enabled legacy bare-nick row exists;
+            # otherwise plaintext passthrough is safe (genuinely no E2E state).
             my $cfg = $kr->{channels}{$target};
             return ('refuse', $REFUSE_NO_HANDLE) if $cfg && ($cfg->{enabled} // 0);
             return ('pass', undef);
@@ -1662,9 +1684,13 @@ sub _gate_decide {
     my $cfg = $kr->{channels}{$ctx};
     return ('pass', undef) unless $cfg && ($cfg->{enabled} // 0);
 
+    # Persist only when a key is actually generated/rotated — otherwise the
+    # existing key is returned unchanged and rewriting the whole keyring JSON on
+    # every message is wasted I/O.
+    my $pre_existing = $kr->{outgoing}{$ctx} && !($kr->{outgoing}{$ctx}{pending_rotation} // 0);
     my ($sk, $had_pending) = _get_or_generate_outgoing_key_with_rotation($kr, $ctx);
     _distribute_rekey_safe($server, $kr, $ctx, $sk) if $had_pending;
-    save_keyring($kr);
+    save_keyring($kr) unless $pre_existing;
     my $wires = eval {
         $is_action ? _encrypt_ctcp_wire($sk, $ctx, $body)
                    : _encrypt_plain_wire($sk, $ctx, $body);
@@ -1689,6 +1715,10 @@ sub _e2e_gate_wire {
     return @res;
 }
 
+# THE single authoritative outbound gate. Every PRIVMSG irssi is about to send —
+# from plain typed text, `/me`, `/msg`, `/say`, `/amsg`, or a script — passes
+# through here (there is no separate `send text` handler; irssi's own command
+# layer produces the local echo, and this gate rewrites only the wire).
 sub signal_server_sending_command {
     my ($server, $data) = @_;
     return unless $server && defined $data;
@@ -1710,64 +1740,16 @@ sub signal_server_sending_command {
         return;
     }
     if ($action eq 'refuse') {
-        _prnt_err(_notice_witem_for_ctx($server, $target, $target), $payload);
+        # irssi's command layer already echoed the plaintext locally, so make it
+        # explicit that nothing was delivered (the wire line is dropped below).
+        _prnt_err(_notice_witem_for_ctx($server, $target, $target),
+                  "$payload — the message shown above was NOT delivered");
         Irssi::signal_stop();   # drop the plaintext line — never reaches the wire
         return;
     }
     # cipher: suppress the original and emit the encrypted chunks ourselves.
     Irssi::signal_stop();
     _send_raw_privmsg($server, $target, $_) for @$payload;
-}
-
-sub signal_send_text {
-    my ($data, $server, $witem) = @_;
-    return unless $witem;
-    return if !defined($data) || $data =~ m{^/};
-    my $target = $witem->{name};
-    # Bot-command bypass is CHANNEL-ONLY: `.cmd`/`!cmd` lines go out
-    # unencrypted so channel bots can parse them (the CLEARTEXT warning is
-    # shown by the server-sending-command gate). DMs never bypass — prose
-    # starting with '.'/'!' in an E2E DM must still encrypt.
-    return if $target =~ $CHANNEL_PREFIX_RE && $data =~ m{^[.!]};
-    my ($kr, $ok) = _load_keyring_checked();
-    unless ($ok) {
-        # Fail closed: a keyring read error may hide an enabled config.
-        _prnt_err($witem, $REFUSE_KEYRING);
-        Irssi::signal_stop();
-        return;
-    }
-    my $ctx;
-    if ($target =~ $CHANNEL_PREFIX_RE) {
-        $ctx = $target;
-    } else {
-        my $handle = _find_handle_by_nick($kr, $target);
-        unless (defined $handle) {
-            # No cached handle → no `@<handle>` config can exist. Refuse only if
-            # an enabled legacy bare-nick row exists (never downgrade E2E to
-            # plaintext); otherwise let the plain DM pass through normally.
-            my $cfg = $kr->{channels}{$target};
-            if ($cfg && ($cfg->{enabled} // 0)) {
-                _prnt_err($witem, $REFUSE_NO_HANDLE);
-                Irssi::signal_stop();
-            }
-            return;
-        }
-        $ctx = '@' . $handle;
-    }
-    my $cfg = $kr->{channels}{$ctx};
-    return unless $cfg && ($cfg->{enabled} // 0);
-    my ($sk, $had_pending) = _get_or_generate_outgoing_key_with_rotation($kr, $ctx);
-    _distribute_rekey_safe($server, $kr, $ctx, $sk) if $had_pending;
-    save_keyring($kr);
-    my $wires = eval { _encrypt_plain_wire($sk, $ctx, $data) };
-    if ($@ || !defined $wires) {
-        _prnt_err($witem, $REFUSE_ENCRYPT);
-        Irssi::signal_stop();
-        return;
-    }
-    _send_raw_privmsg($server, $target, $_) for @$wires;
-    _emit_own_message($server, $witem, $target, $data);
-    Irssi::signal_stop();
 }
 
 # Decrypt one RPE2E wire message. Returns ($handled, $decoded):
@@ -1836,17 +1818,33 @@ sub signal_event_privmsg {
     # the channel; for a DM, target is OUR nick and the sender is $nick.
     my ($target, $text) = $data =~ /^(\S+)\s+:?(.*)$/s;
     return unless defined $target && defined $text;
-    return unless parse_wire($text);   # not RPE2E → let irssi handle normally
-    my $is_channel = $target =~ $CHANNEL_PREFIX_RE;
+    # STATUSMSG incoming (@#chan) still keys off the underlying channel.
+    my $chan = _strip_statusmsg($target);
+    my $is_channel = $chan =~ $CHANNEL_PREFIX_RE;
     # Context target: channel → the channel; DM → the SENDER's nick (DM context
     # is keyed off the sender's handle, matching the old message-private path).
-    my $ctx_target = $is_channel ? $target : $nick;
+    my $ctx_target = $is_channel ? $chan : $nick;
+    # _decrypt_wire_message returns (0, undef) for a non-RPE2E line (no second
+    # parse needed here), (1, undef) when it already dropped the ciphertext, or
+    # (1, $plaintext) on success.
     my ($handled, $decoded) = _decrypt_wire_message($server, $text, $nick, $host, $ctx_target);
-    return unless $handled;
+    return unless $handled && defined $decoded;
+    # A decrypted non-ACTION CTCP frame (\x01VERSION\x01, \x01PING\x01, DCC, …)
+    # must NOT be re-driven through the pipeline: irssi would interpret it and
+    # auto-answer with a PLAINTEXT NOTICE. Our own outbound side never encrypts
+    # non-ACTION CTCP (it is a cleartext escape hatch), so this is anomalous —
+    # drop it visibly instead of executing it. ACTION frames and ordinary text
+    # re-enter normally.
+    if ($decoded =~ /^\x01/ && $decoded !~ /^\x01ACTION /) {
+        _prnt_warn(_notice_witem_for_ctx($server, $ctx_target, $nick),
+                   "dropped an encrypted non-ACTION CTCP from $nick");
+        Irssi::signal_stop();
+        return;
+    }
     # Re-drive the DECRYPTED text through the same event, preserving the wire's
     # original target so routing (channel vs query) is unchanged. irssi then
     # performs the CTCP/ACTION split on cleartext.
-    Irssi::signal_continue($server, "$target :$decoded", $nick, $host) if defined $decoded;
+    Irssi::signal_continue($server, "$target :$decoded", $nick, $host);
 }
 
 sub _handle_rpee2e_ctcp_reply {
@@ -1921,9 +1919,9 @@ sub signal_default_ctcp_reply_generic {
 ensure_identity();
 
 Irssi::command_bind('e2e', \&cmd_e2e);
-Irssi::signal_add_first('send text', \&signal_send_text);
-# Authoritative outbound fail-closed gate (F1): every PRIVMSG on the wire —
-# `/me`, `/msg`, `/say`, `/amsg`, plain input — passes through here.
+# THE single authoritative outbound fail-closed gate (F1): every PRIVMSG on the
+# wire — plain typed text, `/me`, `/msg`, `/say`, `/amsg`, scripts — passes
+# through here. irssi's own command layer produces the local echo.
 Irssi::signal_add_first('server sending command', \&signal_server_sending_command);
 # F2: decrypt on the raw PRIVMSG event, BEFORE irssi's CTCP/ACTION split, so
 # an encrypted ACTION renders as an action rather than raw control characters.
