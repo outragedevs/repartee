@@ -391,6 +391,40 @@
 >
 > Weryfikacja: `make clippy` 0 warnings, `make test` 1516 passed (1 nowy).
 
+> **STATUS 14 (2026-07-09): RUNDA ZEWNĘTRZNA #11 — NAPRAWIONE.** Oba
+> findingi potwierdzone i naprawione. Sweep z rundy #10 tego NIE złapał —
+> błąd procesu odnotowany.
+>
+> - **[P1] Multi-network upgrade: legacy DM wysyłany plaintextem zamiast
+>   refuse** (`e2e_gate.rs:358`): na keyringu wielosieciowym po upgradzie
+>   enabled config DM leży pod NIESCOPE'owanym wierszem `@<handle>`, a
+>   `last_handle_for_nick` rozwiązuje handle z network-agnostycznego
+>   `e2e_peers` (cache `e2e_dm_handle_cache` jeszcze pusty).
+>   `get_channel_config(scoped)` zwraca None (legacy fallback wyłączony dla
+>   >1 sieci) → `enabled=false` → `plain_passthrough()` → **plaintext do
+>   peera, który miał E2E**. Komentarz w keyring.rs:1467 („still-encrypted
+>   send that self-heals") był prawdziwy TYLKO dla jednej sieci. Fix: w
+>   gałęzi Query zapamiętujemy niescope'owany wire (`dm_peer_wire`), a po
+>   `!enabled` sondujemy go bezpośrednio; jeśli niescope'owany config jest
+>   enabled → `Err(E2eRefusal::NoPeerHandle)` (peer domknie scoped migrację
+>   po pierwszej wiadomości). Jedna sieć nigdy tu nie wchodzi (fallback
+>   znajduje wiersz w scoped lookupie). Test:
+>   `multi_network_upgraded_legacy_dm_refuses_instead_of_plaintext`.
+> - **[P2] Gapfill po własnym handle gubiony przy CHATHISTORY w locie**
+>   (`backlog.rs:576`): `regapfill_queries_after_own_handle` wołał
+>   `request_connect_gapfill` w pętli IGNORUJĄC zwrot. Gdy handle własny
+>   nauczony podczas trwającego batcha CHATHISTORY dla tej samej query,
+>   request był tłumiony (guard in-flight), retry przepadał — linie już
+>   przetworzone jako nieodszyfrowywalne nigdy nie były re-fetchowane,
+>   placeholder „awaiting our own identity" wisiał do reconnectu. Fix:
+>   delegacja do `regapfill_conversation_after_session` (zwraca `false` przy
+>   transient-busy) + re-queue do `pending_e2e_gapfills` — dokładnie jak
+>   drain KEYRSP w `App::handle_irc_event` (irc.rs:907-916); END batcha
+>   (event IRC) wznawia retry. Weryfikacja przez konstrukcję (wierny mirror
+>   sprawdzonej ścieżki sesyjnej; brak harnessu App-level w tym module).
+>
+> Weryfikacja: `make clippy` 0 warnings, `make test` 1517 passed (1 nowy).
+
 - **Data review:** 2026-07-01
 - **Zakres:** pełny diff PR #29 (`main...fix/various-improvements`, stan po commicie `96580de`)
 - **Metoda:** 8 niezależnych kątów wyszukiwania (line-by-line, removed-behavior, cross-file, reuse, simplification, efficiency, altitude, conventions) → dedup → 12 osobnych weryfikatorów (po jednym na kandydata, verdict CONFIRMED/PLAUSIBLE/REFUTED z cytatami z kodu)

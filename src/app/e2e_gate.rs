@@ -254,6 +254,12 @@ impl AppState {
                 |net| crate::e2e::scoped_context(net, wire),
             )
         };
+        // The UNSCOPED wire context for a DM (`@<handle>`), captured when the
+        // Query arm resolves a peer handle. Used by the multi-network upgrade
+        // guard below the enabled check: on a multi-network keyring the scoped
+        // lookup will not see a pre-upgrade config stored under this unscoped
+        // row, so we must probe it directly before ever sending plaintext.
+        let mut dm_peer_wire: Option<String> = None;
         let context: String = match buffer_type {
             BufferType::Channel => {
                 // IRC channel names are case-insensitive; the config row
@@ -331,7 +337,9 @@ impl AppState {
                     }
                     return plain_passthrough();
                 };
-                scope(&crate::e2e::context_key(buffer_name, &peer_handle))
+                let wire = crate::e2e::context_key(buffer_name, &peer_handle);
+                dm_peer_wire = Some(wire.clone());
+                scope(&wire)
             }
             // Server/Status/DccChat/Shell/Mentions/Special: E2E does not
             // apply. handle_plain_message already gates messaging on
@@ -356,6 +364,34 @@ impl AppState {
             }
         };
         if !enabled {
+            // Multi-network upgrade guard. On a multi-network keyring the
+            // scoped enabled check above will NOT see a pre-upgrade DM config
+            // stored under the UNSCOPED `@<handle>` row: the legacy fallback in
+            // get_channel_config is denied for >1 configured network (so a
+            // same-nick peer on another network can't inherit it). But the
+            // peer handle may itself have been resolved from that very legacy
+            // `e2e_peers` row (last_handle_for_nick's fallback), meaning an
+            // enabled config really does exist for this DM. Sending plaintext
+            // here would silently downgrade a previously-E2E conversation.
+            // Probe the unscoped row directly; if it is enabled, refuse and let
+            // the peer's next message drive a scoped migration + handshake,
+            // exactly like NoPeerHandle. (Single-network never reaches here —
+            // its fallback makes the scoped lookup find the unscoped row.)
+            if let Some(wire) = &dm_peer_wire {
+                let legacy_enabled = match mgr.keyring().get_channel_config(wire) {
+                    Ok(cfg) => cfg.is_some_and(|c| c.enabled),
+                    Err(e) => {
+                        tracing::warn!(
+                            "e2e: keyring read failed probing legacy DM config {wire}: {e}; \
+                             refusing to send rather than risk plaintext"
+                        );
+                        return Err(E2eRefusal::KeyringRead);
+                    }
+                };
+                if legacy_enabled {
+                    return Err(E2eRefusal::NoPeerHandle);
+                }
+            }
             return plain_passthrough();
         }
         // CTCP frames (`/me`, Lua `ctcp()`) take the framing-aware encrypt:
@@ -954,6 +990,62 @@ mod tests {
         assert!(!plan.encrypted);
         assert_eq!(plan.wire_lines, vec!["hello there".to_string()]);
 
+    }
+
+    #[test]
+    fn multi_network_upgraded_legacy_dm_refuses_instead_of_plaintext() {
+        // Multi-network upgraded keyring: an enabled DM config from before the
+        // scoping upgrade lives under the UNSCOPED `@<handle>` row, and the peer
+        // handle is only resolvable via the network-agnostic e2e_peers fallback
+        // (e2e_dm_handle_cache still empty). get_channel_config(scoped) returns
+        // None because legacy fallback is denied for >1 configured network — but
+        // the config IS enabled, so a plaintext send would silently downgrade a
+        // previously-E2E DM. The gate must REFUSE (NoPeerHandle) and let the
+        // peer's next message drive a scoped migration + handshake.
+        use crate::e2e::keyring::{PeerRecord, TrustStatus};
+
+        let mut state = make_state_with_manager();
+        {
+            let mgr = state.e2e_manager.as_ref().unwrap();
+            let keyring = mgr.keyring();
+            // Two configured networks → legacy fallback disabled.
+            keyring
+                .set_configured_networks(["TestServer".to_string(), "OtherNet".to_string()]);
+            // Enabled config under the UNSCOPED legacy row.
+            keyring
+                .set_channel_config(&ChannelConfig {
+                    channel: "@~bob@old.host".to_string(),
+                    enabled: true,
+                    mode: ChannelMode::Normal,
+                })
+                .unwrap();
+            // e2e_peers maps bob → ~bob@old.host (network-agnostic), so
+            // last_handle_for_nick resolves it while the cache is empty.
+            keyring
+                .upsert_peer(&PeerRecord {
+                    fingerprint: [7u8; 16],
+                    pubkey: [0x44; 32],
+                    last_handle: Some("~bob@old.host".to_string()),
+                    last_nick: Some("bob".to_string()),
+                    first_seen: 0,
+                    last_seen: 100,
+                    global_status: TrustStatus::Trusted,
+                })
+                .unwrap();
+        }
+        state.add_buffer(make_buf(BufferType::Query, "bob"));
+
+        match state.e2e_send_plan_for_target("test", "bob", "the secret") {
+            Err(E2eRefusal::NoPeerHandle) => {}
+            Err(other) => panic!(
+                "expected NoPeerHandle refusal, got a different refusal: {}",
+                other.user_message()
+            ),
+            Ok(plan) => panic!(
+                "multi-network legacy DM must refuse, not send: encrypted={}, wire={:?}",
+                plan.encrypted, plan.wire_lines
+            ),
+        }
     }
 
     #[test]

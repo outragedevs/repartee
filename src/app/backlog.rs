@@ -574,10 +574,25 @@ impl App {
             .map(|b| b.name.clone())
             .collect();
         for target in targets {
-            if let Some(conn) = self.state.connections.get_mut(conn_id) {
-                conn.chathistory.clear_connect_gapfilled(&target);
+            // Reuse the session-path helper: it releases the one-shot claim,
+            // re-issues the gap-fill, and returns `false` when the request was
+            // suppressed by a CHATHISTORY for the same target still in flight.
+            // In that transient-busy case the lines already skipped as
+            // undecryptable (processed before the handle was learned) would
+            // otherwise never be re-fetched — the in-flight batch ends with no
+            // pending retry, so the transient "awaiting our own identity"
+            // placeholder survives until reconnect. Re-queue exactly like the
+            // KEYRSP gap-fill drain so the in-flight batch's END event (itself
+            // an IRC event) drives the retry once the conflict clears.
+            if !self.regapfill_conversation_after_session(conn_id, &target) {
+                let gapfill = crate::state::PendingE2eGapfill {
+                    connection_id: conn_id.to_string(),
+                    target: target.clone(),
+                };
+                if !self.state.pending_e2e_gapfills.contains(&gapfill) {
+                    self.state.pending_e2e_gapfills.push(gapfill);
+                }
             }
-            self.request_connect_gapfill(conn_id, &target);
         }
     }
 
