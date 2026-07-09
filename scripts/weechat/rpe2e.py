@@ -1906,6 +1906,24 @@ def _distribute_rekey_safe(channel: str, new_sk: bytes, server: str) -> None:
         _dbg(f"_distribute_rekey_safe: distribution failed for {channel}: {e}")
 
 
+def _strip_statusmsg(target: str) -> str:
+    """Strip a leading STATUSMSG prefix (`@#chan`, `+#chan`, `%#chan`, …): a
+    message to a channel subset is still that channel for E2E. A real channel
+    name whose first char is itself a channel prefix is left untouched — only a
+    non-channel char sitting in front of a channel prefix is stripped. Without
+    this, `/msg @#secret …` classified as a DM to a bogus nick and leaked
+    plaintext to the channel ops on an E2E-enabled channel."""
+    i = 0
+    while (
+        i < len(target)
+        and target[i] in "@%+&~"
+        and i + 1 < len(target)
+        and target[i + 1] in CHANNEL_PREFIXES
+    ):
+        i += 1
+    return target[i:]
+
+
 def _e2e_gate_wire(server: str, target: str, body: str):
     """Fail-closed outbound gate — mirror of `e2e_encrypt_or_passthrough`.
 
@@ -1919,7 +1937,10 @@ def _e2e_gate_wire(server: str, target: str, body: str):
     point it can be reached we can no longer rule out an enabled E2E context
     and must not leak plaintext."""
     try:
-        is_channel = bool(target) and target[0] in CHANNEL_PREFIXES
+        # STATUSMSG targets (`@#chan`, `+#chan`) address a channel subset —
+        # classify and key them by the underlying channel, never as a DM.
+        chan = _strip_statusmsg(target)
+        is_channel = bool(chan) and chan[0] in CHANNEL_PREFIXES
 
         # Non-ACTION CTCP (VERSION, PING, …) is a deliberate plaintext escape
         # hatch, exactly as the Rust client leaves /ctcp and /version in
@@ -1940,16 +1961,16 @@ def _e2e_gate_wire(server: str, target: str, body: str):
             # (fail-closed visibility — never silently drop the warning on a
             # transient DB error).
             warn = None
-            if _config_enabled(target) != _ENABLED_NO:
+            if _config_enabled(chan) != _ENABLED_NO:
                 warn = (
-                    f"bot-style message to {target} sent in CLEARTEXT — channel "
+                    f"bot-style message to {chan} sent in CLEARTEXT — channel "
                     "lines starting with '.' or '!' bypass encryption for bots"
                 )
             return ("bypass", warn)
 
         # Resolve the keyring context (unscoped in F1; F3 adds network scope).
         if is_channel:
-            context = target
+            context = chan
         else:
             # Live OR cached handle resolution (mirror of Rust
             # `resolve_query_peer_handle`): a peer who isn't currently in a
@@ -2052,7 +2073,12 @@ def hook_irc_out_privmsg(data, modifier, server, msg):
             _prnt_warn(_target_buffer(server, target), payload)
         return msg
     if action == "refuse":
-        _prnt_err(_target_buffer(server, target), payload)
+        # For command paths (/msg, /me, /say) weechat's core may already have
+        # echoed the plaintext locally, so make the drop explicit.
+        _prnt_err(
+            _target_buffer(server, target),
+            f"{payload} — the message shown above was NOT delivered",
+        )
         _dbg(f"hook_irc_out_privmsg REFUSED send to {target}: {payload}")
         return ""
     # action == "cipher": send the encrypted chunks ourselves and drop the
@@ -2143,6 +2169,15 @@ def hook_irc_in_privmsg(data, modifier, server, msg):
             pt_str = pt.decode("utf-8")
         except UnicodeDecodeError:
             pt_str = pt.decode("utf-8", errors="replace")
+        # A decrypted non-ACTION CTCP frame (\x01VERSION\x01, \x01PING\x01, …)
+        # must NOT be re-injected into weechat's PRIVMSG pipeline: weechat would
+        # interpret it and auto-answer with a PLAINTEXT NOTICE. Our own outbound
+        # side never encrypts non-ACTION CTCP (it is a cleartext escape hatch),
+        # so this is anomalous — drop it. ACTION frames and ordinary text pass
+        # through and render normally.
+        if pt_str.startswith("\x01") and not pt_str.startswith("\x01ACTION "):
+            _dbg(f"hook_irc_in_privmsg: dropping decrypted non-ACTION CTCP from {nick}")
+            return ""
         return f":{prefix} PRIVMSG {target} :{pt_str}"
     except Exception as e:
         _dbg(f"hook_irc_in_privmsg OUTER EXCEPTION: {e}\n{traceback.format_exc()}")
