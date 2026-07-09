@@ -103,23 +103,31 @@ sub empty_keyring {
     };
 }
 
-sub load_keyring {
-    return empty_keyring() unless -f $keyring_path;
-    open my $fh, '<', $keyring_path or return empty_keyring();
+# Load the keyring, distinguishing a genuine read/parse error from an absent
+# file. Returns ($kr, $ok): $ok=0 means the file EXISTS but could not be read
+# or parsed — the outbound gate must fail closed on that (an enabled config may
+# be present but unreadable, so refusing beats risking plaintext). An absent
+# file is ($empty, 1): there is legitimately no E2E state.
+sub _load_keyring_checked {
+    return (empty_keyring(), 1) unless -f $keyring_path;
+    open my $fh, '<', $keyring_path or return (empty_keyring(), 0);
     local $/;
     my $json = <$fh>;
     close $fh;
     my $kr;
     eval { $kr = decode_json($json) };
-    if ($@ || ref($kr) ne 'HASH') {
-        Irssi::print("[E2E] keyring corrupt, starting fresh");
-        return empty_keyring();
-    }
+    return (empty_keyring(), 0) if $@ || ref($kr) ne 'HASH';
     for my $k (qw(identity peers outgoing incoming channels pending outgoing_recipients pending_inbound)) {
         $kr->{$k} //= {};
     }
     $kr->{autotrust} //= [];
     $kr->{pending_trust_change} //= [];
+    return ($kr, 1);
+}
+
+sub load_keyring {
+    my ($kr, $ok) = _load_keyring_checked();
+    Irssi::print("[E2E] keyring corrupt, starting fresh") if !$ok;
     return $kr;
 }
 
@@ -358,12 +366,21 @@ sub parse_wire {
 
 sub split_plaintext {
     my ($text) = @_;
+    return split_plaintext_budget($text, $MAX_PT_PER_CHUNK);
+}
+
+# split_plaintext with a caller-chosen per-chunk byte budget — mirrors Rust
+# src/e2e/chunker.rs::split_plaintext_budget. Used by the CTCP ACTION splitter,
+# whose per-piece budget must leave room for the \x01ACTION …\x01 framing each
+# piece is wrapped in afterwards. The MAX_CHUNKS cap applies regardless.
+sub split_plaintext_budget {
+    my ($text, $max_per_chunk) = @_;
     die "empty plaintext" unless defined $text && length $text;
     my $bytes = encode('UTF-8', $text);
     my @chunks;
     my $i = 0;
     while ($i < length($bytes)) {
-        my $j = $i + $MAX_PT_PER_CHUNK;
+        my $j = $i + $max_per_chunk;
         $j = length($bytes) if $j > length($bytes);
         while ($j > $i && $j < length($bytes) && ((ord(substr($bytes, $j, 1)) & 0xC0) == 0x80)) {
             $j--;
@@ -994,20 +1011,6 @@ sub _send_raw_privmsg {
     $server->send_raw_now("PRIVMSG $target :$body");
 }
 
-sub _emit_own_message {
-    my ($server, $witem, $target, $plain) = @_;
-    return unless $server && $witem;
-    if ($target =~ $CHANNEL_PREFIX_RE) {
-        eval { Irssi::signal_emit('message own_public', $server, $plain, $target) };
-    } else {
-        eval { Irssi::signal_emit('message own_private', $server, $plain, $target, $target) };
-    }
-    if ($@) {
-        my $nick = $server->{nick} // '';
-        $witem->print("<$nick> $plain", Irssi::MSGLEVEL_PUBLIC());
-    }
-}
-
 sub _resolve_ctx_for_command {
     my ($kr, $witem, $nick) = @_;
     return undef unless $witem;
@@ -1522,57 +1525,278 @@ sub cmd_e2e {
     }
 }
 
-sub signal_send_text {
-    my ($data, $server, $witem) = @_;
-    return unless $witem;
-    return if !defined($data) || $data =~ m{^/};
-    my $target = $witem->{name};
-    # Bot-command bypass is CHANNEL-ONLY: `.cmd`/`!cmd` lines go out
-    # unencrypted so channel bots can parse them. DMs never bypass —
-    # prose starting with '.'/'!' in an E2E DM must still encrypt.
-    return if $target =~ $CHANNEL_PREFIX_RE && $data =~ m{^[.!]};
-    my $kr = load_keyring();
-    my $ctx;
-    if ($target =~ $CHANNEL_PREFIX_RE) {
-        $ctx = $target;
-    } else {
-        my $handle = _find_handle_by_nick($kr, $target);
-        unless (defined $handle) {
-            _prnt_err($witem, "cannot resolve handle for $target — has the user spoken yet?");
-            Irssi::signal_stop();
-            return;
-        }
-        $ctx = '@' . $handle;
-    }
-    my $cfg = $kr->{channels}{$ctx};
-    return unless $cfg && ($cfg->{enabled} // 0);
-    my ($sk, $had_pending) = _get_or_generate_outgoing_key_with_rotation($kr, $ctx);
-    _distribute_rekey($server, $kr, $ctx, $sk) if $had_pending;
-    my $chunks = eval { split_plaintext($data) };
-    if ($@) {
-        _prnt_err($witem, "encrypt failed: $@");
-        Irssi::signal_stop();
-        return;
-    }
+# ── Outbound E2E gate (F1) — mirror of e2e_encrypt_or_passthrough ─────────
+#
+# irssi's high-level `send text` signal only carries plain typed lines; `/me`
+# (ACTION), `/msg`, `/say`, `/amsg`, … never pass through it, so they used to
+# reach the wire as PLAINTEXT in an E2E conversation. The authoritative fix is
+# a low-level chokepoint on `server sending command` (the same interception
+# point the FiSH encryption script uses): every PRIVMSG about to hit the wire —
+# regardless of the command that produced it — passes through the gate below.
+# It NEVER downgrades an E2E-enabled conversation to plaintext; every refusal is
+# visible.
+
+# Themed refusal reasons (mirror Rust E2eRefusal::user_message).
+my $REFUSE_NO_HANDLE = "cannot encrypt PM without peer handle — wait for a message from them first";
+my $REFUSE_KEYRING   = "cannot encrypt — keyring read failed; message NOT sent (E2E stays on)";
+my $REFUSE_ENCRYPT   = "encryption failed — message NOT sent as plaintext (use /e2e off to send cleartext)";
+my $REFUSE_AMBIGUOUS = "ambiguous target %s — E2E is enabled on both %s (STATUSMSG subset vs distinct channel); refusing to guess a context";
+my $BOT_BYPASS_WARN  = "bot-style message to %s sent in CLEARTEXT — channel lines starting with '.' or '!' bypass encryption for bots";
+
+# Encrypt plaintext under session key $sk for wire context $ctx; returns an
+# arrayref of wire lines (one per chunk). Shared by the plain and ACTION gate
+# paths so the wire framing has a single source of truth.
+sub _encrypt_plain_wire {
+    my ($sk, $ctx, $plain) = @_;
+    my $chunks = split_plaintext($plain);
+    my $total = scalar @$chunks;
     my $msgid = _raw(random_bytes(8));
     my $ts = now_unix();
+    my @out;
     my $idx = 0;
     for my $chunk (@$chunks) {
         $idx++;
-        my $aad = build_aad($ctx, $msgid, $ts, $idx, scalar @$chunks);
+        my $aad = build_aad($ctx, $msgid, $ts, $idx, $total);
         my ($nonce, $ct) = aead_encrypt($sk, $aad, $chunk);
-        my $wire = encode_wire($msgid, $ts, $idx, scalar @$chunks, $nonce, $ct);
-        _send_raw_privmsg($server, $target, $wire);
+        push @out, encode_wire($msgid, $ts, $idx, $total, $nonce, $ct);
     }
-    save_keyring($kr);
-    _emit_own_message($server, $witem, $target, $data);
+    return \@out;
+}
+
+# Encrypt a \x01ACTION …\x01 CTCP frame — mirror of Rust
+# E2eManager::encrypt_outgoing_ctcp. A frame fitting one chunk encrypts as-is;
+# a longer ACTION splits into independent, individually-wrapped \x01ACTION
+# piece\x01 frames (never fragmenting the CTCP envelope across bare chunks).
+# Byte length, not character length, gates the one-chunk case.
+sub _encrypt_ctcp_wire {
+    my ($sk, $ctx, $frame) = @_;
+    my $action_prefix = "\x01ACTION ";
+    my $action_framing = length($action_prefix) + 1;   # +1 for trailing \x01
+    if (length(encode('UTF-8', $frame)) <= $MAX_PT_PER_CHUNK) {
+        return _encrypt_plain_wire($sk, $ctx, $frame);
+    }
+    die "CTCP frame exceeds one encrypted chunk and cannot be split"
+        unless $frame =~ /^\Q$action_prefix\E/ && substr($frame, -1) eq "\x01";
+    my $body = substr($frame, length($action_prefix), length($frame) - length($action_prefix) - 1);
+    my $budget = $MAX_PT_PER_CHUNK - $action_framing;
+    my $pieces = split_plaintext_budget($body, $budget);
+    my @out;
+    for my $piece (@$pieces) {
+        my $piece_str = decode('UTF-8', $piece);
+        push @out, @{ _encrypt_plain_wire($sk, $ctx, $action_prefix . $piece_str . "\x01") };
+    }
+    return \@out;
+}
+
+# Best-effort REKEY distribution that never dies. A distribution failure must
+# NOT refuse the user's message: the key has already rotated (a revoked peer is
+# excluded regardless) and a trusted peer that misses the REKEY re-handshakes on
+# its next undecryptable ciphertext (auto-KEYREQ) — mirroring the Rust gate,
+# whose REKEY NOTICEs are queued/retried rather than gating the send.
+sub _distribute_rekey_safe {
+    my ($server, $kr, $channel, $new_sk) = @_;
+    eval { _distribute_rekey($server, $kr, $channel, $new_sk); 1 }
+        or _dbg("_distribute_rekey_safe: distribution failed for $channel: $@");
+}
+
+# The gate decision for one outgoing PRIVMSG body. Returns ($action, $payload):
+#   ('pass',   undef)      send $body unchanged (no E2E state / escape hatch)
+#   ('cipher', [wire, …])  send these encrypted lines, drop the original
+#   ('refuse', reason)     drop; caller shows the [E2E] reason
+#   ('bypass', warn|undef) channel bot bypass; send plaintext, maybe warn
+# Every channel reading of a possibly-STATUSMSG-prefixed target, most-stripped
+# first; empty list → not a channel. `@#chan` has exactly one reading (#chan):
+# a message to a channel subset is still that channel for E2E purposes, and
+# without stripping, `/msg @#secret …` classified as a DM to a bogus nick and
+# leaked plaintext to the channel ops on an E2E-enabled channel. But `+` and
+# `&` are BOTH status prefixes AND channel prefixes (RFC 2811), so `+#secret`
+# is genuinely ambiguous without per-server ISUPPORT (which irssi's Perl API
+# does not expose): the voiced subset of #secret OR the distinct channel
+# "+#secret". Callers get every reading and must stay fail-closed across all
+# of them — encrypting under the one enabled reading is always safe (a peer on
+# the other reading sees undecryptable ciphertext, never plaintext).
+sub _channel_readings {
+    my ($target) = @_;
+    $target //= '';
+    my $run = 0;
+    $run++ while $run < length($target) && index('@%+&~', substr($target, $run, 1)) >= 0;
+    my @readings;
+    for my $j (reverse 0 .. $run) {
+        my $rest = substr($target, $j);
+        push @readings, $rest if length($rest) && $rest =~ $CHANNEL_PREFIX_RE;
+    }
+    return @readings;
+}
+
+# Resolve a DM peer's ident@host: LIVE first (an open query or a shared channel
+# carries the peer's current ident@host, which a nick change does NOT alter),
+# then the persisted cache by last_nick. Live resolution is what stops a renamed
+# E2E peer from falling through to a plaintext send — the cache's last_nick can
+# be stale (there is no 'event nick' handler), but the handle is unchanged and
+# the live query/channel record still has it. Mirrors weechat's nicklist/query
+# resolution.
+sub _resolve_dm_handle {
+    my ($server, $kr, $nick) = @_;
+    if ($server) {
+        my $q = eval { $server->query_find($nick) };
+        return $q->{address} if $q && $q->{address};
+        for my $ch (eval { $server->channels() }) {
+            my $n = eval { $ch->nick_find($nick) };
+            return $n->{host} if $n && $n->{host};
+        }
+    }
+    return _find_handle_by_nick($kr, $nick);
+}
+
+sub _gate_decide {
+    my ($server, $target, $body) = @_;
+    # STATUSMSG targets (@#chan) address a channel subset — classify and key
+    # them by the underlying channel, never as a DM. `+#chan`/`&#chan` are
+    # ambiguous (see _channel_readings): every reading is considered below.
+    my @readings   = _channel_readings($target);
+    my $is_channel = scalar @readings;
+    my $chan       = $readings[0];
+
+    # Non-ACTION CTCP (VERSION, PING, …) is a deliberate plaintext escape hatch,
+    # exactly as the Rust client leaves /ctcp and /version cleartext.
+    my $is_ctcp   = length($body) >= 2 && substr($body, 0, 1) eq "\x01" && substr($body, -1) eq "\x01";
+    my $is_action = $body =~ /^\x01ACTION / && substr($body, -1) eq "\x01";
+    return ('pass', undef) if $is_ctcp && !$is_action;
+
+    my ($kr, $ok) = _load_keyring_checked();
+
+    # Bot-command bypass: `.cmd`/`!cmd` go out unencrypted so channel bots can
+    # parse them. CHANNEL-ONLY and SINGLE-LINE; DMs never bypass. Warn whenever
+    # we cannot POSITIVELY rule E2E out (enabled OR a keyring read error) so the
+    # cleartext is never a silent surprise.
+    if ($is_channel && $body =~ /^[.!]/ && index($body, "\n") < 0) {
+        my $enabled = grep { my $c = $kr->{channels}{$_}; $c && ($c->{enabled} // 0) } @readings;
+        my $warn = (!$ok || $enabled) ? sprintf($BOT_BYPASS_WARN, $chan) : undef;
+        return ('bypass', $warn);
+    }
+
+    # A genuine keyring read error means an enabled config may exist but be
+    # unreadable — refuse rather than risk plaintext (fail-closed).
+    return ('refuse', $REFUSE_KEYRING) unless $ok;
+
+    my $ctx;
+    if ($is_channel) {
+        # Encrypt under whichever reading has E2E enabled — a peer on the other
+        # reading of an ambiguous target sees ciphertext, never plaintext. Two
+        # enabled readings cannot be disambiguated locally → refuse.
+        my @on = grep { my $c = $kr->{channels}{$_}; $c && ($c->{enabled} // 0) } @readings;
+        return ('refuse', sprintf($REFUSE_AMBIGUOUS, $target, join(' and ', @on))) if @on > 1;
+        $ctx = $on[0] // $chan;
+    } else {
+        my $handle = _resolve_dm_handle($server, $kr, $target);
+        unless (defined $handle && length $handle) {
+            # Nothing resolvable → no `@<handle>` config can exist for this nick
+            # (a handshake would have cached one, and live resolution catches a
+            # rename). Refuse only if an enabled legacy bare-nick row exists;
+            # otherwise plaintext passthrough is safe (genuinely no E2E state).
+            my $cfg = $kr->{channels}{$target};
+            return ('refuse', $REFUSE_NO_HANDLE) if $cfg && ($cfg->{enabled} // 0);
+            return ('pass', undef);
+        }
+        $ctx = '@' . $handle;
+    }
+
+    my $cfg = $kr->{channels}{$ctx};
+    return ('pass', undef) unless $cfg && ($cfg->{enabled} // 0);
+
+    # Persist only when a key is actually generated/rotated — otherwise the
+    # existing key is returned unchanged and rewriting the whole keyring JSON on
+    # every message is wasted I/O.
+    my $pre_existing = $kr->{outgoing}{$ctx} && !($kr->{outgoing}{$ctx}{pending_rotation} // 0);
+    my ($sk, $had_pending) = _get_or_generate_outgoing_key_with_rotation($kr, $ctx);
+    _distribute_rekey_safe($server, $kr, $ctx, $sk) if $had_pending;
+    save_keyring($kr) unless $pre_existing;
+    my $wires = eval {
+        $is_action ? _encrypt_ctcp_wire($sk, $ctx, $body)
+                   : _encrypt_plain_wire($sk, $ctx, $body);
+    };
+    if ($@ || !defined $wires) {
+        _dbg("_gate_decide encrypt failed for $ctx: $@");
+        return ('refuse', $REFUSE_ENCRYPT);
+    }
+    return ('cipher', $wires);
+}
+
+# Fail-closed wrapper: any unexpected error in the decision resolves to a
+# refusal, because at that point we can no longer rule out an enabled E2E
+# context and must not leak plaintext.
+sub _e2e_gate_wire {
+    my ($server, $target, $body) = @_;
+    my @res = eval { _gate_decide($server, $target, $body) };
+    if ($@) {
+        _dbg("_e2e_gate_wire OUTER EXCEPTION for $target: $@");
+        return ('refuse', $REFUSE_KEYRING);
+    }
+    return @res;
+}
+
+# THE single authoritative outbound gate, hooked on `server outgoing modify` —
+# the raw-line signal irssi fires for EVERY line it is about to write to the
+# socket (the analog of weechat's `irc_out1_privmsg`). Every PRIVMSG — from
+# plain typed text, `/me`, `/msg`, `/say`, `/amsg`, or a script — passes through
+# here; irssi's own command/send-text layer produces the local echo, and this
+# gate rewrites only the wire. `$data` is the signal's GString parameter, which
+# irssi's Perl glue passes as a SCALAR REF and copies back after the handler
+# returns (perl-signals.c marshals `gstring` args via newRV + write-back). We
+# DROP a line by blanking `$$data`: the emitter — irc_server_send_and_redirect,
+# irc-servers.c — checks `if (str->len)` after the signal, so a blanked line is
+# never written to the socket, rawlogged, or redirect-matched. signal_stop()
+# only silences later handlers; the drop itself never depends on it.
+sub signal_server_outgoing {
+    my ($server, $data, $crlf) = @_;
+    return unless $server && ref($data) eq 'SCALAR' && defined $$data;
+    my $line = $$data;
+    $line =~ s/\r*\n*\z//;   # the raw line may carry a trailing CRLF
+    # Only PRIVMSG carries user message content. NOTICE (KEYREQ/KEYRSP/REKEY)
+    # and every other command pass through untouched.
+    return unless $line =~ /^PRIVMSG\s+(\S+)\s+:?(.*)$/s;
+    my ($target, $body) = ($1, $2);
+    # Re-entrancy guard: a STRUCTURALLY valid wire chunk is our own re-emit from
+    # _send_raw_privmsg. Keyed on parse_wire (not a bare +RPE2E01 prefix) so a
+    # user command like "/msg bob +RPE2E01 secret" still goes through the gate
+    # instead of leaking as plaintext.
+    return if parse_wire($body);
+    my ($action, $payload) = _e2e_gate_wire($server, $target, $body);
+    return if $action eq 'pass';
+    if ($action eq 'bypass') {
+        _prnt_warn(_notice_witem_for_ctx($server, $target, $target), $payload) if defined $payload;
+        return;   # leave $$data unchanged — the plaintext bot command goes out
+    }
+    if ($action eq 'refuse') {
+        # irssi's command layer already echoed the plaintext locally, so make it
+        # explicit that nothing was delivered.
+        _prnt_err(_notice_witem_for_ctx($server, $target, $target),
+                  "$payload — the message shown above was NOT delivered");
+        $$data = "";            # drop the plaintext line — never reaches the wire
+        Irssi::signal_stop();
+        return;
+    }
+    # cipher: emit the encrypted chunks ourselves (in order, before the original
+    # line is written), then blank the original so the plaintext never goes out.
+    _send_raw_privmsg($server, $target, $_) for @$payload;
+    $$data = "";
     Irssi::signal_stop();
 }
 
+# Decrypt one RPE2E wire message. Returns ($handled, $decoded):
+#   (0, undef)      — not an RPE2E wire; caller lets irssi handle it
+#   (1, undef)      — handled by dropping (ts skew / no session→KEYREQ /
+#                     decrypt fail); this sub already called signal_stop()
+#   (1, $plaintext) — decrypted; caller re-drives the DECRYPTED text through
+#                     the pipeline (so a \x01ACTION…\x01 frame renders as an
+#                     action instead of raw control bytes)
+# `$target` is the CONTEXT target: the channel for channel messages, the
+# SENDER's nick for DMs (DM context = @<sender handle>). `$alt_ctxs` (optional
+# arrayref) carries the remaining readings of an ambiguous +#chan/&#chan target.
 sub _decrypt_wire_message {
-    my ($server, $msg, $nick, $host, $target) = @_;
+    my ($server, $msg, $nick, $host, $target, $alt_ctxs) = @_;
     my $wire = parse_wire($msg);
-    return 0 unless $wire;
+    return (0, undef) unless $wire;
     my $handle = $host;
     my $ctx = _ctx_for_target($target, $handle);
     my $kr = load_keyring();
@@ -1580,9 +1804,21 @@ sub _decrypt_wire_message {
     if (abs(now_unix() - $wire->{ts}) > $TS_TOLERANCE) {
         _prnt_dbg($server, $ctx, $nick, "drop ciphertext from $nick ($handle): timestamp skew");
         Irssi::signal_stop();
-        return 1;
+        return (1, undef);
     }
     my $row = $kr->{incoming}{"$handle|$ctx"};
+    # An ambiguous +#chan/&#chan target carries alternate context readings:
+    # prefer one holding a trusted session for this sender (a wrong pick cannot
+    # leak — AEAD decrypt just fails and drops). The primary, most-stripped
+    # reading stays the default so auto-KEYREQ keeps keying off it.
+    if ($alt_ctxs && (!$row || ($row->{status} // '') ne 'trusted')) {
+        for my $alt (@$alt_ctxs) {
+            my $r = $kr->{incoming}{"$handle|$alt"};
+            next unless $r && ($r->{status} // '') eq 'trusted';
+            ($ctx, $row) = ($alt, $r);
+            last;
+        }
+    }
     if (!$row || ($row->{status} // '') ne 'trusted') {
         _prnt_dbg($server, $ctx, $nick, "no trusted incoming for ($handle,$ctx)");
         if (_allow_outgoing_keyreq($handle)) {
@@ -1599,30 +1835,64 @@ sub _decrypt_wire_message {
             }
         }
         Irssi::signal_stop();
-        return 1;
+        return (1, undef);
     }
     my $aad = build_aad($ctx, $wire->{msgid}, $wire->{ts}, $wire->{part}, $wire->{total});
     my $pt = aead_decrypt(b64d($row->{sk}), $wire->{nonce}, $aad, $wire->{ct});
     unless (defined $pt) {
         _prnt_dbg($server, $ctx, $nick, "decrypt failed for ($handle,$ctx)");
         Irssi::signal_stop();
-        return 1;
+        return (1, undef);
     }
     my $decoded = eval { decode('UTF-8', $pt, FB_DEFAULT) };
     $decoded = decode('UTF-8', $pt) if !defined $decoded;
-    Irssi::signal_continue($server, $decoded, $nick, $host, $target);
-    return 1;
+    return (1, $decoded);
 }
 
-sub signal_message_public {
-    my ($server, $msg, $nick, $host, $target) = @_;
-    _decrypt_wire_message($server, $msg, $nick, $host, $target);
-}
-
-sub signal_message_private {
-    my ($server, $msg, $nick, $host, $target) = @_;
-    my $query = $nick;
-    _decrypt_wire_message($server, $msg, $nick, $host, $query);
+# F2: decrypt on `event privmsg` — the irssi analog of weechat's raw-line
+# `irc_in2_privmsg` modifier, firing BEFORE irssi splits out CTCP/ACTION. An
+# encrypted ACTION travels on the wire as `+RPE2E01…` (no \x01), so decrypting
+# it here yields `\x01ACTION…\x01` which re-enters the pipeline and renders as a
+# proper action; decrypting later (on `message public`/`private`, post-CTCP-
+# split) rendered raw control characters instead.
+sub signal_event_privmsg {
+    my ($server, $data, $nick, $host) = @_;
+    return unless defined $data;
+    # `$data` is "target :text" (the PRIVMSG params). For a channel, target is
+    # the channel; for a DM, target is OUR nick and the sender is $nick.
+    my ($target, $text) = $data =~ /^(\S+)\s+:?(.*)$/s;
+    return unless defined $target && defined $text;
+    # STATUSMSG incoming (@#chan) still keys off the underlying channel; an
+    # ambiguous +#chan/&#chan target has several readings, and decrypt below
+    # prefers whichever holds a trusted session (see _channel_readings).
+    my @readings = _channel_readings($target);
+    my $is_channel = scalar @readings;
+    # Context target: channel → most-stripped reading; DM → the SENDER's nick
+    # (DM context is keyed off the sender's handle, matching the old
+    # message-private path).
+    my $ctx_target = $is_channel ? $readings[0] : $nick;
+    my $alt_ctxs = @readings > 1 ? [@readings[1 .. $#readings]] : undef;
+    # _decrypt_wire_message returns (0, undef) for a non-RPE2E line (no second
+    # parse needed here), (1, undef) when it already dropped the ciphertext, or
+    # (1, $plaintext) on success.
+    my ($handled, $decoded) = _decrypt_wire_message($server, $text, $nick, $host, $ctx_target, $alt_ctxs);
+    return unless $handled && defined $decoded;
+    # A decrypted non-ACTION CTCP frame (\x01VERSION\x01, \x01PING\x01, DCC, …)
+    # must NOT be re-driven through the pipeline: irssi would interpret it and
+    # auto-answer with a PLAINTEXT NOTICE. Our own outbound side never encrypts
+    # non-ACTION CTCP (it is a cleartext escape hatch), so this is anomalous —
+    # drop it visibly instead of executing it. ACTION frames and ordinary text
+    # re-enter normally.
+    if ($decoded =~ /^\x01/ && $decoded !~ /^\x01ACTION /) {
+        _prnt_warn(_notice_witem_for_ctx($server, $ctx_target, $nick),
+                   "dropped an encrypted non-ACTION CTCP from $nick");
+        Irssi::signal_stop();
+        return;
+    }
+    # Re-drive the DECRYPTED text through the same event, preserving the wire's
+    # original target so routing (channel vs query) is unchanged. irssi then
+    # performs the CTCP/ACTION split on cleartext.
+    Irssi::signal_continue($server, "$target :$decoded", $nick, $host);
 }
 
 sub _handle_rpee2e_ctcp_reply {
@@ -1694,12 +1964,42 @@ sub signal_default_ctcp_reply_generic {
     Irssi::signal_stop();
 }
 
+# The outbound gate depends on `server outgoing modify`, which exists only
+# since irssi 1.4.1 (2022-06-12). On older irssi, signal_add binds to a name
+# that is simply never emitted — no error, no gate: every message would leave
+# in PLAINTEXT while the user believes E2E is on. Refuse to load instead
+# (fail-closed at load time).
+sub _require_signal_capable_irssi {
+    my $j = eval { Irssi::parse_special('$J') } // '';
+    if ($j =~ /^(\d+)\.(\d+)(?:\.(\d+))?/) {
+        my ($maj, $min, $pat) = ($1, $2, $3 // 0);
+        return if $maj > 1
+               || ($maj == 1 && $min > 4)
+               || ($maj == 1 && $min == 4 && $pat >= 1);
+    } else {
+        # Unparseable $J — fall back to the ABI date stamp: Irssi::version()
+        # is "YYYYMMDD.HHMM", and 1.4.1 is dated 2022-06-12.
+        my $abi = eval { Irssi::version() } // 0;
+        return if $abi >= 20220612;
+    }
+    die "rpe2e requires irssi >= 1.4.1 (found: " . ($j || 'unknown')
+      . ") — the 'server outgoing modify' signal this script's outbound"
+      . " encryption gate hooks does not exist on older irssi, so messages"
+      . " would silently go out in PLAINTEXT. Not loading.\n";
+}
+
+_require_signal_capable_irssi();
 ensure_identity();
 
 Irssi::command_bind('e2e', \&cmd_e2e);
-Irssi::signal_add_first('send text', \&signal_send_text);
-Irssi::signal_add_first('message public', \&signal_message_public);
-Irssi::signal_add_first('message private', \&signal_message_private);
+# THE single authoritative outbound fail-closed gate (F1): `server outgoing
+# modify` is the raw-line signal irssi fires for every line about to hit the
+# socket, so every PRIVMSG — plain typed text, `/me`, `/msg`, `/say`, `/amsg`,
+# scripts — passes through here. irssi's own layer produces the local echo.
+Irssi::signal_add_first('server outgoing modify', \&signal_server_outgoing);
+# F2: decrypt on the raw PRIVMSG event, BEFORE irssi's CTCP/ACTION split, so
+# an encrypted ACTION renders as an action rather than raw control characters.
+Irssi::signal_add_first('event privmsg', \&signal_event_privmsg);
 Irssi::signal_add_first('ctcp reply RPEE2E', \&signal_ctcp_reply_rpee2e);
 Irssi::signal_add_first('ctcp reply', \&signal_ctcp_reply_generic);
 Irssi::signal_add_first('default ctcp reply', \&signal_default_ctcp_reply_generic);
