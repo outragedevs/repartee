@@ -1809,6 +1809,10 @@ _REFUSE_KEYRING = (
 _REFUSE_ENCRYPT = (
     "encryption failed — message NOT sent as plaintext (use /e2e off to send cleartext)"
 )
+_REFUSE_AMBIGUOUS = (
+    "ambiguous target %s — E2E is enabled on both %s "
+    "(STATUSMSG subset vs distinct channel); refusing to guess a context"
+)
 
 # `_config_enabled` result sentinels — explicit strings, never bare bools, so
 # a read error can NEVER be mistaken for "not enabled" (that would fail open).
@@ -1906,22 +1910,28 @@ def _distribute_rekey_safe(channel: str, new_sk: bytes, server: str) -> None:
         _dbg(f"_distribute_rekey_safe: distribution failed for {channel}: {e}")
 
 
-def _strip_statusmsg(target: str) -> str:
-    """Strip a leading STATUSMSG prefix (`@#chan`, `+#chan`, `%#chan`, …): a
-    message to a channel subset is still that channel for E2E. A real channel
-    name whose first char is itself a channel prefix is left untouched — only a
-    non-channel char sitting in front of a channel prefix is stripped. Without
-    this, `/msg @#secret …` classified as a DM to a bogus nick and leaked
-    plaintext to the channel ops on an E2E-enabled channel."""
-    i = 0
-    while (
-        i < len(target)
-        and target[i] in "@%+&~"
-        and i + 1 < len(target)
-        and target[i + 1] in CHANNEL_PREFIXES
-    ):
-        i += 1
-    return target[i:]
+def _channel_readings(target: str) -> list:
+    """Every channel reading of a possibly-STATUSMSG-prefixed target, most-
+    stripped first; empty list → not a channel. `@#chan` has exactly one
+    reading (#chan): a message to a channel subset is still that channel for
+    E2E, and without stripping, `/msg @#secret …` classified as a DM to a
+    bogus nick and leaked plaintext to the channel ops on an E2E-enabled
+    channel. But `+` and `&` are BOTH status prefixes AND channel prefixes
+    (RFC 2811), so `+#secret` is genuinely ambiguous without per-server
+    ISUPPORT: the voiced subset of #secret OR the distinct channel "+#secret".
+    Callers get every reading and must stay fail-closed across all of them —
+    encrypting under the one enabled reading is always safe (a peer on the
+    other reading sees undecryptable ciphertext, never plaintext). Mirrors the
+    Perl helper of the same name."""
+    run = 0
+    while run < len(target) and target[run] in "@%+&~":
+        run += 1
+    readings = []
+    for j in range(run, -1, -1):
+        rest = target[j:]
+        if rest and rest[0] in CHANNEL_PREFIXES:
+            readings.append(rest)
+    return readings
 
 
 def _e2e_gate_wire(server: str, target: str, body: str):
@@ -1937,10 +1947,12 @@ def _e2e_gate_wire(server: str, target: str, body: str):
     point it can be reached we can no longer rule out an enabled E2E context
     and must not leak plaintext."""
     try:
-        # STATUSMSG targets (`@#chan`, `+#chan`) address a channel subset —
-        # classify and key them by the underlying channel, never as a DM.
-        chan = _strip_statusmsg(target)
-        is_channel = bool(chan) and chan[0] in CHANNEL_PREFIXES
+        # STATUSMSG targets (`@#chan`) address a channel subset — classify and
+        # key them by the underlying channel, never as a DM. `+#chan`/`&#chan`
+        # are ambiguous (see _channel_readings): every reading is considered.
+        readings = _channel_readings(target)
+        is_channel = bool(readings)
+        chan = readings[0] if readings else target
 
         # Non-ACTION CTCP (VERSION, PING, …) is a deliberate plaintext escape
         # hatch, exactly as the Rust client leaves /ctcp and /version in
@@ -1961,7 +1973,7 @@ def _e2e_gate_wire(server: str, target: str, body: str):
             # (fail-closed visibility — never silently drop the warning on a
             # transient DB error).
             warn = None
-            if _config_enabled(chan) != _ENABLED_NO:
+            if any(_config_enabled(r) != _ENABLED_NO for r in readings):
                 warn = (
                     f"bot-style message to {chan} sent in CLEARTEXT — channel "
                     "lines starting with '.' or '!' bypass encryption for bots"
@@ -1970,7 +1982,17 @@ def _e2e_gate_wire(server: str, target: str, body: str):
 
         # Resolve the keyring context (unscoped in F1; F3 adds network scope).
         if is_channel:
-            context = chan
+            # Encrypt under whichever reading has E2E enabled — a peer on the
+            # other reading of an ambiguous target sees ciphertext, never
+            # plaintext. Two enabled readings cannot be disambiguated locally
+            # → refuse; a read error on ANY reading refuses too (fail-closed).
+            states = [(r, _config_enabled(r)) for r in readings]
+            if any(s == _ENABLED_ERR for _, s in states):
+                return ("refuse", _REFUSE_KEYRING)
+            on = [r for r, s in states if s == _ENABLED_YES]
+            if len(on) > 1:
+                return ("refuse", _REFUSE_AMBIGUOUS % (target, " and ".join(on)))
+            context = on[0] if on else chan
         else:
             # Live OR cached handle resolution (mirror of Rust
             # `resolve_query_peer_handle`): a peer who isn't currently in a
@@ -2128,18 +2150,34 @@ def hook_irc_in_privmsg(data, modifier, server, msg):
         skew = abs(int(time.time()) - wire["ts"])
         if skew > TS_TOLERANCE:
             return ""
-        # STATUSMSG delivery (`@#chan`, `+#chan`): the decrypt context is the
-        # underlying channel, mirroring the outbound gate. Keep the original
-        # `target` for the reconstructed PRIVMSG line so weechat routes it
-        # unchanged; only the context key is stripped. Without this, ciphertext
-        # sent to `@#chan` would be keyed as a DM (`@<handle>`) and fail to
-        # decrypt (drop + spurious KEYREQ).
-        ctx = context_key(_strip_statusmsg(target), handle)
+        # STATUSMSG delivery (`@#chan`): the decrypt context is the underlying
+        # channel, mirroring the outbound gate. Keep the original `target` for
+        # the reconstructed PRIVMSG line so weechat routes it unchanged; only
+        # the context key is re-read. Without this, ciphertext sent to `@#chan`
+        # would be keyed as a DM (`@<handle>`) and fail to decrypt (drop +
+        # spurious KEYREQ). An ambiguous `+#chan`/`&#chan` target has several
+        # readings: prefer one holding a trusted session for this sender (a
+        # wrong pick cannot leak — AEAD decrypt just fails); the most-stripped
+        # reading stays the default so auto-KEYREQ keeps keying off it.
+        readings = _channel_readings(target)
+        ctx_candidates = [context_key(r, handle) for r in readings] or [
+            context_key(target, handle)
+        ]
+        ctx = ctx_candidates[0]
         with db_conn() as c:
             row = c.execute(
                 "SELECT sk, status FROM incoming WHERE handle = ? AND channel = ?",
                 (handle, ctx),
             ).fetchone()
+            if row is None or row[1] != "trusted":
+                for cand in ctx_candidates[1:]:
+                    alt = c.execute(
+                        "SELECT sk, status FROM incoming WHERE handle = ? AND channel = ?",
+                        (handle, cand),
+                    ).fetchone()
+                    if alt is not None and alt[1] == "trusted":
+                        ctx, row = cand, alt
+                        break
         if row is None or row[1] != "trusted":
             _dbg(
                 f"hook_irc_in_privmsg: no trusted incoming for ({handle},{ctx}) "

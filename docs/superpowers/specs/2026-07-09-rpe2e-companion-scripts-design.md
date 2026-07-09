@@ -181,3 +181,28 @@ Tooling present locally: `python3`, `perl` (+ `Crypt::NaCl::Sodium`), `weechat`,
    both worse than the LOW-MED issue it fixes. Design + full change-surface map
    captured in `2026-07-09-rpe2e-f3-network-scoping-followup.md`.
 5. **PR to `outrage/main` with F1+F2** (this branch). No merge without approval.
+6. **Post-PR review round (P1/P2)** — resolved 2026-07-09:
+   - **P1 (irssi gate "disabled" via wrong signal handling): REFUTED against
+     irssi source.** `server outgoing modify` passes the line as a
+     `GString *` (`docs/signals.txt:154`); irssi's Perl glue marshals
+     `gstring` args as a SCALAR REF and writes changes back
+     (`perl-signals.c`), and the emitter (`irc_server_send_and_redirect`,
+     `irc-servers.c`) skips the socket write entirely when the string is
+     blanked (`if (str->len)`). Scalar-ref mutation is therefore the correct
+     mechanism, not `signal_continue` (that idiom is for by-value `char *`
+     signals like `send text`). Real adjacent gap found while verifying: the
+     signal only exists since **irssi 1.4.1** (2022-06-12) — on older irssi
+     the hook binds to a never-emitted name and the gate silently vanishes.
+     Fixed with a load-time version check that refuses to load (fail-closed).
+   - **P2 (ambiguous STATUSMSG stripping): CONFIRMED, fixed stronger than
+     suggested.** `+`/`&` are both STATUSMSG prefixes and RFC 2811 channel
+     prefixes, so `+#chan` has two readings. Blind stripping leaked one way;
+     the suggested "don't strip channel-prefix chars" leaks the other way
+     (`/msg +#secret` as a voice-STATUSMSG on a `CHANTYPES=#` server).
+     Fix: `_channel_readings` returns every reading; outbound encrypts under
+     the single enabled reading (wrong-reading recipients see ciphertext,
+     never plaintext), refuses when BOTH readings are enabled, and fails
+     closed on any read error; inbound prefers the reading holding a trusted
+     session (a wrong pick just fails AEAD). ISUPPORT-based resolution was
+     rejected: irssi's Perl API exposes no ISUPPORT accessor, and ISUPPORT
+     alone still cannot resolve an overlap server.
