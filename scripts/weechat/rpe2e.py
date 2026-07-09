@@ -401,6 +401,16 @@ def db_conn():
     conn = sqlite3.connect(DB_PATH)
     try:
         yield conn
+        # Persist on success. sqlite3 opens an implicit transaction for every
+        # INSERT/UPDATE/DELETE in legacy isolation mode; without this commit the
+        # transaction is rolled back on close() and NOTHING is written — which
+        # would leave `/e2e on`, session keys, and peer trust un-persisted and
+        # silently downgrade every "enabled" conversation to plaintext (the gate
+        # would always read "not enabled"). Commit-on-success / rollback-on-error.
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
