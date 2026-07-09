@@ -365,6 +365,18 @@ _rate_limit_sent: dict[str, float] = {}
 
 _incoming_buckets: dict[str, "IncomingBucket"] = {}
 
+# Our own server-stamped ident@host, per server — the recipient-keyed DM
+# context (docs/rpe2e-dm-addendum.md): DMs we RECEIVE are keyed `@<own>`.
+# VOLATILE by design (never persisted): reset at (dis)connect and re-seeded via
+# the one-shot self-USERHOST, our own CHGHOST, and echo-message echoes, because
+# the server may assign a different ident/host/cloak each session.
+_own_handle: dict[str, str] = {}
+
+# Throttle for the "held — own identity not learned yet" notice, per
+# (server, sender nick), so a chatty peer doesn't flood the buffer while we
+# wait for the USERHOST reply.
+_own_wait_notice_at: dict[tuple, float] = {}
+
 
 class IncomingBucket:
     __slots__ = ("recent", "backoff_until")
@@ -510,6 +522,54 @@ def context_key(target: str, handle: str) -> str:
     if target and target[0] in CHANNEL_PREFIXES:
         return target
     return "@" + handle
+
+
+def _parse_userhost_reply(entry: str):
+    """One RPL_USERHOST (302) entry `nick[*]=[+|-]ident@host` → (nick, handle)
+    or None. Mirrors Rust `parse_userhost_reply`: the trailing `*` on the nick
+    marks an oper (stripped), the leading `+`/`-` on the userhost is the away
+    flag (stripped); the handle keeps `~` and any cloak verbatim."""
+    if "=" not in entry:
+        return None
+    nick_part, userhost = entry.split("=", 1)
+    nick_part = nick_part.rstrip("*")
+    if userhost[:1] in ("+", "-"):
+        userhost = userhost[1:]
+    if not nick_part or "@" not in userhost:
+        return None
+    return nick_part, userhost
+
+
+def _own_nick(server: str) -> str:
+    return weechat.info_get("irc_nick", server) if weechat else ""
+
+
+def _set_own_handle(server: str, handle: str) -> None:
+    if handle and _own_handle.get(server) != handle:
+        _own_handle[server] = handle
+        _dbg(f"own handle on {server}: {handle}")
+
+
+def _send_self_userhost(server: str) -> None:
+    """ONE-SHOT self-USERHOST to seed our own handle — gated to connect/load
+    events, never per message (the 302 reply is itself a message; a per-message
+    trigger would loop). Mirrors the Rust client's RPL_WELCOME one-shot."""
+    if weechat is None:
+        return
+    nick = _own_nick(server)
+    buf = weechat.buffer_search("irc", f"server.{server}") or ""
+    if nick and buf:
+        weechat.command(buf, f"/quote USERHOST {nick}")
+
+
+def _incoming_ctx_for(server: str, ctx: str):
+    """Context that REAL incoming DM sessions live under: `@<own_handle>`
+    (recipient-keyed — the recipient of the direction is us). Channels pass
+    through unchanged. None → our own handle is not known yet."""
+    if ctx.startswith("@"):
+        own_h = _own_handle.get(server)
+        return ("@" + own_h) if own_h else None
+    return ctx
 
 
 def fingerprint(pk: bytes) -> bytes:
@@ -834,15 +894,6 @@ def _resolve_cached_handle_by_nick(nick: str) -> str | None:
         return None
     matches.sort(key=lambda item: item[0])
     return matches[-1][1]
-
-
-def _ctx_for_target(target: str, handle: str) -> str:
-    """Same as context_key but explicit: channel targets pass through,
-    PM targets become `@<handle>`. Callers that have a real handle (from
-    an inbound message or from a nicklist lookup) pass it here."""
-    if target and target[0] in CHANNEL_PREFIXES:
-        return target
-    return "@" + handle
 
 
 def _ctx_for_command(buffer_ptr, server: str, target: str, nick: str | None) -> str | None:
@@ -1220,7 +1271,23 @@ def _build_keyrsp_for_req(
     return "\x01" + body + "\x01"
 
 
-def _maybe_build_reciprocal_keyreq(channel: str, sender_handle: str) -> str | None:
+def _reciprocal_ctx(channel: str, server: str) -> str | None:
+    """Context for OUR reciprocal KEYREQ. A reciprocal establishes the
+    peer→us direction, whose recipient-keyed context is OUR handle — not the
+    requester's context from their KEYREQ (that names the other direction).
+    Channels pass through. None → own handle unknown; skip the reciprocal
+    (the transport self-heals later via auto-KEYREQ on their first wire)."""
+    if channel[:1] in CHANNEL_PREFIXES:
+        return channel
+    own_h = _own_handle.get(server)
+    return ("@" + own_h) if own_h else None
+
+
+def _maybe_build_reciprocal_keyreq(channel: str, sender_handle: str, server: str) -> str | None:
+    channel = _reciprocal_ctx(channel, server)
+    if channel is None:
+        _dbg("_maybe_build_reciprocal_keyreq: own handle unknown — skipping")
+        return None
     with db_conn() as c:
         row = c.execute(
             "SELECT status FROM incoming WHERE handle = ? AND channel = ?",
@@ -1241,7 +1308,11 @@ def _maybe_build_reciprocal_keyreq(channel: str, sender_handle: str) -> str | No
     return build_keyreq(channel, sender_handle)
 
 
-def _build_reciprocal_keyreq_on_accept(channel: str, sender_handle: str) -> str | None:
+def _build_reciprocal_keyreq_on_accept(channel: str, sender_handle: str, server: str) -> str | None:
+    channel = _reciprocal_ctx(channel, server)
+    if channel is None:
+        _dbg("_build_reciprocal_keyreq_on_accept: own handle unknown — skipping")
+        return None
     with db_conn() as c:
         row = c.execute(
             "SELECT status FROM incoming WHERE handle = ? AND channel = ?",
@@ -1393,7 +1464,7 @@ def handle_keyreq(server: str, sender_handle: str, nick: str, body: str) -> tupl
         req["channel"], sender_handle, req["pub"], req["eph_x25519"]
     )
     _dbg(f"handle_keyreq: _build_keyrsp_for_req returned rsp={'yes' if rsp else 'no'}")
-    reciprocal = _maybe_build_reciprocal_keyreq(req["channel"], sender_handle)
+    reciprocal = _maybe_build_reciprocal_keyreq(req["channel"], sender_handle, server)
     _dbg(f"handle_keyreq: reciprocal={'yes' if reciprocal else 'no'}")
     return rsp, reciprocal
 
@@ -2120,6 +2191,63 @@ def hook_irc_out_privmsg(data, modifier, server, msg):
     return ""
 
 
+def hook_signal_server_connected(data, signal, signal_data):
+    """Registration complete: RESET the own handle (the server may assign a
+    different ident/host/cloak this session) and re-seed it with the one-shot
+    self-USERHOST. `signal_data` is the server name."""
+    try:
+        server = signal_data or ""
+        _own_handle.pop(server, None)
+        _send_self_userhost(server)
+    except Exception as e:
+        _dbg(f"hook_signal_server_connected: {e}")
+    return weechat.WEECHAT_RC_OK if weechat else 0
+
+
+def hook_signal_server_disconnected(data, signal, signal_data):
+    try:
+        _own_handle.pop(signal_data or "", None)
+    except Exception as e:
+        _dbg(f"hook_signal_server_disconnected: {e}")
+    return weechat.WEECHAT_RC_OK if weechat else 0
+
+
+def hook_irc_in_302(data, modifier, server, msg):
+    """RPL_USERHOST: seed our own handle from any entry matching our nick
+    (a self-USERHOST on connect, or any later USERHOST that includes us).
+    Observe-only — the line always passes through unmodified."""
+    try:
+        trailing = msg.split(" :", 1)[1] if " :" in msg else msg.rsplit(" ", 1)[-1]
+        own = _own_nick(server)
+        for entry in trailing.split():
+            parsed = _parse_userhost_reply(entry)
+            if parsed and own and parsed[0].lower() == own.lower():
+                _set_own_handle(server, parsed[1])
+    except Exception as e:
+        _dbg(f"hook_irc_in_302: {e}")
+    return msg
+
+
+def hook_irc_in_chghost(data, modifier, server, msg):
+    """CHGHOST `:nick!old@old CHGHOST newident newhost`: track our OWN handle
+    (peer handles are always read live from prefixes/nicklists). weechat's
+    irc plugin only forwards CHGHOST when the cap is active, so this is a
+    no-op otherwise. Observe-only."""
+    try:
+        if msg.startswith(":"):
+            parts = msg.split(" ")
+            nick = parts[0][1:].split("!", 1)[0]
+            own = _own_nick(server)
+            if own and nick.lower() == own.lower() and len(parts) >= 4:
+                newuser = parts[2]
+                newhost = parts[3].lstrip(":")
+                if newuser and newhost:
+                    _set_own_handle(server, f"{newuser}@{newhost}")
+    except Exception as e:
+        _dbg(f"hook_irc_in_chghost: {e}")
+    return msg
+
+
 def hook_irc_in_privmsg(data, modifier, server, msg):
     try:
         if not msg.startswith(":"):
@@ -2137,9 +2265,22 @@ def hook_irc_in_privmsg(data, modifier, server, msg):
         target = rest_parts[1]
         text = rest_parts[2][1:] if rest_parts[2].startswith(":") else rest_parts[2]
 
+        # echo-message: the server echoes our own PRIVMSG back with our
+        # CANONICAL prefix — the freshest own-handle source there is (weechat
+        # requests available caps by default, so this is commonly active).
+        own = _own_nick(server)
+        is_own_echo = bool(own) and nick.lower() == own.lower()
+        if is_own_echo:
+            _set_own_handle(server, handle)
+
         wire = parse_wire(text)
         if wire is None:
             return msg
+        if is_own_echo:
+            # Our own ciphertext echo: the plaintext was already rendered
+            # locally at send time. Swallow it — falling through would treat
+            # it as a peer's wire (decrypt fail → auto-KEYREQ to ourselves).
+            return ""
         _dbg(
             f"hook_irc_in_privmsg RPE2E wire from {nick}!{handle} → {target} "
             f"msgid={wire['msgid'].hex() if isinstance(wire.get('msgid'), bytes) else wire.get('msgid')} "
@@ -2160,9 +2301,31 @@ def hook_irc_in_privmsg(data, modifier, server, msg):
         # wrong pick cannot leak — AEAD decrypt just fails); the most-stripped
         # reading stays the default so auto-KEYREQ keeps keying off it.
         readings = _channel_readings(target)
-        ctx_candidates = [context_key(r, handle) for r in readings] or [
-            context_key(target, handle)
-        ]
+        if readings:
+            ctx_candidates = [context_key(r, handle) for r in readings]
+        else:
+            # DM: recipient-keyed context (docs/rpe2e-dm-addendum.md) — WE are
+            # the recipient, so the context is OUR handle, never the sender's.
+            own_h = _own_handle.get(server)
+            if not own_h:
+                # Own handle not learned yet (e.g. right after connect, before
+                # the self-USERHOST reply). Do NOT fall back to `@<sender>` —
+                # decrypting or KEYREQ-ing under it would negotiate the WRONG
+                # DM direction. Drop; the peer's next message re-establishes
+                # once the handle is known.
+                now_f = time.time()
+                wait_key = (server, nick)
+                if now_f - _own_wait_notice_at.get(wait_key, 0.0) >= KEYREQ_MIN_INTERVAL:
+                    _own_wait_notice_at[wait_key] = now_f
+                    buf = weechat.buffer_search("irc", f"{server}.{nick}") if weechat else ""
+                    _prnt_warn(
+                        buf,
+                        f"encrypted DM from {nick} held — own identity not "
+                        "learned yet (waiting for the USERHOST reply)",
+                    )
+                _dbg(f"hook_irc_in_privmsg: DM wire from {nick} but own handle unknown on {server}")
+                return ""
+            ctx_candidates = ["@" + own_h]
         ctx = ctx_candidates[0]
         with db_conn() as c:
             row = c.execute(
@@ -2187,7 +2350,10 @@ def hook_irc_in_privmsg(data, modifier, server, msg):
             now_f = time.time()
             if now_f - last >= KEYREQ_MIN_INTERVAL:
                 _rate_limit_sent[handle] = now_f
-                buf = weechat.buffer_search("irc", f"{server}.{target}") if weechat else ""
+                # For a DM the wire target is OUR nick — the query buffer is
+                # named after the PEER, so search by sender there.
+                buf_name = target if readings else nick
+                buf = weechat.buffer_search("irc", f"{server}.{buf_name}") if weechat else ""
                 try:
                     kreq = build_keyreq(ctx, handle)
                     if weechat:
@@ -2422,10 +2588,19 @@ def cmd_e2e(data, buffer, args):
         if ctx is None:
             return weechat.WEECHAT_RC_OK if weechat else 0
         with db_conn() as c:
-            rows = c.execute(
-                "SELECT handle, channel, fp, status FROM incoming WHERE channel = ?",
-                (ctx,),
-            ).fetchall()
+            if ctx.startswith("@"):
+                # Query buffer: real DM sessions are recipient-keyed under
+                # `@<own>`, trust markers under `@<peer>` — list everything
+                # from this peer regardless of context.
+                rows = c.execute(
+                    "SELECT handle, channel, fp, status FROM incoming WHERE handle = ?",
+                    (ctx[1:],),
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT handle, channel, fp, status FROM incoming WHERE channel = ?",
+                    (ctx,),
+                ).fetchall()
         if not rows:
             _prnt_ok(buf, "no peers")
         else:
@@ -2455,7 +2630,7 @@ def cmd_e2e(data, buffer, args):
                     (ctx, s_handle),
                 )
             rsp_wire = _build_keyrsp_for_req(ctx, s_handle, s_pub, s_eph)
-            reciprocal = _build_reciprocal_keyreq_on_accept(ctx, s_handle)
+            reciprocal = _build_reciprocal_keyreq_on_accept(ctx, s_handle, server)
             if rsp_wire is not None and weechat:
                 _send_raw_notice(server, nick, rsp_wire)
             if reciprocal is not None and weechat:
@@ -2504,10 +2679,15 @@ def cmd_e2e(data, buffer, args):
         if handle is None:
             return weechat.WEECHAT_RC_OK if weechat else 0
         with db_conn() as c:
-            c.execute(
-                "UPDATE incoming SET status='revoked' WHERE handle = ? AND channel = ?",
-                (handle, ctx),
-            )
+            # DM sessions live under two contexts (recipient-keyed): real
+            # incoming sessions under `@<own>`, KEYREQ-direction trust markers
+            # under `@<peer>` (= ctx). Revoke both so inbound decrypt — which
+            # honors only `@<own>` — actually stops trusting the peer.
+            for rctx in {ctx, _incoming_ctx_for(server, ctx) or ctx}:
+                c.execute(
+                    "UPDATE incoming SET status='revoked' WHERE handle = ? AND channel = ?",
+                    (handle, rctx),
+                )
             c.execute(
                 "DELETE FROM outgoing_recipients WHERE channel = ? AND handle = ?",
                 (ctx, handle),
@@ -2526,10 +2706,12 @@ def cmd_e2e(data, buffer, args):
         if handle is None:
             return weechat.WEECHAT_RC_OK if weechat else 0
         with db_conn() as c:
-            c.execute(
-                "UPDATE incoming SET status='trusted' WHERE handle = ? AND channel = ?",
-                (handle, ctx),
-            )
+            # Mirror of revoke: restore trust under both DM context forms.
+            for rctx in {ctx, _incoming_ctx_for(server, ctx) or ctx}:
+                c.execute(
+                    "UPDATE incoming SET status='trusted' WHERE handle = ? AND channel = ?",
+                    (handle, rctx),
+                )
         _prnt_ok(buf, f"unrevoked {nick} on {ctx}")
     elif sub == "forget":
         if not rest:
@@ -2543,10 +2725,12 @@ def cmd_e2e(data, buffer, args):
         if handle is None:
             return weechat.WEECHAT_RC_OK if weechat else 0
         with db_conn() as c:
-            c.execute(
-                "DELETE FROM incoming WHERE handle = ? AND channel = ?",
-                (handle, ctx),
-            )
+            # Delete both DM context forms (see revoke).
+            for rctx in {ctx, _incoming_ctx_for(server, ctx) or ctx}:
+                c.execute(
+                    "DELETE FROM incoming WHERE handle = ? AND channel = ?",
+                    (handle, rctx),
+                )
         _prnt_warn(buf, f"forgotten {nick} on {ctx}")
     elif sub == "handshake":
         if not rest:
@@ -2556,8 +2740,22 @@ def cmd_e2e(data, buffer, args):
         ctx = _ctx_or_error(buf, buffer, server, channel, nick, "/e2e handshake")
         if ctx is None:
             return weechat.WEECHAT_RC_OK if weechat else 0
+        # A KEYREQ asks the peer for the key of the direction WE receive, so
+        # for a DM it is stamped with OUR handle (recipient-keyed), not the
+        # peer's context the config is stored under.
+        kreq_ctx = _incoming_ctx_for(server, ctx)
+        if kreq_ctx is None:
+            _prnt_err(
+                buf,
+                "/e2e handshake: own identity not learned yet (waiting for "
+                "the USERHOST reply) — try again in a moment",
+            )
+            return weechat.WEECHAT_RC_OK if weechat else 0
+        # Best-effort peer handle for the pending key; build_keyreq falls back
+        # to a bare-ctx pending row when unresolvable (KEYRSP matches either).
+        s_handle = _resolve_handle_for_command(server, channel, nick)
         try:
-            kreq = build_keyreq(ctx)
+            kreq = build_keyreq(kreq_ctx, s_handle)
         except Exception as e:
             _prnt_err(buf, f"handshake failed: {e}")
             return weechat.WEECHAT_RC_OK if weechat else 0
@@ -2583,10 +2781,17 @@ def cmd_e2e(data, buffer, args):
         local_hex = fingerprint_hex(local_fp)
         local_short = local_hex[:16]
         with db_conn() as c:
-            row = c.execute(
-                "SELECT fp FROM incoming WHERE handle = ? AND channel = ?",
-                (handle, ctx),
-            ).fetchone()
+            # Real DM sessions are recipient-keyed under `@<own>`; fall back
+            # to the peer-keyed trust marker if only that exists.
+            row = None
+            inc_ctx = _incoming_ctx_for(server, ctx)
+            for rctx in [c2 for c2 in (inc_ctx, ctx) if c2]:
+                row = c.execute(
+                    "SELECT fp FROM incoming WHERE handle = ? AND channel = ?",
+                    (handle, rctx),
+                ).fetchone()
+                if row is not None:
+                    break
         if row is None:
             _prnt_err(buf, f"no session for {nick} on {ctx}")
         else:
@@ -2982,6 +3187,21 @@ def main() -> None:
     # Authoritative outbound fail-closed gate (F1): every PRIVMSG on the wire —
     # `/me`, `/msg`, `/say`, `/amsg`, plain input — passes through here.
     weechat.hook_modifier("irc_out1_privmsg", "hook_irc_out_privmsg", "")
+    # Own-handle tracking for the recipient-keyed DM context
+    # (docs/rpe2e-dm-addendum.md): reset+reseed at registration, observe 302
+    # (self-USERHOST reply) and our own CHGHOST.
+    weechat.hook_signal("irc_server_connected", "hook_signal_server_connected", "")
+    weechat.hook_signal("irc_server_disconnected", "hook_signal_server_disconnected", "")
+    weechat.hook_modifier("irc_in2_302", "hook_irc_in_302", "")
+    weechat.hook_modifier("irc_in2_chghost", "hook_irc_in_chghost", "")
+    # Script (re)loaded mid-session: `irc_server_connected` will not fire for
+    # servers that are already up — seed their own handle now.
+    infolist = weechat.infolist_get("irc_server", "", "")
+    if infolist:
+        while weechat.infolist_next(infolist):
+            if weechat.infolist_integer(infolist, "is_connected") == 1:
+                _send_self_userhost(weechat.infolist_string(infolist, "name"))
+        weechat.infolist_free(infolist)
     weechat.hook_command(
         "e2e",
         SCRIPT_DESC,
