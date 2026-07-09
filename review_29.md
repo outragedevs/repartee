@@ -425,6 +425,26 @@
 >
 > Weryfikacja: `make clippy` 0 warnings, `make test` 1517 passed (1 nowy).
 
+> **STATUS 15 (2026-07-09): RUNDA ZEWNĘTRZNA #12 — NAPRAWIONE.** Finding
+> [P2] potwierdzony — regresja z MOJEGO fixa #2 (STATUS 13). Odnotowane.
+>
+> - **[P2] Shrink używał advisory zamiast fail-closed** (`input.rs:1403`):
+>   fix #2 bramkował dispatch skracarki przez `e2e_enabled_for_target`,
+>   który jest ADVISORY i zwraca `false` dla nierozwiązanego/legacy stanu DM
+>   oraz błędów odczytu keyringu — czyli dokładnie tych stanów, w których
+>   PRAWDZIWA bramka send REFUSE'uje jako E2E (legacy bare-nick, pre-upgrade
+>   `@handle`, KeyringRead). W tych przypadkach URL był już wysłany
+>   cleartextem do skracarki, ZANIM bramka odrzuciła wiadomość. Fix: nowy
+>   predykat fail-closed `e2e_possible_for_target` — `true` gdy E2E NIE DA
+>   SIĘ wykluczyć (każdy błąd odczytu, nierozwiązany handle z możliwym
+>   bare-nick configiem, multi-network legacy `@handle`). Mirroruje
+>   rozwiązanie bramki send, nie advisory. Skracarka pomijana gdy
+>   `e2e_possible_for_target` = true. Test:
+>   `e2e_possible_for_target_is_fail_closed_where_advisory_under_reports`
+>   (advisory zwraca false, fail-closed zwraca true dla legacy bare-nick).
+>
+> Weryfikacja: `make clippy` 0 warnings, `make test` 1518 passed (1 nowy).
+
 - **Data review:** 2026-07-01
 - **Zakres:** pełny diff PR #29 (`main...fix/various-improvements`, stan po commicie `96580de`)
 - **Metoda:** 8 niezależnych kątów wyszukiwania (line-by-line, removed-behavior, cross-file, reuse, simplification, efficiency, altitude, conventions) → dedup → 12 osobnych weryfikatorów (po jednym na kandydata, verdict CONFIRMED/PLAUSIBLE/REFUTED z cytatami z kodu)

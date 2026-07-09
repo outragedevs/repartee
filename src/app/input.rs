@@ -1397,11 +1397,15 @@ impl App {
         // Never hand an E2E conversation's content to the external shortener:
         // the URL is part of the end-to-end-protected message, and the shrink
         // worker POSTs it in cleartext to a third-party API before the E2E gate
-        // ever runs. When E2E is enabled for this target, skip outgoing shrink
-        // entirely and fall through to the synchronous path, where the original
-        // URL is encrypted on the wire like the rest of the message.
-        let e2e_active = self.state.e2e_enabled_for_target(&conn_id, &buffer_name);
-        if !e2e_active
+        // ever runs. Use the FAIL-CLOSED predicate, not the advisory
+        // `e2e_enabled_for_target`: the advisory returns false for unresolved /
+        // legacy DM state and keyring read errors, which the send gate still
+        // REFUSES as E2E-enabled — shrinking on those would leak the URL to the
+        // shortener before the refusal. Skip outgoing shrink whenever E2E
+        // cannot be ruled out and fall through to the synchronous path, where
+        // the original URL is encrypted on the wire like the rest of the message.
+        let e2e_possible = self.state.e2e_possible_for_target(&conn_id, &buffer_name);
+        if !e2e_possible
             && self.config.shrink.enabled
             && self.config.shrink.outgoing_enabled
             && self.shrink_client.is_some()

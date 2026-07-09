@@ -552,6 +552,71 @@ impl AppState {
             .is_some_and(|c| c.enabled)
     }
 
+    /// Fail-CLOSED twin of [`Self::e2e_enabled_for_target`]: `true` whenever
+    /// E2E might be in play for TARGET, treating every uncertainty as
+    /// "possible" — a keyring read error, an unresolved DM handle that a legacy
+    /// bare-nick config could still gate, or a multi-network pre-upgrade
+    /// `@<handle>` row the scoped lookup can't see. It mirrors the send gate's
+    /// refuse-or-encrypt resolution ([`Self::e2e_encrypt_or_passthrough`]),
+    /// NOT the advisory's best-effort read.
+    ///
+    /// Used to decide whether it is safe to hand a message's URLs to the
+    /// external shortener: the shortener receives CLEARTEXT before the send
+    /// gate runs, so we must skip it unless E2E is DEFINITIVELY ruled out. The
+    /// advisory `e2e_enabled_for_target` returns `false` for exactly the states
+    /// the gate still refuses on, which would leak the URL before the refusal.
+    pub(crate) fn e2e_possible_for_target(&self, conn_id: &str, target: &str) -> bool {
+        let Some(mgr) = self.e2e_manager.as_ref() else {
+            return false;
+        };
+        let network = self
+            .connections
+            .get(conn_id)
+            .map(|c| c.label.clone())
+            .unwrap_or_default();
+        if crate::e2e::is_channel_target(target) {
+            let base = crate::e2e::scoped_context(&network, target);
+            let context = match mgr.keyring().canonical_channel_context(&base) {
+                Ok(Some(c)) => c,
+                Ok(None) => base,
+                // Read error — the gate refuses (KeyringRead); can't rule E2E out.
+                Err(_) => return true,
+            };
+            // Read error → can't rule E2E out (the gate refuses on it).
+            return mgr
+                .keyring()
+                .get_channel_config(&context)
+                .map_or(true, |cfg| cfg.is_some_and(|c| c.enabled));
+        }
+        // DM: mirror the send gate's fail-closed resolution. A read error here
+        // makes the gate refuse (KeyringRead), so it can't rule E2E out.
+        let buffer_id = make_buffer_id(conn_id, target);
+        let Ok(peer_handle) = self.resolve_query_peer_handle(&buffer_id, target) else {
+            return true;
+        };
+        let Some(handle) = peer_handle else {
+            // No handle: a legacy bare-nick enabled row still makes the gate
+            // refuse (NoPeerHandle), so it is NOT safe to shrink.
+            return mgr
+                .keyring()
+                .get_channel_config(target)
+                .map_or(true, |cfg| cfg.is_some_and(|c| c.enabled));
+        };
+        // Enabled under the scoped context (single-network fallback finds the
+        // unscoped row) OR the unscoped `@<handle>` row directly (multi-network
+        // upgrade — see the gate's guard). Any read error → cannot rule out.
+        let wire = crate::e2e::context_key(target, &handle);
+        let scoped = crate::e2e::scoped_context(&network, &wire);
+        for ctx in [scoped, wire] {
+            match mgr.keyring().get_channel_config(&ctx) {
+                Ok(Some(c)) if c.enabled => return true,
+                Ok(_) => {}
+                Err(_) => return true,
+            }
+        }
+        false
+    }
+
     /// Themed `[E2E]` line in the channel buffer noting that a bot-style
     /// `.`/`!` message left in CLEARTEXT despite E2E being enabled there —
     /// the visibility half of the channel-only bot-command bypass in
@@ -1046,6 +1111,34 @@ mod tests {
                 plan.encrypted, plan.wire_lines
             ),
         }
+    }
+
+    #[test]
+    fn e2e_possible_for_target_is_fail_closed_where_advisory_under_reports() {
+        // The URL shortener receives CLEARTEXT, so it must be skipped for any
+        // DM the send gate would refuse as E2E-enabled. A legacy bare-nick
+        // enabled row with no resolvable handle is exactly such a case: the
+        // advisory e2e_enabled_for_target returns false (Ok(None) handle), but
+        // the gate refuses (NoPeerHandle) — so the fail-closed predicate the
+        // shrink gate uses must report the conversation as E2E-possible.
+        let mut state = make_state_with_manager();
+        state.add_buffer(make_buf(BufferType::Query, "bob"));
+        enable(&state, "bob"); // legacy bare-nick row, no handle resolvable
+
+        assert!(
+            !state.e2e_enabled_for_target("test", "bob"),
+            "advisory under-reports the legacy bare-nick state"
+        );
+        assert!(
+            state.e2e_possible_for_target("test", "bob"),
+            "fail-closed predicate must flag the legacy DM so shrink is skipped"
+        );
+
+        // A target with no E2E state anywhere is definitively safe to shrink.
+        assert!(
+            !state.e2e_possible_for_target("test", "carol"),
+            "no E2E state → shrink is allowed"
+        );
     }
 
     #[test]
