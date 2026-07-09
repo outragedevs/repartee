@@ -1721,6 +1721,15 @@ def encode_wire(
 
 
 def split_plaintext(pt: str) -> list[bytes]:
+    return split_plaintext_budget(pt, MAX_PT_PER_CHUNK)
+
+
+def split_plaintext_budget(pt: str, max_per_chunk: int) -> list[bytes]:
+    """`split_plaintext` with a caller-chosen per-chunk byte budget — mirrors
+    Rust `src/e2e/chunker.rs::split_plaintext_budget`. Used by the CTCP ACTION
+    splitter, whose per-piece budget must leave room for the `\x01ACTION …\x01`
+    framing each piece is wrapped in afterwards. The `MAX_CHUNKS` cap applies to
+    the produced pieces regardless of budget."""
     # G13: refuse empty plaintext outright — mirrors Rust
     # `src/e2e/chunker.rs::split_plaintext`. No zero-length-ciphertext
     # chunk should ever be shipped to a peer.
@@ -1730,7 +1739,7 @@ def split_plaintext(pt: str) -> list[bytes]:
     chunks: list[bytes] = []
     i = 0
     while i < len(b):
-        j = min(i + MAX_PT_PER_CHUNK, len(b))
+        j = min(i + max_per_chunk, len(b))
         while j > i and j < len(b) and (b[j] & 0xC0) == 0x80:
             j -= 1
         if j == i:
@@ -1771,6 +1780,250 @@ def _get_or_generate_outgoing_key_with_rotation(channel: str) -> tuple[bytes, bo
             (channel, fresh, int(time.time())),
         )
         return fresh, had_pending
+
+
+# ── Outbound E2E gate (F1) ──────────────────────────────────────────────
+#
+# Mirror of the Rust client's single fail-closed chokepoint
+# (`src/app/e2e_gate.rs::e2e_encrypt_or_passthrough`). In the Rust client
+# EVERY send path routes through that one gate. WeeChat has no equivalent
+# high-level chokepoint, so we hook the low-level `irc_out1_privmsg` modifier:
+# every PRIVMSG that reaches the wire — from plain input, `/msg`, `/say`,
+# `/me` (ACTION), `/amsg`, … — passes through here regardless of the command
+# that produced it. Without this, `/me`/`/msg`/`/say` bypassed
+# `hook_input_text_for_buffer` (which bails on any `/`-command) and left an
+# E2E conversation in PLAINTEXT.
+#
+# The gate NEVER downgrades an E2E-enabled conversation to plaintext: an
+# unresolved handle, a keyring read error, or an encrypt failure all REFUSE
+# (drop the line + show a visible `[E2E]` reason), exactly like the Rust
+# `E2eRefusal` variants.
+
+# Themed refusal lines (mirror `E2eRefusal::user_message`).
+_REFUSE_NO_HANDLE = (
+    "cannot encrypt PM without peer handle — wait for a message from them first"
+)
+_REFUSE_KEYRING = (
+    "cannot encrypt — keyring read failed; message NOT sent (E2E stays on)"
+)
+_REFUSE_ENCRYPT = (
+    "encryption failed — message NOT sent as plaintext (use /e2e off to send cleartext)"
+)
+
+# `_config_enabled` result sentinels — explicit strings, never bare bools, so
+# a read error can NEVER be mistaken for "not enabled" (that would fail open).
+_ENABLED_YES = "yes"
+_ENABLED_NO = "no"
+_ENABLED_ERR = "err"
+
+
+def _config_enabled(context: str) -> str:
+    """Fail-closed enabled check: `_ENABLED_YES` / `_ENABLED_NO` / `_ENABLED_ERR`.
+    A DB read error returns `_ENABLED_ERR` so the caller refuses rather than
+    risk plaintext — mirrors the Rust gate's `KeyringRead` refusal."""
+    try:
+        with db_conn() as c:
+            row = c.execute(
+                "SELECT enabled FROM channels WHERE channel = ?", (context,)
+            ).fetchone()
+        return _ENABLED_YES if (row is not None and row[0]) else _ENABLED_NO
+    except Exception as e:
+        _dbg(f"_config_enabled read error for {context}: {e}")
+        return _ENABLED_ERR
+
+
+def _parse_out_privmsg(raw: str) -> tuple[str, str] | None:
+    """Parse an `irc_out1_privmsg` line into `(target, body)`. Returns None if
+    it is not a PRIVMSG we recognize (then the caller passes it through)."""
+    s = raw
+    if s.startswith("@"):  # strip IRCv3 message tags
+        sp = s.find(" ")
+        if sp == -1:
+            return None
+        s = s[sp + 1 :]
+    if s.startswith(":"):  # strip an (unusual for client→server) source prefix
+        sp = s.find(" ")
+        if sp == -1:
+            return None
+        s = s[sp + 1 :]
+    parts = s.split(" ", 2)
+    if len(parts) < 3 or parts[0].upper() != "PRIVMSG":
+        return None
+    target = parts[1]
+    body = parts[2]
+    if body.startswith(":"):
+        body = body[1:]
+    return (target, body)
+
+
+def _encrypt_plain_wire(sk: bytes, context: str, plain: str) -> list[str]:
+    """Encrypt `plain` under session key `sk` for `context`, one wire line per
+    chunk. `context` is the wire context used for the AAD (unscoped in F1)."""
+    chunks = split_plaintext(plain)
+    total = len(chunks)
+    msgid = nacl_random(8)
+    ts = int(time.time())
+    out: list[str] = []
+    for idx, chunk in enumerate(chunks, start=1):
+        aad = build_aad(context, msgid, ts, idx, total)
+        nonce, ct = aead_encrypt(sk, aad, chunk)
+        out.append(encode_wire(msgid, ts, idx, total, nonce, ct))
+    return out
+
+
+def _encrypt_ctcp_wire(sk: bytes, context: str, frame: str) -> list[str]:
+    """Encrypt a `\x01ACTION …\x01` CTCP frame — mirror of Rust
+    `E2eManager::encrypt_outgoing_ctcp`. A frame fitting one chunk encrypts
+    as-is; a longer ACTION splits into independent, individually-wrapped
+    `\x01ACTION piece\x01` frames (never fragmenting the CTCP envelope across
+    bare chunks). Byte length, not char length, gates the one-chunk case."""
+    action_prefix = "\x01ACTION "
+    action_framing = len(action_prefix) + 1  # +1 for the trailing \x01
+    if len(frame.encode("utf-8")) <= MAX_PT_PER_CHUNK:
+        return _encrypt_plain_wire(sk, context, frame)
+    if not (frame.startswith(action_prefix) and frame.endswith("\x01")):
+        raise ValueError("CTCP frame exceeds one encrypted chunk and cannot be split")
+    body = frame[len(action_prefix) : -1]
+    budget = MAX_PT_PER_CHUNK - action_framing
+    pieces = split_plaintext_budget(body, budget)
+    out: list[str] = []
+    for piece in pieces:
+        piece_str = piece.decode("utf-8")
+        out.extend(_encrypt_plain_wire(sk, context, f"{action_prefix}{piece_str}\x01"))
+    return out
+
+
+def _e2e_gate_wire(server: str, target: str, body: str):
+    """Fail-closed outbound gate — mirror of `e2e_encrypt_or_passthrough`.
+
+    Returns one of:
+      ("pass", None)          — send `body` unchanged (no E2E state / bypass)
+      ("cipher", [wire, …])   — send these encrypted lines, drop the original
+      ("refuse", themed_msg)  — drop; caller shows the `[E2E]` reason
+      ("bypass", warn_or_None)— channel bot bypass; send plaintext, maybe warn
+
+    Never raises: any unexpected error resolves to a refusal, because at the
+    point it can be reached we can no longer rule out an enabled E2E context
+    and must not leak plaintext."""
+    try:
+        is_channel = bool(target) and target[0] in CHANNEL_PREFIXES
+
+        # Non-ACTION CTCP (VERSION, PING, …) is a deliberate plaintext escape
+        # hatch, exactly as the Rust client leaves /ctcp and /version in
+        # cleartext. Only ACTION frames and plain text are encrypted.
+        is_ctcp = len(body) >= 2 and body.startswith("\x01") and body.endswith("\x01")
+        is_action = body.startswith("\x01ACTION ") and body.endswith("\x01")
+        if is_ctcp and not is_action:
+            return ("pass", None)
+
+        # Bot-command bypass: `.cmd`/`!cmd` go out unencrypted so channel bots
+        # can parse them. CHANNEL-ONLY and SINGLE-LINE (a newline forces the
+        # full gate); DMs never bypass. Mirror of the channel-only bypass +
+        # `warn_e2e_bot_bypass` visibility in the Rust gate.
+        if is_channel and (body.startswith(".") or body.startswith("!")) and "\n" not in body:
+            warn = None
+            if _config_enabled(target) == _ENABLED_YES:
+                warn = (
+                    f"bot-style message to {target} sent in CLEARTEXT — channel "
+                    "lines starting with '.' or '!' bypass encryption for bots"
+                )
+            return ("bypass", warn)
+
+        # Resolve the keyring context (unscoped in F1; F3 adds network scope).
+        if is_channel:
+            context = target
+        else:
+            handle = _resolve_handle_by_nick(server, target, target)
+            if handle is None:
+                # No resolvable handle → no `@<handle>` config can exist.
+                # Refuse only if an enabled legacy bare-nick row exists;
+                # otherwise plaintext passthrough is safe (no E2E state).
+                legacy = _config_enabled(target)
+                if legacy == _ENABLED_ERR:
+                    return ("refuse", _REFUSE_KEYRING)
+                if legacy == _ENABLED_YES:
+                    return ("refuse", _REFUSE_NO_HANDLE)
+                return ("pass", None)
+            context = "@" + handle
+
+        enabled = _config_enabled(context)
+        if enabled == _ENABLED_ERR:
+            return ("refuse", _REFUSE_KEYRING)
+        if enabled == _ENABLED_NO:
+            return ("pass", None)
+
+        # Enabled — encrypt. An encrypt failure REFUSES (never plaintext).
+        try:
+            fresh, had_pending = _get_or_generate_outgoing_key_with_rotation(context)
+            if had_pending:
+                _distribute_rekey(context, fresh, server)
+            if is_action:
+                wires = _encrypt_ctcp_wire(fresh, context, body)
+            else:
+                wires = _encrypt_plain_wire(fresh, context, body)
+        except Exception as e:
+            _dbg(f"_e2e_gate_wire encrypt failed for {context}: {e}")
+            return ("refuse", _REFUSE_ENCRYPT)
+        return ("cipher", wires)
+    except Exception as e:
+        _dbg(f"_e2e_gate_wire OUTER EXCEPTION for {target}: {e}\n{traceback.format_exc()}")
+        # We touched keyring state but failed before ruling E2E out — refuse
+        # rather than risk plaintext (fail-closed).
+        return ("refuse", _REFUSE_KEYRING)
+
+
+def _target_buffer(server: str, target: str) -> str:
+    """Best-effort buffer pointer for showing an `[E2E]` line about `target`."""
+    if weechat is None:
+        return ""
+    buf = weechat.buffer_search("irc", f"{server}.{target}") or ""
+    if not buf:
+        buf = weechat.buffer_search("irc", f"server.{server}") or ""
+    return buf
+
+
+def hook_irc_out_privmsg(data, modifier, server, msg):
+    """`irc_out1_privmsg` modifier — the authoritative fail-closed outbound
+    gate. Returns the (possibly unchanged) line, or "" to drop it after having
+    sent encrypted chunks / refused."""
+    try:
+        if weechat is None:
+            return msg
+        parsed = _parse_out_privmsg(msg)
+        if parsed is None:
+            return msg
+        target, body = parsed
+        # Re-entrancy guard: our own `_send_raw_privmsg` re-emits ciphertext
+        # through this modifier — never re-process an already-encrypted line.
+        if body.startswith(WIRE_PREFIX):
+            return msg
+    except Exception as e:
+        # A line we cannot even parse carries no derivable E2E context; the
+        # irc_out1_privmsg feed is always a PRIVMSG, so this is unreachable in
+        # practice. Passing it through cannot leak an E2E conversation.
+        _dbg(f"hook_irc_out_privmsg parse EXCEPTION: {e}")
+        return msg
+
+    action, payload = _e2e_gate_wire(server, target, body)
+    if action == "pass":
+        return msg
+    if action == "bypass":
+        if payload:
+            _prnt_warn(_target_buffer(server, target), payload)
+        return msg
+    if action == "refuse":
+        _prnt_err(_target_buffer(server, target), payload)
+        _dbg(f"hook_irc_out_privmsg REFUSED send to {target}: {payload}")
+        return ""
+    # action == "cipher": send the encrypted chunks ourselves and drop the
+    # original. Once we have decided to encrypt we NEVER fall back to
+    # plaintext, even if a send raises mid-loop.
+    try:
+        for line in payload:
+            _send_raw_privmsg(server, target, line)
+    except Exception as e:
+        _dbg(f"hook_irc_out_privmsg send EXCEPTION for {target}: {e}")
+    return ""
 
 
 def hook_irc_in_privmsg(data, modifier, server, msg):
@@ -2601,6 +2854,9 @@ def main() -> None:
     weechat.hook_modifier("irc_in2_privmsg", "hook_irc_in_privmsg", "")
     weechat.hook_modifier("input_text_for_buffer", "hook_input_text_for_buffer", "")
     weechat.hook_modifier("irc_in2_notice", "hook_irc_in_notice", "")
+    # Authoritative outbound fail-closed gate (F1): every PRIVMSG on the wire —
+    # `/me`, `/msg`, `/say`, `/amsg`, plain input — passes through here.
+    weechat.hook_modifier("irc_out1_privmsg", "hook_irc_out_privmsg", "")
     weechat.hook_command(
         "e2e",
         SCRIPT_DESC,
