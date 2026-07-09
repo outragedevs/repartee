@@ -520,6 +520,9 @@ pub(crate) fn cmd_server(app: &mut App, args: &[String]) {
                 return;
             }
             add_local_event(app, &format!("{C_OK}Server '{id}' added{C_RST}"));
+            // A newly configured network changes the legacy-adoption isolation
+            // count even before it is connected — see the helper.
+            app.refresh_e2e_configured_networks();
         }
         "remove" => {
             if args.len() < 2 {
@@ -554,6 +557,9 @@ pub(crate) fn cmd_server(app: &mut App, args: &[String]) {
                 let sasl =
                     crate::config::env::remove_env_value(&env_path, &format!("{upper}_SASL_PASS"));
                 add_local_event(app, &format!("{C_OK}Server '{id}' removed{C_RST}"));
+                // Removing a configured network changes the legacy-adoption
+                // isolation count — see the helper.
+                app.refresh_e2e_configured_networks();
                 // The config entry is already gone from disk, so the removal
                 // itself succeeded — but a failed `.env` write would silently
                 // leave secrets behind. Surface that instead of swallowing it.

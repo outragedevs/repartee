@@ -1846,8 +1846,6 @@ def hook_input_text_for_buffer(data, modifier, modifier_data, text):
             return text
         if text.startswith("/"):
             return text
-        if text.startswith(".") or text.startswith("!"):
-            return text
         buffer = modifier_data
         if not buffer:
             return text
@@ -1863,6 +1861,11 @@ def hook_input_text_for_buffer(data, modifier, modifier_data, text):
         if not plain:
             return text
         is_channel = target and target[0] in CHANNEL_PREFIXES
+        # Bot-command bypass is CHANNEL-ONLY: `.cmd`/`!cmd` lines go out
+        # unencrypted so channel bots can parse them. DMs never bypass —
+        # prose starting with '.'/'!' in an E2E DM must still encrypt.
+        if is_channel and (plain.startswith(".") or plain.startswith("!")):
+            return text
         if is_channel:
             channel = target
         else:

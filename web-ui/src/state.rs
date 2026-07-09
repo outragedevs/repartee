@@ -297,6 +297,20 @@ impl AppState {
                     });
                 }
             }
+            WebEvent::DeleteMessages {
+                buffer_id,
+                message_ids,
+            } => {
+                // A transient E2E placeholder was swept server-side after its
+                // decrypted line surfaced. Drop it here too — otherwise the
+                // placeholder (delivered earlier via NewMessage) and the
+                // decrypted InsertMessage both stay visible until a resync.
+                self.messages.update(|msgs| {
+                    if let Some(entry) = msgs.get_mut(&buffer_id) {
+                        entry.retain(|m| !message_ids.contains(&m.id));
+                    }
+                });
+            }
             WebEvent::TopicChanged {
                 buffer_id, topic, ..
             } => {

@@ -553,6 +553,83 @@ impl App {
         self.request_connect_gapfill(conn_id, &target);
     }
 
+    /// Re-run every query buffer's reconnect gap-fill once our own handle (the
+    /// recipient DM context) is learned. The end-of-MOTD gap-fill may have run
+    /// before the self-`USERHOST` reply and skipped encrypted DM backlog, yet
+    /// still claimed the one-shot via `request_connect_gapfill` — so we must
+    /// RELEASE that claim first, otherwise the retry is suppressed and the
+    /// skipped backlog is never re-fetched. `CHATHISTORY` dedups, so re-issuing
+    /// is safe.
+    ///
+    /// All query buffers on the connection are re-fetched, not just the active
+    /// one: an encrypted DM that arrived in a background query before the handle
+    /// was known otherwise stays stuck on the "awaiting our own identity"
+    /// placeholder (which is transient, so backlog reload won't heal it either).
+    pub(crate) fn regapfill_queries_after_own_handle(&mut self, conn_id: &str) {
+        let targets: Vec<String> = self
+            .state
+            .buffers
+            .values()
+            .filter(|b| b.connection_id == conn_id && matches!(b.buffer_type, BufferType::Query))
+            .map(|b| b.name.clone())
+            .collect();
+        for target in targets {
+            // Reuse the session-path helper: it releases the one-shot claim,
+            // re-issues the gap-fill, and returns `false` when the request was
+            // suppressed by a CHATHISTORY for the same target still in flight.
+            // In that transient-busy case the lines already skipped as
+            // undecryptable (processed before the handle was learned) would
+            // otherwise never be re-fetched — the in-flight batch ends with no
+            // pending retry, so the transient "awaiting our own identity"
+            // placeholder survives until reconnect. Re-queue exactly like the
+            // KEYRSP gap-fill drain so the in-flight batch's END event (itself
+            // an IRC event) drives the retry once the conflict clears.
+            if !self.regapfill_conversation_after_session(conn_id, &target) {
+                let gapfill = crate::state::PendingE2eGapfill {
+                    connection_id: conn_id.to_string(),
+                    target: target.clone(),
+                };
+                if !self.state.pending_e2e_gapfills.contains(&gapfill) {
+                    self.state.pending_e2e_gapfills.push(gapfill);
+                }
+            }
+        }
+    }
+
+    /// Re-run one conversation's `CHATHISTORY` gap-fill after a KEYRSP
+    /// installed its session (drained from `state.pending_e2e_gapfills`;
+    /// `target` is the peer nick for a DM, the channel name for a channel).
+    /// The ciphertext that triggered the handshake was shown only as the
+    /// transient "[E2E: awaiting session with …]" placeholder; the re-fetch
+    /// decrypts it under the fresh session and the splice sweeps the
+    /// placeholder. The one-shot connect-gapfill claim must be released
+    /// first, same as `regapfill_queries_after_own_handle`.
+    ///
+    /// Returns `false` when the request was suppressed by another
+    /// `CHATHISTORY` for the same target already in flight — the caller
+    /// must re-queue the gap-fill and retry, because that in-flight batch
+    /// may neither contain nor decrypt the placeholder line, and nothing
+    /// else re-issues this fetch. Any other failure (connection gone, no
+    /// `draft/chathistory`, dead send) returns `true`: there is no later
+    /// signal worth waiting for, and reconnect flows re-run their own
+    /// gap-fills anyway.
+    pub(crate) fn regapfill_conversation_after_session(
+        &mut self,
+        conn_id: &str,
+        target: &str,
+    ) -> bool {
+        if let Some(conn) = self.state.connections.get_mut(conn_id) {
+            conn.chathistory.clear_connect_gapfilled(target);
+        }
+        if self.request_connect_gapfill(conn_id, target) {
+            return true;
+        }
+        let transiently_busy = self.state.connections.get(conn_id).is_some_and(|conn| {
+            conn.enabled_caps.contains("draft/chathistory") && conn.chathistory.any_in_flight(target)
+        });
+        !transiently_busy
+    }
+
     /// On a channel's NAMES completion after (re)connect, gap-fill that channel's
     /// history **if it is the active buffer**. Running here (rather than at
     /// end-of-MOTD) guarantees the server has acknowledged our JOIN — NAMES is
@@ -578,8 +655,9 @@ impl App {
     /// Shared gap-fill request: anchor `AFTER` the newest stored row (so we pull
     /// only what we missed while disconnected), or `LATEST` when the buffer has
     /// no stored history yet. No-op unless the connection negotiated
-    /// `draft/chathistory`.
-    fn request_connect_gapfill(&mut self, conn_id: &str, target: &str) {
+    /// `draft/chathistory`. Returns `true` only when a request actually
+    /// went out (and the one-shot claim was taken).
+    fn request_connect_gapfill(&mut self, conn_id: &str, target: &str) -> bool {
         use crate::irc::chathistory::Direction;
 
         // Gate once per target per connection. The channel path runs on
@@ -590,13 +668,13 @@ impl App {
         // attempt is suppressed by an in-flight request or a failed send.
         let (network, cutoff) = {
             let Some(conn) = self.state.connections.get(conn_id) else {
-                return;
+                return false;
             };
             if !conn.enabled_caps.contains("draft/chathistory") {
-                return;
+                return false;
             }
             if conn.chathistory.is_connect_gapfilled(target) {
-                return;
+                return false;
             }
             // Exclude reconnect-time rows (JOIN echo, traffic logged during a slow
             // NAMES) so the AFTER anchor stays on the pre-disconnect tail and the
@@ -642,6 +720,7 @@ impl App {
         {
             conn.chathistory.mark_connect_gapfilled(target);
         }
+        issued
     }
 
     /// Pin the active live-chat buffer so loaded backlog survives trimming. Called

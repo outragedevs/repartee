@@ -4,6 +4,7 @@
 )]
 pub(crate) mod backlog;
 mod dcc;
+pub mod e2e_gate;
 #[allow(
     clippy::redundant_pub_crate,
     reason = "ui::layout calls emote_anim::composite"
@@ -572,6 +573,21 @@ impl App {
             && let Some(storage_ref) = storage.as_ref()
         {
             let keyring = crate::e2e::keyring::Keyring::new_encrypted(storage_ref.db.clone())?;
+            // Gates the renamed-label read heal and the legacy fallback —
+            // see Keyring::get_channel_config / Keyring::legacy_fallback.
+            keyring.set_configured_networks(config.servers.values().map(|s| s.label.clone()));
+            // Move pre-scoping rows to their owning network while ownership
+            // is still determinable; unattributable leftovers are surfaced
+            // by warn_orphaned_e2e_networks once buffers exist.
+            match keyring.adopt_legacy_contexts() {
+                Ok(unattributed) if !unattributed.is_empty() => tracing::warn!(
+                    "e2e: {} pre-upgrade context(s) left unattributed: {}",
+                    unattributed.len(),
+                    unattributed.join(", ")
+                ),
+                Ok(_) => {}
+                Err(e) => tracing::error!("e2e: legacy-context migration failed: {e}"),
+            }
             match crate::e2e::E2eManager::load_or_init_with_config(keyring, &config.e2e) {
                 Ok(mgr) => {
                     let fp = mgr.fingerprint();
@@ -925,12 +941,113 @@ impl App {
         (self.cached_term_cols, self.cached_term_rows)
     }
 
+    /// Warn — loudly, in a buffer — when the keyring holds E2E state scoped
+    /// to a network label that no configured server uses. A `label` rename in
+    /// config.toml orphans every scoped row: conversations the user
+    /// explicitly encrypted would silently lose their config (reads heal only
+    /// the unambiguous single-candidate case — see
+    /// `Keyring::get_channel_config`). Called once at startup.
+    fn warn_orphaned_e2e_networks(&mut self) {
+        let Some(mgr) = self.state.e2e_manager.clone() else {
+            return;
+        };
+        let scoped_networks = match mgr.keyring().list_scoped_networks() {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("e2e: orphaned-network scan failed: {e}");
+                return;
+            }
+        };
+        let configured: std::collections::HashSet<String> = self
+            .config
+            .servers
+            .values()
+            .map(|s| s.label.clone())
+            .collect();
+        for network in scoped_networks {
+            if configured.contains(&network) {
+                continue;
+            }
+            tracing::warn!("e2e: keyring holds state for unconfigured network '{network}'");
+            self.push_e2e_startup_warning(format!(
+                "[E2E] warning: encrypted-conversation state exists for network '{network}', \
+                 which no configured server uses — if you renamed the server's label, E2E may \
+                 be OFF for those conversations; run /e2e status in each and /e2e on to re-enable"
+            ));
+        }
+
+        // Same visibility rule for pre-upgrade unscoped rows that startup
+        // migration could not attribute to a single network
+        // (`Keyring::adopt_legacy_contexts`): on a multi-network config the
+        // read fallback is denied, so those conversations behave as if no
+        // session exists (fresh handshakes re-establish them fail-closed) —
+        // say so instead of letting E2E state vanish silently. "Multi-
+        // network" must mean what the keyring's gate means: DISTINCT labels,
+        // not server entries — two bouncer entries sharing one label are one
+        // network there, and warning "ignored" about state the fallback
+        // still serves would be false.
+        let distinct_networks = self
+            .config
+            .servers
+            .values()
+            .map(|s| s.label.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        if distinct_networks > 1 {
+            match mgr.keyring().list_legacy_contexts() {
+                Ok(contexts) => {
+                    for context in contexts {
+                        tracing::warn!(
+                            "e2e: unattributable pre-upgrade state for context '{context}'"
+                        );
+                        self.push_e2e_startup_warning(format!(
+                            "[E2E] warning: pre-upgrade encrypted-conversation state for \
+                             '{context}' cannot be attributed to a single network (multiple \
+                             servers configured) and is ignored — sessions there will \
+                             re-establish via fresh key exchanges"
+                        ));
+                    }
+                }
+                Err(e) => tracing::warn!("e2e: legacy-context scan failed: {e}"),
+            }
+        }
+    }
+
+    /// Append a highlighted `[E2E]` startup warning to the active (or
+    /// Status) buffer — shared by [`Self::warn_orphaned_e2e_networks`].
+    fn push_e2e_startup_warning(&mut self, text: String) {
+        let buffer_id = self
+            .state
+            .active_buffer_id
+            .clone()
+            .unwrap_or_else(|| make_buffer_id(Self::DEFAULT_CONN_ID, "Status"));
+        let id = self.state.next_message_id();
+        self.state.add_local_message(
+            &buffer_id,
+            Message {
+                id,
+                timestamp: Utc::now(),
+                message_type: MessageType::Event,
+                nick: None,
+                nick_mode: None,
+                text: text.clone(),
+                highlight: true,
+                event_key: Some("e2e_warning".to_string()),
+                event_params: Some(vec![text]),
+                log_msg_id: None,
+                log_ref_id: None,
+                tags: None,
+            },
+        );
+    }
+
     fn create_default_status(state: &mut AppState) {
         let buf_id = make_buffer_id(Self::DEFAULT_CONN_ID, "Status");
         state.add_connection(Connection {
             id: Self::DEFAULT_CONN_ID.to_string(),
             label: "Status".to_string(),
             status: ConnectionStatus::Disconnected,
+            own_handle: None,
             nick: String::new(),
             user_modes: String::new(),
             isupport: HashMap::new(),
@@ -1075,6 +1192,8 @@ impl App {
         if !self.log_browser_mode && self.state.buffers.is_empty() {
             Self::create_default_status(&mut self.state);
         }
+
+        self.warn_orphaned_e2e_networks();
 
         if !self.log_browser_mode {
             self.autoload_scripts();

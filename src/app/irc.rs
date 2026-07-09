@@ -33,6 +33,7 @@ impl App {
             id: conn_id.to_string(),
             label: server_config.label.clone(),
             status: ConnectionStatus::Connecting,
+            own_handle: None,
             nick: server_config
                 .nick
                 .as_deref()
@@ -59,6 +60,15 @@ impl App {
             silent_who_channels: HashSet::new(),
             silent_banlist_channels: HashSet::new(),
         });
+
+        // A newly registered connection may add a network the keyring's
+        // configured-network set (snapshotted at startup) doesn't know about —
+        // an ad-hoc `/connect` or a `/server add` since launch. Refresh it so
+        // `legacy_adoption_allowed()` reflects the networks actually in play:
+        // a stale count of <=1 would let a scoped miss on this second network
+        // fall back to an unscoped legacy E2E row, defeating cross-network
+        // isolation.
+        self.refresh_e2e_configured_networks();
 
         let server_buf_id = make_buffer_id(conn_id, &server_config.label);
         self.state.add_buffer(Buffer {
@@ -107,6 +117,44 @@ impl App {
         );
 
         server_buf_id
+    }
+
+    /// Recompute the keyring's configured-network set from the CURRENT servers
+    /// config plus every active connection, so `legacy_adoption_allowed()`
+    /// reflects runtime changes — an ad-hoc `/connect` net or a `/server
+    /// add`/`remove` since startup, none of which touch the startup snapshot.
+    /// A stale set that still reports <=1 network would let a scoped miss on a
+    /// newly-connected second network fall back to an unscoped legacy E2E row,
+    /// the exact cross-network reuse the scoping prevents. No-op without an E2E
+    /// manager.
+    pub(crate) fn refresh_e2e_configured_networks(&self) {
+        let Some(mgr) = self.state.e2e_manager.as_ref() else {
+            return;
+        };
+        // Real IRC networks only: the union of configured server labels and the
+        // labels of live connections, EXCLUDING the UI pseudo-connections (the
+        // `_default` status placeholder, the `_shell` PTY, and `_log_*` log
+        // browsers). They hold no E2E contexts and must not inflate the
+        // isolation count — doing so would wrongly deny the legacy fallback to a
+        // genuine single-network user (fail-closed, but a functional regression).
+        let labels: HashSet<String> = self
+            .config
+            .servers
+            .values()
+            .map(|s| s.label.clone())
+            .chain(
+                self.state
+                    .connections
+                    .values()
+                    .filter(|c| {
+                        c.id != Self::DEFAULT_CONN_ID
+                            && c.id != Self::SHELL_CONN_ID
+                            && !c.id.starts_with(Self::LOG_CONN_PREFIX)
+                    })
+                    .map(|c| c.label.clone()),
+            )
+            .collect();
+        mgr.keyring().set_configured_networks(labels);
     }
 
     pub(crate) fn start_autoconnects(&mut self, server_ids: &[String]) {
@@ -705,9 +753,33 @@ impl App {
                         ref args,
                     ) = msg.command
                         && let Some(confirmed_nick) = args.first()
-                        && let Some(conn) = self.state.connections.get_mut(&conn_id)
                     {
-                        conn.nick.clone_from(confirmed_nick);
+                        if let Some(conn) = self.state.connections.get_mut(&conn_id) {
+                            conn.nick.clone_from(confirmed_nick);
+                            // Drop any handle from a previous registration —
+                            // the server may assign a different ident/host/cloak
+                            // on (re)connect. The fresh self-USERHOST below
+                            // re-seeds it; until then DM E2E waits rather than
+                            // keying under a stale @<old_handle>.
+                            conn.own_handle = None;
+                        }
+
+                        // Seed our own ident@host (the recipient-keyed DM E2E
+                        // context) with a ONE-SHOT self-USERHOST, gated to
+                        // RPL_WELCOME so it fires exactly once per registration —
+                        // NOT per message (the RPL_USERHOST reply is itself a
+                        // message, which would otherwise loop). Sent early so the
+                        // reply lands before the end-of-MOTD CHATHISTORY gap-fill
+                        // that decrypts DM backlog under it. echo-message + CHGHOST
+                        // keep it current afterwards. E2E-only.
+                        if self.state.e2e_manager.is_some()
+                            && let Some(handle) = self.irc_handles.get(&conn_id)
+                        {
+                            let _ = handle.sender.send(::irc::proto::Command::Raw(
+                                "USERHOST".to_string(),
+                                vec![confirmed_nick.clone()],
+                            ));
+                        }
                     }
 
                     // Emit to scripts before default handling. Suppress semantics:
@@ -849,6 +921,11 @@ impl App {
                     // Snapshot buffer count so we can detect newly created buffers
                     // and feed them with chat history from the log database.
                     let buffers_before = self.state.buffers.len();
+                    let own_handle_before = self
+                        .state
+                        .connections
+                        .get(&conn_id)
+                        .and_then(|c| c.own_handle.clone());
 
                     if suppress_display {
                         self.state.suppress_event_display = true;
@@ -863,6 +940,45 @@ impl App {
                     // Drain queued RPE2E NOTICE sends (handshake replies,
                     // auto-KEYREQ on MissingKey) produced by the handlers.
                     self.drain_pending_e2e_sends();
+
+                    // Drain post-handshake gap-fills: a KEYRSP that just
+                    // installed a session queued its conversation here so the
+                    // message that triggered the handshake (transient
+                    // "[E2E: awaiting session with …]" placeholder) is
+                    // re-fetched via CHATHISTORY and decrypted for real. A
+                    // gap-fill suppressed by an in-flight CHATHISTORY for the
+                    // same target is re-queued: its batch END is itself an
+                    // IRC event, so the retry fires exactly when the conflict
+                    // clears (dropping it instead would strand the
+                    // placeholder until reconnect).
+                    let e2e_gapfills = std::mem::take(&mut self.state.pending_e2e_gapfills);
+                    for gapfill in e2e_gapfills {
+                        if !self.regapfill_conversation_after_session(
+                            &gapfill.connection_id,
+                            &gapfill.target,
+                        ) && !self.state.pending_e2e_gapfills.contains(&gapfill)
+                        {
+                            self.state.pending_e2e_gapfills.push(gapfill);
+                        }
+                    }
+
+                    // If we just learned our own ident@host (the recipient-keyed
+                    // DM context), re-run the query gap-fill: a gap-fill that ran
+                    // at end-of-MOTD before the self-USERHOST reply arrived would
+                    // have skipped encrypted DM backlog (and the batch completes,
+                    // so it is never retried). The retry must release the one-shot
+                    // gap-fill claim the first request took, or it would be
+                    // suppressed — see the helper.
+                    if own_handle_before.is_none()
+                        && self.state.e2e_manager.is_some()
+                        && self
+                            .state
+                            .connections
+                            .get(&conn_id)
+                            .is_some_and(|c| c.own_handle.is_some())
+                    {
+                        self.regapfill_queries_after_own_handle(&conn_id);
+                    }
 
                     // Load backlog for any buffers created by handle_irc_message
                     // (e.g. query buffer on first PRIVMSG from a new nick)

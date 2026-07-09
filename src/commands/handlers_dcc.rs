@@ -80,6 +80,12 @@ fn accept_dcc_chat(app: &mut App, nick: &str, id: &str) {
         return;
     };
 
+    // DCC CHAT is a separate direct TCP channel outside RPE2E — when the
+    // peer's IRC conversation is E2E-enabled, make sure the user knows this
+    // side channel is cleartext before they start typing into it.
+    let advisory_conn = record.conn_id.clone();
+    app.warn_cleartext_to_e2e_target(&advisory_conn, nick, "DCC CHAT");
+
     // Passive DCC (port == 0, has token): we become the listener and the
     // remote peer connects to us once we reply with our address + token.
     if record.port == 0 && record.passive_token.is_some() {
@@ -200,6 +206,10 @@ fn initiate_dcc_chat(app: &mut App, nick: &str, passive: bool) {
         add_local_event(app, "No active connection");
         return;
     };
+
+    // See accept_dcc_chat: DCC CHAT bypasses RPE2E entirely — advise when
+    // the peer's IRC conversation is E2E-enabled.
+    app.warn_cleartext_to_e2e_target(&conn_id, nick, "DCC CHAT");
 
     if passive {
         // Passive/reverse DCC: send CTCP with fake IP + port 0 + token.

@@ -1028,6 +1028,9 @@ impl App {
                     built.sasl_pass,
                 );
                 self.cached_config_toml = None;
+                // config.servers changed in-memory; refresh the keyring's
+                // legacy-adoption isolation count — see the helper.
+                self.refresh_e2e_configured_networks();
                 match result {
                     Ok(()) => {
                         self.wizard = None;
@@ -1366,6 +1369,18 @@ impl App {
             return;
         }
 
+        // Same precheck as send_gated_message: the E2E gate below may
+        // rotate the outgoing session and queue REKEYs, which the drain
+        // DROPS without an IRC handle — and the local echo would render a
+        // message that never left. Refuse up front.
+        if !self.irc_handles.contains_key(&conn_id) {
+            crate::commands::helpers::add_local_event(
+                self,
+                "Failed to send message: connection unavailable",
+            );
+            return;
+        }
+
         // Outgoing shrink is the FIRST step for any message that
         // qualifies — by the time we reach E2E encrypt / IRC send /
         // local echo, the text is already shortened (or the original
@@ -1382,7 +1397,19 @@ impl App {
         // path); per-chunk substitution accounting is out of scope.
         let pre_extracted_urls =
             crate::shrink::find_long_urls(text, self.state.shrink_min_url_length as usize);
-        if self.config.shrink.enabled
+        // Never hand an E2E conversation's content to the external shortener:
+        // the URL is part of the end-to-end-protected message, and the shrink
+        // worker POSTs it in cleartext to a third-party API before the E2E gate
+        // ever runs. Use the FAIL-CLOSED predicate, not the advisory
+        // `e2e_enabled_for_target`: the advisory returns false for unresolved /
+        // legacy DM state and keyring read errors, which the send gate still
+        // REFUSES as E2E-enabled — shrinking on those would leak the URL to the
+        // shortener before the refusal. Skip outgoing shrink whenever E2E
+        // cannot be ruled out and fall through to the synchronous path, where
+        // the original URL is encrypted on the wire like the rest of the message.
+        let e2e_possible = self.state.e2e_possible_for_target(&conn_id, &buffer_name);
+        if !e2e_possible
+            && self.config.shrink.enabled
             && self.config.shrink.outgoing_enabled
             && self.shrink_client.is_some()
             && text.len() <= crate::irc::MESSAGE_MAX_BYTES
@@ -1395,11 +1422,24 @@ impl App {
                 .get(&conn_id)
                 .map_or_else(|| nick.clone(), |c| c.nick.clone());
             let captured_own_mode = self.state.nick_prefix(&active_id, &captured_nick);
+            // Resolve the FULL E2E peer handle now, while the buffer still
+            // exists: its live peer_handle OR the network-scoped cached handle
+            // `/e2e on` keyed its config under. Capturing only `b.peer_handle`
+            // (None until the peer speaks) would let a `/close` during the
+            // shrink wait strand `e2e_encrypt_or_passthrough` — it could no
+            // longer recover the network to resolve the cache, falling through
+            // to plaintext for an E2E-enabled DM.
             let captured_peer_handle = if buf_type == BufferType::Query {
-                self.state
-                    .buffers
-                    .get(&active_id)
-                    .and_then(|b| b.peer_handle.clone())
+                // A keyring read error here is logged and treated as "unresolved"
+                // for the capture; the authoritative refuse-vs-plaintext decision
+                // is re-made in `e2e_encrypt_or_passthrough` at send time.
+                self.state.resolve_query_peer_handle(&active_id, &buffer_name)
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(
+                            "e2e: failed to resolve DM peer handle for {buffer_name}: {e}"
+                        );
+                        None
+                    })
             } else {
                 None
             };
@@ -1454,25 +1494,18 @@ impl App {
         // For PMs the context key is `@<peer_handle>` (spec §6), so we
         // pass the buffer type through — the helper derives the
         // pseudochannel from the Query buffer's cached `peer_handle`.
-        // When E2E is configured for a Query buffer but the peer's
-        // `ident@host` has not been captured yet (the user has never
-        // received a message from them), the helper returns `None` and
-        // we surface a themed refusal rather than leaking cleartext
-        // under a weak key.
-        let Some((wire_lines, plain_echo)) =
-            self.e2e_encrypt_or_passthrough(&active_id, &buffer_name, &buf_type, text, None)
-        else {
-            crate::commands::helpers::add_local_event(
-                self,
-                &format!(
-                    "{err}[E2E] cannot encrypt PM without peer handle \
-                     — wait for a message from them first{rst}",
-                    err = crate::commands::types::C_ERR,
-                    rst = crate::commands::types::C_RST,
-                ),
-            );
-            return;
-        };
+        // When E2E is configured for a Query buffer but we can't safely
+        // encrypt (peer `ident@host` not known yet, keyring read failed, or
+        // encryption failed), the helper returns `Err(reason)` and we surface
+        // the reason-specific refusal rather than leaking cleartext.
+        let (wire_lines, plain_echo) =
+            match self.state.e2e_encrypt_or_passthrough(&active_id, &buffer_name, &buf_type, text, None) {
+                Ok(v) => v,
+                Err(reason) => {
+                    crate::commands::helpers::add_local_event(self, &reason.user_message());
+                    return;
+                }
+            };
 
         // When echo-message is enabled, the server will echo our message back
         // with authoritative server-time — skip local display and wait for echo.
@@ -1690,191 +1723,6 @@ impl App {
                         },
                     );
                 }
-            }
-        }
-    }
-
-    /// Return `Some((wire_lines, local_plain))` where `wire_lines` is what
-    /// goes out on IRC (encrypted when e2e is enabled on the conversation,
-    /// otherwise the plain text split at IRC byte boundaries) and
-    /// `local_plain` is what is echoed into the local buffer for the user.
-    ///
-    /// Returns `None` to signal a hard refusal: the conversation is a PM
-    /// with an E2E config enabled under the `@<peer_handle>` pseudochannel
-    /// (spec §6), but the peer's `ident@host` has not been captured yet
-    /// (the user has never received a message from this peer in this
-    /// buffer). The caller must surface a themed error and drop the
-    /// message. This prevents silently encrypting under a nick-keyed row
-    /// that would collide with other peers sharing the same nick.
-    ///
-    /// For real IRC channels (`#&!+`) the context is the channel name,
-    /// unchanged. For Query buffers the context is `@<peer_handle>`
-    /// derived from the buffer's cached handle.
-    #[allow(clippy::too_many_lines)]
-    pub(crate) fn e2e_encrypt_or_passthrough(
-        &mut self,
-        buffer_id: &str,
-        buffer_name: &str,
-        buffer_type: &BufferType,
-        text: &str,
-        // Pre-resolved Query peer_handle. Inline callers pass None
-        // (live buffer is guaranteed present). The deferred shrink
-        // path captures the handle at dispatch time and passes
-        // Some(handle) so a `/close` during the shrink wait can't
-        // make this fall through to plain_passthrough() and leak
-        // ciphertext-intended plaintext on the wire.
-        captured_peer_handle: Option<&str>,
-    ) -> Option<(Vec<String>, String)> {
-        let plain_passthrough = || {
-            Some((
-                crate::irc::split_irc_message(text, crate::irc::MESSAGE_MAX_BYTES),
-                text.to_string(),
-            ))
-        };
-
-        if text.starts_with(['.', '!']) {
-            return plain_passthrough();
-        }
-
-        let Some(mgr) = self.state.e2e_manager.clone() else {
-            return plain_passthrough();
-        };
-
-        // Derive the keyring context from the conversation. Channels pass
-        // through unchanged; PMs require a server-stamped peer handle we
-        // cached on the Query buffer at the first incoming PRIVMSG.
-        //
-        // CRITICAL: look the buffer up by `buffer_id` (the caller's
-        // captured target), NOT `state.active_buffer()`. The deferred
-        // shrink path runs this helper from a main-loop arm long after
-        // the user typed the message; the active buffer may have
-        // moved on. Resolving peer_handle from active_buffer would
-        // encrypt under the WRONG peer's session key (or fall back to
-        // plain) and produce a confidentiality regression.
-        let context: String = match buffer_type {
-            BufferType::Channel => buffer_name.to_string(),
-            BufferType::Query => {
-                // Prefer a caller-captured peer_handle (deferred
-                // shrink path) over a live state lookup — the buffer
-                // may have been closed during the shrink wait.
-                let handle_from_state = self
-                    .state
-                    .buffers
-                    .get(buffer_id)
-                    .and_then(|b| b.peer_handle.as_deref());
-                let peer_handle = captured_peer_handle.or(handle_from_state);
-                let Some(peer_handle) = peer_handle else {
-                    // No peer handle yet. Check whether E2E was
-                    // (mis)configured under the bare-nick key from an
-                    // earlier version — if a legacy enabled row exists,
-                    // refuse rather than falling back to it. Otherwise
-                    // there is no E2E state at all, so plain passthrough
-                    // is safe.
-                    let legacy_enabled = mgr
-                        .keyring()
-                        .get_channel_config(buffer_name)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|c| c.enabled);
-                    if legacy_enabled {
-                        return None;
-                    }
-                    return plain_passthrough();
-                };
-                crate::e2e::context_key(buffer_name, peer_handle)
-            }
-            // Server/Status/DccChat/Shell/Mentions/Special: E2E does not
-            // apply. handle_plain_message already gates messaging on
-            // Channel|Query|DccChat, so we only reach this arm if a new
-            // sendable type is added in the future — passthrough is the
-            // safe default.
-            _ => return plain_passthrough(),
-        };
-
-        let enabled = mgr
-            .keyring()
-            .get_channel_config(&context)
-            .ok()
-            .flatten()
-            .is_some_and(|c| c.enabled);
-        if !enabled {
-            return plain_passthrough();
-        }
-        let result = mgr.encrypt_outgoing(&context, text);
-
-        // Drain any REKEY CTCPs produced by a lazy rotate that happened
-        // inside `encrypt_outgoing`. These must go out as NOTICEs to the
-        // remaining trusted peers on this channel. We resolve peer handle
-        // → nick via the active buffer's user list; if the nick can't be
-        // resolved (peer left the channel between handshake and rotation)
-        // the distribution entry is dropped with a warning — the peer
-        // will re-handshake on next ciphertext if they come back.
-        let rekey_sends = mgr.take_pending_rekey_sends();
-        if !rekey_sends.is_empty() {
-            // Resolve the connection from the caller-passed
-            // buffer_id, NOT the active buffer, so REKEY NOTICEs
-            // from a deferred-shrink encrypt land on the correct
-            // connection. Fall back to splitting buffer_id on '/'
-            // — `make_buffer_id` joins as `conn_id/channel`, so the
-            // first segment is recoverable even when the buffer was
-            // closed during the shrink wait window.
-            let conn_id_opt = self
-                .state
-                .buffers
-                .get(buffer_id)
-                .map(|b| b.connection_id.clone())
-                .or_else(|| {
-                    buffer_id
-                        .split_once('/')
-                        .map(|(conn_id, _)| conn_id.to_string())
-                });
-            if let Some(conn_id) = conn_id_opt {
-                // Use the caller-passed `buffer_id` directly. For Channel
-                // buffers `buffer_id` already keys to the right buffer; for
-                // Query (PM) E2E the `context` we'd reconstruct from is
-                // `@<peer_handle>`, which does NOT match how Query buffers
-                // are stored (keyed by nick), so reconstructing via
-                // `make_buffer_id(&conn_id, &context)` would always miss
-                // and silently drop REKEY NOTICEs for every E2E PM.
-                for rk in rekey_sends {
-                    let nick = self.state.buffers.get(buffer_id).and_then(|b| {
-                        b.users.values().find_map(|u| {
-                            let ident = u.ident.as_deref().unwrap_or("");
-                            let host = u.host.as_deref().unwrap_or("");
-                            let handle = format!("{ident}@{host}");
-                            if handle == rk.target_handle {
-                                Some(u.nick.clone())
-                            } else {
-                                None
-                            }
-                        })
-                    });
-                    let Some(nick) = nick else {
-                        tracing::warn!(
-                            target_handle = %rk.target_handle,
-                            channel = %context,
-                            "rekey drop: no nick resolved for handle on current channel"
-                        );
-                        continue;
-                    };
-                    self.state
-                        .pending_e2e_sends
-                        .push(crate::state::PendingE2eSend {
-                            connection_id: conn_id.clone(),
-                            target: nick,
-                            notice_text: rk.notice_text,
-                        });
-                }
-            } else {
-                tracing::warn!("rekey drop: no active buffer to resolve connection");
-            }
-        }
-
-        match result {
-            Ok(wires) => Some((wires, text.to_string())),
-            Err(e) => {
-                tracing::warn!("e2e encrypt failed on {context}: {e}; sending cleartext");
-                plain_passthrough()
             }
         }
     }

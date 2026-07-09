@@ -54,6 +54,10 @@ struct PendingHandshake {
     channel: String,
     peer_handle: Option<String>,
     eph_x25519_secret: [u8; 32],
+    /// Unix time the KEYREQ was built — drives TTL eviction
+    /// (`PENDING_KEYREQ_TTL_SECS`); a KEYRSP that never arrives must not
+    /// pin the ephemeral secret in memory forever.
+    created_at: i64,
 }
 
 /// Inbound KEYREQ cached in Normal mode for a yet-unknown peer, so that a
@@ -64,7 +68,30 @@ struct PendingHandshake {
 #[derive(Debug, Clone)]
 struct PendingInboundKeyReq {
     req: KeyReq,
+    /// Unix time the KEYREQ was cached — drives TTL eviction
+    /// (`PENDING_INBOUND_TTL_SECS`).
+    created_at: i64,
 }
+
+/// TTL for the initiator's in-memory pending handshakes (ephemeral secrets
+/// awaiting a KEYRSP). A KEYRSP normally arrives within seconds; after the
+/// TTL the entry is pruned and recovery is simply the next auto-KEYREQ on
+/// inbound ciphertext. Bounds `E2eManager::pending` across long sessions
+/// with unanswered KEYREQs.
+const PENDING_KEYREQ_TTL_SECS: i64 = 900;
+
+/// TTL for Normal-mode inbound KEYREQs cached for `/e2e accept`. Much longer
+/// than the initiator TTL — the user may be away from the keyboard — but
+/// still bounded: after eviction the zero-key accept guard explains what
+/// happened and the peer just re-handshakes.
+const PENDING_INBOUND_TTL_SECS: i64 = 21_600;
+
+/// How long a superseded incoming session key stays usable for decrypt after
+/// a REKEY replaces it. This is a reorder-tolerance window (a REKEY NOTICE
+/// can overtake PRIVMSG ciphertext already sent under the old key), NOT a
+/// second long-lived key — after it lapses, old-key ciphertext is rejected
+/// like any other AEAD failure.
+const REKEY_PREV_KEY_GRACE_SECS: i64 = 300;
 
 /// An outbound REKEY CTCP ready to ship, paired with the target IRC handle
 /// it must go to. Drained by `take_pending_rekey_sends` right after
@@ -230,6 +257,44 @@ pub enum DecryptOutcome {
 }
 
 impl E2eManager {
+    /// Evict pending handshake entries past their TTL. Called from the
+    /// insert paths (every new handshake build / inbound cache), which
+    /// bounds both maps without a timer: a session that stops handshaking
+    /// stops growing them, and one that keeps handshaking keeps pruning.
+    fn prune_expired_pending(&self) {
+        let now = now_unix();
+        self.pending
+            .lock()
+            .expect("e2e pending mutex poisoned")
+            .retain(|_, ph| now - ph.created_at <= PENDING_KEYREQ_TTL_SECS);
+        self.pending_inbound
+            .lock()
+            .expect("e2e pending inbound mutex poisoned")
+            .retain(|_, p| now - p.created_at <= PENDING_INBOUND_TTL_SECS);
+    }
+
+    /// Test clock control: shift every pending entry's `created_at` into the
+    /// past so TTL eviction can be exercised without sleeping.
+    #[cfg(test)]
+    pub(crate) fn age_pending_entries_for_test(&self, secs: i64) {
+        for ph in self
+            .pending
+            .lock()
+            .expect("e2e pending mutex poisoned")
+            .values_mut()
+        {
+            ph.created_at -= secs;
+        }
+        for p in self
+            .pending_inbound
+            .lock()
+            .expect("e2e pending inbound mutex poisoned")
+            .values_mut()
+        {
+            p.created_at -= secs;
+        }
+    }
+
     fn clear_pending_state_for_handle(&self, handle: &str) -> usize {
         let mut deleted = 0usize;
 
@@ -520,6 +585,41 @@ impl E2eManager {
 
     // ---------- encrypt outgoing ----------
 
+    /// Encrypt a full `\x01…\x01` CTCP frame for `channel`. Frames must
+    /// survive chunking: every RPE2E01 chunk decrypts and renders standalone
+    /// (no reassembly, architecture §6), so a frame longer than one chunk
+    /// would arrive as unframed fragments with raw `\x01` bytes. A frame
+    /// that fits one chunk encrypts as-is; a longer ACTION is split into
+    /// independent, individually-wrapped `\x01ACTION …\x01` pieces (the
+    /// peer renders a sequence of actions, just as long plain text renders
+    /// as several lines); any other overlong frame is refused — silently
+    /// shipping broken framing is worse than a visible failure.
+    pub fn encrypt_outgoing_ctcp(&self, channel: &str, frame: &str) -> Result<Vec<String>> {
+        const ACTION_PREFIX: &str = "\x01ACTION ";
+        const ACTION_FRAMING: usize = ACTION_PREFIX.len() + 1;
+
+        if frame.len() <= crate::e2e::MAX_PLAINTEXT_PER_CHUNK {
+            return self.encrypt_outgoing(channel, frame);
+        }
+        let body = frame
+            .strip_prefix(ACTION_PREFIX)
+            .and_then(|f| f.strip_suffix('\x01'))
+            .ok_or_else(|| {
+                E2eError::Wire("CTCP frame exceeds one encrypted chunk and cannot be split".into())
+            })?;
+        let budget = crate::e2e::MAX_PLAINTEXT_PER_CHUNK - ACTION_FRAMING;
+        let pieces = crate::e2e::chunker::split_plaintext_budget(body, budget)?;
+        let mut out = Vec::with_capacity(pieces.len());
+        for piece in pieces {
+            // The chunker splits on UTF-8 char boundaries, so this cannot
+            // fail for the valid-UTF-8 input `body` is.
+            let piece = String::from_utf8(piece)
+                .map_err(|_| E2eError::Wire("chunker split off a UTF-8 boundary".into()))?;
+            out.extend(self.encrypt_outgoing(channel, &format!("{ACTION_PREFIX}{piece}\x01"))?);
+        }
+        Ok(out)
+    }
+
     /// Encrypt `plaintext` for `channel` and return one wire-format line per
     /// chunk. Callers send these verbatim via PRIVMSG. Honors lazy rotation:
     /// if the outgoing session is flagged `pending_rotation`, a fresh key is
@@ -545,7 +645,9 @@ impl E2eManager {
         for (idx, plain) in chunks.iter().enumerate() {
             // idx is in 0..total, so idx+1 fits in u8 because total ≤ u8::MAX.
             let part = u8::try_from(idx + 1).map_err(|_| E2eError::ChunkLimit(u8::MAX))?;
-            let aad = build_aad(channel, msgid, ts, part, total);
+            // AAD uses the WIRE context — the network-scope prefix (if any)
+            // is a local storage detail the peer never sees.
+            let aad = build_aad(crate::e2e::wire_context(channel), msgid, ts, part, total);
             let (nonce, ct) = aead::encrypt(&sk, &aad, plain)?;
             let wire = WireChunk {
                 msgid,
@@ -648,7 +750,10 @@ impl E2eManager {
         // HKDF → 32-byte wrap key (same labels as the handshake path so
         // libsodium-based peers can reuse their existing wrap helpers,
         // with the `REKEY` info string acting as the domain separator).
-        let info = rekey_info(channel);
+        // Everything on the wire (HKDF info, signed payload, c=) uses the
+        // WIRE context so unscoped peers derive identical bytes.
+        let wire_channel = crate::e2e::wire_context(channel);
+        let info = rekey_info(wire_channel);
         let hk = Hkdf::<Sha256>::new(Some(b"RPE2E01-WRAP"), shared.as_bytes());
         let mut wrap_key = [0u8; 32];
         hk.expand(info.as_bytes(), &mut wrap_key)
@@ -659,12 +764,18 @@ impl E2eManager {
         let mut nonce = [0u8; 16];
         rand::fill(&mut nonce);
         let pubkey = self.identity.public_bytes();
-        let sig_payload =
-            signed_keyrekey_payload(channel, &pubkey, &eph_pub, &wrap_nonce, &wrap_ct, &nonce);
+        let sig_payload = signed_keyrekey_payload(
+            wire_channel,
+            &pubkey,
+            &eph_pub,
+            &wrap_nonce,
+            &wrap_ct,
+            &nonce,
+        );
         let sig_bytes = sig::sign(self.identity.signing_key(), &sig_payload);
 
         Ok(KeyRekey {
-            channel: channel.to_string(),
+            channel: wire_channel.to_string(),
             pubkey,
             eph_pub,
             wrap_nonce,
@@ -749,6 +860,28 @@ impl E2eManager {
         Ok(deleted)
     }
 
+    /// Forget a DM peer across BOTH of its recipient-keyed contexts: the peer
+    /// context `@<peer>` (where our outgoing-recipient + their pending state
+    /// live) and our own context `@<own>` (where their TRUSTED INCOMING session
+    /// lives — recipient-keyed, see `docs/rpe2e-dm-addendum.md`). Without the
+    /// own-context delete the peer's messages keep decrypting after the user was
+    /// told they were forgotten. For a channel `own == peer == channel`, so the
+    /// second delete is skipped. Returns the total rows/entries removed.
+    pub fn forget_peer_on_dm_contexts(
+        &self,
+        handle: &str,
+        peer_channel: &str,
+        own_channel: Option<&str>,
+    ) -> Result<usize> {
+        let n = self.forget_peer_on_channel(handle, peer_channel)?;
+        match own_channel {
+            Some(own) if own != peer_channel => {
+                self.forget_peer_on_channel(handle, own).map(|m| n + m)
+            }
+            _ => Ok(n),
+        }
+    }
+
     pub fn forget_peer_everywhere(&self, handle: &str) -> Result<usize> {
         let mut deleted = 0usize;
         if let Some(peer) = self.keyring.get_peer_by_handle(handle)? {
@@ -768,8 +901,10 @@ impl E2eManager {
     pub fn handle_rekey(&self, sender_handle: &str, rekey: &KeyRekey) -> Result<()> {
         // Verify signature first — no state touched until we're sure the
         // message is authentic against the pubkey it carries.
+        // The caller may have scoped rekey.channel to its network for
+        // storage; the sender signed (and derived) over the WIRE context.
         let sig_payload = signed_keyrekey_payload(
-            &rekey.channel,
+            crate::e2e::wire_context(&rekey.channel),
             &rekey.pubkey,
             &rekey.eph_pub,
             &rekey.wrap_nonce,
@@ -811,12 +946,28 @@ impl E2eManager {
             }
         }
 
+        // Freshness: the signed nonce is single-use. A captured REKEY stays
+        // decryptable forever (its wrap targets our long-term key), so
+        // without this check an on-path attacker could replay an old REKEY
+        // and roll the session back to a stale key — silently breaking
+        // decryption of everything the peer sends under the current one.
+        // The nonce is consumed even if the unwrap below fails: a legitimate
+        // sender never reuses nonces, so burning it loses nothing.
+        if !self
+            .keyring
+            .record_rekey_nonce(&new_fp, &rekey.channel, &rekey.nonce)?
+        {
+            return Err(E2eError::Handshake(
+                "REKEY replay detected (nonce already consumed); ignoring".into(),
+            ));
+        }
+
         // Derive our X25519 secret from our Ed25519 seed and complete ECDH.
         let my_seed = self.identity.secret_bytes();
         let my_x25519_scalar = ecdh::ed25519_seed_to_x25519(&my_seed);
         let my_sk = StaticSecret::from(my_x25519_scalar);
         let shared = my_sk.diffie_hellman(&XPub::from(rekey.eph_pub));
-        let info = rekey_info(&rekey.channel);
+        let info = rekey_info(crate::e2e::wire_context(&rekey.channel));
         let hk = Hkdf::<Sha256>::new(Some(b"RPE2E01-WRAP"), shared.as_bytes());
         let mut wrap_key = [0u8; 32];
         hk.expand(info.as_bytes(), &mut wrap_key)
@@ -891,13 +1042,38 @@ impl E2eManager {
             )));
         }
 
-        let aad = build_aad(channel, wire.msgid, wire.ts, wire.part, wire.total);
+        // AAD uses the WIRE context — see encrypt_outgoing.
+        let aad = build_aad(
+            crate::e2e::wire_context(channel),
+            wire.msgid,
+            wire.ts,
+            wire.part,
+            wire.total,
+        );
+        let utf8_or_reject = |pt: Vec<u8>| match String::from_utf8(pt) {
+            Ok(s) => DecryptOutcome::Plaintext(s),
+            Err(e) => DecryptOutcome::Rejected(format!("utf8: {e}")),
+        };
         match aead::decrypt(&sess.sk, &wire.nonce, &aad, &wire.ciphertext) {
-            Ok(pt) => match String::from_utf8(pt) {
-                Ok(s) => Ok(DecryptOutcome::Plaintext(s)),
-                Err(e) => Ok(DecryptOutcome::Rejected(format!("utf8: {e}"))),
-            },
-            Err(e) => Ok(DecryptOutcome::Rejected(format!("aead failed: {e}"))),
+            Ok(pt) => Ok(utf8_or_reject(pt)),
+            Err(e) => {
+                // Reorder tolerance: a REKEY NOTICE can overtake PRIVMSG
+                // ciphertext already sent under the key it replaced. Inside
+                // the grace window, fall back to the retained previous key
+                // (see install_incoming_session_strict) before rejecting.
+                if let Some((prev_sk, replaced_at)) =
+                    self.keyring.get_incoming_prev_key(sender_handle, channel)?
+                    && now - replaced_at <= REKEY_PREV_KEY_GRACE_SECS
+                    && let Ok(pt) = aead::decrypt(&prev_sk, &wire.nonce, &aad, &wire.ciphertext)
+                {
+                    tracing::debug!(
+                        channel,
+                        "decrypted under the previous session key (post-REKEY reorder)"
+                    );
+                    return Ok(utf8_or_reject(pt));
+                }
+                Ok(DecryptOutcome::Rejected(format!("aead failed: {e}")))
+            }
         }
     }
 
@@ -931,6 +1107,8 @@ impl E2eManager {
         //    `handle_privmsg`, but even if something else leaks a
         //    stale entry in the future, the match-by-unwrap in
         //    `handle_keyrsp` makes it harmless.
+        self.prune_expired_pending();
+
         let mut nonce = [0u8; 16];
         rand::fill(&mut nonce);
 
@@ -942,7 +1120,12 @@ impl E2eManager {
         };
 
         let pubkey = self.identity.public_bytes();
-        let sig_payload = signed_keyreq_payload(channel, &pubkey, &eph_pub, &nonce);
+        // Sign and stamp the WIRE context: the peer (possibly an unscoped
+        // client) verifies against the c= it receives. The pending map keeps
+        // the caller's (possibly network-scoped) storage context — the
+        // KEYRSP consumer re-scopes the reply before looking it up.
+        let wire_channel = crate::e2e::wire_context(channel);
+        let sig_payload = signed_keyreq_payload(wire_channel, &pubkey, &eph_pub, &nonce);
         let sig_bytes = sig::sign(self.identity.signing_key(), &sig_payload);
 
         self.pending
@@ -954,11 +1137,12 @@ impl E2eManager {
                     channel: channel.to_string(),
                     peer_handle: peer_handle.map(ToOwned::to_owned),
                     eph_x25519_secret: eph_secret,
+                    created_at: now_unix(),
                 },
             );
 
         Ok(KeyReq {
-            channel: channel.to_string(),
+            channel: wire_channel.to_string(),
             pubkey,
             eph_x25519: eph_pub,
             nonce,
@@ -1112,12 +1296,16 @@ impl E2eManager {
         if let Err(e) = self.keyring.install_incoming_session_strict(&pending_sess) {
             tracing::warn!("normal-mode pending session install failed: {e}");
         }
+        self.prune_expired_pending();
         self.pending_inbound
             .lock()
             .expect("e2e pending inbound mutex poisoned")
             .insert(
                 (sender_handle.to_string(), req.channel.clone()),
-                PendingInboundKeyReq { req: req.clone() },
+                PendingInboundKeyReq {
+                    req: req.clone(),
+                    created_at: now_unix(),
+                },
             );
         self.pending_accept_requests
             .lock()
@@ -1152,8 +1340,14 @@ impl E2eManager {
         }
 
         // Verify signature over the full KEYREQ payload, binding `eph_x25519`.
-        let sig_payload =
-            signed_keyreq_payload(&req.channel, &req.pubkey, &req.eph_x25519, &req.nonce);
+        // The sender signed the WIRE channel; the caller may have scoped
+        // req.channel to its network for storage.
+        let sig_payload = signed_keyreq_payload(
+            crate::e2e::wire_context(&req.channel),
+            &req.pubkey,
+            &req.eph_x25519,
+            &req.nonce,
+        );
         sig::verify(&req.pubkey, &sig_payload, &req.sig)?;
 
         // Channel config + autotrust mode promotion.
@@ -1214,7 +1408,7 @@ impl E2eManager {
         // initiator does not know its own server-assigned handle at the
         // point it calls `handle_keyrsp`. The ephemeral X25519 keypairs
         // themselves bind the exchange to a specific peer.
-        let info = wrap_info(&req.channel);
+        let info = wrap_info(crate::e2e::wire_context(&req.channel));
         let wrap_key = derive_wrap_key(&our_eph_sec, &req.eph_x25519, info.as_bytes());
         let (wrap_nonce, wrap_ct) = aead::encrypt(&wrap_key, info.as_bytes(), &our_sk)?;
 
@@ -1226,7 +1420,7 @@ impl E2eManager {
         let mut rsp_nonce = [0u8; 16];
         rand::fill(&mut rsp_nonce);
         let sig_payload = signed_keyrsp_payload(
-            &req.channel,
+            crate::e2e::wire_context(&req.channel),
             &our_pubkey,
             &our_eph_pub,
             &wrap_nonce,
@@ -1254,7 +1448,15 @@ impl E2eManager {
             .lock()
             .expect("rate limiter mutex poisoned")
             .allow_outgoing(sender_handle);
-        if !already_incoming && allow_out {
+        // Skip the reciprocal for DMs. The reverse (us-receiving) direction is
+        // keyed by OUR own handle, not `req.channel` (= `@<peer>`), which the
+        // manager doesn't know. Building it under `@<peer>` would install
+        // orphan rows AND spend the shared per-peer rate-limit slot, stalling
+        // the correct live auto-KEYREQ (keyed `@<own>`) that establishes the
+        // reverse direction when the peer first messages us. Channels
+        // (own == peer == channel) keep the proactive reciprocal.
+        let is_dm = crate::e2e::wire_context(&req.channel).starts_with('@');
+        if !is_dm && !already_incoming && allow_out {
             let reciprocal = self.build_keyreq_for_peer(&req.channel, Some(sender_handle))?;
             self.pending_outbound_keyreqs
                 .lock()
@@ -1267,7 +1469,9 @@ impl E2eManager {
         }
 
         Ok(Some(KeyRsp {
-            channel: req.channel.clone(),
+            // Echo the WIRE c= verbatim (spec: verbatim echo) — the storage
+            // scope prefix never leaves the process.
+            channel: crate::e2e::wire_context(&req.channel).to_string(),
             pubkey: our_pubkey,
             ephemeral_pub: our_eph_pub,
             wrap_nonce,
@@ -1289,6 +1493,12 @@ impl E2eManager {
         sender_handle: &str,
         channel: &str,
     ) -> Result<Option<KeyRsp>> {
+        // Enforce the inbound TTL on the ACCEPT side, not only on insert: a
+        // Normal-mode KEYREQ that has sat longer than
+        // `PENDING_INBOUND_TTL_SECS` with no intervening handshake to trigger
+        // pruning must not be accepted. Pruning first evicts the stale entry
+        // so the removal below naturally returns "nothing to accept".
+        self.prune_expired_pending();
         let cached = {
             let mut guard = self
                 .pending_inbound
@@ -1296,7 +1506,7 @@ impl E2eManager {
                 .expect("e2e pending inbound mutex poisoned");
             guard.remove(&(sender_handle.to_string(), channel.to_string()))
         };
-        let Some(PendingInboundKeyReq { req }) = cached else {
+        let Some(PendingInboundKeyReq { req, .. }) = cached else {
             return Ok(None);
         };
 
@@ -1346,7 +1556,7 @@ impl E2eManager {
         let our_eph_sec = StaticSecret::from(our_eph_secret);
         let our_eph_pub = XPub::from(&our_eph_sec).to_bytes();
 
-        let info = wrap_info(&req.channel);
+        let info = wrap_info(crate::e2e::wire_context(&req.channel));
         let wrap_key = derive_wrap_key(&our_eph_sec, &req.eph_x25519, info.as_bytes());
         let (wrap_nonce, wrap_ct) = aead::encrypt(&wrap_key, info.as_bytes(), &our_sk)?;
 
@@ -1354,7 +1564,7 @@ impl E2eManager {
         let mut rsp_nonce = [0u8; 16];
         rand::fill(&mut rsp_nonce);
         let sig_payload = signed_keyrsp_payload(
-            &req.channel,
+            crate::e2e::wire_context(&req.channel),
             &our_pubkey,
             &our_eph_pub,
             &wrap_nonce,
@@ -1383,7 +1593,15 @@ impl E2eManager {
             .lock()
             .expect("rate limiter mutex poisoned")
             .allow_outgoing(sender_handle);
-        if !already_incoming && allow_out {
+        // Skip the reciprocal for DMs. The reverse (us-receiving) direction is
+        // keyed by OUR own handle, not `req.channel` (= `@<peer>`), which the
+        // manager doesn't know. Building it under `@<peer>` would install
+        // orphan rows AND spend the shared per-peer rate-limit slot, stalling
+        // the correct live auto-KEYREQ (keyed `@<own>`) that establishes the
+        // reverse direction when the peer first messages us. Channels
+        // (own == peer == channel) keep the proactive reciprocal.
+        let is_dm = crate::e2e::wire_context(&req.channel).starts_with('@');
+        if !is_dm && !already_incoming && allow_out {
             let reciprocal = self.build_keyreq_for_peer(&req.channel, Some(sender_handle))?;
             self.pending_outbound_keyreqs
                 .lock()
@@ -1396,7 +1614,8 @@ impl E2eManager {
         }
 
         Ok(KeyRsp {
-            channel: req.channel.clone(),
+            // Echo the WIRE c= verbatim — see handle_keyreq_with_nick.
+            channel: crate::e2e::wire_context(&req.channel).to_string(),
             pubkey: our_pubkey,
             ephemeral_pub: our_eph_pub,
             wrap_nonce,
@@ -1442,7 +1661,13 @@ impl E2eManager {
     /// Unrelated entries for the same channel stay in the map; they
     /// are still awaiting their own KEYRSPs.
     fn consume_matching_pending_for_keyrsp(&self, rsp: &KeyRsp) -> Result<[u8; 32]> {
-        let info = wrap_info(&rsp.channel);
+        // Enforce the TTL on the CONSUMER side, not only on insert: a KEYRSP
+        // arriving after `PENDING_KEYREQ_TTL_SECS` with no intervening
+        // handshake to trigger pruning must not complete an arbitrarily old
+        // handshake (nor keep its ephemeral secret past the TTL). Pruning
+        // first drops the stale candidate so it is never even tried.
+        self.prune_expired_pending();
+        let info = wrap_info(crate::e2e::wire_context(&rsp.channel));
         let candidate_keys: Vec<(String, [u8; 16])> = {
             let pending = self.pending.lock().expect("e2e pending mutex poisoned");
             pending
@@ -1501,7 +1726,7 @@ impl E2eManager {
 
         // Verify signature first, before touching any state.
         let sig_payload = signed_keyrsp_payload(
-            &rsp.channel,
+            crate::e2e::wire_context(&rsp.channel),
             &sender_pubkey,
             &rsp.ephemeral_pub,
             &rsp.wrap_nonce,
@@ -1745,13 +1970,19 @@ mod tests {
     fn forget_peer_everywhere_clears_handle_scoped_pending_state() {
         let mgr = make_manager();
         let _ = mgr.build_keyreq_for_peer("#x", Some("~bob@host")).unwrap();
+        // Build the KeyReq BEFORE taking the pending_inbound lock:
+        // build_keyreq prunes expired pending entries, which locks
+        // pending_inbound itself — building it inside the insert expression
+        // (guard alive for the whole statement) deadlocks.
+        let inbound_req = mgr.build_keyreq("#x").unwrap();
         mgr.pending_inbound
             .lock()
             .expect("pending inbound mutex poisoned in test")
             .insert(
                 ("~bob@host".to_string(), "#x".to_string()),
                 PendingInboundKeyReq {
-                    req: mgr.build_keyreq("#x").unwrap(),
+                    req: inbound_req,
+                    created_at: now_unix(),
                 },
             );
         mgr.pending_accept_requests

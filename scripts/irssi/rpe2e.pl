@@ -1526,8 +1526,11 @@ sub signal_send_text {
     my ($data, $server, $witem) = @_;
     return unless $witem;
     return if !defined($data) || $data =~ m{^/};
-    return if $data =~ m{^[.!]};
     my $target = $witem->{name};
+    # Bot-command bypass is CHANNEL-ONLY: `.cmd`/`!cmd` lines go out
+    # unencrypted so channel bots can parse them. DMs never bypass —
+    # prose starting with '.'/'!' in an E2E DM must still encrypt.
+    return if $target =~ $CHANNEL_PREFIX_RE && $data =~ m{^[.!]};
     my $kr = load_keyring();
     my $ctx;
     if ($target =~ $CHANNEL_PREFIX_RE) {

@@ -289,6 +289,30 @@ mod tests {
         assert_eq!(got, expected, "AAD golden byte sequence mismatch");
     }
 
+    #[test]
+    fn build_aad_golden_vector_dm() {
+        // DM (recipient-keyed): the context is the RECIPIENT's pseudochannel
+        // "@<recipient_handle>". The AAD LAYOUT is identical to a channel —
+        // only the channel STRING differs. This pins the DM AAD bytes for
+        // cross-client interop (the lurker TS port validates the same vector).
+        let got = build_aad("@~bob@b.host", [1u8; 8], 100, 1, 1);
+        let expected: Vec<u8> = vec![
+            // PROTO = "RPE2E01"
+            0x52, 0x50, 0x45, 0x32, 0x45, 0x30, 0x31,
+            // be16(12) || "@~bob@b.host"
+            0x00, 0x0c, 0x40, 0x7e, 0x62, 0x6f, 0x62, 0x40, 0x62, 0x2e, 0x68, 0x6f, 0x73, 0x74,
+            // be16(8) || msgid (8x 0x01)
+            0x00, 0x08, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+            // be16(8) || ts=100 be64
+            0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64,
+            // be16(1) || part=1
+            0x00, 0x01, 0x01, // be16(1) || total=1
+            0x00, 0x01, 0x01,
+        ];
+        assert_eq!(got.len(), 47, "DM AAD length mismatch");
+        assert_eq!(got, expected, "DM AAD golden byte sequence mismatch");
+    }
+
     /// Colon-in-channel attack: with the old `:`-joined format, a channel
     /// containing `:` could shift later AAD fields. The length-prefixed
     /// layout must keep `"#a:b"` distinct from any other arrangement that

@@ -18,8 +18,10 @@ use crate::e2e::manager::{DecryptOutcome, E2eManager, ReverifyOutcome, TrustChan
 const SCHEMA: &str = "
 CREATE TABLE e2e_identity (id INTEGER PRIMARY KEY CHECK (id = 1), pubkey BLOB NOT NULL, privkey BLOB NOT NULL, fingerprint BLOB NOT NULL, created_at INTEGER NOT NULL);
 CREATE TABLE e2e_peers (fingerprint BLOB PRIMARY KEY, pubkey BLOB NOT NULL, last_handle TEXT, last_nick TEXT, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, global_status TEXT NOT NULL DEFAULT 'pending');
+CREATE TABLE e2e_dm_handle_cache (network TEXT NOT NULL, nick TEXT NOT NULL COLLATE NOCASE, handle TEXT NOT NULL, PRIMARY KEY (network, nick));
 CREATE TABLE e2e_outgoing_sessions (channel TEXT PRIMARY KEY, sk BLOB NOT NULL, created_at INTEGER NOT NULL, pending_rotation INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE e2e_incoming_sessions (handle TEXT NOT NULL, channel TEXT NOT NULL, fingerprint BLOB NOT NULL, sk BLOB NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, PRIMARY KEY (handle, channel));
+CREATE TABLE e2e_incoming_sessions (handle TEXT NOT NULL, channel TEXT NOT NULL, fingerprint BLOB NOT NULL, sk BLOB NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, prev_sk BLOB, prev_created_at INTEGER, PRIMARY KEY (handle, channel));
+CREATE TABLE e2e_seen_rekeys (fingerprint BLOB NOT NULL, channel TEXT NOT NULL, nonce BLOB NOT NULL, seen_at INTEGER NOT NULL, PRIMARY KEY (fingerprint, channel, nonce));
 CREATE TABLE e2e_channel_config (channel TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, mode TEXT NOT NULL DEFAULT 'normal');
 CREATE TABLE e2e_autotrust (id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, handle_pattern TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(scope, handle_pattern));
 CREATE TABLE e2e_outgoing_recipients (channel TEXT NOT NULL, handle TEXT NOT NULL, fingerprint BLOB NOT NULL, first_sent_at INTEGER NOT NULL, PRIMARY KEY (channel, handle));
@@ -92,6 +94,188 @@ fn full_handshake_and_encrypted_exchange() {
         DecryptOutcome::Plaintext(s) => assert_eq!(s, "hello bob"),
         other => panic!("expected Plaintext, got {other:?}"),
     }
+}
+
+#[test]
+fn long_encrypted_action_splits_into_complete_ctcp_frames() {
+    // Chunks decrypt and render STANDALONE (no reassembly, spec §6), so a
+    // `\x01ACTION …\x01` frame longer than one chunk must be split into
+    // independent, individually-framed ACTIONs before encryption — never
+    // fragmented mid-frame, which would render as raw \x01 garbage on the
+    // peer. A short action stays a single frame; an overlong non-ACTION
+    // CTCP is refused rather than silently shipped broken.
+    let alice = make_manager();
+    let bob = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+    let alice_handle = "~alice@a.host";
+    let bob_handle = "~bob@b.host";
+    let req = bob.build_keyreq("#x").unwrap();
+    let rsp = alice.handle_keyreq(bob_handle, &req).unwrap().unwrap();
+    bob.handle_keyrsp(alice_handle, &rsp).unwrap();
+
+    let body = "zażółć gęślą jaźń ".repeat(30); // multi-byte, ≫ one chunk
+    let frame = format!("\x01ACTION {body}\x01");
+    let wire_lines = alice.encrypt_outgoing_ctcp("#x", &frame).unwrap();
+    assert!(wire_lines.len() > 1, "an overlong action must split");
+
+    let mut reassembled = String::new();
+    for wire in &wire_lines {
+        let DecryptOutcome::Plaintext(plain) =
+            bob.decrypt_incoming(alice_handle, "#x", wire).unwrap()
+        else {
+            panic!("every piece must decrypt standalone");
+        };
+        let piece_body = plain
+            .strip_prefix("\x01ACTION ")
+            .and_then(|p| p.strip_suffix('\x01'))
+            .unwrap_or_else(|| panic!("piece is not a complete CTCP ACTION frame: {plain:?}"));
+        assert!(
+            !piece_body.contains('\x01'),
+            "no stray CTCP framing inside a piece"
+        );
+        reassembled.push_str(piece_body);
+    }
+    assert_eq!(reassembled, body, "no bytes lost or duplicated across pieces");
+
+    let short = alice.encrypt_outgoing_ctcp("#x", "\x01ACTION waves\x01").unwrap();
+    assert_eq!(short.len(), 1, "a short action stays a single frame");
+
+    let overlong_other = format!("\x01VERSION {}\x01", "x".repeat(300));
+    assert!(
+        alice.encrypt_outgoing_ctcp("#x", &overlong_other).is_err(),
+        "an overlong non-ACTION CTCP must refuse, not fragment"
+    );
+}
+
+#[test]
+fn dm_round_trip_recipient_keyed_both_directions() {
+    // A DM is recipient-keyed: the context for a message is the RECIPIENT's
+    // handle. So Alice->Bob uses @<bob_handle> on BOTH sides and Bob->Alice
+    // uses @<alice_handle>. The recipient stamps the KEYREQ c= with its own
+    // handle; both sides use it verbatim. This proves the manager needs no
+    // change for DMs — only the IRC callers must compute the recipient-keyed
+    // context (own handle on decrypt, peer handle on encrypt).
+    let alice = make_manager();
+    let bob = make_manager();
+    let alice_handle = "~alice@a.host";
+    let bob_handle = "~bob@b.host";
+    let ctx_to_bob = format!("@{bob_handle}"); // recipient = Bob
+    let ctx_to_alice = format!("@{alice_handle}"); // recipient = Alice
+
+    enable_channel(&alice, &ctx_to_bob, ChannelMode::AutoAccept);
+    enable_channel(&bob, &ctx_to_alice, ChannelMode::AutoAccept);
+
+    // Dir Alice->Bob: Bob (the recipient) sends a KEYREQ stamped with his own
+    // handle; Alice responds; Bob installs the incoming session under @<bob>.
+    let req = bob.build_keyreq(&ctx_to_bob).unwrap();
+    let rsp = alice.handle_keyreq(bob_handle, &req).unwrap().unwrap();
+    bob.handle_keyrsp(alice_handle, &rsp).unwrap();
+    let wire = alice.encrypt_outgoing(&ctx_to_bob, "hi bob").unwrap();
+    match bob
+        .decrypt_incoming(alice_handle, &ctx_to_bob, &wire[0])
+        .unwrap()
+    {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "hi bob"),
+        other => panic!("A->B: expected Plaintext, got {other:?}"),
+    }
+
+    // Dir Bob->Alice: symmetric, recipient = Alice.
+    let req2 = alice.build_keyreq(&ctx_to_alice).unwrap();
+    let rsp2 = bob.handle_keyreq(alice_handle, &req2).unwrap().unwrap();
+    alice.handle_keyrsp(bob_handle, &rsp2).unwrap();
+    let wire2 = bob.encrypt_outgoing(&ctx_to_alice, "hey alice").unwrap();
+    match alice
+        .decrypt_incoming(bob_handle, &ctx_to_alice, &wire2[0])
+        .unwrap()
+    {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "hey alice"),
+        other => panic!("B->A: expected Plaintext, got {other:?}"),
+    }
+}
+
+#[test]
+fn chghost_migrates_enabled_dm_config_to_new_context() {
+    // A peer's vhost/host change must carry the E2E policy to the new
+    // pseudochannel, or the next DM would key under @<new>, find no config,
+    // and go plaintext.
+    let mgr = make_manager();
+    let old_ctx = "@~bob@old.host";
+    let new_ctx = "@~bob@user/bob";
+    enable_channel(&mgr, old_ctx, ChannelMode::Normal);
+
+    assert!(
+        crate::irc::events::migrate_dm_e2e_config(&mgr, old_ctx, new_ctx, false).unwrap(),
+        "an enabled config must report as migrated"
+    );
+
+    // New context is now enabled; the old context stays enabled too (copy,
+    // not move) so the encrypt path's cached @<old> fallback still encrypts
+    // rather than going plaintext — and the TOFU last_handle is left untouched.
+    assert!(
+        mgr.keyring()
+            .get_channel_config(new_ctx)
+            .unwrap()
+            .is_some_and(|c| c.enabled),
+        "config must follow the peer to the new handle"
+    );
+    assert!(
+        mgr.keyring()
+            .get_channel_config(old_ctx)
+            .unwrap()
+            .is_some_and(|c| c.enabled),
+        "old-context config stays enabled (copy, not move)"
+    );
+
+    // A disabled old config is NOT migrated (no policy to preserve).
+    let mgr2 = make_manager();
+    mgr2.keyring()
+        .set_channel_config(&ChannelConfig {
+            channel: old_ctx.to_string(),
+            enabled: false,
+            mode: ChannelMode::Normal,
+        })
+        .unwrap();
+    assert!(
+        !crate::irc::events::migrate_dm_e2e_config(&mgr2, old_ctx, new_ctx, false).unwrap(),
+        "a disabled config must report as not migrated"
+    );
+    assert!(
+        mgr2.keyring().get_channel_config(new_ctx).unwrap().is_none(),
+        "a disabled config must not be migrated"
+    );
+}
+
+#[test]
+fn dm_keyreq_skips_reciprocal_but_channel_keeps_it() {
+    // DM: Alice receives Bob's KEYREQ for the DM context (Bob's own handle).
+    // No reciprocal is queued — the reverse (Alice-receives-from-Bob) direction
+    // is keyed by Alice's OWN handle, which the manager can't derive from
+    // req.channel; it self-heals via the live auto-KEYREQ instead. Building one
+    // under @<bob> would orphan rows and spend the shared rate-limit slot.
+    let alice = make_manager();
+    let bob = make_manager();
+    let bob_handle = "~bob@b.host";
+    let dm_ctx = format!("@{bob_handle}");
+    enable_channel(&alice, &dm_ctx, ChannelMode::AutoAccept);
+    let dm_req = bob.build_keyreq(&dm_ctx).unwrap();
+    alice.handle_keyreq(bob_handle, &dm_req).unwrap();
+    assert!(
+        alice.take_pending_outbound_keyreqs().is_empty(),
+        "a DM KEYREQ must not build a mis-keyed reciprocal"
+    );
+
+    // Channel: the proactive reciprocal IS still built (own == peer == channel).
+    let carol = make_manager();
+    let dave = make_manager();
+    let dave_handle = "~dave@d.host";
+    enable_channel(&carol, "#x", ChannelMode::AutoAccept);
+    let chan_req = dave.build_keyreq("#x").unwrap();
+    carol.handle_keyreq(dave_handle, &chan_req).unwrap();
+    assert!(
+        !carol.take_pending_outbound_keyreqs().is_empty(),
+        "a channel KEYREQ still builds the proactive reciprocal"
+    );
 }
 
 #[test]
@@ -359,6 +543,10 @@ fn import_replaces_existing_keyring_state() {
             created_at: 2_000,
         })
         .unwrap();
+    carol
+        .keyring()
+        .cache_dm_handle("StaleNet", "stale", "~stale@old.host")
+        .unwrap();
 
     let tmp = tempfile::NamedTempFile::new().unwrap();
     crate::e2e::portable::export_to_path(alice.keyring(), tmp.path()).unwrap();
@@ -404,6 +592,15 @@ fn import_replaces_existing_keyring_state() {
             .get_channel_config("#stale")
             .unwrap()
             .is_none()
+    );
+    // The stale DM handle cache from the previous keyring must be cleared, so
+    // an imported keyring can't resolve a DM under the old handle.
+    assert_eq!(
+        carol
+            .keyring()
+            .last_handle_for_nick("stale", "StaleNet")
+            .unwrap(),
+        None
     );
 }
 
@@ -1639,4 +1836,877 @@ fn load_identity_detects_corrupted_fingerprint() {
         Err(e) => panic!("expected Err(Crypto), got different Err: {e:?}"),
         Ok(_) => panic!("expected Err(Crypto), got Ok"),
     }
+}
+
+// === Phase C: REKEY replay protection + previous-key retention ===
+
+/// Handshake carol→alice on `#x` and return the parsed REKEY produced by
+/// alice's next lazy rotation, plus the pre-rotation ciphertext `w1`.
+fn setup_rotation(alice: &E2eManager, carol: &E2eManager) -> (String, crate::e2e::handshake::KeyRekey, Vec<String>) {
+    enable_channel(alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(carol, "#x", ChannelMode::AutoAccept);
+    let req = carol.build_keyreq("#x").unwrap();
+    let rsp = alice.handle_keyreq("~carol@c.host", &req).unwrap().unwrap();
+    carol.handle_keyrsp("~alice@a.host", &rsp).unwrap();
+
+    // Message sent under the CURRENT (soon to be previous) key.
+    let w1 = alice.encrypt_outgoing("#x", "in-flight under old key").unwrap();
+
+    // Rotate: the next send regenerates the key and queues a REKEY to carol.
+    alice.keyring().mark_outgoing_pending_rotation("#x").unwrap();
+    let _w2 = alice.encrypt_outgoing("#x", "first under new key").unwrap();
+    let rekeys = alice.take_pending_rekey_sends();
+    assert_eq!(rekeys.len(), 1);
+    let inner = rekeys[0]
+        .notice_text
+        .strip_prefix('\x01')
+        .and_then(|s| s.strip_suffix('\x01'))
+        .unwrap()
+        .to_string();
+    let parsed = crate::e2e::handshake::parse(&inner).unwrap().unwrap();
+    let rk = match parsed {
+        crate::e2e::handshake::HandshakeMsg::Rekey(r) => r,
+        other => panic!("expected Rekey, got {other:?}"),
+    };
+    (inner, rk, w1)
+}
+
+#[test]
+fn rekey_replay_is_rejected() {
+    // A captured REKEY replayed later must not overwrite the current
+    // incoming session (rollback/DoS): the signed nonce is single-use.
+    let alice = make_manager();
+    let carol = make_manager();
+    let (_inner, rk, _w1) = setup_rotation(&alice, &carol);
+
+    carol.handle_rekey("~alice@a.host", &rk).unwrap();
+    let err = carol
+        .handle_rekey("~alice@a.host", &rk)
+        .expect_err("replayed REKEY must be rejected");
+    assert!(
+        err.to_string().to_lowercase().contains("replay"),
+        "error should name the replay: {err}"
+    );
+}
+
+#[test]
+fn in_flight_ciphertext_under_previous_key_decrypts_after_rekey() {
+    // NOTICE (REKEY) can overtake PRIVMSG ciphertext already sent under the
+    // superseded key. The receiver must keep the previous key for a grace
+    // window so the in-flight message still decrypts instead of failing AEAD
+    // until a manual re-handshake.
+    let alice = make_manager();
+    let carol = make_manager();
+    let (_inner, rk, w1) = setup_rotation(&alice, &carol);
+
+    // REKEY arrives FIRST (reorder), replacing carol's incoming session…
+    carol.handle_rekey("~alice@a.host", &rk).unwrap();
+
+    // …then the older ciphertext lands. It must still decrypt.
+    match carol.decrypt_incoming("~alice@a.host", "#x", &w1[0]).unwrap() {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "in-flight under old key"),
+        other => panic!("in-flight message must decrypt under the previous key, got {other:?}"),
+    }
+}
+
+#[test]
+fn previous_key_grace_window_expires() {
+    // The previous key is a short reorder tolerance, not a second long-lived
+    // key: once the grace window has passed, old-key ciphertext is rejected.
+    let alice = make_manager();
+    let carol_conn = Connection::open_in_memory().unwrap();
+    carol_conn.execute_batch(SCHEMA).unwrap();
+    let carol_db = Arc::new(Mutex::new(carol_conn));
+    let carol = E2eManager::load_or_init(Keyring::new(Arc::clone(&carol_db))).unwrap();
+    let (_inner, rk, w1) = setup_rotation(&alice, &carol);
+
+    carol.handle_rekey("~alice@a.host", &rk).unwrap();
+
+    // Age the retained previous key far past the grace window.
+    carol_db
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE e2e_incoming_sessions SET prev_created_at = 1 WHERE channel = '#x'",
+            [],
+        )
+        .unwrap();
+
+    match carol.decrypt_incoming("~alice@a.host", "#x", &w1[0]).unwrap() {
+        DecryptOutcome::Rejected(_) => {}
+        other => panic!("expired previous key must not decrypt, got {other:?}"),
+    }
+}
+
+// === Phase D: pending-handshake TTL ===
+
+#[test]
+fn stale_pending_handshakes_are_evicted() {
+    // The initiator's in-memory pending map (ephemeral secrets awaiting a
+    // KEYRSP) must not grow without bound across a long session: entries
+    // past the TTL are pruned on the next handshake build, and a KEYRSP for
+    // an evicted entry fails like any unknown handshake.
+    let bob = make_manager();
+    let alice = make_manager();
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+
+    let req = bob.build_keyreq("#x").unwrap();
+    let rsp = alice.handle_keyreq("~bob@b.host", &req).unwrap().unwrap();
+
+    // Age bob's pending entry far past the TTL; the next build prunes.
+    bob.age_pending_entries_for_test(1_000_000);
+    let _ = bob.build_keyreq("#other").unwrap();
+
+    let err = bob
+        .handle_keyrsp("~alice@a.host", &rsp)
+        .expect_err("KEYRSP for an evicted pending entry must fail");
+    assert!(
+        err.to_string().contains("no pending handshake"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn stale_pending_inbound_keyreqs_are_evicted() {
+    // Normal-mode inbound KEYREQs cached for /e2e accept get the same TTL
+    // treatment (a much longer window — the user may be away). After
+    // eviction, accept finds nothing; the peer simply re-handshakes.
+    let alice = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::Normal);
+    let bob = make_manager();
+    let req = bob.build_keyreq("#x").unwrap();
+    assert!(
+        alice.handle_keyreq("~bob@b.host", &req).unwrap().is_none(),
+        "normal mode caches the KEYREQ instead of answering"
+    );
+
+    alice.age_pending_entries_for_test(1_000_000);
+    // Any new inbound handshake triggers the prune.
+    let carol = make_manager();
+    let req2 = carol.build_keyreq("#x").unwrap();
+    let _ = alice.handle_keyreq("~carol@c.host", &req2).unwrap();
+
+    assert!(
+        alice
+            .accept_pending_inbound("~bob@b.host", "#x")
+            .unwrap()
+            .is_none(),
+        "the evicted inbound KEYREQ must be gone"
+    );
+}
+
+#[test]
+fn stale_pending_handshake_rejected_by_keyrsp_consumer_without_insert() {
+    // Consumer-side TTL enforcement: a KEYRSP arriving after the TTL with NO
+    // intervening handshake build (so nothing pruned on insert) must still
+    // be rejected, and the stale ephemeral secret must not complete the
+    // handshake. This is the gap the insert-only prune leaves open.
+    let bob = make_manager();
+    let alice = make_manager();
+    enable_channel(&bob, "#x", ChannelMode::AutoAccept);
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+
+    let req = bob.build_keyreq("#x").unwrap();
+    let rsp = alice.handle_keyreq("~bob@b.host", &req).unwrap().unwrap();
+
+    // Age bob's pending entry past the TTL — and do NOT build another
+    // handshake, so the only thing that can evict it is the KEYRSP consumer.
+    bob.age_pending_entries_for_test(1_000_000);
+
+    let err = bob
+        .handle_keyrsp("~alice@a.host", &rsp)
+        .expect_err("a KEYRSP past the TTL must not complete a stale handshake");
+    assert!(
+        err.to_string().contains("no pending handshake"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn stale_pending_inbound_rejected_by_accept_without_insert() {
+    // Consumer-side TTL enforcement for the inbound cache: /e2e accept on a
+    // KEYREQ that has sat past the inbound TTL, with NO intervening inbound
+    // handshake to trigger pruning, must find nothing to accept.
+    let alice = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::Normal);
+    let bob = make_manager();
+    let req = bob.build_keyreq("#x").unwrap();
+    assert!(
+        alice.handle_keyreq("~bob@b.host", &req).unwrap().is_none(),
+        "normal mode caches the KEYREQ instead of answering"
+    );
+
+    // Age it past the inbound TTL; accept alone must evict + refuse.
+    alice.age_pending_entries_for_test(1_000_000);
+
+    assert!(
+        alice
+            .accept_pending_inbound("~bob@b.host", "#x")
+            .unwrap()
+            .is_none(),
+        "a stale inbound KEYREQ must not be accepted"
+    );
+}
+
+// === Phase E: network-scoped keyring contexts ===
+
+#[test]
+fn scoped_context_keeps_wire_fields_unscoped() {
+    // Everything that leaves the process must carry the WIRE context —
+    // the network label is a local storage detail. A scoped KEYREQ must
+    // stamp c= with the bare channel and sign over it (interop with
+    // clients that never scope).
+    let alice = make_manager();
+    let ctx = crate::e2e::scoped_context("NetA", "#x");
+    let req = alice.build_keyreq(&ctx).unwrap();
+    assert_eq!(req.channel, "#x", "c= must carry the wire context");
+
+    // The signature must verify against the wire channel, exactly as an
+    // unscoped peer would compute it.
+    let payload = crate::e2e::handshake::signed_keyreq_payload(
+        "#x",
+        &req.pubkey,
+        &req.eph_x25519,
+        &req.nonce,
+    );
+    crate::e2e::crypto::sig::verify(&req.pubkey, &payload, &req.sig)
+        .expect("signature must be over the wire channel");
+}
+
+#[test]
+fn scoped_handshake_round_trip_and_network_isolation() {
+    // Both sides key their storage under their own network label while the
+    // wire carries only "#x". After the handshake, the session exists under
+    // NetA's scoped context — and NOT under NetB's, even though the channel
+    // name is identical.
+    let alice = make_manager();
+    let carol = make_manager();
+    let a_ctx = crate::e2e::scoped_context("NetA", "#x");
+    enable_channel(&alice, &a_ctx, ChannelMode::AutoAccept);
+    enable_channel(&carol, &a_ctx, ChannelMode::AutoAccept);
+
+    let req = carol.build_keyreq(&a_ctx).unwrap();
+    assert_eq!(req.channel, "#x");
+    // The receiving side scopes the wire channel with ITS network before
+    // handing the message to the manager (what events.rs does).
+    let mut scoped_req = req.clone();
+    scoped_req.channel = crate::e2e::scoped_context("NetA", &req.channel);
+    let rsp = alice
+        .handle_keyreq("~carol@c.host", &scoped_req)
+        .unwrap()
+        .expect("AutoAccept must answer");
+    assert_eq!(rsp.channel, "#x", "KEYRSP echoes the wire c= verbatim");
+
+    let mut scoped_rsp = rsp.clone();
+    scoped_rsp.channel = crate::e2e::scoped_context("NetA", &rsp.channel);
+    carol.handle_keyrsp("~alice@a.host", &scoped_rsp).unwrap();
+
+    // Encrypt/decrypt round trip under the scoped context.
+    let wires = alice.encrypt_outgoing(&a_ctx, "scoped secret").unwrap();
+    match carol
+        .decrypt_incoming("~alice@a.host", &a_ctx, &wires[0])
+        .unwrap()
+    {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "scoped secret"),
+        other => panic!("scoped decrypt failed: {other:?}"),
+    }
+
+    // Isolation: the same channel name on another network has NO session
+    // and NO config.
+    let b_ctx = crate::e2e::scoped_context("NetB", "#x");
+    assert!(
+        carol
+            .keyring()
+            .get_incoming_session("~alice@a.host", &b_ctx)
+            .unwrap()
+            .is_none(),
+        "NetB must not inherit NetA's session"
+    );
+    assert!(
+        alice.keyring().get_channel_config(&b_ctx).unwrap().is_none(),
+        "NetB must not inherit NetA's config"
+    );
+}
+
+#[test]
+fn legacy_unscoped_rows_still_resolve_after_upgrade() {
+    // Pre-upgrade databases hold unscoped rows ("#x"). Scoped reads must
+    // fall back to them so an existing E2E setup keeps decrypting and
+    // keeps its config after the upgrade; scoped rows win when present.
+    let alice = make_manager();
+    let carol = make_manager();
+    // Legacy handshake — everything stored unscoped.
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&carol, "#x", ChannelMode::AutoAccept);
+    let req = carol.build_keyreq("#x").unwrap();
+    let rsp = alice.handle_keyreq("~carol@c.host", &req).unwrap().unwrap();
+    carol.handle_keyrsp("~alice@a.host", &rsp).unwrap();
+    let wires = alice.encrypt_outgoing("#x", "legacy msg").unwrap();
+
+    // Post-upgrade the caller passes scoped contexts.
+    let scoped = crate::e2e::scoped_context("NetA", "#x");
+    assert!(
+        carol
+            .keyring()
+            .get_channel_config(&scoped)
+            .unwrap()
+            .is_some_and(|c| c.enabled),
+        "scoped config read must fall back to the legacy row"
+    );
+    match carol
+        .decrypt_incoming("~alice@a.host", &scoped, &wires[0])
+        .unwrap()
+    {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "legacy msg"),
+        other => panic!("legacy session must decrypt under a scoped read: {other:?}"),
+    }
+    // Our own outgoing key must also fall back — otherwise the first
+    // post-upgrade send generates a fresh key without a REKEY and every
+    // legacy peer fails AEAD.
+    let post = alice.encrypt_outgoing(&scoped, "post-upgrade msg").unwrap();
+    match carol
+        .decrypt_incoming("~alice@a.host", "#x", &post[0])
+        .unwrap()
+    {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "post-upgrade msg"),
+        other => panic!("post-upgrade send must reuse the legacy outgoing key: {other:?}"),
+    }
+}
+
+#[test]
+fn scoped_dm_keyreq_still_skips_reciprocal() {
+    // The DM test inside handle_keyreq must look at the WIRE part of a
+    // scoped context — 'Net\x1F@handle' does not start with '@', and
+    // treating it as a channel would fire a reciprocal KEYREQ keyed under
+    // the wrong DM direction (the G13 bug all over again).
+    let alice = make_manager();
+    let dm_ctx = crate::e2e::scoped_context("NetA", "@~me@host");
+    enable_channel(&alice, &dm_ctx, ChannelMode::AutoAccept);
+
+    let bob = make_manager();
+    let mut req = bob.build_keyreq(&dm_ctx).unwrap();
+    assert_eq!(req.channel, "@~me@host");
+    req.channel = dm_ctx;
+    alice
+        .handle_keyreq("~bob@b.host", &req)
+        .unwrap()
+        .expect("AutoAccept answers the DM KEYREQ");
+    assert!(
+        alice.take_pending_outbound_keyreqs().is_empty(),
+        "a DM KEYREQ must not queue a reciprocal (per-direction handshakes)"
+    );
+}
+
+#[test]
+fn rotation_recipients_union_scoped_and_legacy_rows() {
+    // Upgraded keyrings hold pre-scoping recipients under the legacy
+    // unscoped channel while new handshakes record under the scoped one.
+    // A rotate must REKEY the UNION of both — dropping the legacy list
+    // would leave every pre-upgrade peer on the old key.
+    let alice = make_manager();
+    let scoped = crate::e2e::scoped_context("NetA", "#x");
+    alice
+        .keyring()
+        .record_outgoing_recipient("#x", "~legacy@old.host", &[0xaa; 16], 100)
+        .unwrap();
+    alice
+        .keyring()
+        .record_outgoing_recipient(&scoped, "~new@new.host", &[0xbb; 16], 200)
+        .unwrap();
+    // The same peer present in both generations must appear once, with the
+    // scoped row winning.
+    alice
+        .keyring()
+        .record_outgoing_recipient("#x", "~both@dual.host", &[0xcc; 16], 100)
+        .unwrap();
+    alice
+        .keyring()
+        .record_outgoing_recipient(&scoped, "~both@dual.host", &[0xdd; 16], 200)
+        .unwrap();
+
+    let recipients = alice.keyring().list_outgoing_recipients(&scoped).unwrap();
+    let handles: Vec<&str> = recipients.iter().map(|(h, _)| h.as_str()).collect();
+    assert!(handles.contains(&"~legacy@old.host"), "legacy peer dropped: {handles:?}");
+    assert!(handles.contains(&"~new@new.host"));
+    assert_eq!(
+        handles.iter().filter(|h| **h == "~both@dual.host").count(),
+        1,
+        "same peer in both generations must be deduped"
+    );
+    let both_fp = recipients
+        .iter()
+        .find(|(h, _)| h == "~both@dual.host")
+        .map(|(_, fp)| *fp)
+        .unwrap();
+    assert_eq!(both_fp, [0xdd; 16], "the scoped row wins the dedup");
+}
+
+#[test]
+fn trusted_peer_listing_unions_scoped_and_legacy_rows() {
+    // /e2e list and the /e2e status peer count read
+    // list_trusted_peers_for_channel — after the upgrade it must show BOTH
+    // generations (dedup by handle, scoped wins), like the REKEY
+    // recipient list.
+    let mgr = make_manager();
+    let scoped = crate::e2e::scoped_context("NetA", "#x");
+    for (channel, handle, fpb) in [
+        ("#x", "~legacy@old.host", 0xaau8),
+        (scoped.as_str(), "~new@new.host", 0xbb),
+        ("#x", "~both@dual.host", 0xcc),
+        (scoped.as_str(), "~both@dual.host", 0xdd),
+    ] {
+        mgr.keyring()
+            .set_incoming_session(&IncomingSession {
+                handle: handle.to_string(),
+                channel: channel.to_string(),
+                fingerprint: [fpb; 16],
+                sk: [1u8; 32],
+                status: TrustStatus::Trusted,
+                created_at: 100,
+            })
+            .unwrap();
+    }
+
+    let peers = mgr
+        .keyring()
+        .list_trusted_peers_for_channel(&scoped)
+        .unwrap();
+    let handles: Vec<&str> = peers.iter().map(|p| p.handle.as_str()).collect();
+    assert!(handles.contains(&"~legacy@old.host"), "legacy peer hidden: {handles:?}");
+    assert!(handles.contains(&"~new@new.host"));
+    assert_eq!(
+        handles.iter().filter(|h| **h == "~both@dual.host").count(),
+        1
+    );
+    let both = peers.iter().find(|p| p.handle == "~both@dual.host").unwrap();
+    assert_eq!(both.fingerprint, [0xdd; 16], "scoped row wins the dedup");
+}
+
+#[test]
+fn first_scoped_rekey_retains_legacy_key_and_fingerprint_check() {
+    // Upgraded keyring: the established Trusted session lives under the
+    // legacy unscoped row. The FIRST scoped install (post-upgrade REKEY)
+    // must consult that row — both for the fingerprint-continuity check
+    // and as the prev-key source, or the reorder grace window is lost
+    // exactly once per conversation after the upgrade.
+    let kr_conn = Connection::open_in_memory().unwrap();
+    kr_conn.execute_batch(SCHEMA).unwrap();
+    let kr = Keyring::new(Arc::new(Mutex::new(kr_conn)));
+    kr.set_incoming_session(&IncomingSession {
+        handle: "~alice@a.host".into(),
+        channel: "#x".into(),
+        fingerprint: [0xaa; 16],
+        sk: [1u8; 32],
+        status: TrustStatus::Trusted,
+        created_at: 100,
+    })
+    .unwrap();
+
+    let scoped = crate::e2e::scoped_context("NetA", "#x");
+    // Same fingerprint, new key → allowed, legacy key retained as prev.
+    kr.install_incoming_session_strict(&IncomingSession {
+        handle: "~alice@a.host".into(),
+        channel: scoped.clone(),
+        fingerprint: [0xaa; 16],
+        sk: [2u8; 32],
+        status: TrustStatus::Trusted,
+        created_at: 200,
+    })
+    .unwrap();
+    let (prev_sk, _) = kr
+        .get_incoming_prev_key("~alice@a.host", &scoped)
+        .unwrap()
+        .expect("legacy key must be retained as prev on the first scoped install");
+    assert_eq!(prev_sk, [1u8; 32]);
+
+    // Different fingerprint under another scoped context with only a legacy
+    // row → must be rejected like any TOFU fingerprint change.
+    let fresh_conn = Connection::open_in_memory().unwrap();
+    fresh_conn.execute_batch(SCHEMA).unwrap();
+    let kr2 = Keyring::new(Arc::new(Mutex::new(fresh_conn)));
+    kr2.set_incoming_session(&IncomingSession {
+        handle: "~alice@a.host".into(),
+        channel: "#x".into(),
+        fingerprint: [0xaa; 16],
+        sk: [1u8; 32],
+        status: TrustStatus::Trusted,
+        created_at: 100,
+    })
+    .unwrap();
+    let err = kr2
+        .install_incoming_session_strict(&IncomingSession {
+            handle: "~alice@a.host".into(),
+            channel: crate::e2e::scoped_context("NetA", "#x"),
+            fingerprint: [0xbb; 16],
+            sk: [2u8; 32],
+            status: TrustStatus::Trusted,
+            created_at: 200,
+        })
+        .expect_err("fingerprint change vs the legacy row must be rejected");
+    assert!(err.to_string().contains("fp="), "unexpected error: {err}");
+}
+
+#[test]
+fn renamed_network_label_heals_unambiguous_config_read() {
+    // config.toml label rename ("Libera" → "LiberaChat") orphans every
+    // scoped row. The enabled check is the fail-open point: it must find
+    // the config when EXACTLY ONE other network's row shares the wire part
+    // (unambiguous rename) — never when two networks both have one (real
+    // cross-network isolation).
+    let mgr = make_manager();
+    let old_ctx = crate::e2e::scoped_context("Libera", "@~bob@b.host");
+    enable_channel(&mgr, &old_ctx, ChannelMode::Normal);
+
+    // The heal fires only when the sibling's label is no longer configured
+    // (true rename signal) — declare the post-rename server set.
+    mgr.keyring()
+        .set_configured_networks(["LiberaChat".to_string(), "Rizon".to_string()]);
+
+    let renamed = crate::e2e::scoped_context("LiberaChat", "@~bob@b.host");
+    assert!(
+        mgr.keyring()
+            .get_channel_config(&renamed)
+            .unwrap()
+            .is_some_and(|c| c.enabled),
+        "unambiguous rename must heal the enabled read (fail-open otherwise)"
+    );
+
+    // Ambiguous: a second network has its own row for the same wire part →
+    // NO heal (isolation wins).
+    enable_channel(
+        &mgr,
+        &crate::e2e::scoped_context("OFTC", "@~bob@b.host"),
+        ChannelMode::Normal,
+    );
+    assert!(
+        mgr.keyring()
+            .get_channel_config(&crate::e2e::scoped_context("Rizon", "@~bob@b.host"))
+            .unwrap()
+            .is_none(),
+        "two candidate networks → ambiguous → no heal"
+    );
+}
+
+#[test]
+fn multi_network_config_denies_legacy_fallback() {
+    // With two networks configured, a legacy unscoped row has no
+    // determinable owner. Serving it to every scoped miss would hand one
+    // network's keys to ANY network sharing the wire name (`#x` on NetA
+    // and NetB) — the reads must fail closed instead.
+    let alice = make_manager();
+    let carol = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&carol, "#x", ChannelMode::AutoAccept);
+    let req = carol.build_keyreq("#x").unwrap();
+    let rsp = alice.handle_keyreq("~carol@c.host", &req).unwrap().unwrap();
+    carol.handle_keyrsp("~alice@a.host", &rsp).unwrap();
+    carol
+        .keyring()
+        .record_outgoing_recipient("#x", "~legacy@old.host", &[0xaa; 16], 100)
+        .unwrap();
+    carol.keyring().add_autotrust("#x", "*", 100).unwrap();
+
+    carol
+        .keyring()
+        .set_configured_networks(["NetA".to_string(), "NetB".to_string()]);
+
+    let net_b = crate::e2e::scoped_context("NetB", "#x");
+    assert!(
+        carol.keyring().get_channel_config(&net_b).unwrap().is_none(),
+        "NetB must not inherit NetA's legacy config"
+    );
+    assert!(
+        carol
+            .keyring()
+            .get_incoming_session("~alice@a.host", &net_b)
+            .unwrap()
+            .is_none(),
+        "NetB must not decrypt with the legacy session"
+    );
+    assert!(
+        carol.keyring().get_outgoing_session(&net_b).unwrap().is_none(),
+        "NetB must not encrypt with the legacy outgoing key"
+    );
+    assert!(
+        carol
+            .keyring()
+            .list_outgoing_recipients(&net_b)
+            .unwrap()
+            .is_empty(),
+        "NetB must not REKEY the legacy recipient list"
+    );
+    assert!(
+        carol
+            .keyring()
+            .list_trusted_peers_for_channel(&net_b)
+            .unwrap()
+            .is_empty(),
+        "NetB must not list the legacy trusted peers"
+    );
+    assert!(
+        !carol
+            .keyring()
+            .autotrust_matches("~mallory@m.host", &net_b)
+            .unwrap(),
+        "a legacy autotrust rule must not auto-trust peers on another network"
+    );
+}
+
+#[test]
+fn single_network_startup_migrates_legacy_rows() {
+    // Exactly one configured network is the unambiguous owner: startup
+    // migration renames every context-keyed legacy row to its scope, so
+    // scoped reads resolve exactly and nothing is left for the fallback.
+    let alice = make_manager();
+    let carol = make_manager();
+    enable_channel(&alice, "#x", ChannelMode::AutoAccept);
+    enable_channel(&carol, "#x", ChannelMode::AutoAccept);
+    let req = carol.build_keyreq("#x").unwrap();
+    let rsp = alice.handle_keyreq("~carol@c.host", &req).unwrap().unwrap();
+    carol.handle_keyrsp("~alice@a.host", &rsp).unwrap();
+    let wires = alice.encrypt_outgoing("#x", "pre-upgrade msg").unwrap();
+    carol
+        .keyring()
+        .record_outgoing_recipient("#x", "~alice@a.host", &[0xaa; 16], 100)
+        .unwrap();
+    carol.keyring().add_autotrust("#x", "~alice*", 100).unwrap();
+
+    carol.keyring().set_configured_networks(["NetA".to_string()]);
+    let unattributed = carol.keyring().adopt_legacy_contexts().unwrap();
+    assert!(unattributed.is_empty(), "single network is never ambiguous");
+    assert!(
+        carol.keyring().list_legacy_contexts().unwrap().is_empty(),
+        "migration must leave no unscoped rows behind"
+    );
+
+    let scoped = crate::e2e::scoped_context("NetA", "#x");
+    assert!(
+        carol
+            .keyring()
+            .get_channel_config(&scoped)
+            .unwrap()
+            .is_some_and(|c| c.enabled),
+        "config must resolve under the scoped key after migration"
+    );
+    match carol
+        .decrypt_incoming("~alice@a.host", &scoped, &wires[0])
+        .unwrap()
+    {
+        DecryptOutcome::Plaintext(s) => assert_eq!(s, "pre-upgrade msg"),
+        other => panic!("migrated session must keep decrypting: {other:?}"),
+    }
+    assert_eq!(
+        carol
+            .keyring()
+            .list_outgoing_recipients(&scoped)
+            .unwrap()
+            .len(),
+        1,
+        "recipient rows must migrate with the context"
+    );
+    assert!(
+        carol
+            .keyring()
+            .autotrust_matches("~alice@a.host", &scoped)
+            .unwrap(),
+        "autotrust rules must migrate with the context"
+    );
+    // A different network's scoped read finds nothing — the migrated rows
+    // belong to NetA now.
+    assert!(
+        carol
+            .keyring()
+            .get_channel_config(&crate::e2e::scoped_context("NetB", "#x"))
+            .unwrap()
+            .is_none(),
+        "migrated rows must not leak to another network"
+    );
+}
+
+#[test]
+fn adoption_attributes_dm_context_via_handle_cache() {
+    // Multi-network config, but the DM handle cache (network-keyed) has
+    // seen the peer's handle on exactly one configured network — that
+    // attribution is unambiguous, so the DM context migrates to it.
+    let mgr = make_manager();
+    let dm_wire = "@~bob@b.host";
+    enable_channel(&mgr, dm_wire, ChannelMode::AutoAccept);
+    mgr.keyring()
+        .cache_dm_handle("NetA", "bob", "~bob@b.host")
+        .unwrap();
+
+    mgr.keyring()
+        .set_configured_networks(["NetA".to_string(), "NetB".to_string()]);
+    let unattributed = mgr.keyring().adopt_legacy_contexts().unwrap();
+    assert!(
+        unattributed.is_empty(),
+        "cache-attributed DM context must migrate: {unattributed:?}"
+    );
+    assert!(
+        mgr.keyring()
+            .get_channel_config(&crate::e2e::scoped_context("NetA", dm_wire))
+            .unwrap()
+            .is_some_and(|c| c.enabled),
+        "the DM config must now live under the cache's network"
+    );
+    assert!(
+        mgr.keyring()
+            .get_channel_config(&crate::e2e::scoped_context("NetB", dm_wire))
+            .unwrap()
+            .is_none(),
+        "the other network must not see the migrated DM config"
+    );
+}
+
+#[test]
+fn adoption_never_attributes_channel_contexts_from_chat_logs() {
+    // Multi-network config; the shared database's message log shows '#only'
+    // active solely on NetA — but chat logs prove activity, not key
+    // ownership: the pre-upgrade E2E rows could belong to a network whose
+    // history is empty, excluded, or purged, and migrating on that evidence
+    // would reuse the keys cross-network. Channel contexts therefore always
+    // stay legacy on multi-network configs and are reported for the startup
+    // warning; the read gate keeps them inert (fresh handshakes
+    // re-establish sessions fail-closed).
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(SCHEMA).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY, network TEXT NOT NULL,
+                                buffer TEXT NOT NULL, timestamp INTEGER NOT NULL DEFAULT 0)",
+    )
+    .unwrap();
+    conn.execute_batch("INSERT INTO messages (network, buffer) VALUES ('NetA', '#only');")
+        .unwrap();
+    let kr = Keyring::new(Arc::new(Mutex::new(conn)));
+    let mgr = E2eManager::load_or_init(kr).unwrap();
+    enable_channel(&mgr, "#only", ChannelMode::AutoAccept);
+
+    mgr.keyring()
+        .set_configured_networks(["NetA".to_string(), "NetB".to_string()]);
+    let unattributed = mgr.keyring().adopt_legacy_contexts().unwrap();
+    assert_eq!(
+        unattributed,
+        vec!["#only".to_string()],
+        "channel contexts must never be attributed from the message log"
+    );
+    for network in ["NetA", "NetB"] {
+        assert!(
+            mgr.keyring()
+                .get_channel_config(&crate::e2e::scoped_context(network, "#only"))
+                .unwrap()
+                .is_none(),
+            "the legacy channel config must not migrate to '{network}'"
+        );
+    }
+}
+
+#[test]
+fn nick_rename_carries_dm_handle_cache() {
+    // An IRC NICK must re-key the (network, nick) handle cache row, or a
+    // `/msg <new_nick>` with no live query buffer resolves no handle and
+    // downgrades an E2E-enabled DM to plaintext. Scoped per network: the
+    // same nick on another network is untouched, and a stale row already
+    // holding the new nick is replaced (NICK is authoritative). The
+    // network-agnostic e2e_peers.last_nick hint must NOT be rewritten: a
+    // rename on NetA says nothing about a same-nick peer on NetB, and
+    // moving their hint off the nick they still hold would break the
+    // legacy_handle_for_nick fallback there (plaintext passthrough).
+    let mgr = make_manager();
+    let kr = mgr.keyring();
+    kr.cache_dm_handle("NetA", "bob", "~bob@b.host").unwrap();
+    kr.cache_dm_handle("NetA", "bobby", "~stale@old.host").unwrap();
+    kr.cache_dm_handle("NetB", "bob", "~otherbob@x.host").unwrap();
+    // A same-nick peer on ANOTHER network, resolvable only via the
+    // legacy last_nick hint (no cache row for them on NetB).
+    kr.upsert_peer(&crate::e2e::keyring::PeerRecord {
+        fingerprint: [7u8; 16],
+        pubkey: [9u8; 32],
+        last_handle: Some("~carol@b.net".to_string()),
+        last_nick: Some("carol".to_string()),
+        first_seen: 0,
+        last_seen: 1,
+        global_status: crate::e2e::keyring::TrustStatus::Trusted,
+    })
+    .unwrap();
+
+    kr.rename_dm_nick("NetA", "bob", "bobby").unwrap();
+    kr.rename_dm_nick("NetA", "carol", "dave").unwrap();
+
+    assert_eq!(
+        kr.last_handle_for_nick("bobby", "NetA").unwrap().as_deref(),
+        Some("~bob@b.host"),
+        "the renamed peer must resolve under the new nick"
+    );
+    assert!(
+        kr.last_handle_for_nick("bob", "NetA").unwrap().is_none(),
+        "the old nick no longer belongs to the peer"
+    );
+    assert_eq!(
+        kr.last_handle_for_nick("bob", "NetB").unwrap().as_deref(),
+        Some("~otherbob@x.host"),
+        "another network's row for the same nick must be untouched"
+    );
+    assert_eq!(
+        kr.legacy_handle_for_nick("carol").unwrap().as_deref(),
+        Some("~carol@b.net"),
+        "a rename on one network must not clobber the last_nick hint of a \
+         same-nick peer elsewhere — that hint is their only resolution path"
+    );
+}
+
+#[test]
+fn adoption_keeps_existing_scoped_row_on_conflict() {
+    // A legacy row whose scoped twin already exists loses: every scoped
+    // write postdates any pre-upgrade row, so the scoped one is kept and
+    // the legacy one dropped (never the reverse, and never an error).
+    let mgr = make_manager();
+    enable_channel(&mgr, "#x", ChannelMode::AutoAccept); // legacy
+    let scoped = crate::e2e::scoped_context("NetA", "#x");
+    enable_channel(&mgr, &scoped, ChannelMode::Normal); // newer scoped twin
+
+    mgr.keyring().set_configured_networks(["NetA".to_string()]);
+    mgr.keyring().adopt_legacy_contexts().unwrap();
+
+    let cfg = mgr.keyring().get_channel_config(&scoped).unwrap().unwrap();
+    assert_eq!(
+        cfg.mode,
+        ChannelMode::Normal,
+        "the existing scoped row must win the collision"
+    );
+    assert!(
+        mgr.keyring().list_legacy_contexts().unwrap().is_empty(),
+        "the colliding legacy row must be dropped, not kept"
+    );
+}
+
+#[test]
+fn adoption_skips_bare_nick_dm_rows() {
+    // Pre-handle bare-nick DM rows (neither `#…` nor `@handle`) must stay
+    // unscoped: the send gate consults them UNSCOPED for its fail-closed
+    // NoPeerHandle refusal, and scoping them would move the row out of the
+    // gate's reach — turning the refusal into a plaintext send. They are
+    // also not reported as unattributed leftovers: the unscoped read path
+    // still serves them, so warning "ignored" would be false.
+    let mgr = make_manager();
+    enable_channel(&mgr, "bob", ChannelMode::Normal);
+
+    mgr.keyring().set_configured_networks(["NetA".to_string()]);
+    let unattributed = mgr.keyring().adopt_legacy_contexts().unwrap();
+
+    assert!(
+        unattributed.is_empty(),
+        "bare-nick rows are skipped, not reported as unattributed"
+    );
+    assert!(
+        mgr.keyring()
+            .get_channel_config("bob")
+            .unwrap()
+            .is_some_and(|c| c.enabled),
+        "the bare-nick row must remain readable under its unscoped key"
+    );
+    assert!(
+        mgr.keyring().list_legacy_contexts().unwrap().is_empty(),
+        "bare-nick rows must not appear in the startup-warning listing"
+    );
 }

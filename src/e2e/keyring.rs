@@ -129,6 +129,13 @@ pub struct ChannelConfig {
 pub struct Keyring {
     db: Arc<Mutex<Connection>>,
     secret_key: Option<Key<Aes256Gcm>>,
+    /// Labels of the servers currently configured, shared across clones.
+    /// Gates the renamed-label heal in [`Self::get_channel_config`]: a
+    /// scoped sibling row is only adopted when its label is NOT configured
+    /// anymore (a true rename signal) — never when the other network still
+    /// exists (cross-network isolation). Empty (e.g. tests) disables the
+    /// heal entirely.
+    configured_networks: Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
 }
 
 impl Keyring {
@@ -138,6 +145,7 @@ impl Keyring {
         Self {
             db,
             secret_key: None,
+            configured_networks: Arc::default(),
         }
     }
 
@@ -149,6 +157,7 @@ impl Keyring {
         Ok(Self {
             db,
             secret_key: Some(secret_key),
+            configured_networks: Arc::default(),
         })
     }
 
@@ -196,6 +205,11 @@ impl Keyring {
         tx.execute("DELETE FROM e2e_outgoing_sessions", [])?;
         tx.execute("DELETE FROM e2e_incoming_sessions", [])?;
         tx.execute("DELETE FROM e2e_peers", [])?;
+        // The DM handle cache is per-(network, nick) resolution state for the
+        // OLD keyring; the snapshot carries no network, so it can't be rebuilt.
+        // Clear it so an imported keyring can't key a DM under a stale handle
+        // before the peer speaks — it re-populates observationally.
+        tx.execute("DELETE FROM e2e_dm_handle_cache", [])?;
         tx.execute("DELETE FROM e2e_identity", [])?;
 
         let (pubkey, privkey, fingerprint, created_at) = identity;
@@ -479,6 +493,17 @@ impl Keyring {
     }
 
     pub fn get_outgoing_session(&self, channel: &str) -> Result<Option<OutgoingSession>> {
+        if let Some(sess) = self.get_outgoing_session_exact(channel)? {
+            return Ok(Some(sess));
+        }
+        // Legacy-row fallback (see get_channel_config). Critical here: a
+        // scoped miss that generated a FRESH key would look like a rotation
+        // without a REKEY — every pre-upgrade peer would fail AEAD.
+        self.legacy_fallback(channel)
+            .map_or_else(|| Ok(None), |wire| self.get_outgoing_session_exact(wire))
+    }
+
+    fn get_outgoing_session_exact(&self, channel: &str) -> Result<Option<OutgoingSession>> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
         let row: Option<(Vec<u8>, i64, i64)> = conn
             .query_row(
@@ -502,9 +527,12 @@ impl Keyring {
 
     pub fn mark_outgoing_pending_rotation(&self, channel: &str) -> Result<()> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
+        // Mutations hit the legacy unscoped row too: before the first scoped
+        // write, the read fallback serves the legacy row — a rotate/revoke
+        // that only touched the scoped key would silently not apply.
         conn.execute(
-            "UPDATE e2e_outgoing_sessions SET pending_rotation = 1 WHERE channel = ?1",
-            params![channel],
+            "UPDATE e2e_outgoing_sessions SET pending_rotation = 1 WHERE channel = ?1 OR channel = ?2",
+            params![channel, crate::e2e::wire_context(channel)],
         )?;
         Ok(())
     }
@@ -512,8 +540,8 @@ impl Keyring {
     pub fn clear_outgoing_pending_rotation(&self, channel: &str) -> Result<()> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
         conn.execute(
-            "UPDATE e2e_outgoing_sessions SET pending_rotation = 0 WHERE channel = ?1",
-            params![channel],
+            "UPDATE e2e_outgoing_sessions SET pending_rotation = 0 WHERE channel = ?1 OR channel = ?2",
+            params![channel, crate::e2e::wire_context(channel)],
         )?;
         Ok(())
     }
@@ -554,26 +582,63 @@ impl Keyring {
     pub fn install_incoming_session_strict(&self, s: &IncomingSession) -> Result<()> {
         let enc_sk = self.encode_secret(&s.sk)?;
         let conn = self.db.lock().expect("keyring mutex poisoned");
-        let existing: Option<Vec<u8>> = conn
+        let mut existing: Option<(Vec<u8>, Vec<u8>, String)> = conn
             .query_row(
-                "SELECT fingerprint FROM e2e_incoming_sessions
+                "SELECT fingerprint, sk, status FROM e2e_incoming_sessions
                  WHERE handle = ?1 AND channel = ?2",
                 params![s.handle, s.channel],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        if let Some(existing_fp) = existing
+        // Upgraded keyring: the established session may still live under the
+        // legacy unscoped row. The FIRST scoped install (post-upgrade REKEY)
+        // must consult it too, or that install skips the TOFU
+        // fingerprint-continuity check and drops the superseded key that the
+        // prev-key grace window exists to retain.
+        if existing.is_none()
+            && let Some(wire) = self.legacy_fallback(&s.channel)
+        {
+            existing = conn
+                .query_row(
+                    "SELECT fingerprint, sk, status FROM e2e_incoming_sessions
+                     WHERE handle = ?1 AND channel = ?2",
+                    params![s.handle, wire],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+        }
+        if let Some((existing_fp, _, _)) = &existing
             && existing_fp.as_slice() != s.fingerprint.as_slice()
         {
             return Err(crate::e2e::error::E2eError::HandleMismatch {
-                expected: format!("fp={}", hex::encode(&existing_fp)),
+                expected: format!("fp={}", hex::encode(existing_fp)),
                 got: format!("fp={}", hex::encode(s.fingerprint)),
             });
         }
+        // Retain the key this install supersedes: a REKEY NOTICE can overtake
+        // PRIVMSG ciphertext already sent under the old key, and without the
+        // previous key those in-flight lines fail AEAD until a manual
+        // re-handshake. Only a Trusted, non-placeholder key that actually
+        // changed is worth keeping; `prev_created_at` records the replacement
+        // time so decrypt can enforce the grace window
+        // (`manager::REKEY_PREV_KEY_GRACE_SECS`). The blob is copied as
+        // stored — already encrypted when the keyring is.
+        let prev: Option<(Vec<u8>, i64)> = existing.and_then(|(_, old_enc, old_status)| {
+            if old_status != TrustStatus::Trusted.as_str() {
+                return None;
+            }
+            let old_sk = self
+                .decode_secret::<32>(&old_enc, "e2e_incoming_sessions sk")
+                .ok()?;
+            if old_sk == s.sk || old_sk == [0u8; 32] {
+                return None;
+            }
+            Some((old_enc, now_unix()))
+        });
         conn.execute(
             "INSERT OR REPLACE INTO e2e_incoming_sessions
-                (handle, channel, fingerprint, sk, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (handle, channel, fingerprint, sk, status, created_at, prev_sk, prev_created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 s.handle,
                 s.channel,
@@ -581,12 +646,89 @@ impl Keyring {
                 enc_sk,
                 s.status.as_str(),
                 s.created_at,
+                prev.as_ref().map(|(blob, _)| blob.as_slice()),
+                prev.as_ref().map(|(_, at)| *at),
             ],
         )?;
         Ok(())
     }
 
+    /// The previous session key for `(handle, channel)` plus the unix time it
+    /// was superseded, when one is retained. Decrypt-side reorder tolerance
+    /// only — see [`Self::install_incoming_session_strict`].
+    pub fn get_incoming_prev_key(
+        &self,
+        handle: &str,
+        channel: &str,
+    ) -> Result<Option<(SessionKey, i64)>> {
+        if let Some(prev) = self.get_incoming_prev_key_exact(handle, channel)? {
+            return Ok(Some(prev));
+        }
+        self.legacy_fallback(channel).map_or_else(
+            || Ok(None),
+            |wire| self.get_incoming_prev_key_exact(handle, wire),
+        )
+    }
+
+    fn get_incoming_prev_key_exact(
+        &self,
+        handle: &str,
+        channel: &str,
+    ) -> Result<Option<(SessionKey, i64)>> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let row: Option<(Option<Vec<u8>>, Option<i64>)> = conn
+            .query_row(
+                "SELECT prev_sk, prev_created_at FROM e2e_incoming_sessions
+                 WHERE handle = ?1 AND channel = ?2",
+                params![handle, channel],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((Some(enc), Some(replaced_at))) = row else {
+            return Ok(None);
+        };
+        let sk = self.decode_secret::<32>(&enc, "e2e_incoming_sessions prev_sk")?;
+        Ok(Some((sk, replaced_at)))
+    }
+
+    /// Record a REKEY nonce as consumed. Returns `false` when the exact nonce
+    /// was already seen for this `(fingerprint, channel)` — a replay. The
+    /// `INSERT OR IGNORE` makes check-and-record one atomic statement under
+    /// the keyring lock, and the nonce is covered by the REKEY signature, so
+    /// single-use enforcement here is complete replay protection without a
+    /// wire-format change.
+    pub fn record_rekey_nonce(
+        &self,
+        fingerprint: &Fingerprint,
+        channel: &str,
+        nonce: &[u8],
+    ) -> Result<bool> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO e2e_seen_rekeys (fingerprint, channel, nonce, seen_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![fingerprint.as_slice(), channel, nonce, now_unix()],
+        )?;
+        Ok(inserted == 1)
+    }
+
     pub fn get_incoming_session(
+        &self,
+        handle: &str,
+        channel: &str,
+    ) -> Result<Option<IncomingSession>> {
+        if let Some(sess) = self.get_incoming_session_exact(handle, channel)? {
+            return Ok(Some(sess));
+        }
+        // Legacy-row fallback (see get_channel_config): sessions installed
+        // before network scoping keep decrypting.
+        self.legacy_fallback(channel).map_or_else(
+            || Ok(None),
+            |wire| self.get_incoming_session_exact(handle, wire),
+        )
+    }
+
+    fn get_incoming_session_exact(
         &self,
         handle: &str,
         channel: &str,
@@ -629,18 +771,27 @@ impl Keyring {
         status: TrustStatus,
     ) -> Result<()> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
+        // Legacy row included — see mark_outgoing_pending_rotation.
         conn.execute(
-            "UPDATE e2e_incoming_sessions SET status = ?1 WHERE handle = ?2 AND channel = ?3",
-            params![status.as_str(), handle, channel],
+            "UPDATE e2e_incoming_sessions SET status = ?1
+             WHERE handle = ?2 AND (channel = ?3 OR channel = ?4)",
+            params![
+                status.as_str(),
+                handle,
+                channel,
+                crate::e2e::wire_context(channel)
+            ],
         )?;
         Ok(())
     }
 
     pub fn delete_incoming_session(&self, handle: &str, channel: &str) -> Result<()> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
+        // Legacy row included — see mark_outgoing_pending_rotation.
         conn.execute(
-            "DELETE FROM e2e_incoming_sessions WHERE handle = ?1 AND channel = ?2",
-            params![handle, channel],
+            "DELETE FROM e2e_incoming_sessions
+             WHERE handle = ?1 AND (channel = ?2 OR channel = ?3)",
+            params![handle, channel, crate::e2e::wire_context(channel)],
         )?;
         Ok(())
     }
@@ -692,6 +843,23 @@ impl Keyring {
 
     /// List all incoming sessions on `channel` whose status is `trusted`.
     pub fn list_trusted_peers_for_channel(&self, channel: &str) -> Result<Vec<IncomingSession>> {
+        let mut peers = self.list_trusted_peers_for_channel_exact(channel)?;
+        // UNION with the legacy unscoped rows — same transition rule as
+        // list_outgoing_recipients: dedup by handle, the scoped row wins.
+        if let Some(wire) = self.legacy_fallback(channel) {
+            for sess in self.list_trusted_peers_for_channel_exact(wire)? {
+                if !peers.iter().any(|p| p.handle == sess.handle) {
+                    peers.push(sess);
+                }
+            }
+        }
+        Ok(peers)
+    }
+
+    fn list_trusted_peers_for_channel_exact(
+        &self,
+        channel: &str,
+    ) -> Result<Vec<IncomingSession>> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT handle, fingerprint, sk, status, created_at
@@ -743,6 +911,286 @@ impl Keyring {
     }
 
     pub fn get_channel_config(&self, channel: &str) -> Result<Option<ChannelConfig>> {
+        if let Some(cfg) = self.get_channel_config_exact(channel)? {
+            return Ok(Some(cfg));
+        }
+        // Network-scoped read over a pre-scoping database: fall back to the
+        // legacy unscoped row so existing setups survive the upgrade. A
+        // scoped row always wins when present (all writes are scoped), and
+        // the fallback is denied on multi-network configs — see
+        // `legacy_fallback` (the renamed-label heal below stays available
+        // regardless: it reads scoped siblings, not the legacy row).
+        if let Some(wire) = legacy_wire_fallback(channel) {
+            if self.legacy_adoption_allowed()
+                && let Some(cfg) = self.get_channel_config_exact(wire)?
+            {
+                return Ok(Some(cfg));
+            }
+            // Renamed-label heal: a config.toml `label` change orphans every
+            // scoped row, and the enabled check is the FAIL-OPEN point — a
+            // miss here sends an explicitly-encrypted conversation as
+            // plaintext. When exactly ONE other network's row shares the
+            // wire part, the rename is unambiguous and its config is used
+            // (erring toward encryption); two or more candidates keep the
+            // cross-network isolation and return nothing. Sessions do NOT
+            // heal — the send generates a fresh key and peers re-handshake,
+            // which is recoverable, unlike a plaintext send.
+            if let Some(healed) = self.unique_scoped_config_sibling(wire)? {
+                // Adopt the sibling ONLY when its label vanished from the
+                // config (true rename); a still-configured network keeps its
+                // rows to itself — that is the isolation this scoping exists
+                // for. An empty configured set (tests, pre-init reads)
+                // disables the heal.
+                let healed_net = healed
+                    .split_once(crate::e2e::CONTEXT_NET_SEPARATOR)
+                    .map(|(net, _)| net.to_string())
+                    .unwrap_or_default();
+                let configured = self
+                    .configured_networks
+                    .read()
+                    .expect("configured networks lock poisoned");
+                if !configured.is_empty() && !configured.contains(&healed_net) {
+                    tracing::warn!(
+                        "e2e: config for {channel} healed from a renamed network's row — \
+                         re-run /e2e on to migrate it to the current label"
+                    );
+                    return self.get_channel_config_exact(&healed);
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Record the labels of the currently configured servers — see the
+    /// `configured_networks` field. Called once at startup.
+    pub fn set_configured_networks<I: IntoIterator<Item = String>>(&self, labels: I) {
+        let mut guard = self
+            .configured_networks
+            .write()
+            .expect("configured networks lock poisoned");
+        *guard = labels.into_iter().collect();
+    }
+
+    /// Whether a scoped miss may consult the legacy (unscoped, pre-upgrade)
+    /// row at all. With more than one configured network the legacy row has
+    /// no determinable owner, and serving it to every scoped lookup would
+    /// hand ONE network's keys to ANY network sharing the wire name — the
+    /// exact cross-network reuse the scoping exists to prevent. Zero or one
+    /// configured network is unambiguous (and startup migration via
+    /// [`Self::adopt_legacy_contexts`] usually empties the legacy rows
+    /// first; the read fallback then remains as a safety net).
+    fn legacy_adoption_allowed(&self) -> bool {
+        self.configured_networks
+            .read()
+            .expect("configured networks lock poisoned")
+            .len()
+            <= 1
+    }
+
+    /// The legacy unscoped row key to consult for a scoped `channel`, or
+    /// `None` when `channel` is already unscoped or legacy adoption is
+    /// denied — see [`Self::legacy_adoption_allowed`].
+    fn legacy_fallback<'a>(&self, channel: &'a str) -> Option<&'a str> {
+        let wire = legacy_wire_fallback(channel)?;
+        self.legacy_adoption_allowed().then_some(wire)
+    }
+
+    /// Migrate pre-scoping (unscoped) keyring rows to network-scoped ones.
+    /// Called once at startup, after [`Self::set_configured_networks`].
+    ///
+    /// Ownership is resolved per context:
+    /// - exactly one configured network → it owns everything (unambiguous);
+    /// - otherwise only a DM context (`@handle`) can be attributed, via the
+    ///   network-keyed `e2e_dm_handle_cache` — E2E state written by the DM
+    ///   machinery itself, so a single matching network is direct proof of
+    ///   ownership. Channel contexts stay unattributed on multi-network
+    ///   configs: chat logs only prove activity, not key ownership — the
+    ///   pre-upgrade keys could belong to a network whose history is empty,
+    ///   excluded, or purged, and migrating on that evidence would reuse
+    ///   keys cross-network.
+    ///
+    /// Contexts that cannot be attributed are left in place and returned so
+    /// the caller can warn; the read-side [`Self::legacy_fallback`] gate
+    /// keeps them inert on multi-network configs (fail-closed: fresh
+    /// handshakes re-establish sessions instead of reusing another
+    /// network's keys). When a scoped row already exists for the same key,
+    /// the scoped row wins and the legacy one is dropped.
+    pub fn adopt_legacy_contexts(&self) -> Result<Vec<String>> {
+        let configured: Vec<String> = {
+            let guard = self
+                .configured_networks
+                .read()
+                .expect("configured networks lock poisoned");
+            guard.iter().cloned().collect()
+        };
+        if configured.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let legacy = Self::legacy_context_values(&conn)?;
+        let mut unattributed = Vec::new();
+        for wire in legacy {
+            let owner = if let [only] = configured.as_slice() {
+                Some(only.clone())
+            } else {
+                Self::attribute_legacy_context(&conn, &wire, &configured)?
+            };
+            match owner {
+                Some(network) => Self::migrate_legacy_context(&conn, &wire, &network)?,
+                None => unattributed.push(wire),
+            }
+        }
+        Ok(unattributed)
+    }
+
+    /// Distinct unscoped context values across every context-keyed table.
+    /// (`e2e_seen_rekeys` and `prev_sk` are excluded: both were introduced
+    /// together with scoping, so they can never hold legacy rows.)
+    ///
+    /// Bare-nick rows — neither a `#…` channel nor an `@handle` DM — are
+    /// excluded too: they predate DM handles, the send gate consults them
+    /// UNSCOPED for its fail-closed `NoPeerHandle` refusal, and the first
+    /// observed handle migrates them to `@<handle>` contexts. Scoping them
+    /// here would move the row out of the gate's reach and turn that
+    /// refusal into a plaintext send.
+    fn legacy_context_values(conn: &Connection) -> Result<Vec<String>> {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT ctx FROM (
+                 SELECT channel AS ctx FROM e2e_channel_config
+                 UNION SELECT channel FROM e2e_outgoing_sessions
+                 UNION SELECT channel FROM e2e_incoming_sessions
+                 UNION SELECT channel FROM e2e_outgoing_recipients
+                 UNION SELECT scope FROM e2e_autotrust WHERE scope <> 'global'
+             ) WHERE instr(ctx, char(31)) = 0",
+        )?;
+        let mut rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows.retain(|ctx| ctx.starts_with('@') || crate::e2e::is_channel_target(ctx));
+        Ok(rows)
+    }
+
+    /// Legacy contexts still present after [`Self::adopt_legacy_contexts`] —
+    /// startup warns about them on multi-network configs, where the read
+    /// fallback is denied and the state is effectively dormant.
+    pub fn list_legacy_contexts(&self) -> Result<Vec<String>> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        Self::legacy_context_values(&conn)
+    }
+
+    /// The single configured network that DM context `wire` can be
+    /// attributed to, or `None` when it is a channel context or when zero
+    /// or several networks match (ambiguity keeps the row legacy).
+    fn attribute_legacy_context(
+        conn: &Connection,
+        wire: &str,
+        configured: &[String],
+    ) -> Result<Option<String>> {
+        let Some(handle) = wire.strip_prefix('@') else {
+            return Ok(None);
+        };
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT network FROM e2e_dm_handle_cache WHERE handle = ?1")?;
+        let networks: Vec<String> = stmt
+            .query_map(params![handle], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(match networks.as_slice() {
+            [only] if configured.contains(only) => Some(only.clone()),
+            _ => None,
+        })
+    }
+
+    /// Rename every row keyed by the unscoped `wire` context to
+    /// `{network}\x1F{wire}`, atomically. A rename that would collide with
+    /// an existing scoped row is skipped and the legacy row deleted — every
+    /// scoped write is newer than any pre-upgrade row, so scoped wins.
+    fn migrate_legacy_context(conn: &Connection, wire: &str, network: &str) -> Result<()> {
+        let scoped = crate::e2e::scoped_context(network, wire);
+        let tx = conn.unchecked_transaction()?;
+        for (table, column) in [
+            ("e2e_channel_config", "channel"),
+            ("e2e_outgoing_sessions", "channel"),
+            ("e2e_incoming_sessions", "channel"),
+            ("e2e_outgoing_recipients", "channel"),
+            ("e2e_autotrust", "scope"),
+        ] {
+            tx.execute(
+                &format!("UPDATE OR IGNORE {table} SET {column} = ?1 WHERE {column} = ?2"),
+                params![scoped, wire],
+            )?;
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE {column} = ?1"),
+                params![wire],
+            )?;
+        }
+        tx.commit()?;
+        tracing::info!("e2e: migrated legacy context '{wire}' to network '{network}'");
+        Ok(())
+    }
+
+    /// The single scoped `e2e_channel_config` row whose wire part equals
+    /// `wire`, or `None` when zero or several networks have one — see the
+    /// renamed-label heal in [`Self::get_channel_config`].
+    fn unique_scoped_config_sibling(&self, wire: &str) -> Result<Option<String>> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT channel FROM e2e_channel_config
+             WHERE instr(channel, char(31)) > 0
+               AND substr(channel, instr(channel, char(31)) + 1) = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![wire], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(match rows.as_slice() {
+            [only] => Some(only.clone()),
+            _ => None,
+        })
+    }
+
+    /// Distinct network labels embedded in scoped keyring rows (config +
+    /// sessions). Startup compares them with the configured server labels
+    /// and warns about orphans — a renamed `label` silently detaches every
+    /// scoped row from its conversations.
+    pub fn list_scoped_networks(&self) -> Result<Vec<String>> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT substr(channel, 1, instr(channel, char(31)) - 1) FROM (
+                 SELECT channel FROM e2e_channel_config
+                 UNION SELECT channel FROM e2e_outgoing_sessions
+                 UNION SELECT channel FROM e2e_incoming_sessions
+             ) WHERE instr(channel, char(31)) > 0",
+        )?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// The stored `e2e_channel_config` row key matching `context`
+    /// case-insensitively, preferring an exact match. IRC channel names are
+    /// case-insensitive, but contexts are written with the conversation
+    /// buffer's case — a by-target send (`/msg #Chan …`) must land on the
+    /// same row as `/e2e on` did in `#chan`, or the enabled channel would
+    /// silently downgrade to plaintext. The send gate canonicalizes its
+    /// context through this ONCE, so sessions/recipients (keyed by the same
+    /// string, BINARY) stay consistent downstream. `NOCASE` folds ASCII
+    /// only; rfc1459's `[]\~`↔`{}|^` pairs are not folded — that needs the
+    /// server itself to present both spellings, which none do in practice.
+    pub fn canonical_channel_context(&self, context: &str) -> Result<Option<String>> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT channel FROM e2e_channel_config
+                 WHERE channel = ?1 COLLATE NOCASE
+                 ORDER BY (channel = ?1) DESC
+                 LIMIT 1",
+                params![context],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    fn get_channel_config_exact(&self, channel: &str) -> Result<Option<ChannelConfig>> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
         let row: Option<(i64, String)> = conn
             .query_row(
@@ -787,13 +1235,19 @@ impl Keyring {
     /// (possibly empty), `?` matches exactly one character, everything
     /// else is a literal. No bracket expressions. This mirrors spec §7.
     pub fn autotrust_matches(&self, handle: &str, channel: &str) -> Result<bool> {
+        // ?2 is the legacy unscoped scope (see get_channel_config's
+        // fallback): autotrust rows written before network scoping keep
+        // matching scoped lookups. Denied on multi-network configs like
+        // every legacy adoption — a pre-upgrade rule for `#chan` must not
+        // auto-trust peers on a DIFFERENT network's `#chan`.
+        let legacy_scope = self.legacy_fallback(channel).unwrap_or(channel);
         let conn = self.db.lock().expect("keyring mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT handle_pattern FROM e2e_autotrust
-             WHERE scope = 'global' OR scope = ?1",
+             WHERE scope = 'global' OR scope = ?1 OR scope = ?2",
         )?;
         let rows = stmt
-            .query_map(params![channel], |r| r.get::<_, String>(0))?
+            .query_map(params![channel, legacy_scope], |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         for pat in rows {
             if glob_matches_ci(&pat, handle) {
@@ -842,10 +1296,11 @@ impl Keyring {
     /// the fresh key to the revoked peer.
     pub fn remove_outgoing_recipient(&self, channel: &str, handle: &str) -> Result<()> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
+        // Legacy row included — see mark_outgoing_pending_rotation.
         conn.execute(
             "DELETE FROM e2e_outgoing_recipients
-             WHERE channel = ?1 AND handle = ?2",
-            params![channel, handle],
+             WHERE (channel = ?1 OR channel = ?3) AND handle = ?2",
+            params![channel, handle, crate::e2e::wire_context(channel)],
         )?;
         Ok(())
     }
@@ -853,6 +1308,26 @@ impl Keyring {
     /// Return every recipient of our outgoing session key for `channel`.
     /// The returned tuples are `(handle, fingerprint)`.
     pub fn list_outgoing_recipients(&self, channel: &str) -> Result<Vec<(String, Fingerprint)>> {
+        let mut recipients = self.list_outgoing_recipients_exact(channel)?;
+        // UNION with the legacy unscoped rows, not a fallback: on an upgraded
+        // keyring pre-scoping peers stay recorded under the wire channel
+        // while new handshakes record under the scoped one — a rotate must
+        // REKEY both generations or every pre-upgrade peer is left on the
+        // old key. Dedup by handle; the scoped row wins.
+        if let Some(wire) = self.legacy_fallback(channel) {
+            for (handle, fp) in self.list_outgoing_recipients_exact(wire)? {
+                if !recipients.iter().any(|(h, _)| *h == handle) {
+                    recipients.push((handle, fp));
+                }
+            }
+        }
+        Ok(recipients)
+    }
+
+    fn list_outgoing_recipients_exact(
+        &self,
+        channel: &str,
+    ) -> Result<Vec<(String, Fingerprint)>> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT handle, fingerprint
@@ -938,6 +1413,110 @@ impl Keyring {
             });
         }
         Ok(out)
+    }
+
+    /// Most-recent server-stamped handle (`ident@host`) for `nick` on `network`
+    /// (case-insensitive nick). Resolves a DM peer's handle when the live
+    /// `Buffer.peer_handle` isn't set yet (the peer hasn't spoken this session)
+    /// so the `/e2e` command layer AND the encrypt path key the DM under the same
+    /// `@<handle>` context — avoiding a plaintext send when `/e2e on` enabled E2E
+    /// for that context.
+    ///
+    /// Resolution order:
+    /// 1. The `(network, nick)` cache — authoritative and network-scoped, so the
+    ///    same E2E identity seen on two networks keeps independent handles. This
+    ///    is the source for all keyrings once a peer has been observed.
+    /// 2. Legacy fallback to `e2e_peers.last_handle` by nick, for keyrings created
+    ///    BEFORE the cache table existed: on upgrade the cache starts empty while
+    ///    `e2e_peers` still holds last-seen handles. Without this an enabled
+    ///    `@<handle>` config would be invisible here and the DM would go out in
+    ///    PLAINTEXT. This fallback is network-AGNOSTIC (`e2e_peers` has no network
+    ///    column), so the only imperfect case is the SAME nick being an E2E peer
+    ///    on two networks while the cache hasn't been populated for `network`
+    ///    yet — that yields a wrong-context but still-ENCRYPTED (never plaintext)
+    ///    send that self-heals the instant the peer speaks (which writes the
+    ///    network-scoped cache via `cache_dm_handle`).
+    pub fn last_handle_for_nick(&self, nick: &str, network: &str) -> Result<Option<String>> {
+        let cached = self.cached_dm_handle(nick, network)?;
+        if cached.is_some() {
+            return Ok(cached);
+        }
+        self.legacy_handle_for_nick(nick)
+    }
+
+    /// The network-scoped `(network, nick)` cache row ONLY — no legacy
+    /// fallback. This is the source [`crate::irc::events`]' DM handle-change
+    /// tracking uses to pick a MIGRATION source: the legacy fallback is
+    /// network-agnostic, so treating its result as "the peer's previous
+    /// context" would copy an enabled config from a same-nick peer on another
+    /// network onto a stranger (see [`Self::legacy_handle_for_nick`]).
+    pub fn cached_dm_handle(&self, nick: &str, network: &str) -> Result<Option<String>> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT handle FROM e2e_dm_handle_cache WHERE network = ?1 AND nick = ?2",
+                params![network, nick],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Pre-cache keyring (upgrade) fallback: resolve the nick's last-seen
+    /// handle from `e2e_peers` so an existing enabled `@<handle>` config is
+    /// reachable instead of leaking plaintext. Network-AGNOSTIC (`e2e_peers`
+    /// has no network column) — safe for the SEND path (worst case is a
+    /// wrong-context but still-encrypted send that self-heals when the peer
+    /// speaks), but callers must NOT trust it as a config-migration source.
+    pub fn legacy_handle_for_nick(&self, nick: &str) -> Result<Option<String>> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT last_handle FROM e2e_peers
+                 WHERE last_nick = ?1 COLLATE NOCASE AND last_handle IS NOT NULL
+                 ORDER BY last_seen DESC LIMIT 1",
+                params![nick],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Record that DM peer `nick` was seen as `handle` (`ident@host`) on
+    /// `network`, so [`Self::last_handle_for_nick`] can resolve it later.
+    /// Keyed by `(network, nick)` — one row per network for a given nick, so the
+    /// same identity on two networks keeps independent handles. Latest write
+    /// wins (a CHGHOST / reconnect updates the cached handle).
+    pub fn cache_dm_handle(&self, network: &str, nick: &str, handle: &str) -> Result<()> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        conn.execute(
+            "INSERT INTO e2e_dm_handle_cache (network, nick, handle) VALUES (?1, ?2, ?3)
+             ON CONFLICT(network, nick) DO UPDATE SET handle = excluded.handle",
+            params![network, nick, handle],
+        )?;
+        Ok(())
+    }
+
+    /// Carry the DM handle cache across an IRC nick change: the row keyed
+    /// `(network, old_nick)` is re-keyed to `new_nick`. Without this a
+    /// rename orphans the cached `ident@host`: a `/msg <new_nick>` with no
+    /// live query buffer resolves no handle, misses the peer's enabled
+    /// `@<handle>` config, and falls through to PLAINTEXT. A row already
+    /// keyed `new_nick` (a previous holder of that nick) is replaced — the
+    /// NICK event is authoritative for who owns the nick now.
+    ///
+    /// The network-agnostic `e2e_peers.last_nick` hint is deliberately NOT
+    /// rewritten here: a NICK on one network says nothing about a same-nick
+    /// peer on another, and moving their hint off the nick they still hold
+    /// would break `legacy_handle_for_nick` resolution for them — turning
+    /// an E2E-enabled DM there into a plaintext passthrough. `last_nick`
+    /// keeps being refreshed by actual sightings (handshakes, PRIVMSGs).
+    pub fn rename_dm_nick(&self, network: &str, old_nick: &str, new_nick: &str) -> Result<()> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        conn.execute(
+            "UPDATE OR REPLACE e2e_dm_handle_cache SET nick = ?1
+             WHERE network = ?2 AND nick = ?3",
+            params![new_nick, network, old_nick],
+        )?;
+        Ok(())
     }
 
     /// Return every row of `e2e_incoming_sessions`, across every channel.
@@ -1050,6 +1629,23 @@ impl Keyring {
     }
 }
 
+/// For a network-scoped context, the legacy (wire) key to retry a read
+/// under; `None` for already-unscoped contexts. See `get_channel_config`
+/// for the fallback rule (scoped row wins, legacy fills the gap).
+fn legacy_wire_fallback(channel: &str) -> Option<&str> {
+    let wire = crate::e2e::wire_context(channel);
+    (wire != channel).then_some(wire)
+}
+
+/// Unix time for keyring bookkeeping rows (`prev_created_at`, `seen_at`).
+/// Same clock policy as `manager::now_unix`: a pre-epoch clock degrades to 0
+/// rather than panicking — the values gate relative windows, not authenticity.
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
 /// Minimal case-insensitive glob matcher used by `autotrust_matches`.
 ///
 /// Supports:
@@ -1118,6 +1714,12 @@ mod tests {
             last_seen     INTEGER NOT NULL,
             global_status TEXT NOT NULL DEFAULT 'pending'
         );
+        CREATE TABLE e2e_dm_handle_cache (
+            network TEXT NOT NULL,
+            nick    TEXT NOT NULL COLLATE NOCASE,
+            handle  TEXT NOT NULL,
+            PRIMARY KEY (network, nick)
+        );
         CREATE TABLE e2e_outgoing_sessions (
             channel           TEXT PRIMARY KEY,
             sk                BLOB NOT NULL,
@@ -1125,13 +1727,22 @@ mod tests {
             pending_rotation  INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE e2e_incoming_sessions (
-            handle       TEXT NOT NULL,
-            channel      TEXT NOT NULL,
-            fingerprint  BLOB NOT NULL,
-            sk           BLOB NOT NULL,
-            status       TEXT NOT NULL DEFAULT 'pending',
-            created_at   INTEGER NOT NULL,
+            handle           TEXT NOT NULL,
+            channel          TEXT NOT NULL,
+            fingerprint      BLOB NOT NULL,
+            sk               BLOB NOT NULL,
+            status           TEXT NOT NULL DEFAULT 'pending',
+            created_at       INTEGER NOT NULL,
+            prev_sk          BLOB,
+            prev_created_at  INTEGER,
             PRIMARY KEY (handle, channel)
+        );
+        CREATE TABLE e2e_seen_rekeys (
+            fingerprint  BLOB NOT NULL,
+            channel      TEXT NOT NULL,
+            nonce        BLOB NOT NULL,
+            seen_at      INTEGER NOT NULL,
+            PRIMARY KEY (fingerprint, channel, nonce)
         );
         CREATE TABLE e2e_channel_config (
             channel  TEXT PRIMARY KEY,
@@ -1168,6 +1779,7 @@ mod tests {
         Keyring {
             db: Arc::new(Mutex::new(conn)),
             secret_key: Some(secret_key),
+            configured_networks: Arc::default(),
         }
     }
 
@@ -1432,6 +2044,67 @@ mod tests {
         assert_eq!(all[1].last_handle, None);
         assert_eq!(all[2].fingerprint, [0xcc; 16]);
         assert_eq!(all[2].global_status, TrustStatus::Revoked);
+    }
+
+    #[test]
+    fn last_handle_for_nick_scopes_by_network() {
+        let kr = open_mem();
+        // Same nick (same E2E identity) observed on two networks. The cache is
+        // keyed by (network, nick), so caching the NetB handle must NOT clobber
+        // the NetA handle — the exact failure of a single fingerprint-keyed row.
+        kr.cache_dm_handle("NetA", "bob", "~bob@a.host").unwrap();
+        kr.cache_dm_handle("NetB", "bob", "~bob@b.host").unwrap();
+        assert_eq!(
+            kr.last_handle_for_nick("bob", "NetA").unwrap().as_deref(),
+            Some("~bob@a.host"),
+            "NetA must still resolve its own handle after NetB was cached"
+        );
+        assert_eq!(
+            kr.last_handle_for_nick("BOB", "NetB").unwrap().as_deref(),
+            Some("~bob@b.host"),
+            "nick lookup is case-insensitive"
+        );
+        // A third network with no cache row → None, not a cross-network leak.
+        assert_eq!(kr.last_handle_for_nick("bob", "NetC").unwrap(), None);
+        // Latest write wins per (network, nick) — a CHGHOST updates the handle.
+        kr.cache_dm_handle("NetA", "bob", "~bob@cloak").unwrap();
+        assert_eq!(
+            kr.last_handle_for_nick("bob", "NetA").unwrap().as_deref(),
+            Some("~bob@cloak")
+        );
+    }
+
+    #[test]
+    fn last_handle_for_nick_falls_back_to_e2e_peers_when_cache_empty() {
+        // Upgrade scenario: a pre-cache keyring has e2e_peers rows (last-seen
+        // handles) but an empty e2e_dm_handle_cache. Without a fallback, a DM to
+        // a peer who hasn't spoken this session would resolve None and go out in
+        // PLAINTEXT despite an enabled @<handle> config. The fallback resolves
+        // the handle from e2e_peers so the config is reachable.
+        let kr = open_mem();
+        kr.upsert_peer(&PeerRecord {
+            fingerprint: [7u8; 16],
+            pubkey: [1; 32],
+            last_handle: Some("~bob@legacy.host".into()),
+            last_nick: Some("bob".into()),
+            first_seen: 100,
+            last_seen: 200,
+            global_status: TrustStatus::Trusted,
+        })
+        .unwrap();
+        // Cache is empty → fall back to e2e_peers (case-insensitive nick).
+        assert_eq!(
+            kr.last_handle_for_nick("BOB", "AnyNet").unwrap().as_deref(),
+            Some("~bob@legacy.host"),
+            "must resolve the legacy e2e_peers handle when the cache is empty"
+        );
+        // Once the cache is populated it is authoritative and wins over e2e_peers.
+        kr.cache_dm_handle("AnyNet", "bob", "~bob@fresh.host").unwrap();
+        assert_eq!(
+            kr.last_handle_for_nick("bob", "AnyNet").unwrap().as_deref(),
+            Some("~bob@fresh.host"),
+            "network-scoped cache must take precedence over the legacy fallback"
+        );
     }
 
     #[test]

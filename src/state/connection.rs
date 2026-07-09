@@ -20,6 +20,11 @@ pub struct Connection {
     pub label: String,
     pub status: ConnectionStatus,
     pub nick: String,
+    /// Our own server-stamped `ident@host` on this connection, learned from
+    /// an echo-message echo of our own PRIVMSG, a self-USERHOST reply, or our
+    /// own CHGHOST. `None` until first learned. Drives the recipient-keyed
+    /// DM E2E context (we key incoming DMs by our own handle).
+    pub own_handle: Option<String>,
     pub user_modes: String,
     pub isupport: HashMap<String, String>,
     pub isupport_parsed: crate::irc::isupport::Isupport,

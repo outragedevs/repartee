@@ -102,12 +102,78 @@ pub const DEFAULT_TS_TOLERANCE_SECS: i64 = 300;
 /// to prevent.
 #[must_use]
 pub fn context_key(target: &str, peer_handle: &str) -> String {
-    if target.starts_with(['#', '&', '!', '+']) {
+    if is_channel_target(target) {
         target.to_string()
     } else {
         format!("@{peer_handle}")
     }
 }
+
+/// `true` when TARGET names an IRC channel by prefix (`#&!+`) — the single
+/// classification `context_key` and every outbound gate caller share, so a
+/// target can never be a channel for context derivation but a DM for gating
+/// (or vice versa).
+#[must_use]
+pub fn is_channel_target(target: &str) -> bool {
+    target.starts_with(['#', '&', '!', '+'])
+}
+
+/// Separator between the network label and the wire context inside a
+/// network-scoped keyring context. `US` (unit separator, 0x1F) is a control
+/// character, which the IRC grammar forbids in channel names and in
+/// `ident@host`, so a scoped context can never collide with a wire one.
+pub const CONTEXT_NET_SEPARATOR: char = '\u{1f}';
+
+/// Scope a wire context (`#chan` or `@<handle>`) to a network for keyring
+/// storage: `"{network}\x1F{wire}"`. Without this, `#rust` on two networks
+/// (or two peers behind identical `ident@host`) share one config and one set
+/// of session keys — a confidentiality-boundary violation. The scoped form
+/// exists ONLY in local storage: everything that leaves the process (the
+/// `c=` handshake field, AAD, HKDF info strings, signature payloads) uses
+/// [`wire_context`] of it, so interop is byte-identical to the spec.
+#[must_use]
+pub fn scoped_context(network: &str, wire: &str) -> String {
+    format!("{network}{CONTEXT_NET_SEPARATOR}{wire}")
+}
+
+/// The on-wire part of a (possibly network-scoped) keyring context. For a
+/// scoped context this is the part after the separator; a legacy/unscoped
+/// context is returned whole — which is what makes the scoping fully
+/// backward compatible: every crypto/wire derivation goes through here, and
+/// `wire_context(unscoped) == unscoped`.
+#[must_use]
+pub fn wire_context(context: &str) -> &str {
+    context
+        .split_once(CONTEXT_NET_SEPARATOR)
+        .map_or(context, |(_, wire)| wire)
+}
+
+/// Human-readable form of a stored context for `/e2e list`/`status` output:
+/// `"{network}:{wire}"` for scoped rows, the raw string for legacy rows.
+#[must_use]
+pub fn display_context(context: &str) -> String {
+    context
+        .split_once(CONTEXT_NET_SEPARATOR)
+        .map_or_else(|| context.to_string(), |(net, wire)| format!("{net}:{wire}"))
+}
+
+/// Transient line shown in a query buffer for a DM ciphertext that arrived
+/// before our own handle (the recipient-keyed decrypt context) was learned.
+/// Never persisted; once the handle is known the real line is re-fetched via
+/// CHATHISTORY, decrypted, and spliced in — at which point the placeholder is
+/// removed (`AppState::surface_history_rows`). One constant so the creation
+/// site (`irc::events::handle_privmsg`) and the removal site match exactly.
+pub const AWAITING_OWN_IDENTITY_PLACEHOLDER: &str = "[E2E: awaiting our own identity]";
+
+/// Prefix of the transient line shown for a DM ciphertext that arrived before
+/// a session with the sender existed (`"[E2E: awaiting session with <handle>]"`).
+/// Like the own-identity placeholder it is never persisted: once the KEYRSP
+/// installs the session, the query is gap-filled via CHATHISTORY, the line is
+/// decrypted for real, and `AppState::surface_history_rows` sweeps any message
+/// starting with this prefix at the replayed timestamp. One constant so the
+/// creation site (`irc::events::try_decrypt_e2e`), the transiency check
+/// (`irc::events::handle_privmsg`), and the sweep match exactly.
+pub const AWAITING_SESSION_PLACEHOLDER_PREFIX: &str = "[E2E: awaiting session with ";
 
 #[cfg(test)]
 mod context_key_tests {

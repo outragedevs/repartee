@@ -365,6 +365,15 @@ impl HistoryState {
         self.gapfilled_targets.insert(target.to_lowercase());
     }
 
+    /// Release `target`'s one-shot reconnect gap-fill claim so a follow-up
+    /// trigger re-issues it. Used when the first request completed but skipped
+    /// data it couldn't yet process — encrypted DM backlog fetched before our
+    /// own handle (the recipient context) was known — and a retry must actually
+    /// go out instead of being suppressed by [`Self::is_connect_gapfilled`].
+    pub fn clear_connect_gapfilled(&mut self, target: &str) {
+        self.gapfilled_targets.remove(&target.to_lowercase());
+    }
+
     /// Complete all in-flight requests for `target` after its batch arrived
     /// with `rows` total messages whose oldest line was `oldest` —
     /// `(unix_millis, msgid?)`.
@@ -738,6 +747,17 @@ mod tests {
         st.set_gapfill_cutoff(1_700_000_000_000);
         assert!(!st.is_connect_gapfilled("#rust"));
         assert!(!st.is_connect_gapfilled("#linux"));
+    }
+
+    #[test]
+    fn clear_connect_gapfilled_allows_a_retry() {
+        let mut st = HistoryState::new();
+        st.mark_connect_gapfilled("bob");
+        assert!(st.is_connect_gapfilled("bob"));
+        // Releasing the claim (own-handle DM retry) lets the next request issue.
+        // Case-insensitive, matching mark/is.
+        st.clear_connect_gapfilled("BOB");
+        assert!(!st.is_connect_gapfilled("bob"));
     }
 
     #[test]

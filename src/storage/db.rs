@@ -128,6 +128,27 @@ CREATE TABLE IF NOT EXISTS e2e_peers (
     global_status TEXT NOT NULL DEFAULT 'pending'
 )";
 
+// (network, nick) -> last-seen DM handle, used to resolve a query peer's
+// `ident@host` before they speak this session. Keyed by (network, nick) rather
+// than the fingerprint so the SAME E2E identity seen on two networks gets one
+// cache row per network — `e2e_peers` keeps only one (global-newest) handle per
+// fingerprint and cannot be network-scoped.
+const CREATE_E2E_DM_HANDLE_CACHE: &str = "
+CREATE TABLE IF NOT EXISTS e2e_dm_handle_cache (
+    network TEXT NOT NULL,
+    nick    TEXT NOT NULL COLLATE NOCASE,
+    handle  TEXT NOT NULL,
+    PRIMARY KEY (network, nick)
+)";
+
+// The legacy nick→handle fallback (`legacy_handle_for_nick`) filters on
+// `last_nick = ? COLLATE NOCASE`; the index must carry the same collation or
+// SQLite cannot use it and falls back to a full table scan on every DM-handle
+// cache miss (the steady state for peers who haven't spoken this session).
+const CREATE_E2E_PEERS_NICK_INDEX: &str = "
+CREATE INDEX IF NOT EXISTS idx_e2e_peers_last_nick
+    ON e2e_peers(last_nick COLLATE NOCASE)";
+
 const CREATE_E2E_OUTGOING: &str = "
 CREATE TABLE IF NOT EXISTS e2e_outgoing_sessions (
     channel           TEXT PRIMARY KEY,
@@ -136,15 +157,35 @@ CREATE TABLE IF NOT EXISTS e2e_outgoing_sessions (
     pending_rotation  INTEGER NOT NULL DEFAULT 0
 )";
 
+/// `prev_sk`/`prev_created_at` retain the session key a REKEY just replaced
+/// (and the unix time of the replacement) so ciphertext that was in flight
+/// under the old key still decrypts during a short grace window — see
+/// `e2e::manager::REKEY_PREV_KEY_GRACE_SECS`.
 const CREATE_E2E_INCOMING: &str = "
 CREATE TABLE IF NOT EXISTS e2e_incoming_sessions (
-    handle       TEXT NOT NULL,
-    channel      TEXT NOT NULL,
-    fingerprint  BLOB NOT NULL,
-    sk           BLOB NOT NULL,
-    status       TEXT NOT NULL DEFAULT 'pending',
-    created_at   INTEGER NOT NULL,
+    handle           TEXT NOT NULL,
+    channel          TEXT NOT NULL,
+    fingerprint      BLOB NOT NULL,
+    sk               BLOB NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'pending',
+    created_at       INTEGER NOT NULL,
+    prev_sk          BLOB,
+    prev_created_at  INTEGER,
     PRIMARY KEY (handle, channel)
+)";
+
+/// Consumed REKEY nonces, keyed by the sender's identity fingerprint and the
+/// rekeyed context. The nonce is covered by the REKEY's Ed25519 signature, so
+/// single-use enforcement here is complete replay protection without any wire
+/// format change (a replayed REKEY would otherwise roll the session back to a
+/// stale key — silent decrypt failure of everything the peer sends next).
+const CREATE_E2E_SEEN_REKEYS: &str = "
+CREATE TABLE IF NOT EXISTS e2e_seen_rekeys (
+    fingerprint  BLOB NOT NULL,
+    channel      TEXT NOT NULL,
+    nonce        BLOB NOT NULL,
+    seen_at      INTEGER NOT NULL,
+    PRIMARY KEY (fingerprint, channel, nonce)
 )";
 
 const CREATE_E2E_CHANNEL_CONFIG: &str = "
@@ -196,6 +237,9 @@ fn create_schema(db: &Connection, encrypt: bool) -> rusqlite::Result<()> {
     db.execute_batch(CREATE_E2E_CHANNEL_CONFIG)?;
     db.execute_batch(CREATE_E2E_AUTOTRUST)?;
     db.execute_batch(CREATE_E2E_OUTGOING_RECIPIENTS)?;
+    db.execute_batch(CREATE_E2E_DM_HANDLE_CACHE)?;
+    db.execute_batch(CREATE_E2E_PEERS_NICK_INDEX)?;
+    db.execute_batch(CREATE_E2E_SEEN_REKEYS)?;
     if !encrypt {
         db.execute_batch(CREATE_FTS)?;
         db.execute_batch(CREATE_FTS_TRIGGERS)?;
@@ -226,6 +270,19 @@ fn migrate_schema(db: &Connection) {
             }
         } else {
             tracing::info!("migrated messages table: added {col}");
+        }
+    }
+
+    // Previous-key retention (post-REKEY decrypt grace) — see
+    // CREATE_E2E_INCOMING. NULL on existing rows: no previous key retained.
+    for col in ["prev_sk BLOB", "prev_created_at INTEGER"] {
+        let sql = format!("ALTER TABLE e2e_incoming_sessions ADD COLUMN {col}");
+        if let Err(e) = db.execute_batch(&sql) {
+            if !e.to_string().contains("duplicate column name") {
+                tracing::warn!("migration warning for '{col}': {e}");
+            }
+        } else {
+            tracing::info!("migrated e2e_incoming_sessions: added {col}");
         }
     }
 
