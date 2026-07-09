@@ -1893,6 +1893,19 @@ def _encrypt_ctcp_wire(sk: bytes, context: str, frame: str) -> list[str]:
     return out
 
 
+def _distribute_rekey_safe(channel: str, new_sk: bytes, server: str) -> None:
+    """Best-effort REKEY distribution that never raises. A distribution failure
+    must NOT refuse the user's message: the outgoing key has already rotated
+    (so a revoked peer is excluded regardless), and a trusted peer that misses
+    the REKEY re-handshakes on its next undecryptable ciphertext (auto-KEYREQ).
+    Any hard failure is logged; per-peer failures already warn inside
+    `_distribute_rekey`."""
+    try:
+        _distribute_rekey(channel, new_sk, server)
+    except Exception as e:
+        _dbg(f"_distribute_rekey_safe: distribution failed for {channel}: {e}")
+
+
 def _e2e_gate_wire(server: str, target: str, body: str):
     """Fail-closed outbound gate — mirror of `e2e_encrypt_or_passthrough`.
 
@@ -1921,8 +1934,13 @@ def _e2e_gate_wire(server: str, target: str, body: str):
         # full gate); DMs never bypass. Mirror of the channel-only bypass +
         # `warn_e2e_bot_bypass` visibility in the Rust gate.
         if is_channel and (body.startswith(".") or body.startswith("!")) and "\n" not in body:
+            # Warn whenever we cannot POSITIVELY confirm the channel is
+            # non-E2E: an enabled config OR a keyring read error both mean the
+            # cleartext bypass may be surprising, so the warning must show
+            # (fail-closed visibility — never silently drop the warning on a
+            # transient DB error).
             warn = None
-            if _config_enabled(target) == _ENABLED_YES:
+            if _config_enabled(target) != _ENABLED_NO:
                 warn = (
                     f"bot-style message to {target} sent in CLEARTEXT — channel "
                     "lines starting with '.' or '!' bypass encryption for bots"
@@ -1933,11 +1951,17 @@ def _e2e_gate_wire(server: str, target: str, body: str):
         if is_channel:
             context = target
         else:
-            handle = _resolve_handle_by_nick(server, target, target)
+            # Live OR cached handle resolution (mirror of Rust
+            # `resolve_query_peer_handle`): a peer who isn't currently in a
+            # shared nicklist is still resolvable from the persisted peers
+            # cache, so the `@<handle>` config the DM was enabled under is
+            # found instead of being missed into a plaintext send.
+            handle = _resolve_handle_for_command(server, target, target)
             if handle is None:
-                # No resolvable handle → no `@<handle>` config can exist.
-                # Refuse only if an enabled legacy bare-nick row exists;
-                # otherwise plaintext passthrough is safe (no E2E state).
+                # Nothing resolvable → no `@<handle>` config can exist for this
+                # nick (any handshake would have cached a handle). Refuse only
+                # if an enabled legacy bare-nick row exists; otherwise plaintext
+                # passthrough is safe (no E2E state). Fail closed on a read err.
                 legacy = _config_enabled(target)
                 if legacy == _ENABLED_ERR:
                     return ("refuse", _REFUSE_KEYRING)
@@ -1952,11 +1976,21 @@ def _e2e_gate_wire(server: str, target: str, body: str):
         if enabled == _ENABLED_NO:
             return ("pass", None)
 
-        # Enabled — encrypt. An encrypt failure REFUSES (never plaintext).
+        # Enabled — encrypt. A key-generation or encrypt failure REFUSES
+        # (never plaintext). REKEY distribution is best-effort and must NOT
+        # refuse the message: the key has already rotated (the revoked peer is
+        # excluded regardless), and any trusted peer that misses the REKEY
+        # re-handshakes on its next undecryptable ciphertext via auto-KEYREQ —
+        # mirroring the Rust gate, whose REKEY NOTICEs are queued/retried
+        # rather than gating the send.
         try:
             fresh, had_pending = _get_or_generate_outgoing_key_with_rotation(context)
-            if had_pending:
-                _distribute_rekey(context, fresh, server)
+        except Exception as e:
+            _dbg(f"_e2e_gate_wire key generation failed for {context}: {e}")
+            return ("refuse", _REFUSE_ENCRYPT)
+        if had_pending:
+            _distribute_rekey_safe(context, fresh, server)
+        try:
             if is_action:
                 wires = _encrypt_ctcp_wire(fresh, context, body)
             else:
@@ -1995,7 +2029,13 @@ def hook_irc_out_privmsg(data, modifier, server, msg):
         target, body = parsed
         # Re-entrancy guard: our own `_send_raw_privmsg` re-emits ciphertext
         # through this modifier — never re-process an already-encrypted line.
-        if body.startswith(WIRE_PREFIX):
+        # Key the guard on a STRUCTURALLY VALID wire chunk (parse_wire), NOT a
+        # bare `+RPE2E01` prefix: a user command like `/msg bob +RPE2E01 secret`
+        # starts with the prefix but is not a real chunk, and must still go
+        # through the gate (else it would leak as plaintext to an E2E DM). A
+        # crafted string that DOES parse as a chunk carries no readable
+        # plaintext, so passing it through is harmless.
+        if parse_wire(body) is not None:
             return msg
     except Exception as e:
         # A line we cannot even parse carries no derivable E2E context; the
@@ -2017,12 +2057,18 @@ def hook_irc_out_privmsg(data, modifier, server, msg):
         return ""
     # action == "cipher": send the encrypted chunks ourselves and drop the
     # original. Once we have decided to encrypt we NEVER fall back to
-    # plaintext, even if a send raises mid-loop.
+    # plaintext, even if a send raises mid-loop — but the failure must be
+    # VISIBLE (never a silent message drop).
     try:
         for line in payload:
             _send_raw_privmsg(server, target, line)
     except Exception as e:
         _dbg(f"hook_irc_out_privmsg send EXCEPTION for {target}: {e}")
+        _prnt_err(
+            _target_buffer(server, target),
+            f"failed to send encrypted message to {target} — NOT delivered "
+            "(message stays encrypted; retry when the connection recovers)",
+        )
     return ""
 
 
@@ -2132,7 +2178,14 @@ def hook_input_text_for_buffer(data, modifier, modifier_data, text):
         if is_channel:
             channel = target
         else:
-            peer_handle = _resolve_handle_by_nick(server, target, target)
+            # Resolve the peer handle live OR from the keyring cache — the same
+            # resolution `/e2e on` / the outbound gate use (mirror of Rust
+            # `resolve_query_peer_handle`). Live-only resolution would miss the
+            # persisted `@<handle>` config whenever the peer isn't currently in
+            # a shared channel's nicklist, silently downgrading the DM to
+            # plaintext. If neither resolves, the out gate is still the
+            # authoritative backstop.
+            peer_handle = _resolve_handle_for_command(server, target, target)
             if peer_handle is None:
                 _prnt_err(buffer, f"cannot resolve handle for {target} — has the user spoken yet?")
                 return text
@@ -2146,16 +2199,9 @@ def hook_input_text_for_buffer(data, modifier, modifier_data, text):
             return text
         fresh, had_pending = _get_or_generate_outgoing_key_with_rotation(channel)
         if had_pending:
-            _distribute_rekey(channel, fresh)
-        sk = fresh
-        chunks = split_plaintext(plain)
-        total = len(chunks)
-        msgid = nacl_random(8)
-        ts = int(time.time())
-        for idx, chunk in enumerate(chunks, start=1):
-            aad = build_aad(channel, msgid, ts, idx, total)
-            nonce, ct = aead_encrypt(sk, aad, chunk)
-            wire = encode_wire(msgid, ts, idx, total, nonce, ct)
+            _distribute_rekey_safe(channel, fresh, server)
+        # Single source of truth for wire framing (shared with the out gate).
+        for wire in _encrypt_plain_wire(fresh, channel, plain):
             _send_raw_privmsg(server, target, wire)
         _prnt_self_msg(buffer, plain)
         return ""
