@@ -1770,10 +1770,19 @@ sub signal_send_text {
     Irssi::signal_stop();
 }
 
+# Decrypt one RPE2E wire message. Returns ($handled, $decoded):
+#   (0, undef)      — not an RPE2E wire; caller lets irssi handle it
+#   (1, undef)      — handled by dropping (ts skew / no session→KEYREQ /
+#                     decrypt fail); this sub already called signal_stop()
+#   (1, $plaintext) — decrypted; caller re-drives the DECRYPTED text through
+#                     the pipeline (so a \x01ACTION…\x01 frame renders as an
+#                     action instead of raw control bytes)
+# `$target` is the CONTEXT target: the channel for channel messages, the
+# SENDER's nick for DMs (DM context = @<sender handle>).
 sub _decrypt_wire_message {
     my ($server, $msg, $nick, $host, $target) = @_;
     my $wire = parse_wire($msg);
-    return 0 unless $wire;
+    return (0, undef) unless $wire;
     my $handle = $host;
     my $ctx = _ctx_for_target($target, $handle);
     my $kr = load_keyring();
@@ -1781,7 +1790,7 @@ sub _decrypt_wire_message {
     if (abs(now_unix() - $wire->{ts}) > $TS_TOLERANCE) {
         _prnt_dbg($server, $ctx, $nick, "drop ciphertext from $nick ($handle): timestamp skew");
         Irssi::signal_stop();
-        return 1;
+        return (1, undef);
     }
     my $row = $kr->{incoming}{"$handle|$ctx"};
     if (!$row || ($row->{status} // '') ne 'trusted') {
@@ -1800,30 +1809,44 @@ sub _decrypt_wire_message {
             }
         }
         Irssi::signal_stop();
-        return 1;
+        return (1, undef);
     }
     my $aad = build_aad($ctx, $wire->{msgid}, $wire->{ts}, $wire->{part}, $wire->{total});
     my $pt = aead_decrypt(b64d($row->{sk}), $wire->{nonce}, $aad, $wire->{ct});
     unless (defined $pt) {
         _prnt_dbg($server, $ctx, $nick, "decrypt failed for ($handle,$ctx)");
         Irssi::signal_stop();
-        return 1;
+        return (1, undef);
     }
     my $decoded = eval { decode('UTF-8', $pt, FB_DEFAULT) };
     $decoded = decode('UTF-8', $pt) if !defined $decoded;
-    Irssi::signal_continue($server, $decoded, $nick, $host, $target);
-    return 1;
+    return (1, $decoded);
 }
 
-sub signal_message_public {
-    my ($server, $msg, $nick, $host, $target) = @_;
-    _decrypt_wire_message($server, $msg, $nick, $host, $target);
-}
-
-sub signal_message_private {
-    my ($server, $msg, $nick, $host, $target) = @_;
-    my $query = $nick;
-    _decrypt_wire_message($server, $msg, $nick, $host, $query);
+# F2: decrypt on `event privmsg` — the irssi analog of weechat's raw-line
+# `irc_in2_privmsg` modifier, firing BEFORE irssi splits out CTCP/ACTION. An
+# encrypted ACTION travels on the wire as `+RPE2E01…` (no \x01), so decrypting
+# it here yields `\x01ACTION…\x01` which re-enters the pipeline and renders as a
+# proper action; decrypting later (on `message public`/`private`, post-CTCP-
+# split) rendered raw control characters instead.
+sub signal_event_privmsg {
+    my ($server, $data, $nick, $host) = @_;
+    return unless defined $data;
+    # `$data` is "target :text" (the PRIVMSG params). For a channel, target is
+    # the channel; for a DM, target is OUR nick and the sender is $nick.
+    my ($target, $text) = $data =~ /^(\S+)\s+:?(.*)$/s;
+    return unless defined $target && defined $text;
+    return unless parse_wire($text);   # not RPE2E → let irssi handle normally
+    my $is_channel = $target =~ $CHANNEL_PREFIX_RE;
+    # Context target: channel → the channel; DM → the SENDER's nick (DM context
+    # is keyed off the sender's handle, matching the old message-private path).
+    my $ctx_target = $is_channel ? $target : $nick;
+    my ($handled, $decoded) = _decrypt_wire_message($server, $text, $nick, $host, $ctx_target);
+    return unless $handled;
+    # Re-drive the DECRYPTED text through the same event, preserving the wire's
+    # original target so routing (channel vs query) is unchanged. irssi then
+    # performs the CTCP/ACTION split on cleartext.
+    Irssi::signal_continue($server, "$target :$decoded", $nick, $host) if defined $decoded;
 }
 
 sub _handle_rpee2e_ctcp_reply {
@@ -1902,8 +1925,9 @@ Irssi::signal_add_first('send text', \&signal_send_text);
 # Authoritative outbound fail-closed gate (F1): every PRIVMSG on the wire —
 # `/me`, `/msg`, `/say`, `/amsg`, plain input — passes through here.
 Irssi::signal_add_first('server sending command', \&signal_server_sending_command);
-Irssi::signal_add_first('message public', \&signal_message_public);
-Irssi::signal_add_first('message private', \&signal_message_private);
+# F2: decrypt on the raw PRIVMSG event, BEFORE irssi's CTCP/ACTION split, so
+# an encrypted ACTION renders as an action rather than raw control characters.
+Irssi::signal_add_first('event privmsg', \&signal_event_privmsg);
 Irssi::signal_add_first('ctcp reply RPEE2E', \&signal_ctcp_reply_rpee2e);
 Irssi::signal_add_first('ctcp reply', \&signal_ctcp_reply_generic);
 Irssi::signal_add_first('default ctcp reply', \&signal_default_ctcp_reply_generic);
