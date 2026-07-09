@@ -80,6 +80,19 @@ my $debug_log    = File::Spec->catfile($rpe2e_dir, 'rpe2e-debug.log');
 
 my %rate_limit_sent;
 
+# Our own server-stamped ident@host, per server tag — the recipient-keyed DM
+# context (docs/rpe2e-dm-addendum.md): DMs we RECEIVE are keyed `@<own>`.
+# VOLATILE by design (never persisted): reset at registration and re-seeded via
+# the one-shot self-USERHOST and our own CHGHOST. irssi core's
+# `$server->{userhost}` is the fallback seed (core fills it from our first own
+# JOIN and RPL_HOSTHIDDEN, but NOT on own CHGHOST and not before a join —
+# hence this store on top).
+my %own_handle;
+
+# Throttle for the "held — own identity not learned yet" notice, per
+# "<tag>|<nick>", so a chatty peer doesn't flood while we wait for USERHOST.
+my %own_wait_notice_at;
+
 sub _dbg {
     my ($msg) = @_;
     return unless $DEBUG_ENABLED;
@@ -518,6 +531,69 @@ sub _ctx_for_target {
     return '@' . $handle;
 }
 
+# One RPL_USERHOST (302) entry `nick[*]=[+|-]ident@host` → ($nick, $handle) or
+# (). Mirrors Rust `parse_userhost_reply`: the trailing `*` on the nick marks
+# an oper (stripped), the leading `+`/`-` on the userhost is the away flag
+# (stripped); the handle keeps `~` and any cloak verbatim.
+sub _parse_userhost_entry {
+    my ($entry) = @_;
+    return unless defined $entry && $entry =~ /^(.+?)=(.+)$/;
+    my ($nick, $userhost) = ($1, $2);
+    $nick =~ s/\*+\z//;
+    $userhost =~ s/^[+-]//;
+    return unless length($nick) && index($userhost, '@') > 0;
+    return ($nick, $userhost);
+}
+
+sub _set_own_handle {
+    my ($server, $handle) = @_;
+    return unless $server && defined $handle && length $handle;
+    my $tag = $server->{tag} // return;
+    if (($own_handle{$tag} // '') ne $handle) {
+        $own_handle{$tag} = $handle;
+        _dbg("own handle on $tag: $handle");
+    }
+}
+
+# Our own ident@host on this server, or undef while unknown. The script store
+# wins (it tracks own CHGHOST); irssi core's join-seeded value is the fallback.
+sub _own_handle_for {
+    my ($server) = @_;
+    return unless $server;
+    my $tag = $server->{tag} // '';
+    return $own_handle{$tag} // $server->{userhost};
+}
+
+# ONE-SHOT self-USERHOST to seed our own handle — gated to registration/load
+# events, never per message (the 302 reply is itself a message; a per-message
+# trigger would loop). Mirrors the Rust client's RPL_WELCOME one-shot.
+sub _send_self_userhost {
+    my ($server) = @_;
+    return unless $server && ($server->{nick} // '') ne '';
+    eval { $server->send_raw('USERHOST ' . $server->{nick}) };
+    _dbg("_send_self_userhost failed on " . ($server->{tag} // '?') . ": $@") if $@;
+}
+
+# Context that REAL incoming DM sessions live under: `@<own_handle>`
+# (recipient-keyed — the recipient of the direction is us). Channels pass
+# through unchanged. undef → our own handle is not known yet.
+sub _incoming_ctx_for {
+    my ($server, $ctx) = @_;
+    return $ctx if !defined($ctx) || $ctx !~ /^\@/;
+    my $own = _own_handle_for($server);
+    return defined($own) && length($own) ? '@' . $own : undef;
+}
+
+# Both context forms a DM row can live under: the peer-keyed $ctx (config and
+# KEYREQ-direction trust markers) and the recipient-keyed `@<own>` (real
+# incoming sessions). Channels yield just themselves.
+sub _ctx_variants {
+    my ($witem, $ctx) = @_;
+    my $own_ctx = _incoming_ctx_for($witem ? $witem->{server} : undef, $ctx);
+    my %seen;
+    return grep { defined($_) && !$seen{$_}++ } ($ctx, $own_ctx);
+}
+
 sub _find_peer_by_handle {
     my ($kr, $handle) = @_;
     for my $fp_hex (keys %{ $kr->{peers} }) {
@@ -713,8 +789,21 @@ sub _build_keyrsp_for_req {
         . "\x01";
 }
 
+# Context for OUR reciprocal KEYREQ. A reciprocal establishes the peer→us
+# direction, whose recipient-keyed context is OUR handle — not the requester's
+# context from their KEYREQ (that names the other direction). Channels pass
+# through. undef → own handle unknown; skip the reciprocal (the transport
+# self-heals later via auto-KEYREQ on their first wire).
+sub _reciprocal_ctx {
+    my ($channel, $own_handle) = @_;
+    return $channel if defined $channel && $channel =~ $CHANNEL_PREFIX_RE;
+    return defined($own_handle) && length($own_handle) ? '@' . $own_handle : undef;
+}
+
 sub _maybe_build_reciprocal_keyreq {
-    my ($kr, $channel, $sender_handle) = @_;
+    my ($kr, $channel, $sender_handle, $own_handle) = @_;
+    $channel = _reciprocal_ctx($channel, $own_handle);
+    return undef unless defined $channel;
     my $row = $kr->{incoming}{"$sender_handle|$channel"};
     my $pending = $kr->{pending}{ _pending_key($channel, $sender_handle) };
     my $already_trusted = $row && ($row->{status} // '') eq 'trusted';
@@ -723,7 +812,9 @@ sub _maybe_build_reciprocal_keyreq {
 }
 
 sub _build_reciprocal_keyreq_on_accept {
-    my ($kr, $channel, $sender_handle) = @_;
+    my ($kr, $channel, $sender_handle, $own_handle) = @_;
+    $channel = _reciprocal_ctx($channel, $own_handle);
+    return undef unless defined $channel;
     my $row = $kr->{incoming}{"$sender_handle|$channel"};
     my $already_trusted = $row && ($row->{status} // '') eq 'trusted';
     return undef if $already_trusted;
@@ -732,7 +823,7 @@ sub _build_reciprocal_keyreq_on_accept {
 }
 
 sub handle_keyreq {
-    my ($kr, $sender_handle, $nick, $body) = @_;
+    my ($kr, $sender_handle, $nick, $body, $own_handle) = @_;
     my $req = parse_keyreq($body);
     return (undef, undef, undef) unless $req;
     my $ctx = $req->{channel};
@@ -796,7 +887,7 @@ sub handle_keyreq {
         return (undef, undef, $ctx);
     }
     my $rsp = _build_keyrsp_for_req($kr, $ctx, $sender_handle, $req->{pub}, $req->{eph_x25519});
-    my $reciprocal = _maybe_build_reciprocal_keyreq($kr, $ctx, $sender_handle);
+    my $reciprocal = _maybe_build_reciprocal_keyreq($kr, $ctx, $sender_handle, $own_handle);
     return ($rsp, $reciprocal, $ctx);
 }
 
@@ -1016,8 +1107,10 @@ sub _resolve_ctx_for_command {
     return undef unless $witem;
     my $target = $witem->{name};
     return $target if $target =~ $CHANNEL_PREFIX_RE;
-    my $handle = _find_handle_by_nick($kr, $nick || $target);
-    return defined $handle ? '@' . $handle : undef;
+    # DM: LIVE-first resolution (open query / shared channel), falling back to
+    # the peers cache — a first-time `/e2e on` in a query has no cache entry.
+    my $handle = _resolve_dm_handle($witem->{server}, $kr, $nick || $target);
+    return defined $handle && length $handle ? '@' . $handle : undef;
 }
 
 sub _resolve_handle_for_command {
@@ -1026,40 +1119,41 @@ sub _resolve_handle_for_command {
     return _find_handle_by_nick($kr, $nick_or_handle);
 }
 
+# /e2e on|off|mode work in a channel OR a query: the config is keyed by the
+# channel name or the PEER-keyed DM context `@<peer_handle>` ("E2E with that
+# peer") — the recipient-keyed wire contexts are derived where they are used
+# (matching weechat and the Rust client, which have always allowed DM enable).
 sub cmd_on {
     my ($witem) = @_;
-    unless ($witem && ($witem->{name} // '') =~ $CHANNEL_PREFIX_RE) {
-        return _prnt_err(undef, 'not on a channel');
-    }
     my $kr = load_keyring();
-    $kr->{channels}{ $witem->{name} } = { enabled => 1, mode => 'normal' };
+    my $ctx = _resolve_ctx_for_command($kr, $witem, undef);
+    return _prnt_err($witem, 'not in a channel or query (or peer handle unknown — wait for a message from them)') unless defined $ctx;
+    $kr->{channels}{$ctx} = { enabled => 1, mode => 'normal' };
     save_keyring($kr);
-    _prnt_ok($witem, "enabled on " . $witem->{name} . " (mode=normal)");
+    _prnt_ok($witem, "enabled on $ctx (mode=normal)");
 }
 
 sub cmd_off {
     my ($witem) = @_;
-    unless ($witem && ($witem->{name} // '') =~ $CHANNEL_PREFIX_RE) {
-        return _prnt_err(undef, 'not on a channel');
-    }
     my $kr = load_keyring();
-    $kr->{channels}{ $witem->{name} } = { enabled => 0, mode => $kr->{channels}{ $witem->{name} }{mode} // 'normal' };
+    my $ctx = _resolve_ctx_for_command($kr, $witem, undef);
+    return _prnt_err($witem, 'not in a channel or query (or peer handle unknown — wait for a message from them)') unless defined $ctx;
+    $kr->{channels}{$ctx} = { enabled => 0, mode => $kr->{channels}{$ctx}{mode} // 'normal' };
     save_keyring($kr);
-    _prnt_ok($witem, "disabled on " . $witem->{name});
+    _prnt_ok($witem, "disabled on $ctx");
 }
 
 sub cmd_mode {
     my ($witem, $mode) = @_;
-    unless ($witem && ($witem->{name} // '') =~ $CHANNEL_PREFIX_RE) {
-        return _prnt_err(undef, 'not on a channel');
-    }
     $mode //= 'normal';
     $mode = 'auto-accept' if $mode eq 'auto';
     return _prnt_err($witem, "invalid mode: $mode") unless $mode =~ /^(auto-accept|normal|quiet)$/;
     my $kr = load_keyring();
-    $kr->{channels}{ $witem->{name} } = { enabled => 1, mode => $mode };
+    my $ctx = _resolve_ctx_for_command($kr, $witem, undef);
+    return _prnt_err($witem, 'not in a channel or query (or peer handle unknown — wait for a message from them)') unless defined $ctx;
+    $kr->{channels}{$ctx} = { enabled => 1, mode => $mode };
     save_keyring($kr);
-    _prnt_ok($witem, "mode=$mode on " . $witem->{name});
+    _prnt_ok($witem, "mode=$mode on $ctx");
 }
 
 sub cmd_fingerprint {
@@ -1122,7 +1216,12 @@ sub cmd_list {
     }
     my $ctx = _resolve_ctx_for_command($kr, $witem, undef);
     return _prnt_err($witem, 'cannot resolve current context') unless defined $ctx;
-    my @rows = grep { (split(/\|/, $_, 2))[1] eq $ctx } keys %{ $kr->{incoming} || {} };
+    # Query buffer: real DM sessions are recipient-keyed under `@<own>`, trust
+    # markers under `@<peer>` — list everything from this peer regardless of
+    # context. Channel buffers filter by the channel as before.
+    my @rows = $ctx =~ /^\@/
+        ? grep { (split(/\|/, $_, 2))[0] eq substr($ctx, 1) } keys %{ $kr->{incoming} || {} }
+        : grep { (split(/\|/, $_, 2))[1] eq $ctx } keys %{ $kr->{incoming} || {} };
     if (!@rows) {
         return _prnt_ok($witem, 'no peers');
     }
@@ -1142,8 +1241,14 @@ sub cmd_handshake {
     return _prnt_err($witem, "cannot resolve handle for $nick") unless defined $ctx;
     my $cfg = $kr->{channels}{$ctx};
     return _prnt_err($witem, "e2e not enabled on $ctx") unless $cfg && ($cfg->{enabled} // 0);
+    # A KEYREQ asks the peer for the key of the direction WE receive, so for a
+    # DM it is stamped with OUR handle (recipient-keyed) — the peer-keyed $ctx
+    # above is only the config key.
+    my $kreq_ctx = _incoming_ctx_for($server, $ctx);
+    return _prnt_err($witem, 'own identity not learned yet (waiting for the USERHOST reply) — try again in a moment')
+        unless defined $kreq_ctx;
     my $handle = _resolve_handle_for_command($kr, $nick);
-    my $wire = eval { build_keyreq($kr, $ctx, $handle) };
+    my $wire = eval { build_keyreq($kr, $kreq_ctx, $handle) };
     return _prnt_err($witem, "handshake failed: $@") if $@ || !defined $wire;
     save_keyring($kr);
     _send_raw_notice($server, $nick, $wire);
@@ -1162,7 +1267,7 @@ sub cmd_accept {
     my $pending = delete $kr->{pending_inbound}{"$handle|$ctx"};
     if ($pending) {
         my $rsp = _build_keyrsp_for_req($kr, $ctx, $handle, b64d($pending->{pubkey}), b64d($pending->{eph_x25519}));
-        my $reciprocal = eval { _build_reciprocal_keyreq_on_accept($kr, $ctx, $handle) };
+        my $reciprocal = eval { _build_reciprocal_keyreq_on_accept($kr, $ctx, $handle, _own_handle_for($server)) };
         if ($@) {
             _dbg("cmd_accept reciprocal build failed for $nick ($handle) on $ctx: $@");
             $reciprocal = undef;
@@ -1207,8 +1312,14 @@ sub cmd_revoke {
     return _prnt_err($witem, "cannot resolve handle for $nick") unless defined $handle;
     my $ctx = _resolve_ctx_for_command($kr, $witem, $nick);
     return _prnt_err($witem, "cannot resolve context for $nick") unless defined $ctx;
-    if (my $row = $kr->{incoming}{"$handle|$ctx"}) {
-        $row->{status} = 'revoked';
+    # DM sessions live under two contexts (recipient-keyed): real incoming
+    # sessions under `@<own>`, KEYREQ-direction trust markers under `@<peer>`
+    # (= $ctx). Revoke both so inbound decrypt — which honors only `@<own>` —
+    # actually stops trusting the peer.
+    for my $rctx (_ctx_variants($witem, $ctx)) {
+        if (my $row = $kr->{incoming}{"$handle|$rctx"}) {
+            $row->{status} = 'revoked';
+        }
     }
     delete $kr->{outgoing_recipients}{"$ctx|$handle"};
     if (my $out = $kr->{outgoing}{$ctx}) {
@@ -1228,8 +1339,11 @@ sub cmd_unrevoke {
     return _prnt_err($witem, "cannot resolve handle for $nick") unless defined $handle;
     my $ctx = _resolve_ctx_for_command($kr, $witem, $nick);
     return _prnt_err($witem, "cannot resolve context for $nick") unless defined $ctx;
-    if (my $row = $kr->{incoming}{"$handle|$ctx"}) {
-        $row->{status} = 'trusted';
+    # Mirror of revoke: restore trust under both DM context forms.
+    for my $rctx (_ctx_variants($witem, $ctx)) {
+        if (my $row = $kr->{incoming}{"$handle|$rctx"}) {
+            $row->{status} = 'trusted';
+        }
     }
     my ($fp_hex, $peer) = _find_peer_by_handle($kr, $handle);
     $peer->{status} = 'trusted' if $peer;
@@ -1267,10 +1381,10 @@ sub cmd_forget {
     }
     my $ctx = _resolve_ctx_for_command($kr, $witem, $who);
     return _prnt_err($witem, "cannot resolve context for $who") unless defined $ctx;
+    # Delete both DM context forms (see cmd_revoke).
     for my $store ($kr->{incoming}, $kr->{pending_inbound}) {
-        my $key = "$handle|$ctx";
-        if (delete $store->{$key}) {
-            $removed++;
+        for my $rctx (_ctx_variants($witem, $ctx)) {
+            $removed++ if delete $store->{"$handle|$rctx"};
         }
     }
     save_keyring($kr);
@@ -1285,7 +1399,10 @@ sub cmd_verify {
     return _prnt_err($witem, "cannot resolve handle for $nick") unless defined $handle;
     my $ctx = _resolve_ctx_for_command($kr, $witem, $nick);
     return _prnt_err($witem, "cannot resolve context for $nick") unless defined $ctx;
-    my $row = $kr->{incoming}{"$handle|$ctx"};
+    # Real DM sessions are recipient-keyed under `@<own>`; fall back to the
+    # peer-keyed trust marker if only that exists.
+    my ($row) = grep { defined }
+        map { $kr->{incoming}{"$handle|$_"} } reverse _ctx_variants($witem, $ctx);
     return _prnt_err($witem, "no session for $nick on $ctx") unless $row;
     my (undef, undef, $local_fp) = ensure_identity();
     _prnt_ok($witem, 'Fingerprint Verification');
@@ -1798,7 +1915,32 @@ sub _decrypt_wire_message {
     my $wire = parse_wire($msg);
     return (0, undef) unless $wire;
     my $handle = $host;
-    my $ctx = _ctx_for_target($target, $handle);
+    my $ctx;
+    my $is_dm = !(defined $target && $target =~ $CHANNEL_PREFIX_RE);
+    if ($is_dm) {
+        # DM: recipient-keyed context (docs/rpe2e-dm-addendum.md) — WE are the
+        # recipient, so the context is OUR handle, never the sender's.
+        my $own = _own_handle_for($server);
+        unless (defined $own && length $own) {
+            # Own handle not learned yet (e.g. right after connect, before the
+            # self-USERHOST reply). Do NOT fall back to `@<sender>` —
+            # decrypting or KEYREQ-ing under it would negotiate the WRONG DM
+            # direction. Drop; the peer's next message re-establishes once the
+            # handle is known.
+            my $wait_key = ($server->{tag} // '') . "|$nick";
+            if (now_unix() - ($own_wait_notice_at{$wait_key} // 0) >= $KEYREQ_MIN_INTERVAL) {
+                $own_wait_notice_at{$wait_key} = now_unix();
+                _prnt_warn(_notice_witem_for_ctx($server, $nick, $nick),
+                           "encrypted DM from $nick held — own identity not learned yet (waiting for the USERHOST reply)");
+            }
+            _dbg("DM wire from $nick but own handle unknown on " . ($server->{tag} // '?'));
+            Irssi::signal_stop();
+            return (1, undef);
+        }
+        $ctx = '@' . $own;
+    } else {
+        $ctx = $target;
+    }
     my $kr = load_keyring();
     _dbg("wire from $nick!$handle -> $target part=$wire->{part}/$wire->{total}");
     if (abs(now_unix() - $wire->{ts}) > $TS_TOLERANCE) {
@@ -1822,7 +1964,11 @@ sub _decrypt_wire_message {
     if (!$row || ($row->{status} // '') ne 'trusted') {
         _prnt_dbg($server, $ctx, $nick, "no trusted incoming for ($handle,$ctx)");
         if (_allow_outgoing_keyreq($handle)) {
-            my $cfg = $kr->{channels}{$ctx};
+            # The enable gate is the PEER-keyed config ("E2E with that peer");
+            # the KEYREQ context is the direction's recipient — us ($ctx is
+            # already @<own> for a DM, the channel itself otherwise).
+            my $cfg_ctx = $is_dm ? '@' . $handle : $ctx;
+            my $cfg = $kr->{channels}{$cfg_ctx};
             if ($cfg && ($cfg->{enabled} // 0)) {
                 my $req = eval { build_keyreq($kr, $ctx, $handle) };
                 if (!$@ && defined $req) {
@@ -1847,6 +1993,45 @@ sub _decrypt_wire_message {
     my $decoded = eval { decode('UTF-8', $pt, FB_DEFAULT) };
     $decoded = decode('UTF-8', $pt) if !defined $decoded;
     return (1, $decoded);
+}
+
+# Registration complete: RESET the own handle (the server may assign a
+# different ident/host/cloak this session) and re-seed it with the one-shot
+# self-USERHOST. irssi core also clears `$server->{userhost}` on disconnect,
+# so the fallback never goes stale either.
+sub signal_event_001 {
+    my ($server, $data, $nick, $address) = @_;
+    return unless $server;
+    delete $own_handle{ $server->{tag} // '' };
+    _send_self_userhost($server);
+}
+
+# RPL_USERHOST: seed our own handle from any entry matching our nick (the
+# self-USERHOST on connect, or any later USERHOST that includes us).
+# Observe-only — never stops the signal (irssi core reads 302 for away flags).
+sub signal_event_302 {
+    my ($server, $data) = @_;
+    return unless $server && defined $data;
+    my ($replies) = $data =~ /:(.*)$/s;
+    $replies //= $data;
+    my $own_nick = lc($server->{nick} // '');
+    return unless length $own_nick;
+    for my $entry (split ' ', $replies) {
+        my ($n, $handle) = _parse_userhost_entry($entry);
+        next unless defined $n && lc($n) eq $own_nick;
+        _set_own_handle($server, $handle);
+    }
+}
+
+# CHGHOST: track our OWN handle (peer handles are read live from prefixes and
+# nicklists; irssi core updates nicklists itself but NOT its own userhost).
+sub signal_event_chghost {
+    my ($server, $data, $nick, $address) = @_;
+    return unless $server && defined $data && defined $nick;
+    return unless lc($nick) eq lc($server->{nick} // '');
+    my ($newuser, $newhost) = $data =~ /^(\S+)\s+:?(\S+)/;
+    return unless defined $newuser && defined $newhost;
+    _set_own_handle($server, "$newuser\@$newhost");
 }
 
 # F2: decrypt on `event privmsg` — the irssi analog of weechat's raw-line
@@ -1905,7 +2090,8 @@ sub _handle_rpee2e_ctcp_reply {
         my $parsed = parse_keyreq($inner);
         my $ctx = $parsed ? $parsed->{channel} : '';
         _prnt_dbg($server, $ctx, $nick, "RX KEYREQ from $nick ($sender_handle) for $ctx") if $parsed;
-        my ($rsp, $reciprocal, $ctx_unused) = handle_keyreq($kr, $sender_handle, $nick, $inner);
+        my ($rsp, $reciprocal, $ctx_unused) =
+            handle_keyreq($kr, $sender_handle, $nick, $inner, _own_handle_for($server));
         save_keyring($kr);
         if ($parsed && !$rsp && exists $kr->{pending_inbound}{"$sender_handle|$ctx"}) {
             my $witem = _notice_witem_for_ctx($server, $ctx, $nick);
@@ -2003,6 +2189,22 @@ Irssi::signal_add_first('event privmsg', \&signal_event_privmsg);
 Irssi::signal_add_first('ctcp reply RPEE2E', \&signal_ctcp_reply_rpee2e);
 Irssi::signal_add_first('ctcp reply', \&signal_ctcp_reply_generic);
 Irssi::signal_add_first('default ctcp reply', \&signal_default_ctcp_reply_generic);
+# Own-handle tracking for the recipient-keyed DM context
+# (docs/rpe2e-dm-addendum.md): reset+reseed at registration, observe 302
+# (self-USERHOST reply) and our own CHGHOST. Plain observers — never stop
+# these signals (irssi core reads 302 for away flags itself).
+Irssi::signal_add('event 001', \&signal_event_001);
+Irssi::signal_add('event 302', \&signal_event_302);
+Irssi::signal_add('event chghost', \&signal_event_chghost);
+# Script (re)loaded mid-session: `event 001` will not fire for servers that
+# are already up — seed their own handle now (irssi's own join-seeded
+# `$server->{userhost}` already covers those that joined a channel).
+for my $server (Irssi::servers()) {
+    next unless $server->{connected};
+    my $known = _own_handle_for($server);
+    next if defined $known && length $known;
+    _send_self_userhost($server);
+}
 
 Irssi::print("RPE2E $VERSION loaded — /e2e fingerprint to see your fingerprint");
 
