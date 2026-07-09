@@ -662,6 +662,20 @@ impl AppState {
         // raised pinned limit preserves the loaded backlog, exactly as for live
         // traffic.
         let limit = self.scrollback_limit;
+        // A decrypted replay and its placeholder share the same server @time,
+        // and placeholders are tagless (no @msgid) with no other correlator, so
+        // the sweep matches by timestamp. But remove at most ONE placeholder
+        // PER spliced row at a given timestamp: two transient placeholders can
+        // collide on the same millisecond @time, and if only one of their
+        // ciphertexts was replayed here, removing every placeholder at that
+        // timestamp would hide a still-undecryptable message from both the TUI
+        // and web clients. Budget the sweep by how many rows actually spliced at
+        // each timestamp.
+        let mut sweep_budget: std::collections::HashMap<chrono::DateTime<chrono::Utc>, usize> =
+            std::collections::HashMap::new();
+        for ts in &spliced_ts {
+            *sweep_budget.entry(*ts).or_insert(0) += 1;
+        }
         // In-memory ids of the placeholders swept below. The placeholder was
         // broadcast to live web clients via `NewMessage` when it was delivered,
         // so a server-side retain alone leaves the client showing BOTH the
@@ -671,17 +685,21 @@ impl AppState {
         let mut swept_ids: Vec<u64> = Vec::new();
         if let Some(buf) = self.buffers.get_mut(buffer_id) {
             // Sweep placeholders whose real (decrypted) line just surfaced.
-            if !spliced_ts.is_empty() {
+            if !sweep_budget.is_empty() {
                 buf.messages.retain(|m| {
                     let is_e2e_placeholder = m.text
                         == crate::e2e::AWAITING_OWN_IDENTITY_PLACEHOLDER
                         || m.text
                             .starts_with(crate::e2e::AWAITING_SESSION_PLACEHOLDER_PREFIX);
-                    let sweep = is_e2e_placeholder && spliced_ts.contains(&m.timestamp);
-                    if sweep {
+                    if is_e2e_placeholder
+                        && let Some(budget) = sweep_budget.get_mut(&m.timestamp)
+                        && *budget > 0
+                    {
+                        *budget -= 1;
                         swept_ids.push(m.id);
+                        return false;
                     }
-                    !sweep
+                    true
                 });
             }
             enforce_scrollback(buf, limit);
@@ -1961,6 +1979,65 @@ mod tests {
                 crate::web::protocol::WebEvent::DeleteMessages { .. }
             )),
             "no DeleteMessages must be emitted when nothing is swept"
+        );
+    }
+
+    #[test]
+    fn only_one_placeholder_swept_per_replay_at_shared_timestamp() {
+        // Two transient placeholders colliding on the same @time: if only ONE
+        // decryptable replay splices at that timestamp, exactly ONE placeholder
+        // must be swept. Removing every placeholder at the timestamp (the old
+        // `spliced_ts.contains` behavior) would hide the second, still-
+        // undecryptable message from both the TUI and web clients.
+        let mut state = make_test_state();
+        let shared_ts = Utc::now();
+
+        let mut p1 =
+            make_test_message(&mut state, crate::e2e::AWAITING_OWN_IDENTITY_PLACEHOLDER);
+        p1.timestamp = shared_ts;
+        p1.tags = None;
+        state.add_transient_message_with_activity("libera/#rust", p1, ActivityLevel::Mention);
+
+        let mut p2 =
+            make_test_message(&mut state, crate::e2e::AWAITING_OWN_IDENTITY_PLACEHOLDER);
+        p2.timestamp = shared_ts;
+        p2.tags = None;
+        state.add_transient_message_with_activity("libera/#rust", p2, ActivityLevel::Mention);
+        state.pending_web_events.clear();
+
+        // A single decrypted replay lands on the shared timestamp.
+        let mut decrypted = make_test_message(&mut state, "decrypted line");
+        decrypted.timestamp = shared_ts;
+        decrypted.tags = Some(HashMap::from([("msgid".to_string(), "abc".to_string())]));
+        state.surface_history_rows("libera/#rust", vec![decrypted]);
+
+        let buf = state.buffers.get("libera/#rust").unwrap();
+        let remaining = buf
+            .messages
+            .iter()
+            .filter(|m| m.text == crate::e2e::AWAITING_OWN_IDENTITY_PLACEHOLDER)
+            .count();
+        assert_eq!(
+            remaining, 1,
+            "one placeholder must survive when only one of two collided replays surfaced"
+        );
+        assert!(
+            buf.messages.iter().any(|m| m.text == "decrypted line"),
+            "the decrypted replay must surface"
+        );
+        let deleted: usize = state
+            .pending_web_events
+            .iter()
+            .filter_map(|e| match e {
+                crate::web::protocol::WebEvent::DeleteMessages { message_ids, .. } => {
+                    Some(message_ids.len())
+                }
+                _ => None,
+            })
+            .sum();
+        assert_eq!(
+            deleted, 1,
+            "web clients must be told to drop exactly the one swept placeholder"
         );
     }
 

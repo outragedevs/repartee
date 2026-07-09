@@ -445,6 +445,34 @@
 >
 > Weryfikacja: `make clippy` 0 warnings, `make test` 1518 passed (1 nowy).
 
+> **STATUS 16 (2026-07-09): RUNDA ZEWNĘTRZNA #13 — NAPRAWIONE.** Oba
+> findingi [P2] potwierdzone i naprawione.
+>
+> - **[P2] Labele sieci E2E nie odświeżane po zmianach runtime**
+>   (`mod.rs:578`): `set_configured_networks` wołane RAZ na starcie ze
+>   snapshotu `config.servers`. `/connect` (ad-hoc), `/server add|remove`
+>   zmieniają zbiór sieci bez aktualizacji keyringu — sesja startująca z 0/1
+>   labelami, potem łącząca drugą sieć, nadal miała
+>   `legacy_adoption_allowed()=true`, więc scoped miss na nowej sieci
+>   spadał do niescope'owanego legacy rowa → cross-network leak. Fix: nowy
+>   `App::refresh_e2e_configured_networks()` (union labeli z `config.servers`
+>   + żywych połączeń, z WYKLUCZENIEM pseudo-połączeń `_default`/`_shell`/
+>   `_log_*` — nie są sieciami IRC i nie mogą zawyżać licznika izolacji).
+>   Wołany w: `setup_connection` (każdy /connect i autoconnect), `/server
+>   add`, `/server remove`, oraz zapis wizarda (web `SaveServer` + TUI).
+>   Weryfikacja przez konstrukcję (4 call-sites; brak harnessu App-level).
+> - **[P2] Sweep placeholderów po samym timestampie usuwał niepowiązane**
+>   (`state/events.rs:675`): `spliced_ts.contains(&m.timestamp)` usuwał
+>   KAŻDY placeholder o danym @time. Dwa transientne placeholdery kolidujące
+>   na tej samej milisekundzie + jeden odszyfrowany replay → oba usuwane,
+>   drugi (wciąż nieodszyfrowywalny) znikał z TUI i web. Fix: budżet sweepa
+>   liczony per-timestamp (`HashMap<ts, count>` z liczby faktycznie
+>   splice'owanych rowów) — usuwamy co najwyżej tyle placeholderów ile
+>   replayów na danym @time. Test:
+>   `only_one_placeholder_swept_per_replay_at_shared_timestamp`.
+>
+> Weryfikacja: `make clippy` 0 warnings, `make test` 1519 passed (1 nowy).
+
 - **Data review:** 2026-07-01
 - **Zakres:** pełny diff PR #29 (`main...fix/various-improvements`, stan po commicie `96580de`)
 - **Metoda:** 8 niezależnych kątów wyszukiwania (line-by-line, removed-behavior, cross-file, reuse, simplification, efficiency, altitude, conventions) → dedup → 12 osobnych weryfikatorów (po jednym na kandydata, verdict CONFIRMED/PLAUSIBLE/REFUTED z cytatami z kodu)

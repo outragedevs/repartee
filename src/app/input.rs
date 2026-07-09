@@ -1028,6 +1028,9 @@ impl App {
                     built.sasl_pass,
                 );
                 self.cached_config_toml = None;
+                // config.servers changed in-memory; refresh the keyring's
+                // legacy-adoption isolation count — see the helper.
+                self.refresh_e2e_configured_networks();
                 match result {
                     Ok(()) => {
                         self.wizard = None;

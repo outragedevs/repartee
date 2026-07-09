@@ -61,6 +61,15 @@ impl App {
             silent_banlist_channels: HashSet::new(),
         });
 
+        // A newly registered connection may add a network the keyring's
+        // configured-network set (snapshotted at startup) doesn't know about —
+        // an ad-hoc `/connect` or a `/server add` since launch. Refresh it so
+        // `legacy_adoption_allowed()` reflects the networks actually in play:
+        // a stale count of <=1 would let a scoped miss on this second network
+        // fall back to an unscoped legacy E2E row, defeating cross-network
+        // isolation.
+        self.refresh_e2e_configured_networks();
+
         let server_buf_id = make_buffer_id(conn_id, &server_config.label);
         self.state.add_buffer(Buffer {
             id: server_buf_id.clone(),
@@ -108,6 +117,44 @@ impl App {
         );
 
         server_buf_id
+    }
+
+    /// Recompute the keyring's configured-network set from the CURRENT servers
+    /// config plus every active connection, so `legacy_adoption_allowed()`
+    /// reflects runtime changes — an ad-hoc `/connect` net or a `/server
+    /// add`/`remove` since startup, none of which touch the startup snapshot.
+    /// A stale set that still reports <=1 network would let a scoped miss on a
+    /// newly-connected second network fall back to an unscoped legacy E2E row,
+    /// the exact cross-network reuse the scoping prevents. No-op without an E2E
+    /// manager.
+    pub(crate) fn refresh_e2e_configured_networks(&self) {
+        let Some(mgr) = self.state.e2e_manager.as_ref() else {
+            return;
+        };
+        // Real IRC networks only: the union of configured server labels and the
+        // labels of live connections, EXCLUDING the UI pseudo-connections (the
+        // `_default` status placeholder, the `_shell` PTY, and `_log_*` log
+        // browsers). They hold no E2E contexts and must not inflate the
+        // isolation count — doing so would wrongly deny the legacy fallback to a
+        // genuine single-network user (fail-closed, but a functional regression).
+        let labels: HashSet<String> = self
+            .config
+            .servers
+            .values()
+            .map(|s| s.label.clone())
+            .chain(
+                self.state
+                    .connections
+                    .values()
+                    .filter(|c| {
+                        c.id != Self::DEFAULT_CONN_ID
+                            && c.id != Self::SHELL_CONN_ID
+                            && !c.id.starts_with(Self::LOG_CONN_PREFIX)
+                    })
+                    .map(|c| c.label.clone()),
+            )
+            .collect();
+        mgr.keyring().set_configured_networks(labels);
     }
 
     pub(crate) fn start_autoconnects(&mut self, server_ids: &[String]) {
