@@ -1715,15 +1715,21 @@ sub _e2e_gate_wire {
     return @res;
 }
 
-# THE single authoritative outbound gate. Every PRIVMSG irssi is about to send —
-# from plain typed text, `/me`, `/msg`, `/say`, `/amsg`, or a script — passes
-# through here (there is no separate `send text` handler; irssi's own command
-# layer produces the local echo, and this gate rewrites only the wire).
-sub signal_server_sending_command {
-    my ($server, $data) = @_;
-    return unless $server && defined $data;
-    my $line = $data;
-    $line =~ s/\r*\n*\z//;   # some paths append CRLF; never let it into the body
+# THE single authoritative outbound gate, hooked on `server outgoing modify` —
+# the raw-line signal irssi fires for EVERY line it is about to write to the
+# socket (the analog of weechat's `irc_out1_privmsg`). Every PRIVMSG — from
+# plain typed text, `/me`, `/msg`, `/say`, `/amsg`, or a script — passes through
+# here; irssi's own command/send-text layer produces the local echo, and this
+# gate rewrites only the wire. `$data` is a SCALAR REF to the outgoing line
+# (mutable): we DROP a line by blanking `$$data` (an empty line is silently
+# ignored by the server per RFC 1459), which does not depend on signal_stop's
+# behavior for `modify` signals — a leak here would be catastrophic, so we never
+# rely on it alone.
+sub signal_server_outgoing {
+    my ($server, $data, $crlf) = @_;
+    return unless $server && ref($data) eq 'SCALAR' && defined $$data;
+    my $line = $$data;
+    $line =~ s/\r*\n*\z//;   # the raw line may carry a trailing CRLF
     # Only PRIVMSG carries user message content. NOTICE (KEYREQ/KEYRSP/REKEY)
     # and every other command pass through untouched.
     return unless $line =~ /^PRIVMSG\s+(\S+)\s+:?(.*)$/s;
@@ -1737,19 +1743,22 @@ sub signal_server_sending_command {
     return if $action eq 'pass';
     if ($action eq 'bypass') {
         _prnt_warn(_notice_witem_for_ctx($server, $target, $target), $payload) if defined $payload;
-        return;
+        return;   # leave $$data unchanged — the plaintext bot command goes out
     }
     if ($action eq 'refuse') {
         # irssi's command layer already echoed the plaintext locally, so make it
-        # explicit that nothing was delivered (the wire line is dropped below).
+        # explicit that nothing was delivered.
         _prnt_err(_notice_witem_for_ctx($server, $target, $target),
                   "$payload — the message shown above was NOT delivered");
-        Irssi::signal_stop();   # drop the plaintext line — never reaches the wire
+        $$data = "";            # drop the plaintext line — never reaches the wire
+        Irssi::signal_stop();
         return;
     }
-    # cipher: suppress the original and emit the encrypted chunks ourselves.
-    Irssi::signal_stop();
+    # cipher: emit the encrypted chunks ourselves (in order, before the original
+    # line is written), then blank the original so the plaintext never goes out.
     _send_raw_privmsg($server, $target, $_) for @$payload;
+    $$data = "";
+    Irssi::signal_stop();
 }
 
 # Decrypt one RPE2E wire message. Returns ($handled, $decoded):
@@ -1919,10 +1928,11 @@ sub signal_default_ctcp_reply_generic {
 ensure_identity();
 
 Irssi::command_bind('e2e', \&cmd_e2e);
-# THE single authoritative outbound fail-closed gate (F1): every PRIVMSG on the
-# wire — plain typed text, `/me`, `/msg`, `/say`, `/amsg`, scripts — passes
-# through here. irssi's own command layer produces the local echo.
-Irssi::signal_add_first('server sending command', \&signal_server_sending_command);
+# THE single authoritative outbound fail-closed gate (F1): `server outgoing
+# modify` is the raw-line signal irssi fires for every line about to hit the
+# socket, so every PRIVMSG — plain typed text, `/me`, `/msg`, `/say`, `/amsg`,
+# scripts — passes through here. irssi's own layer produces the local echo.
+Irssi::signal_add_first('server outgoing modify', \&signal_server_outgoing);
 # F2: decrypt on the raw PRIVMSG event, BEFORE irssi's CTCP/ACTION split, so
 # an encrypted ACTION renders as an action rather than raw control characters.
 Irssi::signal_add_first('event privmsg', \&signal_event_privmsg);
