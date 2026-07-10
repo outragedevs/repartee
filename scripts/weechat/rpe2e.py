@@ -589,6 +589,15 @@ def _own_handle_get(server: str):
                 finally:
                     weechat.infolist_free(infolist)
                 if found:
+                    # PROMOTE to the rank-2 store: nicklist values are
+                    # prefix-visible (JOIN/WHO/userhost-in-names/CHGHOST-fed)
+                    # but VANISH when the last shared channel is parted —
+                    # without caching, the next read would fall back to the
+                    # rank-1 USERHOST value (the non-visible REAL host on
+                    # solanum) and break the recipient-keyed DM context.
+                    # Later host changes still win via the equal-rank
+                    # JOIN/CHGHOST/396/echo hooks.
+                    _set_own_handle(server, found)
                     return found
     return entry["handle"] if entry else None
 

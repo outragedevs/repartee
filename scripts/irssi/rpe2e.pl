@@ -581,7 +581,16 @@ sub _own_handle_for {
     if (length $nick) {
         for my $ch (eval { $server->channels() }) {
             my $n = eval { $ch->nick_find($nick) };
-            return $n->{host} if $n && $n->{host};
+            next unless $n && $n->{host};
+            # PROMOTE to the rank-2 store: nicklist values are prefix-visible
+            # (JOIN/WHO/CHGHOST-fed) but VANISH when the last shared channel
+            # is parted — without caching, the next read would fall back to
+            # core's possibly-stale userhost or the rank-1 USERHOST value
+            # (the non-visible REAL host on solanum) and break the
+            # recipient-keyed DM context. Later host changes still win via
+            # the equal-rank JOIN/CHGHOST/396 handlers.
+            _set_own_handle($server, $n->{host}, 2);
+            return $n->{host};
         }
     }
     return $server->{userhost}
