@@ -534,6 +534,23 @@ def context_key(target: str, handle: str) -> str:
     return "@" + handle
 
 
+def _split_irc_tags(msg: str):
+    """weechat's `irc_in2_*` modifiers pass the raw line INCLUDING IRCv3
+    message tags (`@time=… :prefix CMD …`) whenever caps like server-time are
+    active (verified in irc-server.c: the modifier gets the full decoded
+    line). Returns (tags_prefix, rest): `tags_prefix` is "" or the tag
+    section INCLUDING its trailing space, so a hook that rewrites the line
+    can re-prepend it verbatim; `rest` starts at the `:prefix`. Every parser
+    here works on the tagless form — without this, `@time=…` lines made the
+    prefix-visible own-handle hooks blind and let hook_irc_in_396 read the
+    wrong token as the new host (poisoning the rank-2 store)."""
+    if msg.startswith("@"):
+        sp = msg.find(" ")
+        if sp > 0:
+            return msg[: sp + 1], msg[sp + 1 :].lstrip(" ")
+    return "", msg
+
+
 def _parse_userhost_reply(entry: str):
     """One RPL_USERHOST (302) entry `nick[*]=[+|-]ident@host` → (nick, handle)
     or None. Mirrors Rust `parse_userhost_reply`: the trailing `*` on the nick
@@ -2312,7 +2329,8 @@ def hook_irc_in_302(data, modifier, server, msg):
     host, not the cloak peers see — so this only fills a hole and never
     overrides a prefix-visible source. Observe-only, line passes through."""
     try:
-        trailing = msg.split(" :", 1)[1] if " :" in msg else msg.rsplit(" ", 1)[-1]
+        _tags, line = _split_irc_tags(msg)
+        trailing = line.split(" :", 1)[1] if " :" in line else line.rsplit(" ", 1)[-1]
         own = _own_nick(server)
         for entry in trailing.split():
             parsed = _parse_userhost_reply(entry)
@@ -2328,8 +2346,9 @@ def hook_irc_in_join(data, modifier, server, msg):
     peers see it — the strongest own-handle source next to echo-message, and
     present right after connect (autojoin). Observe-only."""
     try:
-        if msg.startswith(":"):
-            prefix = msg[1:].split(" ", 1)[0]
+        _tags, line = _split_irc_tags(msg)
+        if line.startswith(":"):
+            prefix = line[1:].split(" ", 1)[0]
             if "!" in prefix and "@" in prefix:
                 nick, userhost = prefix.split("!", 1)
                 own = _own_nick(server)
@@ -2345,8 +2364,12 @@ def hook_irc_in_396(data, modifier, server, msg):
     the server telling US our new DISPLAYED host (peer-visible by
     definition). Host-only form merges with the known ident. Observe-only."""
     try:
-        parts = msg.split(" ")
-        if len(parts) >= 4:
+        _tags, line = _split_irc_tags(msg)
+        parts = line.split(" ")
+        # Field positions are only meaningful on a well-formed
+        # `:server 396 nick <host> …` line — never guess otherwise (a shifted
+        # token here would poison the rank-2 store).
+        if line.startswith(":") and len(parts) >= 4 and parts[1] == "396":
             newhost = parts[3].lstrip(":")
             # mirror irssi core's sanity check on the announced host
             if newhost and not any(c in newhost for c in "*?!# ") and newhost[0] not in "@:-" and not newhost.endswith("-"):
@@ -2367,8 +2390,9 @@ def hook_irc_in_chghost(data, modifier, server, msg):
     irc plugin only forwards CHGHOST when the cap is active, so this is a
     no-op otherwise. Observe-only."""
     try:
-        if msg.startswith(":"):
-            parts = msg.split(" ")
+        _tags, line = _split_irc_tags(msg)
+        if line.startswith(":"):
+            parts = line.split(" ")
             nick = parts[0][1:].split("!", 1)[0]
             own = _own_nick(server)
             if own and nick.lower() == own.lower() and len(parts) >= 4:
@@ -2383,11 +2407,12 @@ def hook_irc_in_chghost(data, modifier, server, msg):
 
 def hook_irc_in_privmsg(data, modifier, server, msg):
     try:
-        if not msg.startswith(":"):
+        tags, line = _split_irc_tags(msg)
+        if not line.startswith(":"):
             return msg
-        prefix_end = msg.index(" ")
-        prefix = msg[1:prefix_end]
-        rest = msg[prefix_end + 1 :]
+        prefix_end = line.index(" ")
+        prefix = line[1:prefix_end]
+        rest = line[prefix_end + 1 :]
         if "!" not in prefix or "@" not in prefix:
             return msg
         nick, userhost = prefix.split("!", 1)
@@ -2521,7 +2546,9 @@ def hook_irc_in_privmsg(data, modifier, server, msg):
         if pt_str.startswith("\x01") and not pt_str.startswith("\x01ACTION "):
             _dbg(f"hook_irc_in_privmsg: dropping decrypted non-ACTION CTCP from {nick}")
             return ""
-        return f":{prefix} PRIVMSG {target} :{pt_str}"
+        # Re-prepend the original IRCv3 tags: dropping them would lose
+        # server-time/msgid on the decrypted line.
+        return f"{tags}:{prefix} PRIVMSG {target} :{pt_str}"
     except Exception as e:
         _dbg(f"hook_irc_in_privmsg OUTER EXCEPTION: {e}\n{traceback.format_exc()}")
         return msg
@@ -2590,11 +2617,12 @@ def hook_input_text_for_buffer(data, modifier, modifier_data, text):
 
 def hook_irc_in_notice(data, modifier, server, msg):
     try:
-        if not msg.startswith(":"):
+        _tags, line = _split_irc_tags(msg)
+        if not line.startswith(":"):
             return msg
-        prefix_end = msg.index(" ")
-        prefix = msg[1:prefix_end]
-        rest = msg[prefix_end + 1 :]
+        prefix_end = line.index(" ")
+        prefix = line[1:prefix_end]
+        rest = line[prefix_end + 1 :]
         if "!" not in prefix or "@" not in prefix:
             return msg
         nick, userhost = prefix.split("!", 1)
