@@ -31,7 +31,25 @@ had no DM enable path (`/e2e on|off|mode` were channel-only).
   negotiate the wrong direction). Next message re-establishes after the handle
   is learned. Own handle resets at registration and re-seeds.
 
-## Own-handle capture (mirrors Rust)
+## Own-handle capture (mirrors Rust, with ranked sources)
+
+Post-PR review round (2026-07-10): sources are RANKED, because they disagree
+on cloaked networks — what matters is the handle as PEERS see it (our message
+prefix), and solanum-family ircds (Libera) answer a self-USERHOST with the
+REAL host, not the cloak (verified in solanum `m_userhost.c`: `target ==
+source` uses `sockhost`/`orighost`). Rank 2 (authoritative, prefix-visible):
+echo-message echoes (weechat), our own JOIN, our own CHGHOST, RPL_HOSTHIDDEN
+(396). Rank 1 (seed of last resort): the 302 reply. A lower rank never
+overwrites a higher one; reads prefer the rank-2 store, then a live
+own-nicklist lookup (both clients keep nicklists current, incl. CHGHOST),
+then (irssi) core's join/396-seeded `$server->{userhost}`, then rank 1.
+The load-time self-USERHOST is sent UNCONDITIONALLY for connected servers
+(a mere non-empty fallback can be stale — irssi core does not update
+`userhost` on own CHGHOST); under the ranking this can never clobber a
+prefix-visible value. Review claim that weechat's `irc_server_connected` is
+a socket-connect signal was refuted against weechat source: it is emitted in
+`IRC_PROTOCOL_CALLBACK(001)` (irc-protocol.c), i.e. exactly at the welcome
+numeric, same as the Rust client's one-shot.
 
 Per-server volatile store (never persisted):
 

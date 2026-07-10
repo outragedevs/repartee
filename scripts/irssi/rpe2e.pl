@@ -82,11 +82,19 @@ my %rate_limit_sent;
 
 # Our own server-stamped ident@host, per server tag — the recipient-keyed DM
 # context (docs/rpe2e-dm-addendum.md): DMs we RECEIVE are keyed `@<own>`.
-# VOLATILE by design (never persisted): reset at registration and re-seeded via
-# the one-shot self-USERHOST and our own CHGHOST. irssi core's
-# `$server->{userhost}` is the fallback seed (core fills it from our first own
-# JOIN and RPL_HOSTHIDDEN, but NOT on own CHGHOST and not before a join —
-# hence this store on top).
+# VOLATILE by design (never persisted): reset at registration and re-seeded.
+#
+# Sources are RANKED, because they disagree on cloaked networks: what matters
+# is the handle as PEERS see it (our message prefix), and solanum-family ircds
+# (Libera) answer a self-USERHOST with the REAL host, not the cloak.
+#   rank 2 — prefix-visible: our own JOIN, our own CHGHOST, RPL_HOSTHIDDEN
+#            (396). Authoritative.
+#   rank 1 — self-USERHOST (302) reply: seed of last resort (a DM-only user
+#            on zero channels produces no rank-2 event).
+# A lower rank never overwrites a higher one; reads prefer rank 2, then a live
+# own-nicklist lookup (irssi keeps nicklists current, incl. CHGHOST), then
+# core's join/396-seeded `$server->{userhost}`, then rank 1.
+# Values: { handle => ..., rank => ... }, keyed by server tag.
 my %own_handle;
 
 # Throttle for the "held — own identity not learned yet" notice, per
@@ -546,22 +554,39 @@ sub _parse_userhost_entry {
 }
 
 sub _set_own_handle {
-    my ($server, $handle) = @_;
+    my ($server, $handle, $rank) = @_;
     return unless $server && defined $handle && length $handle;
+    $rank //= 2;
     my $tag = $server->{tag} // return;
-    if (($own_handle{$tag} // '') ne $handle) {
-        $own_handle{$tag} = $handle;
-        _dbg("own handle on $tag: $handle");
+    my $cur = $own_handle{$tag};
+    return if $cur && $cur->{rank} > $rank;   # prefix-visible never yields to USERHOST
+    if (!$cur || $cur->{handle} ne $handle || $cur->{rank} != $rank) {
+        $own_handle{$tag} = { handle => $handle, rank => $rank };
+        _dbg("own handle on $tag: $handle (rank $rank)");
     }
 }
 
-# Our own ident@host on this server, or undef while unknown. The script store
-# wins (it tracks own CHGHOST); irssi core's join-seeded value is the fallback.
+# Best current view of our own PEER-VISIBLE ident@host, or undef while
+# unknown. Priority: rank-2 store → our own nick on any joined channel's
+# nicklist (irssi keeps it current, incl. CHGHOST) → core's join/396-seeded
+# `$server->{userhost}` → rank-1 store (self-USERHOST; solanum-family ircds
+# answer that with the REAL host, so it is last).
 sub _own_handle_for {
     my ($server) = @_;
     return unless $server;
     my $tag = $server->{tag} // '';
-    return $own_handle{$tag} // $server->{userhost};
+    my $entry = $own_handle{$tag};
+    return $entry->{handle} if $entry && $entry->{rank} >= 2;
+    my $nick = $server->{nick} // '';
+    if (length $nick) {
+        for my $ch (eval { $server->channels() }) {
+            my $n = eval { $ch->nick_find($nick) };
+            return $n->{host} if $n && $n->{host};
+        }
+    }
+    return $server->{userhost}
+        if defined $server->{userhost} && length $server->{userhost};
+    return $entry ? $entry->{handle} : undef;
 }
 
 # ONE-SHOT self-USERHOST to seed our own handle — gated to registration/load
@@ -2007,8 +2032,11 @@ sub signal_event_001 {
 }
 
 # RPL_USERHOST: seed our own handle from any entry matching our nick (the
-# self-USERHOST on connect, or any later USERHOST that includes us).
-# Observe-only — never stops the signal (irssi core reads 302 for away flags).
+# self-USERHOST on connect, or any later USERHOST that includes us). Rank 1:
+# solanum-family ircds (Libera) answer a SELF-query with the REAL host, not
+# the cloak peers see — this only fills a hole, never overrides a
+# prefix-visible source. Observe-only — never stops the signal (irssi core
+# reads 302 for away flags).
 sub signal_event_302 {
     my ($server, $data) = @_;
     return unless $server && defined $data;
@@ -2019,8 +2047,37 @@ sub signal_event_302 {
     for my $entry (split ' ', $replies) {
         my ($n, $handle) = _parse_userhost_entry($entry);
         next unless defined $n && lc($n) eq $own_nick;
-        _set_own_handle($server, $handle);
+        _set_own_handle($server, $handle, 1);
     }
+}
+
+# Our own JOIN carries our prefix exactly as peers see it — the strongest
+# own-handle source irssi has (no echo-message support), and present right
+# after connect (autojoin). irssi core only copies it into
+# `$server->{userhost}` when that is still NULL; we track every occurrence.
+sub signal_event_join_own {
+    my ($server, $data, $nick, $address) = @_;
+    return unless $server && defined $nick && defined $address && length $address;
+    return unless lc($nick) eq lc($server->{nick} // '');
+    _set_own_handle($server, $address, 2);
+}
+
+# RPL_HOSTHIDDEN (396): the server telling US our new DISPLAYED host —
+# peer-visible by definition. Host-only form merges with the known ident.
+# Sanity checks mirror irssi core's event_hosthidden.
+sub signal_event_396 {
+    my ($server, $data) = @_;
+    return unless $server && defined $data;
+    my ($newhost) = $data =~ /^\S+\s+:?(\S+)/;
+    return unless defined $newhost && length $newhost;
+    return if $newhost =~ /[*?!#&\s]/ || $newhost =~ /^[@:\-]/ || $newhost =~ /-$/;
+    if (index($newhost, '@') > 0) {
+        _set_own_handle($server, $newhost, 2);
+        return;
+    }
+    my $cur = _own_handle_for($server);
+    return unless defined $cur && $cur =~ /^([^@]+)@/;
+    _set_own_handle($server, "$1\@$newhost", 2);
 }
 
 # CHGHOST: track our OWN handle (peer handles are read live from prefixes and
@@ -2196,13 +2253,16 @@ Irssi::signal_add_first('default ctcp reply', \&signal_default_ctcp_reply_generi
 Irssi::signal_add('event 001', \&signal_event_001);
 Irssi::signal_add('event 302', \&signal_event_302);
 Irssi::signal_add('event chghost', \&signal_event_chghost);
+Irssi::signal_add('event join', \&signal_event_join_own);
+Irssi::signal_add('event 396', \&signal_event_396);
 # Script (re)loaded mid-session: `event 001` will not fire for servers that
-# are already up — seed their own handle now (irssi's own join-seeded
-# `$server->{userhost}` already covers those that joined a channel).
+# are already up — seed their own handle now. Sent UNCONDITIONALLY: core's
+# `$server->{userhost}` can be stale (it is not updated on own CHGHOST), so
+# skipping when a fallback merely exists would pin the stale value until
+# reconnect. The reply seeds only rank 1, so it can never clobber a
+# prefix-visible value; live nicklist/core lookups still outrank it.
 for my $server (Irssi::servers()) {
     next unless $server->{connected};
-    my $known = _own_handle_for($server);
-    next if defined $known && length $known;
     _send_self_userhost($server);
 }
 

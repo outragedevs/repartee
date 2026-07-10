@@ -367,10 +367,20 @@ _incoming_buckets: dict[str, "IncomingBucket"] = {}
 
 # Our own server-stamped ident@host, per server — the recipient-keyed DM
 # context (docs/rpe2e-dm-addendum.md): DMs we RECEIVE are keyed `@<own>`.
-# VOLATILE by design (never persisted): reset at (dis)connect and re-seeded via
-# the one-shot self-USERHOST, our own CHGHOST, and echo-message echoes, because
-# the server may assign a different ident/host/cloak each session.
-_own_handle: dict[str, str] = {}
+# VOLATILE by design (never persisted): reset at (dis)connect and re-seeded,
+# because the server may assign a different ident/host/cloak each session.
+#
+# Sources are RANKED, because they disagree on cloaked networks: what matters
+# is the handle as PEERS see it (our message prefix), and solanum-family ircds
+# (Libera) answer a self-USERHOST with the REAL host, not the cloak.
+#   rank 2 — prefix-visible: echo-message echoes, our own JOIN, our own
+#            CHGHOST, RPL_HOSTHIDDEN (396). Authoritative.
+#   rank 1 — self-USERHOST (302) reply: seed of last resort (a DM-only user
+#            on zero channels produces no rank-2 event until they speak).
+# A lower rank never overwrites a higher one; reads prefer rank 2, then a live
+# own-nicklist lookup (kept current by weechat incl. CHGHOST), then rank 1.
+# Values: {"handle": str, "rank": int}.
+_own_handle: dict[str, dict] = {}
 
 # Throttle for the "held — own identity not learned yet" notice, per
 # (server, sender nick), so a chatty peer doesn't flood the buffer while we
@@ -544,10 +554,43 @@ def _own_nick(server: str) -> str:
     return weechat.info_get("irc_nick", server) if weechat else ""
 
 
-def _set_own_handle(server: str, handle: str) -> None:
-    if handle and _own_handle.get(server) != handle:
-        _own_handle[server] = handle
-        _dbg(f"own handle on {server}: {handle}")
+def _set_own_handle(server: str, handle: str, rank: int = 2) -> None:
+    if not handle:
+        return
+    cur = _own_handle.get(server)
+    if cur and cur["rank"] > rank:
+        return  # a prefix-visible value never yields to a self-USERHOST one
+    if not cur or cur["handle"] != handle or cur["rank"] != rank:
+        _own_handle[server] = {"handle": handle, "rank": rank}
+        _dbg(f"own handle on {server}: {handle} (rank {rank})")
+
+
+def _own_handle_get(server: str):
+    """Best current view of our own peer-visible handle, or None.
+    Priority: rank-2 store → our own nick on any joined channel's nicklist
+    (weechat keeps it current, incl. CHGHOST) → rank-1 store (USERHOST)."""
+    entry = _own_handle.get(server)
+    if entry and entry["rank"] >= 2:
+        return entry["handle"]
+    if weechat is not None:
+        nick = _own_nick(server)
+        if nick:
+            infolist = weechat.infolist_get("irc_channel", "", server)
+            if infolist:
+                found = None
+                try:
+                    while weechat.infolist_next(infolist):
+                        chan = weechat.infolist_string(infolist, "name") or ""
+                        if not chan:
+                            continue
+                        found = _resolve_handle_by_nick(server, chan, nick)
+                        if found:
+                            break
+                finally:
+                    weechat.infolist_free(infolist)
+                if found:
+                    return found
+    return entry["handle"] if entry else None
 
 
 def _send_self_userhost(server: str) -> None:
@@ -567,7 +610,7 @@ def _incoming_ctx_for(server: str, ctx: str):
     (recipient-keyed — the recipient of the direction is us). Channels pass
     through unchanged. None → our own handle is not known yet."""
     if ctx.startswith("@"):
-        own_h = _own_handle.get(server)
+        own_h = _own_handle_get(server)
         return ("@" + own_h) if own_h else None
     return ctx
 
@@ -1279,7 +1322,7 @@ def _reciprocal_ctx(channel: str, server: str) -> str | None:
     (the transport self-heals later via auto-KEYREQ on their first wire)."""
     if channel[:1] in CHANNEL_PREFIXES:
         return channel
-    own_h = _own_handle.get(server)
+    own_h = _own_handle_get(server)
     return ("@" + own_h) if own_h else None
 
 
@@ -2214,17 +2257,57 @@ def hook_signal_server_disconnected(data, signal, signal_data):
 
 def hook_irc_in_302(data, modifier, server, msg):
     """RPL_USERHOST: seed our own handle from any entry matching our nick
-    (a self-USERHOST on connect, or any later USERHOST that includes us).
-    Observe-only — the line always passes through unmodified."""
+    (the self-USERHOST on connect, or any later USERHOST that includes us).
+    Rank 1: solanum-family ircds (Libera) answer a SELF-query with the REAL
+    host, not the cloak peers see — so this only fills a hole and never
+    overrides a prefix-visible source. Observe-only, line passes through."""
     try:
         trailing = msg.split(" :", 1)[1] if " :" in msg else msg.rsplit(" ", 1)[-1]
         own = _own_nick(server)
         for entry in trailing.split():
             parsed = _parse_userhost_reply(entry)
             if parsed and own and parsed[0].lower() == own.lower():
-                _set_own_handle(server, parsed[1])
+                _set_own_handle(server, parsed[1], rank=1)
     except Exception as e:
         _dbg(f"hook_irc_in_302: {e}")
+    return msg
+
+
+def hook_irc_in_join(data, modifier, server, msg):
+    """Our own JOIN (`:nick!ident@host JOIN :#chan`) carries our prefix as
+    peers see it — the strongest own-handle source next to echo-message, and
+    present right after connect (autojoin). Observe-only."""
+    try:
+        if msg.startswith(":"):
+            prefix = msg[1:].split(" ", 1)[0]
+            if "!" in prefix and "@" in prefix:
+                nick, userhost = prefix.split("!", 1)
+                own = _own_nick(server)
+                if own and nick.lower() == own.lower():
+                    _set_own_handle(server, userhost)
+    except Exception as e:
+        _dbg(f"hook_irc_in_join: {e}")
+    return msg
+
+
+def hook_irc_in_396(data, modifier, server, msg):
+    """RPL_HOSTHIDDEN: `:srv 396 nick <host|user@host> :is now your ...` —
+    the server telling US our new DISPLAYED host (peer-visible by
+    definition). Host-only form merges with the known ident. Observe-only."""
+    try:
+        parts = msg.split(" ")
+        if len(parts) >= 4:
+            newhost = parts[3].lstrip(":")
+            # mirror irssi core's sanity check on the announced host
+            if newhost and not any(c in newhost for c in "*?!# ") and newhost[0] not in "@:-" and not newhost.endswith("-"):
+                if "@" in newhost:
+                    _set_own_handle(server, newhost)
+                else:
+                    cur = _own_handle_get(server)
+                    if cur and "@" in cur:
+                        _set_own_handle(server, cur.split("@", 1)[0] + "@" + newhost)
+    except Exception as e:
+        _dbg(f"hook_irc_in_396: {e}")
     return msg
 
 
@@ -2306,7 +2389,7 @@ def hook_irc_in_privmsg(data, modifier, server, msg):
         else:
             # DM: recipient-keyed context (docs/rpe2e-dm-addendum.md) — WE are
             # the recipient, so the context is OUR handle, never the sender's.
-            own_h = _own_handle.get(server)
+            own_h = _own_handle_get(server)
             if not own_h:
                 # Own handle not learned yet (e.g. right after connect, before
                 # the self-USERHOST reply). Do NOT fall back to `@<sender>` —
@@ -3194,6 +3277,8 @@ def main() -> None:
     weechat.hook_signal("irc_server_disconnected", "hook_signal_server_disconnected", "")
     weechat.hook_modifier("irc_in2_302", "hook_irc_in_302", "")
     weechat.hook_modifier("irc_in2_chghost", "hook_irc_in_chghost", "")
+    weechat.hook_modifier("irc_in2_join", "hook_irc_in_join", "")
+    weechat.hook_modifier("irc_in2_396", "hook_irc_in_396", "")
     # Script (re)loaded mid-session: `irc_server_connected` will not fire for
     # servers that are already up — seed their own handle now.
     infolist = weechat.infolist_get("irc_server", "", "")
