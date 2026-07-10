@@ -615,6 +615,47 @@ def _incoming_ctx_for(server: str, ctx: str):
     return ctx
 
 
+def _update_incoming_trust(handle: str, ctx: str, status: str) -> int:
+    """Set the trust status of a peer's incoming session(s); returns the row
+    count. A DM trust change targets the PEER, not one context string: the
+    real session lives under `@<own>` (which may be UNKNOWN right now, e.g.
+    right after reconnect/reload before USERHOST/JOIN/396 seeds it), the
+    trust marker under `@<peer>`, plus possibly stale rows from handle drift
+    — so update EVERY DM row for the handle. Touching only the resolvable
+    context would report success while leaving the trusted `@<own>` session
+    decryptable once the handle is learned. Channels update exactly
+    (handle, ctx)."""
+    with db_conn() as c:
+        if ctx.startswith("@"):
+            cur = c.execute(
+                "UPDATE incoming SET status=? WHERE handle = ? AND channel LIKE '@%'",
+                (status, handle),
+            )
+        else:
+            cur = c.execute(
+                "UPDATE incoming SET status=? WHERE handle = ? AND channel = ?",
+                (status, handle, ctx),
+            )
+        return cur.rowcount
+
+
+def _delete_incoming_rows(handle: str, ctx: str) -> int:
+    """Forget a peer's incoming session(s); same handle-wide DM semantics as
+    `_update_incoming_trust` (see there for why)."""
+    with db_conn() as c:
+        if ctx.startswith("@"):
+            cur = c.execute(
+                "DELETE FROM incoming WHERE handle = ? AND channel LIKE '@%'",
+                (handle,),
+            )
+        else:
+            cur = c.execute(
+                "DELETE FROM incoming WHERE handle = ? AND channel = ?",
+                (handle, ctx),
+            )
+        return cur.rowcount
+
+
 def fingerprint(pk: bytes) -> bytes:
     return hashlib.sha256(b"RPE2E01-FP:" + pk).digest()[:16]
 
@@ -2761,16 +2802,8 @@ def cmd_e2e(data, buffer, args):
         handle = _handle_or_error(buf, server, channel, nick, "/e2e revoke")
         if handle is None:
             return weechat.WEECHAT_RC_OK if weechat else 0
+        _update_incoming_trust(handle, ctx, "revoked")
         with db_conn() as c:
-            # DM sessions live under two contexts (recipient-keyed): real
-            # incoming sessions under `@<own>`, KEYREQ-direction trust markers
-            # under `@<peer>` (= ctx). Revoke both so inbound decrypt — which
-            # honors only `@<own>` — actually stops trusting the peer.
-            for rctx in {ctx, _incoming_ctx_for(server, ctx) or ctx}:
-                c.execute(
-                    "UPDATE incoming SET status='revoked' WHERE handle = ? AND channel = ?",
-                    (handle, rctx),
-                )
             c.execute(
                 "DELETE FROM outgoing_recipients WHERE channel = ? AND handle = ?",
                 (ctx, handle),
@@ -2788,13 +2821,8 @@ def cmd_e2e(data, buffer, args):
         handle = _handle_or_error(buf, server, channel, nick, "/e2e unrevoke")
         if handle is None:
             return weechat.WEECHAT_RC_OK if weechat else 0
-        with db_conn() as c:
-            # Mirror of revoke: restore trust under both DM context forms.
-            for rctx in {ctx, _incoming_ctx_for(server, ctx) or ctx}:
-                c.execute(
-                    "UPDATE incoming SET status='trusted' WHERE handle = ? AND channel = ?",
-                    (handle, rctx),
-                )
+        # Mirror of revoke: handle-wide for DMs (see _update_incoming_trust).
+        _update_incoming_trust(handle, ctx, "trusted")
         _prnt_ok(buf, f"unrevoked {nick} on {ctx}")
     elif sub == "forget":
         if not rest:
@@ -2807,13 +2835,8 @@ def cmd_e2e(data, buffer, args):
         handle = _handle_or_error(buf, server, channel, nick, "/e2e forget")
         if handle is None:
             return weechat.WEECHAT_RC_OK if weechat else 0
-        with db_conn() as c:
-            # Delete both DM context forms (see revoke).
-            for rctx in {ctx, _incoming_ctx_for(server, ctx) or ctx}:
-                c.execute(
-                    "DELETE FROM incoming WHERE handle = ? AND channel = ?",
-                    (handle, rctx),
-                )
+        # Handle-wide for DMs (see _update_incoming_trust for why).
+        _delete_incoming_rows(handle, ctx)
         _prnt_warn(buf, f"forgotten {nick} on {ctx}")
     elif sub == "handshake":
         if not rest:

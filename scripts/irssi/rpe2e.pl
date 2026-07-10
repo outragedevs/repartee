@@ -611,12 +611,61 @@ sub _incoming_ctx_for {
 
 # Both context forms a DM row can live under: the peer-keyed $ctx (config and
 # KEYREQ-direction trust markers) and the recipient-keyed `@<own>` (real
-# incoming sessions). Channels yield just themselves.
+# incoming sessions). Channels yield just themselves. READ-ONLY callers only:
+# trust-CHANGING commands must not use this — when the own handle is still
+# unknown it degrades to just ($ctx), which would silently skip the real
+# `@<own>` session. They use the handle-wide helpers below instead.
 sub _ctx_variants {
     my ($witem, $ctx) = @_;
     my $own_ctx = _incoming_ctx_for($witem ? $witem->{server} : undef, $ctx);
     my %seen;
     return grep { defined($_) && !$seen{$_}++ } ($ctx, $own_ctx);
+}
+
+# Set the trust status of a peer's incoming session(s); returns the count. A
+# DM trust change targets the PEER, not one context string: the real session
+# lives under `@<own>` (which may be UNKNOWN right now, e.g. right after
+# reconnect/reload before USERHOST/JOIN/396 seeds it), the trust marker under
+# `@<peer>`, plus possibly stale rows from handle drift — so update EVERY DM
+# row for the handle. Touching only the resolvable context would report
+# success while leaving the trusted `@<own>` session decryptable once the
+# handle is learned. Channels update exactly (handle, ctx).
+sub _set_incoming_trust {
+    my ($kr, $handle, $ctx, $status) = @_;
+    my $n = 0;
+    if ($ctx =~ /^\@/) {
+        for my $key (keys %{ $kr->{incoming} || {} }) {
+            my ($h, $c) = split /\|/, $key, 2;
+            next unless defined($c) && $h eq $handle && $c =~ /^\@/;
+            $kr->{incoming}{$key}{status} = $status;
+            $n++;
+        }
+    } elsif (my $row = $kr->{incoming}{"$handle|$ctx"}) {
+        $row->{status} = $status;
+        $n++;
+    }
+    return $n;
+}
+
+# Forget a peer's incoming (and pending-inbound) rows; same handle-wide DM
+# semantics as _set_incoming_trust (see there for why).
+sub _delete_incoming_rows {
+    my ($kr, $handle, $ctx) = @_;
+    my $n = 0;
+    for my $store ($kr->{incoming}, $kr->{pending_inbound}) {
+        next unless $store;
+        if ($ctx =~ /^\@/) {
+            for my $key (keys %{$store}) {
+                my ($h, $c) = split /\|/, $key, 2;
+                next unless defined($c) && $h eq $handle && $c =~ /^\@/;
+                delete $store->{$key};
+                $n++;
+            }
+        } else {
+            $n++ if delete $store->{"$handle|$ctx"};
+        }
+    }
+    return $n;
 }
 
 sub _find_peer_by_handle {
@@ -1337,15 +1386,9 @@ sub cmd_revoke {
     return _prnt_err($witem, "cannot resolve handle for $nick") unless defined $handle;
     my $ctx = _resolve_ctx_for_command($kr, $witem, $nick);
     return _prnt_err($witem, "cannot resolve context for $nick") unless defined $ctx;
-    # DM sessions live under two contexts (recipient-keyed): real incoming
-    # sessions under `@<own>`, KEYREQ-direction trust markers under `@<peer>`
-    # (= $ctx). Revoke both so inbound decrypt — which honors only `@<own>` —
-    # actually stops trusting the peer.
-    for my $rctx (_ctx_variants($witem, $ctx)) {
-        if (my $row = $kr->{incoming}{"$handle|$rctx"}) {
-            $row->{status} = 'revoked';
-        }
-    }
+    # Handle-wide for DMs (see _set_incoming_trust for why — the `@<own>`
+    # session may be unreachable by name right now, but must still revoke).
+    _set_incoming_trust($kr, $handle, $ctx, 'revoked');
     delete $kr->{outgoing_recipients}{"$ctx|$handle"};
     if (my $out = $kr->{outgoing}{$ctx}) {
         $out->{pending_rotation} = 1;
@@ -1364,12 +1407,8 @@ sub cmd_unrevoke {
     return _prnt_err($witem, "cannot resolve handle for $nick") unless defined $handle;
     my $ctx = _resolve_ctx_for_command($kr, $witem, $nick);
     return _prnt_err($witem, "cannot resolve context for $nick") unless defined $ctx;
-    # Mirror of revoke: restore trust under both DM context forms.
-    for my $rctx (_ctx_variants($witem, $ctx)) {
-        if (my $row = $kr->{incoming}{"$handle|$rctx"}) {
-            $row->{status} = 'trusted';
-        }
-    }
+    # Mirror of revoke: handle-wide for DMs (see _set_incoming_trust).
+    _set_incoming_trust($kr, $handle, $ctx, 'trusted');
     my ($fp_hex, $peer) = _find_peer_by_handle($kr, $handle);
     $peer->{status} = 'trusted' if $peer;
     save_keyring($kr);
@@ -1406,12 +1445,8 @@ sub cmd_forget {
     }
     my $ctx = _resolve_ctx_for_command($kr, $witem, $who);
     return _prnt_err($witem, "cannot resolve context for $who") unless defined $ctx;
-    # Delete both DM context forms (see cmd_revoke).
-    for my $store ($kr->{incoming}, $kr->{pending_inbound}) {
-        for my $rctx (_ctx_variants($witem, $ctx)) {
-            $removed++ if delete $store->{"$handle|$rctx"};
-        }
-    }
+    # Handle-wide for DMs (see _set_incoming_trust for why).
+    $removed += _delete_incoming_rows($kr, $handle, $ctx);
     save_keyring($kr);
     _prnt_ok($witem, "forgotten $who on $ctx");
 }
