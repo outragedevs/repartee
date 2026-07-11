@@ -106,7 +106,7 @@ notice = "%Z06b6d4⬢%N %Z3b82f6$0%Z06b6d4 ⟫%N %Z94a3b8$1%N"
 
 # join — emerald arrow ⥤
 # erssi: join = "%Z10B981⥤%N {channick_hilight $0} {chanhost_hilight $1} %Z10B981has joined%N {channel $2}"
-join = "%Z10b981⥤%N %Z10b981%_$0%_%N %Z64748b⟨%Z94a3b8$1@$2%Z64748b⟩%N %Z10b981has joined%N {channel $3}"
+join = "%Z10b981⥤%N %Z10b981%_$0%_%N %Z64748b⟨%Z94a3b8$1@$2%Z64748b⟩%N %Z10b981has joined%N {channel $3} %Z64748b$4%N %Z94a3b8$5%N %Z64748b$6%N"
 
 # part — amber arrow ⥢
 # erssi: part = "%ZF59E0B⥢%N {channick $0} {chanhost $1} %ZF59E0Bhas left%N {channel $2} {reason $3}"

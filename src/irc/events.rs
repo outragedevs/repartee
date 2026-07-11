@@ -69,17 +69,10 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
         Command::NOTICE(target, text) => {
             handle_notice(state, conn_id, msg.prefix.as_ref(), target, text, tags);
         }
-        Command::JOIN(channel, account, realname) => {
-            handle_join(
-                state,
-                conn_id,
-                &our_nick,
-                msg.prefix.as_ref(),
-                channel,
-                account.as_deref(),
-                realname.as_deref(),
-                tags,
-            );
+        Command::JOIN(..) => {
+            let fields = join_fields(&msg.command)
+                .expect("join_fields always matches Command::JOIN");
+            handle_join(state, conn_id, &our_nick, msg.prefix.as_ref(), &fields, tags);
         }
         Command::PART(channel, reason) => {
             handle_part(
@@ -260,26 +253,18 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
             } else {
                 None
             };
-            let (account, realname) = if let Some((_, account, realname)) = fields {
-                (account, realname)
-            } else {
+            let fields = fields.unwrap_or_else(|| {
                 tracing::debug!(
                     args = args.len(),
                     has_cap,
                     "raw JOIN with unexpected shape — treating as channel-only join"
                 );
-                (None, None)
-            };
-            handle_join(
-                state,
-                conn_id,
-                &our_nick,
-                msg.prefix.as_ref(),
-                &args[0],
-                account,
-                realname,
-                tags,
-            );
+                JoinFields {
+                    channel: &args[0],
+                    ..JoinFields::default()
+                }
+            });
+            handle_join(state, conn_id, &our_nick, msg.prefix.as_ref(), &fields, tags);
         }
         // IRCv3 standard-reply FAIL for a BATCH command — surface multiline
         // rejections (MULTILINE_MAX_BYTES / MAX_LINES / INVALID_TARGET / INVALID).
@@ -1745,22 +1730,22 @@ fn handle_notice(
     );
 }
 
-#[expect(clippy::too_many_arguments, clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 fn handle_join(
     state: &mut AppState,
     conn_id: &str,
     our_nick: &str,
     prefix: Option<&Prefix>,
-    channel: &str,
-    extended_account: Option<&str>,
-    extended_realname: Option<&str>,
+    fields: &JoinFields<'_>,
     tags: Option<HashMap<String, String>>,
 ) {
     let (nick, ident, host) = extract_nick_userhost(prefix);
+    let channel = fields.channel;
     let buffer_id = make_buffer_id(conn_id, channel);
 
-    // extended-join: account from second JOIN arg ("*" means not logged in)
-    let account = match extended_account {
+    // extended-join: account from second JOIN arg ("*" means not logged in;
+    // IRCnet 2.12 hardcodes "*" — no services on that network)
+    let account = match fields.account {
         Some("*") | None => None,
         Some(a) => Some(a.to_string()),
     };
@@ -1773,7 +1758,7 @@ fn handle_join(
     });
 
     // extended-join: realname from third JOIN arg
-    let realname = extended_realname.unwrap_or("");
+    let realname = fields.realname.unwrap_or("");
 
     // --- Ignore check (never ignore our own joins) ---
     if nick != our_nick
@@ -1899,6 +1884,19 @@ fn handle_join(
     } else {
         realname.to_string()
     };
+    // ircnet.com/extended-join: uid + ip, same bracket style WHOX uses
+    let uid_display = match (fields.uid, fields.ip) {
+        (Some(uid), Some(ip)) => format!("[{uid} {ip}]"),
+        (Some(uid), None) => format!("[{uid}]"),
+        _ => String::new(),
+    };
+
+    let mut text = format!("{nick} ({ident}@{host}) has joined {channel}");
+    for part in [&account_display, &realname_display, &uid_display] {
+        if !part.is_empty() {
+            let _ = write!(text, " {part}");
+        }
+    }
 
     let id = state.next_message_id();
     state.add_message(
@@ -1909,12 +1907,11 @@ fn handle_join(
             message_type: MessageType::Event,
             nick: None,
             nick_mode: None,
-            text: format!(
-                "{nick} ({ident}@{host}) has joined {channel} {account_display} {realname_display}"
-            ),
+            text,
             highlight: false,
             event_key: Some("join".to_string()),
-            // $0=nick, $1=ident, $2=host, $3=channel, $4=account, $5=realname
+            // $0=nick, $1=ident, $2=host, $3=channel, $4=account, $5=realname,
+            // $6=uid+ip (ircnet.com/extended-join)
             event_params: Some(vec![
                 nick,
                 ident,
@@ -1922,6 +1919,7 @@ fn handle_join(
                 channel.to_string(),
                 account_display,
                 realname_display,
+                uid_display,
             ]),
             log_msg_id: None,
             log_ref_id: None,
@@ -4162,19 +4160,40 @@ fn whois_freeform_key(numeric: &str) -> Option<&'static str> {
     }
 }
 
-/// Extract `(channel, account, realname)` from either JOIN wire form: the
-/// crate-parsed `Command::JOIN` (1-3 args) or the 6-arg
-/// `ircnet.com/extended-join` Raw variant. `None` for anything else.
-pub fn join_fields(command: &Command) -> Option<(&str, Option<&str>, Option<&str>)> {
+/// Fields carried by a JOIN, unified across both wire forms.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct JoinFields<'a> {
+    pub channel: &'a str,
+    pub account: Option<&'a str>,
+    pub realname: Option<&'a str>,
+    /// `ircnet.com/extended-join` only: server-assigned UID (matches WHOX `U`).
+    pub uid: Option<&'a str>,
+    /// `ircnet.com/extended-join` only: client IP as seen by the server.
+    pub ip: Option<&'a str>,
+}
+
+/// Extract join fields from either JOIN wire form: the crate-parsed
+/// `Command::JOIN` (1-3 args) or the 6-arg `ircnet.com/extended-join` Raw
+/// variant (`<channel> <uid> <ip> <netjoin> <account> :<realname>`).
+/// `None` for anything else.
+pub fn join_fields(command: &Command) -> Option<JoinFields<'_>> {
     match command {
-        Command::JOIN(channel, account, realname) => {
-            Some((channel, account.as_deref(), realname.as_deref()))
+        Command::JOIN(channel, account, realname) => Some(JoinFields {
+            channel,
+            account: account.as_deref(),
+            realname: realname.as_deref(),
+            uid: None,
+            ip: None,
+        }),
+        Command::Raw(cmd, args) if cmd.eq_ignore_ascii_case("JOIN") && args.len() == 6 => {
+            Some(JoinFields {
+                channel: &args[0],
+                account: Some(&args[4]),
+                realname: Some(&args[5]),
+                uid: Some(&args[1]),
+                ip: Some(&args[2]),
+            })
         }
-        Command::Raw(cmd, args) if cmd.eq_ignore_ascii_case("JOIN") && args.len() == 6 => Some((
-            args[0].as_str(),
-            Some(args[4].as_str()),
-            Some(args[5].as_str()),
-        )),
         _ => None,
     }
 }
@@ -6342,6 +6361,7 @@ mod tests {
         let params = m.event_params.as_ref().unwrap();
         assert_eq!(params[4], "", "no account display without the cap");
         assert_eq!(params[5], "", "no realname display without the cap");
+        assert_eq!(params[6], "", "no uid display without the cap");
     }
 
     #[test]
@@ -6375,6 +6395,8 @@ mod tests {
         let params = m.event_params.as_ref().unwrap();
         assert_eq!(params[4], "[acct]"); // $4 = account
         assert_eq!(params[5], "extended-join test"); // $5 = realname
+        assert_eq!(params[6], "[528HAAD32 92.206.50.109]"); // $6 = uid+ip
+        assert!(m.text.contains("[528HAAD32 92.206.50.109]"));
     }
 
     #[test]
@@ -6455,6 +6477,55 @@ mod tests {
         assert!(buf.users.contains_key("carol"));
         let m = buf.messages.back().unwrap();
         assert_eq!(m.event_key.as_deref(), Some("join"));
+    }
+
+    #[test]
+    fn ircnet_extended_join_full_wire_line_shows_uid_and_ip() {
+        // End-to-end through the real irc-proto parser: the exact line an
+        // IRCnet 2.12.0 server emits (channel.c sendto_channel_butserv_caps,
+        // CAP_IRCNET_EXTENDED_JOIN branch). Guards against parse-layer drift
+        // that Command::Raw-constructing tests can't see.
+        use std::str::FromStr as _;
+        let mut state = make_test_state();
+        enable_ircnet_extended_join(&mut state);
+        let msg = IrcMessage::from_str(
+            ":ejtest435!~ejtest435@92.206.50.109 JOIN #test 528HAAD32 92.206.50.109 0 * :extended-join test\r\n",
+        )
+        .expect("ircnet extended-join wire line must parse");
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        assert!(buf.users.contains_key("ejtest435"));
+        let m = buf.messages.back().unwrap();
+        assert_eq!(m.event_key.as_deref(), Some("join"));
+        assert!(
+            m.text.contains("528HAAD32"),
+            "uid must appear in text (web renders text): {}",
+            m.text
+        );
+        let params = m.event_params.as_ref().unwrap();
+        assert_eq!(
+            params.get(6).map(String::as_str),
+            Some("[528HAAD32 92.206.50.109]"),
+            "$6 must carry uid+ip for themed rendering"
+        );
+    }
+
+    #[test]
+    fn standard_extended_join_has_empty_uid_param() {
+        // IRCv3 extended-join (3-arg Command::JOIN) has no uid/ip — $6 must
+        // exist (themes reference it) but stay empty.
+        let mut state = make_test_state();
+        let msg = make_irc_msg(
+            Some("dave!user@host"),
+            Command::JOIN("#test".into(), Some("acct".into()), Some("Real Name".into())),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        let m = buf.messages.back().unwrap();
+        let params = m.event_params.as_ref().unwrap();
+        assert_eq!(params.get(6).map(String::as_str), Some(""));
     }
 
     // === account-notify tests ===
