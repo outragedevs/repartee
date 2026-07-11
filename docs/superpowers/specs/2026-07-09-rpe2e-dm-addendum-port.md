@@ -31,25 +31,30 @@ had no DM enable path (`/e2e on|off|mode` were channel-only).
   negotiate the wrong direction). Next message re-establishes after the handle
   is learned. Own handle resets at registration and re-seeds.
 
-## Own-handle capture (mirrors Rust, with ranked sources)
+## Own-handle capture (prefix-visible sources ONLY)
 
-Post-PR review round (2026-07-10): sources are RANKED, because they disagree
-on cloaked networks — what matters is the handle as PEERS see it (our message
-prefix), and solanum-family ircds (Libera) answer a self-USERHOST with the
-REAL host, not the cloak (verified in solanum `m_userhost.c`: `target ==
-source` uses `sockhost`/`orighost`). Rank 2 (authoritative, prefix-visible):
+Final design (review rounds 2026-07-10/11 collapsed an interim ranked-source
+scheme): the store only ever holds values PEERS themselves see in our message
+prefix — anything else eventually disagrees with it and breaks the
+recipient-keyed context. Sources, all equal-trust (newest write wins):
 echo-message echoes (weechat), our own JOIN, our own CHGHOST, RPL_HOSTHIDDEN
-(396). Rank 1 (seed of last resort): the 302 reply. A lower rank never
-overwrites a higher one; reads prefer the rank-2 store, then a live
-own-nicklist lookup (both clients keep nicklists current, incl. CHGHOST),
-then (irssi) core's join/396-seeded `$server->{userhost}`, then rank 1.
-The load-time self-USERHOST is sent UNCONDITIONALLY for connected servers
-(a mere non-empty fallback can be stale — irssi core does not update
-`userhost` on own CHGHOST); under the ranking this can never clobber a
-prefix-visible value. Review claim that weechat's `irc_server_connected` is
-a socket-connect signal was refuted against weechat source: it is emitted in
-`IRC_PROTOCOL_CALLBACK(001)` (irc-protocol.c), i.e. exactly at the welcome
-numeric, same as the Rust client's one-shot.
+(396), self-WHOIS RPL_WHOISUSER (311), and a live own-nicklist lookup
+(promoted into the store on discovery, because nicklists vanish with the
+last part). The one-shot at registration/load is a self-WHOIS, not a
+self-USERHOST: solanum-family ircds (Libera) answer a self-USERHOST with the
+REAL host (`m_userhost.c`: `target == source` uses `sockhost`/`orighost`),
+while 311 carries the DISPLAYED host by definition (`m_whois.c` uses
+`target_p->host`; the real host travels only in 338, never parsed). There is
+deliberately NO weaker fallback tier: irssi core's `$server->{userhost}` is
+not updated on our own CHGHOST (stale risk) and USERHOST is self-view — with
+both removed, "unknown" is a transient one-round-trip state (held wires +
+visible notice), after which every source in play equals the prefix.
+Historical notes: the claim that weechat's `irc_server_connected` fires at
+socket-connect was refuted against weechat source (it is emitted in
+`IRC_PROTOCOL_CALLBACK(001)`, the welcome numeric); weechat's `irc_in2_*`
+modifiers retain IRCv3 tags, so every hook parses through
+`_split_irc_tags()` and the decrypted PRIVMSG reconstruction re-prepends the
+original tag section.
 
 Per-server volatile store (never persisted):
 

@@ -370,21 +370,22 @@ _incoming_buckets: dict[str, "IncomingBucket"] = {}
 # VOLATILE by design (never persisted): reset at (dis)connect and re-seeded,
 # because the server may assign a different ident/host/cloak each session.
 #
-# Sources are RANKED, because they disagree on cloaked networks: what matters
-# is the handle as PEERS see it (our message prefix), and solanum-family ircds
-# (Libera) answer a self-USERHOST with the REAL host, not the cloak.
-#   rank 2 — prefix-visible: echo-message echoes, our own JOIN, our own
-#            CHGHOST, RPL_HOSTHIDDEN (396). Authoritative.
-#   rank 1 — self-USERHOST (302) reply: seed of last resort (a DM-only user
-#            on zero channels produces no rank-2 event until they speak).
-# A lower rank never overwrites a higher one; reads prefer rank 2, then a live
-# own-nicklist lookup (kept current by weechat incl. CHGHOST), then rank 1.
-# Values: {"handle": str, "rank": int}.
-_own_handle: dict[str, dict] = {}
+# ONLY PREFIX-VISIBLE sources are ever stored — values peers themselves see
+# in our message prefix: echo-message echoes, our own JOIN, our own CHGHOST,
+# RPL_HOSTHIDDEN (396), self-WHOIS RPL_WHOISUSER (311 — the DISPLAYED host by
+# definition; solanum reveals the real host only in 338, which we never
+# parse), and the own-nicklist lookup in _own_handle_get. Self-view sources
+# are deliberately NOT used at all: a self-USERHOST on solanum-family ircds
+# (Libera) answers with the REAL host, and ANY tier that can disagree with
+# the prefix breaks the recipient-keyed DM context sooner or later. While no
+# source has fired yet, the handle is simply UNKNOWN (transient — the
+# one-shot self-WHOIS at registration/load answers within a round-trip) and
+# inbound DM wires are held, per the addendum.
+_own_handle: dict[str, str] = {}
 
 # Throttle for the "held — own identity not learned yet" notice, per
 # (server, sender nick), so a chatty peer doesn't flood the buffer while we
-# wait for the USERHOST reply.
+# wait for the self-WHOIS reply.
 _own_wait_notice_at: dict[tuple, float] = {}
 
 
@@ -543,7 +544,7 @@ def _split_irc_tags(msg: str):
     can re-prepend it verbatim; `rest` starts at the `:prefix`. Every parser
     here works on the tagless form — without this, `@time=…` lines made the
     prefix-visible own-handle hooks blind and let hook_irc_in_396 read the
-    wrong token as the new host (poisoning the rank-2 store)."""
+    wrong token as the new host (poisoning the own-handle store)."""
     if msg.startswith("@"):
         sp = msg.find(" ")
         if sp > 0:
@@ -551,44 +552,28 @@ def _split_irc_tags(msg: str):
     return "", msg
 
 
-def _parse_userhost_reply(entry: str):
-    """One RPL_USERHOST (302) entry `nick[*]=[+|-]ident@host` → (nick, handle)
-    or None. Mirrors Rust `parse_userhost_reply`: the trailing `*` on the nick
-    marks an oper (stripped), the leading `+`/`-` on the userhost is the away
-    flag (stripped); the handle keeps `~` and any cloak verbatim."""
-    if "=" not in entry:
-        return None
-    nick_part, userhost = entry.split("=", 1)
-    nick_part = nick_part.rstrip("*")
-    if userhost[:1] in ("+", "-"):
-        userhost = userhost[1:]
-    if not nick_part or "@" not in userhost:
-        return None
-    return nick_part, userhost
-
-
 def _own_nick(server: str) -> str:
     return weechat.info_get("irc_nick", server) if weechat else ""
 
 
-def _set_own_handle(server: str, handle: str, rank: int = 2) -> None:
-    if not handle:
-        return
-    cur = _own_handle.get(server)
-    if cur and cur["rank"] > rank:
-        return  # a prefix-visible value never yields to a self-USERHOST one
-    if not cur or cur["handle"] != handle or cur["rank"] != rank:
-        _own_handle[server] = {"handle": handle, "rank": rank}
-        _dbg(f"own handle on {server}: {handle} (rank {rank})")
+def _set_own_handle(server: str, handle: str) -> None:
+    """Callers pass ONLY prefix-visible values (see the _own_handle comment);
+    all sources are equal-trust, so the newest write wins."""
+    if handle and _own_handle.get(server) != handle:
+        _own_handle[server] = handle
+        _dbg(f"own handle on {server}: {handle}")
 
 
 def _own_handle_get(server: str):
-    """Best current view of our own peer-visible handle, or None.
-    Priority: rank-2 store → our own nick on any joined channel's nicklist
-    (weechat keeps it current, incl. CHGHOST) → rank-1 store (USERHOST)."""
+    """Best current view of our own peer-visible handle, or None while it is
+    genuinely unknown. Priority: the store → our own nick on any joined
+    channel's nicklist (weechat keeps it current, incl. CHGHOST; promoted
+    into the store on discovery because it vanishes with the last part).
+    There is deliberately NO further fallback — better transiently unknown
+    than a value peers do not see."""
     entry = _own_handle.get(server)
-    if entry and entry["rank"] >= 2:
-        return entry["handle"]
+    if entry:
+        return entry
     if weechat is not None:
         nick = _own_nick(server)
         if nick:
@@ -606,29 +591,30 @@ def _own_handle_get(server: str):
                 finally:
                     weechat.infolist_free(infolist)
                 if found:
-                    # PROMOTE to the rank-2 store: nicklist values are
+                    # PROMOTE into the store: nicklist values are
                     # prefix-visible (JOIN/WHO/userhost-in-names/CHGHOST-fed)
                     # but VANISH when the last shared channel is parted —
-                    # without caching, the next read would fall back to the
-                    # rank-1 USERHOST value (the non-visible REAL host on
-                    # solanum) and break the recipient-keyed DM context.
-                    # Later host changes still win via the equal-rank
-                    # JOIN/CHGHOST/396/echo hooks.
+                    # without caching, the handle would go unknown again.
+                    # Later host changes still win via the JOIN/CHGHOST/396/
+                    # echo hooks (newest write wins).
                     _set_own_handle(server, found)
                     return found
-    return entry["handle"] if entry else None
+    return None
 
 
-def _send_self_userhost(server: str) -> None:
-    """ONE-SHOT self-USERHOST to seed our own handle — gated to connect/load
-    events, never per message (the 302 reply is itself a message; a per-message
-    trigger would loop). Mirrors the Rust client's RPL_WELCOME one-shot."""
+def _send_self_whois(server: str) -> None:
+    """ONE-SHOT self-WHOIS to seed our own handle from RPL_WHOISUSER (311) —
+    the DISPLAYED ident@host, i.e. exactly what peers see in our prefix (a
+    self-USERHOST is NOT equivalent: solanum-family ircds answer it with the
+    real host). Gated to connect/load events, never per message (the reply is
+    itself a message; a per-message trigger would loop). Analog of the Rust
+    client's RPL_WELCOME one-shot."""
     if weechat is None:
         return
     nick = _own_nick(server)
     buf = weechat.buffer_search("irc", f"server.{server}") or ""
     if nick and buf:
-        weechat.command(buf, f"/quote USERHOST {nick}")
+        weechat.command(buf, f"/quote WHOIS {nick}")
 
 
 def _incoming_ctx_for(server: str, ctx: str):
@@ -645,7 +631,7 @@ def _update_incoming_trust(handle: str, ctx: str, status: str) -> int:
     """Set the trust status of a peer's incoming session(s); returns the row
     count. A DM trust change targets the PEER, not one context string: the
     real session lives under `@<own>` (which may be UNKNOWN right now, e.g.
-    right after reconnect/reload before USERHOST/JOIN/396 seeds it), the
+    right after reconnect/reload before WHOIS/JOIN/396 seeds it), the
     trust marker under `@<peer>`, plus possibly stale rows from handle drift
     — so update EVERY DM row for the handle. Touching only the resolvable
     context would report success while leaving the trusted `@<own>` session
@@ -2304,11 +2290,11 @@ def hook_irc_out_privmsg(data, modifier, server, msg):
 def hook_signal_server_connected(data, signal, signal_data):
     """Registration complete: RESET the own handle (the server may assign a
     different ident/host/cloak this session) and re-seed it with the one-shot
-    self-USERHOST. `signal_data` is the server name."""
+    self-WHOIS. `signal_data` is the server name."""
     try:
         server = signal_data or ""
         _own_handle.pop(server, None)
-        _send_self_userhost(server)
+        _send_self_whois(server)
     except Exception as e:
         _dbg(f"hook_signal_server_connected: {e}")
     return weechat.WEECHAT_RC_OK if weechat else 0
@@ -2322,22 +2308,21 @@ def hook_signal_server_disconnected(data, signal, signal_data):
     return weechat.WEECHAT_RC_OK if weechat else 0
 
 
-def hook_irc_in_302(data, modifier, server, msg):
-    """RPL_USERHOST: seed our own handle from any entry matching our nick
-    (the self-USERHOST on connect, or any later USERHOST that includes us).
-    Rank 1: solanum-family ircds (Libera) answer a SELF-query with the REAL
-    host, not the cloak peers see — so this only fills a hole and never
-    overrides a prefix-visible source. Observe-only, line passes through."""
+def hook_irc_in_311(data, modifier, server, msg):
+    """RPL_WHOISUSER: `:srv 311 me nick ident host * :realname` — seed our
+    own handle when the WHOIS is about US. The 311 host is the DISPLAYED
+    (peer-visible) one by definition; the real host travels separately in
+    338/378, which we never parse. Observe-only, line passes through."""
     try:
         _tags, line = _split_irc_tags(msg)
-        trailing = line.split(" :", 1)[1] if " :" in line else line.rsplit(" ", 1)[-1]
-        own = _own_nick(server)
-        for entry in trailing.split():
-            parsed = _parse_userhost_reply(entry)
-            if parsed and own and parsed[0].lower() == own.lower():
-                _set_own_handle(server, parsed[1], rank=1)
+        parts = line.split(" ")
+        if line.startswith(":") and len(parts) >= 6 and parts[1] == "311":
+            nick, ident, host = parts[3], parts[4], parts[5]
+            own = _own_nick(server)
+            if own and nick.lower() == own.lower() and ident and host:
+                _set_own_handle(server, f"{ident}@{host}")
     except Exception as e:
-        _dbg(f"hook_irc_in_302: {e}")
+        _dbg(f"hook_irc_in_311: {e}")
     return msg
 
 
@@ -2368,7 +2353,7 @@ def hook_irc_in_396(data, modifier, server, msg):
         parts = line.split(" ")
         # Field positions are only meaningful on a well-formed
         # `:server 396 nick <host> …` line — never guess otherwise (a shifted
-        # token here would poison the rank-2 store).
+        # token here would poison the own-handle store).
         if line.startswith(":") and len(parts) >= 4 and parts[1] == "396":
             newhost = parts[3].lstrip(":")
             # mirror irssi core's sanity check on the announced host
@@ -2467,7 +2452,7 @@ def hook_irc_in_privmsg(data, modifier, server, msg):
             own_h = _own_handle_get(server)
             if not own_h:
                 # Own handle not learned yet (e.g. right after connect, before
-                # the self-USERHOST reply). Do NOT fall back to `@<sender>` —
+                # the self-WHOIS reply). Do NOT fall back to `@<sender>` —
                 # decrypting or KEYREQ-ing under it would negotiate the WRONG
                 # DM direction. Drop; the peer's next message re-establishes
                 # once the handle is known.
@@ -2479,7 +2464,7 @@ def hook_irc_in_privmsg(data, modifier, server, msg):
                     _prnt_warn(
                         buf,
                         f"encrypted DM from {nick} held — own identity not "
-                        "learned yet (waiting for the USERHOST reply)",
+                        "learned yet (waiting for the WHOIS reply)",
                     )
                 _dbg(f"hook_irc_in_privmsg: DM wire from {nick} but own handle unknown on {server}")
                 return ""
@@ -2891,7 +2876,7 @@ def cmd_e2e(data, buffer, args):
             _prnt_err(
                 buf,
                 "/e2e handshake: own identity not learned yet (waiting for "
-                "the USERHOST reply) — try again in a moment",
+                "the WHOIS reply) — try again in a moment",
             )
             return weechat.WEECHAT_RC_OK if weechat else 0
         # Best-effort peer handle for the pending key; build_keyreq falls back
@@ -3331,11 +3316,12 @@ def main() -> None:
     # `/me`, `/msg`, `/say`, `/amsg`, plain input — passes through here.
     weechat.hook_modifier("irc_out1_privmsg", "hook_irc_out_privmsg", "")
     # Own-handle tracking for the recipient-keyed DM context
-    # (docs/rpe2e-dm-addendum.md): reset+reseed at registration, observe 302
-    # (self-USERHOST reply) and our own CHGHOST.
+    # (docs/rpe2e-dm-addendum.md): reset+reseed at registration, observe 311
+    # (self-WHOIS reply — the displayed host, exactly what peers see) and our
+    # own CHGHOST. Prefix-visible sources ONLY; see the _own_handle comment.
     weechat.hook_signal("irc_server_connected", "hook_signal_server_connected", "")
     weechat.hook_signal("irc_server_disconnected", "hook_signal_server_disconnected", "")
-    weechat.hook_modifier("irc_in2_302", "hook_irc_in_302", "")
+    weechat.hook_modifier("irc_in2_311", "hook_irc_in_311", "")
     weechat.hook_modifier("irc_in2_chghost", "hook_irc_in_chghost", "")
     weechat.hook_modifier("irc_in2_join", "hook_irc_in_join", "")
     weechat.hook_modifier("irc_in2_396", "hook_irc_in_396", "")
@@ -3345,7 +3331,7 @@ def main() -> None:
     if infolist:
         while weechat.infolist_next(infolist):
             if weechat.infolist_integer(infolist, "is_connected") == 1:
-                _send_self_userhost(weechat.infolist_string(infolist, "name"))
+                _send_self_whois(weechat.infolist_string(infolist, "name"))
         weechat.infolist_free(infolist)
     weechat.hook_command(
         "e2e",

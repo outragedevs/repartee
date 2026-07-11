@@ -84,21 +84,23 @@ my %rate_limit_sent;
 # context (docs/rpe2e-dm-addendum.md): DMs we RECEIVE are keyed `@<own>`.
 # VOLATILE by design (never persisted): reset at registration and re-seeded.
 #
-# Sources are RANKED, because they disagree on cloaked networks: what matters
-# is the handle as PEERS see it (our message prefix), and solanum-family ircds
-# (Libera) answer a self-USERHOST with the REAL host, not the cloak.
-#   rank 2 — prefix-visible: our own JOIN, our own CHGHOST, RPL_HOSTHIDDEN
-#            (396). Authoritative.
-#   rank 1 — self-USERHOST (302) reply: seed of last resort (a DM-only user
-#            on zero channels produces no rank-2 event).
-# A lower rank never overwrites a higher one; reads prefer rank 2, then a live
-# own-nicklist lookup (irssi keeps nicklists current, incl. CHGHOST), then
-# core's join/396-seeded `$server->{userhost}`, then rank 1.
-# Values: { handle => ..., rank => ... }, keyed by server tag.
+# ONLY PREFIX-VISIBLE sources are ever stored — values peers themselves see
+# in our message prefix: our own JOIN, our own CHGHOST, RPL_HOSTHIDDEN (396),
+# self-WHOIS RPL_WHOISUSER (311 — the DISPLAYED host by definition; solanum
+# reveals the real host only in 338, which we never parse), and the
+# own-nicklist lookup in _own_handle_for. Self-view or possibly-stale sources
+# are deliberately NOT used at all: a self-USERHOST on solanum-family ircds
+# (Libera) answers with the REAL host, and irssi core's `$server->{userhost}`
+# is not updated on our own CHGHOST — ANY tier that can disagree with the
+# prefix breaks the recipient-keyed DM context sooner or later. While no
+# source has fired yet, the handle is simply UNKNOWN (transient — the
+# one-shot self-WHOIS at registration/load answers within a round-trip) and
+# inbound DM wires are held, per the addendum.
 my %own_handle;
 
 # Throttle for the "held — own identity not learned yet" notice, per
-# "<tag>|<nick>", so a chatty peer doesn't flood while we wait for USERHOST.
+# "<tag>|<nick>", so a chatty peer doesn't flood while we wait for the
+# self-WHOIS reply.
 my %own_wait_notice_at;
 
 sub _dbg {
@@ -539,73 +541,54 @@ sub _ctx_for_target {
     return '@' . $handle;
 }
 
-# One RPL_USERHOST (302) entry `nick[*]=[+|-]ident@host` → ($nick, $handle) or
-# (). Mirrors Rust `parse_userhost_reply`: the trailing `*` on the nick marks
-# an oper (stripped), the leading `+`/`-` on the userhost is the away flag
-# (stripped); the handle keeps `~` and any cloak verbatim.
-sub _parse_userhost_entry {
-    my ($entry) = @_;
-    return unless defined $entry && $entry =~ /^(.+?)=(.+)$/;
-    my ($nick, $userhost) = ($1, $2);
-    $nick =~ s/\*+\z//;
-    $userhost =~ s/^[+-]//;
-    return unless length($nick) && index($userhost, '@') > 0;
-    return ($nick, $userhost);
-}
-
 sub _set_own_handle {
-    my ($server, $handle, $rank) = @_;
+    my ($server, $handle) = @_;
     return unless $server && defined $handle && length $handle;
-    $rank //= 2;
     my $tag = $server->{tag} // return;
-    my $cur = $own_handle{$tag};
-    return if $cur && $cur->{rank} > $rank;   # prefix-visible never yields to USERHOST
-    if (!$cur || $cur->{handle} ne $handle || $cur->{rank} != $rank) {
-        $own_handle{$tag} = { handle => $handle, rank => $rank };
-        _dbg("own handle on $tag: $handle (rank $rank)");
+    # Callers pass ONLY prefix-visible values (see the %own_handle comment);
+    # all sources are equal-trust, so the newest write wins.
+    if (($own_handle{$tag} // '') ne $handle) {
+        $own_handle{$tag} = $handle;
+        _dbg("own handle on $tag: $handle");
     }
 }
 
-# Best current view of our own PEER-VISIBLE ident@host, or undef while
-# unknown. Priority: rank-2 store → our own nick on any joined channel's
-# nicklist (irssi keeps it current, incl. CHGHOST) → core's join/396-seeded
-# `$server->{userhost}` → rank-1 store (self-USERHOST; solanum-family ircds
-# answer that with the REAL host, so it is last).
+# Best current view of our own PEER-VISIBLE ident@host, or undef while it is
+# genuinely unknown. Priority: the store → our own nick on any joined
+# channel's nicklist (irssi keeps it current, incl. CHGHOST; promoted into
+# the store on discovery because it vanishes with the last part). There is
+# deliberately NO further fallback: core's `$server->{userhost}` can be stale
+# (not updated on our own CHGHOST) and a self-USERHOST answer can be the
+# non-visible real host — better transiently unknown than a value peers do
+# not see.
 sub _own_handle_for {
     my ($server) = @_;
     return unless $server;
     my $tag = $server->{tag} // '';
-    my $entry = $own_handle{$tag};
-    return $entry->{handle} if $entry && $entry->{rank} >= 2;
+    return $own_handle{$tag} if defined $own_handle{$tag};
     my $nick = $server->{nick} // '';
     if (length $nick) {
         for my $ch (eval { $server->channels() }) {
             my $n = eval { $ch->nick_find($nick) };
             next unless $n && $n->{host};
-            # PROMOTE to the rank-2 store: nicklist values are prefix-visible
-            # (JOIN/WHO/CHGHOST-fed) but VANISH when the last shared channel
-            # is parted — without caching, the next read would fall back to
-            # core's possibly-stale userhost or the rank-1 USERHOST value
-            # (the non-visible REAL host on solanum) and break the
-            # recipient-keyed DM context. Later host changes still win via
-            # the equal-rank JOIN/CHGHOST/396 handlers.
-            _set_own_handle($server, $n->{host}, 2);
+            _set_own_handle($server, $n->{host});
             return $n->{host};
         }
     }
-    return $server->{userhost}
-        if defined $server->{userhost} && length $server->{userhost};
-    return $entry ? $entry->{handle} : undef;
+    return undef;
 }
 
-# ONE-SHOT self-USERHOST to seed our own handle — gated to registration/load
-# events, never per message (the 302 reply is itself a message; a per-message
-# trigger would loop). Mirrors the Rust client's RPL_WELCOME one-shot.
-sub _send_self_userhost {
+# ONE-SHOT self-WHOIS to seed our own handle from RPL_WHOISUSER (311) — the
+# DISPLAYED ident@host, i.e. exactly what peers see in our prefix (a
+# self-USERHOST is NOT equivalent: solanum-family ircds answer it with the
+# real host). Gated to registration/load events, never per message (the
+# reply is itself a message; a per-message trigger would loop). Analog of
+# the Rust client's RPL_WELCOME one-shot.
+sub _send_self_whois {
     my ($server) = @_;
     return unless $server && ($server->{nick} // '') ne '';
-    eval { $server->send_raw('USERHOST ' . $server->{nick}) };
-    _dbg("_send_self_userhost failed on " . ($server->{tag} // '?') . ": $@") if $@;
+    eval { $server->send_raw('WHOIS ' . $server->{nick}) };
+    _dbg("_send_self_whois failed on " . ($server->{tag} // '?') . ": $@") if $@;
 }
 
 # Context that REAL incoming DM sessions live under: `@<own_handle>`
@@ -634,7 +617,7 @@ sub _ctx_variants {
 # Set the trust status of a peer's incoming session(s); returns the count. A
 # DM trust change targets the PEER, not one context string: the real session
 # lives under `@<own>` (which may be UNKNOWN right now, e.g. right after
-# reconnect/reload before USERHOST/JOIN/396 seeds it), the trust marker under
+# reconnect/reload before WHOIS/JOIN/396 seeds it), the trust marker under
 # `@<peer>`, plus possibly stale rows from handle drift — so update EVERY DM
 # row for the handle. Touching only the resolvable context would report
 # success while leaving the trusted `@<own>` session decryptable once the
@@ -1328,7 +1311,7 @@ sub cmd_handshake {
     # DM it is stamped with OUR handle (recipient-keyed) — the peer-keyed $ctx
     # above is only the config key.
     my $kreq_ctx = _incoming_ctx_for($server, $ctx);
-    return _prnt_err($witem, 'own identity not learned yet (waiting for the USERHOST reply) — try again in a moment')
+    return _prnt_err($witem, 'own identity not learned yet (waiting for the WHOIS reply) — try again in a moment')
         unless defined $kreq_ctx;
     my $handle = _resolve_handle_for_command($kr, $nick);
     my $wire = eval { build_keyreq($kr, $kreq_ctx, $handle) };
@@ -1992,7 +1975,7 @@ sub _decrypt_wire_message {
         my $own = _own_handle_for($server);
         unless (defined $own && length $own) {
             # Own handle not learned yet (e.g. right after connect, before the
-            # self-USERHOST reply). Do NOT fall back to `@<sender>` —
+            # self-WHOIS reply). Do NOT fall back to `@<sender>` —
             # decrypting or KEYREQ-ing under it would negotiate the WRONG DM
             # direction. Drop; the peer's next message re-establishes once the
             # handle is known.
@@ -2000,7 +1983,7 @@ sub _decrypt_wire_message {
             if (now_unix() - ($own_wait_notice_at{$wait_key} // 0) >= $KEYREQ_MIN_INTERVAL) {
                 $own_wait_notice_at{$wait_key} = now_unix();
                 _prnt_warn(_notice_witem_for_ctx($server, $nick, $nick),
-                           "encrypted DM from $nick held — own identity not learned yet (waiting for the USERHOST reply)");
+                           "encrypted DM from $nick held — own identity not learned yet (waiting for the WHOIS reply)");
             }
             _dbg("DM wire from $nick but own handle unknown on " . ($server->{tag} // '?'));
             Irssi::signal_stop();
@@ -2066,33 +2049,26 @@ sub _decrypt_wire_message {
 
 # Registration complete: RESET the own handle (the server may assign a
 # different ident/host/cloak this session) and re-seed it with the one-shot
-# self-USERHOST. irssi core also clears `$server->{userhost}` on disconnect,
-# so the fallback never goes stale either.
+# self-WHOIS.
 sub signal_event_001 {
     my ($server, $data, $nick, $address) = @_;
     return unless $server;
     delete $own_handle{ $server->{tag} // '' };
-    _send_self_userhost($server);
+    _send_self_whois($server);
 }
 
-# RPL_USERHOST: seed our own handle from any entry matching our nick (the
-# self-USERHOST on connect, or any later USERHOST that includes us). Rank 1:
-# solanum-family ircds (Libera) answer a SELF-query with the REAL host, not
-# the cloak peers see — this only fills a hole, never overrides a
-# prefix-visible source. Observe-only — never stops the signal (irssi core
-# reads 302 for away flags).
-sub signal_event_302 {
+# RPL_WHOISUSER (311): `$data` = "me nick ident host * :realname" — seed our
+# own handle when the WHOIS is about US. The 311 host is the DISPLAYED
+# (peer-visible) one by definition; the real host travels separately in
+# 338/378, which we never parse. Observe-only — never stops the signal.
+sub signal_event_311 {
     my ($server, $data) = @_;
     return unless $server && defined $data;
-    my ($replies) = $data =~ /:(.*)$/s;
-    $replies //= $data;
-    my $own_nick = lc($server->{nick} // '');
-    return unless length $own_nick;
-    for my $entry (split ' ', $replies) {
-        my ($n, $handle) = _parse_userhost_entry($entry);
-        next unless defined $n && lc($n) eq $own_nick;
-        _set_own_handle($server, $handle, 1);
-    }
+    my (undef, $nick, $ident, $host) = split ' ', $data;
+    return unless defined $nick && defined $ident && defined $host;
+    return unless lc($nick) eq lc($server->{nick} // '');
+    return unless length $ident && length $host;
+    _set_own_handle($server, "$ident\@$host");
 }
 
 # Our own JOIN carries our prefix exactly as peers see it — the strongest
@@ -2103,7 +2079,7 @@ sub signal_event_join_own {
     my ($server, $data, $nick, $address) = @_;
     return unless $server && defined $nick && defined $address && length $address;
     return unless lc($nick) eq lc($server->{nick} // '');
-    _set_own_handle($server, $address, 2);
+    _set_own_handle($server, $address);
 }
 
 # RPL_HOSTHIDDEN (396): the server telling US our new DISPLAYED host —
@@ -2116,12 +2092,12 @@ sub signal_event_396 {
     return unless defined $newhost && length $newhost;
     return if $newhost =~ /[*?!#&\s]/ || $newhost =~ /^[@:\-]/ || $newhost =~ /-$/;
     if (index($newhost, '@') > 0) {
-        _set_own_handle($server, $newhost, 2);
+        _set_own_handle($server, $newhost);
         return;
     }
     my $cur = _own_handle_for($server);
     return unless defined $cur && $cur =~ /^([^@]+)@/;
-    _set_own_handle($server, "$1\@$newhost", 2);
+    _set_own_handle($server, "$1\@$newhost");
 }
 
 # CHGHOST: track our OWN handle (peer handles are read live from prefixes and
@@ -2291,23 +2267,22 @@ Irssi::signal_add_first('ctcp reply RPEE2E', \&signal_ctcp_reply_rpee2e);
 Irssi::signal_add_first('ctcp reply', \&signal_ctcp_reply_generic);
 Irssi::signal_add_first('default ctcp reply', \&signal_default_ctcp_reply_generic);
 # Own-handle tracking for the recipient-keyed DM context
-# (docs/rpe2e-dm-addendum.md): reset+reseed at registration, observe 302
-# (self-USERHOST reply) and our own CHGHOST. Plain observers — never stop
+# (docs/rpe2e-dm-addendum.md): reset+reseed at registration, observe 311
+# (self-WHOIS 311 reply — displayed host, exactly what peers see) and our
+# own CHGHOST. Prefix-visible sources ONLY. Plain observers — never stop
 # these signals (irssi core reads 302 for away flags itself).
 Irssi::signal_add('event 001', \&signal_event_001);
-Irssi::signal_add('event 302', \&signal_event_302);
+Irssi::signal_add('event 311', \&signal_event_311);
 Irssi::signal_add('event chghost', \&signal_event_chghost);
 Irssi::signal_add('event join', \&signal_event_join_own);
 Irssi::signal_add('event 396', \&signal_event_396);
 # Script (re)loaded mid-session: `event 001` will not fire for servers that
-# are already up — seed their own handle now. Sent UNCONDITIONALLY: core's
-# `$server->{userhost}` can be stale (it is not updated on own CHGHOST), so
-# skipping when a fallback merely exists would pin the stale value until
-# reconnect. The reply seeds only rank 1, so it can never clobber a
-# prefix-visible value; live nicklist/core lookups still outrank it.
+# are already up — seed their own handle now, unconditionally. The 311 reply
+# is prefix-visible, so at worst it rewrites the store with the same value;
+# users on channels are already covered by the nicklist tier meanwhile.
 for my $server (Irssi::servers()) {
     next unless $server->{connected};
-    _send_self_userhost($server);
+    _send_self_whois($server);
 }
 
 Irssi::print("RPE2E $VERSION loaded — /e2e fingerprint to see your fingerprint");
