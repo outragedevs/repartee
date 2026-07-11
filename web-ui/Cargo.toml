@@ -16,6 +16,9 @@ web-sys = { version = "0.3", features = [
     "Clipboard", "Navigator", "FontFaceSet", "FontFaceSetLoadStatus",
     "ClipboardEvent", "DataTransfer",
     "TouchEvent", "Touch", "TouchList",
+    # `MouseEvent` powers the completion popup's mousedown-accept in
+    # `input.rs` (preventDefault keeps the textarea focused on tap).
+    "MouseEvent",
     # `Selection` + `NodeList` + `HtmlCollection` power the copy handler in
     # `chat_view.rs` — it walks the selection to rebuild each `.chat-line`
     # as space-separated text instead of newline-separated flex items.

@@ -136,6 +136,31 @@ const SETTING_PATHS: &[&str] = &[
     "web.username",
 ];
 
+/// One row of the completion popup.
+#[derive(Clone, PartialEq, Eq)]
+struct PopupItem {
+    /// What the row displays (`doddy`, `/join`, `:usmiech:`).
+    label: String,
+    /// What accepting the row splices into the input (with its delimiter).
+    insert: String,
+    /// Inline thumbnail for emote rows (`/emotes/<stem>.gif`).
+    emote_url: Option<String>,
+}
+
+/// The live completion popup: the byte range of the input it would replace
+/// plus the candidate rows. `None` = hidden. Recomputed on every input event,
+/// so the range always refers to the current `value`.
+#[derive(Clone, PartialEq, Eq)]
+struct PopupData {
+    replace_start: usize,
+    replace_end: usize,
+    items: Vec<PopupItem>,
+}
+
+/// Cap on popup rows — a bare `@` in a big channel matches everyone; the
+/// popup shows the first 50 and the user narrows by typing.
+const MAX_POPUP_ITEMS: usize = 50;
+
 #[component]
 pub fn InputLine() -> impl IntoView {
     let state = use_context::<AppState>().unwrap();
@@ -148,7 +173,79 @@ pub fn InputLine() -> impl IntoView {
     let (tab_replace_start, set_tab_replace_start) = signal(0usize);
     let (tab_active, set_tab_active) = signal(false);
 
+    // Completion popup (tap-friendly alternative to Tab — phones have no Tab
+    // key). Triggered by `@nick`, `/command`, and `:emote` prefixes.
+    // `popup_engaged` flips true once the user navigates the list (arrows /
+    // Shift+Tab); only then does Enter accept instead of sending — a fully
+    // typed "/part" + Enter must send on the first press even though the
+    // popup still matches it.
+    let (popup, set_popup) = signal(None::<PopupData>);
+    let (popup_sel, set_popup_sel) = signal(0usize);
+    let (popup_engaged, set_popup_engaged) = signal(false);
+
     let input_ref = NodeRef::<leptos::html::Textarea>::new();
+
+    // Hide the popup when the active buffer changes — its nick matches came
+    // from the buffer it was computed in.
+    Effect::new(move || {
+        let _ = state.active_buffer.get();
+        set_popup.set(None);
+    });
+
+    // Accept popup row `idx`: splice its insert text over the trigger word,
+    // restore focus/caret, and hide the popup. Captures only Copy signal
+    // handles, so the closure itself is Copy and usable from both the keydown
+    // handler and every row's mousedown handler.
+    let accept_popup = move |idx: usize| {
+        let Some(p) = popup.get_untracked() else {
+            return;
+        };
+        let Some(item) = p.items.get(idx) else {
+            return;
+        };
+        let text = value.get_untracked();
+        // The popup is recomputed on every input event and cleared by the
+        // picker-insert Effect, so the range should always be valid for the
+        // current text — but a stale range slicing mid-UTF-8 would panic and
+        // kill the whole WASM app, so guard boundaries too.
+        if p.replace_start > p.replace_end
+            || p.replace_end > text.len()
+            || !text.is_char_boundary(p.replace_start)
+            || !text.is_char_boundary(p.replace_end)
+        {
+            set_popup.set(None);
+            return;
+        }
+        let new_text = format!(
+            "{}{}{}",
+            &text[..p.replace_start],
+            item.insert,
+            &text[p.replace_end..]
+        );
+        let new_cursor = p.replace_start + item.insert.len();
+        set_value.set(new_text.clone());
+        set_textarea_cursor(&input_ref, &new_text, new_cursor);
+        if let Some(el) = input_ref.get_untracked() {
+            let html_el: &web_sys::HtmlTextAreaElement = el.as_ref();
+            let _ = html_el.focus();
+        }
+        set_popup.set(None);
+    };
+
+    // Keep the keyboard-selected row visible when arrowing through a long
+    // popup list. Only the focused (visible) InputLine ever has a popup, so
+    // the class selector can't hit the hidden twin instance.
+    Effect::new(move || {
+        let _ = popup_sel.get();
+        if popup.get().is_none() {
+            return;
+        }
+        if let Some(doc) = web_sys::window().and_then(|w| w.document())
+            && let Ok(Some(el)) = doc.query_selector(".completion-popup .completion-item.selected")
+        {
+            el.scroll_into_view_with_bool(false);
+        }
+    });
 
     // Set enterkeyhint for mobile keyboard "Send" button.
     Effect::new(move || {
@@ -190,6 +287,9 @@ pub fn InputLine() -> impl IntoView {
         set_textarea_cursor(&input_ref, &new_text, new_cursor);
         let _ = html_el.focus();
         state.pending_insert.set(None);
+        // The splice changed `value` without going through on_input — any
+        // open popup now holds a stale byte range; drop it.
+        set_popup.set(None);
     });
 
     // Global keydown listener — focus textarea when user types anywhere.
@@ -289,6 +389,15 @@ pub fn InputLine() -> impl IntoView {
         // frame thousands of lines into batches and store/render one giant
         // message, bypassing the flood/render guard the TUI path applies.
         const MAX_PASTE_LINES: usize = 1000;
+        // Leading `@nick` → "nick: " rewrite applies to single-line sends
+        // only (the hand-typed mobile mention). Multiline text is a paste,
+        // and pasted lines must go out byte-for-byte — a quoted log line
+        // "@doddy said…" must not be rewritten.
+        let text = if !text.contains('\n') && text.starts_with('@') {
+            convert_leading_at_mention(&text, &completion_nicks(&state))
+        } else {
+            text
+        };
         let flush = |pending: &mut Vec<&str>| {
             while pending.last().is_some_and(|l| l.trim().is_empty()) {
                 pending.pop();
@@ -330,9 +439,63 @@ pub fn InputLine() -> impl IntoView {
             return;
         }
 
+        // Completion popup navigation takes precedence while it is open.
+        // Arrows (and Shift+Tab) move the selection; Tab accepts; Enter
+        // accepts ONLY once the user has engaged the list — otherwise Enter
+        // still means send (a fully typed "/part" or "@doddy hi" must go out
+        // on the first press even though the popup still matches its last
+        // word). `PopupData.items` is never empty (popup_matches returns
+        // None instead), so the modular arithmetic is safe.
+        if let Some(p) = popup.get_untracked() {
+            let len = p.items.len();
+            match ev.key().as_str() {
+                "ArrowDown" => {
+                    ev.prevent_default();
+                    set_popup_engaged.set(true);
+                    set_popup_sel.update(|s| *s = (*s + 1) % len);
+                    return;
+                }
+                "ArrowUp" => {
+                    ev.prevent_default();
+                    set_popup_engaged.set(true);
+                    set_popup_sel.update(|s| *s = (*s + len - 1) % len);
+                    return;
+                }
+                // Tab must not fall through to the legacy cycling below while
+                // the popup is showing different candidates.
+                "Tab" => {
+                    ev.prevent_default();
+                    if ev.shift_key() {
+                        set_popup_engaged.set(true);
+                        set_popup_sel.update(|s| *s = (*s + len - 1) % len);
+                    } else {
+                        accept_popup(popup_sel.get_untracked().min(len - 1));
+                    }
+                    return;
+                }
+                "Enter" if !ev.shift_key() => {
+                    if popup_engaged.get_untracked() {
+                        ev.prevent_default();
+                        accept_popup(popup_sel.get_untracked().min(len - 1));
+                        return;
+                    }
+                    // Not engaged: Enter means send — close the popup and
+                    // fall through to the send branch below.
+                    set_popup.set(None);
+                }
+                "Escape" => {
+                    ev.prevent_default();
+                    set_popup.set(None);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         if ev.key() == "Enter" && !ev.shift_key() {
             ev.prevent_default();
             set_tab_active.set(false);
+            set_popup.set(None);
             let text = value.get();
             send_text(text);
             set_value.set(String::new());
@@ -371,10 +534,10 @@ pub fn InputLine() -> impl IntoView {
                 set_value.set(new_text.clone());
                 set_textarea_cursor(&input_ref, &new_text, new_cursor);
             } else {
-                // New tab completion.
-                let before_cursor = &text[..cursor];
-                let word_start = before_cursor.rfind(' ').map_or(0, |i| i + 1);
-                let typed = &before_cursor[word_start..];
+                // New tab completion. Word boundaries and the addressing
+                // delimiter share the popup's rules (word_bounds /
+                // at_line_start) so Tab and the popup can't drift.
+                let (word_start, typed) = word_bounds(&text, cursor);
 
                 if typed.is_empty() && !text.starts_with('/') {
                     return;
@@ -393,7 +556,7 @@ pub fn InputLine() -> impl IntoView {
                             // commands and `:name:` emotes already carry their
                             // own delimiter; just add a trailing space.
                             format!("{m} ")
-                        } else if word_start == 0 {
+                        } else if at_line_start(&text, word_start) {
                             format!("{m}: ")
                         } else {
                             format!("{m} ")
@@ -442,10 +605,55 @@ pub fn InputLine() -> impl IntoView {
             let h = scroll_h.min(max_h);
             style.style().set_property("height", &format!("{h}px")).ok();
         }
+        // Recompute the completion popup for the word at the caret.
+        let text = value.get_untracked();
+        let cursor = get_textarea_cursor(&input_ref, &text);
+        let next = compute_popup(&text, cursor, &state);
+        set_popup_engaged.set(false);
+        set_popup_sel.set(0);
+        set_popup.set(next);
     };
 
     view! {
         <div class="input-line">
+            // Completion popup — anchored above the input row. Rows insert on
+            // mousedown (with preventDefault) rather than click: mousedown
+            // fires before the textarea's blur, so accepting a completion by
+            // tap doesn't close the mobile keyboard.
+            {move || {
+                let p = popup.get()?;
+                Some(view! {
+                    <div class="completion-popup">
+                        {p.items.iter().enumerate().map(|(i, item)| {
+                            // Per-row reactive class: arrowing through the
+                            // list updates two class attributes instead of
+                            // rebuilding all rows (which would restart the
+                            // animated emote GIFs on every keypress).
+                            let class = move || {
+                                if popup_sel.get() == i {
+                                    "completion-item selected"
+                                } else {
+                                    "completion-item"
+                                }
+                            };
+                            let label = item.label.clone();
+                            let emote = item.emote_url.clone();
+                            let on_mousedown = move |ev: web_sys::MouseEvent| {
+                                ev.prevent_default();
+                                accept_popup(i);
+                            };
+                            view! {
+                                <div class=class on:mousedown=on_mousedown>
+                                    {emote.map(|src| view! {
+                                        <img class="completion-emote" src=src alt="" />
+                                    })}
+                                    <span class="completion-label">{label}</span>
+                                </div>
+                            }
+                        }).collect::<Vec<_>>()}
+                    </div>
+                })
+            }}
             <button
                 type="button"
                 class="input-emote-btn"
@@ -469,8 +677,13 @@ pub fn InputLine() -> impl IntoView {
                 node_ref=input_ref
                 on:input=on_input
                 on:keydown=on_keydown
+                // Popup rows accept on mousedown (preventDefault keeps focus),
+                // so a blur here can only mean the user left the input — an
+                // open popup would otherwise silently eat the next Enter.
+                on:blur=move |_| set_popup.set(None)
             ></textarea>
             <button class="send-btn" on:click=move |_| {
+                set_popup.set(None);
                 let text = value.get();
                 send_text(text);
                 set_value.set(String::new());
@@ -538,10 +751,166 @@ fn set_textarea_cursor(input_ref: &NodeRef<leptos::html::Textarea>, text: &str, 
     }
 }
 
+/// Nicks that can be completed/mentioned in the active buffer: the live nick
+/// list for channels, or the peer's nick for query buffers (queries have no
+/// NAMES list). Reads signals untracked — callers are event handlers.
+fn completion_nicks(state: &AppState) -> Vec<String> {
+    let Some(active_id) = state.active_buffer.get_untracked() else {
+        return Vec::new();
+    };
+    let from_list: Vec<String> = state.nick_lists.with_untracked(|lists| {
+        lists
+            .get(&active_id)
+            .map(|l| l.iter().map(|n| n.nick.clone()).collect())
+            .unwrap_or_default()
+    });
+    if !from_list.is_empty() {
+        return from_list;
+    }
+    state.buffers.with_untracked(|bufs| {
+        bufs.iter()
+            .find(|b| b.id == active_id && b.buffer_type == "query")
+            .map(|b| vec![b.name.clone()])
+            .unwrap_or_default()
+    })
+}
+
+/// `(word_start, word)` for the whitespace-delimited word ending at `cursor`.
+/// Word boundaries are spaces AND newlines, so multiline drafts complete per
+/// line. Shared by Tab completion and the popup so the two can't drift.
+fn word_bounds(text: &str, cursor: usize) -> (usize, &str) {
+    let cursor = floor_char_boundary(text, cursor);
+    let before = &text[..cursor];
+    let word_start = before.rfind([' ', '\n']).map_or(0, |i| i + 1);
+    (word_start, &before[word_start..])
+}
+
+/// Whether `word_start` sits at the start of a line (start of the input or
+/// right after a newline) — where completed nicks take the addressing `": "`
+/// delimiter instead of a plain space. Shared by Tab completion and the popup.
+fn at_line_start(text: &str, word_start: usize) -> bool {
+    word_start == 0 || text[..word_start].ends_with('\n')
+}
+
+/// Popup computation with a cheap trigger pre-check: the nick list is only
+/// materialized when the caret word actually starts with `@` — typing a plain
+/// sentence in a 2000-user channel must not clone 2000 nick Strings per
+/// keypress.
+fn compute_popup(text: &str, cursor: usize, state: &AppState) -> Option<PopupData> {
+    let (_, word) = word_bounds(text, cursor);
+    let nicks = if word.starts_with('@') {
+        completion_nicks(state)
+    } else {
+        Vec::new()
+    };
+    popup_matches(text, cursor, &nicks, state.emotes_enabled.get_untracked())
+}
+
+/// Completion popup candidates for the word at the caret.
+///
+/// Triggers (all tap-friendly — phones have no Tab key):
+/// - `@prefix`  → nicks (canonical casing; `nick: ` at line start, `nick `
+///   mid-line — same delimiters Tab completion uses)
+/// - `/prefix`  → commands, only while typing the first word
+/// - `:prefix`  → `:name:` emotes (when emotes are enabled), with thumbnails
+///
+/// Returns `None` when there is nothing to show; the item list is never empty.
+fn popup_matches(
+    text: &str,
+    cursor: usize,
+    nicks: &[String],
+    emotes_enabled: bool,
+) -> Option<PopupData> {
+    let cursor = floor_char_boundary(text, cursor);
+    let (word_start, word) = word_bounds(text, cursor);
+
+    let mut items: Vec<PopupItem> = Vec::new();
+
+    if word_start == 0 && word.starts_with('/') {
+        let prefix = word[1..].to_ascii_lowercase();
+        items.extend(
+            COMMANDS
+                .iter()
+                .filter(|c| c.starts_with(&prefix))
+                .map(|c| PopupItem {
+                    label: format!("/{c}"),
+                    insert: format!("/{c} "),
+                    emote_url: None,
+                }),
+        );
+    } else if let Some(word_prefix) = word.strip_prefix('@') {
+        let prefix = word_prefix.to_lowercase();
+        // Addressing delimiter at the start of any line (first or a later
+        // line of a multiline draft); plain space mid-sentence.
+        let delim = if at_line_start(text, word_start) { ": " } else { " " };
+        let mut matched: Vec<&String> = nicks
+            .iter()
+            .filter(|n| n.to_lowercase().starts_with(&prefix))
+            .collect();
+        matched.sort_by_key(|n| n.to_lowercase());
+        matched.dedup();
+        items.extend(matched.into_iter().map(|n| PopupItem {
+            label: n.clone(),
+            insert: format!("{n}{delim}"),
+            emote_url: None,
+        }));
+    } else if emotes_enabled && word.starts_with(':') {
+        items.extend(emote_tab_matches(word).into_iter().map(|m| {
+            let stem = crate::emotes::stem_for(m.trim_matches(':'));
+            PopupItem {
+                emote_url: (!stem.is_empty()).then(|| format!("/emotes/{stem}.gif")),
+                insert: format!("{m} "),
+                label: m,
+            }
+        }));
+    }
+
+    if items.is_empty() {
+        return None;
+    }
+    items.truncate(MAX_POPUP_ITEMS);
+    Some(PopupData {
+        replace_start: word_start,
+        replace_end: cursor,
+        items,
+    })
+}
+
+/// Convert a leading `@nick` mention to irssi-style `nick: ` — the mobile
+/// typed form (`@doddy siema`) is sent to IRC as `doddy: siema`. Only the
+/// first token converts, and only when the nick is actually present in the
+/// buffer (case-insensitive; the list's canonical casing is used), so a
+/// literal leading `@handle` that isn't anyone in the channel passes through
+/// untouched. Mid-line `@nick` is always left alone.
+fn convert_leading_at_mention(line: &str, nicks: &[String]) -> String {
+    let Some(rest) = line.strip_prefix('@') else {
+        return line.to_string();
+    };
+    let (token, tail) = match rest.find(' ') {
+        Some(i) => (&rest[..i], &rest[i + 1..]),
+        None => (rest, ""),
+    };
+    // Tolerate a typed delimiter on the token itself ("@nick:" / "@nick,").
+    let token = token.trim_end_matches([':', ',']);
+    if token.is_empty() {
+        return line.to_string();
+    }
+    let Some(canonical) = nicks.iter().find(|n| n.eq_ignore_ascii_case(token)) else {
+        return line.to_string();
+    };
+    if tail.is_empty() {
+        format!("{canonical}:")
+    } else {
+        format!("{canonical}: {tail}")
+    }
+}
+
 /// Build tab completion matches based on input context.
 fn build_tab_matches(text: &str, word_start: usize, typed: &str, state: &AppState) -> Vec<String> {
-    // Case 1: /command completion.
-    if text.starts_with('/') && !text[..word_start.max(1)].contains(' ') {
+    // Case 1: /command completion — only while typing the FIRST word of the
+    // draft (a `/word` at the start of a later line is not a command position
+    // for completion; newline counts as a separator like space).
+    if text.starts_with('/') && !text[..word_start.max(1)].contains([' ', '\n']) {
         let prefix = typed.strip_prefix('/').unwrap_or(typed).to_lowercase();
         return COMMANDS
             .iter()
@@ -567,19 +936,13 @@ fn build_tab_matches(text: &str, word_start: usize, typed: &str, state: &AppStat
         }
     }
 
-    // Case 4: Nick completion.
-    let nicks = state.nick_lists.get_untracked();
-    let active_id = state.active_buffer.get_untracked();
+    // Case 4: Nick completion — same source as the popup (live nick list,
+    // with the query-peer fallback), so Tab and the popup can't drift.
     let typed_lower = typed.to_lowercase();
-
-    active_id
-        .and_then(|id| nicks.get(&id))
-        .map_or_else(Vec::new, |list| {
-            list.iter()
-                .filter(|n| n.nick.to_lowercase().starts_with(&typed_lower))
-                .map(|n| n.nick.clone())
-                .collect()
-        })
+    completion_nicks(state)
+        .into_iter()
+        .filter(|n| n.to_lowercase().starts_with(&typed_lower))
+        .collect()
 }
 
 /// `:usm` → `[":usmiech:", ...]`. Returns empty unless `word` is a single
@@ -656,5 +1019,155 @@ mod tests {
     #[test]
     fn emote_tab_is_case_insensitive() {
         assert_eq!(emote_tab_matches(":USM").len(), emote_tab_matches(":usm").len());
+    }
+
+    // ── completion popup ────────────────────────────────────────────────
+
+    fn nicks(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn popup_at_line_start_appends_colon_delimiter() {
+        let p = popup_matches("@do", 3, &nicks(&["doddy", "kofany"]), true).unwrap();
+        assert_eq!(p.replace_start, 0);
+        assert_eq!(p.replace_end, 3);
+        assert_eq!(p.items.len(), 1);
+        assert_eq!(p.items[0].label, "doddy");
+        assert_eq!(p.items[0].insert, "doddy: ");
+    }
+
+    #[test]
+    fn popup_at_midline_appends_space_delimiter() {
+        let p = popup_matches("hej @do", 7, &nicks(&["doddy"]), true).unwrap();
+        assert_eq!(p.replace_start, 4);
+        assert_eq!(p.items[0].insert, "doddy ");
+    }
+
+    #[test]
+    fn popup_bare_at_lists_all_nicks_sorted_case_insensitively() {
+        let p = popup_matches("@", 1, &nicks(&["Zed", "alice"]), true).unwrap();
+        let labels: Vec<&str> = p.items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, vec!["alice", "Zed"]);
+    }
+
+    #[test]
+    fn popup_nick_match_is_case_insensitive_with_canonical_casing() {
+        let p = popup_matches("@DO", 3, &nicks(&["DoDdy"]), true).unwrap();
+        assert_eq!(p.items[0].label, "DoDdy");
+        assert_eq!(p.items[0].insert, "DoDdy: ");
+    }
+
+    #[test]
+    fn popup_caps_item_count() {
+        let many: Vec<String> = (0..200).map(|i| format!("nick{i:03}")).collect();
+        let p = popup_matches("@nick", 5, &many, true).unwrap();
+        assert_eq!(p.items.len(), MAX_POPUP_ITEMS);
+    }
+
+    #[test]
+    fn popup_none_when_nothing_matches() {
+        assert!(popup_matches("@zz", 3, &nicks(&["doddy"]), true).is_none());
+        assert!(popup_matches("plain text", 10, &nicks(&["doddy"]), true).is_none());
+        assert!(popup_matches("", 0, &nicks(&["doddy"]), true).is_none());
+    }
+
+    #[test]
+    fn popup_command_trigger_only_in_first_word() {
+        let p = popup_matches("/joi", 4, &[], true).unwrap();
+        assert_eq!(p.items[0].label, "/join");
+        assert_eq!(p.items[0].insert, "/join ");
+        assert_eq!(p.replace_start, 0);
+        // Past the first word, `/…` must not re-trigger command completion.
+        assert!(popup_matches("/msg /joi", 9, &[], true).is_none());
+    }
+
+    #[test]
+    fn popup_emote_trigger_carries_thumbnail_and_respects_toggle() {
+        let p = popup_matches(":usm", 4, &[], true).unwrap();
+        assert!(p.items[0].label.starts_with(':'));
+        assert!(p.items[0].insert.ends_with(": ") || p.items[0].insert.ends_with(' '));
+        assert!(
+            p.items[0]
+                .emote_url
+                .as_deref()
+                .is_some_and(|u| u.starts_with("/emotes/") && u.ends_with(".gif"))
+        );
+        assert!(popup_matches(":usm", 4, &[], false).is_none(), "gated off");
+    }
+
+    #[test]
+    fn popup_survives_multibyte_text_before_word() {
+        // "żółć @do" — multibyte chars before the trigger word.
+        let text = "\u{17c}\u{f3}\u{142}\u{107} @do";
+        let cursor = text.len();
+        let p = popup_matches(text, cursor, &nicks(&["doddy"]), true).unwrap();
+        assert_eq!(p.items[0].insert, "doddy ");
+        assert_eq!(&text[p.replace_start..p.replace_end], "@do");
+    }
+
+    #[test]
+    fn popup_word_detection_respects_newlines() {
+        // The start of a later line in a multiline draft is still a line
+        // start — the addressing ": " delimiter applies there too.
+        let text = "first line\n@do";
+        let p = popup_matches(text, text.len(), &nicks(&["doddy"]), true).unwrap();
+        assert_eq!(p.items[0].insert, "doddy: ");
+        assert_eq!(&text[p.replace_start..p.replace_end], "@do");
+    }
+
+    // ── leading @nick → "nick: " send rewrite ───────────────────────────
+
+    #[test]
+    fn mention_converts_with_canonical_casing() {
+        assert_eq!(
+            convert_leading_at_mention("@DoDDy siema", &nicks(&["Doddy"])),
+            "Doddy: siema"
+        );
+    }
+
+    #[test]
+    fn mention_unknown_nick_passes_through() {
+        assert_eq!(
+            convert_leading_at_mention("@stranger hi", &nicks(&["doddy"])),
+            "@stranger hi"
+        );
+    }
+
+    #[test]
+    fn mention_midline_untouched() {
+        assert_eq!(
+            convert_leading_at_mention("hej @doddy co tam", &nicks(&["doddy"])),
+            "hej @doddy co tam"
+        );
+    }
+
+    #[test]
+    fn mention_bare_token_gets_colon() {
+        assert_eq!(
+            convert_leading_at_mention("@doddy", &nicks(&["doddy"])),
+            "doddy:"
+        );
+    }
+
+    #[test]
+    fn mention_tolerates_typed_delimiter() {
+        assert_eq!(
+            convert_leading_at_mention("@doddy: hej", &nicks(&["doddy"])),
+            "doddy: hej"
+        );
+        assert_eq!(
+            convert_leading_at_mention("@doddy, hej", &nicks(&["doddy"])),
+            "doddy: hej"
+        );
+    }
+
+    #[test]
+    fn mention_plain_line_untouched() {
+        assert_eq!(
+            convert_leading_at_mention("no mention here", &nicks(&["doddy"])),
+            "no mention here"
+        );
+        assert_eq!(convert_leading_at_mention("@", &nicks(&["doddy"])), "@");
     }
 }

@@ -340,6 +340,55 @@ html, body {
     display: flex;
     align-items: center;
     gap: 6px;
+    /* Anchor for the completion popup. */
+    position: relative;
+}
+
+/* === Completion popup (@nick, /command, :emote) === */
+
+.completion-popup {
+    position: absolute;
+    bottom: 100%;
+    left: 8px;
+    right: 8px;
+    margin-bottom: 4px;
+    max-height: 180px;
+    overflow-y: auto;
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.35);
+    /* Above the chat area, but BELOW the mobile slide-out panels and their
+       overlay (z-index 10/11) — an open panel must cover the popup. */
+    z-index: 9;
+    overscroll-behavior: contain;
+}
+
+.completion-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    cursor: pointer;
+    color: var(--fg);
+    -webkit-tap-highlight-color: transparent;
+}
+
+.completion-item.selected,
+.completion-item:hover {
+    background: rgba(122, 162, 247, 0.15);
+}
+
+.completion-emote {
+    width: 18px;
+    height: 18px;
+    object-fit: contain;
+}
+
+@media (max-width: 767px) {
+    /* Bigger touch targets on phones. */
+    .completion-item { padding: 9px 12px; }
+    .completion-popup { max-height: 210px; }
 }
 
 .input-line .prompt { color: var(--accent); }
