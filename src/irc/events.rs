@@ -233,13 +233,10 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
         // WHOIS numerics with freeform prose that irc-proto has no Response
         // variant for (320 cloak/SSL specials, 307 regnick, 379 modes, ...).
         // Without this arm they'd fall to the generic numeric catch-all and
-        // render unthemed outside the WHOIS block.
-        Command::Raw(cmd, args)
-            if matches!(
-                cmd.as_str(),
-                "307" | "310" | "320" | "335" | "338" | "378" | "379"
-            ) =>
-        {
+        // render unthemed outside the WHOIS block. Shorter-than-3-arg forms
+        // (no separate nick token) intentionally fall through to that
+        // catch-all so the line still displays.
+        Command::Raw(cmd, args) if args.len() >= 3 && whois_freeform_key(cmd).is_some() => {
             handle_whois_freeform(state, conn_id, cmd, args);
         }
         // ircnet.com/extended-join (IRCnet ircd 2.12.0):
@@ -249,16 +246,38 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
         // ONLY this variant — dropping it would lose joins entirely (own
         // joins included, so no channel buffer would ever open). uid/ip are
         // informational; netjoin=1 (burst after relink) rides the same
-        // netsplit detection as ordinary joins inside handle_join.
-        Command::Raw(cmd, args) if cmd.eq_ignore_ascii_case("JOIN") && args.len() == 6 => {
+        // netsplit detection as ordinary joins inside handle_join. Without
+        // the cap ack, or with an unexpected arity, the extension fields are
+        // untrusted — fall back to a channel-only join (args[0] is the
+        // channel in every JOIN form) so the join still lands.
+        Command::Raw(cmd, args) if cmd.eq_ignore_ascii_case("JOIN") && !args.is_empty() => {
+            let has_cap = state
+                .connections
+                .get(conn_id)
+                .is_some_and(|c| c.enabled_caps.contains("ircnet.com/extended-join"));
+            let fields = if has_cap {
+                join_fields(&msg.command)
+            } else {
+                None
+            };
+            let (account, realname) = if let Some((_, account, realname)) = fields {
+                (account, realname)
+            } else {
+                tracing::debug!(
+                    args = args.len(),
+                    has_cap,
+                    "raw JOIN with unexpected shape — treating as channel-only join"
+                );
+                (None, None)
+            };
             handle_join(
                 state,
                 conn_id,
                 &our_nick,
                 msg.prefix.as_ref(),
                 &args[0],
-                Some(args[4].as_str()),
-                Some(args[5].as_str()),
+                account,
+                realname,
                 tags,
             );
         }
@@ -4111,23 +4130,49 @@ fn handle_whois_account(state: &mut AppState, conn_id: &str, args: &[String]) {
     }
 }
 
+/// Theme event key for WHOIS numerics whose payload is freeform prose and
+/// which irc-proto has no `Response` variant for. Single source of truth for
+/// both the dispatch guard and the per-numeric theming.
+fn whois_freeform_key(numeric: &str) -> Option<&'static str> {
+    match numeric {
+        "307" => Some("whois_registered"),
+        "310" => Some("whois_help"),
+        "320" => Some("whois_special"),
+        "335" => Some("whois_bot"),
+        "338" => Some("whois_actually"),
+        "378" => Some("whois_host"),
+        "379" => Some("whois_modes"),
+        _ => None,
+    }
+}
+
+/// Extract `(channel, account, realname)` from either JOIN wire form: the
+/// crate-parsed `Command::JOIN` (1-3 args) or the 6-arg
+/// `ircnet.com/extended-join` Raw variant. `None` for anything else.
+pub fn join_fields(command: &Command) -> Option<(&str, Option<&str>, Option<&str>)> {
+    match command {
+        Command::JOIN(channel, account, realname) => {
+            Some((channel, account.as_deref(), realname.as_deref()))
+        }
+        Command::Raw(cmd, args) if cmd.eq_ignore_ascii_case("JOIN") && args.len() == 6 => Some((
+            args[0].as_str(),
+            Some(args[4].as_str()),
+            Some(args[5].as_str()),
+        )),
+        _ => None,
+    }
+}
+
 /// WHOIS numerics whose payload is freeform prose: args = [`our_nick`, nick,
 /// text...]. Middle args (338's host/ip values) join into the text so every
-/// known wire variant renders. Each numeric gets its own theme event key;
-/// unknown callers fall back to `whois_special`.
+/// known wire variant renders.
 fn handle_whois_freeform(state: &mut AppState, conn_id: &str, numeric: &str, args: &[String]) {
+    let Some(event_key) = whois_freeform_key(numeric) else {
+        return;
+    };
     if args.len() < 3 {
         return;
     }
-    let event_key = match numeric {
-        "307" => "whois_registered",
-        "310" => "whois_help",
-        "335" => "whois_bot",
-        "338" => "whois_actually",
-        "378" => "whois_host",
-        "379" => "whois_modes",
-        _ => "whois_special",
-    };
     let text = args[2..].join(" ");
     let target_buf = whois_buffer(state, conn_id);
     emit_event(
@@ -6157,9 +6202,54 @@ mod tests {
     // Wire format: :src JOIN <channel> <uid> <ip> <netjoin> <account> :<realname>
     // Six args exceed irc-proto's JOIN arity, so it arrives as Command::Raw.
 
+    fn enable_ircnet_extended_join(state: &mut AppState) {
+        state
+            .connections
+            .get_mut("test")
+            .unwrap()
+            .enabled_caps
+            .insert("ircnet.com/extended-join".to_string());
+    }
+
+    #[test]
+    fn ircnet_extended_join_without_cap_ignores_extension_fields() {
+        // A 6-arg JOIN from a server that did NOT ack the cap has unknown
+        // field semantics — the join must still land (args[0] is always the
+        // channel) but nothing should be read as account/realname.
+        let mut state = make_test_state();
+        let msg = make_irc_msg(
+            Some("carol!user@host"),
+            Command::Raw(
+                "JOIN".to_string(),
+                vec![
+                    "#test".to_string(),
+                    "key1".to_string(),
+                    "key2".to_string(),
+                    "0".to_string(),
+                    "something".to_string(),
+                    "trailing".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        assert!(buf.users.contains_key("carol"), "join itself must land");
+        assert_eq!(
+            buf.users.get("carol").unwrap().account,
+            None,
+            "args[4] must not be trusted as account without the cap"
+        );
+        let m = buf.messages.back().unwrap();
+        let params = m.event_params.as_ref().unwrap();
+        assert_eq!(params[4], "", "no account display without the cap");
+        assert_eq!(params[5], "", "no realname display without the cap");
+    }
+
     #[test]
     fn ircnet_extended_join_with_account_and_realname() {
         let mut state = make_test_state();
+        enable_ircnet_extended_join(&mut state);
         let msg = make_irc_msg(
             Some("ejtest435!~ejtest435@92.206.50.109"),
             Command::Raw(
@@ -6192,6 +6282,7 @@ mod tests {
     #[test]
     fn ircnet_extended_join_star_account_is_none() {
         let mut state = make_test_state();
+        enable_ircnet_extended_join(&mut state);
         let msg = make_irc_msg(
             Some("ejtest435!~ejtest435@92.206.50.109"),
             Command::Raw(
@@ -6219,6 +6310,7 @@ mod tests {
     #[test]
     fn ircnet_extended_join_own_join_creates_buffer() {
         let mut state = make_test_state();
+        enable_ircnet_extended_join(&mut state);
         let msg = make_irc_msg(
             Some("me!~me@host.example"),
             Command::Raw(
@@ -6244,6 +6336,7 @@ mod tests {
         // netjoin=1 without a tracked split (we saw no QUITs) must not be
         // silently dropped — the join line still shows.
         let mut state = make_test_state();
+        enable_ircnet_extended_join(&mut state);
         let msg = make_irc_msg(
             Some("carol!user@host"),
             Command::Raw(
@@ -8374,6 +8467,30 @@ mod tests {
                 "numeric {numeric} params"
             );
         }
+    }
+
+    #[test]
+    fn whois_raw_320_short_form_falls_to_catch_all() {
+        // A 2-arg freeform numeric (no separate nick token) must not be
+        // swallowed — it should fall through to the generic numeric
+        // catch-all that displays args[1..], as it did before the themed
+        // freeform handlers existed.
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+
+        let msg = make_irc_msg(
+            None,
+            Command::Raw(
+                "320".to_string(),
+                vec!["me".to_string(), "is a Cloaked Connection".to_string()],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/testserver").unwrap();
+        let m = buf.messages.back().expect("short 320 must still display");
+        assert_eq!(m.event_key, None);
+        assert_eq!(m.text, "is a Cloaked Connection");
     }
 
     #[test]

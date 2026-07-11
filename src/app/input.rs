@@ -646,8 +646,11 @@ impl App {
             .ui_regions
             .and_then(|r| r.buffer_list_area)
             .map_or(0, |r| r.height as usize);
-        let max_scroll = self.buffer_list_total.saturating_sub(visible_h);
-        let clamped_scroll = self.buffer_list_scroll.min(max_scroll);
+        let (clamped_scroll, _) = crate::ui::chat_view::resolve_scroll(
+            self.buffer_list_total,
+            visible_h,
+            self.buffer_list_scroll,
+        );
         self.buffer_list_scroll = clamped_scroll;
         let logical_row = y_offset + clamped_scroll;
         let sorted_ids = self.state.sorted_buffer_ids();
@@ -679,8 +682,11 @@ impl App {
             .ui_regions
             .and_then(|r| r.nick_list_area)
             .map_or(0, |r| r.height as usize);
-        let max_scroll = self.nick_list_total.saturating_sub(visible_h);
-        let clamped_scroll = self.nick_list_scroll.min(max_scroll);
+        let (clamped_scroll, _) = crate::ui::chat_view::resolve_scroll(
+            self.nick_list_total,
+            visible_h,
+            self.nick_list_scroll,
+        );
         self.nick_list_scroll = clamped_scroll;
         let logical_row = y_offset + clamped_scroll;
 
@@ -748,15 +754,19 @@ impl App {
             return;
         };
 
-        // Map the clicked row to the corresponding message, same logic as chat_view render.
+        // Map the clicked row to the corresponding message, same logic as
+        // chat_view render (approximated in message units — wrapped messages
+        // shift the mapping; do NOT write the clamped value back here).
         let total = buf.messages.len();
         let chat_height = self
             .ui_regions
             .and_then(|r| r.chat_area)
             .map_or(0, |a| a.height as usize);
-        let max_scroll = total.saturating_sub(chat_height);
-        let scroll = self.scroll_offset.min(max_scroll);
-        let skip = total.saturating_sub(chat_height + scroll);
+        let (_scroll, skip) = crate::ui::chat_view::resolve_scroll(
+            total,
+            chat_height,
+            self.scroll_offset,
+        );
         let msg_index = skip + y_offset;
 
         let Some(msg) = buf.messages.get(msg_index) else {

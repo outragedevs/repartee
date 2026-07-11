@@ -644,13 +644,15 @@ fn process_netjoin_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo)
 
     // Directly update nick lists without replaying through handle_irc_message,
     // which would generate individual join display messages we don't want.
+    // `join_fields` also matches the 6-arg ircnet.com/extended-join Raw form,
+    // which exceeds irc-proto's JOIN arity and would otherwise be skipped.
     for msg in &batch.messages {
-        if let Command::JOIN(channel, account, _) = &msg.command {
+        if let Some((channel, account, _realname)) = super::events::join_fields(&msg.command) {
             let (nick, _ident, _host) = extract_nick_userhost(msg.prefix.as_ref());
             let buffer_id = make_buffer_id(conn_id, channel);
 
             // Parse account from extended-join parameter
-            let account = match account.as_deref() {
+            let account = match account {
                 Some("*") | None => None,
                 Some(a) => Some(a.to_string()),
             };
@@ -1233,6 +1235,57 @@ mod tests {
             )),
             command: Command::PRIVMSG(target.to_string(), text.to_string()),
         }
+    }
+
+    #[test]
+    fn netjoin_batch_handles_ircnet_extended_join_raw_form() {
+        // With ircnet.com/extended-join acked, JOINs inside a NETJOIN batch
+        // arrive as the 6-arg Raw form (exceeds irc-proto's JOIN arity).
+        // They must still repopulate the nick list and feed the summary.
+        let conn_id = "test";
+        let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
+
+        let batch = BatchInfo {
+            batch_type: "NETJOIN".to_string(),
+            params: vec!["hub.example".to_string(), "leaf.example".to_string()],
+            started_at: Instant::now(),
+            opener_tags: None,
+            dropped_messages: 0,
+            messages: vec![IrcMessage {
+                tags: None,
+                prefix: Some(irc::proto::Prefix::Nickname(
+                    "bob".to_string(),
+                    "b".to_string(),
+                    "h.example".to_string(),
+                )),
+                command: Command::Raw(
+                    "JOIN".to_string(),
+                    vec![
+                        "#test".to_string(),
+                        "528HAAD32".to_string(),
+                        "10.0.0.1".to_string(),
+                        "1".to_string(),
+                        "bobacct".to_string(),
+                        "Bob Real".to_string(),
+                    ],
+                ),
+            }],
+        };
+
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        let buf = state.buffers.get(&buf_id).expect("buffer exists");
+        assert!(
+            buf.users.contains_key("bob"),
+            "netjoin raw JOIN must repopulate the nick list"
+        );
+        assert_eq!(
+            buf.users.get("bob").unwrap().account.as_deref(),
+            Some("bobacct")
+        );
+        let summary = buf.messages.back().expect("netjoin summary emitted");
+        assert_eq!(summary.event_key.as_deref(), Some("netjoin"));
+        assert!(summary.text.contains("bob"));
     }
 
     #[test]

@@ -42,18 +42,39 @@ fn compute_render_budget(buffer_len: usize, visible_height: usize, scroll_offset
 /// precisely the at-the-top case this clamp exists for. A budget-limited walk
 /// always yields `total > visible_height + scroll_offset`, leaving the offset
 /// untouched.
-fn resolve_scroll(total: usize, visible_height: usize, scroll_offset: usize) -> (usize, usize) {
+pub fn resolve_scroll(total: usize, visible_height: usize, scroll_offset: usize) -> (usize, usize) {
     let max_scroll = total.saturating_sub(visible_height);
     let scroll = scroll_offset.min(max_scroll);
     let skip = total.saturating_sub(visible_height.saturating_add(scroll));
     (scroll, skip)
 }
 
+/// True when the view is pinned at the top of the *loaded* content: the line
+/// walk exhausted the buffer (`walked_all` — so `total` is exact) and the
+/// clamped scroll sits at its maximum. This is the signal the backlog
+/// paginators key on; it replaces comparing a visual-line offset against a
+/// message count, which only ever worked while the offset could overshoot.
+const fn scroll_pinned_at_top(
+    walked_all: bool,
+    scroll: usize,
+    total: usize,
+    visible_height: usize,
+) -> bool {
+    walked_all && scroll >= total.saturating_sub(visible_height)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear render pass — wrap walk, scroll resolution, emote placement"
+)]
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     // Clear any emote placements up-front so early returns (shell buffer, zero
     // area) don't leave stale rects that would ghost-render over another view
     // and keep the animation clock spinning. The normal path overwrites this.
     app.emote_placements.clear();
+    // Same hygiene for the pinned-top flag: early returns must not leave a
+    // stale `true` from another buffer feeding the backlog paginators.
+    app.chat_scroll_at_top = false;
 
     // Delegate to shell renderer for shell buffers.
     if app
@@ -108,7 +129,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         let needed = compute_render_budget(buf.messages.len(), visible_height, app.scroll_offset);
         let mut visual_lines: VecDeque<Line<'_>> = VecDeque::new();
 
-        for msg in buf.messages.iter().rev() {
+        let mut msgs = buf.messages.iter().rev();
+        for msg in msgs.by_ref() {
             let is_own = msg.nick.as_deref() == Some(current_nick);
             let nick_fg = if app.config.display.nick_colors && !is_own && !msg.highlight {
                 msg.nick.as_deref().map(|n| {
@@ -155,6 +177,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             }
         }
 
+        // If the walk broke on the budget with messages left, `total` is a
+        // lower bound, not the true line count.
+        let walked_all = msgs.next().is_none();
+
         let total = visual_lines.len();
         let (scroll, skip) = resolve_scroll(total, visible_height, app.scroll_offset);
         // Write the clamped value back: without this, wheel-up past the top
@@ -164,6 +190,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         // visible_height+offset and the offset passes through untouched, so
         // this only clamps at the true top boundary.
         app.scroll_offset = scroll;
+        app.chat_scroll_at_top = scroll_pinned_at_top(walked_all, scroll, total, visible_height);
 
         let visible_lines: Vec<Line<'_>> = visual_lines
             .into_iter()
@@ -269,6 +296,34 @@ mod tests {
                 got, expected,
                 "usize::MAX scroll_offset must not overflow and must cap at 100*MAX_WRAPPED_LINES_PER_MSG={expected}, got {got}"
             );
+        }
+    }
+
+    mod scroll_pinned_at_top {
+        use super::super::scroll_pinned_at_top;
+
+        #[test]
+        fn pinned_when_walk_exhausted_and_clamped_at_max() {
+            assert!(scroll_pinned_at_top(true, 80, 100, 20));
+        }
+
+        #[test]
+        fn not_pinned_when_budget_cut_the_walk_short() {
+            // Budget-limited frame: the true top wasn't reached, so the
+            // backlog paginators must not fire.
+            assert!(!scroll_pinned_at_top(false, 80, 100, 20));
+        }
+
+        #[test]
+        fn not_pinned_mid_scroll() {
+            assert!(!scroll_pinned_at_top(true, 30, 100, 20));
+        }
+
+        #[test]
+        fn pinned_for_content_shorter_than_window() {
+            // Everything already visible: scrolling up should be allowed to
+            // pull older history in.
+            assert!(scroll_pinned_at_top(true, 0, 5, 20));
         }
     }
 

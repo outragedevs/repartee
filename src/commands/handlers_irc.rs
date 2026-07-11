@@ -1284,14 +1284,9 @@ pub(crate) fn cmd_wii(app: &mut App, args: &[String]) {
         return;
     };
 
-    if let Some(sender) = app.active_irc_sender() {
-        // WHOIS nick nick — queries the user's server for idle info
-        if let Err(e) = sender.send(irc::proto::Command::WHOIS(Some(nick.clone()), nick)) {
-            add_local_event(app, &format!("Failed to send WHOIS: {e}"));
-        }
-    } else {
-        add_local_event(app, "Not connected");
-    }
+    // WHOIS nick nick — the remote form that returns idle/signon; same path
+    // as `/whois nick nick`.
+    cmd_whois(app, &[nick.clone(), nick]);
 }
 
 /// Default nick for /whois when no argument given.
