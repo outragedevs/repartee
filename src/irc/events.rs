@@ -3886,34 +3886,30 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
             // 4-char SID before the realname in the trailing.
             if args.len() >= 8 {
                 let channel = &args[1];
-                let (silent, ircnet) = state.connections.get(conn_id).map_or(
-                    (false, false),
-                    |c| {
-                        (
-                            contains_case_insensitive(&c.silent_who_channels, channel),
-                            c.isupport_parsed.is_ircnet_lineage(),
-                        )
-                    },
-                );
+                let conn = state.connections.get(conn_id);
+                let silent = conn
+                    .is_some_and(|c| contains_case_insensitive(&c.silent_who_channels, channel));
+                let ircnet = conn.is_some_and(|c| c.isupport_parsed.is_ircnet_lineage());
                 let user = &args[2];
                 let host = &args[3];
                 let nick = &args[5];
                 let flags = &args[6];
-                let realname = whoreply_realname(&args[7], ircnet).to_string();
 
                 // Mirror the WHOX path: keep the nick entry fresh so silent
                 // auto-WHO is not wasted on servers without WHOX.
-                let away = flags.starts_with('G');
                 let buffer_id = make_buffer_id(conn_id, channel);
-                if let Some(buf) = state.buffers.get_mut(&buffer_id)
-                    && let Some(entry) = buf.users.get_mut(&nick.to_lowercase())
-                {
-                    entry.ident = Some(user.clone());
-                    entry.host = Some(host.clone());
-                    entry.away = away;
-                }
+                update_who_nick_entry(
+                    state,
+                    &buffer_id,
+                    nick,
+                    user,
+                    host,
+                    flags.starts_with('G'),
+                    WhoAccount::Keep,
+                );
 
                 if !silent {
+                    let realname = whoreply_realname(&args[7], ircnet);
                     let target_buf = active_or_server_buffer(state, conn_id);
                     emit(state, &target_buf, &format!(
                         "%Zc0caf5{nick}%Z565f89 ({user}@{host}) [{flags}] {channel}%Za9b1d6 {realname}%N"
@@ -4339,26 +4335,25 @@ pub fn build_whox_who(
     channel: &str,
     silent: bool,
 ) -> Option<(String, String)> {
-    let (has_whox, selector) = state.connections.get(conn_id).map_or(
-        (false, crate::constants::WHOX_FIELDS),
-        |c| {
-            (
-                c.isupport_parsed.has_whox(),
-                c.isupport_parsed.whox_field_selector(),
-            )
-        },
-    );
-
-    if has_whox {
-        let token = next_who_token(state, conn_id);
-        if silent && let Some(conn) = state.connections.get_mut(conn_id) {
-            conn.silent_who_channels.insert(channel.to_string());
-        }
-        let fields = format!("{selector},{token}");
-        Some((channel.to_string(), fields))
-    } else {
-        None
+    let fields = build_whox_fields(state, conn_id)?;
+    if silent && let Some(conn) = state.connections.get_mut(conn_id) {
+        conn.silent_who_channels.insert(channel.to_string());
     }
+    Some((channel.to_string(), fields))
+}
+
+/// The `%fields,token` argument for a WHOX WHO command, or `None` when the
+/// server lacks WHOX. Shared by manual `/who` and the auto-WHO batcher so
+/// both always request the same field layout (which the 354 parser's
+/// arg-count disambiguation depends on).
+pub fn build_whox_fields(state: &mut AppState, conn_id: &str) -> Option<String> {
+    let selector = state
+        .connections
+        .get(conn_id)?
+        .isupport_parsed
+        .whox_request()?;
+    let token = next_who_token(state, conn_id);
+    Some(format!("{selector},{token}"))
 }
 
 /// Handle a WHOX reply (numeric 354 / `RPL_WHOSPCRPL`).
@@ -4392,10 +4387,14 @@ fn handle_whox_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
     let nick = &args[6];
     let flags = &args[7];
     let account_raw = &args[8];
-    let (uid, realname) = if args.len() >= 11 {
+    // The realname is the trailing parameter — always the LAST arg (kept even
+    // when empty by irc-proto's suffix handling). The UID sits at 9 only in
+    // the exact 11-arg IRCnet layout; anything longer is an unknown layout,
+    // where guessing a middle field would corrupt the display.
+    let (uid, realname) = if args.len() == 11 {
         (Some(args[9].as_str()), &args[10])
     } else {
-        (None, &args[9])
+        (None, &args[args.len() - 1])
     };
 
     // Auto-WHO replies are silent — update state only, no display
@@ -4404,25 +4403,19 @@ fn handle_whox_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
         .get(conn_id)
         .is_some_and(|c| contains_case_insensitive(&c.silent_who_channels, channel));
 
-    // Parse away status from flags: H = here, G = gone
-    let away = flags.starts_with('G');
-
     // Parse account: "0" means not logged in
     let account = (account_raw != "0").then(|| account_raw.clone());
 
-    // Update NickEntry in the channel buffer
     let buffer_id = make_buffer_id(conn_id, channel);
-    if let Some(buf) = state.buffers.get_mut(&buffer_id)
-        && let Some(entry) = buf.users.get_mut(&nick.to_lowercase())
-    {
-        tracing::trace!(%nick, %channel, %away, ?account, "WHOX: updating nick entry");
-        entry.ident = Some(user.clone());
-        entry.host = Some(host.clone());
-        entry.account.clone_from(&account);
-        entry.away = away;
-    } else {
-        tracing::warn!(%nick, %channel, %buffer_id, "WHOX: buffer or nick not found for update");
-    }
+    update_who_nick_entry(
+        state,
+        &buffer_id,
+        nick,
+        user,
+        host,
+        flags.starts_with('G'),
+        WhoAccount::Set(account.clone()),
+    );
 
     // Only display for manual /who — auto-WHO on join is silent
     if !silent {
@@ -4439,16 +4432,71 @@ fn handle_whox_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
     }
 }
 
-/// Extract the realname from a 352 trailing parameter (`<hop> <realname>`;
-/// on `IRCnet`-lineage servers `<hop> <sid> <realname>` — the 4-char server
-/// SID is unconditionally present there, per `ircd/s_err.c`'s `RPL_WHOREPLY`
-/// format string).
-fn whoreply_realname(trailing: &str, strip_sid: bool) -> &str {
-    let after_hop = trailing.split_once(' ').map_or("", |(_, rest)| rest);
-    if strip_sid {
-        after_hop.split_once(' ').map_or("", |(_, rest)| rest)
+/// Whether a WHO-family reply carries an account field to store.
+enum WhoAccount {
+    /// 352 — no account on the wire; leave the stored value untouched.
+    Keep,
+    /// 354 — overwrite with the parsed account (`None` = not logged in).
+    Set(Option<String>),
+}
+
+/// Update a channel nick entry from a WHO (352) or WHOX (354) reply. Both
+/// reply paths share this so the field writes can never drift apart.
+fn update_who_nick_entry(
+    state: &mut AppState,
+    buffer_id: &str,
+    nick: &str,
+    ident: &str,
+    host: &str,
+    away: bool,
+    account: WhoAccount,
+) {
+    if let Some(buf) = state.buffers.get_mut(buffer_id)
+        && let Some(entry) = buf.users.get_mut(&nick.to_lowercase())
+    {
+        tracing::trace!(%nick, %buffer_id, %away, "WHO: updating nick entry");
+        entry.ident = Some(ident.to_string());
+        entry.host = Some(host.to_string());
+        entry.away = away;
+        if let WhoAccount::Set(account) = account {
+            entry.account = account;
+        }
     } else {
-        after_hop
+        tracing::trace!(%nick, %buffer_id, "WHO: buffer or nick not found for update");
+    }
+}
+
+/// True for an `IRCnet` server SID: exactly 4 chars, `[0-9][0-9A-Z]{3}`
+/// (`ircd/s_id.c` `sid_valid`, SIDLEN=4).
+fn is_ircnet_sid(token: &str) -> bool {
+    token.len() == 4
+        && token.as_bytes()[0].is_ascii_digit()
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b.is_ascii_uppercase())
+}
+
+/// Extract the realname from a 352 trailing parameter (`<hop> <realname>`;
+/// on `IRCnet`-lineage servers `<hop> <sid> <realname>` per `ircd/s_err.c`'s
+/// `RPL_WHOREPLY` format string). Defensive on both counts: the hopcount is
+/// stripped only when the first token is all digits, and the SID only when
+/// the token actually matches the SID shape — so a non-conforming trailing
+/// (bouncers, services) or a false-positive lineage classification degrades
+/// to showing extra tokens instead of eating realname words.
+fn whoreply_realname(trailing: &str, strip_sid: bool) -> &str {
+    let is_hop = |t: &str| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit());
+    let rest = match trailing.split_once(' ') {
+        Some((first, rest)) if is_hop(first) => rest,
+        Some(_) => return trailing,
+        None => return if is_hop(trailing) { "" } else { trailing },
+    };
+    if !strip_sid {
+        return rest;
+    }
+    match rest.split_once(' ') {
+        Some((sid, realname)) if is_ircnet_sid(sid) => realname,
+        None if is_ircnet_sid(rest) => "",
+        _ => rest,
     }
 }
 
@@ -8398,6 +8446,64 @@ mod tests {
         let text = &server_buf.messages.back().unwrap().text;
         assert!(text.contains("Alice Real"), "realname shifted: {text}");
         assert!(text.contains("528HAAD32"), "uid missing from display: {text}");
+    }
+
+    #[test]
+    fn whoreply_realname_defensive_edges() {
+        // RFC shape: "<hop> <realname>"; ircnet: "<hop> <sid> <realname>".
+        // Non-conforming trailings (bouncers/services) must degrade to
+        // showing the text verbatim, never eating realname words.
+        assert_eq!(whoreply_realname("0 John Doe", false), "John Doe");
+        assert_eq!(whoreply_realname("2 111A Alice Real", true), "Alice Real");
+        // No leading hopcount → whole trailing is the realname.
+        assert_eq!(whoreply_realname("Real Name", false), "Real Name");
+        assert_eq!(whoreply_realname("Bob", false), "Bob");
+        // Hop only, no realname.
+        assert_eq!(whoreply_realname("0", false), "");
+        // ircnet-classified but the second token is not SID-shaped
+        // ([0-9][0-9A-Z]{3}) — keep it (false-positive lineage guard).
+        assert_eq!(whoreply_realname("3 John Smith", true), "John Smith");
+        assert_eq!(whoreply_realname("3 111a Alice", true), "111a Alice");
+        // SID-shaped single remainder → empty realname.
+        assert_eq!(whoreply_realname("3 111A", true), "");
+    }
+
+    #[test]
+    fn whox_reply_overlong_takes_trailing_as_realname() {
+        // A 354 with more args than either known layout (12+) must still
+        // show the trailing (always the last arg) as the realname instead
+        // of a middle field.
+        let mut state = make_whox_state();
+        state.set_active_buffer("test/testserver");
+
+        let msg = make_irc_msg(
+            None,
+            Command::Raw(
+                "354".to_string(),
+                vec![
+                    "me".to_string(),
+                    "1".to_string(),
+                    "#test".to_string(),
+                    "~alice".to_string(),
+                    "1.2.3.4".to_string(),
+                    "host.example".to_string(),
+                    "alice".to_string(),
+                    "H".to_string(),
+                    "0".to_string(),
+                    "111A".to_string(),
+                    "528HAAD32".to_string(),
+                    "Alice Real".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let server_buf = state.buffers.get("test/testserver").unwrap();
+        let text = &server_buf.messages.back().unwrap().text;
+        assert!(
+            text.contains("Alice Real"),
+            "realname must come from the trailing: {text}"
+        );
     }
 
     #[test]

@@ -122,6 +122,14 @@ impl Isupport {
         }
     }
 
+    /// The WHOX field selector to request, or `None` when the server does
+    /// not advertise WHOX. Resolving support and selector together keeps
+    /// every WHO sender on the same request shape.
+    #[must_use]
+    pub fn whox_request(&self) -> Option<&'static str> {
+        self.has_whox().then(|| self.whox_field_selector())
+    }
+
     /// Maximum number of modes that can be changed in a single MODE command.
     /// Defaults to 3.
     #[must_use]
