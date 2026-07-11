@@ -396,33 +396,52 @@ pub fn ChatView() -> impl IntoView {
         cb.forget();
     });
 
-    // Single window.resize listener, coalesced into the next RAF.
-    // Fires on:
-    //   - desktop browser resize
-    //   - Android Chrome keyboard open/close (OSK overlays a smaller
-    //     area, browser resizes the layout viewport)
+    // ResizeObserver on the scroll container, coalesced into the next RAF.
+    // Fires whenever the container's box changes:
+    //   - desktop browser resize / mobile orientation change
+    //   - Android Chrome keyboard open/close (layout viewport resizes)
     //   - mobile URL-bar collapse/expand
-    // iOS Safari does NOT fire `window.resize` on keyboard open and
-    // does NOT resize the layout viewport; the OSK overlays the visual
-    // viewport. We accept that — the browser auto-scrolls the focused
-    // textarea into view on focus, and on blur the visual viewport
-    // returns to the layout viewport with chat unchanged. Adding a
-    // VisualViewport listener was a net negative: it fired
-    // mid-animation and re-pinned partway through, producing visible
-    // hops at both keyboard open and close.
-    type ResizeHandle = Option<(wasm_bindgen::prelude::Closure<dyn Fn()>, js_sys::Function)>;
-    let resize_cleanup: StoredValue<ResizeHandle, leptos::prelude::LocalStorage> =
+    //   - the input textarea auto-growing while the user types a long
+    //     message (the bottom bar grows, this container shrinks) — the
+    //     tester's "last line hides while typing on the phone" bug; a
+    //     window.resize listener never sees this one.
+    // iOS Safari's keyboard overlays the visual viewport without resizing
+    // the layout viewport, so nothing fires here — and nothing needs to:
+    // the container geometry is unchanged and the browser pans the focused
+    // input into view itself. (A VisualViewport listener was tried and
+    // reverted: it fired mid-animation and produced visible hops.)
+    //
+    // The callback body never re-measures `is_at_bottom` — it only re-pins
+    // when we were already at the bottom, with `skip_next_scroll` set (via
+    // `do_pin`), so per-frame firing during a keyboard animation glues the
+    // view to the bottom instead of jittering it.
+    type ObserverHandle = Option<(
+        web_sys::ResizeObserver,
+        wasm_bindgen::prelude::Closure<dyn Fn()>,
+        web_sys::Element,
+    )>;
+    let observer_handle: StoredValue<ObserverHandle, leptos::prelude::LocalStorage> =
         StoredValue::new_local(None);
-    let resize_registered = StoredValue::new(false);
     let resize_throttle = StoredValue::new(false);
     Effect::new(move || {
-        if chat_ref.get().is_none() {
+        let Some(el) = chat_ref.get() else { return };
+        let el_dom: web_sys::Element = el.into();
+        // Keyed on the OBSERVED ELEMENT, not a "registered" boolean: the
+        // shell branch swaps this whole subtree out and back, re-creating
+        // the chat div — a boolean flag would leave the observer bound to
+        // the detached old node and silently kill resize re-pinning after
+        // the first /shell round-trip.
+        let already_observing = observer_handle
+            .with_value(|h| h.as_ref().is_some_and(|(_, _, observed)| observed == &el_dom));
+        if already_observing {
             return;
         }
-        if resize_registered.get_value() {
-            return;
+        if let Some((old_observer, old_cb, _)) =
+            observer_handle.try_update_value(Option::take).flatten()
+        {
+            old_observer.disconnect();
+            drop(old_cb);
         }
-        resize_registered.set_value(true);
         let cb = wasm_bindgen::prelude::Closure::<dyn Fn()>::new(move || {
             if resize_throttle.get_value() {
                 return;
@@ -443,19 +462,17 @@ pub fn ChatView() -> impl IntoView {
             let _ = window.request_animation_frame(raf_cb.as_ref().unchecked_ref());
             raf_cb.forget();
         });
-        let cb_fn: js_sys::Function = cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
-        if let Some(window) = web_sys::window() {
-            let _ = window.add_event_listener_with_callback("resize", &cb_fn);
-        }
-        resize_cleanup.set_value(Some((cb, cb_fn)));
+        let Ok(observer) = web_sys::ResizeObserver::new(cb.as_ref().unchecked_ref()) else {
+            return;
+        };
+        observer.observe(&el_dom);
+        observer_handle.set_value(Some((observer, cb, el_dom)));
     });
 
     on_cleanup(move || {
-        let handle = resize_cleanup.try_update_value(Option::take).flatten();
-        let Some((cb, cb_fn)) = handle else { return };
-        if let Some(window) = web_sys::window() {
-            let _ = window.remove_event_listener_with_callback("resize", &cb_fn);
-        }
+        let handle = observer_handle.try_update_value(Option::take).flatten();
+        let Some((observer, cb, _)) = handle else { return };
+        observer.disconnect();
         drop(cb);
     });
 
@@ -905,44 +922,27 @@ fn render_previews(
                 });
                 crate::state::save_dismissed_previews(&state.dismissed_previews.get());
             };
-            // Reveal-on-load: the card is `display:none` by default
-            // (see `.msg-preview-card` in base.css). On successful
-            // image load we add the `.loaded` class, which switches
-            // it to `display:inline-block` and reserves its 320×200
-            // (or aspect-ratio on mobile) box. On error we do
-            // nothing, so failed previews never flash a placeholder
-            // and never trigger reserve-then-collapse reflow.
+            // Reserve-upfront: the card renders its fixed 320×200
+            // (aspect-ratio on mobile) box IMMEDIATELY, so an async
+            // image load never changes layout — the load only fades
+            // the pixels in (`.loaded` flips opacity). This is what
+            // keeps the log rock-steady while a just-switched-to
+            // buffer's previews stream in; the previous
+            // reveal-on-load design (display:none until onload) grew
+            // the scroller at each decode and visibly floated the
+            // text.
             //
-            // The trailing scroll re-anchor handles the case where
-            // the user was at the bottom of chat when the new card
-            // appeared — without it the freshly-revealed 200 px box
-            // pushes live messages off-screen. Threshold (40 px)
-            // matches `SCROLL_THRESHOLD` so the re-anchor logic
-            // tracks the same "near bottom" semantics used elsewhere.
+            // The rare failure path (dead link, /api/preview 502)
+            // collapses the box with scroll compensation — that logic
+            // lives as a named, formatted function in `index.html`
+            // (`__rpPreviewError`); the attribute here only delegates.
             //
-            // Inline HTML attribute rather than a Leptos closure
+            // Inline HTML attributes rather than Leptos closures
             // because `render_message` has no access to `ChatView`'s
-            // `chat_ref` and threading it through every per-message
-            // child would be ceremony for no functional gain. The
-            // `loading="lazy"` attribute is intentionally absent —
-            // it's a no-op while the parent is display:none, so all
-            // preview images for in-DOM messages fetch eagerly.
-            // Re-pinning on image decode falls out of the messages
-            // Effect in ChatView: when the preview's `loaded` class
-            // flips and the card reveals, the resulting reflow does
-            // not affect scrollHeight any differently than the
-            // initial message append — and we already pin on append.
-            // Reveal-on-load plus an inline scroll-pin: previews go
-            // from display:none to display:inline-block, which grows
-            // the message-list scrollHeight. We measure whether the
-            // user was at the bottom BEFORE flipping the class, and
-            // if so, snap to the new bottom afterwards. The previous
-            // implementation relied on a ResizeObserver in ChatView
-            // to catch this; we dropped that observer because it also
-            // fired on every keyboard-animation frame and produced
-            // visible jitter. The threshold (30) mirrors
-            // `SCROLL_THRESHOLD`.
-            const ON_IMG_LOAD: &str = "var c=this.closest('.msg-preview-card');var s=c&&c.closest('.chat-messages');var atBottom=s&&(s.scrollHeight-s.scrollTop-s.clientHeight<=30);c.classList.add('loaded');if(atBottom){s.scrollTop=s.scrollHeight;}";
+            // `chat_ref`, and the handlers need only the DOM they're
+            // attached to.
+            const ON_IMG_LOAD: &str = "this.classList.add('loaded');";
+            const ON_IMG_ERROR: &str = "__rpPreviewError(this);";
             view! {
                 <span class="msg-preview-card">
                     <a
@@ -951,11 +951,17 @@ fn render_previews(
                         rel="noopener noreferrer"
                         class="msg-preview-link"
                     >
+                        // `loading="lazy"` is viable again now that the card
+                        // is never display:none — the reserved box gives the
+                        // lazy-load observer real geometry, and off-screen
+                        // backlog previews stop fetching eagerly.
                         <img
                             src=thumb
                             class="msg-preview-thumb"
                             alt="link preview"
+                            loading="lazy"
                             onload=ON_IMG_LOAD
+                            onerror=ON_IMG_ERROR
                         />
                     </a>
                     <button

@@ -8,6 +8,34 @@
     <link data-trunk rel="css" href="styles/themes.css" />
     <link data-trunk rel="css" href="styles/base.css" />
     <link data-trunk rel="copy-dir" href="fonts" />
+    <script>
+      // Collapse a failed link-preview card without moving what the reader
+      // sees: re-pin when the user is at the bottom (threshold mirrors
+      // SCROLL_THRESHOLD in chat_view.rs); when the card sat fully above the
+      // viewport, subtract the removed height from scrollTop; a card in view
+      // just disappears in place. Lives here as a named, formatted function —
+      // the per-image onerror attribute in chat_view.rs only delegates to it.
+      window.__rpPreviewError = function (img) {
+        var card = img.closest('.msg-preview-card');
+        if (!card) return;
+        var s = card.closest('.chat-messages');
+        var atBottom = s && (s.scrollHeight - s.scrollTop - s.clientHeight <= 30);
+        var above = false;
+        if (s) {
+          var cr = card.getBoundingClientRect();
+          var sr = s.getBoundingClientRect();
+          above = cr.bottom < sr.top;
+        }
+        var oldH = s ? s.scrollHeight : 0;
+        card.style.display = 'none';
+        if (!s) return;
+        if (atBottom) {
+          s.scrollTop = s.scrollHeight;
+        } else if (above) {
+          s.scrollTop = Math.max(0, s.scrollTop - (oldH - s.scrollHeight));
+        }
+      };
+    </script>
 </head>
 <body></body>
 </html>
