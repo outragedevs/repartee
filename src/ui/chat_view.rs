@@ -35,11 +35,46 @@ fn compute_render_budget(buffer_len: usize, visible_height: usize, scroll_offset
 // Wrap-indent is cached on `App::wrap_indent` and recomputed only when
 // config or theme changes (see `App::recompute_wrap_indent`).
 
+/// Clamp the scroll offset against the wrapped lines produced this frame and
+/// derive how many leading lines to skip. Returns `(scroll, skip)`.
+///
+/// `total` is exact only when the render walk exhausted the buffer — which is
+/// precisely the at-the-top case this clamp exists for. A budget-limited walk
+/// always yields `total > visible_height + scroll_offset`, leaving the offset
+/// untouched.
+pub fn resolve_scroll(total: usize, visible_height: usize, scroll_offset: usize) -> (usize, usize) {
+    let max_scroll = total.saturating_sub(visible_height);
+    let scroll = scroll_offset.min(max_scroll);
+    let skip = total.saturating_sub(visible_height.saturating_add(scroll));
+    (scroll, skip)
+}
+
+/// True when the view is pinned at the top of the *loaded* content: the line
+/// walk exhausted the buffer (`walked_all` — so `total` is exact) and the
+/// clamped scroll sits at its maximum. This is the signal the backlog
+/// paginators key on; it replaces comparing a visual-line offset against a
+/// message count, which only ever worked while the offset could overshoot.
+const fn scroll_pinned_at_top(
+    walked_all: bool,
+    scroll: usize,
+    total: usize,
+    visible_height: usize,
+) -> bool {
+    walked_all && scroll >= total.saturating_sub(visible_height)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear render pass — wrap walk, scroll resolution, emote placement"
+)]
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     // Clear any emote placements up-front so early returns (shell buffer, zero
     // area) don't leave stale rects that would ghost-render over another view
     // and keep the animation clock spinning. The normal path overwrites this.
     app.emote_placements.clear();
+    // Same hygiene for the pinned-top flag: early returns must not leave a
+    // stale `true` from another buffer feeding the backlog paginators.
+    app.chat_scroll_at_top = false;
 
     // Delegate to shell renderer for shell buffers.
     if app
@@ -94,7 +129,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         let needed = compute_render_budget(buf.messages.len(), visible_height, app.scroll_offset);
         let mut visual_lines: VecDeque<Line<'_>> = VecDeque::new();
 
-        for msg in buf.messages.iter().rev() {
+        let mut msgs = buf.messages.iter().rev();
+        for msg in msgs.by_ref() {
             let is_own = msg.nick.as_deref() == Some(current_nick);
             let nick_fg = if app.config.display.nick_colors && !is_own && !msg.highlight {
                 msg.nick.as_deref().map(|n| {
@@ -141,10 +177,20 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             }
         }
 
+        // If the walk broke on the budget with messages left, `total` is a
+        // lower bound, not the true line count.
+        let walked_all = msgs.next().is_none();
+
         let total = visual_lines.len();
-        let max_scroll = total.saturating_sub(visible_height);
-        let scroll = app.scroll_offset.min(max_scroll);
-        let skip = total.saturating_sub(visible_height + scroll);
+        let (scroll, skip) = resolve_scroll(total, visible_height, app.scroll_offset);
+        // Write the clamped value back: without this, wheel-up past the top
+        // leaves scroll_offset above max and every wheel-down only "works
+        // off" the excess while the view appears frozen. When the render
+        // budget cut the line walk short, `total` exceeds
+        // visible_height+offset and the offset passes through untouched, so
+        // this only clamps at the true top boundary.
+        app.scroll_offset = scroll;
+        app.chat_scroll_at_top = scroll_pinned_at_top(walked_all, scroll, total, visible_height);
 
         let visible_lines: Vec<Line<'_>> = visual_lines
             .into_iter()
@@ -250,6 +296,71 @@ mod tests {
                 got, expected,
                 "usize::MAX scroll_offset must not overflow and must cap at 100*MAX_WRAPPED_LINES_PER_MSG={expected}, got {got}"
             );
+        }
+    }
+
+    mod scroll_pinned_at_top {
+        use super::super::scroll_pinned_at_top;
+
+        #[test]
+        fn pinned_when_walk_exhausted_and_clamped_at_max() {
+            assert!(scroll_pinned_at_top(true, 80, 100, 20));
+        }
+
+        #[test]
+        fn not_pinned_when_budget_cut_the_walk_short() {
+            // Budget-limited frame: the true top wasn't reached, so the
+            // backlog paginators must not fire.
+            assert!(!scroll_pinned_at_top(false, 80, 100, 20));
+        }
+
+        #[test]
+        fn not_pinned_mid_scroll() {
+            assert!(!scroll_pinned_at_top(true, 30, 100, 20));
+        }
+
+        #[test]
+        fn pinned_for_content_shorter_than_window() {
+            // Everything already visible: scrolling up should be allowed to
+            // pull older history in.
+            assert!(scroll_pinned_at_top(true, 0, 5, 20));
+        }
+    }
+
+    mod resolve_scroll {
+        use super::super::resolve_scroll;
+
+        #[test]
+        fn clamps_offset_past_top_to_max_scroll() {
+            // The wheel-up freeze bug: 10 extra ticks past the top left
+            // scroll_offset at max+30, and every wheel-down had to be
+            // "worked off" before the view moved. The resolved scroll must
+            // clamp to total-height so render can write it back.
+            let (scroll, skip) = resolve_scroll(100, 20, 500);
+            assert_eq!(scroll, 80, "offset past top must clamp to total-height");
+            assert_eq!(skip, 0, "clamped-at-top view starts at the first line");
+        }
+
+        #[test]
+        fn keeps_offset_within_range() {
+            let (scroll, skip) = resolve_scroll(100, 20, 30);
+            assert_eq!(scroll, 30);
+            assert_eq!(skip, 50);
+        }
+
+        #[test]
+        fn zero_offset_shows_bottom() {
+            let (scroll, skip) = resolve_scroll(100, 20, 0);
+            assert_eq!(scroll, 0);
+            assert_eq!(skip, 80);
+        }
+
+        #[test]
+        fn short_buffer_clamps_to_zero() {
+            // Fewer lines than the window: nothing to scroll at all.
+            let (scroll, skip) = resolve_scroll(5, 20, 7);
+            assert_eq!(scroll, 0);
+            assert_eq!(skip, 0);
         }
     }
 }

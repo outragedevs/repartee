@@ -1242,19 +1242,30 @@ pub(crate) fn cmd_notice(app: &mut App, args: &[String]) {
 
 // === Info ===
 
+/// Split `/whois` args into `(target_server, nick)`. One arg queries our own
+/// server; two args ask `<target>` directly — `/whois nick nick` is the
+/// remote form, the only one that returns 317 idle/signon for users on other
+/// servers.
+fn whois_request_parts(args: &[String]) -> Option<(Option<&str>, &str)> {
+    match args {
+        [] => None,
+        [nick] => Some((None, nick.as_str())),
+        [target, nick, ..] => Some((Some(target.as_str()), nick.as_str())),
+    }
+}
+
 pub(crate) fn cmd_whois(app: &mut App, args: &[String]) {
-    let nick = if args.is_empty() {
-        whois_default_nick(app)
+    let (target, nick) = if let Some((target, nick)) = whois_request_parts(args) {
+        (target.map(str::to_string), nick.to_string())
+    } else if let Some(nick) = whois_default_nick(app) {
+        (None, nick)
     } else {
-        Some(args[0].clone())
-    };
-    let Some(nick) = nick else {
-        add_local_event(app, "Usage: /whois <nick>");
+        add_local_event(app, "Usage: /whois [server|nick] <nick>");
         return;
     };
 
     if let Some(sender) = app.active_irc_sender() {
-        if let Err(e) = sender.send(irc::proto::Command::WHOIS(None, nick)) {
+        if let Err(e) = sender.send(irc::proto::Command::WHOIS(target, nick)) {
             add_local_event(app, &format!("Failed to send WHOIS: {e}"));
         }
     } else {
@@ -1273,14 +1284,9 @@ pub(crate) fn cmd_wii(app: &mut App, args: &[String]) {
         return;
     };
 
-    if let Some(sender) = app.active_irc_sender() {
-        // WHOIS nick nick — queries the user's server for idle info
-        if let Err(e) = sender.send(irc::proto::Command::WHOIS(Some(nick.clone()), nick)) {
-            add_local_event(app, &format!("Failed to send WHOIS: {e}"));
-        }
-    } else {
-        add_local_event(app, "Not connected");
-    }
+    // WHOIS nick nick — the remote form that returns idle/signon; same path
+    // as `/whois nick nick`.
+    cmd_whois(app, &[nick.clone(), nick]);
 }
 
 /// Default nick for /whois when no argument given.
@@ -1508,7 +1514,10 @@ pub(crate) fn cmd_links(app: &mut App, args: &[String]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{kick_chunk_sizes, list_mode_command_args, nick_mode_chunk_sizes, parse_kick_args};
+    use super::{
+        kick_chunk_sizes, list_mode_command_args, nick_mode_chunk_sizes, parse_kick_args,
+        whois_request_parts,
+    };
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| (*x).to_string()).collect()
@@ -1535,6 +1544,34 @@ mod tests {
         assert_eq!(kick_chunk_sizes(4), vec![4]);
         assert_eq!(kick_chunk_sizes(5), vec![2, 3]);
         assert_eq!(kick_chunk_sizes(6), vec![2, 4]);
+    }
+
+    #[test]
+    fn whois_request_parts_empty_returns_none() {
+        assert_eq!(whois_request_parts(&s(&[])), None);
+    }
+
+    #[test]
+    fn whois_request_parts_single_arg_is_plain_query() {
+        assert_eq!(whois_request_parts(&s(&["kofany"])), Some((None, "kofany")));
+    }
+
+    #[test]
+    fn whois_request_parts_two_args_targets_users_server() {
+        // /whois kofany kofany — remote WHOIS asking kofany's own server,
+        // which is the only form that returns 317 idle/signon.
+        assert_eq!(
+            whois_request_parts(&s(&["kofany", "kofany"])),
+            Some((Some("kofany"), "kofany"))
+        );
+    }
+
+    #[test]
+    fn whois_request_parts_extra_args_ignored() {
+        assert_eq!(
+            whois_request_parts(&s(&["irc.example.net", "alice", "junk"])),
+            Some((Some("irc.example.net"), "alice"))
+        );
     }
 
     #[test]

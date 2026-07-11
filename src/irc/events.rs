@@ -230,6 +230,57 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
         Command::Raw(cmd, args) if cmd == "671" => {
             handle_whois_secure(state, conn_id, args);
         }
+        // WHOIS numerics with freeform prose that irc-proto has no Response
+        // variant for (320 cloak/SSL specials, 307 regnick, 379 modes, ...).
+        // Without this arm they'd fall to the generic numeric catch-all and
+        // render unthemed outside the WHOIS block. Shorter-than-3-arg forms
+        // (no separate nick token) intentionally fall through to that
+        // catch-all so the line still displays.
+        Command::Raw(cmd, args) if args.len() >= 3 && whois_freeform_key(cmd).is_some() => {
+            handle_whois_freeform(state, conn_id, cmd, args);
+        }
+        // ircnet.com/extended-join (IRCnet ircd 2.12.0):
+        //   :src JOIN <channel> <uid> <ip> <netjoin> <account> :<realname>
+        // Six args exceed irc-proto's JOIN arity, so it arrives as Raw. When
+        // both this cap and IRCv3 extended-join are acked, the server sends
+        // ONLY this variant — dropping it would lose joins entirely (own
+        // joins included, so no channel buffer would ever open). uid/ip are
+        // informational; netjoin=1 (burst after relink) rides the same
+        // netsplit detection as ordinary joins inside handle_join. Without
+        // the cap ack, or with an unexpected arity, the extension fields are
+        // untrusted — fall back to a channel-only join (args[0] is the
+        // channel in every JOIN form) so the join still lands.
+        Command::Raw(cmd, args) if cmd.eq_ignore_ascii_case("JOIN") && !args.is_empty() => {
+            let has_cap = state
+                .connections
+                .get(conn_id)
+                .is_some_and(|c| c.enabled_caps.contains("ircnet.com/extended-join"));
+            let fields = if has_cap {
+                join_fields(&msg.command)
+            } else {
+                None
+            };
+            let (account, realname) = if let Some((_, account, realname)) = fields {
+                (account, realname)
+            } else {
+                tracing::debug!(
+                    args = args.len(),
+                    has_cap,
+                    "raw JOIN with unexpected shape — treating as channel-only join"
+                );
+                (None, None)
+            };
+            handle_join(
+                state,
+                conn_id,
+                &our_nick,
+                msg.prefix.as_ref(),
+                &args[0],
+                account,
+                realname,
+                tags,
+            );
+        }
         // IRCv3 standard-reply FAIL for a BATCH command — surface multiline
         // rejections (MULTILINE_MAX_BYTES / MAX_LINES / INVALID_TARGET / INVALID).
         // FAIL arrives as a `Command::Raw` (not a numeric), so it isn't caught by
@@ -3830,19 +3881,35 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
         // === WHO responses ===
 
         Response::RPL_WHOREPLY => {
-            // params: [our_nick, channel, user, host, server, nick, flags, hopcount_realname]
+            // params: [our_nick, channel, user, host, server, nick, flags,
+            //          ":<hop> <realname>"] — ircnet-ircd (2.11+) inserts its
+            // 4-char SID before the realname in the trailing.
             if args.len() >= 8 {
                 let channel = &args[1];
-                let silent = state
-                    .connections
-                    .get(conn_id)
+                let conn = state.connections.get(conn_id);
+                let silent = conn
                     .is_some_and(|c| contains_case_insensitive(&c.silent_who_channels, channel));
+                let ircnet = conn.is_some_and(|c| c.isupport_parsed.is_ircnet_lineage());
+                let user = &args[2];
+                let host = &args[3];
+                let nick = &args[5];
+                let flags = &args[6];
+
+                // Mirror the WHOX path: keep the nick entry fresh so silent
+                // auto-WHO is not wasted on servers without WHOX.
+                let buffer_id = make_buffer_id(conn_id, channel);
+                update_who_nick_entry(
+                    state,
+                    &buffer_id,
+                    nick,
+                    user,
+                    host,
+                    flags.starts_with('G'),
+                    WhoAccount::Keep,
+                );
+
                 if !silent {
-                    let user = &args[2];
-                    let host = &args[3];
-                    let nick = &args[5];
-                    let flags = &args[6];
-                    let realname = &args[7];
+                    let realname = whoreply_realname(&args[7], ircnet);
                     let target_buf = active_or_server_buffer(state, conn_id);
                     emit(state, &target_buf, &format!(
                         "%Zc0caf5{nick}%Z565f89 ({user}@{host}) [{flags}] {channel}%Za9b1d6 {realname}%N"
@@ -4079,6 +4146,60 @@ fn handle_whois_account(state: &mut AppState, conn_id: &str, args: &[String]) {
     }
 }
 
+/// Theme event key for WHOIS numerics whose payload is freeform prose and
+/// which irc-proto has no `Response` variant for. Single source of truth for
+/// both the dispatch guard and the per-numeric theming.
+fn whois_freeform_key(numeric: &str) -> Option<&'static str> {
+    match numeric {
+        "307" => Some("whois_registered"),
+        "310" => Some("whois_help"),
+        "320" => Some("whois_special"),
+        "335" => Some("whois_bot"),
+        "338" => Some("whois_actually"),
+        "378" => Some("whois_host"),
+        "379" => Some("whois_modes"),
+        _ => None,
+    }
+}
+
+/// Extract `(channel, account, realname)` from either JOIN wire form: the
+/// crate-parsed `Command::JOIN` (1-3 args) or the 6-arg
+/// `ircnet.com/extended-join` Raw variant. `None` for anything else.
+pub fn join_fields(command: &Command) -> Option<(&str, Option<&str>, Option<&str>)> {
+    match command {
+        Command::JOIN(channel, account, realname) => {
+            Some((channel, account.as_deref(), realname.as_deref()))
+        }
+        Command::Raw(cmd, args) if cmd.eq_ignore_ascii_case("JOIN") && args.len() == 6 => Some((
+            args[0].as_str(),
+            Some(args[4].as_str()),
+            Some(args[5].as_str()),
+        )),
+        _ => None,
+    }
+}
+
+/// WHOIS numerics whose payload is freeform prose: args = [`our_nick`, nick,
+/// text...]. Middle args (338's host/ip values) join into the text so every
+/// known wire variant renders.
+fn handle_whois_freeform(state: &mut AppState, conn_id: &str, numeric: &str, args: &[String]) {
+    let Some(event_key) = whois_freeform_key(numeric) else {
+        return;
+    };
+    if args.len() < 3 {
+        return;
+    }
+    let text = args[2..].join(" ");
+    let target_buf = whois_buffer(state, conn_id);
+    emit_event(
+        state,
+        &target_buf,
+        event_key,
+        format!("%Z565f89  %Za9b1d6{text}%N"),
+        vec![args[1].clone(), text],
+    );
+}
+
 fn handle_whois_secure(state: &mut AppState, conn_id: &str, args: &[String]) {
     if args.len() >= 2 {
         let target_buf = whois_buffer(state, conn_id);
@@ -4189,9 +4310,13 @@ fn parse_userhost(input: &str) -> (String, Option<String>, Option<String>) {
 // === WHOX helpers ===
 
 /// Generate the next WHOX token for a connection and return it as a string.
+///
+/// Wraps within 1..=999: both ircu and ircnet-ircd cap the token at 3 chars
+/// (ircnet drops longer ones and replies with token "0", which is also why 0
+/// itself is skipped).
 pub fn next_who_token(state: &mut AppState, conn_id: &str) -> String {
     if let Some(conn) = state.connections.get_mut(conn_id) {
-        conn.who_token_counter = conn.who_token_counter.wrapping_add(1);
+        conn.who_token_counter = conn.who_token_counter % 999 + 1;
         conn.who_token_counter.to_string()
     } else {
         "0".to_string()
@@ -4210,27 +4335,34 @@ pub fn build_whox_who(
     channel: &str,
     silent: bool,
 ) -> Option<(String, String)> {
-    let has_whox = state
-        .connections
-        .get(conn_id)
-        .is_some_and(|c| c.isupport_parsed.has_whox());
-
-    if has_whox {
-        let token = next_who_token(state, conn_id);
-        if silent && let Some(conn) = state.connections.get_mut(conn_id) {
-            conn.silent_who_channels.insert(channel.to_string());
-        }
-        let fields = format!("{},{token}", crate::constants::WHOX_FIELDS);
-        Some((channel.to_string(), fields))
-    } else {
-        None
+    let fields = build_whox_fields(state, conn_id)?;
+    if silent && let Some(conn) = state.connections.get_mut(conn_id) {
+        conn.silent_who_channels.insert(channel.to_string());
     }
+    Some((channel.to_string(), fields))
+}
+
+/// The `%fields,token` argument for a WHOX WHO command, or `None` when the
+/// server lacks WHOX. Shared by manual `/who` and the auto-WHO batcher so
+/// both always request the same field layout (which the 354 parser's
+/// arg-count disambiguation depends on).
+pub fn build_whox_fields(state: &mut AppState, conn_id: &str) -> Option<String> {
+    let selector = state
+        .connections
+        .get(conn_id)?
+        .isupport_parsed
+        .whox_request()?;
+    let token = next_who_token(state, conn_id);
+    Some(format!("{selector},{token}"))
 }
 
 /// Handle a WHOX reply (numeric 354 / `RPL_WHOSPCRPL`).
 ///
 /// Our field selector `%tcuihnfar` produces responses with fields:
 ///   `[our_nick, token, channel, user, ip, host, nick, flags, account, realname]`
+/// On `IRCnet`-lineage servers we request `%tcuihnfaUr` instead, which inserts
+/// the user's UID between account and realname (11 args). The layout is
+/// disambiguated by arg count — we only ever send those two selectors.
 ///
 /// Note: The irc crate treats 354 as `Command::Raw("354", args)` since it's non-standard.
 /// The `args` vec already has `our_nick` as the first element (the trailing prefix from the Raw parse).
@@ -4255,7 +4387,15 @@ fn handle_whox_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
     let nick = &args[6];
     let flags = &args[7];
     let account_raw = &args[8];
-    let realname = &args[9];
+    // The realname is the trailing parameter — always the LAST arg (kept even
+    // when empty by irc-proto's suffix handling). The UID sits at 9 only in
+    // the exact 11-arg IRCnet layout; anything longer is an unknown layout,
+    // where guessing a middle field would corrupt the display.
+    let (uid, realname) = if args.len() == 11 {
+        (Some(args[9].as_str()), &args[10])
+    } else {
+        (None, &args[args.len() - 1])
+    };
 
     // Auto-WHO replies are silent — update state only, no display
     let silent = state
@@ -4263,37 +4403,100 @@ fn handle_whox_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
         .get(conn_id)
         .is_some_and(|c| contains_case_insensitive(&c.silent_who_channels, channel));
 
-    // Parse away status from flags: H = here, G = gone
-    let away = flags.starts_with('G');
-
     // Parse account: "0" means not logged in
     let account = (account_raw != "0").then(|| account_raw.clone());
 
-    // Update NickEntry in the channel buffer
     let buffer_id = make_buffer_id(conn_id, channel);
-    if let Some(buf) = state.buffers.get_mut(&buffer_id)
-        && let Some(entry) = buf.users.get_mut(&nick.to_lowercase())
-    {
-        tracing::trace!(%nick, %channel, %away, ?account, "WHOX: updating nick entry");
-        entry.ident = Some(user.clone());
-        entry.host = Some(host.clone());
-        entry.account.clone_from(&account);
-        entry.away = away;
-    } else {
-        tracing::warn!(%nick, %channel, %buffer_id, "WHOX: buffer or nick not found for update");
-    }
+    update_who_nick_entry(
+        state,
+        &buffer_id,
+        nick,
+        user,
+        host,
+        flags.starts_with('G'),
+        WhoAccount::Set(account.clone()),
+    );
 
     // Only display for manual /who — auto-WHO on join is silent
     if !silent {
         let target_buf = active_or_server_buffer(state, conn_id);
         let account_str = account.as_deref().unwrap_or("");
+        let uid_str = uid.map_or_else(String::new, |u| format!(" {u}"));
         emit(
             state,
             &target_buf,
             &format!(
-                "%Zc0caf5{nick}%Z565f89 ({user}@{host}) [{flags}] {channel}%Za9b1d6 {realname}%Z565f89 [{account_str}]%N"
+                "%Zc0caf5{nick}%Z565f89 ({user}@{host}) [{flags}] {channel}%Za9b1d6 {realname}%Z565f89 [{account_str}]{uid_str}%N"
             ),
         );
+    }
+}
+
+/// Whether a WHO-family reply carries an account field to store.
+enum WhoAccount {
+    /// 352 — no account on the wire; leave the stored value untouched.
+    Keep,
+    /// 354 — overwrite with the parsed account (`None` = not logged in).
+    Set(Option<String>),
+}
+
+/// Update a channel nick entry from a WHO (352) or WHOX (354) reply. Both
+/// reply paths share this so the field writes can never drift apart.
+fn update_who_nick_entry(
+    state: &mut AppState,
+    buffer_id: &str,
+    nick: &str,
+    ident: &str,
+    host: &str,
+    away: bool,
+    account: WhoAccount,
+) {
+    if let Some(buf) = state.buffers.get_mut(buffer_id)
+        && let Some(entry) = buf.users.get_mut(&nick.to_lowercase())
+    {
+        tracing::trace!(%nick, %buffer_id, %away, "WHO: updating nick entry");
+        entry.ident = Some(ident.to_string());
+        entry.host = Some(host.to_string());
+        entry.away = away;
+        if let WhoAccount::Set(account) = account {
+            entry.account = account;
+        }
+    } else {
+        tracing::trace!(%nick, %buffer_id, "WHO: buffer or nick not found for update");
+    }
+}
+
+/// True for an `IRCnet` server SID: exactly 4 chars, `[0-9][0-9A-Z]{3}`
+/// (`ircd/s_id.c` `sid_valid`, SIDLEN=4).
+fn is_ircnet_sid(token: &str) -> bool {
+    token.len() == 4
+        && token.as_bytes()[0].is_ascii_digit()
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b.is_ascii_uppercase())
+}
+
+/// Extract the realname from a 352 trailing parameter (`<hop> <realname>`;
+/// on `IRCnet`-lineage servers `<hop> <sid> <realname>` per `ircd/s_err.c`'s
+/// `RPL_WHOREPLY` format string). Defensive on both counts: the hopcount is
+/// stripped only when the first token is all digits, and the SID only when
+/// the token actually matches the SID shape — so a non-conforming trailing
+/// (bouncers, services) or a false-positive lineage classification degrades
+/// to showing extra tokens instead of eating realname words.
+fn whoreply_realname(trailing: &str, strip_sid: bool) -> &str {
+    let is_hop = |t: &str| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit());
+    let rest = match trailing.split_once(' ') {
+        Some((first, rest)) if is_hop(first) => rest,
+        Some(_) => return trailing,
+        None => return if is_hop(trailing) { "" } else { trailing },
+    };
+    if !strip_sid {
+        return rest;
+    }
+    match rest.split_once(' ') {
+        Some((sid, realname)) if is_ircnet_sid(sid) => realname,
+        None if is_ircnet_sid(rest) => "",
+        _ => rest,
     }
 }
 
@@ -6091,6 +6294,167 @@ mod tests {
         assert!(buf.users.contains_key("carol"));
         let entry = buf.users.get("carol").unwrap();
         assert_eq!(entry.account, None);
+    }
+
+    // === ircnet.com/extended-join tests ===
+    // Wire format: :src JOIN <channel> <uid> <ip> <netjoin> <account> :<realname>
+    // Six args exceed irc-proto's JOIN arity, so it arrives as Command::Raw.
+
+    fn enable_ircnet_extended_join(state: &mut AppState) {
+        state
+            .connections
+            .get_mut("test")
+            .unwrap()
+            .enabled_caps
+            .insert("ircnet.com/extended-join".to_string());
+    }
+
+    #[test]
+    fn ircnet_extended_join_without_cap_ignores_extension_fields() {
+        // A 6-arg JOIN from a server that did NOT ack the cap has unknown
+        // field semantics — the join must still land (args[0] is always the
+        // channel) but nothing should be read as account/realname.
+        let mut state = make_test_state();
+        let msg = make_irc_msg(
+            Some("carol!user@host"),
+            Command::Raw(
+                "JOIN".to_string(),
+                vec![
+                    "#test".to_string(),
+                    "key1".to_string(),
+                    "key2".to_string(),
+                    "0".to_string(),
+                    "something".to_string(),
+                    "trailing".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        assert!(buf.users.contains_key("carol"), "join itself must land");
+        assert_eq!(
+            buf.users.get("carol").unwrap().account,
+            None,
+            "args[4] must not be trusted as account without the cap"
+        );
+        let m = buf.messages.back().unwrap();
+        let params = m.event_params.as_ref().unwrap();
+        assert_eq!(params[4], "", "no account display without the cap");
+        assert_eq!(params[5], "", "no realname display without the cap");
+    }
+
+    #[test]
+    fn ircnet_extended_join_with_account_and_realname() {
+        let mut state = make_test_state();
+        enable_ircnet_extended_join(&mut state);
+        let msg = make_irc_msg(
+            Some("ejtest435!~ejtest435@92.206.50.109"),
+            Command::Raw(
+                "JOIN".to_string(),
+                vec![
+                    "#test".to_string(),
+                    "528HAAD32".to_string(),
+                    "92.206.50.109".to_string(),
+                    "0".to_string(),
+                    "acct".to_string(),
+                    "extended-join test".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        assert!(buf.users.contains_key("ejtest435"));
+        assert_eq!(
+            buf.users.get("ejtest435").unwrap().account.as_deref(),
+            Some("acct")
+        );
+        let m = buf.messages.back().unwrap();
+        assert_eq!(m.event_key.as_deref(), Some("join"));
+        let params = m.event_params.as_ref().unwrap();
+        assert_eq!(params[4], "[acct]"); // $4 = account
+        assert_eq!(params[5], "extended-join test"); // $5 = realname
+    }
+
+    #[test]
+    fn ircnet_extended_join_star_account_is_none() {
+        let mut state = make_test_state();
+        enable_ircnet_extended_join(&mut state);
+        let msg = make_irc_msg(
+            Some("ejtest435!~ejtest435@92.206.50.109"),
+            Command::Raw(
+                "JOIN".to_string(),
+                vec![
+                    "#test".to_string(),
+                    "528HAAD32".to_string(),
+                    "92.206.50.109".to_string(),
+                    "0".to_string(),
+                    "*".to_string(),
+                    "extended-join test".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        assert_eq!(buf.users.get("ejtest435").unwrap().account, None);
+        let m = buf.messages.back().unwrap();
+        let params = m.event_params.as_ref().unwrap();
+        assert_eq!(params[4], ""); // no account display
+        assert_eq!(params[5], "extended-join test");
+    }
+
+    #[test]
+    fn ircnet_extended_join_own_join_creates_buffer() {
+        let mut state = make_test_state();
+        enable_ircnet_extended_join(&mut state);
+        let msg = make_irc_msg(
+            Some("me!~me@host.example"),
+            Command::Raw(
+                "JOIN".to_string(),
+                vec![
+                    "#testy".to_string(),
+                    "528HAAD32".to_string(),
+                    "10.0.0.1".to_string(),
+                    "0".to_string(),
+                    "*".to_string(),
+                    "my realname".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        assert!(state.buffers.contains_key("test/#testy"));
+        assert_eq!(state.active_buffer_id.as_deref(), Some("test/#testy"));
+    }
+
+    #[test]
+    fn ircnet_extended_join_netjoin_flag_untracked_still_displays() {
+        // netjoin=1 without a tracked split (we saw no QUITs) must not be
+        // silently dropped — the join line still shows.
+        let mut state = make_test_state();
+        enable_ircnet_extended_join(&mut state);
+        let msg = make_irc_msg(
+            Some("carol!user@host"),
+            Command::Raw(
+                "JOIN".to_string(),
+                vec![
+                    "#test".to_string(),
+                    "528HAAD32".to_string(),
+                    "10.0.0.1".to_string(),
+                    "1".to_string(),
+                    "*".to_string(),
+                    "Real Name".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        assert!(buf.users.contains_key("carol"));
+        let m = buf.messages.back().unwrap();
+        assert_eq!(m.event_key.as_deref(), Some("join"));
     }
 
     // === account-notify tests ===
@@ -7935,6 +8299,247 @@ mod tests {
     }
 
     #[test]
+    fn whoreply_strips_hopcount_from_realname() {
+        // 352 trailing is ":<hopcount> <realname>" — the hopcount must not
+        // leak into the displayed realname.
+        let mut state = make_whox_state();
+        state.set_active_buffer("test/testserver");
+
+        let msg = make_irc_msg(
+            None,
+            Command::Response(
+                Response::RPL_WHOREPLY,
+                vec![
+                    "me".to_string(),
+                    "#test".to_string(),
+                    "~user".to_string(),
+                    "host.com".to_string(),
+                    "irc.net".to_string(),
+                    "alice".to_string(),
+                    "H".to_string(),
+                    "3 Real Name".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/testserver").unwrap();
+        let text = &buf.messages.back().unwrap().text;
+        assert!(text.contains("Real Name"));
+        assert!(!text.contains("3 Real Name"), "hopcount leaked: {text}");
+    }
+
+    #[test]
+    fn whoreply_ircnet_strips_sid_and_updates_nicklist() {
+        // ircnet-ircd (2.11+) sends 352 as ":<hop> <sid> <realname>" — the
+        // 4-char SID must be stripped on IRCnet-lineage servers, and the
+        // reply must update the nick entry like the WHOX path does.
+        let mut state = make_whox_state();
+        if let Some(conn) = state.connections.get_mut("test") {
+            conn.isupport_parsed.parse_tokens(&["IDCHAN=!:5"]);
+        }
+        state.set_active_buffer("test/testserver");
+
+        let msg = make_irc_msg(
+            None,
+            Command::Response(
+                Response::RPL_WHOREPLY,
+                vec![
+                    "me".to_string(),
+                    "#test".to_string(),
+                    "~alice".to_string(),
+                    "host.example".to_string(),
+                    "irc.atw.hu".to_string(),
+                    "alice".to_string(),
+                    "G".to_string(),
+                    "2 111A Alice Real".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        let entry = buf.users.get("alice").unwrap();
+        assert_eq!(entry.ident.as_deref(), Some("~alice"));
+        assert_eq!(entry.host.as_deref(), Some("host.example"));
+        assert!(entry.away, "G flag must mark away");
+
+        let server_buf = state.buffers.get("test/testserver").unwrap();
+        let text = &server_buf.messages.back().unwrap().text;
+        assert!(text.contains("Alice Real"));
+        assert!(!text.contains("111A"), "SID leaked into display: {text}");
+    }
+
+    #[test]
+    fn whoreply_updates_nicklist_even_when_silent() {
+        // Auto-WHO on non-WHOX servers replies with 352 — state must update
+        // even though nothing is displayed, else the query is wasted.
+        let mut state = make_whox_state();
+        if let Some(conn) = state.connections.get_mut("test") {
+            conn.silent_who_channels.insert("#test".to_string());
+        }
+        state.set_active_buffer("test/testserver");
+
+        let msg = make_irc_msg(
+            None,
+            Command::Response(
+                Response::RPL_WHOREPLY,
+                vec![
+                    "me".to_string(),
+                    "#test".to_string(),
+                    "~alice".to_string(),
+                    "host.example".to_string(),
+                    "irc.net".to_string(),
+                    "alice".to_string(),
+                    "G".to_string(),
+                    "0 Alice Real".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let server_buf = state.buffers.get("test/testserver").unwrap();
+        assert!(
+            server_buf.messages.is_empty(),
+            "silent WHO must not display"
+        );
+        let buf = state.buffers.get("test/#test").unwrap();
+        let entry = buf.users.get("alice").unwrap();
+        assert_eq!(entry.ident.as_deref(), Some("~alice"));
+        assert!(entry.away);
+    }
+
+    #[test]
+    fn whox_reply_with_ircnet_uid_field() {
+        // IRCnet's WHOX extension letter 'U' inserts the user's UID between
+        // account and realname: 11 args instead of 10.
+        let mut state = make_whox_state();
+        state.set_active_buffer("test/testserver");
+
+        let msg = make_irc_msg(
+            None,
+            Command::Raw(
+                "354".to_string(),
+                vec![
+                    "me".to_string(),
+                    "1".to_string(),
+                    "#test".to_string(),
+                    "~alice".to_string(),
+                    "1.2.3.4".to_string(),
+                    "host.example".to_string(),
+                    "alice".to_string(),
+                    "H".to_string(),
+                    "0".to_string(),
+                    "528HAAD32".to_string(),
+                    "Alice Real".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        let entry = buf.users.get("alice").unwrap();
+        assert_eq!(entry.ident.as_deref(), Some("~alice"));
+        assert_eq!(entry.account, None, "account \"0\" means not logged in");
+
+        let server_buf = state.buffers.get("test/testserver").unwrap();
+        let text = &server_buf.messages.back().unwrap().text;
+        assert!(text.contains("Alice Real"), "realname shifted: {text}");
+        assert!(text.contains("528HAAD32"), "uid missing from display: {text}");
+    }
+
+    #[test]
+    fn whoreply_realname_defensive_edges() {
+        // RFC shape: "<hop> <realname>"; ircnet: "<hop> <sid> <realname>".
+        // Non-conforming trailings (bouncers/services) must degrade to
+        // showing the text verbatim, never eating realname words.
+        assert_eq!(whoreply_realname("0 John Doe", false), "John Doe");
+        assert_eq!(whoreply_realname("2 111A Alice Real", true), "Alice Real");
+        // No leading hopcount → whole trailing is the realname.
+        assert_eq!(whoreply_realname("Real Name", false), "Real Name");
+        assert_eq!(whoreply_realname("Bob", false), "Bob");
+        // Hop only, no realname.
+        assert_eq!(whoreply_realname("0", false), "");
+        // ircnet-classified but the second token is not SID-shaped
+        // ([0-9][0-9A-Z]{3}) — keep it (false-positive lineage guard).
+        assert_eq!(whoreply_realname("3 John Smith", true), "John Smith");
+        assert_eq!(whoreply_realname("3 111a Alice", true), "111a Alice");
+        // SID-shaped single remainder → empty realname.
+        assert_eq!(whoreply_realname("3 111A", true), "");
+    }
+
+    #[test]
+    fn whox_reply_overlong_takes_trailing_as_realname() {
+        // A 354 with more args than either known layout (12+) must still
+        // show the trailing (always the last arg) as the realname instead
+        // of a middle field.
+        let mut state = make_whox_state();
+        state.set_active_buffer("test/testserver");
+
+        let msg = make_irc_msg(
+            None,
+            Command::Raw(
+                "354".to_string(),
+                vec![
+                    "me".to_string(),
+                    "1".to_string(),
+                    "#test".to_string(),
+                    "~alice".to_string(),
+                    "1.2.3.4".to_string(),
+                    "host.example".to_string(),
+                    "alice".to_string(),
+                    "H".to_string(),
+                    "0".to_string(),
+                    "111A".to_string(),
+                    "528HAAD32".to_string(),
+                    "Alice Real".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let server_buf = state.buffers.get("test/testserver").unwrap();
+        let text = &server_buf.messages.back().unwrap().text;
+        assert!(
+            text.contains("Alice Real"),
+            "realname must come from the trailing: {text}"
+        );
+    }
+
+    #[test]
+    fn next_who_token_stays_within_three_chars_and_nonzero() {
+        // Both ircu and ircnet-ircd cap the WHOX token at 3 chars (ircnet
+        // silently drops longer ones and replies with token "0").
+        let mut state = make_test_state();
+        for _ in 0..1500 {
+            let token = next_who_token(&mut state, "test");
+            assert!(token.len() <= 3, "token too long: {token}");
+            assert_ne!(token, "0", "token 0 collides with the server default");
+        }
+    }
+
+    #[test]
+    fn build_whox_who_requests_uid_on_ircnet_lineage() {
+        let mut state = make_whox_state();
+        if let Some(conn) = state.connections.get_mut("test") {
+            conn.isupport_parsed.parse_tokens(&["IDCHAN=!:5"]);
+        }
+        let (_, fields) = build_whox_who(&mut state, "test", "#test", false).unwrap();
+        assert!(
+            fields.starts_with("%tcuihnfaUr,"),
+            "IRCnet lineage must request the UID field: {fields}"
+        );
+
+        // Non-IRCnet WHOX server keeps the standard selector.
+        let mut state = make_whox_state();
+        let (_, fields) = build_whox_who(&mut state, "test", "#test", false).unwrap();
+        assert!(
+            fields.starts_with("%tcuihnfar,"),
+            "standard servers must not request unknown letters: {fields}"
+        );
+    }
+
+    #[test]
     fn whois_user_and_server_emit_theme_params() {
         let mut state = make_test_state();
         state.set_active_buffer("test/testserver");
@@ -8130,6 +8735,129 @@ mod tests {
                 ][..]
             )
         );
+    }
+
+    #[test]
+    fn whois_raw_320_special_is_themeable() {
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+
+        let msg = make_irc_msg(
+            None,
+            Command::Raw(
+                "320".to_string(),
+                vec![
+                    "me".to_string(),
+                    "kofany".to_string(),
+                    "is a Cloaked Connection (Spoof)".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/testserver").unwrap();
+        let m = buf.messages.back().unwrap();
+        assert_eq!(m.event_key.as_deref(), Some("whois_special"));
+        assert!(m.text.contains("is a Cloaked Connection (Spoof)"));
+        assert_eq!(
+            m.event_params.as_deref(),
+            Some(
+                &[
+                    "kofany".to_string(),
+                    "is a Cloaked Connection (Spoof)".to_string(),
+                ][..]
+            )
+        );
+    }
+
+    #[test]
+    fn whois_raw_freeform_numerics_get_event_keys() {
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+
+        for (numeric, expected_key, text) in [
+            ("307", "whois_registered", "is a registered nick"),
+            ("310", "whois_help", "is available for help"),
+            ("335", "whois_bot", "is a Bot on TestNet"),
+            ("338", "whois_actually", "is actually using host"),
+            ("378", "whois_host", "is connecting from *@1.2.3.4 1.2.3.4"),
+            ("379", "whois_modes", "is using modes +iwx"),
+        ] {
+            let msg = make_irc_msg(
+                None,
+                Command::Raw(
+                    numeric.to_string(),
+                    vec!["me".to_string(), "alice".to_string(), text.to_string()],
+                ),
+            );
+            handle_irc_message(&mut state, "test", &msg);
+
+            let buf = state.buffers.get("test/testserver").unwrap();
+            let m = buf.messages.back().unwrap();
+            assert_eq!(
+                m.event_key.as_deref(),
+                Some(expected_key),
+                "numeric {numeric} should map to {expected_key}"
+            );
+            assert!(m.text.contains(text), "numeric {numeric} text lost");
+            assert_eq!(
+                m.event_params.as_deref(),
+                Some(&["alice".to_string(), text.to_string()][..]),
+                "numeric {numeric} params"
+            );
+        }
+    }
+
+    #[test]
+    fn whois_raw_320_short_form_falls_to_catch_all() {
+        // A 2-arg freeform numeric (no separate nick token) must not be
+        // swallowed — it should fall through to the generic numeric
+        // catch-all that displays args[1..], as it did before the themed
+        // freeform handlers existed.
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+
+        let msg = make_irc_msg(
+            None,
+            Command::Raw(
+                "320".to_string(),
+                vec!["me".to_string(), "is a Cloaked Connection".to_string()],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/testserver").unwrap();
+        let m = buf.messages.back().expect("short 320 must still display");
+        assert_eq!(m.event_key, None);
+        assert_eq!(m.text, "is a Cloaked Connection");
+    }
+
+    #[test]
+    fn whois_raw_actually_joins_middle_args() {
+        // ircu-style 338 puts values in middle args with a trailing description:
+        // [me, nick, user@host, ip, "Actual user@host, Actual IP"]
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+
+        let msg = make_irc_msg(
+            None,
+            Command::Raw(
+                "338".to_string(),
+                vec![
+                    "me".to_string(),
+                    "alice".to_string(),
+                    "~u@1.2.3.4".to_string(),
+                    "1.2.3.4".to_string(),
+                    "Actual user@host, Actual IP".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/testserver").unwrap();
+        let m = buf.messages.back().unwrap();
+        assert_eq!(m.event_key.as_deref(), Some("whois_actually"));
+        assert!(m.text.contains("~u@1.2.3.4 1.2.3.4 Actual user@host, Actual IP"));
     }
 
     #[test]

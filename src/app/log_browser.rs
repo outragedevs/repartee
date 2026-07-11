@@ -427,10 +427,10 @@ impl App {
     /// the log paginates incrementally without an explicit "fetch more"
     /// gesture.
     ///
-    /// Threshold: trigger when `scroll_offset` is within 50 lines of
-    /// the loaded top — i.e. the next handful of `PageUp`s would
-    /// otherwise hit the boundary. Idempotent: `load_older_messages`
-    /// already early-returns when `history_exhausted` is set.
+    /// Trigger: the renderer reported the view pinned at the top of the
+    /// loaded lines (`chat_scroll_at_top`), so the next scroll-up needs
+    /// older rows. Idempotent: `load_older_messages` already
+    /// early-returns when `history_exhausted` is set.
     pub(crate) fn maybe_paginate_log_buffer(&mut self) {
         let Some(active_id) = self.state.active_buffer_id.clone() else {
             return;
@@ -441,8 +441,7 @@ impl App {
         if buf.buffer_type != BufferType::Log || buf.history_exhausted {
             return;
         }
-        let messages_len = buf.messages.len();
-        if self.scroll_offset.saturating_add(50) >= messages_len {
+        if self.chat_scroll_at_top {
             self.load_older_messages(&active_id);
         }
     }

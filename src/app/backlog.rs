@@ -231,8 +231,11 @@ impl App {
         if buf.messages.len() >= PINNED_BACKLOG_CAP {
             return;
         }
-        // Only act when scrolled within 50 lines of the loaded top (mirrors log mode).
-        if self.scroll_offset.saturating_add(50) < buf.messages.len() {
+        // Only act when the renderer pinned the view at the top of loaded
+        // content. (The previous proximity check compared the visual-line
+        // scroll offset against the message count — mixed units that only
+        // fired because the offset used to overshoot past its max.)
+        if !self.chat_scroll_at_top {
             return;
         }
         if buf.history_exhausted {

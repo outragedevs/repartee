@@ -101,6 +101,35 @@ impl Isupport {
         self.tokens.contains_key("WHOX")
     }
 
+    /// Whether the server is `IRCnet`-lineage ircd (2.11+). Detected via the
+    /// `IDCHAN` token (`!` channel IDs), which no other ircd family
+    /// advertises. Such servers put their 4-char SID into the 352 trailing
+    /// (`:<hop> <sid> <realname>`) and extend WHOX with `S`/`U` fields.
+    #[must_use]
+    pub fn is_ircnet_lineage(&self) -> bool {
+        self.tokens.contains_key("IDCHAN")
+    }
+
+    /// WHOX field selector to request from this server (only meaningful when
+    /// [`Self::has_whox`] is true): `IRCnet` lineage gets the UID-extended
+    /// selector, everyone else the portable one.
+    #[must_use]
+    pub fn whox_field_selector(&self) -> &'static str {
+        if self.is_ircnet_lineage() {
+            crate::constants::WHOX_FIELDS_IRCNET
+        } else {
+            crate::constants::WHOX_FIELDS
+        }
+    }
+
+    /// The WHOX field selector to request, or `None` when the server does
+    /// not advertise WHOX. Resolving support and selector together keeps
+    /// every WHO sender on the same request shape.
+    #[must_use]
+    pub fn whox_request(&self) -> Option<&'static str> {
+        self.has_whox().then(|| self.whox_field_selector())
+    }
+
     /// Maximum number of modes that can be changed in a single MODE command.
     /// Defaults to 3.
     #[must_use]
@@ -251,6 +280,14 @@ mod tests {
     fn parse_bare_token() {
         let mut is = Isupport::new();
         is.parse_tokens(&["WHOX", "SAFELIST"]);
+        assert!(!is.is_ircnet_lineage());
+        assert_eq!(is.whox_field_selector(), crate::constants::WHOX_FIELDS);
+        is.parse_tokens(&["IDCHAN=!:5"]);
+        assert!(is.is_ircnet_lineage());
+        assert_eq!(
+            is.whox_field_selector(),
+            crate::constants::WHOX_FIELDS_IRCNET
+        );
 
         assert!(is.has_whox());
         assert_eq!(is.get("SAFELIST"), Some(""));

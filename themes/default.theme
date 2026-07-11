@@ -61,6 +61,13 @@ whois_account = "%Z565f89  account: %Za9b1d6$1%N"
 whois_secure = "%Z565f89  secure: %Z9ece6a$1%N"
 whois_certfp = "%Z565f89  certfp: %Za9b1d6$1%N"
 whois_keyvalue = "%Z565f89  $1: %Za9b1d6$3%N"
+whois_special = "%Z565f89  %Za9b1d6$1%N"
+whois_registered = "%Z565f89  %Za9b1d6$1%N"
+whois_help = "%Z565f89  %Za9b1d6$1%N"
+whois_bot = "%Z565f89  %Za9b1d6$1%N"
+whois_actually = "%Z565f89  %Za9b1d6$1%N"
+whois_host = "%Z565f89  %Za9b1d6$1%N"
+whois_modes = "%Z565f89  %Za9b1d6$1%N"
 end_of_whois = "%Z7aa2f7─────────────────────────────────────────────%N"
 
 [formats.sidepanel]

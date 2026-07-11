@@ -34,14 +34,17 @@ impl App {
             }
         };
 
-        let has_whox = self
+        let whox_selector = self
             .state
             .connections
             .get(conn_id)
-            .is_some_and(|c| c.isupport_parsed.has_whox());
+            .and_then(|c| c.isupport_parsed.whox_request());
+        let has_whox = whox_selector.is_some();
 
-        // WHO overhead: "WHO " (4) + " %tcuihnfar,NNN" (~16 for WHOX) + "\r\n" (2)
-        let who_overhead = if has_whox { 22 } else { 6 };
+        // WHO overhead, derived from the actual selector so the byte budget
+        // can't drift from constants::WHOX_FIELDS*:
+        // "WHO " (4) + " " (1) + selector + "," (1) + token (≤3) + "\r\n" (2).
+        let who_overhead = whox_selector.map_or(6, |s| s.len() + 11);
         let who_budget = 512 - who_overhead;
 
         // MODE overhead: "MODE " (5) + "\r\n" (2)
@@ -103,9 +106,7 @@ impl App {
         // Send batched WHO (single command, comma-separated channels).
         let chanlist = batch.join(",");
         tracing::trace!(conn_id, %chanlist, has_whox, "send_channel_query_batch: sending WHO+MODE");
-        if has_whox {
-            let token = crate::irc::events::next_who_token(&mut self.state, conn_id);
-            let fields = format!("{},{token}", crate::constants::WHOX_FIELDS);
+        if let Some(fields) = crate::irc::events::build_whox_fields(&mut self.state, conn_id) {
             tracing::trace!(conn_id, %chanlist, %fields, "WHOX command");
             let _ = handle.sender.send(::irc::proto::Command::Raw(
                 "WHO".to_string(),

@@ -370,6 +370,11 @@ pub struct App {
     pub splash_visible: usize,
     pub splash_done: bool,
     pub scroll_offset: usize,
+    /// Set by the chat renderer each frame: true when the view is pinned at
+    /// the top of the *loaded* content (exact line walk, offset clamped at
+    /// max). The backlog paginators key on this instead of comparing a
+    /// visual-line offset against a message count.
+    pub chat_scroll_at_top: bool,
     pub ui_regions: Option<UiRegions>,
     pub irc_handles: HashMap<String, IrcHandle>,
     pub(crate) forwarder_handles: HashMap<String, tokio::task::JoinHandle<()>>,
@@ -713,6 +718,7 @@ impl App {
             splash_visible: 0,
             splash_done: false,
             scroll_offset: 0,
+            chat_scroll_at_top: false,
             ui_regions: None,
             irc_handles: HashMap::new(),
             forwarder_handles: HashMap::new(),
