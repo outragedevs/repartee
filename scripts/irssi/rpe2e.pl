@@ -601,6 +601,20 @@ sub _incoming_ctx_for {
     return defined($own) && length($own) ? '@' . $own : undef;
 }
 
+# The `@<own>` context a DM trust change on THIS server must also touch.
+# Channels: the ctx itself. DMs with the own handle still unknown: print the
+# refusal (the state is transient — one WHOIS round-trip) and return undef;
+# guessing or sweeping handle-wide would either miss the real session or
+# mutate other networks' rows (see _set_incoming_trust).
+sub _own_ctx_or_warn {
+    my ($witem, $ctx, $cmd) = @_;
+    return $ctx unless defined $ctx && $ctx =~ /^\@/;
+    my $own_ctx = _incoming_ctx_for($witem ? $witem->{server} : undef, $ctx);
+    _prnt_err($witem, "$cmd: own identity not learned yet (waiting for the WHOIS reply) — try again in a moment")
+        unless defined $own_ctx;
+    return $own_ctx;
+}
+
 # Both context forms a DM row can live under: the peer-keyed $ctx (config and
 # KEYREQ-direction trust markers) and the recipient-keyed `@<own>` (real
 # incoming sessions). Channels yield just themselves. READ-ONLY callers only:
@@ -614,47 +628,41 @@ sub _ctx_variants {
     return grep { defined($_) && !$seen{$_}++ } ($ctx, $own_ctx);
 }
 
-# Set the trust status of a peer's incoming session(s); returns the count. A
-# DM trust change targets the PEER, not one context string: the real session
-# lives under `@<own>` (which may be UNKNOWN right now, e.g. right after
-# reconnect/reload before WHOIS/JOIN/396 seeds it), the trust marker under
-# `@<peer>`, plus possibly stale rows from handle drift — so update EVERY DM
-# row for the handle. Touching only the resolvable context would report
-# success while leaving the trusted `@<own>` session decryptable once the
-# handle is learned. Channels update exactly (handle, ctx).
+# Set the trust status of a peer's incoming session(s); returns the count.
+# A DM trust change touches EXACTLY this server's two context forms: the
+# real session under `@<own>` ($own_ctx, resolved by the caller — which
+# REFUSES the command while the own handle is unknown, a transient
+# one-WHOIS-round-trip state) and the `@<peer>` trust marker ($ctx). Never
+# wider: the keyring has no network scoping (F3, deferred), so a handle-wide
+# sweep would silently mutate the SAME peer's DM state on OTHER connected
+# networks. Matches the Rust client, whose trust commands operate on
+# current_e2e_own_context and error out without it. Known shared residual
+# (Rust has it too, F3 subsumes): rows under a long-gone `@<old own>` from
+# handle drift are not touched. Channels update exactly (handle, ctx).
 sub _set_incoming_trust {
-    my ($kr, $handle, $ctx, $status) = @_;
+    my ($kr, $handle, $ctx, $status, $own_ctx) = @_;
     my $n = 0;
-    if ($ctx =~ /^\@/) {
-        for my $key (keys %{ $kr->{incoming} || {} }) {
-            my ($h, $c) = split /\|/, $key, 2;
-            next unless defined($c) && $h eq $handle && $c =~ /^\@/;
-            $kr->{incoming}{$key}{status} = $status;
+    my %seen;
+    for my $rctx (grep { defined($_) && !$seen{$_}++ } ($ctx, $own_ctx)) {
+        if (my $row = $kr->{incoming}{"$handle|$rctx"}) {
+            $row->{status} = $status;
             $n++;
         }
-    } elsif (my $row = $kr->{incoming}{"$handle|$ctx"}) {
-        $row->{status} = $status;
-        $n++;
     }
     return $n;
 }
 
-# Forget a peer's incoming (and pending-inbound) rows; same handle-wide DM
+# Forget a peer's incoming (and pending-inbound) rows; same exact-context DM
 # semantics as _set_incoming_trust (see there for why).
 sub _delete_incoming_rows {
-    my ($kr, $handle, $ctx) = @_;
+    my ($kr, $handle, $ctx, $own_ctx) = @_;
     my $n = 0;
+    my %seen;
     for my $store ($kr->{incoming}, $kr->{pending_inbound}) {
         next unless $store;
-        if ($ctx =~ /^\@/) {
-            for my $key (keys %{$store}) {
-                my ($h, $c) = split /\|/, $key, 2;
-                next unless defined($c) && $h eq $handle && $c =~ /^\@/;
-                delete $store->{$key};
-                $n++;
-            }
-        } else {
-            $n++ if delete $store->{"$handle|$ctx"};
+        %seen = ();
+        for my $rctx (grep { defined($_) && !$seen{$_}++ } ($ctx, $own_ctx)) {
+            $n++ if delete $store->{"$handle|$rctx"};
         }
     }
     return $n;
@@ -1378,9 +1386,10 @@ sub cmd_revoke {
     return _prnt_err($witem, "cannot resolve handle for $nick") unless defined $handle;
     my $ctx = _resolve_ctx_for_command($kr, $witem, $nick);
     return _prnt_err($witem, "cannot resolve context for $nick") unless defined $ctx;
-    # Handle-wide for DMs (see _set_incoming_trust for why — the `@<own>`
-    # session may be unreachable by name right now, but must still revoke).
-    _set_incoming_trust($kr, $handle, $ctx, 'revoked');
+    # Exact-context for DMs (see _set_incoming_trust for why).
+    my $own_ctx = _own_ctx_or_warn($witem, $ctx, '/e2e revoke');
+    return unless defined $own_ctx;
+    _set_incoming_trust($kr, $handle, $ctx, 'revoked', $own_ctx);
     delete $kr->{outgoing_recipients}{"$ctx|$handle"};
     if (my $out = $kr->{outgoing}{$ctx}) {
         $out->{pending_rotation} = 1;
@@ -1399,8 +1408,10 @@ sub cmd_unrevoke {
     return _prnt_err($witem, "cannot resolve handle for $nick") unless defined $handle;
     my $ctx = _resolve_ctx_for_command($kr, $witem, $nick);
     return _prnt_err($witem, "cannot resolve context for $nick") unless defined $ctx;
-    # Mirror of revoke: handle-wide for DMs (see _set_incoming_trust).
-    _set_incoming_trust($kr, $handle, $ctx, 'trusted');
+    # Mirror of revoke: exact-context for DMs (see _set_incoming_trust).
+    my $own_ctx = _own_ctx_or_warn($witem, $ctx, '/e2e unrevoke');
+    return unless defined $own_ctx;
+    _set_incoming_trust($kr, $handle, $ctx, 'trusted', $own_ctx);
     my ($fp_hex, $peer) = _find_peer_by_handle($kr, $handle);
     $peer->{status} = 'trusted' if $peer;
     save_keyring($kr);
@@ -1437,8 +1448,10 @@ sub cmd_forget {
     }
     my $ctx = _resolve_ctx_for_command($kr, $witem, $who);
     return _prnt_err($witem, "cannot resolve context for $who") unless defined $ctx;
-    # Handle-wide for DMs (see _set_incoming_trust for why).
-    $removed += _delete_incoming_rows($kr, $handle, $ctx);
+    # Exact-context for DMs (see _set_incoming_trust for why).
+    my $own_ctx = _own_ctx_or_warn($witem, $ctx, '/e2e forget');
+    return unless defined $own_ctx;
+    $removed += _delete_incoming_rows($kr, $handle, $ctx, $own_ctx);
     save_keyring($kr);
     _prnt_ok($witem, "forgotten $who on $ctx");
 }

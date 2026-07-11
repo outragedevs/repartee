@@ -28,7 +28,6 @@ import os
 import sqlite3
 import struct
 import time
-import datetime
 import fnmatch
 import collections
 import traceback
@@ -389,50 +388,31 @@ _own_handle: dict[str, str] = {}
 # wait for the self-WHOIS reply.
 _own_wait_notice_at: dict[tuple, float] = {}
 
-# Wire bodies THIS client sent recently (body → ts), for echo correlation.
-# An own-prefix inbound wire matching this set is our live echo-message echo
-# (prefix trustworthy, plaintext already rendered → swallow); one that does
-# NOT match is a bouncer relay from another attached client or fresh
-# playback — never a handle source, and decrypted with our OWN outgoing key
-# instead of being swallowed. Nick equality alone cannot tell these apart.
-_recent_sent_wires: dict[str, float] = {}
-_SENT_WIRE_TTL = 300.0
-_SENT_WIRE_MAX = 512
+# PRIVMSG bodies THIS client sent recently (body → ts) — wires AND plaintext
+# — for echo correlation. An own-prefix inbound line matching this set is our
+# live echo-message echo: the ONLY situation in which the prefix is
+# trustworthy as our current handle. A non-matching own-prefix line is a
+# bouncer relay from another attached client or playback (tagged or not) —
+# never a handle source. Nick equality alone cannot tell these apart, and
+# tag heuristics cannot either (dumb playback carries no batch/server-time).
+_recent_sent_bodies: dict[str, float] = {}
+_SENT_BODY_TTL = 300.0
+_SENT_BODY_MAX = 512
 
 
-def _note_sent_wire(body: str) -> None:
+def _note_sent_body(body: str) -> None:
     now_f = time.time()
-    if len(_recent_sent_wires) >= _SENT_WIRE_MAX:
-        for k, ts in list(_recent_sent_wires.items()):
-            if now_f - ts > _SENT_WIRE_TTL:
-                del _recent_sent_wires[k]
-    if len(_recent_sent_wires) < _SENT_WIRE_MAX:
-        _recent_sent_wires[body] = now_f
+    if len(_recent_sent_bodies) >= _SENT_BODY_MAX:
+        for k, ts in list(_recent_sent_bodies.items()):
+            if now_f - ts > _SENT_BODY_TTL:
+                del _recent_sent_bodies[k]
+    if len(_recent_sent_bodies) < _SENT_BODY_MAX:
+        _recent_sent_bodies[body] = now_f
 
 
-def _take_sent_wire(body: str) -> bool:
-    ts = _recent_sent_wires.pop(body, None)
-    return ts is not None and time.time() - ts <= _SENT_WIRE_TTL
-
-
-def _tags_suggest_replay(tags: str) -> bool:
-    """True when an IRCv3 tag section marks the line as NOT a live echo: a
-    `batch` tag (chathistory / znc.in/playback) or a `time` stamp far from
-    now. Unparseable time stamps count as replay — when in doubt, do not
-    treat the line's prefix as our current handle."""
-    if not tags:
-        return False
-    for t in tags[1:].strip().split(";"):
-        if t.startswith("batch="):
-            return True
-        if t.startswith("time="):
-            val = t[5:].replace("Z", "+00:00")
-            try:
-                ts = datetime.datetime.fromisoformat(val).timestamp()
-            except (ValueError, OverflowError):
-                return True
-            return abs(time.time() - ts) > 120
-    return False
+def _take_sent_body(body: str) -> bool:
+    ts = _recent_sent_bodies.pop(body, None)
+    return ts is not None and time.time() - ts <= _SENT_BODY_TTL
 
 
 class IncomingBucket:
@@ -673,45 +653,60 @@ def _incoming_ctx_for(server: str, ctx: str):
     return ctx
 
 
-def _update_incoming_trust(handle: str, ctx: str, status: str) -> int:
+def _update_incoming_trust(handle: str, ctx: str, status: str, own_ctx=None) -> int:
     """Set the trust status of a peer's incoming session(s); returns the row
-    count. A DM trust change targets the PEER, not one context string: the
-    real session lives under `@<own>` (which may be UNKNOWN right now, e.g.
-    right after reconnect/reload before WHOIS/JOIN/396 seeds it), the
-    trust marker under `@<peer>`, plus possibly stale rows from handle drift
-    — so update EVERY DM row for the handle. Touching only the resolvable
-    context would report success while leaving the trusted `@<own>` session
-    decryptable once the handle is learned. Channels update exactly
-    (handle, ctx)."""
+    count. A DM trust change touches EXACTLY this server's two context forms:
+    the real session under `@<own>` (`own_ctx`, resolved by the caller —
+    which REFUSES the command while the own handle is unknown, a transient
+    one-WHOIS-round-trip state) and the `@<peer>` trust marker (`ctx`).
+    Never wider: the store has no network column (F3, deferred), so a
+    handle-wide predicate would silently mutate the SAME peer's DM state on
+    OTHER connected networks. This matches the Rust client, whose trust
+    commands operate on `current_e2e_own_context` and error out without it.
+    Known shared residual (Rust has it too, F3 subsumes): rows under a
+    long-gone `@<old own>` from handle drift are not touched. Channels
+    update exactly (handle, ctx)."""
+    ctxs = {ctx, own_ctx} - {None}
     with db_conn() as c:
-        if ctx.startswith("@"):
-            cur = c.execute(
-                "UPDATE incoming SET status=? WHERE handle = ? AND channel LIKE '@%'",
-                (status, handle),
-            )
-        else:
-            cur = c.execute(
+        n = 0
+        for rctx in ctxs:
+            n += c.execute(
                 "UPDATE incoming SET status=? WHERE handle = ? AND channel = ?",
-                (status, handle, ctx),
-            )
-        return cur.rowcount
+                (status, handle, rctx),
+            ).rowcount
+        return n
 
 
-def _delete_incoming_rows(handle: str, ctx: str) -> int:
-    """Forget a peer's incoming session(s); same handle-wide DM semantics as
-    `_update_incoming_trust` (see there for why)."""
+def _own_ctx_or_none(buf: str, server: str, ctx: str, cmd: str):
+    """The `@<own>` context a DM trust change on THIS server must also touch.
+    Channels: the ctx itself. DMs with the own handle still unknown: print
+    the refusal (the state is transient — one WHOIS round-trip) and return
+    None; guessing or going handle-wide would either miss the real session
+    or mutate other networks' rows (see _update_incoming_trust)."""
+    if not ctx.startswith("@"):
+        return ctx
+    own_ctx = _incoming_ctx_for(server, ctx)
+    if own_ctx is None:
+        _prnt_err(
+            buf,
+            f"{cmd}: own identity not learned yet (waiting for the WHOIS "
+            "reply) — try again in a moment",
+        )
+    return own_ctx
+
+
+def _delete_incoming_rows(handle: str, ctx: str, own_ctx=None) -> int:
+    """Forget a peer's incoming session(s); same exact-context DM semantics
+    as `_update_incoming_trust` (see there for why)."""
+    ctxs = {ctx, own_ctx} - {None}
     with db_conn() as c:
-        if ctx.startswith("@"):
-            cur = c.execute(
-                "DELETE FROM incoming WHERE handle = ? AND channel LIKE '@%'",
-                (handle,),
-            )
-        else:
-            cur = c.execute(
+        n = 0
+        for rctx in ctxs:
+            n += c.execute(
                 "DELETE FROM incoming WHERE handle = ? AND channel = ?",
-                (handle, ctx),
-            )
-        return cur.rowcount
+                (handle, rctx),
+            ).rowcount
+        return n
 
 
 def fingerprint(pk: bytes) -> bytes:
@@ -1175,7 +1170,7 @@ def _send_raw_privmsg(server: str, target: str, body: str) -> bool:
     # Every wire this client emits goes through here — record it so an
     # own-prefix inbound copy can be correlated as OUR live echo (vs a
     # bouncer relay from another attached client / playback).
-    _note_sent_wire(body)
+    _note_sent_body(body)
     buf = weechat.buffer_search("irc", f"server.{server}") or ""
     if not buf:
         infolist = weechat.infolist_get("buffer", "", "")
@@ -2306,8 +2301,13 @@ def hook_irc_out_privmsg(data, modifier, server, msg):
 
     action, payload = _e2e_gate_wire(server, target, body)
     if action == "pass":
+        # Plaintext going out: record it for echo correlation (see
+        # _recent_sent_bodies) — a live echo-message echo of this body is the
+        # only own-prefix line whose prefix may seed our own handle.
+        _note_sent_body(body)
         return msg
     if action == "bypass":
+        _note_sent_body(body)
         if payload:
             _prnt_warn(_target_buffer(server, target), payload)
         return msg
@@ -2508,11 +2508,13 @@ def hook_irc_in_privmsg(data, modifier, server, msg):
 
         wire = parse_wire(text)
         if wire is None:
-            # Plaintext own-prefix line: a live echo-message echo carries our
-            # CANONICAL current prefix — the freshest own-handle source there
-            # is — but a replayed one (batch / stale server-time) carries a
-            # historical host and would poison the store.
-            if is_own_prefix and not _tags_suggest_replay(tags):
+            # Plaintext own-prefix line: capture the handle ONLY when it
+            # correlates with a body this client just sent — a live
+            # echo-message echo carries our CANONICAL current prefix, the
+            # freshest own-handle source there is. Uncorrelated copies
+            # (another attached client, playback with or without tags) carry
+            # a prefix we cannot vouch for and would poison the store.
+            if is_own_prefix and _take_sent_body(text):
                 _set_own_handle(server, handle)
             return msg
         _dbg(
@@ -2526,7 +2528,7 @@ def hook_irc_in_privmsg(data, modifier, server, msg):
         if skew > TS_TOLERANCE:
             return ""
         if is_own_prefix:
-            if _take_sent_wire(text):
+            if _take_sent_body(text):
                 # Correlated with a wire THIS client just sent: a live
                 # echo-message echo. Its prefix is our current canonical
                 # handle (capture), and the plaintext was already rendered
@@ -2929,7 +2931,10 @@ def cmd_e2e(data, buffer, args):
         handle = _handle_or_error(buf, server, channel, nick, "/e2e revoke")
         if handle is None:
             return weechat.WEECHAT_RC_OK if weechat else 0
-        _update_incoming_trust(handle, ctx, "revoked")
+        own_ctx = _own_ctx_or_none(buf, server, ctx, "/e2e revoke")
+        if own_ctx is None:
+            return weechat.WEECHAT_RC_OK if weechat else 0
+        _update_incoming_trust(handle, ctx, "revoked", own_ctx)
         with db_conn() as c:
             c.execute(
                 "DELETE FROM outgoing_recipients WHERE channel = ? AND handle = ?",
@@ -2948,8 +2953,11 @@ def cmd_e2e(data, buffer, args):
         handle = _handle_or_error(buf, server, channel, nick, "/e2e unrevoke")
         if handle is None:
             return weechat.WEECHAT_RC_OK if weechat else 0
-        # Mirror of revoke: handle-wide for DMs (see _update_incoming_trust).
-        _update_incoming_trust(handle, ctx, "trusted")
+        # Mirror of revoke: exact-context for DMs (see _update_incoming_trust).
+        own_ctx = _own_ctx_or_none(buf, server, ctx, "/e2e unrevoke")
+        if own_ctx is None:
+            return weechat.WEECHAT_RC_OK if weechat else 0
+        _update_incoming_trust(handle, ctx, "trusted", own_ctx)
         _prnt_ok(buf, f"unrevoked {nick} on {ctx}")
     elif sub == "forget":
         if not rest:
@@ -2962,8 +2970,11 @@ def cmd_e2e(data, buffer, args):
         handle = _handle_or_error(buf, server, channel, nick, "/e2e forget")
         if handle is None:
             return weechat.WEECHAT_RC_OK if weechat else 0
-        # Handle-wide for DMs (see _update_incoming_trust for why).
-        _delete_incoming_rows(handle, ctx)
+        # Exact-context for DMs (see _update_incoming_trust for why).
+        own_ctx = _own_ctx_or_none(buf, server, ctx, "/e2e forget")
+        if own_ctx is None:
+            return weechat.WEECHAT_RC_OK if weechat else 0
+        _delete_incoming_rows(handle, ctx, own_ctx)
         _prnt_warn(buf, f"forgotten {nick} on {ctx}")
     elif sub == "handshake":
         if not rest:
