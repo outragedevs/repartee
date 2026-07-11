@@ -6,8 +6,8 @@
     <title>repartee</title>
     
 <script type="module">
-import init, * as bindings from '/repartee-web-1a8a2c96b6086cc5.js';
-const wasm = await init({ module_or_path: '/repartee-web-1a8a2c96b6086cc5_bg.wasm' });
+import init, * as bindings from '/repartee-web-588623ffac41b818.js';
+const wasm = await init({ module_or_path: '/repartee-web-588623ffac41b818_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -17,8 +17,36 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
 
 </script>
     <link rel="stylesheet" href="/themes-4956c8e94e9a32e3.css" integrity="sha384-NYGkQkiVFff69pBNgOcUJ2xwjtsNCcYzPxYzJQBDNQKDbneslRT8iYd4C0VQsA9S"/>
-    <link rel="stylesheet" href="/base-ded6fe8941ce297a.css" integrity="sha384-7EfADr+ZR9d9G9Wd4Dndge5v+TuuK+I1V+aHhQONVG5jRmiOCHUFia7/d5IKzP4G"/>
+    <link rel="stylesheet" href="/base-c873277e044176b7.css" integrity="sha384-3VyHK5Ghwo+3vB9plBVjoXG0t9cHTfEss71Tmc+QkhyKTiSIn/CGbJe3T12jKcXT"/>
     
-<link rel="modulepreload" href="/repartee-web-1a8a2c96b6086cc5.js" crossorigin="anonymous" integrity="sha384-Xh8ndSed05M0ZRJhRMs+BiGkjff80udDkr1bq4WXm36HdymH7kKHUqkCdBNgFe7l"><link rel="preload" href="/repartee-web-1a8a2c96b6086cc5_bg.wasm" crossorigin="anonymous" integrity="sha384-ZFs8csNGxLsj/oOAzu/fk1BX96VDKbhVXTKUbAUbPt+C9KrUD/07CQyPE+CJVuvP" as="fetch" type="application/wasm"></head>
+    <script>
+      // Collapse a failed link-preview card without moving what the reader
+      // sees: re-pin when the user is at the bottom (threshold mirrors
+      // SCROLL_THRESHOLD in chat_view.rs); when the card sat fully above the
+      // viewport, subtract the removed height from scrollTop; a card in view
+      // just disappears in place. Lives here as a named, formatted function —
+      // the per-image onerror attribute in chat_view.rs only delegates to it.
+      window.__rpPreviewError = function (img) {
+        var card = img.closest('.msg-preview-card');
+        if (!card) return;
+        var s = card.closest('.chat-messages');
+        var atBottom = s && (s.scrollHeight - s.scrollTop - s.clientHeight <= 30);
+        var above = false;
+        if (s) {
+          var cr = card.getBoundingClientRect();
+          var sr = s.getBoundingClientRect();
+          above = cr.bottom < sr.top;
+        }
+        var oldH = s ? s.scrollHeight : 0;
+        card.style.display = 'none';
+        if (!s) return;
+        if (atBottom) {
+          s.scrollTop = s.scrollHeight;
+        } else if (above) {
+          s.scrollTop = Math.max(0, s.scrollTop - (oldH - s.scrollHeight));
+        }
+      };
+    </script>
+<link rel="modulepreload" href="/repartee-web-588623ffac41b818.js" crossorigin="anonymous" integrity="sha384-Pxa9pg68TSZYLwWhCSvRH0WqgQxmVwXjDb9/hU4xX8qAKpFL5Xx1WkaGNS3XYWx2"><link rel="preload" href="/repartee-web-588623ffac41b818_bg.wasm" crossorigin="anonymous" integrity="sha384-vhW/gsyJ8hhtATPAEgBu1vND85ytFWJwB0UUQYzbM/aZWC/vvCnPh47uaXrrHCEC" as="fetch" type="application/wasm"></head>
 <body></body>
 </html>

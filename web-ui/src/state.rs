@@ -43,6 +43,14 @@ pub struct AppState {
     pub error: RwSignal<Option<String>>,
     pub timestamp_format: RwSignal<String>,
     pub line_height: RwSignal<f32>,
+    /// Client-side appearance overrides (persisted in localStorage, applied
+    /// as CSS vars by an Effect in `app.rs`). `None` = follow the server
+    /// setting / stylesheet default. These exist so a phone user can bump
+    /// text size without recompiling or touching the TUI config.
+    pub font_size_override: RwSignal<Option<u32>>,
+    pub line_height_override: RwSignal<Option<f32>>,
+    /// Appearance menu modal open flag.
+    pub appearance_open: RwSignal<bool>,
     pub nick_column_width: RwSignal<u32>,
     pub nick_max_length: RwSignal<u32>,
     pub nick_colors_enabled: RwSignal<bool>,
@@ -81,6 +89,10 @@ pub struct AppState {
     /// A token to splice into the input at the caret (`:name:` or a Unicode
     /// emoji). The input component consumes it and clears it back to `None`.
     pub pending_insert: RwSignal<Option<String>>,
+    /// A nick to mention, set by tapping a nick in the chat log. The input
+    /// component consumes it, choosing the delimiter by caret context
+    /// (`nick: ` at a line start, `nick ` mid-sentence).
+    pub pending_mention: RwSignal<Option<String>>,
     /// Per-buffer: whether the server reported more history is available older
     /// than what's loaded (from the `has_more` field of `Messages`). Drives the
     /// scroll-up loader — `false` (or absent) means stop fetching.
@@ -112,6 +124,19 @@ impl AppState {
             error: RwSignal::new(None),
             timestamp_format: RwSignal::new("%H:%M".to_string()),
             line_height: RwSignal::new(1.35),
+            // Clamp on load: the Aa menu clamps on write, but a stale or
+            // hand-edited stored value (e.g. "999") would otherwise apply
+            // raw and could make the UI — including the reset button —
+            // unusable.
+            font_size_override: RwSignal::new(
+                load_stored_parsed::<i64>(FONT_SIZE_KEY)
+                    .map(crate::components::appearance::clamp_font),
+            ),
+            line_height_override: RwSignal::new(
+                load_stored_parsed::<f32>(LINE_HEIGHT_KEY)
+                    .map(crate::components::appearance::clamp_line_h),
+            ),
+            appearance_open: RwSignal::new(false),
             nick_column_width: RwSignal::new(12),
             nick_max_length: RwSignal::new(9),
             nick_colors_enabled: RwSignal::new(true),
@@ -128,9 +153,24 @@ impl AppState {
             emote_picker_open: RwSignal::new(false),
             emoji_picker_open: RwSignal::new(false),
             pending_insert: RwSignal::new(None),
+            pending_mention: RwSignal::new(None),
             backlog_has_more: RwSignal::new(HashMap::new()),
             backlog_fetching: RwSignal::new(HashSet::new()),
         }
+    }
+
+    /// Switch the active buffer locally and inform the server — the shared
+    /// "user clicked a window" path (buffer list, Act numbers): set the
+    /// signal, echo `SwitchBuffer`, and mark the buffer read up to now.
+    pub fn switch_to_buffer(&self, buffer_id: &str) {
+        self.active_buffer.set(Some(buffer_id.to_string()));
+        crate::ws::send_command(&WebCommand::SwitchBuffer {
+            buffer_id: buffer_id.to_string(),
+        });
+        crate::ws::send_command(&WebCommand::MarkRead {
+            buffer_id: buffer_id.to_string(),
+            up_to: chrono::Utc::now().timestamp(),
+        });
     }
 
     /// Collapse a buffer's loaded backlog window after the user returns to the
@@ -647,6 +687,17 @@ impl AppState {
     }
 }
 
+/// The buffer list with its 1-based display numbers — THE numbering rule.
+/// Both the buffer list and the status-line Act indicator must consume this
+/// (never re-derive `idx + 1` locally), so "Act: 4" always names the window
+/// the list labels "4.".
+pub fn numbered_buffers(buffers: &[BufferMeta]) -> impl Iterator<Item = (u32, &BufferMeta)> {
+    buffers
+        .iter()
+        .enumerate()
+        .map(|(idx, b)| (u32::try_from(idx + 1).unwrap_or(u32::MAX), b))
+}
+
 /// Trim the buffer to `cap`, dropping oldest from the head. Returns `true` if it
 /// actually dropped anything — the caller uses that to re-arm `has_more`, since a
 /// trim means older history now lives only below the in-memory head.
@@ -833,6 +884,34 @@ fn follow_tui_active_buffer() -> bool {
         storage.get_item(FOLLOW_TUI_BUFFER_KEY),
         Ok(Some(ref v)) if v == "false"
     )
+}
+
+/// localStorage keys for the client-side appearance overrides.
+pub const FONT_SIZE_KEY: &str = "repartee-font-size";
+pub const LINE_HEIGHT_KEY: &str = "repartee-line-height";
+
+/// Read + parse an optional localStorage value; absent or malformed → `None`.
+fn load_stored_parsed<T: std::str::FromStr>(key: &str) -> Option<T> {
+    web_sys::window()
+        .and_then(|w| w.local_storage().ok().flatten())
+        .and_then(|s| s.get_item(key).ok().flatten())
+        .and_then(|v| v.parse().ok())
+}
+
+/// Persist an optional override: `Some` writes the value, `None` removes the
+/// key (back to defaults).
+pub fn store_or_remove(key: &str, value: Option<&str>) {
+    let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) else {
+        return;
+    };
+    match value {
+        Some(v) => {
+            let _ = storage.set_item(key, v);
+        }
+        None => {
+            let _ = storage.remove_item(key);
+        }
+    }
 }
 
 const DISMISSED_PREVIEWS_KEY: &str = "repartee-dismissed-previews";

@@ -1,6 +1,5 @@
 use leptos::prelude::*;
 
-use crate::protocol::WebCommand;
 use crate::state::AppState;
 
 #[component]
@@ -20,9 +19,14 @@ pub fn BufferList() -> impl IntoView {
                 let active_id = state.active_buffer.get();
                 let mut views: Vec<leptos::prelude::AnyView> = Vec::new();
 
-                for (idx, buf) in buffers.iter().enumerate() {
+                for (current_num, buf) in crate::state::numbered_buffers(&buffers) {
                     let is_server = buf.buffer_type == "server";
                     let is_active = active_id.as_deref() == Some(buf.id.as_str());
+                    let conn = connections.iter().find(|c| c.id == buf.connection_id);
+                    // Dim every buffer of a disconnected network — at a
+                    // glance the user sees which side of a netsplit or
+                    // dropped link each window belongs to.
+                    let is_offline = conn.is_some_and(|c| !c.connected);
                     let type_class = match buf.buffer_type.as_str() {
                         "server" => " type-server",
                         "query" => " type-query",
@@ -35,36 +39,36 @@ pub fn BufferList() -> impl IntoView {
                         1 => " activity-1",
                         2 => " activity-2",
                         3 => " activity-3",
-                        4 => " activity-4",
                         _ => " activity-4",
                     };
                     let class = format!(
-                        "buffer-item{}{activity_class}{type_class}",
+                        "buffer-item{}{activity_class}{type_class}{}",
                         if is_active { " active" } else { "" },
+                        if is_offline { " offline" } else { "" },
                     );
 
                     let id = buf.id.clone();
                     let name = buf.name.clone();
-                    let current_num = u32::try_from(idx + 1).unwrap_or(0);
 
-                    let on_click = move |_| {
-                        state.active_buffer.set(Some(id.clone()));
-                        crate::ws::send_command(&WebCommand::SwitchBuffer {
-                            buffer_id: id.clone(),
-                        });
-                        crate::ws::send_command(&WebCommand::MarkRead {
-                            buffer_id: id.clone(),
-                            up_to: chrono::Utc::now().timestamp(),
-                        });
-                    };
+                    let on_click = move |_| state.switch_to_buffer(&id);
+
+                    // Unread badge — hidden for the active buffer (its
+                    // content is on screen) and for zero counts; capped so a
+                    // flooded channel doesn't blow the row width.
+                    let unread = buf.unread_count;
+                    let badge = (!is_active && unread > 0).then(|| {
+                        let label = if unread > 99 {
+                            "99+".to_string()
+                        } else {
+                            unread.to_string()
+                        };
+                        view! { <span class="unread-badge">{label}</span> }
+                    });
 
                     // Server buffers display the connection label —
                     // they serve as both the network grouping and status window.
                     let display_name = if is_server {
-                        connections
-                            .iter()
-                            .find(|c| c.id == buf.connection_id)
-                            .map_or_else(|| name.clone(), |c| c.label.clone())
+                        conn.map_or_else(|| name.clone(), |c| c.label.clone())
                     } else {
                         name
                     };
@@ -74,6 +78,7 @@ pub fn BufferList() -> impl IntoView {
                                 <span class="num">{current_num}"."</span>
                                 " "
                                 <span class="name">{display_name}</span>
+                                {badge}
                             </div>
                         }
                         .into_any(),

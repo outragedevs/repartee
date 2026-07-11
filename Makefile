@@ -1,4 +1,4 @@
-.PHONY: all clean wasm build release install test clippy check
+.PHONY: all clean wasm build release install test clippy check test-web clippy-web
 
 # Full clean rebuild: clean → WASM → native release
 all: clean wasm release
@@ -27,10 +27,19 @@ install: release
 	cp target/release/repartee /usr/local/bin/repartee
 	ln -sf /usr/local/bin/repartee /usr/local/bin/reptee
 
-# Run tests
-test:
+# Run tests (both crates — the release pre-flight runs this target, so the
+# web-ui unit tests must be part of it, not a separate opt-in)
+test: test-web
 	cargo test -p repartee
 
-# Run clippy
-clippy:
+# Run clippy (both crates — same 0-warnings policy)
+clippy: clippy-web
 	cargo clippy -p repartee --all-targets
+
+# Run web-ui unit tests (host-side; DOM-free helpers only)
+test-web:
+	cargo test -p repartee-web
+
+# Run clippy on the web-ui crate
+clippy-web:
+	cargo clippy -p repartee-web --all-targets
