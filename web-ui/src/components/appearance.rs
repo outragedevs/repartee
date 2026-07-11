@@ -137,6 +137,18 @@ pub fn AppearanceModal() -> impl IntoView {
                             on:click=move |_| {
                                 state.font_size_override.set(None);
                                 state.line_height_override.set(None);
+                                // Remove the inline var NOW: the value label
+                                // re-reads computed style in this same tick
+                                // and must not see the old override before
+                                // the app.rs Effect removes it.
+                                use wasm_bindgen::JsCast;
+                                if let Some(root) = web_sys::window()
+                                    .and_then(|w| w.document())
+                                    .and_then(|d| d.document_element())
+                                    .and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok())
+                                {
+                                    let _ = root.style().remove_property("--font-size");
+                                }
                             }
                         >"Reset to defaults"</button>
                         <button type="button" class="appearance-close"

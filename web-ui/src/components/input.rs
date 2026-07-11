@@ -320,6 +320,9 @@ pub fn InputLine() -> impl IntoView {
         let new_cursor = p.replace_start + item.insert.len();
         set_value.set(new_text.clone());
         set_textarea_cursor(&input_ref, &new_text, new_cursor);
+        // Re-fit: a long completion can wrap the draft onto another line,
+        // and the stale inline height would clip it (overflow:hidden).
+        resize_textarea();
         if let Some(el) = input_ref.get_untracked() {
             let html_el: &web_sys::HtmlTextAreaElement = el.as_ref();
             let _ = html_el.focus();
@@ -558,17 +561,24 @@ pub fn InputLine() -> impl IntoView {
                     set_popup_sel.update(|s| *s = (*s + len - 1) % len);
                     return;
                 }
-                // Tab must not fall through to the legacy cycling below while
-                // the popup is showing different candidates.
+                // Tab with an arrow-selected row accepts that row. An
+                // UNENGAGED Tab closes the popup and falls through to the
+                // legacy branch below — that branch arms tab_matches, so
+                // repeated Tab presses cycle /join → /jump exactly as they
+                // did before the popup existed (accepting row 0 here instead
+                // used to kill cycling: the second Tab started a fresh,
+                // wrong completion after the inserted trailing space).
                 "Tab" => {
-                    ev.prevent_default();
-                    if ev.shift_key() {
-                        set_popup_engaged.set(true);
-                        set_popup_sel.update(|s| *s = (*s + len - 1) % len);
-                    } else {
-                        accept_popup(popup_sel.get_untracked().min(len - 1));
+                    if popup_engaged.get_untracked() {
+                        ev.prevent_default();
+                        if ev.shift_key() {
+                            set_popup_sel.update(|s| *s = (*s + len - 1) % len);
+                        } else {
+                            accept_popup(popup_sel.get_untracked().min(len - 1));
+                        }
+                        return;
                     }
-                    return;
+                    set_popup.set(None);
                 }
                 "Enter" if !ev.shift_key() => {
                     if popup_engaged.get_untracked() {
@@ -1039,7 +1049,10 @@ fn convert_leading_at_mention(line: &str, nicks: &[String]) -> String {
     if token.is_empty() {
         return line.to_string();
     }
-    let Some(canonical) = nicks.iter().find(|n| n.eq_ignore_ascii_case(token)) else {
+    // Unicode-aware folding, matching the popup/Tab paths — an ASCII-only
+    // comparison would silently skip non-ASCII nicks ("@żółw" vs "Żółw").
+    let token_lower = token.to_lowercase();
+    let Some(canonical) = nicks.iter().find(|n| n.to_lowercase() == token_lower) else {
         return line.to_string();
     };
     if tail.is_empty() {

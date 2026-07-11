@@ -129,6 +129,15 @@ pub fn ChatView() -> impl IntoView {
     let pending_anchor = StoredValue::new(None::<(String, String, f64)>);
 
     let do_pin = move |el: &web_sys::Element| {
+        // Writing an UNCHANGED scrollTop fires no scroll event, which would
+        // strand the skip flag and make on_scroll swallow the user's next
+        // real gesture (one wheel notch near the bottom silently ignored,
+        // then yanked back by the next append). Only arm the flag when the
+        // write will actually move the scroller.
+        let target = (el.scroll_height() - el.client_height()).max(0);
+        if el.scroll_top() == target {
+            return;
+        }
         skip_next_scroll.set_value(true);
         pin_to_bottom(el);
     };
@@ -868,8 +877,15 @@ fn mention_on_click(state: AppState, nick: String) -> impl Fn(web_sys::MouseEven
             return;
         }
         let nick = nick.clone();
+        let tapped_in = state.active_buffer.get_untracked();
         leptos::task::spawn_local(async move {
             gloo_timers::future::sleep(std::time::Duration::from_millis(300)).await;
+            // The user may have switched buffers inside the defer window
+            // (rapid two-tap on mobile) — a mention captured in #foo must
+            // not land in #bar's draft.
+            if state.active_buffer.get_untracked() != tapped_in {
+                return;
+            }
             let selecting = web_sys::window()
                 .and_then(|w| w.get_selection().ok().flatten())
                 .is_some_and(|s| !s.is_collapsed());
@@ -980,15 +996,19 @@ fn render_previews(
                         rel="noopener noreferrer"
                         class="msg-preview-link"
                     >
-                        // `loading="lazy"` is viable again now that the card
-                        // is never display:none — the reserved box gives the
-                        // lazy-load observer real geometry, and off-screen
-                        // backlog previews stop fetching eagerly.
+                        // Eager loading is deliberate (no `loading="lazy"`):
+                        // a dead preview must error out EARLY — while its
+                        // card is still off-screen and the collapse is
+                        // invisible or compensated — not the moment the
+                        // reader scrolls it into view (lazy would time the
+                        // error exactly for the worst reader-visible jump,
+                        // after a long stare at an empty box). The server
+                        // thumbnail cache + browser HTTP cache absorb the
+                        // eager cost, same as before this branch.
                         <img
                             src=thumb
                             class="msg-preview-thumb"
                             alt="link preview"
-                            loading="lazy"
                             onload=ON_IMG_LOAD
                             onerror=ON_IMG_ERROR
                         />

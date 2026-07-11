@@ -27,12 +27,13 @@ install: release
 	cp target/release/repartee /usr/local/bin/repartee
 	ln -sf /usr/local/bin/repartee /usr/local/bin/reptee
 
-# Run tests
-test:
+# Run tests (both crates — the release pre-flight runs this target, so the
+# web-ui unit tests must be part of it, not a separate opt-in)
+test: test-web
 	cargo test -p repartee
 
-# Run clippy
-clippy:
+# Run clippy (both crates — same 0-warnings policy)
+clippy: clippy-web
 	cargo clippy -p repartee --all-targets
 
 # Run web-ui unit tests (host-side; DOM-free helpers only)
