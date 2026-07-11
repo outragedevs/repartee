@@ -23,6 +23,13 @@ pub fn default_quit_message() -> String {
 /// mismatches in the parser.
 pub const WHOX_FIELDS: &str = "%tcuihnfar";
 
+/// WHOX field selector for `IRCnet`-lineage servers (ircd 2.12+), which
+/// extend `WHOX` with `S` (server SID) and `U` (user UID). We add `U` only —
+/// emitted between account and realname (`ircd/s_user.c` `who_one`). Never
+/// send this to other ircds: they ignore unknown letters, shifting the reply
+/// layout.
+pub const WHOX_FIELDS_IRCNET: &str = "%tcuihnfaUr";
+
 /// All themes shipped in the binary via `include_str!`.
 ///
 /// `default.theme` gets special treatment in [`sync_bundled_themes_in`]:
