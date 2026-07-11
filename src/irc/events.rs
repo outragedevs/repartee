@@ -230,6 +230,38 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
         Command::Raw(cmd, args) if cmd == "671" => {
             handle_whois_secure(state, conn_id, args);
         }
+        // WHOIS numerics with freeform prose that irc-proto has no Response
+        // variant for (320 cloak/SSL specials, 307 regnick, 379 modes, ...).
+        // Without this arm they'd fall to the generic numeric catch-all and
+        // render unthemed outside the WHOIS block.
+        Command::Raw(cmd, args)
+            if matches!(
+                cmd.as_str(),
+                "307" | "310" | "320" | "335" | "338" | "378" | "379"
+            ) =>
+        {
+            handle_whois_freeform(state, conn_id, cmd, args);
+        }
+        // ircnet.com/extended-join (IRCnet ircd 2.12.0):
+        //   :src JOIN <channel> <uid> <ip> <netjoin> <account> :<realname>
+        // Six args exceed irc-proto's JOIN arity, so it arrives as Raw. When
+        // both this cap and IRCv3 extended-join are acked, the server sends
+        // ONLY this variant — dropping it would lose joins entirely (own
+        // joins included, so no channel buffer would ever open). uid/ip are
+        // informational; netjoin=1 (burst after relink) rides the same
+        // netsplit detection as ordinary joins inside handle_join.
+        Command::Raw(cmd, args) if cmd.eq_ignore_ascii_case("JOIN") && args.len() == 6 => {
+            handle_join(
+                state,
+                conn_id,
+                &our_nick,
+                msg.prefix.as_ref(),
+                &args[0],
+                Some(args[4].as_str()),
+                Some(args[5].as_str()),
+                tags,
+            );
+        }
         // IRCv3 standard-reply FAIL for a BATCH command — surface multiline
         // rejections (MULTILINE_MAX_BYTES / MAX_LINES / INVALID_TARGET / INVALID).
         // FAIL arrives as a `Command::Raw` (not a numeric), so it isn't caught by
@@ -4079,6 +4111,34 @@ fn handle_whois_account(state: &mut AppState, conn_id: &str, args: &[String]) {
     }
 }
 
+/// WHOIS numerics whose payload is freeform prose: args = [`our_nick`, nick,
+/// text...]. Middle args (338's host/ip values) join into the text so every
+/// known wire variant renders. Each numeric gets its own theme event key;
+/// unknown callers fall back to `whois_special`.
+fn handle_whois_freeform(state: &mut AppState, conn_id: &str, numeric: &str, args: &[String]) {
+    if args.len() < 3 {
+        return;
+    }
+    let event_key = match numeric {
+        "307" => "whois_registered",
+        "310" => "whois_help",
+        "335" => "whois_bot",
+        "338" => "whois_actually",
+        "378" => "whois_host",
+        "379" => "whois_modes",
+        _ => "whois_special",
+    };
+    let text = args[2..].join(" ");
+    let target_buf = whois_buffer(state, conn_id);
+    emit_event(
+        state,
+        &target_buf,
+        event_key,
+        format!("%Z565f89  %Za9b1d6{text}%N"),
+        vec![args[1].clone(), text],
+    );
+}
+
 fn handle_whois_secure(state: &mut AppState, conn_id: &str, args: &[String]) {
     if args.len() >= 2 {
         let target_buf = whois_buffer(state, conn_id);
@@ -6091,6 +6151,119 @@ mod tests {
         assert!(buf.users.contains_key("carol"));
         let entry = buf.users.get("carol").unwrap();
         assert_eq!(entry.account, None);
+    }
+
+    // === ircnet.com/extended-join tests ===
+    // Wire format: :src JOIN <channel> <uid> <ip> <netjoin> <account> :<realname>
+    // Six args exceed irc-proto's JOIN arity, so it arrives as Command::Raw.
+
+    #[test]
+    fn ircnet_extended_join_with_account_and_realname() {
+        let mut state = make_test_state();
+        let msg = make_irc_msg(
+            Some("ejtest435!~ejtest435@92.206.50.109"),
+            Command::Raw(
+                "JOIN".to_string(),
+                vec![
+                    "#test".to_string(),
+                    "528HAAD32".to_string(),
+                    "92.206.50.109".to_string(),
+                    "0".to_string(),
+                    "acct".to_string(),
+                    "extended-join test".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        assert!(buf.users.contains_key("ejtest435"));
+        assert_eq!(
+            buf.users.get("ejtest435").unwrap().account.as_deref(),
+            Some("acct")
+        );
+        let m = buf.messages.back().unwrap();
+        assert_eq!(m.event_key.as_deref(), Some("join"));
+        let params = m.event_params.as_ref().unwrap();
+        assert_eq!(params[4], "[acct]"); // $4 = account
+        assert_eq!(params[5], "extended-join test"); // $5 = realname
+    }
+
+    #[test]
+    fn ircnet_extended_join_star_account_is_none() {
+        let mut state = make_test_state();
+        let msg = make_irc_msg(
+            Some("ejtest435!~ejtest435@92.206.50.109"),
+            Command::Raw(
+                "JOIN".to_string(),
+                vec![
+                    "#test".to_string(),
+                    "528HAAD32".to_string(),
+                    "92.206.50.109".to_string(),
+                    "0".to_string(),
+                    "*".to_string(),
+                    "extended-join test".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        assert_eq!(buf.users.get("ejtest435").unwrap().account, None);
+        let m = buf.messages.back().unwrap();
+        let params = m.event_params.as_ref().unwrap();
+        assert_eq!(params[4], ""); // no account display
+        assert_eq!(params[5], "extended-join test");
+    }
+
+    #[test]
+    fn ircnet_extended_join_own_join_creates_buffer() {
+        let mut state = make_test_state();
+        let msg = make_irc_msg(
+            Some("me!~me@host.example"),
+            Command::Raw(
+                "JOIN".to_string(),
+                vec![
+                    "#testy".to_string(),
+                    "528HAAD32".to_string(),
+                    "10.0.0.1".to_string(),
+                    "0".to_string(),
+                    "*".to_string(),
+                    "my realname".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        assert!(state.buffers.contains_key("test/#testy"));
+        assert_eq!(state.active_buffer_id.as_deref(), Some("test/#testy"));
+    }
+
+    #[test]
+    fn ircnet_extended_join_netjoin_flag_untracked_still_displays() {
+        // netjoin=1 without a tracked split (we saw no QUITs) must not be
+        // silently dropped — the join line still shows.
+        let mut state = make_test_state();
+        let msg = make_irc_msg(
+            Some("carol!user@host"),
+            Command::Raw(
+                "JOIN".to_string(),
+                vec![
+                    "#test".to_string(),
+                    "528HAAD32".to_string(),
+                    "10.0.0.1".to_string(),
+                    "1".to_string(),
+                    "*".to_string(),
+                    "Real Name".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").unwrap();
+        assert!(buf.users.contains_key("carol"));
+        let m = buf.messages.back().unwrap();
+        assert_eq!(m.event_key.as_deref(), Some("join"));
     }
 
     // === account-notify tests ===
@@ -8130,6 +8303,105 @@ mod tests {
                 ][..]
             )
         );
+    }
+
+    #[test]
+    fn whois_raw_320_special_is_themeable() {
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+
+        let msg = make_irc_msg(
+            None,
+            Command::Raw(
+                "320".to_string(),
+                vec![
+                    "me".to_string(),
+                    "kofany".to_string(),
+                    "is a Cloaked Connection (Spoof)".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/testserver").unwrap();
+        let m = buf.messages.back().unwrap();
+        assert_eq!(m.event_key.as_deref(), Some("whois_special"));
+        assert!(m.text.contains("is a Cloaked Connection (Spoof)"));
+        assert_eq!(
+            m.event_params.as_deref(),
+            Some(
+                &[
+                    "kofany".to_string(),
+                    "is a Cloaked Connection (Spoof)".to_string(),
+                ][..]
+            )
+        );
+    }
+
+    #[test]
+    fn whois_raw_freeform_numerics_get_event_keys() {
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+
+        for (numeric, expected_key, text) in [
+            ("307", "whois_registered", "is a registered nick"),
+            ("310", "whois_help", "is available for help"),
+            ("335", "whois_bot", "is a Bot on TestNet"),
+            ("338", "whois_actually", "is actually using host"),
+            ("378", "whois_host", "is connecting from *@1.2.3.4 1.2.3.4"),
+            ("379", "whois_modes", "is using modes +iwx"),
+        ] {
+            let msg = make_irc_msg(
+                None,
+                Command::Raw(
+                    numeric.to_string(),
+                    vec!["me".to_string(), "alice".to_string(), text.to_string()],
+                ),
+            );
+            handle_irc_message(&mut state, "test", &msg);
+
+            let buf = state.buffers.get("test/testserver").unwrap();
+            let m = buf.messages.back().unwrap();
+            assert_eq!(
+                m.event_key.as_deref(),
+                Some(expected_key),
+                "numeric {numeric} should map to {expected_key}"
+            );
+            assert!(m.text.contains(text), "numeric {numeric} text lost");
+            assert_eq!(
+                m.event_params.as_deref(),
+                Some(&["alice".to_string(), text.to_string()][..]),
+                "numeric {numeric} params"
+            );
+        }
+    }
+
+    #[test]
+    fn whois_raw_actually_joins_middle_args() {
+        // ircu-style 338 puts values in middle args with a trailing description:
+        // [me, nick, user@host, ip, "Actual user@host, Actual IP"]
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+
+        let msg = make_irc_msg(
+            None,
+            Command::Raw(
+                "338".to_string(),
+                vec![
+                    "me".to_string(),
+                    "alice".to_string(),
+                    "~u@1.2.3.4".to_string(),
+                    "1.2.3.4".to_string(),
+                    "Actual user@host, Actual IP".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/testserver").unwrap();
+        let m = buf.messages.back().unwrap();
+        assert_eq!(m.event_key.as_deref(), Some("whois_actually"));
+        assert!(m.text.contains("~u@1.2.3.4 1.2.3.4 Actual user@host, Actual IP"));
     }
 
     #[test]

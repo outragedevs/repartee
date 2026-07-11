@@ -4,6 +4,9 @@ use std::collections::HashSet;
 pub const DESIRED_CAPS: &[&str] = &[
     "multi-prefix",
     "extended-join",
+    // IRCnet ircd 2.12.0 extension — takes precedence over extended-join
+    // when both are acked; JOIN then carries <uid> <ip> <netjoin> too.
+    "ircnet.com/extended-join",
     "server-time",
     "account-tag",
     "cap-notify",
@@ -196,10 +199,11 @@ mod tests {
     #[test]
     fn negotiate_with_full_desired_list() {
         let caps = ServerCaps::parse(
-            "multi-prefix extended-join server-time account-tag cap-notify \
-             away-notify account-notify chghost echo-message invite-notify \
-             batch userhost-in-names message-tags draft/multiline draft/chathistory \
-             draft/event-playback sasl=PLAIN,EXTERNAL",
+            "multi-prefix extended-join ircnet.com/extended-join server-time \
+             account-tag cap-notify away-notify account-notify chghost \
+             echo-message invite-notify batch userhost-in-names message-tags \
+             draft/multiline draft/chathistory draft/event-playback \
+             sasl=PLAIN,EXTERNAL",
         );
         let result = caps.negotiate(DESIRED_CAPS);
         // All desired caps should be returned since the server advertises them all
@@ -210,6 +214,14 @@ mod tests {
                 "missing cap: {cap}"
             );
         }
+    }
+
+    #[test]
+    fn desired_caps_include_both_extended_join_variants() {
+        // IRCnet ircd 2.12.0 sends its own extended JOIN format instead of the
+        // IRCv3 one when both caps are acked — we must request both.
+        assert!(DESIRED_CAPS.contains(&"extended-join"));
+        assert!(DESIRED_CAPS.contains(&"ircnet.com/extended-join"));
     }
 
     #[test]

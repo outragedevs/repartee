@@ -35,6 +35,20 @@ fn compute_render_budget(buffer_len: usize, visible_height: usize, scroll_offset
 // Wrap-indent is cached on `App::wrap_indent` and recomputed only when
 // config or theme changes (see `App::recompute_wrap_indent`).
 
+/// Clamp the scroll offset against the wrapped lines produced this frame and
+/// derive how many leading lines to skip. Returns `(scroll, skip)`.
+///
+/// `total` is exact only when the render walk exhausted the buffer — which is
+/// precisely the at-the-top case this clamp exists for. A budget-limited walk
+/// always yields `total > visible_height + scroll_offset`, leaving the offset
+/// untouched.
+fn resolve_scroll(total: usize, visible_height: usize, scroll_offset: usize) -> (usize, usize) {
+    let max_scroll = total.saturating_sub(visible_height);
+    let scroll = scroll_offset.min(max_scroll);
+    let skip = total.saturating_sub(visible_height.saturating_add(scroll));
+    (scroll, skip)
+}
+
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     // Clear any emote placements up-front so early returns (shell buffer, zero
     // area) don't leave stale rects that would ghost-render over another view
@@ -142,9 +156,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         }
 
         let total = visual_lines.len();
-        let max_scroll = total.saturating_sub(visible_height);
-        let scroll = app.scroll_offset.min(max_scroll);
-        let skip = total.saturating_sub(visible_height + scroll);
+        let (scroll, skip) = resolve_scroll(total, visible_height, app.scroll_offset);
+        // Write the clamped value back: without this, wheel-up past the top
+        // leaves scroll_offset above max and every wheel-down only "works
+        // off" the excess while the view appears frozen. When the render
+        // budget cut the line walk short, `total` exceeds
+        // visible_height+offset and the offset passes through untouched, so
+        // this only clamps at the true top boundary.
+        app.scroll_offset = scroll;
 
         let visible_lines: Vec<Line<'_>> = visual_lines
             .into_iter()
@@ -250,6 +269,43 @@ mod tests {
                 got, expected,
                 "usize::MAX scroll_offset must not overflow and must cap at 100*MAX_WRAPPED_LINES_PER_MSG={expected}, got {got}"
             );
+        }
+    }
+
+    mod resolve_scroll {
+        use super::super::resolve_scroll;
+
+        #[test]
+        fn clamps_offset_past_top_to_max_scroll() {
+            // The wheel-up freeze bug: 10 extra ticks past the top left
+            // scroll_offset at max+30, and every wheel-down had to be
+            // "worked off" before the view moved. The resolved scroll must
+            // clamp to total-height so render can write it back.
+            let (scroll, skip) = resolve_scroll(100, 20, 500);
+            assert_eq!(scroll, 80, "offset past top must clamp to total-height");
+            assert_eq!(skip, 0, "clamped-at-top view starts at the first line");
+        }
+
+        #[test]
+        fn keeps_offset_within_range() {
+            let (scroll, skip) = resolve_scroll(100, 20, 30);
+            assert_eq!(scroll, 30);
+            assert_eq!(skip, 50);
+        }
+
+        #[test]
+        fn zero_offset_shows_bottom() {
+            let (scroll, skip) = resolve_scroll(100, 20, 0);
+            assert_eq!(scroll, 0);
+            assert_eq!(skip, 80);
+        }
+
+        #[test]
+        fn short_buffer_clamps_to_zero() {
+            // Fewer lines than the window: nothing to scroll at all.
+            let (scroll, skip) = resolve_scroll(5, 20, 7);
+            assert_eq!(scroll, 0);
+            assert_eq!(skip, 0);
         }
     }
 }
