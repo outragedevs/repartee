@@ -43,6 +43,14 @@ pub struct AppState {
     pub error: RwSignal<Option<String>>,
     pub timestamp_format: RwSignal<String>,
     pub line_height: RwSignal<f32>,
+    /// Client-side appearance overrides (persisted in localStorage, applied
+    /// as CSS vars by an Effect in `app.rs`). `None` = follow the server
+    /// setting / stylesheet default. These exist so a phone user can bump
+    /// text size without recompiling or touching the TUI config.
+    pub font_size_override: RwSignal<Option<u32>>,
+    pub line_height_override: RwSignal<Option<f32>>,
+    /// Appearance menu modal open flag.
+    pub appearance_open: RwSignal<bool>,
     pub nick_column_width: RwSignal<u32>,
     pub nick_max_length: RwSignal<u32>,
     pub nick_colors_enabled: RwSignal<bool>,
@@ -112,6 +120,19 @@ impl AppState {
             error: RwSignal::new(None),
             timestamp_format: RwSignal::new("%H:%M".to_string()),
             line_height: RwSignal::new(1.35),
+            // Clamp on load: the Aa menu clamps on write, but a stale or
+            // hand-edited stored value (e.g. "999") would otherwise apply
+            // raw and could make the UI — including the reset button —
+            // unusable.
+            font_size_override: RwSignal::new(
+                load_stored_parsed::<i64>(FONT_SIZE_KEY)
+                    .map(crate::components::appearance::clamp_font),
+            ),
+            line_height_override: RwSignal::new(
+                load_stored_parsed::<f32>(LINE_HEIGHT_KEY)
+                    .map(crate::components::appearance::clamp_line_h),
+            ),
+            appearance_open: RwSignal::new(false),
             nick_column_width: RwSignal::new(12),
             nick_max_length: RwSignal::new(9),
             nick_colors_enabled: RwSignal::new(true),
@@ -858,6 +879,34 @@ fn follow_tui_active_buffer() -> bool {
         storage.get_item(FOLLOW_TUI_BUFFER_KEY),
         Ok(Some(ref v)) if v == "false"
     )
+}
+
+/// localStorage keys for the client-side appearance overrides.
+pub const FONT_SIZE_KEY: &str = "repartee-font-size";
+pub const LINE_HEIGHT_KEY: &str = "repartee-line-height";
+
+/// Read + parse an optional localStorage value; absent or malformed → `None`.
+fn load_stored_parsed<T: std::str::FromStr>(key: &str) -> Option<T> {
+    web_sys::window()
+        .and_then(|w| w.local_storage().ok().flatten())
+        .and_then(|s| s.get_item(key).ok().flatten())
+        .and_then(|v| v.parse().ok())
+}
+
+/// Persist an optional override: `Some` writes the value, `None` removes the
+/// key (back to defaults).
+pub fn store_or_remove(key: &str, value: Option<&str>) {
+    let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) else {
+        return;
+    };
+    match value {
+        Some(v) => {
+            let _ = storage.set_item(key, v);
+        }
+        None => {
+            let _ = storage.remove_item(key);
+        }
+    }
 }
 
 const DISMISSED_PREVIEWS_KEY: &str = "repartee-dismissed-previews";

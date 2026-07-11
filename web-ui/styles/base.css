@@ -26,7 +26,10 @@ html, body {
     background: var(--bg);
     color: var(--fg);
     font-family: 'FiraCode Nerd Font Mono', 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', monospace;
-    font-size: 13px;
+    /* User-adjustable via the Aa menu (inline --font-size on <html>,
+       persisted in localStorage). The fallback here is the desktop default;
+       the mobile media block below raises the no-override default to 14px. */
+    font-size: var(--font-size, 13px);
     line-height: var(--line-height, 1.35);
     overflow: hidden;
     overscroll-behavior: none;
@@ -56,7 +59,9 @@ html, body {
 .topic-bar {
     background: var(--bg-alt);
     padding: 2px 8px;
-    height: 20px;
+    /* Sized by its line box, not a fixed px height — the root font size is
+       user-adjustable (Aa menu) and a hard 20px would clip larger fonts. */
+    min-height: 20px;
     display: flex;
     align-items: center;
     overflow: hidden;
@@ -189,7 +194,9 @@ html, body {
 }
 
 .chat-line .ts {
-    width: 70px;
+    /* ch, not px: the column must scale with the user-adjustable font.
+       9ch fits "HH:MM:SS" plus breathing room (≈70px at the 13px default). */
+    width: 9ch;
     flex-shrink: 0;
     color: var(--fg-dim);
 }
@@ -402,7 +409,7 @@ html, body {
     border-radius: 3px;
     outline: none;
     font-family: inherit;
-    font-size: 13px;
+    font-size: var(--font-size, 13px);
     line-height: var(--line-height, 1.35);
     resize: none;
     overflow: hidden;
@@ -658,14 +665,28 @@ html, body {
     /* Compact status bar on mobile */
     .status-line { font-size: 11px; }
 
-    /* Touch-friendly input — 16px prevents iOS Safari auto-zoom on focus */
+    /* Larger no-override default on phones (tester: 13px is too small).
+       An explicit --font-size from the Aa menu still wins. */
+    html, body { font-size: var(--font-size, 14px); }
+
+    /* Touch-friendly input — never below 16px, which is the threshold that
+       stops iOS Safari from auto-zooming the page on focus. */
     .input-line textarea {
-        font-size: 16px;
+        font-size: max(16px, var(--font-size, 14px));
         padding: 6px 8px;
     }
 }
 
 /* === Theme switcher === */
+
+/* Shared row for the theme swatches + Aa button in the bottom bar / panel. */
+.bar-tools {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    background: var(--bg-alt);
+}
 
 .theme-picker {
     display: flex;
@@ -674,6 +695,98 @@ html, body {
     justify-content: center;
     background: var(--bg-alt);
 }
+
+/* === Appearance (Aa) menu === */
+
+.appearance-btn {
+    font-family: inherit;
+    font-size: 11px;
+    padding: 0 6px;
+    cursor: pointer;
+    background: transparent;
+    border: 1px solid var(--fg-muted);
+    border-radius: 4px;
+    color: var(--fg-muted);
+    line-height: 1.5;
+    -webkit-tap-highlight-color: transparent;
+}
+.appearance-btn:hover { color: var(--fg); border-color: var(--accent); }
+
+.appearance-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 40;
+}
+
+.appearance-modal {
+    position: fixed;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 41;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px;
+    width: min(320px, 92vw);
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+.appearance-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.appearance-label {
+    flex: 1;
+    color: var(--fg);
+    font-size: 13px;
+}
+
+.appearance-step {
+    width: 32px;
+    height: 32px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--fg);
+    font-size: 16px;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+.appearance-step:hover { border-color: var(--accent); }
+
+.appearance-value {
+    min-width: 52px;
+    text-align: center;
+    color: var(--accent);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+}
+
+.appearance-actions {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 2px;
+}
+
+.appearance-reset,
+.appearance-close {
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: none;
+    cursor: pointer;
+    font-size: 12px;
+    font-family: inherit;
+}
+.appearance-reset { background: var(--border); color: var(--fg); }
+.appearance-close { background: var(--accent); color: var(--bg); font-weight: 600; }
 
 .theme-swatch {
     width: 10px;

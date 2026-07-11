@@ -1,3 +1,4 @@
+pub mod appearance;
 pub mod buffer_list;
 pub mod chat_view;
 pub mod emoji_picker;

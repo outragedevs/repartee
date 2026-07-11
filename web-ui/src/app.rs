@@ -1,4 +1,5 @@
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 
 use crate::components::layout::Layout;
 use crate::components::login::Login;
@@ -44,9 +45,48 @@ pub fn App() -> impl IntoView {
         {
             let _ = doc.set_attribute("data-theme", &theme);
         }
-        if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
-            let _ = storage.set_item("repartee-theme", &theme);
+        crate::state::store_or_remove("repartee-theme", Some(&theme));
+    });
+
+    // Apply + persist the appearance vars. The stylesheet reads
+    // `var(--font-size, …)` / `var(--line-height, 1.35)`, so REMOVING the
+    // inline property is what restores the stylesheet defaults — never write
+    // a hardcoded fallback here. Line height without a local override follows
+    // the server's `web.line_height` (this Effect is what makes that setting
+    // actually take effect; it previously went nowhere).
+    Effect::new(move || {
+        let font_px = state.font_size_override.get();
+        let line_h = state.line_height_override.get();
+        let server_line_h = state.line_height.get();
+
+        if let Some(root) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.document_element())
+            .and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok())
+        {
+            let style = root.style();
+            match font_px {
+                Some(px) => {
+                    let _ = style.set_property("--font-size", &format!("{px}px"));
+                }
+                None => {
+                    let _ = style.remove_property("--font-size");
+                }
+            }
+            let effective_lh = line_h.unwrap_or(server_line_h);
+            // Two decimals: the stepper works in 0.05 increments, and f32
+            // arithmetic noise ("1.4000001") must not leak into the CSS.
+            let _ = style.set_property("--line-height", &format!("{effective_lh:.2}"));
         }
+
+        crate::state::store_or_remove(
+            crate::state::FONT_SIZE_KEY,
+            font_px.map(|v| v.to_string()).as_deref(),
+        );
+        crate::state::store_or_remove(
+            crate::state::LINE_HEIGHT_KEY,
+            line_h.map(|v| v.to_string()).as_deref(),
+        );
     });
 
     view! {

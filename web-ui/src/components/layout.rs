@@ -1,5 +1,6 @@
 use leptos::prelude::*;
 
+use super::appearance::{AppearanceButton, AppearanceModal};
 use super::buffer_list::BufferList;
 use super::chat_view::ChatView;
 use super::emoji_picker::EmojiPicker;
@@ -120,9 +121,12 @@ pub fn Layout() -> impl IntoView {
         <div class="app">
             // Add-server wizard modal (fixed-position overlay; rendered once).
             <ServerWizard />
-            // Emote/emoji picker modals (fixed-position overlays; rendered once).
+            // Emote/emoji picker + appearance modals (fixed-position
+            // overlays; rendered once — never inside the transformed slide
+            // panels, where position:fixed would break).
             <EmotePicker />
             <EmojiPicker />
+            <AppearanceModal />
             // Backend error toast — surfaces any WebEvent::Error in the
             // authenticated app (e.g. a failed wizard save, whose modal has
             // already closed optimistically). Dismissible; also cleared on the
@@ -145,7 +149,10 @@ pub fn Layout() -> impl IntoView {
                 <div class="bottom-bar">
                     <StatusLine />
                     <InputLine />
-                    <ThemePicker />
+                    <div class="bar-tools">
+                        <ThemePicker />
+                        <AppearanceButton />
+                    </div>
                 </div>
             </div>
 
@@ -210,7 +217,10 @@ pub fn Layout() -> impl IntoView {
                         }}
                     </div>
                     <BufferList />
-                    <ThemePicker />
+                    <div class="bar-tools">
+                        <ThemePicker />
+                        <AppearanceButton />
+                    </div>
                 </div>
 
                 <div class="slide-overlay" class:visible=right_open

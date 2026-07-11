@@ -253,10 +253,16 @@ pub fn ChatView() -> impl IntoView {
     // append (or backlog batch) triggers; `pin_scheduled` debounces
     // bursts so we pin at most once per animation frame. RAF lets
     // Leptos commit the DOM patch first, so we measure against the
-    // final scrollHeight.
+    // final scrollHeight. Also subscribes to the appearance signals —
+    // changing font size / line spacing reflows every line and would
+    // otherwise leave the viewport mid-history with is_at_bottom still
+    // true (visible snap on the next append).
     Effect::new(move || {
         state.messages.with(|_| ());
         let _ = state.active_buffer.get();
+        let _ = state.font_size_override.get();
+        let _ = state.line_height_override.get();
+        let _ = state.line_height.get();
         if !state.is_at_bottom.get_untracked() {
             return;
         }
