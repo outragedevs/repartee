@@ -765,13 +765,15 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
             let nick = nick_text.clone();
             move || nick_color_or_empty(state, &nick, !is_own)
         };
+        let on_nick_click = mention_on_click(state, nick_text.clone());
         view! {
             <>
                 <div class=line_class data-mid=mid>
                     <span class="ts">{ts_fn}</span>
                     <span class="action-body">
                         "* "
-                        <span class="action-nick" style=nick_color_style>{nick_text}</span>
+                        <span class="action-nick" style=nick_color_style
+                            on:click=on_nick_click>{nick_text}</span>
                         " "
                         {styled}
                     </span>
@@ -832,6 +834,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
             let nick = nick_text.clone();
             move || nick_color_or_empty(state, &nick, !is_own && !highlight)
         };
+        let on_nick_click = mention_on_click(state, nick_text.clone());
 
         view! {
             <>
@@ -839,7 +842,8 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
                     <span class="ts">{ts_fn}</span>
                     <span class="nick" style=nick_style>
                         <span class="mode">{mode}</span>
-                        <span class="name" style=nick_color_style>{nick_truncated}</span>
+                        <span class="name" style=nick_color_style
+                            on:click=on_nick_click>{nick_truncated}</span>
                         <span class="sep">"❯"</span>
                     </span>
                     <span class="text">{styled}</span>
@@ -848,6 +852,31 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
             </>
         }
         .into_any()
+    }
+}
+
+/// Click handler for a nick in the chat log: queue the nick as a mention for
+/// the input (which picks the `nick: ` / `nick ` delimiter by caret
+/// context). Selecting the nick to copy it must NOT also insert it, and a
+/// double-click's FIRST click still fires with a collapsed selection — so the
+/// insert is deferred past the double-click window and the selection is
+/// re-checked at commit time (later clicks of a multi-click bail immediately
+/// via `detail()`).
+fn mention_on_click(state: AppState, nick: String) -> impl Fn(web_sys::MouseEvent) + Clone {
+    move |ev: web_sys::MouseEvent| {
+        if ev.detail() > 1 || nick.is_empty() {
+            return;
+        }
+        let nick = nick.clone();
+        leptos::task::spawn_local(async move {
+            gloo_timers::future::sleep(std::time::Duration::from_millis(300)).await;
+            let selecting = web_sys::window()
+                .and_then(|w| w.get_selection().ok().flatten())
+                .is_some_and(|s| !s.is_collapsed());
+            if !selecting {
+                state.pending_mention.set(Some(nick));
+            }
+        });
     }
 }
 

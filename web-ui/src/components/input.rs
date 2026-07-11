@@ -185,10 +185,105 @@ pub fn InputLine() -> impl IntoView {
 
     let input_ref = NodeRef::<leptos::html::Textarea>::new();
 
+    // Sent-message history (irssi/TheLounge-style ↑/↓ recall). In-memory,
+    // newest last, capped; `hist_pos` is the entry being browsed (`None` =
+    // live draft, which is stashed in `hist_draft` on entry so ↓ past the
+    // newest entry restores it).
+    const MAX_HISTORY: usize = 100;
+    let history = StoredValue::new(Vec::<String>::new());
+    let hist_pos = StoredValue::new(None::<usize>);
+    let hist_draft = StoredValue::new(String::new());
+
+    let push_history = move |text: &str| {
+        // Skip big multiline sends: recalling a 1000-line paste with ↑ is
+        // never what the user wants, and 100 such entries would pin
+        // megabytes for the session. Small multiline drafts still recall.
+        const MAX_HISTORY_LINES: usize = 3;
+        if !text.trim().is_empty() && text.lines().count() <= MAX_HISTORY_LINES {
+            history.update_value(|h| {
+                if h.last().map(String::as_str) != Some(text) {
+                    h.push(text.to_string());
+                    if h.len() > MAX_HISTORY {
+                        let drop = h.len() - MAX_HISTORY;
+                        h.drain(..drop);
+                    }
+                }
+            });
+        }
+        hist_pos.set_value(None);
+    };
+
+    // Clear the inline height so an emptied textarea returns to its natural
+    // single-row size — shared by the Enter and send-button paths. (Not
+    // `resize_textarea`: measuring immediately after clearing the value
+    // would race the reactive prop:value DOM write for no benefit.)
+    let reset_textarea_height = move || {
+        if let Some(el) = input_ref.get_untracked() {
+            let html_el: &web_sys::HtmlTextAreaElement = el.as_ref();
+            let el_html: &web_sys::HtmlElement = html_el.unchecked_ref();
+            el_html.style().set_property("height", "").ok();
+        }
+    };
+
+    // Fit the textarea to its content — shared by the input handler and the
+    // programmatic value writes (history recall, mention insert).
+    let resize_textarea = move || {
+        if let Some(el) = input_ref.get_untracked() {
+            let html_el: &web_sys::HtmlTextAreaElement = el.as_ref();
+            let style: &web_sys::HtmlElement = html_el.unchecked_ref();
+            style.style().set_property("height", "auto").ok();
+            let scroll_h = html_el.scroll_height();
+            let max_h = 120; // max ~6 lines
+            let h = scroll_h.min(max_h);
+            style.style().set_property("height", &format!("{h}px")).ok();
+        }
+    };
+
     // Hide the popup when the active buffer changes — its nick matches came
     // from the buffer it was computed in.
     Effect::new(move || {
         let _ = state.active_buffer.get();
+        set_popup.set(None);
+    });
+
+    // Consume a tapped-nick mention (chat log → input). The delimiter
+    // depends on caret context, which only this component knows: `nick: `
+    // when the caret's line is still empty, `nick ` mid-sentence (with a
+    // separating space if the caret touches a word). Mirrors the popup's
+    // delimiter rules. Only the visible twin consumes, like pending_insert.
+    Effect::new(move |_| {
+        let Some(nick) = state.pending_mention.get() else {
+            return;
+        };
+        let Some(el) = input_ref.get_untracked() else {
+            return;
+        };
+        let html_el: &web_sys::HtmlTextAreaElement = el.as_ref();
+        let visible = {
+            let he: &web_sys::HtmlElement = html_el.unchecked_ref();
+            he.offset_parent().is_some()
+        };
+        if !visible {
+            return;
+        }
+        let text = value.get_untracked();
+        let cursor = get_textarea_cursor(&input_ref, &text);
+        let before = &text[..cursor];
+        let token = if at_line_start(&text, cursor) {
+            format!("{nick}: ")
+        } else if before.ends_with(' ') {
+            format!("{nick} ")
+        } else {
+            format!(" {nick} ")
+        };
+        let new_text = format!("{}{token}{}", &text[..cursor], &text[cursor..]);
+        let new_cursor = cursor + token.len();
+        set_value.set(new_text.clone());
+        set_textarea_cursor(&input_ref, &new_text, new_cursor);
+        resize_textarea();
+        let _ = html_el.focus();
+        state.pending_mention.set(None);
+        hist_pos.set_value(None);
         set_popup.set(None);
     });
 
@@ -288,8 +383,10 @@ pub fn InputLine() -> impl IntoView {
         let _ = html_el.focus();
         state.pending_insert.set(None);
         // The splice changed `value` without going through on_input — any
-        // open popup now holds a stale byte range; drop it.
+        // open popup now holds a stale byte range; drop it. The draft also
+        // diverged from any history entry being browsed.
         set_popup.set(None);
+        hist_pos.set_value(None);
     });
 
     // Global keydown listener — focus textarea when user types anywhere.
@@ -492,19 +589,51 @@ pub fn InputLine() -> impl IntoView {
             }
         }
 
+        // Input history — ↑ on the draft's first line recalls older sends,
+        // ↓ on the last line walks back toward the live draft. Vertical
+        // caret movement inside a multiline draft is untouched (only the
+        // edge lines intercept). The popup block above already returned if
+        // the completion list was open.
+        let key = ev.key();
+        if key == "ArrowUp" || key == "ArrowDown" {
+            let up = key == "ArrowUp";
+            let text = value.get_untracked();
+            let cursor = get_textarea_cursor(&input_ref, &text);
+            let at_edge_line = if up {
+                !text[..cursor].contains('\n')
+            } else {
+                !text[cursor..].contains('\n')
+            };
+            if at_edge_line {
+                let len = history.with_value(Vec::len);
+                if let Some(next) = history_step(len, hist_pos.get_value(), up) {
+                    ev.prevent_default();
+                    if hist_pos.get_value().is_none() {
+                        hist_draft.set_value(text);
+                    }
+                    let new_text = match next {
+                        Some(i) => history.with_value(|h| h[i].clone()),
+                        None => hist_draft.get_value(),
+                    };
+                    hist_pos.set_value(next);
+                    set_value.set(new_text.clone());
+                    let end = new_text.len();
+                    set_textarea_cursor(&input_ref, &new_text, end);
+                    resize_textarea();
+                    return;
+                }
+            }
+        }
+
         if ev.key() == "Enter" && !ev.shift_key() {
             ev.prevent_default();
             set_tab_active.set(false);
             set_popup.set(None);
             let text = value.get();
+            push_history(&text);
             send_text(text);
             set_value.set(String::new());
-            // Reset textarea height.
-            if let Some(el) = input_ref.get_untracked() {
-                let html_el: &web_sys::HtmlTextAreaElement = el.as_ref();
-                let el_html: &web_sys::HtmlElement = html_el.unchecked_ref();
-                el_html.style().set_property("height", "").ok();
-            }
+            reset_textarea_height();
             return;
         }
 
@@ -595,16 +724,10 @@ pub fn InputLine() -> impl IntoView {
     let on_input = move |ev: web_sys::Event| {
         let target = event_target_value(&ev);
         set_value.set(target);
-        // Resize textarea to fit content.
-        if let Some(el) = input_ref.get_untracked() {
-            let html_el: &web_sys::HtmlTextAreaElement = el.as_ref();
-            let style: &web_sys::HtmlElement = html_el.unchecked_ref();
-            style.style().set_property("height", "auto").ok();
-            let scroll_h = html_el.scroll_height();
-            let max_h = 120; // max ~6 lines
-            let h = scroll_h.min(max_h);
-            style.style().set_property("height", &format!("{h}px")).ok();
-        }
+        resize_textarea();
+        // An edit forks off whatever history entry was being browsed — the
+        // current text is the live draft again.
+        hist_pos.set_value(None);
         // Recompute the completion popup for the word at the caret.
         let text = value.get_untracked();
         let cursor = get_textarea_cursor(&input_ref, &text);
@@ -685,14 +808,10 @@ pub fn InputLine() -> impl IntoView {
             <button class="send-btn" on:click=move |_| {
                 set_popup.set(None);
                 let text = value.get();
+                push_history(&text);
                 send_text(text);
                 set_value.set(String::new());
-                // Reset textarea height.
-                if let Some(el) = input_ref.get_untracked() {
-                    let html_el: &web_sys::HtmlTextAreaElement = el.as_ref();
-                    let el_html: &web_sys::HtmlElement = html_el.unchecked_ref();
-                    el_html.style().set_property("height", "").ok();
-                }
+                reset_textarea_height();
             }
                 inner_html="<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='16' height='16' fill='currentColor'><path d='M2.01 21L23 12 2.01 3 2 10l15 2-15 2z'/></svg>"
             ></button>
@@ -751,6 +870,24 @@ fn set_textarea_cursor(input_ref: &NodeRef<leptos::html::Textarea>, text: &str, 
     }
 }
 
+/// Next history position for an ↑/↓ step. `len` is the history length,
+/// `current` the entry being browsed (`None` = live draft), `up` the
+/// direction. `None` = the step does nothing (empty history, ↑ at the
+/// oldest, ↓ while not browsing); `Some(next)` otherwise, where
+/// `next == None` means "leave history, restore the draft".
+fn history_step(len: usize, current: Option<usize>, up: bool) -> Option<Option<usize>> {
+    if len == 0 {
+        return None;
+    }
+    match (current, up) {
+        (None, true) => Some(Some(len - 1)),
+        (None, false) | (Some(0), true) => None,
+        (Some(i), true) => Some(Some(i - 1)),
+        (Some(i), false) if i + 1 < len => Some(Some(i + 1)),
+        (Some(_), false) => Some(None),
+    }
+}
+
 /// Nicks that can be completed/mentioned in the active buffer: the live nick
 /// list for channels, or the peer's nick for query buffers (queries have no
 /// NAMES list). Reads signals untracked — callers are event handlers.
@@ -785,11 +922,18 @@ fn word_bounds(text: &str, cursor: usize) -> (usize, &str) {
     (word_start, &before[word_start..])
 }
 
-/// Whether `word_start` sits at the start of a line (start of the input or
-/// right after a newline) — where completed nicks take the addressing `": "`
-/// delimiter instead of a plain space. Shared by Tab completion and the popup.
-fn at_line_start(text: &str, word_start: usize) -> bool {
-    word_start == 0 || text[..word_start].ends_with('\n')
+/// Whether everything before `pos` on its own line is blank — the "line
+/// start" predicate that selects the addressing `": "` delimiter for
+/// completed/tapped nicks (whitespace-only prefixes count as line start).
+/// Shared by Tab completion, the popup, and the tapped-nick mention so the
+/// three paths can't drift.
+fn at_line_start(text: &str, pos: usize) -> bool {
+    text[..pos]
+        .rsplit('\n')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .is_empty()
 }
 
 /// Popup computation with a cheap trigger pre-check: the nick list is only
@@ -1107,6 +1251,14 @@ mod tests {
     }
 
     #[test]
+    fn popup_whitespace_prefix_counts_as_line_start() {
+        // "  @do" — only blanks before the trigger word: still the
+        // addressing form, matching the tapped-nick mention path.
+        let p = popup_matches("  @do", 5, &nicks(&["doddy"]), true).unwrap();
+        assert_eq!(p.items[0].insert, "doddy: ");
+    }
+
+    #[test]
     fn popup_word_detection_respects_newlines() {
         // The start of a later line in a multiline draft is still a line
         // start — the addressing ": " delimiter applies there too.
@@ -1160,6 +1312,27 @@ mod tests {
             convert_leading_at_mention("@doddy, hej", &nicks(&["doddy"])),
             "doddy: hej"
         );
+    }
+
+    // ── input history stepping ──────────────────────────────────────────
+
+    #[test]
+    fn history_step_walks_up_then_back_to_draft() {
+        // 3 entries; from the draft, ↑ lands on the newest (index 2).
+        assert_eq!(history_step(3, None, true), Some(Some(2)));
+        assert_eq!(history_step(3, Some(2), true), Some(Some(1)));
+        assert_eq!(history_step(3, Some(1), true), Some(Some(0)));
+        // ↑ at the oldest: no-op.
+        assert_eq!(history_step(3, Some(0), true), None);
+        // ↓ walks forward; past the newest → back to the draft (None).
+        assert_eq!(history_step(3, Some(1), false), Some(Some(2)));
+        assert_eq!(history_step(3, Some(2), false), Some(None));
+    }
+
+    #[test]
+    fn history_step_noop_cases() {
+        assert_eq!(history_step(0, None, true), None, "empty history");
+        assert_eq!(history_step(3, None, false), None, "down while not browsing");
     }
 
     #[test]

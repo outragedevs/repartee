@@ -89,6 +89,10 @@ pub struct AppState {
     /// A token to splice into the input at the caret (`:name:` or a Unicode
     /// emoji). The input component consumes it and clears it back to `None`.
     pub pending_insert: RwSignal<Option<String>>,
+    /// A nick to mention, set by tapping a nick in the chat log. The input
+    /// component consumes it, choosing the delimiter by caret context
+    /// (`nick: ` at a line start, `nick ` mid-sentence).
+    pub pending_mention: RwSignal<Option<String>>,
     /// Per-buffer: whether the server reported more history is available older
     /// than what's loaded (from the `has_more` field of `Messages`). Drives the
     /// scroll-up loader — `false` (or absent) means stop fetching.
@@ -149,6 +153,7 @@ impl AppState {
             emote_picker_open: RwSignal::new(false),
             emoji_picker_open: RwSignal::new(false),
             pending_insert: RwSignal::new(None),
+            pending_mention: RwSignal::new(None),
             backlog_has_more: RwSignal::new(HashMap::new()),
             backlog_fetching: RwSignal::new(HashSet::new()),
         }

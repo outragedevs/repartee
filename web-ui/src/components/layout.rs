@@ -79,6 +79,22 @@ pub fn Layout() -> impl IntoView {
 
     let mention_count = move || state.mention_count.get();
 
+    // Tap on a mentions badge → jump to the mentions buffer (if present).
+    // FetchMentions makes the server reply with MentionsList, which is the
+    // only thing that resets `mention_count` — without it the badge would
+    // keep its stale count until a full resync.
+    let jump_to_mentions = move |_| {
+        let target = state.buffers.with_untracked(|bufs| {
+            bufs.iter()
+                .find(|b| b.buffer_type == "mentions")
+                .map(|b| b.id.clone())
+        });
+        if let Some(id) = target {
+            state.switch_to_buffer(&id);
+            crate::ws::send_command(&WebCommand::FetchMentions);
+        }
+    };
+
     // Swipe gesture state.
     let (touch_start_x, set_touch_start_x) = signal(0i32);
     let (touch_start_y, set_touch_start_y) = signal(0i32);
@@ -177,10 +193,15 @@ pub fn Layout() -> impl IntoView {
                                 .nth(30)
                                 .map_or(topic.len(), |(i, _)| i);
                             let topic_short = &topic[..topic_end];
+                            let topic_full = topic.clone();
                             view! {
                                 <span class="mobile-chan">{b.name}{modes}</span>
                                 {(!topic.is_empty()).then(|| view! {
-                                    <span class="mobile-topic">{format!(" — {topic_short}")}</span>
+                                    // Full topic in the tooltip — the
+                                    // breadcrumb only fits ~30 chars.
+                                    <span class="mobile-topic" title=topic_full>
+                                        {format!(" — {topic_short}")}
+                                    </span>
                                 })}
                             }
                         })}
@@ -189,7 +210,8 @@ pub fn Layout() -> impl IntoView {
                         {move || {
                             let count = mention_count();
                             (count > 0).then(|| view! {
-                                <span class="mention-badge">{count.to_string()}</span>
+                                <span class="mention-badge" title="Open mentions"
+                                    on:click=jump_to_mentions>{count.to_string()}</span>
                             })
                         }}
                         <span class="nicklist-btn" on:click=move |_| set_right_open.set(true)>
@@ -212,7 +234,8 @@ pub fn Layout() -> impl IntoView {
                         {move || {
                             let count = mention_count();
                             (count > 0).then(|| view! {
-                                <span class="mention-badge">{format!("{count} mentions")}</span>
+                                <span class="mention-badge" title="Open mentions"
+                                    on:click=jump_to_mentions>{format!("{count} mentions")}</span>
                             })
                         }}
                     </div>

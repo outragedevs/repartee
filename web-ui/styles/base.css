@@ -90,7 +90,31 @@ html, body {
     padding: 0 6px;
     line-height: 1.4;
     cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 4px;
 }
+
+.buffer-item .name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.buffer-item .unread-badge {
+    flex-shrink: 0;
+    font-size: 9px;
+    line-height: 1.6;
+    padding: 0 5px;
+    border-radius: 8px;
+    background: rgba(122, 162, 247, 0.18);
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+}
+
+/* Buffers of a disconnected network are dimmed at a glance. */
+.buffer-item.offline .name { opacity: 0.45; }
 
 .buffer-list .buffer-item:hover { background: rgba(255,255,255,0.03); }
 
@@ -206,7 +230,10 @@ html, body {
     white-space: nowrap;
 }
 .chat-line .nick .mode { color: var(--fg-muted); }
-.chat-line .nick .name { color: var(--accent); font-weight: bold; }
+.chat-line .nick .name { color: var(--accent); font-weight: bold; cursor: pointer; }
+.chat-line .nick .name:hover { text-decoration: underline; }
+.chat-line .action-nick { cursor: pointer; }
+.chat-line .action-nick:hover { text-decoration: underline; }
 .chat-line .nick .sep { color: var(--accent); margin-left: 2px; }
 .chat-line .text {
     padding-left: 4px;
@@ -553,11 +580,13 @@ html, body {
         overflow-wrap: anywhere;
     }
 
-    /* Mobile top bar */
+    /* Mobile top bar — safe-area padding keeps it clear of the notch /
+       status bar (viewport-fit=cover extends the page under them). */
     .mobile-topbar {
         display: flex;
         background: var(--bg-alt);
         padding: 4px 8px;
+        padding-top: calc(4px + env(safe-area-inset-top));
         align-items: center;
         border-bottom: 1px solid var(--border);
         min-height: 28px;
@@ -625,6 +654,10 @@ html, body {
         flex-direction: column;
         touch-action: pan-y;
         will-change: transform;
+        /* Clear the notch / home indicator (viewport-fit=cover). */
+        padding-top: env(safe-area-inset-top);
+        padding-bottom: env(safe-area-inset-bottom);
+        padding-left: env(safe-area-inset-left);
     }
     .slide-panel-left.open { transform: translateX(0); }
 
@@ -642,6 +675,10 @@ html, body {
         flex-direction: column;
         touch-action: pan-y;
         will-change: transform;
+        /* Clear the notch / home indicator (viewport-fit=cover). */
+        padding-top: env(safe-area-inset-top);
+        padding-bottom: env(safe-area-inset-bottom);
+        padding-right: env(safe-area-inset-right);
     }
     .slide-panel-right.open { transform: translateX(0); }
 
