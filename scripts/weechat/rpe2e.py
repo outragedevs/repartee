@@ -28,6 +28,7 @@ import os
 import sqlite3
 import struct
 import time
+import datetime
 import fnmatch
 import collections
 import traceback
@@ -387,6 +388,51 @@ _own_handle: dict[str, str] = {}
 # (server, sender nick), so a chatty peer doesn't flood the buffer while we
 # wait for the self-WHOIS reply.
 _own_wait_notice_at: dict[tuple, float] = {}
+
+# Wire bodies THIS client sent recently (body → ts), for echo correlation.
+# An own-prefix inbound wire matching this set is our live echo-message echo
+# (prefix trustworthy, plaintext already rendered → swallow); one that does
+# NOT match is a bouncer relay from another attached client or fresh
+# playback — never a handle source, and decrypted with our OWN outgoing key
+# instead of being swallowed. Nick equality alone cannot tell these apart.
+_recent_sent_wires: dict[str, float] = {}
+_SENT_WIRE_TTL = 300.0
+_SENT_WIRE_MAX = 512
+
+
+def _note_sent_wire(body: str) -> None:
+    now_f = time.time()
+    if len(_recent_sent_wires) >= _SENT_WIRE_MAX:
+        for k, ts in list(_recent_sent_wires.items()):
+            if now_f - ts > _SENT_WIRE_TTL:
+                del _recent_sent_wires[k]
+    if len(_recent_sent_wires) < _SENT_WIRE_MAX:
+        _recent_sent_wires[body] = now_f
+
+
+def _take_sent_wire(body: str) -> bool:
+    ts = _recent_sent_wires.pop(body, None)
+    return ts is not None and time.time() - ts <= _SENT_WIRE_TTL
+
+
+def _tags_suggest_replay(tags: str) -> bool:
+    """True when an IRCv3 tag section marks the line as NOT a live echo: a
+    `batch` tag (chathistory / znc.in/playback) or a `time` stamp far from
+    now. Unparseable time stamps count as replay — when in doubt, do not
+    treat the line's prefix as our current handle."""
+    if not tags:
+        return False
+    for t in tags[1:].strip().split(";"):
+        if t.startswith("batch="):
+            return True
+        if t.startswith("time="):
+            val = t[5:].replace("Z", "+00:00")
+            try:
+                ts = datetime.datetime.fromisoformat(val).timestamp()
+            except (ValueError, OverflowError):
+                return True
+            return abs(time.time() - ts) > 120
+    return False
 
 
 class IncomingBucket:
@@ -1126,6 +1172,10 @@ def _send_raw_notice(server: str, nick: str, ctcp_body: str) -> bool:
 def _send_raw_privmsg(server: str, target: str, body: str) -> bool:
     if weechat is None:
         return False
+    # Every wire this client emits goes through here — record it so an
+    # own-prefix inbound copy can be correlated as OUR live echo (vs a
+    # bouncer relay from another attached client / playback).
+    _note_sent_wire(body)
     buf = weechat.buffer_search("irc", f"server.{server}") or ""
     if not buf:
         infolist = weechat.infolist_get("buffer", "", "")
@@ -2390,6 +2440,46 @@ def hook_irc_in_chghost(data, modifier, server, msg):
     return msg
 
 
+def _decrypt_own_copy(server: str, tags: str, prefix: str, target: str, wire) -> str:
+    """Render a copy of OUR OWN message that arrived from outside this client
+    (another attached bouncer client, or fresh playback): decrypt it with our
+    own OUTGOING key for the conversation. `target` is the RECIPIENT (channel
+    or peer nick). Undecryptable (rotated key, unknown peer) → drop with a
+    debug line — never fall through to the peer path (whose failure mode is
+    an auto-KEYREQ to ourselves)."""
+    readings = _channel_readings(target)
+    if readings:
+        ctxs = readings
+    else:
+        h = _resolve_handle_for_command(server, target, target)
+        if not h:
+            _dbg(f"_decrypt_own_copy: cannot resolve peer handle for {target} — dropped")
+            return ""
+        ctxs = ["@" + h]
+    with db_conn() as c:
+        for ctx in ctxs:
+            row = c.execute(
+                "SELECT sk FROM outgoing WHERE channel = ?", (ctx,)
+            ).fetchone()
+            if row is None:
+                continue
+            aad = build_aad(ctx, wire["msgid"], wire["ts"], wire["part"], wire["total"])
+            pt = aead_decrypt(row[0], wire["nonce"], aad, wire["ct"])
+            if pt is None:
+                continue
+            try:
+                pt_str = pt.decode("utf-8")
+            except UnicodeDecodeError:
+                pt_str = pt.decode("utf-8", errors="replace")
+            # Same guard as the peer path: never re-inject a decrypted
+            # non-ACTION CTCP into weechat's pipeline.
+            if pt_str.startswith("\x01") and not pt_str.startswith("\x01ACTION "):
+                return ""
+            return f"{tags}:{prefix} PRIVMSG {target} :{pt_str}"
+    _dbg(f"_decrypt_own_copy: no matching outgoing key for {target} (rotated?) — dropped")
+    return ""
+
+
 def hook_irc_in_privmsg(data, modifier, server, msg):
     try:
         tags, line = _split_irc_tags(msg)
@@ -2408,22 +2498,23 @@ def hook_irc_in_privmsg(data, modifier, server, msg):
         target = rest_parts[1]
         text = rest_parts[2][1:] if rest_parts[2].startswith(":") else rest_parts[2]
 
-        # echo-message: the server echoes our own PRIVMSG back with our
-        # CANONICAL prefix — the freshest own-handle source there is (weechat
-        # requests available caps by default, so this is commonly active).
+        # Our nick in the prefix is NOT proof of a live echo: behind a
+        # bouncer the same shape arrives for messages sent by ANOTHER
+        # attached client, and history playback replays our old lines with
+        # the HISTORICAL prefix. Handle capture and swallowing are therefore
+        # gated below on correlation/freshness, never on nick equality alone.
         own = _own_nick(server)
-        is_own_echo = bool(own) and nick.lower() == own.lower()
-        if is_own_echo:
-            _set_own_handle(server, handle)
+        is_own_prefix = bool(own) and nick.lower() == own.lower()
 
         wire = parse_wire(text)
         if wire is None:
+            # Plaintext own-prefix line: a live echo-message echo carries our
+            # CANONICAL current prefix — the freshest own-handle source there
+            # is — but a replayed one (batch / stale server-time) carries a
+            # historical host and would poison the store.
+            if is_own_prefix and not _tags_suggest_replay(tags):
+                _set_own_handle(server, handle)
             return msg
-        if is_own_echo:
-            # Our own ciphertext echo: the plaintext was already rendered
-            # locally at send time. Swallow it — falling through would treat
-            # it as a peer's wire (decrypt fail → auto-KEYREQ to ourselves).
-            return ""
         _dbg(
             f"hook_irc_in_privmsg RPE2E wire from {nick}!{handle} → {target} "
             f"msgid={wire['msgid'].hex() if isinstance(wire.get('msgid'), bytes) else wire.get('msgid')} "
@@ -2434,6 +2525,20 @@ def hook_irc_in_privmsg(data, modifier, server, msg):
         skew = abs(int(time.time()) - wire["ts"])
         if skew > TS_TOLERANCE:
             return ""
+        if is_own_prefix:
+            if _take_sent_wire(text):
+                # Correlated with a wire THIS client just sent: a live
+                # echo-message echo. Its prefix is our current canonical
+                # handle (capture), and the plaintext was already rendered
+                # locally at send time (swallow).
+                _set_own_handle(server, handle)
+                return ""
+            # Our nick, but not something we sent: another attached client
+            # behind a bouncer, or fresh playback (older replays were just
+            # dropped by the ts-skew check). Never a handle source, never an
+            # auto-KEYREQ target (ourselves) — decrypt with OUR outgoing key
+            # so the copy renders instead of disappearing.
+            return _decrypt_own_copy(server, tags, prefix, target, wire)
         # STATUSMSG delivery (`@#chan`): the decrypt context is the underlying
         # channel, mirroring the outbound gate. Keep the original `target` for
         # the reconstructed PRIVMSG line so weechat routes it unchanged; only

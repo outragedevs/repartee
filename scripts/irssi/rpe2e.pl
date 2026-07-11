@@ -1968,8 +1968,11 @@ sub _decrypt_wire_message {
     return (0, undef) unless $wire;
     my $handle = $host;
     my $ctx;
+    my $is_own_line = $server && lc($nick) eq lc($server->{nick} // '');
     my $is_dm = !(defined $target && $target =~ $CHANNEL_PREFIX_RE);
-    if ($is_dm) {
+    if ($is_own_line) {
+        $ctx = '(own copy)';   # display-only; the real ctx is resolved below
+    } elsif ($is_dm) {
         # DM: recipient-keyed context (docs/rpe2e-dm-addendum.md) — WE are the
         # recipient, so the context is OUR handle, never the sender's.
         my $own = _own_handle_for($server);
@@ -1997,6 +2000,35 @@ sub _decrypt_wire_message {
     _dbg("wire from $nick!$handle -> $target part=$wire->{part}/$wire->{total}");
     if (abs(now_unix() - $wire->{ts}) > $TS_TOLERANCE) {
         _prnt_dbg($server, $ctx, $nick, "drop ciphertext from $nick ($handle): timestamp skew");
+        Irssi::signal_stop();
+        return (1, undef);
+    }
+    if ($is_own_line) {
+        # A wire with OUR prefix. irssi has no echo-message, so this is a
+        # bouncer relay from another attached client or FRESH playback (older
+        # replays were just dropped by the ts-skew check). Never a handle
+        # source (irssi core strips IRCv3 tags here, so live cannot be told
+        # from replay) and never an auto-KEYREQ target (that would be
+        # ourselves) — decrypt with OUR outgoing key so the copy renders
+        # instead of disappearing; undecryptable (rotated key) → quiet drop.
+        my @own_ctxs;
+        if (defined $target && $target =~ $CHANNEL_PREFIX_RE) {
+            @own_ctxs = ($target, @{ $alt_ctxs // [] });
+        } else {
+            my $h = _resolve_dm_handle($server, $kr, $target);
+            @own_ctxs = ('@' . $h) if defined $h && length $h;
+        }
+        for my $octx (@own_ctxs) {
+            my $out = $kr->{outgoing}{$octx};
+            next unless $out && $out->{sk};
+            my $aad2 = build_aad($octx, $wire->{msgid}, $wire->{ts}, $wire->{part}, $wire->{total});
+            my $pt2 = aead_decrypt(b64d($out->{sk}), $wire->{nonce}, $aad2, $wire->{ct});
+            next unless defined $pt2;
+            my $dec = eval { decode('UTF-8', $pt2, FB_DEFAULT) };
+            $dec = decode('UTF-8', $pt2) if !defined $dec;
+            return (1, $dec);
+        }
+        _dbg("own-copy wire to $target undecryptable (rotated key?) — dropped");
         Irssi::signal_stop();
         return (1, undef);
     }
@@ -2129,10 +2161,12 @@ sub signal_event_privmsg {
     # prefers whichever holds a trusted session (see _channel_readings).
     my @readings = _channel_readings($target);
     my $is_channel = scalar @readings;
-    # Context target: channel → most-stripped reading; DM → the SENDER's nick
-    # (DM context is keyed off the sender's handle, matching the old
-    # message-private path).
-    my $ctx_target = $is_channel ? $readings[0] : $nick;
+    # Context target: channel → most-stripped reading; DM → the SENDER's
+    # nick... unless the "sender" is US (a bouncer relay from another
+    # attached client, or playback), where the conversation is named by the
+    # RECIPIENT ($target).
+    my $is_own_line = $server && lc($nick) eq lc($server->{nick} // '');
+    my $ctx_target = $is_channel ? $readings[0] : ($is_own_line ? $target : $nick);
     my $alt_ctxs = @readings > 1 ? [@readings[1 .. $#readings]] : undef;
     # _decrypt_wire_message returns (0, undef) for a non-RPE2E line (no second
     # parse needed here), (1, undef) when it already dropped the ciphertext, or
