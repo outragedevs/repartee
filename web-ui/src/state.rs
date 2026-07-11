@@ -273,9 +273,9 @@ impl AppState {
                     // Dedup — guards against the SyncInit → FetchMessages
                     // round-trip race where the same message arrives as both a
                     // live NewMessage and inside the fetched backlog snapshot.
-                    // Keyed on `(log_id, id)` (not id alone): a live message
-                    // (log_id None) must not be rejected because a DB-sourced
-                    // backlog row happens to share its numeric id. id=0
+                    // Identity is `same_wire_message` (rowid alone for stored
+                    // rows, counter id for live ones — see there for why the
+                    // transport id is not a cross-source key). id=0
                     // (date separators) is always admitted.
                     if !message_already_present(entry, &message) {
                         entry.push(message);
@@ -750,15 +750,36 @@ fn local_date_of(ts: i64) -> Option<chrono::NaiveDate> {
         .map(|dt| chrono::Local.from_utc_datetime(&dt.naive_utc()).date_naive())
 }
 
-/// Whether `msg` is already loaded in `existing`, by the same stable
-/// `(log_id, id)` identity [`dedupe_incoming`] uses (see there for why the
-/// transport `id` alone is not a cross-source key). Date separators (`id == 0`)
-/// are never considered duplicates.
+/// Whether two wire messages are the same logical message.
+///
+/// `log_id` (the SQLite rowid) is the only cross-source identity: the same
+/// row reaches the client as id=rowid from a DB page (`stored_to_wire`) but
+/// as a transient AppState-counter id when served from the in-memory buffer
+/// (`message_to_wire`) — and that counter restarts with the process, so it
+/// can't be compared across sources at all. Two `Some(log_id)` values match
+/// on the rowid alone; two live messages (`log_id` None) match on the
+/// counter id (same process, stable); a live message never matches a stored
+/// row (see `new_live_message_not_dropped_by_db_row_with_same_id`).
+///
+/// INVARIANT: the `<For>` render key in `chat_view.rs` still keys on the
+/// `(id, log_id)` composite — it relies on this dedup layer to guarantee at
+/// most one entry per rowid ever reaches the rendered list. Any new insert
+/// path must route through `message_already_present`/`dedupe_incoming`.
+fn same_wire_message(a: &WireMessage, b: &WireMessage) -> bool {
+    match (a.log_id, b.log_id) {
+        (Some(x), Some(y)) => x == y,
+        (None, None) => a.id == b.id,
+        _ => false,
+    }
+}
+
+/// Whether `msg` is already loaded in `existing`, by the [`same_wire_message`]
+/// identity. Date separators (`id == 0`) are never considered duplicates.
 fn message_already_present(existing: &[WireMessage], msg: &WireMessage) -> bool {
     msg.id != 0
         && existing
             .iter()
-            .any(|m| m.id == msg.id && m.log_id == msg.log_id)
+            .any(|m| m.id != 0 && same_wire_message(m, msg))
 }
 
 /// Timeline ordering key for a sorted (gap-fill) insert: full-millisecond time,
@@ -774,25 +795,39 @@ fn insert_order_key(msg: &WireMessage) -> (i64, u64) {
 }
 
 /// Drop entries from an incoming `messages` batch that are already loaded in
-/// `existing`.
+/// `existing`, by the [`same_wire_message`] identity.
 ///
 /// The transport `id` is NOT a stable cross-source key: live messages carry a
 /// transient in-memory `AppState` counter (`message_to_wire`) while stored rows
 /// carry a `SQLite` rowid (`stored_to_wire`), and the two ranges overlap. Keying
 /// on `id` alone would treat a valid older DB row as a duplicate of an unrelated
-/// live message with the same number, punching gaps in scroll-back. Key on
-/// `(log_id, id)` instead — a DB row (`log_id = Some(rowid)`) can never collide
-/// with a live message (`log_id = None`) sharing the numeric id. Date separators
-/// (`id == 0`) are always admitted.
+/// live message with the same number, punching gaps in scroll-back. A stored
+/// row's identity is its rowid (`log_id`) alone — the same row may arrive under
+/// two different transport ids (in-memory copy vs DB page). Live messages
+/// (`log_id` None) key on the counter id. Date separators (`id == 0`) are
+/// always admitted.
 fn dedupe_incoming(existing: &[WireMessage], messages: Vec<WireMessage>) -> Vec<WireMessage> {
-    let existing_keys: HashSet<(Option<i64>, u64)> = existing
-        .iter()
-        .filter(|m| m.id != 0)
-        .map(|m| (m.log_id, m.id))
-        .collect();
+    let mut existing_log_ids: HashSet<i64> = HashSet::new();
+    let mut existing_live_ids: HashSet<u64> = HashSet::new();
+    for m in existing.iter().filter(|m| m.id != 0) {
+        match m.log_id {
+            Some(log_id) => {
+                existing_log_ids.insert(log_id);
+            }
+            None => {
+                existing_live_ids.insert(m.id);
+            }
+        }
+    }
     messages
         .into_iter()
-        .filter(|m| m.id == 0 || !existing_keys.contains(&(m.log_id, m.id)))
+        .filter(|m| {
+            m.id == 0
+                || match m.log_id {
+                    Some(log_id) => !existing_log_ids.contains(&log_id),
+                    None => !existing_live_ids.contains(&m.id),
+                }
+        })
         .collect()
 }
 
@@ -1145,6 +1180,29 @@ mod tests {
             !message_already_present(&existing, &incoming),
             "a live message must not collide with a DB rowid"
         );
+    }
+
+    #[test]
+    fn same_db_row_under_different_transport_id_is_duplicate() {
+        // The same SQLite row can reach the client under two transport ids:
+        // in-memory copies go out with the AppState counter (`message_to_wire`,
+        // id=500 here) while DB pages carry the rowid (`stored_to_wire`,
+        // id=100). `log_id` (the rowid) is the stable identity — same
+        // `Some(log_id)` means the same row, whatever the transport id says.
+        let seeded = WireMessage {
+            id: 500,
+            log_id: Some(100),
+            ..msg(100, JUN9_12)
+        };
+        let existing = vec![seeded];
+        let incoming = msg(100, JUN9_12); // id=100, log_id=Some(100)
+        assert!(
+            message_already_present(&existing, &incoming),
+            "same rowid under a different transport id is the same message"
+        );
+        let kept = dedupe_incoming(&existing, vec![msg(100, JUN9_12), msg(99, JUN8_12)]);
+        assert_eq!(kept.len(), 1, "the rowid-100 copy must be dropped");
+        assert_eq!(kept[0].id, 99);
     }
 
     #[test]

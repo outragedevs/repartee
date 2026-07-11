@@ -647,12 +647,12 @@ fn process_netjoin_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo)
     // `join_fields` also matches the 6-arg ircnet.com/extended-join Raw form,
     // which exceeds irc-proto's JOIN arity and would otherwise be skipped.
     for msg in &batch.messages {
-        if let Some((channel, account, _realname)) = super::events::join_fields(&msg.command) {
+        if let Some(fields) = super::events::join_fields(&msg.command) {
             let (nick, _ident, _host) = extract_nick_userhost(msg.prefix.as_ref());
-            let buffer_id = make_buffer_id(conn_id, channel);
+            let buffer_id = make_buffer_id(conn_id, fields.channel);
 
             // Parse account from extended-join parameter
-            let account = match account {
+            let account = match fields.account {
                 Some("*") | None => None,
                 Some(a) => Some(a.to_string()),
             };
