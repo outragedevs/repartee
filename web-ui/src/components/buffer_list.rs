@@ -1,6 +1,5 @@
 use leptos::prelude::*;
 
-use crate::protocol::WebCommand;
 use crate::state::AppState;
 
 #[component]
@@ -20,7 +19,7 @@ pub fn BufferList() -> impl IntoView {
                 let active_id = state.active_buffer.get();
                 let mut views: Vec<leptos::prelude::AnyView> = Vec::new();
 
-                for (idx, buf) in buffers.iter().enumerate() {
+                for (current_num, buf) in crate::state::numbered_buffers(&buffers) {
                     let is_server = buf.buffer_type == "server";
                     let is_active = active_id.as_deref() == Some(buf.id.as_str());
                     let type_class = match buf.buffer_type.as_str() {
@@ -45,18 +44,8 @@ pub fn BufferList() -> impl IntoView {
 
                     let id = buf.id.clone();
                     let name = buf.name.clone();
-                    let current_num = u32::try_from(idx + 1).unwrap_or(0);
 
-                    let on_click = move |_| {
-                        state.active_buffer.set(Some(id.clone()));
-                        crate::ws::send_command(&WebCommand::SwitchBuffer {
-                            buffer_id: id.clone(),
-                        });
-                        crate::ws::send_command(&WebCommand::MarkRead {
-                            buffer_id: id.clone(),
-                            up_to: chrono::Utc::now().timestamp(),
-                        });
-                    };
+                    let on_click = move |_| state.switch_to_buffer(&id);
 
                     // Server buffers display the connection label —
                     // they serve as both the network grouping and status window.

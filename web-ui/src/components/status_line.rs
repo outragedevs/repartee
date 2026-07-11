@@ -43,27 +43,16 @@ pub fn StatusLine() -> impl IntoView {
             .find(|c| c.id == buf.connection_id)
     };
 
-    // Activity numbers — skip server buffers, use global sequential numbering.
+    // Activity numbers — must use the exact numbering the buffer list
+    // displays (position in the same sorted vec, 1-based, nothing skipped).
+    // The old version skipped server buffers while counting, so with one
+    // network every Act number was off by one ("[Act:3]" while the traffic
+    // was on window 4), and off by N with N networks.
     let activity_items = move || {
         let active_id = state.active_buffer.get();
-        let buffers = state.buffers.get();
-        let mut num = 1u32;
-        let mut items = Vec::new();
-        for b in &buffers {
-            if b.buffer_type == "server" {
-                continue;
-            }
-            let current_num = num;
-            num += 1;
-            if active_id.as_deref() == Some(b.id.as_str()) {
-                continue;
-            }
-            if b.activity == 0 {
-                continue;
-            }
-            items.push((current_num, b.activity));
-        }
-        items
+        state
+            .buffers
+            .with(|bufs| activity_numbers(bufs, active_id.as_deref()))
     };
 
     view! {
@@ -116,23 +105,97 @@ pub fn StatusLine() -> impl IntoView {
                 Some(view! {
                     <span class="sep">"|"</span>
                     <span class="muted">"Act: "</span>
-                    {items.iter().enumerate().map(|(i, (num, level))| {
+                    {items.into_iter().enumerate().map(|(i, (num, level, id))| {
+                        // Clamp unknown levels to the highest tier, matching
+                        // the buffer list's `activity-4` fallback.
                         let class = match level {
                             1 => "act-green",
                             2 => "act-red",
                             3 => "act-yellow",
-                            4 => "act-purple",
-                            _ => "muted",
+                            _ => "act-purple",
                         };
                         let sep = if i > 0 { "," } else { "" };
+                        let on_click = move |_| state.switch_to_buffer(&id);
                         view! {
                             <span class="sep">{sep}</span>
-                            <span class=class>{num.to_string()}</span>
+                            <span
+                                class=format!("act-num {class}")
+                                title="Jump to this window"
+                                on:click=on_click
+                            >{num.to_string()}</span>
                         }
                     }).collect::<Vec<_>>()}
                 })
             }}
             <span class="bracket">"]"</span>
         </div>
+    }
+}
+
+/// `(display_number, activity_level, buffer_id)` for every non-active buffer
+/// with pending activity. `display_number` is the buffer's 1-based position in
+/// the sorted buffer vec — identical to the number the buffer list renders
+/// next to it, which is the whole point: "Act: 4" must mean "window 4".
+fn activity_numbers(
+    buffers: &[crate::protocol::BufferMeta],
+    active_id: Option<&str>,
+) -> Vec<(u32, u8, String)> {
+    crate::state::numbered_buffers(buffers)
+        .filter(|(_, b)| b.activity != 0 && active_id != Some(b.id.as_str()))
+        .map(|(num, b)| (num, b.activity, b.id.clone()))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::BufferMeta;
+
+    fn buf(id: &str, buffer_type: &str, activity: u8) -> BufferMeta {
+        BufferMeta {
+            id: id.to_string(),
+            connection_id: "net".to_string(),
+            name: id.to_string(),
+            buffer_type: buffer_type.to_string(),
+            topic: None,
+            unread_count: 0,
+            activity,
+            nick_count: 0,
+            modes: None,
+        }
+    }
+
+    #[test]
+    fn numbers_match_buffer_list_positions() {
+        // The tester's bug: activity on the 4th listed window reported as
+        // "Act: 3" because server buffers were skipped while counting. The
+        // number must be the 1-based position in the same vec the buffer
+        // list renders.
+        let buffers = vec![
+            buf("mentions", "mentions", 0),
+            buf("srv", "server", 0),
+            buf("#a", "channel", 0),
+            buf("#b", "channel", 2),
+        ];
+        let items = activity_numbers(&buffers, Some("#a"));
+        assert_eq!(items, vec![(4, 2, "#b".to_string())]);
+    }
+
+    #[test]
+    fn server_buffers_with_activity_are_listed() {
+        let buffers = vec![buf("srv", "server", 1), buf("#a", "channel", 0)];
+        let items = activity_numbers(&buffers, Some("#a"));
+        assert_eq!(items, vec![(1, 1, "srv".to_string())]);
+    }
+
+    #[test]
+    fn active_buffer_and_idle_buffers_are_excluded() {
+        let buffers = vec![
+            buf("#a", "channel", 3), // active — excluded even with activity
+            buf("#b", "channel", 0), // idle — excluded
+            buf("#c", "channel", 4),
+        ];
+        let items = activity_numbers(&buffers, Some("#a"));
+        assert_eq!(items, vec![(3, 4, "#c".to_string())]);
     }
 }

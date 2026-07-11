@@ -39,13 +39,13 @@ mod tests {
 
     #[test]
     fn search_finds_grinning_face() {
-        assert!(search("grinning").iter().any(|&e| e == "\u{1F600}"));
+        assert!(search("grinning").contains(&"\u{1F600}"));
     }
 
     #[test]
     fn search_matches_shortcode() {
         // ":+1:" / "thumbsup" → 👍
-        assert!(search("thumbsup").iter().any(|&e| e == "\u{1F44D}"));
+        assert!(search("thumbsup").contains(&"\u{1F44D}"));
     }
 
     #[test]

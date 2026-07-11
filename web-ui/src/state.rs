@@ -133,6 +133,20 @@ impl AppState {
         }
     }
 
+    /// Switch the active buffer locally and inform the server — the shared
+    /// "user clicked a window" path (buffer list, Act numbers): set the
+    /// signal, echo `SwitchBuffer`, and mark the buffer read up to now.
+    pub fn switch_to_buffer(&self, buffer_id: &str) {
+        self.active_buffer.set(Some(buffer_id.to_string()));
+        crate::ws::send_command(&WebCommand::SwitchBuffer {
+            buffer_id: buffer_id.to_string(),
+        });
+        crate::ws::send_command(&WebCommand::MarkRead {
+            buffer_id: buffer_id.to_string(),
+            up_to: chrono::Utc::now().timestamp(),
+        });
+    }
+
     /// Collapse a buffer's loaded backlog window after the user returns to the
     /// bottom: trim back to `MAX_BUFFER_MESSAGES` (freeing the older lines we're
     /// no longer displaying) and re-arm `has_more` so a later scroll-up fetches
@@ -645,6 +659,17 @@ impl AppState {
             });
         });
     }
+}
+
+/// The buffer list with its 1-based display numbers — THE numbering rule.
+/// Both the buffer list and the status-line Act indicator must consume this
+/// (never re-derive `idx + 1` locally), so "Act: 4" always names the window
+/// the list labels "4.".
+pub fn numbered_buffers(buffers: &[BufferMeta]) -> impl Iterator<Item = (u32, &BufferMeta)> {
+    buffers
+        .iter()
+        .enumerate()
+        .map(|(idx, b)| (u32::try_from(idx + 1).unwrap_or(u32::MAX), b))
 }
 
 /// Trim the buffer to `cap`, dropping oldest from the head. Returns `true` if it

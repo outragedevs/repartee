@@ -332,6 +332,8 @@ html, body {
 .status-line .act-yellow { color: var(--yellow); }
 .status-line .act-red { color: var(--red); }
 .status-line .act-purple { color: var(--purple); }
+.status-line .act-num { cursor: pointer; }
+.status-line .act-num:hover { text-decoration: underline; }
 
 .input-line {
     padding: 2px 8px;
