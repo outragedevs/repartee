@@ -25,10 +25,11 @@ pub fn EmojiPicker() -> impl IntoView {
     view! {
         <Show when=move || open.get() fallback=|| ()>
             <div class="wizard-backdrop" on:click=move |_| close()></div>
-            <div class="emoji-picker-modal">
+            <div class="emoji-picker-modal" role="dialog" aria-modal="true" aria-label="Emoji">
                 <input
                     class="emote-picker-filter"
                     placeholder="search emoji…"
+                    aria-label="Search emoji"
                     autofocus=true
                     prop:value=move || filter.get()
                     on:input=move |ev| filter.set(event_target_value(&ev))
@@ -59,8 +60,10 @@ pub fn EmojiPicker() -> impl IntoView {
                     {crate::emoji::GROUPS.iter().enumerate().map(|(i, (label, _))| {
                         view! {
                             <button
+                                type="button"
                                 class="emoji-tab"
                                 title=*label
+                                aria-pressed=move || group.get() == i && filter.get().is_empty()
                                 on:click=move |_| { filter.set(String::new()); group.set(i); }
                             >{*label}</button>
                         }
@@ -76,7 +79,8 @@ pub fn EmojiPicker() -> impl IntoView {
                         };
                         items.into_iter().map(|ch| {
                             view! {
-                                <button class="emoji-cell" on:click=move |_| pick(ch)>{ch}</button>
+                                <button type="button" class="emoji-cell" aria-label=ch
+                                    on:click=move |_| pick(ch)>{ch}</button>
                             }
                         }).collect::<Vec<_>>()
                     }}

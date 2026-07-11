@@ -118,11 +118,11 @@ pub fn StatusLine() -> impl IntoView {
                         let on_click = move |_| state.switch_to_buffer(&id);
                         view! {
                             <span class="sep">{sep}</span>
-                            <span
+                            <button type="button"
                                 class=format!("act-num {class}")
                                 title="Jump to this window"
                                 on:click=on_click
-                            >{num.to_string()}</span>
+                            >{num.to_string()}</button>
                         }
                     }).collect::<Vec<_>>()}
                 })

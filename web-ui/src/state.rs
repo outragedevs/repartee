@@ -15,10 +15,6 @@ use crate::protocol::*;
 /// image preview), which makes naive index-based virtualization
 /// wrong (scrollbar size, jump-to-position) and proper
 /// measurement-based virtualization a substantial undertaking.
-/// Instead, the per-message DOM uses CSS `content-visibility: auto`
-/// (see `web-ui/styles/base.css`), letting the browser skip layout
-/// and paint for off-screen lines natively — same end-state, almost
-/// free, with no JS scroll-handling complexity.
 const MAX_BUFFER_MESSAGES: usize = 1000;
 
 /// Higher per-buffer cap while the user is scrolled up reading backlog (the
@@ -163,6 +159,7 @@ impl AppState {
     /// "user clicked a window" path (buffer list, Act numbers): set the
     /// signal, echo `SwitchBuffer`, and mark the buffer read up to now.
     pub fn switch_to_buffer(&self, buffer_id: &str) {
+        self.shell_screen.set(None);
         self.active_buffer.set(Some(buffer_id.to_string()));
         crate::ws::send_command(&WebCommand::SwitchBuffer {
             buffer_id: buffer_id.to_string(),
@@ -235,29 +232,15 @@ impl AppState {
                 // epoch — even if the buffer ID is the same as before.
                 self.sync_version.update(|v| *v += 1);
 
-                // Sync to the TUI's active buffer. A single `.set()` is
-                // enough to re-fire the Layout Effect (Leptos 0.7 fires
-                // subscribers regardless of value equality), so we don't
-                // need the old `set(None) + set(Some)` dance — that
-                // dance was the cause of the double-FetchMessages /
-                // duplicate-line bug.
-                if let Some(ref id) = active_buffer_id {
-                    self.active_buffer.set(Some(id.clone()));
-                } else {
-                    // Fallback: select first channel buffer.
-                    let bufs = self.buffers.get_untracked();
-                    if let Some(first) = bufs.iter().find(|b| b.buffer_type == "channel") {
-                        self.active_buffer.set(Some(first.id.clone()));
-                    } else {
-                        // No channel — retrigger current value so the
-                        // Effect fires under the new epoch even though
-                        // the buffer ID didn't change.
-                        let current = self.active_buffer.get_untracked();
-                        if current.is_some() {
-                            self.active_buffer.set(current);
-                        }
-                    }
-                }
+                let fallback = self.buffers.with_untracked(|buffers| {
+                    buffers
+                        .iter()
+                        .find(|buffer| buffer.buffer_type == "channel")
+                        .or_else(|| buffers.first())
+                        .map(|buffer| buffer.id.clone())
+                });
+                self.shell_screen.set(None);
+                self.active_buffer.set(active_buffer_id.or(fallback));
             }
             WebEvent::NewMessage { buffer_id, message } => {
                 // Keep the larger window only for the buffer the user is actively
@@ -266,7 +249,11 @@ impl AppState {
                 let active = self.active_buffer.get_untracked();
                 let pinned =
                     active.as_deref() == Some(&buffer_id) && !self.is_at_bottom.get_untracked();
-                let cap = if pinned { PINNED_WEB_CAP } else { MAX_BUFFER_MESSAGES };
+                let cap = if pinned {
+                    PINNED_WEB_CAP
+                } else {
+                    MAX_BUFFER_MESSAGES
+                };
                 let mut trimmed = false;
                 self.messages.update(|msgs| {
                     let entry = msgs.entry(buffer_id.clone()).or_default();
@@ -306,9 +293,13 @@ impl AppState {
                 // (timestamp, id) instead of appending. No unread bump — it's
                 // backlog, not new activity.
                 let active = self.active_buffer.get_untracked();
-                let pinned = active.as_deref() == Some(&buffer_id)
-                    && !self.is_at_bottom.get_untracked();
-                let cap = if pinned { PINNED_WEB_CAP } else { MAX_BUFFER_MESSAGES };
+                let pinned =
+                    active.as_deref() == Some(&buffer_id) && !self.is_at_bottom.get_untracked();
+                let cap = if pinned {
+                    PINNED_WEB_CAP
+                } else {
+                    MAX_BUFFER_MESSAGES
+                };
                 let mut trimmed = false;
                 self.messages.update(|msgs| {
                     let entry = msgs.entry(buffer_id.clone()).or_default();
@@ -377,6 +368,7 @@ impl AppState {
                 self.buffers.update(|bufs| bufs.push(buffer));
                 self.sort_buffers();
                 // Auto-switch to newly created buffer (matches terminal behavior).
+                self.shell_screen.set(None);
                 self.active_buffer.set(Some(new_id));
             }
             WebEvent::BufferClosed { buffer_id } => {
@@ -387,6 +379,7 @@ impl AppState {
                         .iter()
                         .find(|b| b.id != buffer_id)
                         .map(|b| b.id.clone());
+                    self.shell_screen.set(None);
                     self.active_buffer.set(fallback);
                 }
                 self.buffers
@@ -442,10 +435,13 @@ impl AppState {
                 // backlog (not at bottom): keep a larger window so the just-
                 // prepended older page isn't immediately trimmed away. An
                 // initial load arrives at the bottom and uses the normal cap.
-                let cap = if self.is_at_bottom.get_untracked() {
-                    MAX_BUFFER_MESSAGES
-                } else {
+                let active = self.active_buffer.get_untracked();
+                let cap = if active.as_deref() == Some(&buffer_id)
+                    && !self.is_at_bottom.get_untracked()
+                {
                     PINNED_WEB_CAP
+                } else {
+                    MAX_BUFFER_MESSAGES
                 };
                 self.messages.update(|msgs| {
                     let entry = msgs.entry(buffer_id.clone()).or_default();
@@ -500,80 +496,85 @@ impl AppState {
                 modes,
                 away,
                 ..
-            } => {
-                match kind {
-                    NickEventKind::Join => {
-                        self.nick_lists.update(|lists| {
-                            let list = lists.entry(buffer_id.clone()).or_default();
-                            if !list.iter().any(|n| n.nick == nick) {
-                                list.push(WireNick {
-                                    nick: nick.clone(),
-                                    prefix: prefix.unwrap_or_default(),
-                                    modes: modes.unwrap_or_default(),
-                                    away: away.unwrap_or(false),
-                                });
-                                sort_nicks(list);
-                            }
-                        });
-                        // Update nick_count.
+            } => match kind {
+                NickEventKind::Join => {
+                    let mut inserted = false;
+                    self.nick_lists.update(|lists| {
+                        let list = lists.entry(buffer_id.clone()).or_default();
+                        if !list.iter().any(|n| n.nick == nick) {
+                            inserted = true;
+                            list.push(WireNick {
+                                nick: nick.clone(),
+                                prefix: prefix.unwrap_or_default(),
+                                modes: modes.unwrap_or_default(),
+                                away: away.unwrap_or(false),
+                            });
+                            sort_nicks(list);
+                        }
+                    });
+                    if inserted {
                         self.buffers.update(|bufs| {
                             if let Some(b) = bufs.iter_mut().find(|b| b.id == buffer_id) {
-                                b.nick_count += 1;
+                                b.nick_count = b.nick_count.saturating_add(1);
                             }
                         });
                     }
-                    NickEventKind::Part | NickEventKind::Quit => {
-                        self.nick_lists.update(|lists| {
-                            if let Some(list) = lists.get_mut(&buffer_id) {
-                                list.retain(|n| n.nick != nick);
-                            }
-                        });
-                        // Update nick_count.
+                }
+                NickEventKind::Part | NickEventKind::Quit => {
+                    let mut removed = None;
+                    self.nick_lists.update(|lists| {
+                        if let Some(list) = lists.get_mut(&buffer_id) {
+                            let previous_len = list.len();
+                            list.retain(|n| n.nick != nick);
+                            removed = Some(list.len() != previous_len);
+                        }
+                    });
+                    if removed != Some(false) {
                         self.buffers.update(|bufs| {
                             if let Some(b) = bufs.iter_mut().find(|b| b.id == buffer_id) {
                                 b.nick_count = b.nick_count.saturating_sub(1);
                             }
                         });
                     }
-                    NickEventKind::NickChange => {
-                        if let Some(ref new) = new_nick {
-                            self.nick_lists.update(|lists| {
-                                if let Some(list) = lists.get_mut(&buffer_id)
-                                    && let Some(entry) = list.iter_mut().find(|n| n.nick == nick)
-                                {
-                                    entry.nick = new.clone();
-                                    sort_nicks(list);
-                                }
-                            });
-                        }
-                    }
-                    NickEventKind::ModeChange => {
+                }
+                NickEventKind::NickChange => {
+                    if let Some(ref new) = new_nick {
                         self.nick_lists.update(|lists| {
-                            if let Some(list) = lists.get_mut(&buffer_id) {
-                                if let Some(entry) = list.iter_mut().find(|n| n.nick == nick) {
-                                    if let Some(ref p) = prefix {
-                                        entry.prefix = p.clone();
-                                    }
-                                    if let Some(ref m) = modes {
-                                        entry.modes = m.clone();
-                                    }
-                                }
+                            if let Some(list) = lists.get_mut(&buffer_id)
+                                && let Some(entry) = list.iter_mut().find(|n| n.nick == nick)
+                            {
+                                entry.nick = new.clone();
                                 sort_nicks(list);
                             }
                         });
                     }
-                    NickEventKind::AwayChange => {
-                        self.nick_lists.update(|lists| {
-                            if let Some(list) = lists.get_mut(&buffer_id)
-                                && let Some(entry) = list.iter_mut().find(|n| n.nick == nick)
-                                && let Some(a) = away
-                            {
-                                entry.away = a;
-                            }
-                        });
-                    }
                 }
-            }
+                NickEventKind::ModeChange => {
+                    self.nick_lists.update(|lists| {
+                        if let Some(list) = lists.get_mut(&buffer_id) {
+                            if let Some(entry) = list.iter_mut().find(|n| n.nick == nick) {
+                                if let Some(ref p) = prefix {
+                                    entry.prefix = p.clone();
+                                }
+                                if let Some(ref m) = modes {
+                                    entry.modes = m.clone();
+                                }
+                            }
+                            sort_nicks(list);
+                        }
+                    });
+                }
+                NickEventKind::AwayChange => {
+                    self.nick_lists.update(|lists| {
+                        if let Some(list) = lists.get_mut(&buffer_id)
+                            && let Some(entry) = list.iter_mut().find(|n| n.nick == nick)
+                            && let Some(a) = away
+                        {
+                            entry.away = a;
+                        }
+                    });
+                }
+            },
             WebEvent::ActiveBufferChanged { buffer_id } => {
                 // Skip if the client already switched to this buffer locally
                 // (the click handler sets active_buffer before the server echoes).
@@ -592,6 +593,7 @@ impl AppState {
                     return;
                 }
                 if self.active_buffer.get_untracked().as_deref() != Some(&buffer_id) {
+                    self.shell_screen.set(None);
                     self.active_buffer.set(Some(buffer_id));
                 }
             }
@@ -746,8 +748,11 @@ fn prefix_rank(prefix: &str) -> u8 {
 /// separators). `None` only if the timestamp is out of `chrono`'s range.
 fn local_date_of(ts: i64) -> Option<chrono::NaiveDate> {
     use chrono::TimeZone;
-    chrono::DateTime::from_timestamp(ts, 0)
-        .map(|dt| chrono::Local.from_utc_datetime(&dt.naive_utc()).date_naive())
+    chrono::DateTime::from_timestamp(ts, 0).map(|dt| {
+        chrono::Local
+            .from_utc_datetime(&dt.naive_utc())
+            .date_naive()
+    })
 }
 
 /// Whether two wire messages are the same logical message.
@@ -878,6 +883,22 @@ fn insert_date_separators(messages: Vec<WireMessage>) -> Vec<WireMessage> {
 
     for msg in messages {
         let local_date = local_date_of(msg.timestamp);
+
+        if msg.event_key.as_deref() == Some("date_separator") {
+            if local_date.is_some() && local_date == last_date {
+                continue;
+            }
+            if local_date.is_some() {
+                last_date = local_date;
+            }
+            result.push(msg);
+            continue;
+        }
+
+        if msg.event_key.as_deref() == Some("backlog_end") {
+            result.push(msg);
+            continue;
+        }
 
         if let Some(date) = local_date {
             if last_date.is_some_and(|d| d != date) || last_date.is_none() {
@@ -1067,7 +1088,10 @@ mod tests {
         assert_eq!(under.len(), 3);
 
         let mut over: Vec<WireMessage> = (0..8).map(|i| msg(i, 100)).collect();
-        assert!(cap_messages(&mut over, 5), "trims and reports true at the cap");
+        assert!(
+            cap_messages(&mut over, 5),
+            "trims and reports true at the cap"
+        );
         assert_eq!(over.len(), 5);
         // Oldest rows are the ones dropped (drain from the front).
         assert_eq!(over.first().map(|m| m.id), Some(3));
@@ -1122,6 +1146,31 @@ mod tests {
         let before = separator_count(&tail);
         let combined = prepend_backlog_page(Vec::new(), tail);
         assert_eq!(separator_count(&combined), before);
+    }
+
+    #[test]
+    fn server_date_separator_is_not_duplicated() {
+        let mut server_separator = msg(1, JUN9_12);
+        server_separator.msg_type = "event".to_string();
+        server_separator.nick = None;
+        server_separator.event_key = Some("date_separator".to_string());
+        server_separator.text = "─── Sun, 09 Jun 2024 ───".to_string();
+
+        let with_separators = insert_date_separators(vec![server_separator, msg(2, JUN9_13)]);
+
+        assert_eq!(separator_count(&with_separators), 1);
+    }
+
+    #[test]
+    fn backlog_end_does_not_create_a_date_boundary() {
+        let mut marker = msg(1, JUN8_12);
+        marker.msg_type = "event".to_string();
+        marker.nick = None;
+        marker.event_key = Some("backlog_end".to_string());
+
+        let with_separators = insert_date_separators(vec![marker, msg(2, JUN9_12)]);
+
+        assert_eq!(separator_count(&with_separators), 1);
     }
 
     #[test]

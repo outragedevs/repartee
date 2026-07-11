@@ -10,6 +10,10 @@ pub fn App() -> impl IntoView {
     let state = AppState::new();
     provide_context(state);
 
+    if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+        document.set_title(crate::constants::APP_NAME);
+    }
+
     // Save the non-secret session hint to localStorage whenever it changes.
     Effect::new({
         move || {

@@ -5,7 +5,7 @@ use crate::state::AppState;
 #[component]
 pub fn Login() -> impl IntoView {
     let state = use_context::<AppState>().unwrap();
-    let (username, set_username) = signal(String::from("repartee"));
+    let (username, set_username) = signal(String::from(crate::constants::APP_NAME));
     let (password, set_password) = signal(String::new());
     let (error, set_error) = signal(Option::<String>::None);
     let (loading, set_loading) = signal(false);
@@ -46,10 +46,11 @@ pub fn Login() -> impl IntoView {
 
     view! {
         <div class="login-page">
-            <h1 style="color: var(--accent); font-size: 24px;">"repartee"</h1>
+            <h1 class="login-title">{crate::constants::APP_NAME}</h1>
             <p style="color: var(--fg-muted); font-size: 14px;">"web frontend"</p>
             <form
                 class="login-box"
+                aria-label="Sign in"
                 on:submit=move |ev| {
                     ev.prevent_default();
                     do_submit.run(());
@@ -60,6 +61,7 @@ pub fn Login() -> impl IntoView {
                     name="username"
                     placeholder="Username"
                     autocomplete="username"
+                    aria-label="Username"
                     prop:value=username
                     on:input=move |ev| set_username.set(event_target_value(&ev))
                 />
@@ -68,13 +70,14 @@ pub fn Login() -> impl IntoView {
                     name="password"
                     placeholder="Password"
                     autocomplete="current-password"
+                    aria-label="Password"
                     prop:value=password
                     on:input=move |ev| set_password.set(event_target_value(&ev))
                 />
                 <button type="submit" disabled=loading>
                     {move || if loading.get() { "Connecting..." } else { "Login" }}
                 </button>
-                {move || error.get().map(|e| view! { <p class="error">{e}</p> })}
+                {move || error.get().map(|e| view! { <p class="error" role="alert">{e}</p> })}
             </form>
         </div>
     }
@@ -111,7 +114,7 @@ async fn do_login(username: &str, password: &str) -> Result<(), String> {
 
 /// Best-effort fetch of `/api/login_info` to pre-fill the username field.
 /// Returns `None` if the server is unreachable or the response is malformed —
-/// the form keeps its hard-coded "repartee" default in that case.
+/// the form keeps the application-name default in that case.
 async fn fetch_login_info() -> Option<String> {
     let window = web_sys::window()?;
     let origin = window.location().origin().ok()?;

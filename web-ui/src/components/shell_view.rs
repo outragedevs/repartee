@@ -37,7 +37,7 @@ const ANSI_COLORS: [u32; 16] = [
     0x43_5b_67, // 0: black
     0xfc_38_41, // 1: red
     0x5c_f1_9e, // 2: green
-    0xfe_d032, // 3: yellow (grouped to avoid clippy mistyped-suffix on `_32`)
+    0xfe_d032,  // 3: yellow (grouped to avoid clippy mistyped-suffix on `_32`)
     0x37_b6_ff, // 4: blue
     0xfc_22_6e, // 5: magenta
     0x59_ff_d1, // 6: cyan
@@ -307,14 +307,13 @@ fn start_render_loop(
             send_shell_resize(&state, &st.terminal);
         }
 
-        // F3: get_untracked clones the signal value. ShellScreenData contains
-        // owned Strings, so this is a deep copy. Acceptable at 60fps for typical
-        // terminal sizes (~50 rows). For optimization, wrap in Arc in state.rs.
-        if let Some(data) = state.shell_screen.get_untracked() {
-            render_screen(&mut st.terminal, &data);
-        } else {
-            let _ = st.terminal.render_frame();
-        }
+        state.shell_screen.with_untracked(|screen| {
+            if let Some(data) = screen {
+                render_screen(&mut st.terminal, data);
+            } else {
+                let _ = st.terminal.render_frame();
+            }
+        });
 
         drop(borrow);
         schedule_next_frame(&cb_clone);
@@ -339,7 +338,6 @@ fn render_screen(terminal: &mut Terminal, data: &ShellScreenData) {
     let pty_cols = data.cols;
     let cols = grid_cols.min(pty_cols);
     let total = grid_cols as usize * grid_rows as usize;
-    // F4: TODO — cache this Vec in ShellTerminal and reuse via clear()+reserve().
     let mut cells: Vec<CellData<'_>> = Vec::with_capacity(total);
 
     let blank = CellData::new(

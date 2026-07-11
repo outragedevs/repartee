@@ -111,25 +111,29 @@ pub fn AppearanceModal() -> impl IntoView {
                     class="appearance-backdrop"
                     on:click=move |_| state.appearance_open.set(false)
                 ></div>
-                <div class="appearance-modal" role="dialog" aria-label="Appearance">
+                <div class="appearance-modal" role="dialog" aria-modal="true" aria-label="Appearance">
                     <div class="appearance-row">
                         <span class="appearance-label">"Text size"</span>
                         <button type="button" class="appearance-step"
+                            aria-label="Decrease text size"
                             on:click=move |_| bump_font(-1)>"\u{2212}"</button>
                         <span class="appearance-value">
                             {move || format!("{} px", effective_font())}
                         </span>
                         <button type="button" class="appearance-step"
+                            aria-label="Increase text size"
                             on:click=move |_| bump_font(1)>"+"</button>
                     </div>
                     <div class="appearance-row">
                         <span class="appearance-label">"Line spacing"</span>
                         <button type="button" class="appearance-step"
+                            aria-label="Decrease line spacing"
                             on:click=move |_| bump_line_h(-LINE_H_STEP)>"\u{2212}"</button>
                         <span class="appearance-value">
                             {move || format!("{:.2}", effective_line_h())}
                         </span>
                         <button type="button" class="appearance-step"
+                            aria-label="Increase line spacing"
                             on:click=move |_| bump_line_h(LINE_H_STEP)>"+"</button>
                     </div>
                     <div class="appearance-actions">

@@ -9,6 +9,7 @@ pub fn BufferList() -> impl IntoView {
     view! {
         <div class="buffer-list">
             <button
+                type="button"
                 class="add-network-btn"
                 title="Add a new server"
                 on:click=move |_| state.wizard_open.set(true)
@@ -74,12 +75,13 @@ pub fn BufferList() -> impl IntoView {
                     };
                     views.push(
                         view! {
-                            <div class=class on:click=on_click>
+                            <button type="button" class=class on:click=on_click
+                                aria-current=is_active.then_some("page")>
                                 <span class="num">{current_num}"."</span>
                                 " "
                                 <span class="name">{display_name}</span>
                                 {badge}
-                            </div>
+                            </button>
                         }
                         .into_any(),
                     );

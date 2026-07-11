@@ -19,6 +19,16 @@ fn is_near_bottom(el: &web_sys::Element) -> bool {
         <= SCROLL_THRESHOLD
 }
 
+fn viewport_needs_backlog(scroll_height: i32, client_height: i32) -> bool {
+    client_height > 0 && scroll_height <= client_height
+}
+
+fn restored_scroll_top(current: i32, delta: f64) -> Option<i32> {
+    #[allow(clippy::cast_possible_truncation)]
+    let target = (f64::from(current) + delta).max(0.0) as i32;
+    (target != current).then_some(target)
+}
+
 /// Hard-pin the scroller to the bottom. Callers MUST set
 /// `skip_next_scroll` first so the resulting `scroll` event does not
 /// re-enter `on_scroll` and re-measure mid-paint.
@@ -340,10 +350,11 @@ pub fn ChatView() -> impl IntoView {
             let Some(new_off) = anchor_offset(&el_dom, &anchor_mid) else {
                 return; // anchor trimmed away — leave the view as-is, don't jump
             };
-            skip_next_scroll.set_value(true);
             let delta = new_off - anchor_off;
-            #[allow(clippy::cast_possible_truncation)]
-            let target = (f64::from(el_dom.scroll_top()) + delta).max(0.0) as i32;
+            let Some(target) = restored_scroll_top(el_dom.scroll_top(), delta) else {
+                return;
+            };
+            skip_next_scroll.set_value(true);
             el_dom.set_scroll_top(target);
         });
         let _ = window.request_animation_frame(cb.as_ref().unchecked_ref());
@@ -394,9 +405,7 @@ pub fn ChatView() -> impl IntoView {
             }
             let Some(el) = chat_ref.get() else { return };
             let el_dom: web_sys::Element = el.into();
-            // Already scrollable → the user can reach the top and `on_scroll`
-            // takes over; nothing to pre-fill.
-            if el_dom.scroll_height() > el_dom.client_height() {
+            if !viewport_needs_backlog(el_dom.scroll_height(), el_dom.client_height()) {
                 return;
             }
             trigger_backlog_fetch(&el_dom);
@@ -450,8 +459,10 @@ pub fn ChatView() -> impl IntoView {
         // the chat div — a boolean flag would leave the observer bound to
         // the detached old node and silently kill resize re-pinning after
         // the first /shell round-trip.
-        let already_observing = observer_handle
-            .with_value(|h| h.as_ref().is_some_and(|(_, _, observed)| observed == &el_dom));
+        let already_observing = observer_handle.with_value(|h| {
+            h.as_ref()
+                .is_some_and(|(_, _, observed)| observed == &el_dom)
+        });
         if already_observing {
             return;
         }
@@ -477,6 +488,9 @@ pub fn ChatView() -> impl IntoView {
                 let Some(el) = chat_ref.get() else { return };
                 let el_dom: web_sys::Element = el.into();
                 do_pin(&el_dom);
+                if viewport_needs_backlog(el_dom.scroll_height(), el_dom.client_height()) {
+                    trigger_backlog_fetch(&el_dom);
+                }
             });
             let _ = window.request_animation_frame(raf_cb.as_ref().unchecked_ref());
             raf_cb.forget();
@@ -489,11 +503,7 @@ pub fn ChatView() -> impl IntoView {
         // so it exists by the time the node_ref resolves. Select by class,
         // not positionally — a future first child (sticky header, sentinel)
         // must not silently steal the content-growth observation.
-        if let Some(inner) = el_dom
-            .query_selector(".chat-messages-inner")
-            .ok()
-            .flatten()
-        {
+        if let Some(inner) = el_dom.query_selector(".chat-messages-inner").ok().flatten() {
             observer.observe(&inner);
         }
         observer_handle.set_value(Some((observer, cb, el_dom)));
@@ -501,7 +511,9 @@ pub fn ChatView() -> impl IntoView {
 
     on_cleanup(move || {
         let handle = observer_handle.try_update_value(Option::take).flatten();
-        let Some((observer, cb, _)) = handle else { return };
+        let Some((observer, cb, _)) = handle else {
+            return;
+        };
         observer.disconnect();
         drop(cb);
     });
@@ -632,7 +644,7 @@ pub fn ChatView() -> impl IntoView {
                         />
                     </div>
                 </div>
-                <div class="scroll-bottom-btn"
+                <button type="button" class="scroll-bottom-btn" aria-label="Jump to latest message"
                     class:hidden=move || state.is_at_bottom.get()
                     on:click=move |_| {
                         state.is_at_bottom.set(true);
@@ -652,7 +664,7 @@ pub fn ChatView() -> impl IntoView {
                     }
                 >
                     "\u{25BC}"
-                </div>
+                </button>
             </div>
                 }.into_any()
             }}
@@ -796,13 +808,17 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
             move || nick_color_or_empty(state, &nick, !is_own)
         };
         let on_nick_click = mention_on_click(state, nick_text.clone());
+        let on_nick_keydown = mention_on_keydown(state, nick_text.clone());
+        let nick_label = format!("Mention {nick_text}");
         view! {
             <>
                 <div class=line_class data-mid=mid>
                     <span class="ts">{ts_fn}</span>
                     <span class="action-body">
                         "* "
-                        <span class="action-nick" style=nick_color_style
+                        <span class="action-nick" style=nick_color_style role="button" tabindex="0"
+                            aria-label=nick_label
+                            on:keydown=on_nick_keydown
                             on:click=on_nick_click>{nick_text}</span>
                         " "
                         {styled}
@@ -865,6 +881,7 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
             move || nick_color_or_empty(state, &nick, !is_own && !highlight)
         };
         let on_nick_click = mention_on_click(state, nick_text.clone());
+        let on_nick_keydown = mention_on_keydown(state, nick_text.clone());
 
         view! {
             <>
@@ -872,7 +889,9 @@ fn render_message(state: AppState, msg: crate::protocol::WireMessage) -> AnyView
                     <span class="ts">{ts_fn}</span>
                     <span class="nick" style=nick_style>
                         <span class="mode">{mode}</span>
-                        <span class="name" style=nick_color_style
+                        <span class="name" style=nick_color_style role="button" tabindex="0"
+                            aria-label=format!("Mention {nick_text}")
+                            on:keydown=on_nick_keydown
                             on:click=on_nick_click>{nick_truncated}</span>
                         <span class="sep">"❯"</span>
                     </span>
@@ -914,6 +933,15 @@ fn mention_on_click(state: AppState, nick: String) -> impl Fn(web_sys::MouseEven
                 state.pending_mention.set(Some(nick));
             }
         });
+    }
+}
+
+fn mention_on_keydown(state: AppState, nick: String) -> impl Fn(web_sys::KeyboardEvent) + Clone {
+    move |event: web_sys::KeyboardEvent| {
+        if matches!(event.key().as_str(), "Enter" | " ") && !nick.is_empty() {
+            event.prevent_default();
+            state.pending_mention.set(Some(nick.clone()));
+        }
     }
 }
 
@@ -1035,8 +1063,8 @@ fn render_previews(
                         />
                     </a>
                     <button
-                        class="msg-preview-dismiss"
                         type="button"
+                        class="msg-preview-dismiss"
                         title="Hide this preview"
                         on:click=on_dismiss
                     >"\u{00D7}"</button>
@@ -1150,5 +1178,40 @@ fn truncate_nick(nick: &str, max_len: usize, mode: &str) -> String {
         }
         result.push('+');
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{restored_scroll_top, viewport_needs_backlog};
+
+    #[test]
+    fn viewport_fill_is_disabled_without_a_rendered_viewport() {
+        assert!(!viewport_needs_backlog(0, 0));
+    }
+
+    #[test]
+    fn viewport_fill_is_enabled_when_content_does_not_overflow() {
+        assert!(viewport_needs_backlog(200, 300));
+    }
+
+    #[test]
+    fn viewport_fill_is_disabled_when_content_overflows() {
+        assert!(!viewport_needs_backlog(301, 300));
+    }
+
+    #[test]
+    fn zero_offset_does_not_schedule_a_scroll_restore() {
+        assert_eq!(restored_scroll_top(120, 0.0), None);
+    }
+
+    #[test]
+    fn subpixel_offset_that_keeps_scroll_top_does_not_schedule_a_restore() {
+        assert_eq!(restored_scroll_top(120, 0.75), None);
+    }
+
+    #[test]
+    fn changed_scroll_top_is_returned_for_restore() {
+        assert_eq!(restored_scroll_top(120, 15.0), Some(135));
     }
 }

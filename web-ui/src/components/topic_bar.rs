@@ -22,7 +22,7 @@ pub fn TopicBar() -> impl IntoView {
                         <span>{crate::components::styled::render_topic_text(&topic)}</span>
                     }.into_any()
                 } else {
-                    view! { <span>"repartee"</span> }.into_any()
+                    view! { <span>{crate::constants::APP_NAME}</span> }.into_any()
                 }
             }}
         </div>
