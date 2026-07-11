@@ -273,9 +273,9 @@ impl AppState {
                     // Dedup — guards against the SyncInit → FetchMessages
                     // round-trip race where the same message arrives as both a
                     // live NewMessage and inside the fetched backlog snapshot.
-                    // Keyed on `(log_id, id)` (not id alone): a live message
-                    // (log_id None) must not be rejected because a DB-sourced
-                    // backlog row happens to share its numeric id. id=0
+                    // Identity is `same_wire_message` (rowid alone for stored
+                    // rows, counter id for live ones — see there for why the
+                    // transport id is not a cross-source key). id=0
                     // (date separators) is always admitted.
                     if !message_already_present(entry, &message) {
                         entry.push(message);
@@ -760,6 +760,11 @@ fn local_date_of(ts: i64) -> Option<chrono::NaiveDate> {
 /// on the rowid alone; two live messages (`log_id` None) match on the
 /// counter id (same process, stable); a live message never matches a stored
 /// row (see `new_live_message_not_dropped_by_db_row_with_same_id`).
+///
+/// INVARIANT: the `<For>` render key in `chat_view.rs` still keys on the
+/// `(id, log_id)` composite — it relies on this dedup layer to guarantee at
+/// most one entry per rowid ever reaches the rendered list. Any new insert
+/// path must route through `message_already_present`/`dedupe_incoming`.
 fn same_wire_message(a: &WireMessage, b: &WireMessage) -> bool {
     match (a.log_id, b.log_id) {
         (Some(x), Some(y)) => x == y,

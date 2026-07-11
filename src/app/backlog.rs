@@ -14,6 +14,20 @@ use super::App;
 /// tripping `redundant_pub_crate` from a privately-nested module.
 pub(crate) const PINNED_BACKLOG_CAP: usize = 10_000;
 
+/// `event_key` of the synthetic per-day separator rows.
+pub(crate) const EVENT_KEY_DATE_SEPARATOR: &str = "date_separator";
+/// `event_key` of the synthetic "End of backlog (N lines)" marker.
+pub(crate) const EVENT_KEY_BACKLOG_END: &str = "backlog_end";
+
+/// Synthetic rows (`date_separator` / `backlog_end`) that pagination cursors
+/// and seed detection must skip — they carry no timeline position of their own.
+pub(crate) fn is_synthetic_row(m: &Message) -> bool {
+    matches!(
+        m.event_key.as_deref(),
+        Some(EVENT_KEY_DATE_SEPARATOR | EVENT_KEY_BACKLOG_END)
+    )
+}
+
 /// What the startup/reconnect backlog seeder should do for a buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SeedPlan {
@@ -33,20 +47,29 @@ pub(crate) enum SeedPlan {
 /// buffer already displays (the "last 20 lines duplicated in every buffer"
 /// web bug; the TUI had the identical duplicate 20 lines up in scrollback).
 ///
-/// - Any log-sourced row (`log_msg_id` set) or the end-of-backlog marker
-///   proves a seed already ran → [`SeedPlan::Skip`].
+/// - Any log-sourced row or the end-of-backlog marker proves a seed already
+///   ran → [`SeedPlan::Skip`]. "Log-sourced" means a NUMERIC `log_msg_id`
+///   (the `SQLite` rowid `stored_to_message` stamps): live QUIT/NICK primaries
+///   also carry a `log_msg_id`, but it's a UUID correlation id, not DB
+///   provenance — the same parse rule `message_to_wire` applies.
 /// - Otherwise only rows STRICTLY OLDER than the oldest real message may be
 ///   prepended (a query buffer created by its triggering PRIVMSG, or a
 ///   live-only buffer whose lines are by now also persisted to the DB). The
 ///   live boundary row has no rowid, so the cursor is floored to the whole
 ///   second: an unmigrated DB serves `ts_ms = timestamp * 1000`, and a
 ///   real-millisecond cursor (e.g. `.500`) would re-serve the boundary row's
-///   own floored (`.000`) copy.
+///   own floored (`.000`) copy. On a migrated (real-millisecond) DB the floor
+///   can additionally skip logged rows in the boundary row's own second —
+///   accepted: a visible duplicate is worse than losing <1s of history at a
+///   seam only reached when a never-seeded buffer holds live lines.
 /// - An empty (or separator-only) buffer seeds from the newest page.
 pub(crate) fn backlog_seed_plan(messages: &VecDeque<Message>) -> SeedPlan {
-    let already_seeded = messages
-        .iter()
-        .any(|m| m.log_msg_id.is_some() || m.event_key.as_deref() == Some("backlog_end"));
+    let already_seeded = messages.iter().any(|m| {
+        m.log_msg_id
+            .as_deref()
+            .is_some_and(|s| s.parse::<i64>().is_ok())
+            || m.event_key.as_deref() == Some(EVENT_KEY_BACKLOG_END)
+    });
     if already_seeded {
         return SeedPlan::Skip;
     }
@@ -139,7 +162,7 @@ impl App {
             sep_id,
             Utc::now(),
             format!("─── End of backlog ({count} lines) ───"),
-            "backlog_end",
+            EVENT_KEY_BACKLOG_END,
         ));
 
         // Prepend backlog before any existing messages (e.g. the triggering
@@ -179,10 +202,7 @@ pub(crate) const CHAT_BACKLOG_PAGE: usize = 200;
 ///
 /// [`get_messages_paginated_subsecond`]: crate::storage::query::get_messages_paginated_subsecond
 pub(crate) fn oldest_backlog_cursor(messages: &VecDeque<Message>) -> Option<(i64, i64)> {
-    let oldest = messages.iter().find(|m| {
-        m.event_key.as_deref() != Some("date_separator")
-            && m.event_key.as_deref() != Some("backlog_end")
-    })?;
+    let oldest = messages.iter().find(|m| !is_synthetic_row(m))?;
     let ts = oldest.timestamp.timestamp_millis();
     let id = oldest
         .log_msg_id
@@ -202,10 +222,7 @@ pub(crate) fn oldest_backlog_cursor(messages: &VecDeque<Message>) -> Option<(i64
 /// tags) is a verified server reference. Returns `None` when the buffer has no
 /// real (non-separator) message to anchor on.
 pub(crate) fn in_memory_oldest_anchor(messages: &VecDeque<Message>) -> Option<(Option<String>, i64)> {
-    let oldest = messages.iter().find(|m| {
-        m.event_key.as_deref() != Some("date_separator")
-            && m.event_key.as_deref() != Some("backlog_end")
-    })?;
+    let oldest = messages.iter().find(|m| !is_synthetic_row(m))?;
     let millis = oldest.timestamp.timestamp_millis();
     let msgid = oldest
         .tags
@@ -241,7 +258,7 @@ const fn reached_history_watermark(watermark_ms: Option<i64>, buffer_oldest_ms: 
 /// older rows in above it, that count is stale and the marker no longer denotes
 /// a meaningful point — so it's dropped on the first older-page prepend.
 pub(crate) fn remove_backlog_end_marker(messages: &mut VecDeque<Message>) {
-    messages.retain(|m| m.event_key.as_deref() != Some("backlog_end"));
+    messages.retain(|m| m.event_key.as_deref() != Some(EVENT_KEY_BACKLOG_END));
 }
 
 impl App {
@@ -353,7 +370,7 @@ impl App {
                 .date_naive();
             if let Some(buf) = self.state.buffers.get_mut(buffer_id)
                 && let Some(first) = buf.messages.front()
-                && first.event_key.as_deref() == Some("date_separator")
+                && first.event_key.as_deref() == Some(EVENT_KEY_DATE_SEPARATOR)
                 && Local
                     .from_utc_datetime(&first.timestamp.naive_utc())
                     .date_naive()
@@ -939,6 +956,27 @@ mod tests {
         q.push_back(msg(1000, None, Some("backlog_end")));
         q.push_back(msg(2000, None, None));
         assert!(matches!(backlog_seed_plan(&q), SeedPlan::Skip));
+    }
+
+    #[test]
+    fn seed_plan_ignores_uuid_correlation_ids_from_live_quit_nick() {
+        // Live QUIT/NICK primaries carry log_msg_id = Some(<uuid>) purely as a
+        // cross-buffer correlation id (events.rs handle_quit/handle_nick) —
+        // that is NOT evidence of a DB seed. Only a numeric rowid is. A buffer
+        // whose window holds just live lines + a live quit must still take the
+        // Fetch path, or reconnect backfill starves nondeterministically
+        // depending on whether a quit sits in the window.
+        let mut q: VecDeque<Message> = VecDeque::new();
+        let mut live = msg(1500, None, None);
+        live.timestamp = chrono::DateTime::from_timestamp_millis(1_500_500).unwrap();
+        q.push_back(live);
+        let mut quit = msg(1600, Some("0198c2f4-uuid-not-a-rowid"), Some("quit"));
+        quit.timestamp = chrono::DateTime::from_timestamp_millis(1_600_000).unwrap();
+        q.push_back(quit);
+        assert!(matches!(
+            backlog_seed_plan(&q),
+            SeedPlan::Fetch(Some((1_500_000, 0)))
+        ));
     }
 
     #[test]

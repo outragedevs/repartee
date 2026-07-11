@@ -69,9 +69,14 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
         Command::NOTICE(target, text) => {
             handle_notice(state, conn_id, msg.prefix.as_ref(), target, text, tags);
         }
-        Command::JOIN(..) => {
-            let fields = join_fields(&msg.command)
-                .expect("join_fields always matches Command::JOIN");
+        Command::JOIN(channel, account, realname) => {
+            let fields = JoinFields {
+                channel,
+                account: account.as_deref(),
+                realname: realname.as_deref(),
+                uid: None,
+                ip: None,
+            };
             handle_join(state, conn_id, &our_nick, msg.prefix.as_ref(), &fields, tags);
         }
         Command::PART(channel, reason) => {
@@ -261,7 +266,10 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
                 );
                 JoinFields {
                     channel: &args[0],
-                    ..JoinFields::default()
+                    account: None,
+                    realname: None,
+                    uid: None,
+                    ip: None,
                 }
             });
             handle_join(state, conn_id, &our_nick, msg.prefix.as_ref(), &fields, tags);
@@ -1884,10 +1892,12 @@ fn handle_join(
     } else {
         realname.to_string()
     };
-    // ircnet.com/extended-join: uid + ip, same bracket style WHOX uses
+    // ircnet.com/extended-join: uid + ip. Pre-baked as one display param —
+    // the theme engine is pure substitution (no conditionals), so theme-side
+    // brackets would render a literal "[ ]" on every non-IRCnet join.
+    // join_fields sets uid and ip together or not at all.
     let uid_display = match (fields.uid, fields.ip) {
         (Some(uid), Some(ip)) => format!("[{uid} {ip}]"),
-        (Some(uid), None) => format!("[{uid}]"),
         _ => String::new(),
     };
 
@@ -4161,7 +4171,7 @@ fn whois_freeform_key(numeric: &str) -> Option<&'static str> {
 }
 
 /// Fields carried by a JOIN, unified across both wire forms.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct JoinFields<'a> {
     pub channel: &'a str,
     pub account: Option<&'a str>,

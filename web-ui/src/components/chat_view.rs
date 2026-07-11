@@ -486,8 +486,14 @@ pub fn ChatView() -> impl IntoView {
         };
         observer.observe(&el_dom);
         // The content wrapper is part of the same template as the container,
-        // so it exists by the time the node_ref resolves.
-        if let Some(inner) = el_dom.first_element_child() {
+        // so it exists by the time the node_ref resolves. Select by class,
+        // not positionally — a future first child (sticky header, sentinel)
+        // must not silently steal the content-growth observation.
+        if let Some(inner) = el_dom
+            .query_selector(".chat-messages-inner")
+            .ok()
+            .flatten()
+        {
             observer.observe(&inner);
         }
         observer_handle.set_value(Some((observer, cb, el_dom)));
