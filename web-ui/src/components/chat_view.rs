@@ -405,8 +405,10 @@ pub fn ChatView() -> impl IntoView {
         cb.forget();
     });
 
-    // ResizeObserver on the scroll container, coalesced into the next RAF.
-    // Fires whenever the container's box changes:
+    // ResizeObserver on BOTH the scroll container and its content wrapper
+    // (.chat-messages-inner), coalesced into the next RAF.
+    //
+    // The container's own box changes on:
     //   - desktop browser resize / mobile orientation change
     //   - Android Chrome keyboard open/close (layout viewport resizes)
     //   - mobile URL-bar collapse/expand
@@ -414,6 +416,14 @@ pub fn ChatView() -> impl IntoView {
     //     message (the bottom bar grows, this container shrinks) — the
     //     tester's "last line hides while typing on the phone" bug; a
     //     window.resize listener never sees this one.
+    //
+    // The container is `flex:1` + `overflow-y:auto` inside a bounded flex
+    // column, so CONTENT growth never changes its box — only scrollHeight.
+    // Async image-preview decode grows the content after the pin, which is
+    // invisible to a container-only observer: that was the "switching
+    // channels / loading previews doesn't stick to the last line" bug. The
+    // inner wrapper's height IS the content height, so observing it too
+    // catches every post-pin growth (image decode, font swap, late DOM).
     // iOS Safari's keyboard overlays the visual viewport without resizing
     // the layout viewport, so nothing fires here — and nothing needs to:
     // the container geometry is unchanged and the browser pans the focused
@@ -475,6 +485,11 @@ pub fn ChatView() -> impl IntoView {
             return;
         };
         observer.observe(&el_dom);
+        // The content wrapper is part of the same template as the container,
+        // so it exists by the time the node_ref resolves.
+        if let Some(inner) = el_dom.first_element_child() {
+            observer.observe(&inner);
+        }
         observer_handle.set_value(Some((observer, cb, el_dom)));
     });
 
