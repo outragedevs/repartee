@@ -275,14 +275,27 @@ before the throttle starts delaying, a user who is typing continuously gets ~2.
 **Typing costs roughly one message of burst headroom.** That is acceptable and does not
 justify forking the crate.
 
-Two mitigations make it a non-issue in practice:
+Three mitigations make it a non-issue in practice:
 
 1. **Never send `+typing` to a target within 3 s of sending a real message to it.** The
    message itself already tells the receiver we are present, so the notification is
    redundant precisely when the budget is tightest.
-2. **Drop, never queue.** A typing notification that cannot be sent now is discarded, not
-   buffered. A late "is typing" is worse than none — the receiver's 6-second window will
-   have moved on.
+2. **Drop, never hand to the transport, when the budget is tight.** This has to be enforced
+   *before* `Sender::send`, not after: `Sender` is an `UnboundedSender`
+   (`irc-repartee-1.5.1/src/client/mod.rs:940-947`), and once a frame is in it, `Outgoing`
+   will **buffer and delay** it when the penalty exceeds the threshold
+   (`client/mod.rs:1166-1180`) rather than dropping it. A typing frame handed over under
+   flood pressure does not vanish — it sits in the queue, arrives stale, and spends budget
+   that the user's next real message needed.
+
+   So `TypingSender` keeps its own estimate of the penalty, mirroring the crate's formula
+   (`length_penalty` + `command_penalty`, `client/mod.rs:992-1045`), and simply does not
+   send when the estimate leaves less than a reserve for real messages. The estimate is
+   approximate and deliberately conservative; being wrong costs a missing typing
+   notification, which is the failure we want.
+3. **A late notification is never sent.** If the throttle or the budget blocks a send, the
+   notification is reconsidered on the next tick against the *current* state, not replayed.
+   The receiver's 6-second window has moved on; what matters is what is true now.
 
 *Rejected alternative:* bumping the fork to add a real `Command::TAGMSG` variant with a
 lower penalty. It would be marginally cleaner (typed inbound match, tuned penalty) but
@@ -322,8 +335,10 @@ signal. (Batch membership is already resolved — `src/irc/batch.rs:155`, parent
 | `src/irc/isupport.rs` | new `client_tag_allowed(&self, tag: &str) -> bool` (parses `CLIENTTAGDENY`) |
 | `src/state/typing.rs` | **new** — `TypingTracker`: `buffer_id → nick → TypingEntry`, with set/clear/expire/list |
 | `src/state/mod.rs`, `src/state/events.rs:10` | `AppState.typing: TypingTracker` + one line in `AppState::new()` |
-| `src/app/typing.rs` | **new** — 14th `app/` domain submodule: outbound state machine, expiry sweep, web event emission |
-| `src/app/input.rs` | keystroke hook in `handle_key`; `done` on clear; reset on submit |
+| `src/app/typing.rs` | **new** — 14th `app/` domain submodule: source/target state machine, flood estimate, expiry sweep, web event emission |
+| `src/app/input.rs` | input hooks around **both** `Event::Key` and `Event::Paste` (`handle_event`, `:33-36` — paste is a separate branch and would otherwise be missed); `on_submit` on Enter |
+| `src/commands/handlers_ui.rs` | `parse_statusbar_item` (`:586`), `statusbar_item_name` (`:598`), `AVAILABLE_ITEMS` — all match `StatusbarItem` exhaustively |
+| `src/state/events.rs` | `AppState::remove_buffer` (`:84`) drops the buffer's typing entries |
 | `src/app/mod.rs` | expiry in the 1 s tick arm; new self-rearming 3 s resend timer |
 | `src/config/mod.rs` | `TypingConfig`; `StatusbarItem::Typing`; new default item order |
 | `src/commands/settings.rs` | `typing.*` keys in get/set dispatch + completion list |
@@ -376,16 +391,24 @@ Command::Raw(verb, args) if verb.eq_ignore_ascii_case("TAGMSG") => { … }
 ```
 
 Target resolution reuses the `handle_privmsg` logic: a channel target maps to the channel
-buffer; a target equal to our nick maps to the query buffer keyed by the *sender*; a
-`STATUSMSG` prefix (`@#chan`, `+#chan`) is stripped before lookup.
+buffer; a target equal to our nick maps to the query buffer keyed by the *sender*.
+
+**`STATUSMSG` stripping must be precise.** `is_channel` (`src/irc/formatting.rs:157-161`)
+accepts `#`, `&`, `+`, **and** `!` — so `&chan` and `+chan` are real channels, not
+status-prefixed ones. Blindly trimming a set of prefix characters would turn `&chan` into
+`chan` and resolve it as a query. The rule: strip **at most one** leading character, only if
+it appears in the connection's advertised `STATUSMSG` ISUPPORT token, and only if what
+remains is still a channel. Otherwise use the target as-is.
 
 Then, in order, a message is **dropped** if any of these holds:
 
 1. it carries a `batch` tag (§3.3 — history replay)
-2. the sender is us (§3.2 — `echo-message`)
-3. the sender is on the ignore list (`src/irc/ignore.rs`)
-4. it carries no valid `+typing` tag (unknown/absent/empty value)
-5. the target buffer does not already exist
+2. a script suppressed the event (`state.suppress_event_display`, §4.8)
+3. `typing.show` is off (§5 — the setting gates *ingestion*, not just rendering)
+4. the sender is us (§3.2 — `echo-message`)
+5. the sender is on the ignore list (`src/irc/ignore.rs`)
+6. it carries no valid `+typing` tag (unknown/absent/empty value)
+7. the target buffer does not already exist
 
 Rule 5 is deliberate: **typing never creates a buffer.** Otherwise any stranger could pop
 a query window open on your screen just by starting to type, with no message ever sent —
@@ -405,6 +428,19 @@ across the codebase (mostly test fixtures), so a new field there means 39 mechan
 line. It is also the better boundary — typing is ephemeral session state, not buffer content
 — and it lets the expiry sweep walk one small map instead of every buffer.
 
+**Clearing is connection-scoped.** Buffer ids are `{conn_id}/{name}`
+(`src/state/buffer.rs:213`), and the same nick can be typing on two networks at once. A
+`QUIT` or a `NICK` change belongs to **one** connection, so the cleanup must only touch
+buffer ids under that connection's prefix — a tracker-wide sweep by nick would clear
+`alice` on Libera because `alice` quit on OFTC. `PART` and `KICK` are already scoped to a
+single channel buffer; note that `KICK` must clear the **kicked user**, not the kicker
+(`handle_kick` binds `kicker` and `kicked_user` — there is no `nick` in scope).
+
+**Buffer lifecycle.** `AppState::remove_buffer` (`src/state/events.rs:84`) must drop the
+buffer's typing entries, and the web client must clear its own map on `BufferClosed`.
+Without this, closing and reopening a query inside the 30 s `paused` TTL resurrects a stale
+typer.
+
 ### 4.4 Known quirk: `extract_tags` drops valueless tags
 
 `extract_tags` (`src/irc/events.rs:797-803`) builds its `HashMap` with
@@ -415,56 +451,97 @@ be ignored — which is what already happens. The behaviour is correct by accide
 on it, and note it here so a future `+draft/react`-style valueless tag does not trip over
 it silently.
 
-### 4.5 Sending — state machine
+### 4.5 Sending — sources, targets, and the state machine
 
-Lives in `src/app/typing.rs`. Because a user can only type into one buffer at a time, the
-outbound machine tracks a **single** target:
+Lives in `src/app/typing.rs`.
+
+**There is no single "current input".** The TUI has one, and *each* web session has its own
+— `handle_web_command` is handed a `session_id` (`src/app/web.rs:413-416`), and
+`web_active_buffers` maps session → buffer, independently of the global
+`state.active_buffer_id`. Two browser tabs can be typing into two different buffers while
+the terminal types into a third. A single-target machine would let an idle second tab's
+"input is empty" cancel the terminal's live typing.
+
+So the machine is two-layered: **sources** report what they are doing, **targets** are what
+gets sent.
 
 ```rust
+enum TypingSource { Tui, Web(String) }   // String = web session id
+
+struct SourceState {
+    buffer_id: String,     // where this source is typing
+    active: bool,          // its input holds non-empty, non-slash text
+    last_activity: Instant // when its input last changed
+}
+
+struct TargetState {
+    sent: Option<TypingState>, // last state we transmitted for this buffer
+    last_sent: Option<Instant> // the 3s throttle clock, per target
+}
+
 struct TypingSender {
-    target: Option<(ConnectionId, String)>, // buffer we last typed into
-    sent: Option<TypingState>,              // last state we transmitted
-    last_sent: Option<Instant>,             // for the 3s throttle
-    last_keystroke: Option<Instant>,        // for the paused transition
+    sources: HashMap<TypingSource, SourceState>,
+    targets: HashMap<String, TargetState>,
+    last_message: HashMap<String, Instant>, // real messages, for §3.1 suppression
+    flood: FloodEstimate,                   // §3.1 budget mirror
 }
 ```
 
-The machine is driven from two places only: the keystroke hook, and the existing 1 s tick
-(resend, the `paused` transition, expiry of received state, and the buffer-switch `done`).
-**No new timer is introduced** — see §2.5.
+**Aggregation.** For each buffer, the desired state is derived from every source pointing at
+it:
 
-Input predicate, applied on every keystroke that mutates the input buffer:
+| Sources pointing at the buffer | Desired |
+|--------------------------------|---------|
+| none active                    | `Done` (if we have sent anything for it) |
+| at least one active, some source changed within 3 s | `Active` |
+| at least one active, none changed for ≥ 3 s | `Paused` |
+
+A source that switches buffer, goes empty, submits, or disconnects simply stops holding its
+old target — and the old target's aggregate collapses to `Done` on its own. There is no
+special "buffer switch" case to get wrong.
+
+**Input predicate**, computed per source:
 
 ```
-should_type = !input.is_empty() && !is_slash_command(input)
+active = !input.is_empty() && !is_slash_command(input)
 is_slash_command(s) = s.starts_with('/') && !s.starts_with("/me ")
 ```
 
-`/me` is exempted because it *is* a message — the spec excludes slash commands because
-they are not conversation, and an action is conversation. (`/me` alone, with no trailing
-space or text, is still a bare command and stays excluded.)
+`/me` is exempted because it *is* a message — the spec excludes slash commands because they
+are not conversation, and an action is conversation. (`/me` alone, with no trailing space or
+text, is still a bare command and stays excluded.) The browser applies this predicate
+locally and reports only the resulting boolean (§4.7).
 
-Transitions:
+**Emission.** A target emits when its desired state differs from `sent`, or when `sent` is
+`Active` and the throttle window has reopened (the spec asks for `active` "continuously").
+`Paused` is emitted once. `Done` is emitted once.
 
-| Trigger | Condition | Action |
-|---------|-----------|--------|
-| keystroke | `should_type`, ≥ 3 s since last send | send `active` |
-| keystroke | `should_type`, < 3 s since last send | record keystroke only (throttle) |
-| keystroke | `!should_type`, we previously sent `active`/`paused` | send `done` once, reset |
-| 3 s timer | `should_type`, last keystroke < 3 s ago | resend `active` |
-| 3 s timer | `should_type`, last keystroke ≥ 3 s ago, state is `Active` | send `paused` once |
-| 3 s timer | state is `Paused` | nothing (stay silent until keys resume) |
-| submit (Enter) | — | reset to idle; send nothing (the PRIVMSG clears typing at receivers) |
-| buffer switch | we had sent `active`/`paused` to the old target | send `done` to the old target, reset |
-| disconnect | — | reset (QUIT clears typing at receivers) |
+**The 3-second throttle applies to every notification, including `Done`.** The spec is
+unqualified: *"any `typing` notification is not sent within 3 seconds of another one for a
+given target."* A `Done` that is due but throttled is **not dropped and not sent early** —
+it stays pending, and the 1 s tick emits it as soon as the window opens. If the user resumes
+typing before then, the pending `Done` is simply superseded by the recomputed aggregate, and
+never goes out. This is why the machine stores desired-vs-sent per target rather than a
+queue of notifications: coalescing falls out for free.
 
-Guards — **every** send is gated on all of:
+The cost of obeying the throttle here is that a peer can keep showing "is typing" for up to
+3 s after the user clears their input — against a 6 s expiry they would have hit anyway.
+
+**Drivers.** Two, and only two: the input hooks (TUI keystroke and paste; `WebCommand::Typing`
+from a browser) and the existing 1 s tick, which resends, transitions to `Paused`, flushes
+pending `Done`s, and expires received state. **No new timer** — see §2.5.
+
+**Guards.** Every send is gated on all of:
 
 - `conn.enabled_caps.contains("message-tags")`
-- `isupport.client_tag_allowed("typing")`
+- `isupport_parsed.client_tag_allowed("typing")`
 - config: `typing.send_channels` for `BufferType::Channel`, `typing.send_queries` for `BufferType::Query`
-- buffer type is `Channel` or `Query` (never Server / Log / Shell / DCC — DCC chat has no server to route TAGMSG through)
+- buffer type is `Channel` or `Query` (never Server / Log / Shell / DCC — DCC chat has no server to route a TAGMSG through)
 - no real message sent to this target in the last 3 s (§3.1)
+- the flood estimate leaves headroom for the user's real messages (§3.1)
+
+A send blocked by a guard is *not* queued. The target keeps its desired-vs-sent gap and the
+next tick reconsiders it against the state that is true then.
 
 ### 4.6 TUI rendering
 
@@ -513,23 +590,37 @@ mid-stream; a full set is idempotent and self-healing. Emitted whenever the set 
 (new typer, expiry, clear). Not included in `SyncInit`: typing is ephemeral, and a client
 that connects mid-typing simply learns about it within 3 seconds on the next resend.
 
-**Browser → server:** `WebCommand::Typing { buffer_id: String, typing: bool }`. The
-browser reports **only** the predicate — "my input field currently holds non-empty,
-non-slash text" — debounced to at most 1 message per second to keep the websocket quiet.
-It runs no state machine, no throttle, and knows nothing about caps or `CLIENTTAGDENY`.
-The core treats an arriving `typing: true` exactly as it treats a TUI keystroke for that
-buffer, and `typing: false` as an input-cleared event.
+Because typing is *not* in `SyncInit`, the web client **must reset its typing map when it
+processes `SyncInit`**. A websocket reconnect can miss the expiry or clear event that would
+have retired an indicator, and a stale "alice is typing…" would then persist indefinitely.
 
-This is the key structural decision for the web side: **the state machine exists in
-exactly one place.** TUI and browser are two input sources feeding the same machine, so
-they can never emit two competing TAGMSGs, and turning typing off in config disables it
-everywhere by construction.
+**Browser → server:** `WebCommand::Typing { buffer_id: String, typing: bool }`. The browser
+reports **only** the predicate — "my input field currently holds non-empty, non-slash text"
+— debounced to at most 1 message per second to keep the websocket quiet. It runs no state
+machine, no throttle, and knows nothing about caps or `CLIENTTAGDENY`.
+
+The core keys this by `session_id` (which `handle_web_command` already receives) and feeds
+it into the source layer of §4.5. **This is load-bearing:** two browser tabs plus a terminal
+are three independent sources. Collapsing them into one predicate lets a freshly-opened,
+empty second tab emit `typing: false` and cancel the typing that the terminal is doing right
+now. Each source holds its own `(buffer, active)` and the target's state is the aggregate.
+
+Web submissions must also drive the machine: `WebCommand::SendMessage` and
+`WebCommand::RunCommand` call the same `on_submit` the terminal's Enter key does. Otherwise
+a browser-sent message is followed by a redundant `Done` (from the input going empty), and
+the 3-second post-message suppression never gets recorded.
+
+The structural decision that makes all of this safe: **the state machine exists in exactly
+one place.** TUI and browsers are input sources; the core owns caps, `CLIENTTAGDENY`,
+throttling, flood budget and config. Turning typing off disables it everywhere by
+construction.
 
 `web-ui/src/state.rs` gains a `typing: RwSignal<HashMap<String, Vec<String>>>` keyed by
-buffer id; `web-ui/src/components/status_line.rs` renders the span for the active buffer
-between the channel name and `Lag:`, matching the TUI order. (The web status line
-hardcodes its order and does not read `config.statusbar.items`; keeping the two in sync is
-manual, as it already is today.)
+buffer id, cleared on `SyncInit` and on `BufferClosed`;
+`web-ui/src/components/status_line.rs` renders the span for the active buffer between the
+channel name and `Lag:`, matching the TUI order. (The web status line hardcodes its order
+and does not read `config.statusbar.items`; keeping the two in sync is manual, as it already
+is today.)
 
 ### 4.8 Scripting
 
@@ -562,12 +653,28 @@ send_queries  = true   # send +typing in private queries
 ```
 
 Runtime: `/set typing.show off`, `/set typing.send_channels off`, `/set typing.send_queries off`.
-All three default to `true`. `show = false` hides the status-line item and stops tracking;
-the send flags are independent per spec's privacy guidance, so a user can watch without
-broadcasting, or broadcast in DMs but not in public channels.
+All three default to `true`. The send flags are independent per the spec's privacy guidance,
+so a user can watch without broadcasting, or broadcast in DMs but not in public channels.
 
-Wiring follows the existing pattern in `src/commands/settings.rs`: arms in
-`get_config_value` / `set_config_value` plus entries in the completion list (~`:630`).
+**`show = false` must gate ingestion, not rendering.** Checking it only in the status-line
+render arm would leave the tracker filling up and `WebEvent::Typing` still being broadcast —
+so the browser would keep displaying typing that the user asked not to see. The flag is
+therefore checked in `handle_tagmsg` (drop rule 3, §4.3), and toggling it off **clears the
+tracker and broadcasts the now-empty sets** so live web clients drop what they are showing.
+
+`handle_tagmsg` lives in `src/irc/events.rs`, which has no access to `AppConfig`. The flag
+is mirrored into `AppState.typing_show`, following the existing config→state sync pattern
+used by `scrollback_limit` and `nick_color_sat` — set at startup (`src/app/mod.rs:547`), on
+config reload (`src/commands/handlers_admin.rs:117`), and on `/set`
+(`src/commands/settings.rs:856`).
+
+Wiring the keys themselves follows the existing pattern in `src/commands/settings.rs`: arms
+in `get_config_value` / `set_config_value` plus entries in the completion list (~`:630`).
+
+**`StatusbarItem::Typing` is not just a render arm.** The enum is matched exhaustively in
+`src/commands/handlers_ui.rs` too — `parse_statusbar_item` (`:586`), `statusbar_item_name`
+(`:598`), and the `AVAILABLE_ITEMS` string that `/items` prints. All three must learn the
+new variant, or the build breaks and `/items` cannot manage the new default item.
 
 ---
 
@@ -630,11 +737,16 @@ dependency, no unbounded loops.**
 
 | Risk | Mitigation |
 |------|------------|
-| Flood throttle delays real messages | §3.1 — 3 s post-message suppression; drop-don't-queue |
+| Typing frames queue up under flood pressure and delay real messages | §3.1 — the transport queue is unbounded and *delays* rather than drops, so the budget check happens before `Sender::send`, using an app-side estimate |
 | Self-typing shown via `echo-message` | §3.2 — `is_own` filter in the TAGMSG arm |
 | Phantom typing from history replay | §3.3 — drop TAGMSG carrying a `batch` tag |
+| An idle second browser tab cancels the terminal's typing | §4.5 — per-source state, aggregated per target |
+| `&chan` / `+chan` misparsed as a query by STATUSMSG stripping | §4.3 — strip at most one char, only if advertised in `STATUSMSG` and the remainder is still a channel |
+| `alice` quitting on one network clears her indicator on another | §4.3 — QUIT/NICK cleanup is scoped to the connection's buffer-id prefix |
+| Stale typer resurrected by closing and reopening a buffer | §4.3 — `AppState::remove_buffer` drops the entries; web clears on `BufferClosed` |
+| Stale indicator surviving a websocket reconnect | §4.7 — the web client resets its typing map on `SyncInit` |
+| `typing.show = off` still leaking typing to the web UI | §5 — the flag gates ingestion in `handle_tagmsg`, not just the render arm |
 | Stray separator in the status bar | §4.6 — conditional-separator refactor, covered by a test |
-| Strangers opening query windows by typing | §4.3 rule 5 — typing never creates a buffer |
+| Strangers opening query windows by typing | §4.3 rule 7 — typing never creates a buffer |
 | Server silently drops our tag | `CLIENTTAGDENY` accessor; UI feature gated on it |
-| Web and TUI double-send | §4.7 — one state machine, browser sends a predicate only |
 | Privacy: "typed and thought better of it" leaks | Three independent config flags, `/set`-able at runtime |
