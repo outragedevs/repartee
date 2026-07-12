@@ -400,22 +400,19 @@ pub fn InputLine() -> impl IntoView {
             if is_shell {
                 return;
             }
+            let key = ev.key();
             if let Some(el) = ev
                 .target()
                 .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
             {
                 let tag = el.tag_name();
-                if tag.eq_ignore_ascii_case("input")
-                    || tag.eq_ignore_ascii_case("select")
-                    || tag.eq_ignore_ascii_case("textarea")
-                    || tag.eq_ignore_ascii_case("button")
-                    || tag.eq_ignore_ascii_case("a")
-                    || el.get_attribute("contenteditable").as_deref() == Some("true")
-                {
+                let contenteditable = el
+                    .dyn_ref::<web_sys::HtmlElement>()
+                    .is_some_and(web_sys::HtmlElement::is_content_editable);
+                if should_keep_control_focus(&tag, contenteditable, &key) {
                     return;
                 }
             }
-            let key = ev.key();
             if key == "Tab"
                 || key == "Enter"
                 || key == "Escape"
@@ -1108,9 +1105,38 @@ fn emote_tab_matches(word: &str) -> Vec<String> {
         .collect()
 }
 
+fn should_keep_control_focus(tag: &str, contenteditable: bool, key: &str) -> bool {
+    tag.eq_ignore_ascii_case("input")
+        || tag.eq_ignore_ascii_case("select")
+        || tag.eq_ignore_ascii_case("textarea")
+        || contenteditable
+        || tag.eq_ignore_ascii_case("button") && matches!(key, " " | "Enter")
+        || tag.eq_ignore_ascii_case("a") && key == "Enter"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn printable_key_on_button_returns_focus_to_chat() {
+        assert!(!should_keep_control_focus("BUTTON", false, "x"));
+    }
+
+    #[test]
+    fn space_on_button_keeps_control_focus() {
+        assert!(should_keep_control_focus("BUTTON", false, " "));
+    }
+
+    #[test]
+    fn enter_on_link_keeps_control_focus() {
+        assert!(should_keep_control_focus("A", false, "Enter"));
+    }
+
+    #[test]
+    fn printable_key_in_text_control_keeps_control_focus() {
+        assert!(should_keep_control_focus("INPUT", false, "x"));
+    }
 
     #[test]
     fn floor_char_boundary_clamps_into_multibyte() {

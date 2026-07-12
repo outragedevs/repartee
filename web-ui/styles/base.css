@@ -777,11 +777,6 @@ textarea {
         height: 44px;
     }
 
-    .theme-swatch {
-        width: 28px;
-        height: 28px;
-    }
-
     .mention-badge {
         min-height: 32px;
         padding-inline: 9px;
@@ -921,6 +916,13 @@ textarea {
 
 .theme-swatch.active { border-color: var(--accent); }
 .theme-swatch:hover { border-color: var(--fg-muted); }
+
+@media (max-width: 767px) {
+    .theme-swatch {
+        width: 28px;
+        height: 28px;
+    }
+}
 
 /* === Shell terminal view (beamterm WebGL2 canvas) === */
 

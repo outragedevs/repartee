@@ -116,6 +116,7 @@ fn ResponsiveLayout() -> impl IntoView {
     let (right_open, set_right_open) = signal(false);
     let (touch_start_x, set_touch_start_x) = signal(0i32);
     let (touch_start_y, set_touch_start_y) = signal(0i32);
+    let (tracking_single_touch, set_tracking_single_touch) = signal(false);
 
     let active_buf = move || {
         let active_id = state.active_buffer.get()?;
@@ -136,8 +137,16 @@ fn ResponsiveLayout() -> impl IntoView {
 
     let panel_escape_handle =
         leptos::leptos_dom::helpers::window_event_listener(leptos::ev::keydown, move |event| {
-            if event.key() == "Escape" && (left_open.get_untracked() || right_open.get_untracked())
+            if event.key() != "Escape"
+                || event.default_prevented()
+                || state.appearance_open.get_untracked()
+                || state.emoji_picker_open.get_untracked()
+                || state.emote_picker_open.get_untracked()
+                || state.wizard_open.get_untracked()
             {
+                return;
+            }
+            if left_open.get_untracked() || right_open.get_untracked() {
                 set_left_open.set(false);
                 set_right_open.set(false);
                 event.prevent_default();
@@ -159,12 +168,21 @@ fn ResponsiveLayout() -> impl IntoView {
     };
 
     let on_touch_start = move |event: web_sys::TouchEvent| {
+        if event.touches().length() != 1 {
+            set_tracking_single_touch.set(false);
+            return;
+        }
         if let Some(touch) = event.touches().get(0) {
+            set_tracking_single_touch.set(true);
             set_touch_start_x.set(touch.client_x());
             set_touch_start_y.set(touch.client_y());
         }
     };
     let on_touch_end = move |event: web_sys::TouchEvent| {
+        if !tracking_single_touch.get_untracked() {
+            return;
+        }
+        set_tracking_single_touch.set(false);
         let Some(touch) = event.changed_touches().get(0) else {
             return;
         };

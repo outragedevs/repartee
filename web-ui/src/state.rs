@@ -33,6 +33,7 @@ pub struct AppState {
     pub active_buffer: RwSignal<Option<String>>,
     pub messages: RwSignal<HashMap<String, Vec<WireMessage>>>,
     pub nick_lists: RwSignal<HashMap<String, Vec<WireNick>>>,
+    pub nick_lists_loaded: RwSignal<HashSet<String>>,
     pub mention_count: RwSignal<u32>,
     pub session_hint: RwSignal<bool>,
     pub theme: RwSignal<String>,
@@ -101,9 +102,10 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         // Load theme from localStorage if available.
+        let theme_key = crate::constants::storage_key("theme");
         let saved_theme: String = web_sys::window()
             .and_then(|w| w.local_storage().ok().flatten())
-            .and_then(|s: web_sys::Storage| s.get_item("repartee-theme").ok().flatten())
+            .and_then(|s: web_sys::Storage| s.get_item(&theme_key).ok().flatten())
             .unwrap_or_else(|| "nightfall".to_string());
 
         Self {
@@ -114,6 +116,7 @@ impl AppState {
             active_buffer: RwSignal::new(None),
             messages: RwSignal::new(HashMap::new()),
             nick_lists: RwSignal::new(HashMap::new()),
+            nick_lists_loaded: RwSignal::new(HashSet::new()),
             mention_count: RwSignal::new(0),
             session_hint: RwSignal::new(false),
             theme: RwSignal::new(saved_theme),
@@ -125,11 +128,11 @@ impl AppState {
             // raw and could make the UI — including the reset button —
             // unusable.
             font_size_override: RwSignal::new(
-                load_stored_parsed::<i64>(FONT_SIZE_KEY)
+                load_stored_parsed::<i64>(&crate::constants::storage_key("font-size"))
                     .map(crate::components::appearance::clamp_font),
             ),
             line_height_override: RwSignal::new(
-                load_stored_parsed::<f32>(LINE_HEIGHT_KEY)
+                load_stored_parsed::<f32>(&crate::constants::storage_key("line-height"))
                     .map(crate::components::appearance::clamp_line_h),
             ),
             appearance_open: RwSignal::new(false),
@@ -208,6 +211,7 @@ impl AppState {
                 // forces re-fetch. Handles both initial connect and lag-recovery resync.
                 self.messages.set(HashMap::new());
                 self.nick_lists.set(HashMap::new());
+                self.nick_lists_loaded.set(HashSet::new());
                 self.backlog_loaded.set(HashSet::new());
                 self.backlog_has_more.set(HashMap::new());
                 self.backlog_fetching.set(HashSet::new());
@@ -239,8 +243,14 @@ impl AppState {
                         .or_else(|| buffers.first())
                         .map(|buffer| buffer.id.clone())
                 });
-                self.shell_screen.set(None);
-                self.active_buffer.set(active_buffer_id.or(fallback));
+                let active_buffer = active_buffer_id.or(fallback);
+                if active_buffer_changed(
+                    self.active_buffer.get_untracked().as_deref(),
+                    active_buffer.as_deref(),
+                ) {
+                    self.shell_screen.set(None);
+                }
+                self.active_buffer.set(active_buffer);
             }
             WebEvent::NewMessage { buffer_id, message } => {
                 // Keep the larger window only for the buffer the user is actively
@@ -390,6 +400,9 @@ impl AppState {
                 self.nick_lists.update(|lists| {
                     lists.remove(&buffer_id);
                 });
+                self.nick_lists_loaded.update(|set| {
+                    set.remove(&buffer_id);
+                });
                 self.backlog_loaded.update(|set| {
                     set.remove(&buffer_id);
                 });
@@ -475,10 +488,19 @@ impl AppState {
             WebEvent::NickList {
                 buffer_id, nicks, ..
             } => {
+                let nick_count = u32::try_from(nicks.len()).unwrap_or(u32::MAX);
                 self.nick_lists.update(|lists| {
                     let mut sorted = nicks;
                     sort_nicks(&mut sorted);
-                    lists.insert(buffer_id, sorted);
+                    lists.insert(buffer_id.clone(), sorted);
+                });
+                self.nick_lists_loaded.update(|set| {
+                    set.insert(buffer_id.clone());
+                });
+                self.buffers.update(|buffers| {
+                    if let Some(buffer) = buffers.iter_mut().find(|buffer| buffer.id == buffer_id) {
+                        buffer.nick_count = nick_count;
+                    }
                 });
             }
             WebEvent::MentionAlert { .. } => {
@@ -498,6 +520,9 @@ impl AppState {
                 ..
             } => match kind {
                 NickEventKind::Join => {
+                    let cache_complete = self
+                        .nick_lists_loaded
+                        .with_untracked(|set| set.contains(&buffer_id));
                     let mut inserted = false;
                     self.nick_lists.update(|lists| {
                         let list = lists.entry(buffer_id.clone()).or_default();
@@ -512,7 +537,7 @@ impl AppState {
                             sort_nicks(list);
                         }
                     });
-                    if inserted {
+                    if nick_count_should_change(cache_complete, inserted) {
                         self.buffers.update(|bufs| {
                             if let Some(b) = bufs.iter_mut().find(|b| b.id == buffer_id) {
                                 b.nick_count = b.nick_count.saturating_add(1);
@@ -521,15 +546,18 @@ impl AppState {
                     }
                 }
                 NickEventKind::Part | NickEventKind::Quit => {
-                    let mut removed = None;
+                    let cache_complete = self
+                        .nick_lists_loaded
+                        .with_untracked(|set| set.contains(&buffer_id));
+                    let mut removed = false;
                     self.nick_lists.update(|lists| {
                         if let Some(list) = lists.get_mut(&buffer_id) {
                             let previous_len = list.len();
                             list.retain(|n| n.nick != nick);
-                            removed = Some(list.len() != previous_len);
+                            removed = list.len() != previous_len;
                         }
                     });
-                    if removed != Some(false) {
+                    if nick_count_should_change(cache_complete, removed) {
                         self.buffers.update(|bufs| {
                             if let Some(b) = bufs.iter_mut().find(|b| b.id == buffer_id) {
                                 b.nick_count = b.nick_count.saturating_sub(1);
@@ -711,6 +739,14 @@ fn cap_messages(messages: &mut Vec<WireMessage>, cap: usize) -> bool {
     messages.drain(..drop_count);
     messages.shrink_to(cap);
     true
+}
+
+fn active_buffer_changed(current: Option<&str>, next: Option<&str>) -> bool {
+    current != next
+}
+
+fn nick_count_should_change(cache_complete: bool, membership_changed: bool) -> bool {
+    !cache_complete || membership_changed
 }
 
 fn buf_type_order(t: &str) -> u8 {
@@ -942,10 +978,6 @@ fn follow_tui_active_buffer() -> bool {
     )
 }
 
-/// localStorage keys for the client-side appearance overrides.
-pub const FONT_SIZE_KEY: &str = "repartee-font-size";
-pub const LINE_HEIGHT_KEY: &str = "repartee-line-height";
-
 /// Read + parse an optional localStorage value; absent or malformed → `None`.
 fn load_stored_parsed<T: std::str::FromStr>(key: &str) -> Option<T> {
     web_sys::window()
@@ -970,7 +1002,6 @@ pub fn store_or_remove(key: &str, value: Option<&str>) {
     }
 }
 
-const DISMISSED_PREVIEWS_KEY: &str = "repartee-dismissed-previews";
 const MAX_DISMISSED_ENTRIES: usize = 1000;
 
 /// Read the dismiss list from localStorage. Each entry is `<msg_id>\t<link>`,
@@ -980,7 +1011,8 @@ fn load_dismissed_previews() -> HashSet<(u64, String)> {
     let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) else {
         return out;
     };
-    let Ok(Some(raw)) = storage.get_item(DISMISSED_PREVIEWS_KEY) else {
+    let Ok(Some(raw)) = storage.get_item(&crate::constants::storage_key("dismissed-previews"))
+    else {
         return out;
     };
     for line in raw.lines() {
@@ -1013,12 +1045,40 @@ pub fn save_dismissed_previews(dismissed: &HashSet<(u64, String)>) {
         serialised.push_str(link);
         serialised.push('\n');
     }
-    let _ = storage.set_item(DISMISSED_PREVIEWS_KEY, &serialised);
+    let _ = storage.set_item(
+        &crate::constants::storage_key("dismissed-previews"),
+        &serialised,
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_buffer_changed_preserves_same_buffer() {
+        assert!(!active_buffer_changed(Some("shell:1"), Some("shell:1")));
+    }
+
+    #[test]
+    fn active_buffer_changed_detects_different_buffer() {
+        assert!(active_buffer_changed(Some("shell:1"), Some("channel:1")));
+    }
+
+    #[test]
+    fn partial_nick_cache_does_not_suppress_count_change() {
+        assert!(nick_count_should_change(false, false));
+    }
+
+    #[test]
+    fn complete_nick_cache_suppresses_missing_member_count_change() {
+        assert!(!nick_count_should_change(true, false));
+    }
+
+    #[test]
+    fn complete_nick_cache_applies_member_count_change() {
+        assert!(nick_count_should_change(true, true));
+    }
 
     /// A stored (DB-sourced) message: `log_id == id` (the rowid), as
     /// `stored_to_wire` produces.

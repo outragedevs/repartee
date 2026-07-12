@@ -47,7 +47,10 @@ pub fn EmotePicker() -> impl IntoView {
                     on:input=move |ev| filter.set(event_target_value(&ev))
                     on:keydown=move |ev| {
                         match ev.key().as_str() {
-                            "Escape" => close(),
+                            "Escape" => {
+                                ev.prevent_default();
+                                close();
+                            }
                             "Enter" => {
                                 ev.prevent_default();
                                 if let Some(&idx) = filter_emotes(&filter.get()).first() {
