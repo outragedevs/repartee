@@ -35,13 +35,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let mut spans: Vec<Span> = Vec::new();
     spans.push(Span::styled("[", Style::default().fg(fg_dim)));
 
-    for (i, item) in app.config.statusbar.items.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled(
-                separator.as_str(),
-                Style::default().fg(fg_dim),
-            ));
-        }
+    for item in &app.config.statusbar.items {
+        let start = spans.len();
         match item {
             StatusbarItem::Time => {
                 let time = chrono::Local::now()
@@ -73,41 +68,48 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                             format!("shell: {label}"),
                             Style::default().fg(accent),
                         ));
-                        continue;
-                    }
-                    let name_color = match buf.buffer_type {
-                        BufferType::Channel => accent,
-                        BufferType::Query => fg,
-                        _ => fg_muted,
-                    };
-                    spans.push(Span::styled(
-                        buf.name.clone(),
-                        Style::default().fg(name_color),
-                    ));
-                    if let Some(modes) = &buf.modes
-                        && !modes.is_empty()
-                    {
-                        // Append param values for modes that have them (l=limit, k=key)
-                        let param_str: String = modes
-                            .chars()
-                            .filter_map(|ch| {
-                                buf.mode_params
-                                    .as_ref()
-                                    .and_then(|mp| mp.get(&ch.to_string()))
-                                    .map(String::as_str)
-                            })
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        let display = if param_str.is_empty() {
-                            format!("(+{modes})")
-                        } else {
-                            format!("(+{modes} {param_str})")
+                    } else {
+                        let name_color = match buf.buffer_type {
+                            BufferType::Channel => accent,
+                            BufferType::Query => fg,
+                            _ => fg_muted,
                         };
-                        spans.push(Span::styled(display, Style::default().fg(fg_muted)));
+                        spans.push(Span::styled(
+                            buf.name.clone(),
+                            Style::default().fg(name_color),
+                        ));
+                        if let Some(modes) = &buf.modes
+                            && !modes.is_empty()
+                        {
+                            // Append param values for modes that have them (l=limit, k=key)
+                            let param_str: String = modes
+                                .chars()
+                                .filter_map(|ch| {
+                                    buf.mode_params
+                                        .as_ref()
+                                        .and_then(|mp| mp.get(&ch.to_string()))
+                                        .map(String::as_str)
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            let display = if param_str.is_empty() {
+                                format!("(+{modes})")
+                            } else {
+                                format!("(+{modes} {param_str})")
+                            };
+                            spans.push(Span::styled(display, Style::default().fg(fg_muted)));
+                        }
                     }
                 }
             }
-            StatusbarItem::Typing => {} // filled in by the typing status-line item (next task)
+            StatusbarItem::Typing => {
+                if let Some(buf) = active_buf {
+                    let nicks = app.state.typing.nicks(&buf.id);
+                    if let Some(phrase) = typing_phrase(&nicks) {
+                        spans.push(Span::styled(phrase, Style::default().fg(fg_muted)));
+                    }
+                }
+            }
             StatusbarItem::Lag => {
                 if let Some(c) = conn {
                     if c.lag_pending {
@@ -187,6 +189,15 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                 }
             }
         }
+        // Only now, knowing whether the item produced anything, decide whether it
+        // needs a separator in front of it. `start > 1` because spans[0] is the
+        // opening `[` pushed before the loop.
+        if spans.len() > start && start > 1 {
+            spans.insert(
+                start,
+                Span::styled(separator.as_str(), Style::default().fg(fg_dim)),
+            );
+        }
     }
 
     spans.push(Span::styled("]", Style::default().fg(fg_dim)));
@@ -194,6 +205,19 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let line = Line::from(spans);
     let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, area);
+}
+
+/// How the status line words a set of typing nicks. `None` when nobody is
+/// typing — the caller then renders no item *and no separator*.
+#[must_use]
+pub fn typing_phrase(nicks: &[&str]) -> Option<String> {
+    match nicks {
+        [] => None,
+        [one] => Some(format!("{one} is typing…")),
+        [a, b] => Some(format!("{a} and {b} are typing…")),
+        [a, b, c] => Some(format!("{a}, {b} and {c} are typing…")),
+        [a, b, rest @ ..] => Some(format!("{a}, {b} and {} others are typing…", rest.len())),
+    }
 }
 
 /// Status line in log-browser mode. Layout:
@@ -256,4 +280,35 @@ fn render_log_status(
         ),
     ]);
     frame.render_widget(Paragraph::new(line), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_typers_renders_nothing() {
+        assert_eq!(typing_phrase(&[]), None);
+    }
+
+    #[test]
+    fn phrases_scale_with_the_number_of_typers() {
+        assert_eq!(typing_phrase(&["alice"]).unwrap(), "alice is typing…");
+        assert_eq!(
+            typing_phrase(&["alice", "bob"]).unwrap(),
+            "alice and bob are typing…"
+        );
+        assert_eq!(
+            typing_phrase(&["alice", "bob", "carol"]).unwrap(),
+            "alice, bob and carol are typing…"
+        );
+        assert_eq!(
+            typing_phrase(&["alice", "bob", "carol", "dave"]).unwrap(),
+            "alice, bob and 2 others are typing…"
+        );
+        assert_eq!(
+            typing_phrase(&["a", "b", "c", "d", "e"]).unwrap(),
+            "a, b and 3 others are typing…"
+        );
+    }
 }
