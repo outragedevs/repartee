@@ -10,6 +10,7 @@ pub mod isupport;
 pub mod multiline;
 pub mod netsplit;
 pub mod sasl_scram;
+pub mod typing;
 
 use std::collections::HashSet;
 
