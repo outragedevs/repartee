@@ -94,13 +94,30 @@ impl FloodEstimate {
 }
 
 /// Proposes typing notifications. Pure — no clock, no I/O.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TypingSender {
     sources: HashMap<TypingSource, SourceState>,
     targets: HashMap<String, TargetState>,
     /// Real messages we sent, per target — for the §3.1 suppression window.
     last_message: HashMap<String, Instant>,
     flood: FloodEstimate,
+    /// Mirrors `general.flood_protection`. When the user disables flood
+    /// protection the crate applies no penalty at all (`flood_penalty_threshold:
+    /// 0`, `src/irc/mod.rs:396-399`), so the headroom check must be skipped —
+    /// otherwise the mirror would suppress typing the crate itself never throttles.
+    pub flood_enabled: bool,
+}
+
+impl Default for TypingSender {
+    fn default() -> Self {
+        Self {
+            sources: HashMap::new(),
+            targets: HashMap::new(),
+            last_message: HashMap::new(),
+            flood: FloodEstimate::default(),
+            flood_enabled: true,
+        }
+    }
 }
 
 impl TypingSender {
@@ -230,7 +247,9 @@ impl TypingSender {
             return None;
         }
         // Never hand a frame to the transport when the budget is tight (§3.1).
-        if !self.flood.has_headroom(now) {
+        // Skipped entirely when the user disabled flood protection — the crate
+        // applies no penalty in that case, so there is no headroom to run out of.
+        if self.flood_enabled && !self.flood.has_headroom(now) {
             return None;
         }
         Some(needed)
@@ -272,6 +291,14 @@ impl TypingSender {
         self.last_message
             .get(buffer_id)
             .is_some_and(|t| now.duration_since(*t) < THROTTLE)
+    }
+
+    /// Forget a buffer entirely — its sources and target. Called when the
+    /// buffer has been closed: there is nothing left to notify.
+    pub fn forget_buffer(&mut self, buffer_id: &str) {
+        self.sources.retain(|_, s| s.buffer_id != buffer_id);
+        self.targets.remove(buffer_id);
+        self.last_message.remove(buffer_id);
     }
 
     /// Drop retired targets and stale message timestamps so the maps stay bounded.
@@ -351,6 +378,12 @@ impl App {
     fn dispatch_typing(&mut self, due: Vec<(String, TypingState)>) {
         let now = Instant::now();
         for (buffer_id, state) in due {
+            // The buffer was closed out from under us — nothing left to notify,
+            // and re-proposing it every tick forever would be a slow leak.
+            if !self.state.buffers.contains_key(&buffer_id) {
+                self.typing.forget_buffer(&buffer_id);
+                continue;
+            }
             if self.send_typing(&buffer_id, state) {
                 self.typing.confirm_sent(&buffer_id, state, now);
             }
@@ -662,5 +695,42 @@ mod tests {
             s.on_activity(tui(), "net/#rust", true, later),
             vec![("net/#rust".to_string(), TypingState::Active)]
         );
+    }
+
+    #[test]
+    fn flood_gate_is_skipped_when_flood_protection_is_disabled() {
+        // The crate applies zero penalty when `general.flood_protection` is
+        // off (`flood_penalty_threshold: 0`), so mirroring the gate here would
+        // needlessly suppress typing. `flood_enabled = false` must bypass it.
+        let mut s = TypingSender {
+            flood_enabled: false,
+            ..TypingSender::default()
+        };
+        let mut now = t0();
+        // Burn the budget with real messages, same as the enabled-gate test.
+        for _ in 0..3 {
+            s.on_submit(&tui(), "net/#other", now);
+            now += Duration::from_millis(100);
+        }
+        // With the gate disabled, typing is still proposed despite the budget.
+        assert_eq!(
+            s.on_activity(tui(), "net/#rust", true, now),
+            vec![("net/#rust".to_string(), TypingState::Active)]
+        );
+    }
+
+    #[test]
+    fn forget_buffer_stops_a_closed_buffer_from_being_reproposed() {
+        // A closed buffer must not leak forever: a source still pointed at it
+        // (or a target still holding `sent`) would otherwise get re-proposed
+        // on every tick with nowhere to send it.
+        let mut s = TypingSender::default();
+        let now = t0();
+        let due = s.on_activity(tui(), "net/#rust", true, now);
+        flush(&mut s, &due, now);
+
+        s.forget_buffer("net/#rust");
+
+        assert!(s.on_tick(now + Duration::from_secs(4)).is_empty());
     }
 }

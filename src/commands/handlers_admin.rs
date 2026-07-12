@@ -116,6 +116,7 @@ pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
             // Sync derived state from new config
             app.state.scrollback_limit = app.config.display.scrollback_lines;
             app.state.flood_protection = app.config.general.flood_protection;
+            app.typing.flood_enabled = app.config.general.flood_protection;
             app.state
                 .flood_exemptions
                 .clone_from(&app.config.general.flood_exemptions);
@@ -123,6 +124,11 @@ pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
             app.state.nick_color_sat = app.config.display.nick_color_saturation;
             app.state.nick_color_lit = app.config.display.nick_color_lightness;
             app.state.typing_show = app.config.typing.show;
+            if !app.config.typing.show {
+                for buffer_id in app.state.typing.clear_all() {
+                    crate::irc::events::push_typing_web_event(&mut app.state, &buffer_id);
+                }
+            }
             add_local_event(app, &format!("{C_OK}Config reloaded{C_RST}"));
         }
         Err(e) => {
@@ -196,6 +202,7 @@ pub(crate) fn cmd_flood(app: &mut App, args: &[String]) {
     if subcmd.eq_ignore_ascii_case("on") || subcmd.eq_ignore_ascii_case("enable") {
         app.config.general.flood_protection = true;
         app.state.flood_protection = true;
+        app.typing.flood_enabled = true;
         save_flood_settings(app);
         add_local_event(app, &format!("{C_OK}Flood protection enabled{C_RST}"));
         return;
@@ -204,6 +211,7 @@ pub(crate) fn cmd_flood(app: &mut App, args: &[String]) {
     if subcmd.eq_ignore_ascii_case("off") || subcmd.eq_ignore_ascii_case("disable") {
         app.config.general.flood_protection = false;
         app.state.flood_protection = false;
+        app.typing.flood_enabled = false;
         save_flood_settings(app);
         add_local_event(app, &format!("{C_OK}Flood protection disabled{C_RST}"));
         return;

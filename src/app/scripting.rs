@@ -821,10 +821,25 @@ impl App {
                             .collect()
                     })
                     .unwrap_or_default();
+                // Mirror the display path's live-only guards (spec §3.2/§3.3): a
+                // script should not observe our own echoed typing or chathistory
+                // replays.
+                if tags.contains_key("batch") {
+                    return false;
+                }
                 let Some(typing_state) = crate::irc::typing::parse_typing(&tags) else {
                     return false;
                 };
-                params.insert("nick".to_string(), extract_nick(msg.prefix.as_ref()));
+                let nick = extract_nick(msg.prefix.as_ref());
+                let our_nick = self
+                    .state
+                    .connections
+                    .get(conn_id)
+                    .map_or("", |c| c.nick.as_str());
+                if nick.eq_ignore_ascii_case(our_nick) {
+                    return false;
+                }
+                params.insert("nick".to_string(), nick);
                 params.insert("target".to_string(), args[0].clone());
                 params.insert("state".to_string(), typing_state.as_str().to_string());
                 events::TYPING

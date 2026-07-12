@@ -191,7 +191,7 @@ Same as `irc.join` plus `message` (part reason).
 
 ### `irc.typing`
 
-IRCv3 `+typing` client tag on a `TAGMSG`: someone started, paused, or stopped typing in a channel or query. Fires independently of `[typing] show` (see [Configuration](/configuration.html)), which only gates the built-in display — scripts receive typing events even when the indicator is hidden. A `TAGMSG` carrying no typing tag does not fire this event at all.
+IRCv3 `+typing` client tag on a `TAGMSG`: someone started, paused, or stopped typing in a channel or query. Fires independently of `[typing] show` (see [Configuration](/configuration.html)), which only gates the built-in display — scripts receive typing events even when the indicator is hidden. A `TAGMSG` carrying no typing tag does not fire this event at all. The event skips our own echoed typing (`echo-message`) and `TAGMSG`s replayed from chathistory batches — both are live-only, never scripted.
 
 | Field | Type | Description |
 |---|---|---|

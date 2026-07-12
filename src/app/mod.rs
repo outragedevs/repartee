@@ -813,6 +813,7 @@ impl App {
             cli_bind_override: None,
             typing: crate::app::typing::TypingSender::default(),
         };
+        app.typing.flood_enabled = app.config.general.flood_protection;
         app.recompute_wrap_indent();
 
         if app.config.spellcheck.enabled {

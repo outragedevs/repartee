@@ -867,6 +867,7 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
             // Sync runtime state from config
             if path == "general.flood_protection" {
                 app.state.flood_protection = app.config.general.flood_protection;
+                app.typing.flood_enabled = app.config.general.flood_protection;
             }
             if path == "general.flood_exemptions" {
                 app.state

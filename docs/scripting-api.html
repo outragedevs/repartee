@@ -539,7 +539,7 @@ end)
 </tr>
 </tbody></table>
 <h3><code>irc.typing</code></h3>
-<p>IRCv3 <code>+typing</code> client tag on a <code>TAGMSG</code>: someone started, paused, or stopped typing in a channel or query. Fires independently of <code>[typing] show</code> (see <a href="/configuration.html">Configuration</a>), which only gates the built-in display — scripts receive typing events even when the indicator is hidden. A <code>TAGMSG</code> carrying no typing tag does not fire this event at all.</p>
+<p>IRCv3 <code>+typing</code> client tag on a <code>TAGMSG</code>: someone started, paused, or stopped typing in a channel or query. Fires independently of <code>[typing] show</code> (see <a href="/configuration.html">Configuration</a>), which only gates the built-in display — scripts receive typing events even when the indicator is hidden. A <code>TAGMSG</code> carrying no typing tag does not fire this event at all. The event skips our own echoed typing (<code>echo-message</code>) and <code>TAGMSG</code>s replayed from chathistory batches — both are live-only, never scripted.</p>
 <table>
 <thead>
 <tr>
