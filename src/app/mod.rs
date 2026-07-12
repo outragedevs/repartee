@@ -20,6 +20,7 @@ mod scripting;
 mod session;
 mod shell;
 pub mod shrink;
+pub mod typing;
 mod web;
 mod who;
 
@@ -502,6 +503,8 @@ pub struct App {
     /// stored config so a one-off override doesn't leak into later
     /// sessions.
     pub cli_bind_override: Option<String>,
+    /// Outbound `IRCv3` `+typing` state machine.
+    pub typing: crate::app::typing::TypingSender,
 }
 
 impl App {
@@ -808,6 +811,7 @@ impl App {
             shrink_deliver_tx,
             shrink_deliver_rx,
             cli_bind_override: None,
+            typing: crate::app::typing::TypingSender::default(),
         };
         app.recompute_wrap_indent();
 
@@ -1458,6 +1462,8 @@ impl App {
                         self.load_initial_messages(&active_id);
                     }
                     self.handle_netsplit_tick();
+                    self.typing_tick();
+                    self.expire_typing();
                     self.purge_expired_batches();
                     self.purge_stale_chathistory_requests();
                     self.check_reconnects();

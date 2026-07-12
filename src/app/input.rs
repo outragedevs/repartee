@@ -31,9 +31,21 @@ const fn font_size_from_window_px(
 impl App {
     pub(crate) fn handle_event(&mut self, event: Event) {
         match event {
-            Event::Key(key) => self.handle_key(key),
+            Event::Key(key) => {
+                let before = self.input.value.clone();
+                self.handle_key(key);
+                if self.input.value != before {
+                    self.on_input_changed();
+                }
+            }
             Event::Mouse(mouse) => self.handle_mouse(mouse),
-            Event::Paste(text) => self.handle_paste(&text),
+            Event::Paste(text) => {
+                let before = self.input.value.clone();
+                self.handle_paste(&text);
+                if self.input.value != before {
+                    self.on_input_changed();
+                }
+            }
             Event::Resize(cols, rows) => {
                 self.cached_term_cols = cols;
                 self.cached_term_rows = rows;
@@ -295,6 +307,12 @@ impl App {
                 self.input.spell_state = None;
                 let text = self.input.submit();
                 if !text.is_empty() {
+                    if let Some(buffer_id) = self.state.active_buffer_id.clone() {
+                        self.on_typing_submit(
+                            &crate::app::typing::TypingSource::Tui,
+                            &buffer_id,
+                        );
+                    }
                     self.handle_submit(&text);
                 }
             }
