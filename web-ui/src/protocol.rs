@@ -126,6 +126,14 @@ pub enum WebEvent {
         #[serde(default)]
         session_id: Option<String>,
     },
+    /// Who is currently typing in a buffer (`IRCv3` `+typing`). Mirrors
+    /// `src/web/protocol.rs::WebEvent::Typing`. Deliberately absent from
+    /// `SyncInit` — see `AppState::handle_event`'s `SyncInit` arm for why the
+    /// client clears its typing map there.
+    Typing {
+        buffer_id: String,
+        nicks: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +181,14 @@ pub enum WebCommand {
     /// Add or edit a server from the web wizard (mirrors the server-side
     /// variant). Boxed because the payload dwarfs the other variants.
     SaveServer(Box<SaveServerCmd>),
+    /// The browser's input field changed. `typing` is a predicate ("my input
+    /// holds non-empty, non-slash text"), never a state — the core owns the
+    /// throttle and flood budget. Mirrors
+    /// `src/web/protocol.rs::WebCommand::Typing`.
+    Typing {
+        buffer_id: String,
+        typing: bool,
+    },
 }
 
 /// Payload of [`WebCommand::SaveServer`]. `id` None = add (id derived from

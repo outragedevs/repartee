@@ -166,6 +166,28 @@ pub fn InputLine() -> impl IntoView {
     let state = use_context::<AppState>().unwrap();
     let (value, set_value) = signal(String::new());
 
+    // Report typing to the core, which owns the state machine, the throttle, the
+    // flood budget and every guard. We send a predicate, never the text.
+    let last_report = StoredValue::new(0.0_f64);
+    let last_sent_state = StoredValue::new(false);
+    Effect::new(move |_| {
+        let text = value.get();
+        let Some(buffer_id) = state.active_buffer.get() else {
+            return;
+        };
+        let typing = !text.is_empty() && (!text.starts_with('/') || text.starts_with("/me "));
+        let now = js_sys::Date::now();
+        // A change of state always reports immediately; a steady state is
+        // rate-limited. The core still enforces the 3s IRC throttle — this only
+        // keeps the websocket quiet.
+        if typing == last_sent_state.get_value() && now - last_report.get_value() < 1000.0 {
+            return;
+        }
+        last_report.set_value(now);
+        last_sent_state.set_value(typing);
+        crate::ws::send_command(&WebCommand::Typing { buffer_id, typing });
+    });
+
     // Tab completion state.
     let (tab_matches, set_tab_matches) = signal(Vec::<String>::new());
     let (tab_index, set_tab_index) = signal(0usize);

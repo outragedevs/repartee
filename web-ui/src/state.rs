@@ -97,6 +97,8 @@ pub struct AppState {
     /// Buffers with an in-flight `FetchMessages`. Guards initial loads and
     /// scroll-back requests against duplicate viewport/resize fetches.
     pub backlog_fetching: RwSignal<HashSet<String>>,
+    /// buffer_id -> nicks currently typing (IRCv3 `+typing`).
+    pub typing: RwSignal<HashMap<String, Vec<String>>>,
 }
 
 impl AppState {
@@ -155,6 +157,7 @@ impl AppState {
             pending_mention: RwSignal::new(None),
             backlog_has_more: RwSignal::new(HashMap::new()),
             backlog_fetching: RwSignal::new(HashSet::new()),
+            typing: RwSignal::new(HashMap::new()),
         }
     }
 
@@ -215,6 +218,10 @@ impl AppState {
                 self.backlog_loaded.set(HashSet::new());
                 self.backlog_has_more.set(HashMap::new());
                 self.backlog_fetching.set(HashSet::new());
+                // Typing is not carried in SyncInit — it is ephemeral and refills
+                // within 3s from live traffic. Anything we are still showing is by
+                // definition stale across a reconnect.
+                self.typing.set(HashMap::new());
 
                 self.buffers.set(buffers);
                 self.connections.set(connections);
@@ -414,6 +421,9 @@ impl AppState {
                 });
                 self.backlog_fetching.update(|s| {
                     s.remove(&buffer_id);
+                });
+                self.typing.update(|t| {
+                    t.remove(&buffer_id);
                 });
             }
             WebEvent::ConnectionStatus {
@@ -675,6 +685,15 @@ impl AppState {
                             cursor_visible,
                         }));
                 }
+            }
+            WebEvent::Typing { buffer_id, nicks } => {
+                self.typing.update(|t| {
+                    if nicks.is_empty() {
+                        t.remove(&buffer_id);
+                    } else {
+                        t.insert(buffer_id, nicks);
+                    }
+                });
             }
         }
     }

@@ -84,6 +84,16 @@ pub fn StatusLine() -> impl IntoView {
                     <span class="muted">{modes}</span>
                 }
             })}
+            // Typing — same slot as the TUI: after the buffer name, before lag.
+            {move || {
+                let buf = active_buf()?;
+                let nicks = state.typing.get().get(&buf.id).cloned()?;
+                let phrase = typing_phrase(&nicks)?;
+                Some(view! {
+                    <span class="sep">"|"</span>
+                    <span class="muted">{phrase}</span>
+                })
+            }}
             // Lag
             {move || {
                 let conn = active_conn()?;
@@ -129,6 +139,18 @@ pub fn StatusLine() -> impl IntoView {
             }}
             <span class="bracket">"]"</span>
         </div>
+    }
+}
+
+/// Mirrors `src/ui/status_line.rs::typing_phrase`. Kept in step by test.
+#[must_use]
+pub fn typing_phrase(nicks: &[String]) -> Option<String> {
+    match nicks {
+        [] => None,
+        [one] => Some(format!("{one} is typing…")),
+        [a, b] => Some(format!("{a} and {b} are typing…")),
+        [a, b, c] => Some(format!("{a}, {b} and {c} are typing…")),
+        [a, b, rest @ ..] => Some(format!("{a}, {b} and {} others are typing…", rest.len())),
     }
 }
 
@@ -197,5 +219,28 @@ mod tests {
         ];
         let items = activity_numbers(&buffers, Some("#a"));
         assert_eq!(items, vec![(3, 4, "#c".to_string())]);
+    }
+
+    #[test]
+    fn typing_phrases_match_the_tui() {
+        assert_eq!(typing_phrase(&[]), None);
+        assert_eq!(
+            typing_phrase(&["alice".to_string()]).unwrap(),
+            "alice is typing…"
+        );
+        assert_eq!(
+            typing_phrase(&["alice".to_string(), "bob".to_string()]).unwrap(),
+            "alice and bob are typing…"
+        );
+        assert_eq!(
+            typing_phrase(&[
+                "alice".to_string(),
+                "bob".to_string(),
+                "carol".to_string(),
+                "dave".to_string()
+            ])
+            .unwrap(),
+            "alice, bob and 2 others are typing…"
+        );
     }
 }
