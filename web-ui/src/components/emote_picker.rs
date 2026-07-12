@@ -37,16 +37,20 @@ pub fn EmotePicker() -> impl IntoView {
     view! {
         <Show when=move || open.get() fallback=|| ()>
             <div class="wizard-backdrop" on:click=move |_| close()></div>
-            <div class="emote-picker-modal">
+            <div class="emote-picker-modal" role="dialog" aria-modal="true" aria-label="GG emotes">
                 <input
                     class="emote-picker-filter"
                     placeholder="filter emotes…"
+                    aria-label="Filter emotes"
                     autofocus=true
                     prop:value=move || filter.get()
                     on:input=move |ev| filter.set(event_target_value(&ev))
                     on:keydown=move |ev| {
                         match ev.key().as_str() {
-                            "Escape" => close(),
+                            "Escape" => {
+                                ev.prevent_default();
+                                close();
+                            }
                             "Enter" => {
                                 ev.prevent_default();
                                 if let Some(&idx) = filter_emotes(&filter.get()).first() {
@@ -68,6 +72,7 @@ pub fn EmotePicker() -> impl IntoView {
                                 let src = format!("/emotes/{stem}.gif");
                                 view! {
                                     <button
+                                        type="button"
                                         class="emote-picker-cell"
                                         title=name
                                         on:click=move |_| pick(idx)

@@ -250,7 +250,7 @@ pub fn InputLine() -> impl IntoView {
     // depends on caret context, which only this component knows: `nick: `
     // when the caret's line is still empty, `nick ` mid-sentence (with a
     // separating space if the caret touches a word). Mirrors the popup's
-    // delimiter rules. Only the visible twin consumes, like pending_insert.
+    // delimiter rules.
     Effect::new(move |_| {
         let Some(nick) = state.pending_mention.get() else {
             return;
@@ -259,13 +259,6 @@ pub fn InputLine() -> impl IntoView {
             return;
         };
         let html_el: &web_sys::HtmlTextAreaElement = el.as_ref();
-        let visible = {
-            let he: &web_sys::HtmlElement = html_el.unchecked_ref();
-            he.offset_parent().is_some()
-        };
-        if !visible {
-            return;
-        }
         let text = value.get_untracked();
         let cursor = get_textarea_cursor(&input_ref, &text);
         let before = &text[..cursor];
@@ -331,8 +324,7 @@ pub fn InputLine() -> impl IntoView {
     };
 
     // Keep the keyboard-selected row visible when arrowing through a long
-    // popup list. Only the focused (visible) InputLine ever has a popup, so
-    // the class selector can't hit the hidden twin instance.
+    // popup list. Only the mounted InputLine can have a popup.
     Effect::new(move || {
         let _ = popup_sel.get();
         if popup.get().is_none() {
@@ -355,13 +347,6 @@ pub fn InputLine() -> impl IntoView {
 
     // Apply a picker-requested insertion (`:name:` or a Unicode emoji) at the
     // caret, then clear the signal. Keeps the `value` signal authoritative.
-    //
-    // Two InputLine instances are mounted at once (desktop + mobile layouts,
-    // toggled by CSS `display`), so both subscribe to the shared
-    // `pending_insert`. Only the *visible* textarea may consume the token —
-    // otherwise the hidden desktop instance swallows it on mobile and the
-    // visible field never updates. `offset_parent()` is `None` when an ancestor
-    // is `display:none`, which is exactly the hidden layout.
     Effect::new(move |_| {
         let Some(token) = state.pending_insert.get() else {
             return;
@@ -370,13 +355,6 @@ pub fn InputLine() -> impl IntoView {
             return;
         };
         let html_el: &web_sys::HtmlTextAreaElement = el.as_ref();
-        let visible = {
-            let he: &web_sys::HtmlElement = html_el.unchecked_ref();
-            he.offset_parent().is_some()
-        };
-        if !visible {
-            return; // hidden instance — leave the token for the visible one.
-        }
         let text = value.get_untracked();
         let cursor = get_textarea_cursor(&input_ref, &text);
         let new_text = format!("{}{token}{}", &text[..cursor], &text[cursor..]);
@@ -394,65 +372,62 @@ pub fn InputLine() -> impl IntoView {
 
     // Global keydown listener — focus textarea when user types anywhere.
     // Skipped when active buffer is a shell (shell_view captures input instead).
-    let keydown_registered = StoredValue::new(false);
-    Effect::new(move || {
-        if keydown_registered.get_value() {
-            return;
-        }
-        keydown_registered.set_value(true);
-        let cb = wasm_bindgen::prelude::Closure::<dyn Fn(web_sys::KeyboardEvent)>::new(
-            move |ev: web_sys::KeyboardEvent| {
-                if ev.ctrl_key() || ev.alt_key() || ev.meta_key() {
+    let keydown_handle = leptos::leptos_dom::helpers::window_event_listener(
+        leptos::ev::keydown,
+        move |ev: web_sys::KeyboardEvent| {
+            if ev.ctrl_key() || ev.alt_key() || ev.meta_key() {
+                return;
+            }
+            if state.wizard_open.get_untracked()
+                || state.emote_picker_open.get_untracked()
+                || state.emoji_picker_open.get_untracked()
+                || state.appearance_open.get_untracked()
+            {
+                return;
+            }
+            let is_shell = state
+                .active_buffer
+                .get_untracked()
+                .and_then(|id| {
+                    state
+                        .buffers
+                        .get_untracked()
+                        .iter()
+                        .find(|b| b.id == id)
+                        .map(|b| b.buffer_type == "shell")
+                })
+                .unwrap_or(false);
+            if is_shell {
+                return;
+            }
+            let key = ev.key();
+            if let Some(el) = ev
+                .target()
+                .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+            {
+                let tag = el.tag_name();
+                let contenteditable = el
+                    .dyn_ref::<web_sys::HtmlElement>()
+                    .is_some_and(web_sys::HtmlElement::is_content_editable);
+                if should_keep_control_focus(&tag, contenteditable, &key) {
                     return;
                 }
-                // Don't steal focus from shell terminal.
-                let is_shell = state
-                    .active_buffer
-                    .get_untracked()
-                    .and_then(|id| {
-                        state
-                            .buffers
-                            .get_untracked()
-                            .iter()
-                            .find(|b| b.id == id)
-                            .map(|b| b.buffer_type == "shell")
-                    })
-                    .unwrap_or(false);
-                if is_shell {
-                    return;
-                }
-                // Don't steal focus while the user is typing in another control
-                // (the server wizard's fields, or any future modal/form). Only
-                // grab focus when the keystroke originated from "nowhere".
-                if let Some(el) = ev.target().and_then(|t| t.dyn_into::<web_sys::Element>().ok()) {
-                    let tag = el.tag_name();
-                    if tag.eq_ignore_ascii_case("input")
-                        || tag.eq_ignore_ascii_case("select")
-                        || tag.eq_ignore_ascii_case("textarea")
-                    {
-                        return;
-                    }
-                }
-                let key = ev.key();
-                if key == "Tab"
-                    || key == "Enter"
-                    || key == "Escape"
-                    || key == "F1"
-                    || key.starts_with("Arrow")
-                {
-                    return;
-                }
-                if let Some(el) = input_ref.get_untracked() {
-                    let html_el: &web_sys::HtmlTextAreaElement = el.as_ref();
-                    let _ = html_el.focus();
-                }
-            },
-        );
-        if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-            let _ = doc.add_event_listener_with_callback("keydown", cb.as_ref().unchecked_ref());
-            cb.forget();
-        }
-    });
+            }
+            if key == "Tab"
+                || key == "Enter"
+                || key == "Escape"
+                || key == "F1"
+                || key.starts_with("Arrow")
+            {
+                return;
+            }
+            if let Some(el) = input_ref.get_untracked() {
+                let html_el: &web_sys::HtmlTextAreaElement = el.as_ref();
+                let _ = html_el.focus();
+            }
+        },
+    );
+    on_cleanup(move || keydown_handle.remove());
 
     let send_text = move |text: String| {
         if text.is_empty() {
@@ -471,7 +446,10 @@ pub fn InputLine() -> impl IntoView {
         // `/emoji` (and the `/emote`/`/emotes` aliases) open the GG emote picker
         // client-side rather than dispatching to the server. `/emote <name>`
         // still goes to the server for its insert/search behaviour.
-        if matches!(whole.to_ascii_lowercase().as_str(), "/emoji" | "/emote" | "/emotes") {
+        if matches!(
+            whole.to_ascii_lowercase().as_str(),
+            "/emoji" | "/emote" | "/emotes"
+        ) {
             state.emote_picker_open.set(true);
             return;
         }
@@ -756,7 +734,7 @@ pub fn InputLine() -> impl IntoView {
             {move || {
                 let p = popup.get()?;
                 Some(view! {
-                    <div class="completion-popup">
+                    <div class="completion-popup" role="listbox" aria-label="Completions">
                         {p.items.iter().enumerate().map(|(i, item)| {
                             // Per-row reactive class: arrowing through the
                             // list updates two class attributes instead of
@@ -776,7 +754,9 @@ pub fn InputLine() -> impl IntoView {
                                 accept_popup(i);
                             };
                             view! {
-                                <div class=class on:mousedown=on_mousedown>
+                                <div class=class role="option"
+                                    aria-selected=move || popup_sel.get() == i
+                                    on:mousedown=on_mousedown>
                                     {emote.map(|src| view! {
                                         <img class="completion-emote" src=src alt="" />
                                     })}
@@ -804,6 +784,7 @@ pub fn InputLine() -> impl IntoView {
                 id="chat-input"
                 rows="1"
                 placeholder="Type a message..."
+                aria-label="Message"
                 autofocus=true
                 autocomplete="off"
                 prop:value=value
@@ -815,7 +796,7 @@ pub fn InputLine() -> impl IntoView {
                 // open popup would otherwise silently eat the next Enter.
                 on:blur=move |_| set_popup.set(None)
             ></textarea>
-            <button class="send-btn" on:click=move |_| {
+            <button type="button" class="send-btn" aria-label="Send message" on:click=move |_| {
                 set_popup.set(None);
                 let text = value.get();
                 push_history(&text);
@@ -996,7 +977,11 @@ fn popup_matches(
         let prefix = word_prefix.to_lowercase();
         // Addressing delimiter at the start of any line (first or a later
         // line of a multiline draft); plain space mid-sentence.
-        let delim = if at_line_start(text, word_start) { ": " } else { " " };
+        let delim = if at_line_start(text, word_start) {
+            ": "
+        } else {
+            " "
+        };
         let mut matched: Vec<&String> = nicks
             .iter()
             .filter(|n| n.to_lowercase().starts_with(&prefix))
@@ -1120,9 +1105,38 @@ fn emote_tab_matches(word: &str) -> Vec<String> {
         .collect()
 }
 
+fn should_keep_control_focus(tag: &str, contenteditable: bool, key: &str) -> bool {
+    tag.eq_ignore_ascii_case("input")
+        || tag.eq_ignore_ascii_case("select")
+        || tag.eq_ignore_ascii_case("textarea")
+        || contenteditable
+        || tag.eq_ignore_ascii_case("button") && matches!(key, " " | "Enter")
+        || tag.eq_ignore_ascii_case("a") && key == "Enter"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn printable_key_on_button_returns_focus_to_chat() {
+        assert!(!should_keep_control_focus("BUTTON", false, "x"));
+    }
+
+    #[test]
+    fn space_on_button_keeps_control_focus() {
+        assert!(should_keep_control_focus("BUTTON", false, " "));
+    }
+
+    #[test]
+    fn enter_on_link_keeps_control_focus() {
+        assert!(should_keep_control_focus("A", false, "Enter"));
+    }
+
+    #[test]
+    fn printable_key_in_text_control_keeps_control_focus() {
+        assert!(should_keep_control_focus("INPUT", false, "x"));
+    }
 
     #[test]
     fn floor_char_boundary_clamps_into_multibyte() {
@@ -1170,12 +1184,18 @@ mod tests {
         let m = emote_tab_matches(":usm");
         assert!(!m.is_empty(), "expected :usmiech:");
         assert!(m.iter().all(|s| s.starts_with(':') && s.ends_with(':')));
-        assert!(m.iter().all(|s| !s.ends_with(": ")), "no trailing space yet");
+        assert!(
+            m.iter().all(|s| !s.ends_with(": ")),
+            "no trailing space yet"
+        );
     }
 
     #[test]
     fn emote_tab_is_case_insensitive() {
-        assert_eq!(emote_tab_matches(":USM").len(), emote_tab_matches(":usm").len());
+        assert_eq!(
+            emote_tab_matches(":USM").len(),
+            emote_tab_matches(":usm").len()
+        );
     }
 
     // ── completion popup ────────────────────────────────────────────────
@@ -1345,7 +1365,11 @@ mod tests {
     #[test]
     fn history_step_noop_cases() {
         assert_eq!(history_step(0, None, true), None, "empty history");
-        assert_eq!(history_step(3, None, false), None, "down while not browsing");
+        assert_eq!(
+            history_step(3, None, false),
+            None,
+            "down while not browsing"
+        );
     }
 
     #[test]

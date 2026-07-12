@@ -6,7 +6,7 @@
     src: url('/fonts/FiraCodeNerdFontMono-Regular.ttf') format('truetype');
     font-weight: normal;
     font-style: normal;
-    font-display: block;
+    font-display: swap;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -33,11 +33,19 @@ html, body {
     line-height: var(--line-height, 1.35);
     overflow: hidden;
     overscroll-behavior: none;
-    /* Disables pull-to-refresh and pinch-zoom on touch. Without this,
-       a slow swipe inside `.chat-messages` could reach the top and
-       turn into a Chrome refresh gesture, which fires synthetic scroll
-       events that desync our `is_at_bottom` flag. */
-    touch-action: none;
+    touch-action: manipulation;
+}
+
+button,
+input,
+select,
+textarea {
+    font-family: inherit;
+}
+
+:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
 }
 
 /* === Layout === */
@@ -49,10 +57,19 @@ html, body {
     overflow: hidden;
 }
 
-.desktop-only {
+.layout-host {
     display: flex;
-    flex-direction: column;
     flex: 1;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.responsive-layout {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
     overflow: hidden;
 }
 
@@ -87,12 +104,18 @@ html, body {
 }
 
 .buffer-list .buffer-item {
+    width: 100%;
     padding: 0 6px;
-    line-height: 1.4;
+    line-height: var(--line-height, 1.35);
     cursor: pointer;
     display: flex;
     align-items: center;
     gap: 4px;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font-size: inherit;
+    text-align: left;
 }
 
 .buffer-item .name {
@@ -195,6 +218,10 @@ html, body {
     opacity: 0.85;
     transition: opacity 0.15s;
     -webkit-tap-highlight-color: transparent;
+}
+
+.scroll-bottom-btn:focus-visible {
+    opacity: 1;
 }
 
 .scroll-bottom-btn:hover { opacity: 1; }
@@ -325,9 +352,15 @@ html, body {
 .nick-list .mode-group:first-child { margin-top: 0; }
 
 .nick-list .nick-entry {
+    width: 100%;
     padding: 0 6px;
-    line-height: 1.4;
+    line-height: var(--line-height, 1.35);
     cursor: pointer;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font-size: inherit;
+    text-align: left;
 }
 
 .nick-entry .prefix-op { color: var(--green); }
@@ -355,6 +388,7 @@ html, body {
     display: flex;
     align-items: center;
     white-space: nowrap;
+    overflow: hidden;
     font-size: 12px;
 }
 
@@ -367,6 +401,12 @@ html, body {
 .status-line .act-red { color: var(--red); }
 .status-line .act-purple { color: var(--purple); }
 .status-line .act-num { cursor: pointer; }
+.status-line button.act-num {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    font: inherit;
+}
 .status-line .act-num:hover { text-decoration: underline; }
 
 .input-line {
@@ -473,6 +513,11 @@ html, body {
     gap: 16px;
 }
 
+.login-title {
+    color: var(--accent);
+    font-size: 24px;
+}
+
 .login-box {
     background: var(--bg-alt);
     border: 1px solid var(--border);
@@ -518,31 +563,35 @@ html, body {
     padding: 0 5px;
     border-radius: 8px;
     cursor: pointer;
+    border: 0;
+    font-family: inherit;
 }
 
 /* === Mobile === */
 
 /* Desktop: hide mobile elements */
 @media (min-width: 768px) {
-    .mobile-only { display: none !important; }
+    .mobile-topbar,
+    .slide-overlay,
+    .slide-panel-left,
+    .slide-panel-right { display: none !important; }
 }
 
 /* Mobile: hide desktop, show mobile */
 @media (max-width: 767px) {
-    .desktop-only { display: none !important; }
-    .mobile-only {
+    .responsive-layout {
         display: flex;
         flex-direction: column;
         height: 100%;
         overflow: hidden;
-        /* Re-enable pan-y inside the mobile container so vertical
-           scroll works in `.chat-messages`. The body-level
-           `touch-action: none` blocks pull-to-refresh; we narrow it
-           back to pan-y here so the chat list itself remains
-           scrollable. Horizontal swipe is still handled by JS. */
-        touch-action: pan-y;
+        /* Keep vertical scrolling and pinch zoom native while reserving
+           horizontal swipes for the side-panel gesture handler. */
+        touch-action: pan-y pinch-zoom;
         overscroll-behavior: none;
     }
+
+    .desktop-topic,
+    .desktop-tools { display: none !important; }
 
     .buffer-list, .nick-list {
         display: none; /* hidden by default, shown inside slide-out panels */
@@ -554,7 +603,7 @@ html, body {
         min-width: 0;
     }
     .chat-messages {
-        touch-action: pan-y;
+        touch-action: pan-y pinch-zoom;
     }
 
     /* Inline chat layout — no nick column */
@@ -589,16 +638,21 @@ html, body {
         padding-top: calc(4px + env(safe-area-inset-top));
         align-items: center;
         border-bottom: 1px solid var(--border);
-        min-height: 28px;
+        min-height: 44px;
         flex-shrink: 0;
-        touch-action: pan-y;
+        touch-action: pan-y pinch-zoom;
     }
     .mobile-topbar .hamburger,
     .mobile-topbar .nicklist-btn {
         color: var(--fg-muted);
         cursor: pointer;
         font-size: 16px;
-        padding: 2px 4px;
+        min-width: 40px;
+        min-height: 40px;
+        padding: 6px;
+        border: 0;
+        background: transparent;
+        font-family: inherit;
         -webkit-tap-highlight-color: transparent;
     }
     .mobile-topbar-center {
@@ -652,7 +706,7 @@ html, body {
         transition: transform 0.2s ease;
         display: flex;
         flex-direction: column;
-        touch-action: pan-y;
+        touch-action: pan-y pinch-zoom;
         will-change: transform;
         /* Clear the notch / home indicator (viewport-fit=cover). */
         padding-top: env(safe-area-inset-top);
@@ -673,7 +727,7 @@ html, body {
         transition: transform 0.2s ease;
         display: flex;
         flex-direction: column;
-        touch-action: pan-y;
+        touch-action: pan-y pinch-zoom;
         will-change: transform;
         /* Clear the notch / home indicator (viewport-fit=cover). */
         padding-top: env(safe-area-inset-top);
@@ -691,6 +745,17 @@ html, body {
         flex-shrink: 0;
     }
 
+    .slide-panel-title {
+        color: var(--accent);
+        font-weight: bold;
+    }
+
+    .slide-panel-count {
+        color: var(--fg-muted);
+        font-size: 10px;
+        margin-left: 6px;
+    }
+
     /* Override desktop buffer-list/nick-list styles inside panels */
     .slide-panel-left .buffer-list,
     .slide-panel-right .nick-list {
@@ -701,6 +766,16 @@ html, body {
 
     /* Compact status bar on mobile */
     .status-line { font-size: 11px; }
+
+    .scroll-bottom-btn {
+        width: 44px;
+        height: 44px;
+    }
+
+    .mention-badge {
+        min-height: 32px;
+        padding-inline: 9px;
+    }
 
     /* Larger no-override default on phones (tester: 13px is too small).
        An explicit --font-size from the Aa menu still wins. */
@@ -831,10 +906,18 @@ html, body {
     border-radius: 50%;
     cursor: pointer;
     border: 1px solid transparent;
+    padding: 0;
 }
 
 .theme-swatch.active { border-color: var(--accent); }
 .theme-swatch:hover { border-color: var(--fg-muted); }
+
+@media (max-width: 767px) {
+    .theme-swatch {
+        width: 28px;
+        height: 28px;
+    }
+}
 
 /* === Shell terminal view (beamterm WebGL2 canvas) === */
 
@@ -961,7 +1044,23 @@ html, body {
         height: auto;
         aspect-ratio: 16 / 10;
     }
-    .msg-preview-dismiss { opacity: 1; } /* always visible on touch */
+    .msg-preview-dismiss {
+        width: 32px;
+        height: 32px;
+        line-height: 30px;
+        opacity: 1;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+    }
 }
 
 /* ===== Add-server wizard modal ===== */
@@ -994,7 +1093,14 @@ html, body {
     border-bottom: 1px solid var(--border);
 }
 .wizard-head h3 { margin: 0; font-size: 15px; color: var(--fg); }
-.wizard-x { cursor: pointer; color: var(--fg-muted); font-size: 16px; }
+.wizard-x {
+    cursor: pointer;
+    color: var(--fg-muted);
+    font-size: 16px;
+    border: 0;
+    padding: 4px;
+    background: transparent;
+}
 .wizard-x:hover { color: var(--fg); }
 .wizard-tabs { display: flex; gap: 4px; padding: 10px 16px 0; }
 .wizard-tab {
@@ -1015,7 +1121,7 @@ html, body {
     overflow-y: auto;
 }
 .wizard-row { display: flex; flex-direction: column; gap: 4px; }
-.wizard-row label {
+.wizard-label {
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -1086,6 +1192,7 @@ html, body {
 }
 .error-toast-msg { color: var(--red); font-size: 13px; }
 .error-toast-x { cursor: pointer; color: var(--fg-muted); font-size: 14px; }
+.error-toast-x { border: 0; padding: 2px; background: transparent; }
 .error-toast-x:hover { color: var(--fg); }
 
 /* === Emote / emoji pickers === */
@@ -1190,7 +1297,7 @@ html, body {
 }
 .input-emote-btn:hover { color: var(--fg); border-color: var(--accent); }
 
-/* UTF-8 emoji button is desktop-only — phones provide a system emoji keyboard. */
+/* Phones provide a system emoji keyboard, so hide the extra picker button. */
 @media (max-width: 767px) {
     .input-emote-btn.emoji { display: none; }
 }

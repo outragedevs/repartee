@@ -132,17 +132,20 @@ pub fn ServerWizard() -> impl IntoView {
     view! {
         <Show when=move || open.get() fallback=|| ()>
             <div class="wizard-backdrop" on:click=move |_| open.set(false)></div>
-            <div class="wizard-modal">
+            <div class="wizard-modal" role="dialog" aria-modal="true" aria-labelledby="wizard-title">
                 <div class="wizard-head">
-                    <h3>"Add Server"</h3>
-                    <span class="wizard-x" on:click=move |_| open.set(false)>"\u{2715}"</span>
+                    <h3 id="wizard-title">"Add Server"</h3>
+                    <button type="button" class="wizard-x" aria-label="Close"
+                        on:click=move |_| open.set(false)>"\u{2715}"</button>
                 </div>
                 <div class="wizard-tabs">
                     <button
+                        type="button"
                         class=move || if page.get() == 0 { "wizard-tab active" } else { "wizard-tab" }
                         on:click=move |_| page.set(0)
                     >"Basics"</button>
                     <button
+                        type="button"
                         class=move || if page.get() == 1 { "wizard-tab active" } else { "wizard-tab" }
                         on:click=move |_| page.set(1)
                     >"Advanced"</button>
@@ -174,10 +177,10 @@ pub fn ServerWizard() -> impl IntoView {
                         {text_row("Client cert path", client_cert_path)}
                     </Show>
                 </div>
-                {move || error.get().map(|e| view! { <p class="wizard-error">{e}</p> })}
+                {move || error.get().map(|e| view! { <p class="wizard-error" role="alert">{e}</p> })}
                 <div class="wizard-foot">
-                    <button class="wizard-btn s" on:click=move |_| open.set(false)>"Cancel"</button>
-                    <button class="wizard-btn p" on:click=on_save>"Save"</button>
+                    <button type="button" class="wizard-btn s" on:click=move |_| open.set(false)>"Cancel"</button>
+                    <button type="button" class="wizard-btn p" on:click=on_save>"Save"</button>
                 </div>
             </div>
         </Show>
@@ -187,31 +190,36 @@ pub fn ServerWizard() -> impl IntoView {
 /// Trim and convert empty → `None` (so an untouched credential is left unset).
 fn opt(s: String) -> Option<String> {
     let t = s.trim();
-    if t.is_empty() { None } else { Some(t.to_string()) }
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
 }
 
 fn text_row(label: &'static str, sig: RwSignal<String>) -> impl IntoView {
     view! {
-        <div class="wizard-row">
-            <label>{label}</label>
+        <label class="wizard-row">
+            <span class="wizard-label">{label}</span>
             <input
                 prop:value=move || sig.get()
                 on:input=move |ev| sig.set(event_target_value(&ev))
             />
-        </div>
+        </label>
     }
 }
 
 fn pass_row(label: &'static str, sig: RwSignal<String>) -> impl IntoView {
     view! {
-        <div class="wizard-row">
-            <label>{label}</label>
+        <label class="wizard-row">
+            <span class="wizard-label">{label}</span>
             <input
                 type="password"
+                autocomplete="new-password"
                 prop:value=move || sig.get()
                 on:input=move |ev| sig.set(event_target_value(&ev))
             />
-        </div>
+        </label>
     }
 }
 
@@ -231,8 +239,8 @@ fn check_row(label: &'static str, sig: RwSignal<bool>) -> impl IntoView {
 fn select_row(label: &'static str, sig: RwSignal<String>) -> impl IntoView {
     let opts = ["Auto", "PLAIN", "EXTERNAL"];
     view! {
-        <div class="wizard-row">
-            <label>{label}</label>
+        <label class="wizard-row">
+            <span class="wizard-label">{label}</span>
             <select on:change=move |ev| sig.set(event_target_value(&ev))>
                 {opts.iter().map(|o| {
                     let o = (*o).to_string();
@@ -243,6 +251,6 @@ fn select_row(label: &'static str, sig: RwSignal<String>) -> impl IntoView {
                     }
                 }).collect::<Vec<_>>()}
             </select>
-        </div>
+        </label>
     }
 }

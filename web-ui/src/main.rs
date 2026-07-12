@@ -1,5 +1,6 @@
 mod app;
 mod components;
+mod constants;
 mod emoji;
 mod emotes;
 mod format;

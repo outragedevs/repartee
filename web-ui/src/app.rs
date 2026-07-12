@@ -10,16 +10,23 @@ pub fn App() -> impl IntoView {
     let state = AppState::new();
     provide_context(state);
 
+    if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+        document.set_title(crate::constants::APP_NAME);
+    }
+
+    let session_key = crate::constants::storage_key("session");
+
     // Save the non-secret session hint to localStorage whenever it changes.
     Effect::new({
+        let session_key = session_key.clone();
         move || {
             let session_hint = state.session_hint.get();
             if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten())
             {
                 if session_hint {
-                    let _ = storage.set_item("repartee-session", "1");
+                    let _ = storage.set_item(&session_key, "1");
                 } else {
-                    let _ = storage.remove_item("repartee-session");
+                    let _ = storage.remove_item(&session_key);
                 }
             }
         }
@@ -29,7 +36,7 @@ pub fn App() -> impl IntoView {
     {
         let saved_session = web_sys::window()
             .and_then(|w| w.local_storage().ok().flatten())
-            .and_then(|s| s.get_item("repartee-session").ok().flatten());
+            .and_then(|s| s.get_item(&session_key).ok().flatten());
         if saved_session.is_some() {
             state.session_hint.set(true);
             crate::ws::connect(&state);
@@ -45,7 +52,7 @@ pub fn App() -> impl IntoView {
         {
             let _ = doc.set_attribute("data-theme", &theme);
         }
-        crate::state::store_or_remove("repartee-theme", Some(&theme));
+        crate::state::store_or_remove(&crate::constants::storage_key("theme"), Some(&theme));
     });
 
     // Apply + persist the appearance vars. The stylesheet reads
@@ -80,11 +87,11 @@ pub fn App() -> impl IntoView {
         }
 
         crate::state::store_or_remove(
-            crate::state::FONT_SIZE_KEY,
+            &crate::constants::storage_key("font-size"),
             font_px.map(|v| v.to_string()).as_deref(),
         );
         crate::state::store_or_remove(
-            crate::state::LINE_HEIGHT_KEY,
+            &crate::constants::storage_key("line-height"),
             line_h.map(|v| v.to_string()).as_deref(),
         );
     });

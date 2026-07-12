@@ -64,11 +64,13 @@ pub fn NickList() -> impl IntoView {
                                 });
                             }
                         };
+                        let query_title = format!("Open query with {}", n.nick);
                         view! {
-                            <div class=class on:click=on_click>
+                            <button type="button" class=class on:click=on_click
+                                title=query_title>
                                 <span class=prefix_class>{n.prefix}</span>
                                 <span style=nick_style>{n.nick}</span>
-                            </div>
+                            </button>
                         }
                     }).collect::<Vec<_>>()
                 };

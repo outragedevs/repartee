@@ -17,8 +17,6 @@ use crate::state::AppState;
 #[component]
 pub fn Layout() -> impl IntoView {
     let state = use_context::<AppState>().unwrap();
-    let (left_open, set_left_open) = signal(false);
-    let (right_open, set_right_open) = signal(false);
 
     // Auto-fetch messages and nick list whenever active buffer changes
     // or after a resync (lag recovery / reconnect clears backlog_loaded).
@@ -47,6 +45,9 @@ pub fn Layout() -> impl IntoView {
             pending.update_value(|s| {
                 s.insert(key);
             });
+            state.backlog_fetching.update(|fetching| {
+                fetching.insert(buf_id.clone());
+            });
             crate::ws::send_command(&WebCommand::FetchMessages {
                 buffer_id: buf_id.clone(),
                 limit: 100,
@@ -57,81 +58,25 @@ pub fn Layout() -> impl IntoView {
         crate::ws::send_command(&WebCommand::FetchNickList { buffer_id: buf_id });
     });
 
-    // Auto-close left panel when active buffer changes.
-    Effect::new(move || {
-        let _ = state.active_buffer.get();
-        set_left_open.set(false);
-    });
-
-    let active_buf = move || {
-        let active_id = state.active_buffer.get()?;
-        state
-            .buffers
-            .with(|bufs| bufs.iter().find(|b| b.id == active_id).cloned())
-    };
-
-    // Hide nick list for shell buffers (shells have no users to list).
-    let is_shell_buffer = move || {
-        active_buf()
-            .map(|b| b.buffer_type == "shell")
-            .unwrap_or(false)
-    };
-
-    let mention_count = move || state.mention_count.get();
-
-    // Tap on a mentions badge → jump to the mentions buffer (if present).
-    // FetchMentions makes the server reply with MentionsList, which is the
-    // only thing that resets `mention_count` — without it the badge would
-    // keep its stale count until a full resync.
-    let jump_to_mentions = move |_| {
-        let target = state.buffers.with_untracked(|bufs| {
-            bufs.iter()
-                .find(|b| b.buffer_type == "mentions")
-                .map(|b| b.id.clone())
+    let escape_handle =
+        leptos::leptos_dom::helpers::window_event_listener(leptos::ev::keydown, move |event| {
+            if event.key() != "Escape" {
+                return;
+            }
+            if state.appearance_open.get_untracked() {
+                state.appearance_open.set(false);
+            } else if state.emoji_picker_open.get_untracked() {
+                state.emoji_picker_open.set(false);
+            } else if state.emote_picker_open.get_untracked() {
+                state.emote_picker_open.set(false);
+            } else if state.wizard_open.get_untracked() {
+                state.wizard_open.set(false);
+            } else {
+                return;
+            }
+            event.prevent_default();
         });
-        if let Some(id) = target {
-            state.switch_to_buffer(&id);
-            crate::ws::send_command(&WebCommand::FetchMentions);
-        }
-    };
-
-    // Swipe gesture state.
-    let (touch_start_x, set_touch_start_x) = signal(0i32);
-    let (touch_start_y, set_touch_start_y) = signal(0i32);
-
-    let on_touch_start = move |ev: web_sys::TouchEvent| {
-        if let Some(touch) = ev.touches().get(0) {
-            set_touch_start_x.set(touch.client_x());
-            set_touch_start_y.set(touch.client_y());
-        }
-    };
-
-    let on_touch_end = move |ev: web_sys::TouchEvent| {
-        let Some(touch) = ev.changed_touches().get(0) else {
-            return;
-        };
-        let dx = touch.client_x() - touch_start_x.get_untracked();
-        let dy = touch.client_y() - touch_start_y.get_untracked();
-
-        // Only horizontal swipes (|dx| > |dy|) with minimum 50px distance.
-        if dx.abs() < 50 || dy.abs() > dx.abs() {
-            return;
-        }
-
-        if dx > 0 {
-            if right_open.get_untracked() {
-                set_right_open.set(false);
-            } else if !left_open.get_untracked() {
-                set_left_open.set(true);
-            }
-        } else if dx < 0 {
-            if left_open.get_untracked() {
-                set_left_open.set(false);
-            } else if !right_open.get_untracked() {
-                set_right_open.set(true);
-            }
-        }
-    };
+    on_cleanup(move || escape_handle.remove());
 
     view! {
         <div class="app">
@@ -151,117 +96,212 @@ pub fn Layout() -> impl IntoView {
             {move || state.error.get().map(|msg| view! {
                 <div class="error-toast" role="alert">
                     <span class="error-toast-msg">{msg}</span>
-                    <span class="error-toast-x" on:click=move |_| state.error.set(None)>"\u{2715}"</span>
+                    <button type="button" class="error-toast-x" aria-label="Dismiss error"
+                        on:click=move |_| state.error.set(None)>"\u{2715}"</button>
                 </div>
             })}
-            // Desktop layout
-            <div class="desktop-only">
+            <div class="layout-host" inert=move || {
+                state.appearance_open.get()
+                    || state.emoji_picker_open.get()
+                    || state.emote_picker_open.get()
+                    || state.wizard_open.get()
+            }>
+                <ResponsiveLayout />
+            </div>
+        </div>
+    }
+}
+
+#[component]
+fn ResponsiveLayout() -> impl IntoView {
+    let state = use_context::<AppState>().unwrap();
+    let (left_open, set_left_open) = signal(false);
+    let (right_open, set_right_open) = signal(false);
+    let (touch_start_x, set_touch_start_x) = signal(0i32);
+    let (touch_start_y, set_touch_start_y) = signal(0i32);
+    let (tracking_single_touch, set_tracking_single_touch) = signal(false);
+
+    let active_buf = move || {
+        let active_id = state.active_buffer.get()?;
+        state.buffers.with(|buffers| {
+            buffers
+                .iter()
+                .find(|buffer| buffer.id == active_id)
+                .cloned()
+        })
+    };
+    let has_nick_list = move || active_buf().is_some_and(|buffer| buffer.buffer_type != "shell");
+
+    Effect::new(move || {
+        let _ = state.active_buffer.get();
+        set_left_open.set(false);
+        set_right_open.set(false);
+    });
+
+    let panel_escape_handle =
+        leptos::leptos_dom::helpers::window_event_listener(leptos::ev::keydown, move |event| {
+            if event.key() != "Escape"
+                || event.default_prevented()
+                || state.appearance_open.get_untracked()
+                || state.emoji_picker_open.get_untracked()
+                || state.emote_picker_open.get_untracked()
+                || state.wizard_open.get_untracked()
+            {
+                return;
+            }
+            if left_open.get_untracked() || right_open.get_untracked() {
+                set_left_open.set(false);
+                set_right_open.set(false);
+                event.prevent_default();
+            }
+        });
+    on_cleanup(move || panel_escape_handle.remove());
+
+    let jump_to_mentions = move |_| {
+        let target = state.buffers.with_untracked(|buffers| {
+            buffers
+                .iter()
+                .find(|buffer| buffer.buffer_type == "mentions")
+                .map(|buffer| buffer.id.clone())
+        });
+        if let Some(id) = target {
+            state.switch_to_buffer(&id);
+            crate::ws::send_command(&WebCommand::FetchMentions);
+        }
+    };
+
+    let on_touch_start = move |event: web_sys::TouchEvent| {
+        if event.touches().length() != 1 {
+            set_tracking_single_touch.set(false);
+            return;
+        }
+        if let Some(touch) = event.touches().get(0) {
+            set_tracking_single_touch.set(true);
+            set_touch_start_x.set(touch.client_x());
+            set_touch_start_y.set(touch.client_y());
+        }
+    };
+    let on_touch_end = move |event: web_sys::TouchEvent| {
+        if !tracking_single_touch.get_untracked() {
+            return;
+        }
+        set_tracking_single_touch.set(false);
+        let Some(touch) = event.changed_touches().get(0) else {
+            return;
+        };
+        let dx = touch.client_x() - touch_start_x.get_untracked();
+        let dy = touch.client_y() - touch_start_y.get_untracked();
+        if dx.abs() < 50 || dy.abs() > dx.abs() {
+            return;
+        }
+        if dx > 0 {
+            if right_open.get_untracked() {
+                set_right_open.set(false);
+            } else if !left_open.get_untracked() {
+                set_left_open.set(true);
+            }
+        } else if left_open.get_untracked() {
+            set_left_open.set(false);
+        } else if !right_open.get_untracked() && has_nick_list() {
+            set_right_open.set(true);
+        }
+    };
+
+    view! {
+        <div class="responsive-layout" on:touchstart=on_touch_start on:touchend=on_touch_end>
+            <div class="desktop-topic">
                 <TopicBar />
-                <div class="main-area">
-                    <BufferList />
-                    <ChatView />
-                    {move || (!is_shell_buffer()).then(|| view! { <NickList /> })}
+            </div>
+            <div class="mobile-topbar">
+                <button type="button" class="hamburger" aria-label="Open buffers"
+                    aria-expanded=move || left_open.get()
+                    on:click=move |_| set_left_open.set(true)>"\u{2630}"</button>
+                <div class="mobile-topbar-center">
+                    {move || active_buf().map(|buffer| {
+                        let modes = buffer.modes.as_deref()
+                            .filter(|modes| !modes.is_empty())
+                            .map(|modes| format!(" (+{modes})"))
+                            .unwrap_or_default();
+                        let topic = crate::format::strip_format(buffer.topic.as_deref().unwrap_or(""));
+                        let topic_end = topic.char_indices().nth(30).map_or(topic.len(), |(i, _)| i);
+                        let topic_short = &topic[..topic_end];
+                        let topic_full = topic.clone();
+                        view! {
+                            <span class="mobile-chan">{buffer.name}{modes}</span>
+                            {(!topic.is_empty()).then(|| view! {
+                                <span class="mobile-topic" title=topic_full>
+                                    {format!(" — {topic_short}")}
+                                </span>
+                            })}
+                        }
+                    })}
                 </div>
-                <div class="bottom-bar">
-                    <StatusLine />
-                    <InputLine />
-                    <div class="bar-tools">
-                        <ThemePicker />
-                        <AppearanceButton />
-                    </div>
+                <div class="mobile-topbar-right">
+                    {move || {
+                        let count = state.mention_count.get();
+                        (count > 0).then(|| view! {
+                            <button type="button" class="mention-badge" title="Open mentions"
+                                on:click=jump_to_mentions>{count.to_string()}</button>
+                        })
+                    }}
+                    {move || has_nick_list().then(|| view! {
+                        <button type="button" class="nicklist-btn" aria-label="Open user list"
+                            aria-expanded=move || right_open.get()
+                            on:click=move |_| set_right_open.set(true)>"\u{1F465}"</button>
+                    })}
+                </div>
+            </div>
+            <div class="main-area">
+                <BufferList />
+                <ChatView />
+                {move || has_nick_list().then(|| view! { <NickList /> })}
+            </div>
+            <div class="bottom-bar">
+                <StatusLine />
+                <InputLine />
+                <div class="bar-tools desktop-tools">
+                    <ThemePicker />
+                    <AppearanceButton />
                 </div>
             </div>
 
-            // Mobile layout
-            <div class="mobile-only"
-                on:touchstart=on_touch_start
-                on:touchend=on_touch_end
-            >
-                <div class="mobile-topbar">
-                    <span class="hamburger" on:click=move |_| set_left_open.set(true)>"\u{2630}"</span>
-                    <div class="mobile-topbar-center">
-                        {move || active_buf().map(|b| {
-                            let modes = b.modes.as_deref()
-                                .filter(|m| !m.is_empty())
-                                .map(|m| format!(" (+{m})"))
-                                .unwrap_or_default();
-                            // Strip IRC control codes so raw bytes never leak
-                            // into the breadcrumb (the desktop TopicBar renders
-                            // them styled; the mobile preview is plain text).
-                            let topic = crate::format::strip_format(b.topic.as_deref().unwrap_or(""));
-                            let topic_end = topic.char_indices()
-                                .nth(30)
-                                .map_or(topic.len(), |(i, _)| i);
-                            let topic_short = &topic[..topic_end];
-                            let topic_full = topic.clone();
-                            view! {
-                                <span class="mobile-chan">{b.name}{modes}</span>
-                                {(!topic.is_empty()).then(|| view! {
-                                    // Full topic in the tooltip — the
-                                    // breadcrumb only fits ~30 chars.
-                                    <span class="mobile-topic" title=topic_full>
-                                        {format!(" — {topic_short}")}
-                                    </span>
-                                })}
-                            }
-                        })}
-                    </div>
-                    <div class="mobile-topbar-right">
-                        {move || {
-                            let count = mention_count();
-                            (count > 0).then(|| view! {
-                                <span class="mention-badge" title="Open mentions"
-                                    on:click=jump_to_mentions>{count.to_string()}</span>
-                            })
-                        }}
-                        <span class="nicklist-btn" on:click=move |_| set_right_open.set(true)>
-                            "\u{1F465}"
-                        </span>
-                    </div>
+            <div class="slide-overlay" class:visible=left_open aria-hidden="true"
+                on:click=move |_| set_left_open.set(false)></div>
+            <aside class="slide-panel-left" class:open=left_open
+                aria-label="Buffers" aria-hidden=move || !left_open.get()
+                inert=move || !left_open.get()>
+                <div class="slide-panel-header">
+                    <span class="slide-panel-title">"Buffers"</span>
+                    {move || {
+                        let count = state.mention_count.get();
+                        (count > 0).then(|| view! {
+                            <button type="button" class="mention-badge" title="Open mentions"
+                                on:click=jump_to_mentions>{format!("{count} mentions")}</button>
+                        })
+                    }}
                 </div>
-                <ChatView />
-                <div class="bottom-bar">
-                    <StatusLine />
-                    <InputLine />
+                <BufferList />
+                <div class="bar-tools">
+                    <ThemePicker />
+                    <AppearanceButton />
                 </div>
+            </aside>
 
-                // Slide-out panels — always in DOM, toggled via CSS class.
-                <div class="slide-overlay" class:visible=left_open
-                    on:click=move |_| set_left_open.set(false)></div>
-                <div class="slide-panel-left" class:open=left_open>
-                    <div class="slide-panel-header">
-                        <span style="color: var(--accent); font-weight: bold;">"Buffers"</span>
-                        {move || {
-                            let count = mention_count();
-                            (count > 0).then(|| view! {
-                                <span class="mention-badge" title="Open mentions"
-                                    on:click=jump_to_mentions>{format!("{count} mentions")}</span>
-                            })
-                        }}
-                    </div>
-                    <BufferList />
-                    <div class="bar-tools">
-                        <ThemePicker />
-                        <AppearanceButton />
-                    </div>
-                </div>
-
-                <div class="slide-overlay" class:visible=right_open
+            {move || has_nick_list().then(|| view! {
+                <div class="slide-overlay" class:visible=right_open aria-hidden="true"
                     on:click=move |_| set_right_open.set(false)></div>
-                <div class="slide-panel-right" class:open=right_open>
+                <aside class="slide-panel-right" class:open=right_open
+                    aria-label="Users" aria-hidden=move || !right_open.get()
+                    inert=move || !right_open.get()>
                     <div class="slide-panel-header">
-                        {move || active_buf().map(|b| {
-                            view! {
-                                <span style="color: var(--accent); font-weight: bold;">{b.name}</span>
-                                <span style="color: var(--fg-muted); font-size: 10px; margin-left: 6px;">
-                                    {format!("{} users", b.nick_count)}
-                                </span>
-                            }
+                        {move || active_buf().map(|buffer| view! {
+                            <span class="slide-panel-title">{buffer.name}</span>
+                            <span class="slide-panel-count">{format!("{} users", buffer.nick_count)}</span>
                         })}
                     </div>
                     <NickList />
-                </div>
-            </div>
+                </aside>
+            })}
         </div>
     }
 }
@@ -285,14 +325,22 @@ fn ThemePicker() -> impl IntoView {
             {themes.iter().map(|(name, color)| {
                 let name_owned = (*name).to_string();
                 let name_for_click = name_owned.clone();
-                let is_active = move || state.theme.get() == name_owned;
+                let name_for_class = name_owned.clone();
+                let name_for_pressed = name_owned;
                 view! {
-                    <div
-                        class=move || if is_active() { "theme-swatch active" } else { "theme-swatch" }
+                    <button
+                        type="button"
+                        class=move || if state.theme.get() == name_for_class {
+                            "theme-swatch active"
+                        } else {
+                            "theme-swatch"
+                        }
                         style=format!("background: {color};")
                         title=*name
+                        aria-label=format!("Use {name} theme")
+                        aria-pressed=move || state.theme.get() == name_for_pressed
                         on:click=move |_| state.theme.set(name_for_click.clone())
-                    ></div>
+                    ></button>
                 }
             }).collect::<Vec<_>>()}
         </div>
