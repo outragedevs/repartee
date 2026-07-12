@@ -807,6 +807,28 @@ impl App {
                 params.insert("from_server".to_string(), from_server.to_string());
                 events::WALLOPS
             }
+            // IRCv3 `+typing` arrives as Raw (no TAGMSG variant in the proto crate).
+            // A TAGMSG with no typing tag carries nothing a script can act on.
+            ::irc::proto::Command::Raw(verb, args)
+                if verb.eq_ignore_ascii_case("TAGMSG") && !args.is_empty() =>
+            {
+                let tags: HashMap<String, String> = msg
+                    .tags
+                    .as_ref()
+                    .map(|ts| {
+                        ts.iter()
+                            .filter_map(|t| Some((t.0.clone(), t.1.clone()?)))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let Some(typing_state) = crate::irc::typing::parse_typing(&tags) else {
+                    return false;
+                };
+                params.insert("nick".to_string(), extract_nick(msg.prefix.as_ref()));
+                params.insert("target".to_string(), args[0].clone());
+                params.insert("state".to_string(), typing_state.as_str().to_string());
+                events::TYPING
+            }
             // For non-scriptable events, don't emit
             _ => return false,
         };

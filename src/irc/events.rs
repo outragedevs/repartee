@@ -10375,4 +10375,9 @@ mod tests {
         handle_irc_message(&mut state, "test", &quit);
         assert!(state.typing.nicks("test/#rust").is_empty());
     }
+
+    #[test]
+    fn typing_is_exposed_to_scripts() {
+        assert_eq!(crate::scripting::api::events::TYPING, "irc.typing");
+    }
 }

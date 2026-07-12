@@ -67,6 +67,10 @@ pub mod events {
     /// Params: `connection_id`, nick, `ctcp_type`, message
     pub const CTCP_RESPONSE: &str = "irc.ctcp_response";
 
+    /// `IRCv3` `+typing`: someone started, paused, or stopped typing.
+    /// Params: `connection_id`, `nick`, `target`, `state` (`active`/`paused`/`done`).
+    pub const TYPING: &str = "irc.typing";
+
     // ── Connection lifecycle ─────────────────────────────────
 
     /// Successfully connected and registered on a server.

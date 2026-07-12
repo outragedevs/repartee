@@ -189,6 +189,19 @@ Same as `irc.join` plus `message` (part reason).
 | `message` | string | |
 | `from_server` | boolean | |
 
+### `irc.typing`
+
+IRCv3 `+typing` client tag on a `TAGMSG`: someone started, paused, or stopped typing in a channel or query. Only fires when `[typing] show` is enabled (see [Configuration](/configuration.html)); a `TAGMSG` carrying no typing tag does not fire this event at all.
+
+| Field | Type | Description |
+|---|---|---|
+| `connection_id` | string | |
+| `nick` | string | Who is typing |
+| `target` | string | Channel or your nick |
+| `state` | string | `"active"`, `"paused"`, or `"done"` |
+
+Suppressing this event drops the typing indicator for that notification entirely — the tracker is never updated, so it behaves as if the `TAGMSG` was never received.
+
 ---
 
 ## DCC Events

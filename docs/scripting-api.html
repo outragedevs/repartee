@@ -538,6 +538,38 @@ end)
 <td></td>
 </tr>
 </tbody></table>
+<h3><code>irc.typing</code></h3>
+<p>IRCv3 <code>+typing</code> client tag on a <code>TAGMSG</code>: someone started, paused, or stopped typing in a channel or query. Only fires when <code>[typing] show</code> is enabled (see <a href="/configuration.html">Configuration</a>); a <code>TAGMSG</code> carrying no typing tag does not fire this event at all.</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>connection_id</code></td>
+<td>string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>nick</code></td>
+<td>string</td>
+<td>Who is typing</td>
+</tr>
+<tr>
+<td><code>target</code></td>
+<td>string</td>
+<td>Channel or your nick</td>
+</tr>
+<tr>
+<td><code>state</code></td>
+<td>string</td>
+<td><code>&quot;active&quot;</code>, <code>&quot;paused&quot;</code>, or <code>&quot;done&quot;</code></td>
+</tr>
+</tbody></table>
+<p>Suppressing this event drops the typing indicator for that notification entirely — the tracker is never updated, so it behaves as if the <code>TAGMSG</code> was never received.</p>
 <hr>
 <h2>DCC Events</h2>
 <p>These events fire for DCC CHAT activity. DCC connections are direct peer-to-peer TCP connections that bypass the IRC server.</p>
