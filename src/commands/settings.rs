@@ -1453,6 +1453,60 @@ mod tests {
     }
 
     #[test]
+    fn get_set_typing() {
+        let mut config = default_config();
+        // All three keys read back "true" on a default config.
+        assert_eq!(
+            get_config_value(&config, "typing.show").unwrap().value,
+            "true"
+        );
+        assert_eq!(
+            get_config_value(&config, "typing.send_channels")
+                .unwrap()
+                .value,
+            "true"
+        );
+        assert_eq!(
+            get_config_value(&config, "typing.send_queries")
+                .unwrap()
+                .value,
+            "true"
+        );
+        // Set each to false and read it back through the getter.
+        set_config_value(&mut config, "typing.show", "false").unwrap();
+        assert!(!config.typing.show);
+        assert_eq!(
+            get_config_value(&config, "typing.show").unwrap().value,
+            "false"
+        );
+        set_config_value(&mut config, "typing.send_channels", "false").unwrap();
+        assert!(!config.typing.send_channels);
+        assert_eq!(
+            get_config_value(&config, "typing.send_channels")
+                .unwrap()
+                .value,
+            "false"
+        );
+        set_config_value(&mut config, "typing.send_queries", "false").unwrap();
+        assert!(!config.typing.send_queries);
+        assert_eq!(
+            get_config_value(&config, "typing.send_queries")
+                .unwrap()
+                .value,
+            "false"
+        );
+        // Non-boolean value is rejected by parse_bool.
+        assert!(set_config_value(&mut config, "typing.show", "bogus").is_err());
+        // Unknown field in the typing section is rejected / not resolvable.
+        assert!(set_config_value(&mut config, "typing.nope", "true").is_err());
+        assert!(get_config_value(&config, "typing.nope").is_none());
+        // typing.* paths are advertised as settable.
+        assert!(BASE_PATHS.contains(&"typing.show"));
+        assert!(BASE_PATHS.contains(&"typing.send_channels"));
+        assert!(BASE_PATHS.contains(&"typing.send_queries"));
+    }
+
+    #[test]
     fn set_nick_color_saturation_validates_range() {
         let mut config = default_config();
         assert!(set_config_value(&mut config, "display.nick_color_saturation", "0.7").is_ok());
