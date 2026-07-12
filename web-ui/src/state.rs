@@ -94,8 +94,8 @@ pub struct AppState {
     /// than what's loaded (from the `has_more` field of `Messages`). Drives the
     /// scroll-up loader — `false` (or absent) means stop fetching.
     pub backlog_has_more: RwSignal<HashMap<String, bool>>,
-    /// Buffers with an in-flight scroll-up `FetchMessages`. Guards against
-    /// firing a second request before the first response lands.
+    /// Buffers with an in-flight `FetchMessages`. Guards initial loads and
+    /// scroll-back requests against duplicate viewport/resize fetches.
     pub backlog_fetching: RwSignal<HashSet<String>>,
 }
 

@@ -29,9 +29,7 @@ fn restored_scroll_top(current: i32, delta: f64) -> Option<i32> {
     (target != current).then_some(target)
 }
 
-/// Hard-pin the scroller to the bottom. Callers MUST set
-/// `skip_next_scroll` first so the resulting `scroll` event does not
-/// re-enter `on_scroll` and re-measure mid-paint.
+/// Hard-pin the scroller to the bottom.
 fn pin_to_bottom(el: &web_sys::Element) {
     el.set_scroll_top(el.scroll_height());
 }
@@ -113,12 +111,11 @@ pub fn ChatView() -> impl IntoView {
     // Track previous buffer ID to detect buffer switches.
     let prev_buffer_id = StoredValue::new(None::<String>);
 
-    // Suppresses the next `scroll` event handler. We set `scrollTop`
-    // programmatically in `pin_to_bottom`, the browser fires `scroll`
-    // anyway, and without this flag the handler would re-measure
-    // mid-paint and could briefly flip `is_at_bottom` to false. The
-    // same trick is what keeps thelounge's MessageList stable.
-    let skip_next_scroll = StoredValue::new(false);
+    // Identifies the scroll position requested by the latest programmatic
+    // move. A later user gesture is ignored only when it lands at this exact
+    // position, so a clamped write that emits no event cannot consume the
+    // user's next real scroll.
+    let pending_scroll_top = StoredValue::new(None::<i32>);
 
     // Coalesces multiple message appends in the same microtask into a
     // single RAF-scheduled pin. Without this, a burst of incoming
@@ -139,16 +136,12 @@ pub fn ChatView() -> impl IntoView {
     let pending_anchor = StoredValue::new(None::<(String, String, f64)>);
 
     let do_pin = move |el: &web_sys::Element| {
-        // Writing an UNCHANGED scrollTop fires no scroll event, which would
-        // strand the skip flag and make on_scroll swallow the user's next
-        // real gesture (one wheel notch near the bottom silently ignored,
-        // then yanked back by the next append). Only arm the flag when the
-        // write will actually move the scroller.
         let target = (el.scroll_height() - el.client_height()).max(0);
         if el.scroll_top() == target {
+            pending_scroll_top.set_value(None);
             return;
         }
-        skip_next_scroll.set_value(true);
+        pending_scroll_top.set_value(Some(target));
         pin_to_bottom(el);
     };
 
@@ -354,7 +347,7 @@ pub fn ChatView() -> impl IntoView {
             let Some(target) = restored_scroll_top(el_dom.scroll_top(), delta) else {
                 return;
             };
-            skip_next_scroll.set_value(true);
+            pending_scroll_top.set_value(Some(target));
             el_dom.set_scroll_top(target);
         });
         let _ = window.request_animation_frame(cb.as_ref().unchecked_ref());
@@ -440,7 +433,7 @@ pub fn ChatView() -> impl IntoView {
     // reverted: it fired mid-animation and produced visible hops.)
     //
     // The callback body never re-measures `is_at_bottom` — it only re-pins
-    // when we were already at the bottom, with `skip_next_scroll` set (via
+    // when we were already at the bottom, with `pending_scroll_top` set (via
     // `do_pin`), so per-frame firing during a keyboard animation glues the
     // view to the bottom instead of jittering it.
     type ObserverHandle = Option<(
@@ -518,18 +511,15 @@ pub fn ChatView() -> impl IntoView {
         drop(cb);
     });
 
-    // The scroll handler is the ONLY place that flips `is_at_bottom`
-    // off. Programmatic pins set `skip_next_scroll` so the resulting
-    // scroll event is ignored — without that guard, the synchronous
-    // measurement during a mid-paint scroll callback could read a
-    // stale scrollTop and incorrectly mark us as "not at bottom".
+    // The scroll handler is the ONLY place that flips `is_at_bottom` off.
     let on_scroll = move |ev: web_sys::Event| {
-        if skip_next_scroll.get_value() {
-            skip_next_scroll.set_value(false);
-            return;
-        }
         let target = ev.target().unwrap();
         let el: &web_sys::Element = target.unchecked_ref();
+        let requested = pending_scroll_top.get_value();
+        pending_scroll_top.set_value(None);
+        if requested == Some(el.scroll_top()) {
+            return;
+        }
         let next = is_near_bottom(el);
         if state.is_at_bottom.get_untracked() != next {
             state.is_at_bottom.set(next);
@@ -650,7 +640,7 @@ pub fn ChatView() -> impl IntoView {
                         state.is_at_bottom.set(true);
                         // Mirror the `on_scroll` return-to-bottom path: collapse
                         // the pinned backlog window. `do_pin` sets
-                        // `skip_next_scroll`, so the resulting scroll event
+                        // `pending_scroll_top`, so the resulting scroll event
                         // returns early and never reaches that collapse — without
                         // this, a buffer loaded to PINNED_WEB_CAP stays full and
                         // the scroll-up fetch guard blocks deeper history.

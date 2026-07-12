@@ -106,7 +106,7 @@ textarea {
 .buffer-list .buffer-item {
     width: 100%;
     padding: 0 6px;
-    line-height: 1.4;
+    line-height: var(--line-height, 1.35);
     cursor: pointer;
     display: flex;
     align-items: center;
@@ -354,7 +354,7 @@ textarea {
 .nick-list .nick-entry {
     width: 100%;
     padding: 0 6px;
-    line-height: 1.4;
+    line-height: var(--line-height, 1.35);
     cursor: pointer;
     border: 0;
     background: transparent;
@@ -766,11 +766,6 @@ textarea {
 
     /* Compact status bar on mobile */
     .status-line { font-size: 11px; }
-
-    .buffer-list .buffer-item,
-    .nick-list .nick-entry {
-        min-height: 40px;
-    }
 
     .scroll-bottom-btn {
         width: 44px;

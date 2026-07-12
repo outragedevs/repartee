@@ -45,6 +45,9 @@ pub fn Layout() -> impl IntoView {
             pending.update_value(|s| {
                 s.insert(key);
             });
+            state.backlog_fetching.update(|fetching| {
+                fetching.insert(buf_id.clone());
+            });
             crate::ws::send_command(&WebCommand::FetchMessages {
                 buffer_id: buf_id.clone(),
                 limit: 100,
