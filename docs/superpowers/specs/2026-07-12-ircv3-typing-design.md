@@ -242,8 +242,7 @@ therefore already being captured today; only an accessor is missing.
 
 | Need                | Existing hook                                                                 |
 |---------------------|-------------------------------------------------------------------------------|
-| 1 s expiry sweep    | `tick` interval — `src/app/mod.rs:1227`, select arm `:1445`                    |
-| 3 s resend timer    | self-rearming `sleep` pattern — `src/app/mod.rs:1234`, re-armed `:1276-1296`, arm `:1501` |
+| 1 s expiry sweep **and** 3 s resend | `tick` interval — `src/app/mod.rs:1227`, select arm `:1445`. **No new timer is needed.** The throttle floor is 3 s and the receiver's `active` window is 6 s, so 1 s granularity resends comfortably inside the window; the render loop already redraws on every wakeup. |
 | keystroke hook      | `App::handle_key` — `src/app/input.rs:132`; char arms `:352-390`, clears `:240-244,:303-305` |
 | message submit      | `input.submit()` — `src/app/input.rs:296`                                      |
 | per-buffer state    | `Buffer` — `src/state/buffer.rs:139`                                           |
@@ -321,7 +320,8 @@ signal. (Batch membership is already resolved — `src/irc/batch.rs:155`, parent
 | `src/irc/typing.rs` | **new** — protocol layer: `TypingState`, tag parse, TAGMSG builder, timing constants |
 | `src/irc/events.rs` | new `TAGMSG` arm in `handle_irc_message` (~`:57`); clear-typing calls in PRIVMSG/NOTICE/PART/QUIT/KICK/NICK handlers |
 | `src/irc/isupport.rs` | new `client_tag_allowed(&self, tag: &str) -> bool` (parses `CLIENTTAGDENY`) |
-| `src/state/buffer.rs` | `Buffer.typing: HashMap<String, TypingEntry>` + set/clear/expire/list methods |
+| `src/state/typing.rs` | **new** — `TypingTracker`: `buffer_id → nick → TypingEntry`, with set/clear/expire/list |
+| `src/state/mod.rs`, `src/state/events.rs:10` | `AppState.typing: TypingTracker` + one line in `AppState::new()` |
 | `src/app/typing.rs` | **new** — 14th `app/` domain submodule: outbound state machine, expiry sweep, web event emission |
 | `src/app/input.rs` | keystroke hook in `handle_key`; `done` on clear; reset on submit |
 | `src/app/mod.rs` | expiry in the 1 s tick arm; new self-rearming 3 s resend timer |
@@ -391,10 +391,19 @@ Rule 5 is deliberate: **typing never creates a buffer.** Otherwise any stranger 
 a query window open on your screen just by starting to type, with no message ever sent —
 a spam vector with no analogue in PRIVMSG handling, since we would have nothing to show.
 
-Surviving messages update `Buffer.typing` and, per the message-tags spec's *"MUST NOT
+Surviving messages update `AppState.typing` and, per the message-tags spec's *"MUST NOT
 display them in the message history"*, do **not**: append a buffer line, bump
 activity/unread, write to SQLite (`src/storage/`), or trigger mention/notification logic.
-They mark the buffer dirty for redraw and enqueue a `WebEvent::Typing`.
+They enqueue a `WebEvent::Typing`; the TUI repaints on the next loop iteration.
+
+**Where the state lives.** A dedicated `TypingTracker` in `src/state/typing.rs`, held as
+`AppState.typing`, keyed `buffer_id → nick → TypingEntry { state, since: Instant }`.
+
+*Not* a field on `Buffer`: `Buffer` has no constructor and is built from 39 struct literals
+across the codebase (mostly test fixtures), so a new field there means 39 mechanical edits.
+`AppState` has exactly one constructor (`src/state/events.rs:10`), so the tracker costs one
+line. It is also the better boundary — typing is ephemeral session state, not buffer content
+— and it lets the expiry sweep walk one small map instead of every buffer.
 
 ### 4.4 Known quirk: `extract_tags` drops valueless tags
 
@@ -419,6 +428,10 @@ struct TypingSender {
     last_keystroke: Option<Instant>,        // for the paused transition
 }
 ```
+
+The machine is driven from two places only: the keystroke hook, and the existing 1 s tick
+(resend, the `paused` transition, expiry of received state, and the buffer-switch `done`).
+**No new timer is introduced** — see §2.5.
 
 Input predicate, applied on every keystroke that mutates the input buffer:
 
@@ -520,9 +533,15 @@ manual, as it already is today.)
 
 ### 4.8 Scripting
 
-New event constant `events::TYPING = "irc.typing"` (`src/scripting/api.rs:10`), emitted
-from the TAGMSG arm with params `nick`, `target`, `state`, `network`. `EventResult::Suppress`
-from a script suppresses the state update, consistent with how other events behave.
+New event constant `events::TYPING = "irc.typing"` (`src/scripting/api.rs:10`), with params
+`connection_id`, `nick`, `target`, `state`. Emitted from `src/app/scripting.rs` — that is
+where script events are dispatched (`match &msg.command`, `:686-810`), and today every
+`Command::Raw`, TAGMSG included, falls into its `_ => return false` arm and emits nothing.
+
+`EventResult::Suppress` suppresses the state update. This comes for free: the dispatcher's
+verdict already lands in `state.suppress_event_display`, which `src/app/irc.rs:930-936` sets
+around the `handle_irc_message` call, and a TAGMSG carries nothing *but* the typing tag — so
+`handle_tagmsg` need only check that flag and return.
 
 ### 4.9 Persistence and sessions
 
