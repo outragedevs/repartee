@@ -307,12 +307,7 @@ impl App {
                 self.input.spell_state = None;
                 let text = self.input.submit();
                 if !text.is_empty() {
-                    if let Some(buffer_id) = self.state.active_buffer_id.clone() {
-                        self.on_typing_submit(
-                            &crate::app::typing::TypingSource::Tui,
-                            &buffer_id,
-                        );
-                    }
+                    self.note_tui_submit();
                     self.handle_submit(&text);
                 }
             }
@@ -509,6 +504,7 @@ impl App {
                 format!("{current_input}{}", raw.join("\n"))
             };
             if !joined.is_empty() {
+                self.note_tui_submit();
                 self.handle_submit(&joined);
             }
             return;
@@ -527,6 +523,7 @@ impl App {
         };
 
         // Send first line immediately
+        self.note_tui_submit();
         self.handle_submit(&first);
 
         // Queue remaining lines
@@ -545,6 +542,7 @@ impl App {
     /// Send one queued paste line. Called every 500ms by the paste timer.
     pub(crate) fn drain_paste_queue(&mut self) {
         if let Some(line) = self.paste_queue.pop_front() {
+            self.note_tui_submit();
             self.handle_submit(&line);
         }
     }

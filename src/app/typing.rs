@@ -322,6 +322,16 @@ impl App {
         self.dispatch_typing(due);
     }
 
+    /// Note a TUI-driven submit for the active buffer. Every `handle_submit`
+    /// call site in `input.rs` must go through this first, or the machine keeps
+    /// an `Active` recorded for the target and the next input change retracts
+    /// it with a spurious `done` right after the real PRIVMSG.
+    pub(crate) fn note_tui_submit(&mut self) {
+        if let Some(buffer_id) = self.state.active_buffer_id.clone() {
+            self.on_typing_submit(&TypingSource::Tui, &buffer_id);
+        }
+    }
+
     /// A web session disconnected.
     #[expect(
         dead_code,
