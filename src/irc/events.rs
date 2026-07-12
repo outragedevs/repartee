@@ -69,6 +69,12 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
         Command::NOTICE(target, text) => {
             handle_notice(state, conn_id, msg.prefix.as_ref(), target, text, tags);
         }
+        // IRCv3 `TAGMSG` has no Command variant in the proto crate, so it
+        // arrives as Raw. Only `+typing` is understood; the message-tags spec
+        // forbids ever displaying TAGMSG in history.
+        Command::Raw(verb, args) if verb.eq_ignore_ascii_case("TAGMSG") && !args.is_empty() => {
+            handle_tagmsg(state, conn_id, &our_nick, msg, &args[0], tags.as_ref());
+        }
         Command::JOIN(channel, account, realname) => {
             let fields = JoinFields {
                 channel,
@@ -1134,6 +1140,104 @@ fn incoming_e2e_context(network: &str, target: &str, own_handle: Option<&str>) -
     }
 }
 
+/// Handle an inbound `TAGMSG`. Only the `+typing` client tag is understood.
+///
+/// This function must never append a buffer line, bump activity or unread
+/// counts, persist anything, or create a buffer. The message-tags spec is
+/// explicit: "Clients that receive a `TAGMSG` command MUST NOT display them in
+/// the message history by default."
+fn handle_tagmsg(
+    state: &mut AppState,
+    conn_id: &str,
+    our_nick: &str,
+    msg: &IrcMessage,
+    target: &str,
+    tags: Option<&HashMap<String, String>>,
+) {
+    // 1. History replay (`draft/chathistory` / `draft/event-playback`) can hand
+    //    us a TAGMSG from hours ago. Typing is a live-only signal (spec §3.3).
+    if tags.is_some_and(|t| t.contains_key("batch")) {
+        return;
+    }
+    // 2. A script suppressed this event.
+    if state.suppress_event_display {
+        return;
+    }
+    // 3. The user asked not to see typing. This gates INGESTION, not rendering:
+    //    tracking it anyway would keep feeding the web clients (spec §5).
+    if !state.typing_show {
+        return;
+    }
+    // 4. No typing tag: nothing else is implemented.
+    let Some(typing_state) = tags.and_then(crate::irc::typing::parse_typing) else {
+        return;
+    };
+
+    let (nick, ident, host) = extract_nick_userhost(msg.prefix.as_ref());
+    if nick.is_empty() {
+        return;
+    }
+    // 5. echo-message reflects our own TAGMSG back at us (spec §3.2).
+    if nick.eq_ignore_ascii_case(our_nick) {
+        return;
+    }
+
+    // Resolve the target. `&chan` and `+chan` are CHANNELS, so only a character
+    // the server actually advertised in STATUSMSG may be stripped, and only when
+    // what remains is still a channel.
+    let statusmsg = state
+        .connections
+        .get(conn_id)
+        .map(|c| c.isupport_parsed.statusmsg().to_string())
+        .unwrap_or_default();
+    let target = crate::irc::typing::strip_statusmsg(target, &statusmsg);
+    let target_is_channel = is_channel(target);
+
+    // 6. Ignore list.
+    let ignore_level = if target_is_channel {
+        IgnoreLevel::Public
+    } else {
+        IgnoreLevel::Msgs
+    };
+    let channel = target_is_channel.then_some(target);
+    if should_ignore(
+        &state.ignores,
+        &nick,
+        Some(&ident),
+        Some(&host),
+        &ignore_level,
+        channel,
+    ) {
+        return;
+    }
+
+    // A channel TAGMSG belongs to the channel buffer; a TAGMSG aimed at us
+    // belongs to the sender's query buffer — same rule as PRIVMSG.
+    let buffer_name = if target_is_channel { target } else { &nick };
+    let buffer_id = make_buffer_id(conn_id, buffer_name);
+
+    // 7. Typing never creates a buffer: otherwise any stranger could pop a query
+    //    window open on your screen without ever sending a message.
+    if !state.buffers.contains_key(&buffer_id) {
+        return;
+    }
+
+    if state.typing.set(&buffer_id, &nick, typing_state, Instant::now()) {
+        push_typing_web_event(state, &buffer_id);
+    }
+}
+
+/// Enqueue the current typing set for a buffer to the web clients.
+/// The full set is sent, not a delta — idempotent and self-healing.
+#[expect(
+    clippy::missing_const_for_fn,
+    reason = "stub only — Task 8 restores the WebEvent::Typing push, which cannot be const"
+)]
+pub fn push_typing_web_event(state: &mut AppState, buffer_id: &str) {
+    // TODO(Task 8): restore — WebEvent::Typing lands with the web protocol
+    let _ = (state, buffer_id);
+}
+
 #[expect(clippy::too_many_lines, reason = "linear message handler")]
 fn handle_privmsg(
     state: &mut AppState,
@@ -1272,6 +1376,11 @@ fn handle_privmsg(
         ) {
             return;
         }
+    }
+
+    // A message from this nick means they are no longer typing (spec §1.2).
+    if state.typing.clear(&buffer_id, &nick) {
+        push_typing_web_event(state, &buffer_id);
     }
 
     // Create query buffer if it doesn't exist for PMs. When we create or
@@ -1714,6 +1823,13 @@ fn handle_notice(
             .map_or("Status", |c| c.label.as_str());
         make_buffer_id(conn_id, label)
     };
+
+    // A message from this nick means they are no longer typing (spec §1.2).
+    if let Some(sender) = nick.as_deref()
+        && state.typing.clear(&buffer_id, sender)
+    {
+        push_typing_web_event(state, &buffer_id);
+    }
 
     let mode_prefix = nick
         .as_deref()
@@ -2484,6 +2600,10 @@ fn handle_part(
             return;
         }
 
+        if state.typing.clear(&buffer_id, &nick) {
+            push_typing_web_event(state, &buffer_id);
+        }
+
         let reason_str = reason.unwrap_or("");
         let id = state.next_message_id();
         state.add_message(
@@ -2564,6 +2684,11 @@ fn handle_quit(
         None,
     ) {
         return;
+    }
+
+    // A quitter is no longer typing anywhere on this connection (spec §1.2).
+    for buf_id in state.typing.clear_nick_on_connection(conn_id, &nick) {
+        push_typing_web_event(state, &buf_id);
     }
 
     // --- Netsplit check ---
@@ -2724,6 +2849,11 @@ fn handle_nick_change(
         }
     }
 
+    // The old identity is no longer typing anywhere on this connection (spec §1.2).
+    for buf_id in state.typing.clear_nick_on_connection(conn_id, &old_nick) {
+        push_typing_web_event(state, &buf_id);
+    }
+
     // Update in all buffers on this connection — channels (have user in nick list)
     // AND query buffers (named after the nick, no users list).
     let old_nick_lower = old_nick.to_lowercase();
@@ -2835,6 +2965,11 @@ fn handle_kick(
         // Still remove kicked user from nick list
         state.remove_nick(&buffer_id, kicked_user);
         return;
+    }
+
+    // The person who was kicked stopped typing — not the kicker (spec §1.2).
+    if state.typing.clear(&buffer_id, kicked_user) {
+        push_typing_web_event(state, &buffer_id);
     }
 
     let ts = message_timestamp(tags.as_ref());
@@ -10031,5 +10166,179 @@ mod tests {
                 buf.id
             );
         }
+    }
+
+    // === TAGMSG / typing tests ===
+    //
+    // NOTE: `make_test_state()` creates a connection with id "test" (nick
+    // "me"), not "conn1" as the task brief's tests assume — every "conn1" in
+    // the brief has been substituted with "test" below.
+
+    fn tagmsg(from: &str, target: &str, tag: &str, value: &str) -> IrcMessage {
+        format!("@{tag}={value} :{from}!u@h TAGMSG {target}\r\n")
+            .parse()
+            .expect("valid TAGMSG")
+    }
+
+    #[test]
+    fn tagmsg_sets_typing_without_touching_the_buffer() {
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#rust"));
+        let before = state.buffers["test/#rust"].messages.len();
+
+        handle_irc_message(&mut state, "test", &tagmsg("alice", "#rust", "+typing", "active"));
+
+        assert_eq!(state.typing.nicks("test/#rust"), vec!["alice"]);
+        // The message-tags spec forbids showing TAGMSG in history.
+        assert_eq!(state.buffers["test/#rust"].messages.len(), before);
+        assert_eq!(state.buffers["test/#rust"].unread_count, 0);
+        assert_eq!(
+            state.buffers["test/#rust"].activity,
+            crate::state::buffer::ActivityLevel::None
+        );
+    }
+
+    #[test]
+    fn tagmsg_done_clears_typing() {
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#rust"));
+        handle_irc_message(&mut state, "test", &tagmsg("alice", "#rust", "+typing", "active"));
+        handle_irc_message(&mut state, "test", &tagmsg("alice", "#rust", "+typing", "done"));
+        assert!(state.typing.nicks("test/#rust").is_empty());
+    }
+
+    #[test]
+    fn typing_show_off_drops_the_notification_entirely() {
+        // The setting must gate INGESTION: gating only the render arm would leave the
+        // tracker full and keep broadcasting WebEvent::Typing to the browser.
+        let mut state = make_test_state();
+        state.typing_show = false;
+        state.add_buffer(make_channel_buffer("test", "#rust"));
+        // `add_buffer` itself enqueues a `BufferCreated` web event; drain it
+        // so the assertion below only reflects what `handle_irc_message` did.
+        state.pending_web_events.clear();
+        handle_irc_message(&mut state, "test", &tagmsg("alice", "#rust", "+typing", "active"));
+        assert!(state.typing.nicks("test/#rust").is_empty());
+        assert!(state.pending_web_events.is_empty());
+    }
+
+    #[test]
+    fn our_own_tagmsg_echo_is_ignored() {
+        // echo-message reflects our own TAGMSG back at us (spec §3.2).
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#rust"));
+        let our_nick = state.connections["test"].nick.clone();
+        handle_irc_message(&mut state, "test", &tagmsg(&our_nick, "#rust", "+typing", "active"));
+        assert!(state.typing.nicks("test/#rust").is_empty());
+    }
+
+    #[test]
+    fn replayed_tagmsg_in_a_batch_is_ignored() {
+        // chathistory / event-playback would otherwise show phantom typing (spec §3.3).
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#rust"));
+        let msg: IrcMessage = "@batch=1;+typing=active :alice!u@h TAGMSG #rust\r\n"
+            .parse()
+            .expect("valid");
+        handle_irc_message(&mut state, "test", &msg);
+        assert!(state.typing.nicks("test/#rust").is_empty());
+    }
+
+    #[test]
+    fn tagmsg_without_a_typing_tag_is_ignored() {
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#rust"));
+        handle_irc_message(&mut state, "test", &tagmsg("alice", "#rust", "+example-tag", "x"));
+        assert!(state.typing.nicks("test/#rust").is_empty());
+    }
+
+    #[test]
+    fn tagmsg_never_creates_a_buffer() {
+        // Otherwise a stranger could pop a query window open just by typing.
+        let mut state = make_test_state();
+        let our_nick = state.connections["test"].nick.clone();
+        handle_irc_message(&mut state, "test", &tagmsg("stranger", &our_nick, "+typing", "active"));
+        assert!(!state.buffers.contains_key("test/stranger"));
+        assert!(state.typing.nicks("test/stranger").is_empty());
+    }
+
+    #[test]
+    fn tagmsg_to_an_existing_query_sets_typing_keyed_by_sender() {
+        let mut state = make_test_state();
+        let our_nick = state.connections["test"].nick.clone();
+        let mut buf = make_channel_buffer("test", "alice");
+        buf.buffer_type = crate::state::buffer::BufferType::Query;
+        buf.id = "test/alice".to_string();
+        buf.name = "alice".to_string();
+        state.add_buffer(buf);
+
+        handle_irc_message(&mut state, "test", &tagmsg("alice", &our_nick, "+typing", "active"));
+        assert_eq!(state.typing.nicks("test/alice"), vec!["alice"]);
+    }
+
+    #[test]
+    fn statusmsg_prefixed_target_resolves_to_the_channel() {
+        let mut state = make_test_state();
+        state
+            .connections
+            .get_mut("test")
+            .expect("conn")
+            .isupport_parsed
+            .parse_tokens(&["STATUSMSG=@+"]);
+        state.add_buffer(make_channel_buffer("test", "#rust"));
+        handle_irc_message(&mut state, "test", &tagmsg("alice", "@#rust", "+typing", "active"));
+        assert_eq!(state.typing.nicks("test/#rust"), vec!["alice"]);
+    }
+
+    #[test]
+    fn ampersand_channel_is_not_mistaken_for_a_statusmsg_prefix() {
+        // `&local` is a CHANNEL. Stripping the `&` would resolve it as a query.
+        let mut state = make_test_state();
+        state
+            .connections
+            .get_mut("test")
+            .expect("conn")
+            .isupport_parsed
+            .parse_tokens(&["STATUSMSG=@+"]);
+        state.add_buffer(make_channel_buffer("test", "&local"));
+        handle_irc_message(&mut state, "test", &tagmsg("alice", "&local", "+typing", "active"));
+        assert_eq!(state.typing.nicks("test/&local"), vec!["alice"]);
+    }
+
+    #[test]
+    fn a_message_from_the_sender_clears_their_typing() {
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#rust"));
+        handle_irc_message(&mut state, "test", &tagmsg("alice", "#rust", "+typing", "active"));
+        assert_eq!(state.typing.nicks("test/#rust"), vec!["alice"]);
+
+        let privmsg: IrcMessage = ":alice!u@h PRIVMSG #rust :done typing\r\n".parse().expect("valid");
+        handle_irc_message(&mut state, "test", &privmsg);
+        assert!(state.typing.nicks("test/#rust").is_empty());
+    }
+
+    #[test]
+    fn kick_clears_the_kicked_user_not_the_kicker() {
+        // handle_kick binds `kicker` and `kicked_user` — there is no `nick`.
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#rust"));
+        handle_irc_message(&mut state, "test", &tagmsg("alice", "#rust", "+typing", "active"));
+        handle_irc_message(&mut state, "test", &tagmsg("bob", "#rust", "+typing", "active"));
+
+        // bob kicks alice: alice stops typing, bob does not.
+        let kick: IrcMessage = ":bob!u@h KICK #rust alice :out\r\n".parse().expect("valid");
+        handle_irc_message(&mut state, "test", &kick);
+        assert_eq!(state.typing.nicks("test/#rust"), vec!["bob"]);
+    }
+
+    #[test]
+    fn quit_clears_typing_only_on_that_connection() {
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#rust"));
+        handle_irc_message(&mut state, "test", &tagmsg("alice", "#rust", "+typing", "active"));
+
+        let quit: IrcMessage = ":alice!u@h QUIT :bye\r\n".parse().expect("valid");
+        handle_irc_message(&mut state, "test", &quit);
+        assert!(state.typing.nicks("test/#rust").is_empty());
     }
 }
