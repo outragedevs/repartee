@@ -65,6 +65,10 @@ pub struct PendingUserhostRequest {
     pub action: PendingUserhostAction,
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "top-level app state aggregates independent feature flags"
+)]
 pub struct AppState {
     pub connections: HashMap<String, Connection>,
     pub buffers: IndexMap<String, Buffer>,
@@ -118,7 +122,7 @@ pub struct AppState {
     /// every new session is lost.
     pub pending_e2e_gapfills: Vec<PendingE2eGapfill>,
     pub pending_userhost_requests: Vec<PendingUserhostRequest>,
-    /// Who is typing, per buffer (IRCv3 `+typing`). Ephemeral — never persisted.
+    /// Who is typing, per buffer (`IRCv3` `+typing`). Ephemeral — never persisted.
     pub typing: typing::TypingTracker,
     /// Mirror of `config.typing.show`. `events.rs` has no access to `AppConfig`,
     /// so this follows the same config→state sync as `scrollback_limit`.
