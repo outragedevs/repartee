@@ -2588,6 +2588,11 @@ fn handle_part(
                 message: reason.map(ToString::to_string),
             });
 
+        // A parting user is no longer typing — regardless of ignore (spec §1.2).
+        if state.typing.clear(&buffer_id, &nick) {
+            push_typing_web_event(state, &buffer_id);
+        }
+
         // --- Ignore check ---
         if should_ignore(
             &state.ignores,
@@ -2598,10 +2603,6 @@ fn handle_part(
             Some(channel),
         ) {
             return;
-        }
-
-        if state.typing.clear(&buffer_id, &nick) {
-            push_typing_web_event(state, &buffer_id);
         }
 
         let reason_str = reason.unwrap_or("");
@@ -2674,6 +2675,12 @@ fn handle_quit(
             });
     }
 
+    // A quitter is no longer typing anywhere on this connection, regardless
+    // of ignore/netsplit (spec §1.2).
+    for buf_id in state.typing.clear_nick_on_connection(conn_id, &nick) {
+        push_typing_web_event(state, &buf_id);
+    }
+
     // --- Ignore check ---
     if should_ignore(
         &state.ignores,
@@ -2684,11 +2691,6 @@ fn handle_quit(
         None,
     ) {
         return;
-    }
-
-    // A quitter is no longer typing anywhere on this connection (spec §1.2).
-    for buf_id in state.typing.clear_nick_on_connection(conn_id, &nick) {
-        push_typing_web_event(state, &buf_id);
     }
 
     // --- Netsplit check ---
@@ -2827,6 +2829,12 @@ fn handle_nick_change(
             &IgnoreLevel::Nicks,
             None,
         ) {
+            // The old identity is no longer typing anywhere on this connection,
+            // regardless of ignore (spec §1.2).
+            for buf_id in state.typing.clear_nick_on_connection(conn_id, &old_nick) {
+                push_typing_web_event(state, &buf_id);
+            }
+
             // Still update nick list and rename query buffers so state is
             // correct, but suppress the notification message.
             let old_nick_lower = old_nick.to_lowercase();
@@ -2951,6 +2959,12 @@ fn handle_kick(
     let buffer_id = make_buffer_id(conn_id, channel);
     let reason_str = reason.unwrap_or("");
 
+    // The person who was kicked stopped typing — not the kicker, and
+    // regardless of ignore (spec §1.2).
+    if state.typing.clear(&buffer_id, kicked_user) {
+        push_typing_web_event(state, &buffer_id);
+    }
+
     // --- Ignore check (never ignore kicks against us) ---
     if kicked_user != our_nick
         && should_ignore(
@@ -2965,11 +2979,6 @@ fn handle_kick(
         // Still remove kicked user from nick list
         state.remove_nick(&buffer_id, kicked_user);
         return;
-    }
-
-    // The person who was kicked stopped typing — not the kicker (spec §1.2).
-    if state.typing.clear(&buffer_id, kicked_user) {
-        push_typing_web_event(state, &buffer_id);
     }
 
     let ts = message_timestamp(tags.as_ref());
@@ -10337,6 +10346,25 @@ mod tests {
         state.add_buffer(make_channel_buffer("test", "#rust"));
         handle_irc_message(&mut state, "test", &tagmsg("alice", "#rust", "+typing", "active"));
 
+        let quit: IrcMessage = ":alice!u@h QUIT :bye\r\n".parse().expect("valid");
+        handle_irc_message(&mut state, "test", &quit);
+        assert!(state.typing.nicks("test/#rust").is_empty());
+    }
+
+    #[test]
+    fn quit_from_an_ignored_user_still_clears_their_typing() {
+        // Ignore suppresses the notification, not the state change — the same
+        // convention the nick-list update right next to it follows.
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#rust"));
+        handle_irc_message(&mut state, "test", &tagmsg("alice", "#rust", "+typing", "active"));
+        assert_eq!(state.typing.nicks("test/#rust"), vec!["alice"]);
+
+        state.ignores.push(crate::config::IgnoreEntry {
+            mask: "alice".to_string(),
+            levels: vec![IgnoreLevel::All],
+            channels: None,
+        });
         let quit: IrcMessage = ":alice!u@h QUIT :bye\r\n".parse().expect("valid");
         handle_irc_message(&mut state, "test", &quit);
         assert!(state.typing.nicks("test/#rust").is_empty());
