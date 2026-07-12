@@ -170,6 +170,7 @@ pub fn InputLine() -> impl IntoView {
     // flood budget and every guard. We send a predicate, never the text.
     let last_report = StoredValue::new(0.0_f64);
     let last_sent_state = StoredValue::new(false);
+    let last_sent_buffer: StoredValue<Option<String>> = StoredValue::new(None);
     Effect::new(move |_| {
         let text = value.get();
         let Some(buffer_id) = state.active_buffer.get() else {
@@ -177,14 +178,21 @@ pub fn InputLine() -> impl IntoView {
         };
         let typing = !text.is_empty() && (!text.starts_with('/') || text.starts_with("/me "));
         let now = js_sys::Date::now();
-        // A change of state always reports immediately; a steady state is
-        // rate-limited. The core still enforces the 3s IRC throttle — this only
-        // keeps the websocket quiet.
-        if typing == last_sent_state.get_value() && now - last_report.get_value() < 1000.0 {
+        // A change of state OR of target buffer always reports immediately; a
+        // steady state is rate-limited. The core still enforces the 3s IRC
+        // throttle — this only keeps the websocket quiet.
+        if !should_report_typing(
+            typing,
+            &buffer_id,
+            last_sent_state.get_value(),
+            last_sent_buffer.get_value().as_deref(),
+            now - last_report.get_value(),
+        ) {
             return;
         }
         last_report.set_value(now);
         last_sent_state.set_value(typing);
+        last_sent_buffer.set_value(Some(buffer_id.clone()));
         crate::ws::send_command(&WebCommand::Typing { buffer_id, typing });
     });
 
@@ -901,6 +909,24 @@ fn history_step(len: usize, current: Option<usize>, up: bool) -> Option<Option<u
     }
 }
 
+/// Decide whether the typing predicate must be reported now.
+/// A change of predicate OR of target buffer always reports immediately;
+/// an unchanged steady state is rate-limited to one report per second.
+///
+/// The buffer comparison matters because the reporting Effect is
+/// edge-triggered: switching buffers with a carried-over draft re-runs it
+/// exactly once, and if that run were suppressed the core would keep this
+/// session's typing source on the OLD buffer until the next keystroke.
+fn should_report_typing(
+    typing: bool,
+    buffer_id: &str,
+    last_state: bool,
+    last_buffer: Option<&str>,
+    since_last_ms: f64,
+) -> bool {
+    typing != last_state || last_buffer != Some(buffer_id) || since_last_ms >= 1000.0
+}
+
 /// Nicks that can be completed/mentioned in the active buffer: the live nick
 /// list for channels, or the peer's nick for query buffers (queries have no
 /// NAMES list). Reads signals untracked — callers are event handlers.
@@ -1392,6 +1418,39 @@ mod tests {
             None,
             "down while not browsing"
         );
+    }
+
+    // ── typing report debounce ──────────────────────────────────────────
+
+    #[test]
+    fn typing_report_state_flip_inside_window_reports() {
+        assert!(should_report_typing(true, "#a", false, Some("#a"), 100.0));
+        assert!(should_report_typing(false, "#a", true, Some("#a"), 100.0));
+    }
+
+    #[test]
+    fn typing_report_buffer_change_same_state_inside_window_reports() {
+        // THE regression: a draft carried into a new buffer within the 1s
+        // window — the predicate is unchanged but the target moved, and
+        // Effects are edge-triggered, so suppressing here would leave the
+        // core holding this session's typing source on the OLD buffer until
+        // the user types again.
+        assert!(should_report_typing(true, "#b", true, Some("#a"), 100.0));
+    }
+
+    #[test]
+    fn typing_report_steady_state_inside_window_is_suppressed() {
+        assert!(!should_report_typing(true, "#a", true, Some("#a"), 100.0));
+    }
+
+    #[test]
+    fn typing_report_steady_state_past_window_reports() {
+        assert!(should_report_typing(true, "#a", true, Some("#a"), 1000.0));
+    }
+
+    #[test]
+    fn typing_report_first_ever_call_reports() {
+        assert!(should_report_typing(false, "#a", false, None, 0.0));
     }
 
     #[test]
