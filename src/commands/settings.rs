@@ -256,6 +256,18 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 is_credential: false,
             })
         }
+        "typing" => {
+            let val = match parts[1] {
+                "show" => config.typing.show.to_string(),
+                "send_channels" => config.typing.send_channels.to_string(),
+                "send_queries" => config.typing.send_queries.to_string(),
+                _ => return None,
+            };
+            Some(Resolved {
+                value: val,
+                is_credential: false,
+            })
+        }
         _ => None,
     }
 }
@@ -597,6 +609,12 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
             }
             _ => return Err(format!("Unknown field: {path}")),
         },
+        "typing" => match parts[1] {
+            "show" => config.typing.show = parse_bool(raw)?,
+            "send_channels" => config.typing.send_channels = parse_bool(raw)?,
+            "send_queries" => config.typing.send_queries = parse_bool(raw)?,
+            _ => return Err(format!("Unknown field: {path}")),
+        },
         _ => return Err(format!("Unknown section: {}", parts[0])),
     }
 
@@ -713,6 +731,9 @@ const BASE_PATHS: &[&str] = &[
     "emotes.enabled",
     "emotes.render",
     "emotes.lang",
+    "typing.show",
+    "typing.send_channels",
+    "typing.send_queries",
 ];
 
 const SERVER_FIELDS: &[&str] = &[
@@ -860,6 +881,17 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
             }
             if path == "display.nick_color_lightness" {
                 app.state.nick_color_lit = app.config.display.nick_color_lightness;
+            }
+
+            if path == "typing.show" {
+                app.state.typing_show = app.config.typing.show;
+                if !app.config.typing.show {
+                    // Stop showing what the user just asked not to see — including
+                    // on any live web client.
+                    for buffer_id in app.state.typing.clear_all() {
+                        crate::irc::events::push_typing_web_event(&mut app.state, &buffer_id);
+                    }
+                }
             }
 
             if path == "display.mentions_buffer" {

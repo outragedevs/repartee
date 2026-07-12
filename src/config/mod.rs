@@ -36,6 +36,7 @@ pub enum StatusbarItem {
     ActiveWindows,
     NickInfo,
     ChannelInfo,
+    Typing,
     Lag,
     Time,
 }
@@ -77,6 +78,8 @@ pub struct AppConfig {
     pub e2e: E2eConfig,
     pub shrink: ShrinkConfig,
     pub emotes: EmotesConfig,
+    #[serde(default)]
+    pub typing: TypingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,6 +237,7 @@ impl Default for StatusbarConfig {
                 StatusbarItem::Time,
                 StatusbarItem::NickInfo,
                 StatusbarItem::ChannelInfo,
+                StatusbarItem::Typing,
                 StatusbarItem::Lag,
                 StatusbarItem::ActiveWindows,
             ],
@@ -664,6 +668,31 @@ impl Default for EmotesConfig {
     }
 }
 
+/// `IRCv3` `+typing`. Split three ways because the spec asks clients to "provide
+/// appropriate privacy controls": you may watch without broadcasting, or
+/// broadcast in DMs but not in public channels.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TypingConfig {
+    /// Receive and display other people's typing indicators. Gates ingestion,
+    /// not just rendering (spec §5).
+    pub show: bool,
+    /// Send `+typing` in channels.
+    pub send_channels: bool,
+    /// Send `+typing` in private queries.
+    pub send_queries: bool,
+}
+
+impl Default for TypingConfig {
+    fn default() -> Self {
+        Self {
+            show: true,
+            send_channels: true,
+            send_queries: true,
+        }
+    }
+}
+
 // === Load / Save ===
 
 /// Load config from TOML file, merging with defaults for missing fields.
@@ -1024,5 +1053,33 @@ channels = ["#general"]
         );
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn typing_defaults_are_on() {
+        let config = AppConfig::default();
+        assert!(config.typing.show);
+        assert!(config.typing.send_channels);
+        assert!(config.typing.send_queries);
+    }
+
+    #[test]
+    fn typing_item_sits_between_channel_and_lag() {
+        let config = AppConfig::default();
+        let items = &config.statusbar.items;
+        let channel = items.iter().position(|i| *i == StatusbarItem::ChannelInfo);
+        let typing = items.iter().position(|i| *i == StatusbarItem::Typing);
+        let lag = items.iter().position(|i| *i == StatusbarItem::Lag);
+        assert!(channel < typing, "typing must come after the buffer name");
+        assert!(typing < lag, "typing must come before lag");
+    }
+
+    #[test]
+    fn typing_config_round_trips_through_toml() {
+        let toml = "[typing]\nshow = false\nsend_channels = false\nsend_queries = true\n";
+        let config: AppConfig = toml::from_str(toml).expect("parses");
+        assert!(!config.typing.show);
+        assert!(!config.typing.send_channels);
+        assert!(config.typing.send_queries);
     }
 }

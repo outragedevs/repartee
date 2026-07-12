@@ -107,6 +107,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                     }
                 }
             }
+            StatusbarItem::Typing => {} // filled in by the typing status-line item (next task)
             StatusbarItem::Lag => {
                 if let Some(c) = conn {
                     if c.lag_pending {

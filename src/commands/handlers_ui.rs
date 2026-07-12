@@ -578,7 +578,7 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
     }
 }
 
-const AVAILABLE_ITEMS: &str = "time, nick_info, channel_info, lag, active_windows";
+const AVAILABLE_ITEMS: &str = "time, nick_info, channel_info, typing, lag, active_windows";
 
 fn parse_statusbar_item(name: &str) -> Option<crate::config::StatusbarItem> {
     use crate::config::StatusbarItem;
@@ -586,6 +586,7 @@ fn parse_statusbar_item(name: &str) -> Option<crate::config::StatusbarItem> {
         "time" => Some(StatusbarItem::Time),
         "nick_info" => Some(StatusbarItem::NickInfo),
         "channel_info" => Some(StatusbarItem::ChannelInfo),
+        "typing" => Some(StatusbarItem::Typing),
         "lag" => Some(StatusbarItem::Lag),
         "active_windows" => Some(StatusbarItem::ActiveWindows),
         _ => None,
@@ -598,6 +599,7 @@ const fn statusbar_item_name(item: &crate::config::StatusbarItem) -> &'static st
         StatusbarItem::Time => "time",
         StatusbarItem::NickInfo => "nick_info",
         StatusbarItem::ChannelInfo => "channel_info",
+        StatusbarItem::Typing => "typing",
         StatusbarItem::Lag => "lag",
         StatusbarItem::ActiveWindows => "active_windows",
     }
@@ -798,5 +800,19 @@ pub(crate) fn cmd_wizard(app: &mut App, args: &[String]) {
             app,
             &format!("{C_TEXT}Usage: /wizard server [id]  — open the add/edit-server form{C_RST}"),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::StatusbarItem;
+
+    #[test]
+    fn typing_is_a_manageable_statusbar_item() {
+        // /items add typing must work, and the default item must have a name.
+        assert_eq!(parse_statusbar_item("typing"), Some(StatusbarItem::Typing));
+        assert_eq!(statusbar_item_name(&StatusbarItem::Typing), "typing");
+        assert!(AVAILABLE_ITEMS.contains("typing"));
     }
 }

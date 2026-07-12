@@ -547,6 +547,7 @@ impl App {
         state.scrollback_limit = config.display.scrollback_lines;
         state.nick_color_sat = config.display.nick_color_saturation;
         state.nick_color_lit = config.display.nick_color_lightness;
+        state.typing_show = config.typing.show;
         let (irc_tx, irc_rx) = mpsc::channel(4096);
 
         let storage = if log_browser {

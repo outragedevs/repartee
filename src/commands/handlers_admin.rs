@@ -122,6 +122,7 @@ pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
             app.state.ignores.clone_from(&app.config.ignores);
             app.state.nick_color_sat = app.config.display.nick_color_saturation;
             app.state.nick_color_lit = app.config.display.nick_color_lightness;
+            app.state.typing_show = app.config.typing.show;
             add_local_event(app, &format!("{C_OK}Config reloaded{C_RST}"));
         }
         Err(e) => {
