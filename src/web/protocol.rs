@@ -143,6 +143,17 @@ pub enum WebEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
     },
+    /// Who is currently typing in a buffer (`IRCv3` `+typing`).
+    ///
+    /// Carries the **complete** set, not a delta: deltas drift when a client
+    /// reconnects mid-stream; a full set is idempotent and self-healing.
+    /// Deliberately absent from `SyncInit` — typing is ephemeral, and a fresh
+    /// client learns about it on the sender's next 3s refresh. That is exactly
+    /// why the client must CLEAR its typing map when it processes `SyncInit`.
+    Typing {
+        buffer_id: String,
+        nicks: Vec<String>,
+    },
 }
 
 /// Client → Server commands (JSON over WSS).
@@ -193,6 +204,14 @@ pub enum WebCommand {
     /// Register a newly connected web session with its initial active buffer.
     #[serde(skip)]
     WebConnect { initial_buffer_id: Option<String> },
+    /// The browser's input field changed.
+    ///
+    /// `typing` is a **predicate**, not a state: "my input holds non-empty,
+    /// non-slash text". The browser runs no state machine and knows nothing
+    /// about capabilities, `CLIENTTAGDENY`, throttling, flood budget or config —
+    /// the core owns all of it. The core keys this by session id, because each
+    /// browser tab is an independent source with its own active buffer.
+    Typing { buffer_id: String, typing: bool },
 }
 
 /// Payload of [`WebCommand::SaveServer`]. `id` empty/None = add (id derived from
@@ -428,5 +447,29 @@ mod tests {
             cmd,
             WebCommand::FetchMessages { before: None, .. }
         ));
+    }
+
+    #[test]
+    fn typing_event_serializes_with_a_type_tag() {
+        let ev = WebEvent::Typing {
+            buffer_id: "net/#rust".to_string(),
+            nicks: vec!["alice".to_string(), "bob".to_string()],
+        };
+        let json = serde_json::to_string(&ev).expect("serializes");
+        assert!(json.contains(r#""type":"Typing""#));
+        assert!(json.contains(r#""nicks":["alice","bob"]"#));
+    }
+
+    #[test]
+    fn typing_command_round_trips() {
+        let json = r#"{"type":"Typing","buffer_id":"net/#rust","typing":true}"#;
+        let cmd: WebCommand = serde_json::from_str(json).expect("parses");
+        match cmd {
+            WebCommand::Typing { buffer_id, typing } => {
+                assert_eq!(buffer_id, "net/#rust");
+                assert!(typing);
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 }

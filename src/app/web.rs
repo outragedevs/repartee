@@ -425,7 +425,17 @@ impl App {
                         .insert(session_id.to_string(), buffer_id);
                 }
             }
+            WebCommand::Typing { buffer_id, typing } => {
+                // One source per session. Collapsing all sessions into one
+                // predicate would let a freshly-opened, empty second tab retract
+                // the typing that the terminal is doing right now.
+                self.on_web_typing(session_id, &buffer_id, typing);
+            }
             WebCommand::SendMessage { buffer_id, text } => {
+                self.on_typing_submit(
+                    &crate::app::typing::TypingSource::Web(session_id.to_string()),
+                    &buffer_id,
+                );
                 self.web_send_message(&buffer_id, &text);
             }
             WebCommand::SwitchBuffer { buffer_id } => {
@@ -489,6 +499,10 @@ impl App {
                 self.web_fetch_mentions(session_id);
             }
             WebCommand::RunCommand { buffer_id, text } => {
+                self.on_typing_submit(
+                    &crate::app::typing::TypingSource::Web(session_id.to_string()),
+                    &buffer_id,
+                );
                 self.web_run_command(&buffer_id, &text);
             }
             WebCommand::ShellInput { buffer_id, data } => {
@@ -514,6 +528,7 @@ impl App {
             }
             WebCommand::WebDisconnect => {
                 self.web_active_buffers.remove(session_id);
+                self.on_web_session_gone(session_id);
                 self.shell_mgr.close_web_by_session(session_id);
             }
             WebCommand::ShellResize {

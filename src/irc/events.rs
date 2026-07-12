@@ -1229,13 +1229,19 @@ fn handle_tagmsg(
 
 /// Enqueue the current typing set for a buffer to the web clients.
 /// The full set is sent, not a delta — idempotent and self-healing.
-#[expect(
-    clippy::missing_const_for_fn,
-    reason = "stub only — Task 8 restores the WebEvent::Typing push, which cannot be const"
-)]
 pub fn push_typing_web_event(state: &mut AppState, buffer_id: &str) {
-    // TODO(Task 8): restore — WebEvent::Typing lands with the web protocol
-    let _ = (state, buffer_id);
+    let nicks = state
+        .typing
+        .nicks(buffer_id)
+        .into_iter()
+        .map(ToString::to_string)
+        .collect();
+    state
+        .pending_web_events
+        .push(crate::web::protocol::WebEvent::Typing {
+            buffer_id: buffer_id.to_string(),
+            nicks,
+        });
 }
 
 #[expect(clippy::too_many_lines, reason = "linear message handler")]

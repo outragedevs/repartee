@@ -302,10 +302,6 @@ impl App {
     }
 
     /// A browser session's input changed. It reports only the predicate.
-    #[expect(
-        dead_code,
-        reason = "wired to WebCommand::Typing in the web protocol task"
-    )]
     pub(crate) fn on_web_typing(&mut self, session_id: &str, buffer_id: &str, active: bool) {
         let due = self.typing.on_activity(
             TypingSource::Web(session_id.to_string()),
@@ -333,10 +329,6 @@ impl App {
     }
 
     /// A web session disconnected.
-    #[expect(
-        dead_code,
-        reason = "wired to WebCommand::Typing in the web protocol task"
-    )]
     pub(crate) fn on_web_session_gone(&mut self, session_id: &str) {
         let source = TypingSource::Web(session_id.to_string());
         let due = self.typing.remove_source(&source, Instant::now());
