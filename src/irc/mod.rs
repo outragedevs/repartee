@@ -396,7 +396,10 @@ pub async fn connect_server(
 
     let mut client = Client::from_config(irc_config).await?;
     let local_ip = client.local_addr().map(|a| a.ip());
-    let sender = client.sender();
+    // The connection's budget starts here, not at `IrcHandle::new`: registration
+    // itself (NICK + USER, ~7000ms) is charged by the crate's `Outgoing` like
+    // any other traffic, and the handle must inherit that — see `IrcHandle::new`.
+    let sender = IrcSender::new(client.sender(), u64::from(penalty_threshold));
     let mut stream = client.stream()?;
     // Extract the outgoing task handle so we can abort it on disconnect.
     // Without this, the Pinger inside Outgoing holds a tx_outgoing clone
@@ -489,16 +492,7 @@ pub async fn connect_server(
         let _ = tx.send(IrcEvent::Disconnected(id, error)).await;
     });
 
-    Ok((
-        IrcHandle::new(
-            id2,
-            sender,
-            local_ip,
-            outgoing_handle,
-            u64::from(penalty_threshold),
-        ),
-        rx,
-    ))
+    Ok((IrcHandle::new(id2, sender, local_ip, outgoing_handle), rx))
 }
 
 /// Parameters for IRC connection registration, bundled to avoid long argument lists.
@@ -511,6 +505,34 @@ struct RegistrationParams<'a> {
     sasl_pass: Option<&'a str>,
     sasl_mechanism_override: Option<&'a str>,
     has_client_cert: bool,
+}
+
+/// The frames that open a connection, in order: `CAP LS 302`, optional `PASS`,
+/// `NICK`, `USER`.
+///
+/// A free function so the flood cost of registration can be asserted without a
+/// socket: the crate charges these like any other traffic (`NICK` 3000 + 1000
+/// length, `USER` 2000 + 1000 — `PASS` and `CAP` are exempt), and the budget
+/// the connection is handed to the app must already reflect them.
+fn registration_frames(params: &RegistrationParams<'_>) -> Vec<irc::proto::Message> {
+    use irc::proto::command::CapSubCommand;
+
+    let mut frames = vec![
+        Command::CAP(None, CapSubCommand::LS, Some("302".to_string()), None).into(),
+    ];
+    if let Some(pass) = params.password {
+        frames.push(Command::PASS(pass.to_string()).into());
+    }
+    frames.push(Command::NICK(params.nick.to_string()).into());
+    frames.push(
+        Command::USER(
+            params.username.to_string(),
+            "0".to_string(),
+            params.realname.to_string(),
+        )
+        .into(),
+    );
+    frames
 }
 
 /// Negotiate `IRCv3` capabilities and perform connection registration.
@@ -526,7 +548,7 @@ struct RegistrationParams<'a> {
 /// [`NegotiateResult::early_messages`] for replay by the reader task.
 #[expect(clippy::too_many_lines, reason = "single linear negotiation flow")]
 async fn negotiate_caps(
-    sender: &irc::client::Sender,
+    sender: &IrcSender,
     stream: &mut irc::client::ClientStream,
     params: &RegistrationParams<'_>,
 ) -> Result<NegotiateResult> {
@@ -543,21 +565,9 @@ async fn negotiate_caps(
     //
     // Non-IRCv3 servers ignore CAP and process NICK/USER immediately,
     // producing RPL_WELCOME (or 421 + RPL_WELCOME).
-    sender.send(Command::CAP(
-        None,
-        CapSubCommand::LS,
-        Some("302".to_string()),
-        None,
-    ))?;
-    if let Some(pass) = params.password {
-        sender.send(Command::PASS(pass.to_string()))?;
+    for frame in registration_frames(params) {
+        sender.send(frame)?;
     }
-    sender.send(Command::NICK(params.nick.to_string()))?;
-    sender.send(Command::USER(
-        params.username.to_string(),
-        "0".to_string(),
-        params.realname.to_string(),
-    ))?;
 
     // Step 2: Wait for the server's response to determine IRCv3 support.
     //
@@ -745,7 +755,7 @@ async fn negotiate_caps(
 /// Assumes SASL has already been ACK'd.  Sends `AUTHENTICATE PLAIN`,
 /// waits for `+`, sends base64-encoded credentials, waits for 903/904.
 async fn run_sasl_plain(
-    sender: &irc::client::Sender,
+    sender: &IrcSender,
     stream: &mut irc::client::ClientStream,
     sasl_user: &str,
     sasl_pass: &str,
@@ -788,7 +798,7 @@ async fn run_sasl_plain(
 /// 3. Send base64-encoded client-final message, receive server-final
 /// 4. Verify server signature and wait for 903/904
 async fn run_sasl_scram(
-    sender: &irc::client::Sender,
+    sender: &IrcSender,
     stream: &mut irc::client::ClientStream,
     sasl_user: &str,
     sasl_pass: &str,
@@ -897,7 +907,7 @@ async fn run_sasl_scram(
 /// 3. Send `AUTHENTICATE +` (base64 of empty string — literal `+`)
 /// 4. Wait for `RPL_SASLSUCCESS` (903) or `ERR_SASLFAIL` (904)
 async fn run_sasl_external(
-    sender: &irc::client::Sender,
+    sender: &IrcSender,
     stream: &mut irc::client::ClientStream,
 ) -> Result<()> {
     // Send AUTHENTICATE EXTERNAL
@@ -931,6 +941,103 @@ async fn run_sasl_external(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
+
+    fn reg_params(password: Option<&str>) -> RegistrationParams<'_> {
+        RegistrationParams {
+            nick: "bob",
+            username: "bob",
+            realname: "Bob",
+            password,
+            sasl_user: None,
+            sasl_pass: None,
+            sasl_mechanism_override: None,
+            has_client_cert: false,
+        }
+    }
+
+    #[test]
+    fn registration_charges_the_connection_budget_before_the_app_sees_it() {
+        // Regression: the handle used to mint a *zeroed* budget after
+        // registration had already spent ~7000ms of the crate's real counter
+        // (NICK 3000+1000, USER 2000+1000). A `/query` in the first seconds of a
+        // connection then read 0, let a TAGMSG out, and the user's first real
+        // PRIVMSG landed on a counter near the threshold and was delayed.
+        // Registration now runs through the *same* `IrcSender` the handle
+        // carries, so the budget it hands the app is already charged.
+        let now = Instant::now();
+        let sender = IrcSender::capturing(u64::from(FLOOD_PENALTY_THRESHOLD_MS));
+        assert!(
+            sender.has_typing_headroom_at(now),
+            "a fresh connection starts with headroom"
+        );
+
+        for frame in registration_frames(&reg_params(None)) {
+            sender.send_at(frame, now).unwrap();
+        }
+
+        // NICK 3000+1000, USER 2000+1000; CAP LS is exempt.
+        assert_eq!(
+            sender.penalty_ms(),
+            7000,
+            "registration must be charged, not free"
+        );
+        // 7000 of the 10_000 threshold is spent, and the gate only lets a
+        // TAGMSG (3000) through at or below 3000 — so typing is shut out for
+        // the first seconds of the connection, which is the whole point.
+        assert!(
+            !sender.has_typing_headroom_at(now),
+            "registration must leave no typing headroom at t=0"
+        );
+
+        // And the handle the app gets inherits that budget rather than a fresh
+        // zeroed one — which is what made the bug reachable.
+        let handle = IrcHandle::new("net".to_string(), sender, None, None);
+        assert_eq!(
+            handle.sender().penalty_ms(),
+            7000,
+            "the handle must inherit the charged budget, not a zeroed one"
+        );
+
+        // It is a penalty, not a ban: it drains like any other, so typing opens
+        // up once enough of it has bled off (7000 - 4000ms of drain = 3000).
+        assert!(
+            !handle
+                .sender()
+                .has_typing_headroom_at(now + Duration::from_secs(3))
+        );
+        assert!(
+            handle
+                .sender()
+                .has_typing_headroom_at(now + Duration::from_secs(4))
+        );
+    }
+
+    #[test]
+    fn a_password_does_not_change_the_registration_cost() {
+        // PASS is exempt in the crate's table — charged nothing, not even its
+        // length penalty — so a password-protected server costs the same 7000ms.
+        let now = Instant::now();
+        let with_pass = IrcSender::capturing(u64::from(FLOOD_PENALTY_THRESHOLD_MS));
+        for frame in registration_frames(&reg_params(Some("hunter2"))) {
+            with_pass.send_at(frame, now).unwrap();
+        }
+        assert_eq!(with_pass.captured().len(), 4, "CAP, PASS, NICK, USER");
+        assert_eq!(with_pass.penalty_ms(), 7000);
+    }
+
+    #[test]
+    fn registration_is_not_charged_when_flood_protection_is_off() {
+        // Threshold 0: the crate applies no penalty at all, so the mirror must
+        // not invent one — and typing is never gated.
+        let now = Instant::now();
+        let sender = IrcSender::capturing(0);
+        for frame in registration_frames(&reg_params(None)) {
+            sender.send_at(frame, now).unwrap();
+        }
+        assert_eq!(sender.penalty_ms(), 0);
+        assert!(sender.has_typing_headroom_at(now));
+    }
 
     #[test]
     fn select_external_when_cert_configured() {

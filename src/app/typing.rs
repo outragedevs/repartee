@@ -353,30 +353,14 @@ impl App {
     /// Send one typing notification if every guard allows it.
     /// Returns whether it reached the wire — the machine only records confirmed sends.
     fn send_typing(&self, buffer_id: &str, state: TypingState) -> bool {
-        let Some(buf) = self.state.buffers.get(buffer_id) else {
+        let Some((target, conn_id)) = typing_send_target(
+            &self.state.buffers,
+            &self.state.connections,
+            &self.config.typing,
+            buffer_id,
+        ) else {
             return false;
         };
-        // Server, log, shell and DCC buffers have no channel or nick to TAGMSG.
-        let allowed = match buf.buffer_type {
-            BufferType::Channel => self.config.typing.send_channels,
-            BufferType::Query => self.config.typing.send_queries,
-            _ => false,
-        };
-        if !allowed {
-            return false;
-        }
-        let target = buf.name.clone();
-        let conn_id = buf.connection_id.clone();
-
-        let Some(conn) = self.state.connections.get(&conn_id) else {
-            return false;
-        };
-        if !conn.enabled_caps.contains("message-tags") {
-            return false;
-        }
-        if !conn.isupport_parsed.client_tag_allowed("typing") {
-            return false;
-        }
 
         let Some(handle) = self.irc_handles.get(&conn_id) else {
             return false;
@@ -385,9 +369,9 @@ impl App {
         // tight (§3.1). A frame accepted under pressure is not dropped by the
         // crate — it is buffered and delayed, so it would land stale AND push
         // the user's next real message further back in the queue. The handle's
-        // budget sees every send on this connection (the WHO/MODE burst on
-        // autojoin, lag PINGs, multiline pastes), and it is a no-op on a
-        // connection opened with flood protection off.
+        // budget sees every send on this connection (registration, the WHO/MODE
+        // burst on autojoin, lag PINGs, multiline pastes), and it is a no-op on
+        // a connection opened with flood protection off.
         if !handle.sender().has_typing_headroom() {
             return false;
         }
@@ -401,6 +385,44 @@ impl App {
         }
         true
     }
+}
+
+/// Where — if anywhere — a typing notification for `buffer_id` should go.
+///
+/// Everything `App::send_typing` decides *except* the flood question, which
+/// needs the connection's live handle. Free, and over borrowed state, so the
+/// guard chain is testable without an `App` (whose constructor touches disk).
+///
+/// `None` = suppressed. Returns `(target, connection_id)` otherwise: the target
+/// is the buffer's channel or nick, which is what a TAGMSG is addressed to.
+fn typing_send_target(
+    buffers: &indexmap::IndexMap<String, crate::state::buffer::Buffer>,
+    connections: &HashMap<String, crate::state::connection::Connection>,
+    config: &crate::config::TypingConfig,
+    buffer_id: &str,
+) -> Option<(String, String)> {
+    let buf = buffers.get(buffer_id)?;
+    // Server, log, shell and DCC buffers have no channel or nick to TAGMSG.
+    let allowed = match buf.buffer_type {
+        BufferType::Channel => config.send_channels,
+        BufferType::Query => config.send_queries,
+        _ => false,
+    };
+    if !allowed {
+        return None;
+    }
+
+    let conn = connections.get(&buf.connection_id)?;
+    // No `message-tags` cap: the server would reject or ignore a TAGMSG.
+    if !conn.enabled_caps.contains("message-tags") {
+        return None;
+    }
+    // CLIENTTAGDENY (ISUPPORT) can forbid `+typing` specifically.
+    if !conn.isupport_parsed.client_tag_allowed("typing") {
+        return None;
+    }
+
+    Some((buf.name.clone(), buf.connection_id.clone()))
 }
 
 #[cfg(test)]

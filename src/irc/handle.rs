@@ -87,11 +87,16 @@ fn message_cost(message: &Message) -> u64 {
     }
 }
 
-/// What one `+typing` notification will cost this connection.
+/// What one `+typing` notification will cost this connection, as a lower bound.
 ///
 /// Derived from the real cost function rather than hard-coded, so it tracks
-/// [`command_penalty`]. Every `build_tagmsg` frame is far below the 100-byte
-/// length-penalty step, so the target name cannot change the answer.
+/// [`command_penalty`]. The target name *can* move the answer: a target long
+/// enough to push `@+typing=active TAGMSG <target>\r\n` past 100 bytes (~67
+/// bytes of target) adds one more length step, i.e. 4000 instead of 3000. The
+/// gate deliberately ignores that: the error is bounded by a single 1000ms step
+/// and is absorbed by the 4000ms [`RESERVED_MS`] reserve, so a long target can
+/// at worst leave 3000ms of reserve instead of 4000 — never a delayed frame.
+/// The *charge* on the way out is always computed from the real message.
 fn tagmsg_cost() -> u64 {
     message_cost(&typing::build_tagmsg("#channel", TypingState::Active))
 }
@@ -100,17 +105,13 @@ fn tagmsg_cost() -> u64 {
 #[derive(Debug)]
 struct FloodEstimate {
     penalty_ms: u64,
-    /// The connection's `flood_penalty_threshold`. `0` = the crate applies no
-    /// penalty at all, so there is no headroom to run out of.
-    threshold_ms: u64,
     last_drain: Option<Instant>,
 }
 
 impl FloodEstimate {
-    const fn new(threshold_ms: u64) -> Self {
+    const fn new() -> Self {
         Self {
             penalty_ms: 0,
-            threshold_ms,
             last_drain: None,
         }
     }
@@ -130,13 +131,10 @@ impl FloodEstimate {
     }
 
     /// Room for one more TAGMSG without eating into the reserve the user's real
-    /// messages need?
-    fn has_typing_headroom(&mut self, now: Instant) -> bool {
-        if self.threshold_ms == 0 {
-            return true;
-        }
+    /// messages need? Callers must have ruled out a zero threshold first.
+    fn has_typing_headroom(&mut self, now: Instant, threshold_ms: u64) -> bool {
         self.drain(now);
-        self.penalty_ms + tagmsg_cost() <= self.threshold_ms.saturating_sub(RESERVED_MS)
+        self.penalty_ms + tagmsg_cost() <= threshold_ms.saturating_sub(RESERVED_MS)
     }
 }
 
@@ -158,13 +156,19 @@ enum Wire {
 pub struct IrcSender {
     wire: Wire,
     budget: Arc<Mutex<FloodEstimate>>,
+    /// The connection's `flood_penalty_threshold`. `0` = the crate applies no
+    /// penalty at all, so there is nothing to mirror and no headroom to run out
+    /// of. Held outside the mutex so that case costs neither a lock nor a
+    /// serialization.
+    threshold_ms: u64,
 }
 
 impl IrcSender {
-    fn new(sender: irc::client::Sender, penalty_threshold_ms: u64) -> Self {
+    pub(crate) fn new(sender: irc::client::Sender, penalty_threshold_ms: u64) -> Self {
         Self {
             wire: Wire::Live(sender),
-            budget: Arc::new(Mutex::new(FloodEstimate::new(penalty_threshold_ms))),
+            budget: Arc::new(Mutex::new(FloodEstimate::new())),
+            threshold_ms: penalty_threshold_ms,
         }
     }
 
@@ -180,9 +184,14 @@ impl IrcSender {
         now: Instant,
     ) -> irc::error::Result<()> {
         let message = message.into();
-        let cost = message_cost(&message);
-        if cost > 0 {
-            self.budget_mut().charge(now, cost);
+        // With the threshold at 0 the crate skips its whole penalty block
+        // (`client/mod.rs:1150`), so mirroring it would be a lock and a full
+        // `to_string()` per frame for a counter nobody ever reads.
+        if self.threshold_ms > 0 {
+            let cost = message_cost(&message);
+            if cost > 0 {
+                self.budget_mut().charge(now, cost);
+            }
         }
         match &self.wire {
             Wire::Live(sender) => sender.send(message),
@@ -206,7 +215,11 @@ impl IrcSender {
 
     /// [`Self::has_typing_headroom`] with an injected clock.
     pub(crate) fn has_typing_headroom_at(&self, now: Instant) -> bool {
-        self.budget_mut().has_typing_headroom(now)
+        if self.threshold_ms == 0 {
+            return true;
+        }
+        self.budget_mut()
+            .has_typing_headroom(now, self.threshold_ms)
     }
 
     fn budget_mut(&self) -> std::sync::MutexGuard<'_, FloodEstimate> {
@@ -266,16 +279,21 @@ pub struct IrcHandle {
 }
 
 impl IrcHandle {
-    pub(crate) fn new(
+    /// Takes the connection's [`IrcSender`] rather than minting one, so the
+    /// handle **inherits the budget registration already charged**. The crate
+    /// charges NICK + USER (~7000ms) before this handle exists; a fresh,
+    /// zeroed mirror here would read 0 while the real counter sat near the
+    /// threshold, and typing frames sent on that false reading would delay the
+    /// user's first real message.
+    pub(crate) const fn new(
         conn_id: String,
-        sender: irc::client::Sender,
+        sender: IrcSender,
         local_ip: Option<std::net::IpAddr>,
         outgoing_handle: Option<tokio::task::JoinHandle<()>>,
-        penalty_threshold_ms: u64,
     ) -> Self {
         Self {
             conn_id,
-            sender: IrcSender::new(sender, penalty_threshold_ms),
+            sender,
             local_ip,
             outgoing_handle,
         }
@@ -294,14 +312,23 @@ impl IrcSender {
     pub(crate) fn capturing(penalty_threshold_ms: u64) -> Self {
         Self {
             wire: Wire::Capture(Arc::new(Mutex::new(Vec::new()))),
-            budget: Arc::new(Mutex::new(FloodEstimate::new(penalty_threshold_ms))),
+            budget: Arc::new(Mutex::new(FloodEstimate::new())),
+            threshold_ms: penalty_threshold_ms,
         }
+    }
+
+    /// This connection's mirrored penalty, as of its last charge or drain.
+    pub(crate) fn penalty_ms(&self) -> u64 {
+        self.budget_mut().penalty_ms
     }
 
     /// The frames handed to this sender so far.
     pub(crate) fn captured(&self) -> Vec<Message> {
         match &self.wire {
-            Wire::Live(_) => Vec::new(),
+            // Loudly, rather than as an empty vec: a test that asserted on the
+            // frames of an accidentally-live sender would otherwise pass while
+            // observing nothing at all.
+            Wire::Live(_) => unreachable!("captured() on a live sender — build it with capturing()"),
             Wire::Capture(frames) => frames
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -325,15 +352,19 @@ mod tests {
         // well under 100 bytes), so `cost = command_penalty + 1000` — except
         // for the exempt commands, which are charged NOTHING, not even length.
         let cases: Vec<(Message, u64)> = vec![
+            // Exempt: charged NOTHING, not even the length penalty.
             (Command::PONG("a".to_string(), None).into(), 0),
             (
                 Command::CAP(None, irc::proto::CapSubCommand::END, None, None).into(),
                 0,
             ),
             (Command::QUIT(Some("bye".to_string())).into(), 0),
+            (Command::PASS("hunter2".to_string()).into(), 0),
             (Command::AUTHENTICATE("PLAIN".to_string()).into(), 0),
+            // Named arms.
             (Command::NICK("bob".to_string()).into(), 3000 + 1000),
             (Command::PART("#rust".to_string(), None).into(), 4000 + 1000),
+            // WHO / LIST / NAMES: 10s with no mask (or an empty one), 2s with.
             (Command::WHO(None, None).into(), 10_000 + 1000),
             (
                 Command::WHO(Some(String::new()), None).into(),
@@ -343,16 +374,53 @@ mod tests {
                 Command::WHO(Some("#rust".to_string()), None).into(),
                 2000 + 1000,
             ),
+            (Command::LIST(None, None).into(), 10_000 + 1000),
+            (
+                Command::LIST(Some(String::new()), None).into(),
+                10_000 + 1000,
+            ),
+            (
+                Command::LIST(Some("#rust".to_string()), None).into(),
+                2000 + 1000,
+            ),
+            (Command::NAMES(None, None).into(), 10_000 + 1000),
+            (
+                Command::NAMES(Some(String::new()), None).into(),
+                10_000 + 1000,
+            ),
+            (
+                Command::NAMES(Some("#rust".to_string()), None).into(),
+                2000 + 1000,
+            ),
+            // The 3000 group.
             (Command::WHOIS(None, "bob".to_string()).into(), 3000 + 1000),
+            (
+                Command::WHOWAS("bob".to_string(), None, None).into(),
+                3000 + 1000,
+            ),
+            (Command::LINKS(None, None).into(), 3000 + 1000),
+            (Command::STATS(None, None).into(), 3000 + 1000),
+            // The 2000 group named explicitly by the crate.
+            (Command::LUSERS(None, None).into(), 2000 + 1000),
+            (Command::TRACE(None).into(), 2000 + 1000),
+            // The 5000 group.
+            (Command::USERS(None).into(), 5000 + 1000),
             (Command::MOTD(None).into(), 5000 + 1000),
+            (Command::INFO(None).into(), 5000 + 1000),
+            // Messaging.
             (privmsg("hi"), 2000 + 1000),
             (
                 Command::NOTICE("#rust".to_string(), "hi".to_string()).into(),
                 2000 + 1000,
             ),
+            // The catch-all: JOIN and friends, and...
             (
-                // TAGMSG — what `+typing` rides on. `Command::Raw` falls to the
-                // catch-all 2000, exactly as it does inside the crate.
+                Command::JOIN("#rust".to_string(), None, None).into(),
+                2000 + 1000,
+            ),
+            (
+                // ...TAGMSG — what `+typing` rides on. `Command::Raw` falls to
+                // the catch-all 2000, exactly as it does inside the crate.
                 Command::Raw("TAGMSG".to_string(), vec!["#rust".to_string()]).into(),
                 2000 + 1000,
             ),
@@ -382,7 +450,7 @@ mod tests {
     #[test]
     fn penalty_drains_one_ms_per_ms() {
         let now = Instant::now();
-        let mut budget = FloodEstimate::new(u64::from(FLOOD_PENALTY_THRESHOLD_MS));
+        let mut budget = FloodEstimate::new();
         budget.charge(now, 5000);
         assert_eq!(budget.penalty_ms, 5000);
 
