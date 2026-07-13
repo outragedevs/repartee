@@ -279,6 +279,15 @@ impl TypingSender {
             .is_some_and(|t| now.duration_since(*t) < THROTTLE)
     }
 
+    /// The buffer `source` is currently composing into, if it has one.
+    ///
+    /// The TUI's source is kept level with `state.active_buffer_id` by
+    /// [`App::sync_tui_typing_source`], which compares the two — so this is the
+    /// machine's own answer, not a second copy of it that could drift.
+    pub fn source_buffer(&self, source: &TypingSource) -> Option<&str> {
+        self.sources.get(source).map(|s| s.buffer_id.as_str())
+    }
+
     /// The state we last put on the wire for `buffer_id`. `Some` means a
     /// retraction is still **owed** to that target's peers.
     #[cfg(test)]
@@ -322,9 +331,19 @@ impl TypingSender {
 }
 
 impl App {
-    /// The terminal's input changed — a keystroke or a paste.
+    /// The terminal's input changed — a keystroke, a paste, or a switch to a
+    /// different buffer (the TUI has ONE input box and no per-buffer drafts, so
+    /// a switch re-points the same draft at a new target).
     pub(crate) fn on_input_changed(&mut self) {
         let Some(buffer_id) = self.state.active_buffer_id.clone() else {
+            // No active buffer at all (the log browser closes it). The TUI is
+            // not composing into anything, so its source has to go — leaving it
+            // attached would keep refreshing the old target on every tick, for
+            // the life of the process.
+            let due = self
+                .typing
+                .remove_source(&TypingSource::Tui, Instant::now());
+            self.dispatch_typing(due);
             return;
         };
         let active = typing::should_type(&self.input.value);
@@ -332,6 +351,59 @@ impl App {
             .typing
             .on_activity(TypingSource::Tui, &buffer_id, active, Instant::now());
         self.dispatch_typing(due);
+    }
+
+    /// Re-derive everything the typing machine caches from `[typing]`, after the
+    /// config changed under it.
+    ///
+    /// The single sync point for **both** routes that change that config:
+    /// `/set typing.*` (`commands::settings`) and `/reload`, which replaces
+    /// `app.config` wholesale (`commands::handlers_admin::apply_reloaded_config`).
+    /// They must not be able to disagree — `/reload` used to re-sync `typing.show`
+    /// and forget [`forget_switched_off_buffers`], which re-opened the permanent
+    /// propose/refuse loop that function exists to close.
+    ///
+    /// Written as "re-derive from whatever the config now says" rather than "undo
+    /// what this switch just did", so it is idempotent and safe to call for any
+    /// `typing.*` change, or for none.
+    pub(crate) fn sync_typing_from_config(&mut self) {
+        self.state.typing_show = self.config.typing.show;
+        if !self.config.typing.show {
+            // Stop showing what the user just asked not to see — including on any
+            // live web client.
+            for buffer_id in self.state.typing.clear_all() {
+                crate::irc::events::push_typing_web_event(&mut self.state, &buffer_id);
+            }
+        }
+        // Turning a send switch off makes the guard chain refuse that class of
+        // buffer. `confirm_sent` only runs on a send that happened, so anything
+        // still outstanding would be re-proposed and re-refused on every tick for
+        // the life of the process.
+        forget_switched_off_buffers(&mut self.typing, &self.state.buffers, &self.config.typing);
+    }
+
+    /// Re-point the TUI's typing source at the active buffer if something moved
+    /// it. Called from the ONE place in the main loop that runs after every
+    /// dispatch, whatever the dispatch was.
+    ///
+    /// `handle_event` already does this for keyboard-driven switches, but the
+    /// active buffer is **global** and a dozen other things flip it with no
+    /// keyboard event in sight: `WebCommand::SwitchBuffer` (a phone tapping a
+    /// tab), `/window` from a Lua script, an accepted DCC chat, an IRC event
+    /// opening a query. Hooking each of those call sites would leave the next
+    /// one free to forget; comparing the machine's own source against
+    /// `active_buffer_id` once per loop iteration cannot be forgotten, and
+    /// cannot drift, because there is no second copy of the answer.
+    ///
+    /// Cheap by construction: a string compare, and `on_input_changed` only runs
+    /// when the two actually disagree. It is also why the transient swap-and-
+    /// restore in `shrink`/`e2e` (which put `active_buffer_id` back before
+    /// yielding) is invisible here — the comparison nets to no change.
+    pub(crate) fn sync_tui_typing_source(&mut self) {
+        let attached = self.typing.source_buffer(&TypingSource::Tui);
+        if attached != self.state.active_buffer_id.as_deref() {
+            self.on_input_changed();
+        }
     }
 
     /// A browser session's input changed. It reports only the predicate.
@@ -911,41 +983,52 @@ mod tests {
 
     #[test]
     fn typing_is_suppressed_only_on_the_busy_connection() {
-        // The regression. The crate's penalty counter lives inside each
-        // connection's `Outgoing`, so a burst on Libera says nothing about
-        // OFTC's budget. The old app-side mirror was ONE global estimate: two
-        // messages on Libera silenced typing in an OFTC query whose budget was
-        // untouched.
+        // The regression, driven through the REAL guard chain. The crate's
+        // penalty counter lives inside each connection's `Outgoing`, so a burst
+        // on `net` says nothing about `oftc`'s budget. The old app-side mirror
+        // was ONE global estimate: traffic on `net` silenced typing in an `oftc`
+        // channel whose budget was untouched.
+        //
+        // This asserts on `send_typing_frame` — the thing that actually has to
+        // ask the TARGET's own connection for headroom. (Its previous version
+        // built two `IrcSender::capturing(..)` values and asserted their budgets
+        // were independent, which is true by construction of the type under test:
+        // no revert of the production code could make it fail.)
+        let mut w = Wired::new();
+        let oftc = w.add_second_connection();
         let now = t0();
-        let threshold = u64::from(FLOOD_PENALTY_THRESHOLD_MS);
-        let libera = IrcSender::capturing(threshold);
-        let oftc = IrcSender::capturing(threshold);
 
-        // Autojoin on Libera: a WHO per channel. None of this went through the
-        // old mirror, which is the second half of the bug — it read 0.
+        // Autojoin on `net`: a WHO per channel, 3000ms each.
         for chan in ["#rust", "#tokio", "#linux"] {
-            libera
+            w.sender
                 .send_at(
                     ::irc::proto::Command::WHO(Some(chan.to_string()), None),
                     now,
                 )
                 .unwrap();
         }
+
         assert!(
-            !libera.has_typing_headroom_at(now),
+            !w.send("net/#rust", TypingState::Active, now),
             "the connection that actually spent the budget must be gated"
         );
         assert!(
-            oftc.has_typing_headroom_at(now),
+            w.send("oftc/#rust", TypingState::Active, now),
             "an idle connection's budget must be untouched by another's traffic"
         );
 
-        // And a TAGMSG for a query on OFTC still reaches the wire.
-        oftc.send_at(typing::build_tagmsg("bob", TypingState::Active), now)
-            .unwrap();
-        let sent = oftc.captured();
-        assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].to_string(), "@+typing=active TAGMSG bob\r\n");
+        assert_eq!(
+            oftc.captured()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec!["@+typing=active TAGMSG #rust\r\n"],
+            "the idle connection's TAGMSG reached the wire"
+        );
+        assert!(
+            w.wire().iter().all(|line| !line.starts_with("@+typing")),
+            "and nothing typed was handed to the busy one"
+        );
     }
 
     #[test]
@@ -1008,6 +1091,29 @@ mod tests {
                 config: crate::config::TypingConfig::default(),
                 sender,
             }
+        }
+
+        /// A SECOND registered connection, `oftc`, with its own `#rust` and — the
+        /// whole point — its own flood budget. The crate keeps the penalty counter
+        /// inside each connection's `Outgoing`, so nothing `net` does may be
+        /// visible here. Returns its capturing sender.
+        fn add_second_connection(&mut self) -> IrcSender {
+            let sender = IrcSender::capturing(u64::from(FLOOD_PENALTY_THRESHOLD_MS));
+            let mut conn = make_connection();
+            conn.id = "oftc".to_string();
+            conn.label = "OftcServer".to_string();
+            self.connections.insert("oftc".to_string(), conn);
+
+            let mut buffer = make_buffer("#rust", BufferType::Channel);
+            buffer.id = "oftc/#rust".to_string();
+            buffer.connection_id = "oftc".to_string();
+            self.buffers.insert("oftc/#rust".to_string(), buffer);
+
+            self.handles.insert(
+                "oftc".to_string(),
+                IrcHandle::new("oftc".to_string(), sender.clone(), None, None),
+            );
+            sender
         }
 
         fn send(&self, buffer_id: &str, state: TypingState, now: Instant) -> bool {

@@ -1242,6 +1242,15 @@ impl App {
         tokio::pin!(emote_anim_sleep);
 
         while !self.should_quit {
+            // Runs after EVERY dispatch below, whatever the dispatch was. The
+            // active buffer is global and a dozen things flip it with no keyboard
+            // event in sight — a phone tapping a tab, a Lua `/window`, an accepted
+            // DCC chat, an IRC event opening a query — and the TUI has one input
+            // box with no per-buffer drafts, so the terminal's typing source has
+            // to follow it. Hooking each call site would leave the next one free
+            // to forget; this cannot be forgotten. See `sync_tui_typing_source`.
+            self.sync_tui_typing_source();
+
             if self.should_detach {
                 self.perform_detach();
             }

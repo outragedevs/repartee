@@ -883,28 +883,12 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                 app.state.nick_color_lit = app.config.display.nick_color_lightness;
             }
 
-            if path == "typing.show" {
-                app.state.typing_show = app.config.typing.show;
-                if !app.config.typing.show {
-                    // Stop showing what the user just asked not to see — including
-                    // on any live web client.
-                    for buffer_id in app.state.typing.clear_all() {
-                        crate::irc::events::push_typing_web_event(&mut app.state, &buffer_id);
-                    }
-                }
-            }
-
-            // The send switches need the same post-`/set` sync as `typing.show`.
-            // Turning one off makes the guard chain refuse that class of buffer,
-            // and `confirm_sent` only runs on a send that happened — so anything
-            // still outstanding would be re-proposed and re-refused on every tick
-            // for the life of the process. See `forget_switched_off_buffers`.
-            if path == "typing.send_channels" || path == "typing.send_queries" {
-                crate::app::typing::forget_switched_off_buffers(
-                    &mut app.typing,
-                    &app.state.buffers,
-                    &app.config.typing,
-                );
+            // Every `typing.*` switch goes through the one sync `/reload` also
+            // runs, rather than an arm per key: the sync is idempotent (it
+            // re-derives from the config rather than undoing a specific switch),
+            // and a per-key arm is exactly what let `/reload` drift out of step.
+            if path.starts_with("typing.") {
+                app.sync_typing_from_config();
             }
 
             if path == "display.mentions_buffer" {

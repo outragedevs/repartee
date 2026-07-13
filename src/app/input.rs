@@ -2516,6 +2516,172 @@ mod submit_typing_tests {
         assert!(!w.suppressed("net/bob"));
     }
 
+    // ── A buffer switch that no keystroke drove ──
+    //
+    // `handle_event` is not the only thing that moves `active_buffer_id`, and the
+    // TUI has ONE input box with no per-buffer drafts. Every one of these paths
+    // leaves the terminal's draft pointing at a NEW buffer, so the Tui typing
+    // source has to follow it or the 1s tick keeps announcing us to the old one.
+
+    /// Type `hello wor` into the currently active buffer, exactly as the keyboard
+    /// would, and confirm the source is attached where we think it is.
+    fn start_typing_in(w: &mut Wired, buffer_id: &str) {
+        w.app.state.set_active_buffer(buffer_id);
+        w.app.input.value = "hello wor".to_string();
+        w.app.on_input_changed();
+        assert_eq!(
+            w.app.typing.source_buffer(&TypingSource::Tui),
+            Some(buffer_id)
+        );
+        assert_eq!(w.app.typing.sent_state(buffer_id), Some(TypingState::Active));
+    }
+
+    /// What the abandoned buffer is told once its 3s throttle window opens.
+    ///
+    /// This is where the damage actually shows. The `done` owed to the old buffer
+    /// is throttled at the instant of the switch (the spec's 3s window binds
+    /// `done` too), so nothing reaches the wire yet — what matters is what the
+    /// NEXT tick decides. With the source stranded it re-proposes `active`/
+    /// `paused` and keeps the old buffer's peers showing "typing…" for the full
+    /// TTL; with the source moved it proposes exactly one `done`.
+    fn what_the_next_tick_says_to(w: &mut Wired, buffer_id: &str) -> Vec<TypingState> {
+        w.app
+            .typing
+            .on_tick(Instant::now() + std::time::Duration::from_secs(4))
+            .into_iter()
+            .filter(|(id, _)| id == buffer_id)
+            .map(|(_, state)| state)
+            .collect()
+    }
+
+    #[test]
+    fn a_web_buffer_switch_moves_the_tui_typing_source() {
+        // THE REGRESSION. You type `hello wor` in #rust in the terminal, then tap
+        // the `bob` tab on your phone. `WebCommand::SwitchBuffer` flips the GLOBAL
+        // active buffer, so the terminal now shows `bob` with your draft still in
+        // the box — but nothing told the typing machine, so its Tui source stayed
+        // on #rust and the tick kept refreshing #rust for the full 30s TTL while
+        // `bob` was told nothing at all.
+        let mut w = Wired::new();
+        start_typing_in(&mut w, "net/#rust");
+
+        w.app.handle_web_command(
+            crate::web::protocol::WebCommand::SwitchBuffer {
+                buffer_id: "net/bob".to_string(),
+            },
+            "tab-1",
+        );
+        // What the main loop does after every dispatch, whatever the dispatch was.
+        w.app.sync_tui_typing_source();
+
+        assert_eq!(
+            w.app.typing.source_buffer(&TypingSource::Tui),
+            Some("net/bob"),
+            "the terminal's draft is composed against bob now — the source must follow"
+        );
+        assert_eq!(
+            what_the_next_tick_says_to(&mut w, "net/#rust"),
+            vec![TypingState::Done],
+            "#rust must be retracted, not refreshed"
+        );
+    }
+
+    #[test]
+    fn every_other_non_keyboard_switch_moves_the_source_too() {
+        // `set_active_buffer` is the whole of what `/window` from a Lua script
+        // (`app/scripting.rs`), an accepted DCC chat (`app/dcc.rs`) and an IRC
+        // event opening a query (`irc/events.rs`) do — and the last of those has
+        // only `&mut AppState`, so it could not call into the typing machine even
+        // if it wanted to. The loop-level sync is what covers all three.
+        let mut w = Wired::new();
+        start_typing_in(&mut w, "net/#rust");
+
+        w.app.state.set_active_buffer("net/bob");
+        w.app.sync_tui_typing_source();
+
+        assert_eq!(
+            w.app.typing.source_buffer(&TypingSource::Tui),
+            Some("net/bob")
+        );
+        assert_eq!(
+            what_the_next_tick_says_to(&mut w, "net/#rust"),
+            vec![TypingState::Done]
+        );
+    }
+
+    #[test]
+    fn reload_runs_the_same_post_config_typing_sync_that_set_does() {
+        // THE REGRESSION. `/reload` replaces `app.config` wholesale — every bit
+        // as much a config change as `/set` — but it only re-synced `typing.show`.
+        //
+        // Hand-edit `[typing] send_channels = false` and `/reload` while a `sent`
+        // is outstanding on #rust: `typing_send_target` now returns `None` for
+        // every channel, so `send_typing` refuses, `confirm_sent` never runs, and
+        // `prune` retains any target with `sent.is_some()`. The machine proposes
+        // `Done`, the guard re-refuses it, forever — and the `done` owed to
+        // #rust's peers is never sent. Verbatim the defect that
+        // `forget_switched_off_buffers` exists to prevent.
+        let mut w = Wired::new();
+        start_typing_in(&mut w, "net/#rust");
+
+        let mut edited = crate::config::AppConfig::default();
+        edited.typing.send_channels = false;
+        crate::commands::handlers_admin::apply_reloaded_config(&mut w.app, edited);
+
+        assert_eq!(
+            w.app.typing.sent_state("net/#rust"),
+            None,
+            "the switched-off channel must be forgotten, not left holding `sent`"
+        );
+        for secs in [4, 8, 600] {
+            assert!(
+                what_the_next_tick_says_to(&mut w, "net/#rust").is_empty(),
+                "a switched-off channel must never be re-proposed (t+{secs}s)"
+            );
+        }
+    }
+
+    #[test]
+    fn a_transient_swap_and_restore_leaves_the_source_alone() {
+        // `app/shrink.rs` and `commands/handlers_e2e.rs` borrow `active_buffer_id`
+        // for one synchronous call and put it straight back. The loop-level sync
+        // compares rather than hooks the setter, so it sees no change at all — a
+        // setter hook would have fired twice and reset the pause clock.
+        let mut w = Wired::new();
+        start_typing_in(&mut w, "net/#rust");
+        let before = w.wire().len();
+
+        let prior = w.app.state.active_buffer_id.clone();
+        w.app.state.active_buffer_id = Some("net/bob".to_string());
+        w.app.state.active_buffer_id = prior;
+        w.app.sync_tui_typing_source();
+
+        assert_eq!(
+            w.app.typing.source_buffer(&TypingSource::Tui),
+            Some("net/#rust")
+        );
+        assert_eq!(w.wire().len(), before, "nothing new reached the wire");
+    }
+
+    #[test]
+    fn closing_the_active_buffer_releases_the_tui_source() {
+        // The log browser drops `active_buffer_id` to `None` (`app/log_browser.rs`).
+        // The terminal is composing into nothing, so the source must be dropped —
+        // not left attached to a buffer that keeps getting refreshed forever.
+        let mut w = Wired::new();
+        start_typing_in(&mut w, "net/#rust");
+
+        w.app.state.active_buffer_id = None;
+        w.app.sync_tui_typing_source();
+
+        assert_eq!(w.app.typing.source_buffer(&TypingSource::Tui), None);
+        assert_eq!(
+            what_the_next_tick_says_to(&mut w, "net/#rust"),
+            vec![TypingState::Done],
+            "#rust must be retracted, not refreshed forever"
+        );
+    }
+
     #[test]
     fn a_web_submit_reports_the_real_outcome_too() {
         // `WebCommand::SendMessage` runs the same submit path; a browser session
