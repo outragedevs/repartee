@@ -30,22 +30,20 @@ const fn font_size_from_window_px(
 
 impl App {
     pub(crate) fn handle_event(&mut self, event: Event) {
+        // Snapshot once, around every arm, rather than per-arm: Mouse never
+        // snapshotted before (yet `handle_mouse` inserts emote text via
+        // `insert_emote_by_index`), and no arm watched `active_buffer_id` — an
+        // Alt+digit/arrow buffer switch left the Tui typing source attached to
+        // the old buffer, which then got a spurious `paused`. `on_input_changed`
+        // reads the current buffer + value and drives `on_activity`, whose
+        // source-move logic releases the old target immediately, so a switch
+        // with no value change still needs to run it.
+        let input_before = self.input.value.clone();
+        let buffer_before = self.state.active_buffer_id.clone();
         match event {
-            Event::Key(key) => {
-                let before = self.input.value.clone();
-                self.handle_key(key);
-                if self.input.value != before {
-                    self.on_input_changed();
-                }
-            }
+            Event::Key(key) => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
-            Event::Paste(text) => {
-                let before = self.input.value.clone();
-                self.handle_paste(&text);
-                if self.input.value != before {
-                    self.on_input_changed();
-                }
-            }
+            Event::Paste(text) => self.handle_paste(&text),
             Event::Resize(cols, rows) => {
                 self.cached_term_cols = cols;
                 self.cached_term_rows = rows;
@@ -53,6 +51,9 @@ impl App {
                 self.resize_all_shells();
             }
             _ => {}
+        }
+        if self.input.value != input_before || self.state.active_buffer_id != buffer_before {
+            self.on_input_changed();
         }
     }
 
@@ -307,7 +308,7 @@ impl App {
                 self.input.spell_state = None;
                 let text = self.input.submit();
                 if !text.is_empty() {
-                    self.note_tui_submit();
+                    self.note_tui_submit(&text);
                     self.handle_submit(&text);
                 }
             }
@@ -504,7 +505,7 @@ impl App {
                 format!("{current_input}{}", raw.join("\n"))
             };
             if !joined.is_empty() {
-                self.note_tui_submit();
+                self.note_tui_submit(&joined);
                 self.handle_submit(&joined);
             }
             return;
@@ -523,7 +524,7 @@ impl App {
         };
 
         // Send first line immediately
-        self.note_tui_submit();
+        self.note_tui_submit(&first);
         self.handle_submit(&first);
 
         // Queue remaining lines
@@ -542,7 +543,7 @@ impl App {
     /// Send one queued paste line. Called every 500ms by the paste timer.
     pub(crate) fn drain_paste_queue(&mut self) {
         if let Some(line) = self.paste_queue.pop_front() {
-            self.note_tui_submit();
+            self.note_tui_submit(&line);
             self.handle_submit(&line);
         }
     }

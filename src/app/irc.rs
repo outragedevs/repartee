@@ -59,7 +59,9 @@ impl App {
             batch_ref_counter: 0,
             silent_who_channels: HashSet::new(),
             silent_banlist_channels: HashSet::new(),
+            flood_protected: self.config.general.flood_protection,
         });
+        self.recompute_typing_flood_gate();
 
         // A newly registered connection may add a network the keyring's
         // configured-network set (snapshotted at startup) doesn't know about —

@@ -151,15 +151,28 @@ impl TypingSender {
         self.propose(&dirty, now)
     }
 
-    /// A source submitted a message. Sends nothing: the PRIVMSG itself clears
-    /// typing at the receivers.
+    /// A source submitted something. Sends nothing itself: a real message's
+    /// own PRIVMSG clears typing at the receivers.
+    ///
+    /// `sent_message` distinguishes the two effects a submit can have:
+    /// * The flood charge is unconditional — `/help`, `/whois`, etc. all
+    ///   consume real crate budget too (some, like `/whois`, cost more than a
+    ///   PRIVMSG), so the mirror must stay conservative and charge for every
+    ///   submit, command or not.
+    /// * The §3.1 suppression window (`last_message`) is recorded only when
+    ///   `sent_message` is true — a local command like `/set` never reaches
+    ///   the network, so it must not falsely suppress typing in the current
+    ///   buffer for the next 3 seconds.
     pub fn on_submit(
         &mut self,
         source: &TypingSource,
         buffer_id: &str,
+        sent_message: bool,
         now: Instant,
     ) -> Vec<(String, TypingState)> {
-        self.last_message.insert(buffer_id.to_string(), now);
+        if sent_message {
+            self.last_message.insert(buffer_id.to_string(), now);
+        }
         self.flood.charge(now, MESSAGE_COST_MS);
         if let Some(s) = self.sources.get_mut(source) {
             s.active = false;
@@ -316,6 +329,16 @@ impl TypingSender {
 }
 
 impl App {
+    /// The machine's flood gate mirrors what the LIVE senders actually do.
+    /// `flood_penalty_threshold` is baked into each connection at creation and
+    /// cannot be changed at runtime, so a toggle only affects FUTURE connections:
+    /// the gate must stay on while any live sender still throttles (or the config
+    /// says the next connection will).
+    pub(crate) fn recompute_typing_flood_gate(&mut self) {
+        self.typing.flood_enabled = self.config.general.flood_protection
+            || self.state.connections.values().any(|c| c.flood_protected);
+    }
+
     /// The terminal's input changed — a keystroke or a paste.
     pub(crate) fn on_input_changed(&mut self) {
         let Some(buffer_id) = self.state.active_buffer_id.clone() else {
@@ -339,9 +362,18 @@ impl App {
         self.dispatch_typing(due);
     }
 
-    /// A message was submitted from `source`.
-    pub(crate) fn on_typing_submit(&mut self, source: &TypingSource, buffer_id: &str) {
-        let due = self.typing.on_submit(source, buffer_id, Instant::now());
+    /// Something was submitted from `source`. `sent_message` is whether it was
+    /// an actual message to the network (as opposed to a local command like
+    /// `/help` or `/set`) — see `TypingSender::on_submit`.
+    pub(crate) fn on_typing_submit(
+        &mut self,
+        source: &TypingSource,
+        buffer_id: &str,
+        sent_message: bool,
+    ) {
+        let due = self
+            .typing
+            .on_submit(source, buffer_id, sent_message, Instant::now());
         self.dispatch_typing(due);
     }
 
@@ -349,9 +381,14 @@ impl App {
     /// call site in `input.rs` must go through this first, or the machine keeps
     /// an `Active` recorded for the target and the next input change retracts
     /// it with a spurious `done` right after the real PRIVMSG.
-    pub(crate) fn note_tui_submit(&mut self) {
+    ///
+    /// `text` is the exact string being submitted, so we can tell a real
+    /// message from a local command (`/help`, `/set`, ...): only a real
+    /// message should suppress typing for the next 3 seconds in this buffer.
+    pub(crate) fn note_tui_submit(&mut self, text: &str) {
         if let Some(buffer_id) = self.state.active_buffer_id.clone() {
-            self.on_typing_submit(&TypingSource::Tui, &buffer_id);
+            let sent_message = crate::irc::typing::should_type(text);
+            self.on_typing_submit(&TypingSource::Tui, &buffer_id, sent_message);
         }
     }
 
@@ -653,7 +690,7 @@ mod tests {
         flush(&mut s, &due, now);
 
         let t4 = now + Duration::from_secs(4);
-        assert!(s.on_submit(&tui(), "net/#rust", t4).is_empty());
+        assert!(s.on_submit(&tui(), "net/#rust", true, t4).is_empty());
         assert!(s.on_tick(now + Duration::from_secs(8)).is_empty());
     }
 
@@ -663,11 +700,25 @@ mod tests {
         // The message itself already announced our presence.
         let mut s = TypingSender::default();
         let now = t0();
-        s.on_submit(&tui(), "net/#rust", now);
+        s.on_submit(&tui(), "net/#rust", true, now);
 
         assert!(s.on_activity(tui(), "net/#rust", true, now + Duration::from_secs(1)).is_empty());
         assert_eq!(
             s.on_activity(tui(), "net/#rust", true, now + Duration::from_secs(3)),
+            vec![("net/#rust".to_string(), TypingState::Active)]
+        );
+    }
+
+    #[test]
+    fn a_local_command_does_not_suppress_typing() {
+        // /help, /set etc. send nothing to the network: typing right after must
+        // not be suppressed (the flood charge still applies, but the budget has
+        // room for one frame).
+        let mut s = TypingSender::default();
+        let now = t0();
+        s.on_submit(&tui(), "net/#rust", false, now);
+        assert_eq!(
+            s.on_activity(tui(), "net/#rust", true, now + Duration::from_secs(1)),
             vec![("net/#rust".to_string(), TypingState::Active)]
         );
     }
@@ -680,7 +731,7 @@ mod tests {
         let mut now = t0();
         // Burn the budget with real messages in another buffer.
         for _ in 0..3 {
-            s.on_submit(&tui(), "net/#other", now);
+            s.on_submit(&tui(), "net/#other", true, now);
             now += Duration::from_millis(100);
         }
         // Typing in a fresh buffer is now refused: no headroom left.
@@ -709,7 +760,7 @@ mod tests {
         let mut now = t0();
         // Burn the budget with real messages, same as the enabled-gate test.
         for _ in 0..3 {
-            s.on_submit(&tui(), "net/#other", now);
+            s.on_submit(&tui(), "net/#other", true, now);
             now += Duration::from_millis(100);
         }
         // With the gate disabled, typing is still proposed despite the budget.

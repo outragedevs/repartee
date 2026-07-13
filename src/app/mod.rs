@@ -813,7 +813,7 @@ impl App {
             cli_bind_override: None,
             typing: crate::app::typing::TypingSender::default(),
         };
-        app.typing.flood_enabled = app.config.general.flood_protection;
+        app.recompute_typing_flood_gate();
         app.recompute_wrap_indent();
 
         if app.config.spellcheck.enabled {
@@ -1103,6 +1103,9 @@ impl App {
             batch_ref_counter: 0,
             silent_who_channels: HashSet::new(),
             silent_banlist_channels: HashSet::new(),
+            // Synthetic placeholder — never a live IRC sender, so it must
+            // never force the typing flood gate on.
+            flood_protected: false,
         });
         state.add_buffer(Buffer {
             id: buf_id.clone(),

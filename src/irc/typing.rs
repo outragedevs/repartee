@@ -109,12 +109,20 @@ pub fn build_tagmsg(target: &str, state: TypingState) -> irc::proto::Message {
 /// text-input field **and the text is not a '/slash command'**". `/me` is a
 /// message rather than a command, so it counts as typing; a bare `/me` with no
 /// text does not.
+///
+/// The command parser lowercases command names before dispatch
+/// (`src/commands/parser.rs`), so `/ME waves` executes as a `/me` action —
+/// this predicate must match it case-insensitively too, or an action typed in
+/// caps would be misclassified as a command and never announce typing.
 #[must_use]
 pub fn should_type(input: &str) -> bool {
     if input.is_empty() {
         return false;
     }
-    !input.starts_with('/') || input.starts_with("/me ")
+    !input.starts_with('/')
+        || input
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("/me "))
 }
 
 /// Resolve a `TAGMSG` target that may carry a `STATUSMSG` prefix (`@#chan`).
@@ -228,6 +236,15 @@ mod tests {
         assert!(!should_type(""));
         assert!(!should_type("/join #rust"));
         assert!(!should_type("/me")); // bare command, no text
+    }
+
+    #[test]
+    fn should_type_recognizes_me_regardless_of_case() {
+        // The command parser lowercases command names (parser.rs), so `/ME
+        // waves` executes as a /me action — the predicate must match it too,
+        // or an action typed in caps never announces typing.
+        assert!(should_type("/ME waves"));
+        assert!(!should_type("/ME")); // bare command, no text, still not typing
     }
 
     #[test]

@@ -432,9 +432,11 @@ impl App {
                 self.on_web_typing(session_id, &buffer_id, typing);
             }
             WebCommand::SendMessage { buffer_id, text } => {
+                let sent_message = crate::irc::typing::should_type(&text);
                 self.on_typing_submit(
                     &crate::app::typing::TypingSource::Web(session_id.to_string()),
                     &buffer_id,
+                    sent_message,
                 );
                 self.web_send_message(&buffer_id, &text);
             }
@@ -499,9 +501,11 @@ impl App {
                 self.web_fetch_mentions(session_id);
             }
             WebCommand::RunCommand { buffer_id, text } => {
+                let sent_message = crate::irc::typing::should_type(&text);
                 self.on_typing_submit(
                     &crate::app::typing::TypingSource::Web(session_id.to_string()),
                     &buffer_id,
+                    sent_message,
                 );
                 self.web_run_command(&buffer_id, &text);
             }

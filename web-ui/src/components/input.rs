@@ -176,7 +176,12 @@ pub fn InputLine() -> impl IntoView {
         let Some(buffer_id) = state.active_buffer.get() else {
             return;
         };
-        let typing = !text.is_empty() && (!text.starts_with('/') || text.starts_with("/me "));
+        // Mirrors `irc::typing::should_type` (core, `src/irc/typing.rs`): the
+        // command parser lowercases command names before dispatch, so `/ME
+        // waves` executes as a `/me` action and must count as typing too.
+        let typing = !text.is_empty()
+            && (!text.starts_with('/')
+                || text.get(..4).is_some_and(|prefix| prefix.eq_ignore_ascii_case("/me ")));
         let now = js_sys::Date::now();
         // A change of state OR of target buffer always reports immediately; a
         // steady state is rate-limited. The core still enforces the 3s IRC
