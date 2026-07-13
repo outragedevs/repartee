@@ -532,7 +532,9 @@ impl App {
     #[allow(clippy::too_many_lines)]
     pub fn new_with_mode(log_browser: bool) -> Result<Self> {
         constants::ensure_config_dir();
-        let mut config = config::load_config(&constants::config_path())?;
+        // Migrate *before* credentials are merged in: the migration may rewrite
+        // config.toml, and the merged-in `.env` passwords must never reach it.
+        let mut config = config::load_and_migrate(&constants::config_path())?;
 
         let env_vars = config::load_env(&constants::env_path())?;
         config::apply_credentials(&mut config.servers, &env_vars);

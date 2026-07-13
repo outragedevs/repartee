@@ -104,8 +104,12 @@ pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
     // deliver receiver is owned by the main tokio::select! loop.)
     let shrink_was_inactive = app.shrink_client.is_none();
 
-    // Reload config.toml
-    match crate::config::load_config(&crate::constants::config_path()) {
+    // Reload config.toml. Same migration as startup (and, like startup, it
+    // runs before the credential layers below are re-applied, so a rewrite
+    // cannot leak a `.env` password into config.toml): a file restored from
+    // an old backup, or one whose startup write-back failed on a read-only
+    // dir, must not silently lose the items the current schema expects.
+    match crate::config::load_and_migrate(&crate::constants::config_path()) {
         Ok(new_config) => {
             app.config = new_config;
             app.cached_config_toml = None;
