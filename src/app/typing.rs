@@ -91,12 +91,21 @@ impl TypingSender {
         self.propose(&dirty, now)
     }
 
-    /// A source submitted something. Sends nothing itself: a real message's
-    /// own PRIVMSG clears typing at the receivers.
+    /// A source submitted something. A real message needs no `done` of its own:
+    /// its PRIVMSG clears typing at the receivers.
     ///
-    /// `sent_message` gates the §3.1 suppression window (`last_message`): a
-    /// local command like `/set` never reaches the network, so it must not
-    /// falsely suppress typing in the current buffer for the next 3 seconds.
+    /// `sent_message` — whether the submission actually goes to the network, as
+    /// opposed to a local command like `/set` — gates BOTH of the things that
+    /// happen here, and for the same reason: nothing was said on the wire.
+    ///
+    /// * the §3.1 suppression window (`last_message`), which would otherwise
+    ///   falsely mute typing in this buffer for the next 3 seconds; and
+    /// * retiring the target (`sent = None`), which throws away the record that
+    ///   a `done` is **owed** to the peers. A `/whois` submitted while a `done`
+    ///   is still waiting out its throttle would take that `done` with it, and
+    ///   the peers would show us as typing until the TTL — 30s if the last state
+    ///   on the wire was `paused`.
+    ///
     /// (The flood budget needs no help from here — whatever the submit puts on
     /// the wire is charged by `IrcSender::send` itself.)
     pub fn on_submit(
@@ -106,16 +115,17 @@ impl TypingSender {
         sent_message: bool,
         now: Instant,
     ) -> Vec<(String, TypingState)> {
-        if sent_message {
-            self.last_message.insert(buffer_id.to_string(), now);
-        }
         if let Some(s) = self.sources.get_mut(source) {
             s.active = false;
             s.last_activity = now;
         }
-        // Retire our state for this target without a `done`.
-        if let Some(t) = self.targets.get_mut(buffer_id) {
-            t.sent = None;
+        if sent_message {
+            self.last_message.insert(buffer_id.to_string(), now);
+            // The message itself is the retraction. Retire the target without a
+            // `done`, and coalesce away any `done` that was still pending.
+            if let Some(t) = self.targets.get_mut(buffer_id) {
+                t.sent = None;
+            }
         }
         // Another source may still be typing here, so re-derive rather than assume.
         self.propose(&[buffer_id.to_string()], now)
@@ -648,6 +658,35 @@ mod tests {
         let t4 = now + Duration::from_secs(4);
         assert!(s.on_submit(&tui(), "net/#rust", true, t4).is_empty());
         assert!(s.on_tick(now + Duration::from_secs(8)).is_empty());
+    }
+
+    #[test]
+    fn a_local_command_submit_still_owes_the_pending_done() {
+        // `active` went out at t=0. At t=1s the input is cleared (Ctrl+U) and a
+        // `/whois` typed instead: a `done` is now due but throttled. Submitting
+        // that command at t=2s sends NOTHING to the network, so the retraction
+        // is still owed — the rationale for retiring the target ("the PRIVMSG
+        // itself clears typing at the receivers") only holds when a message
+        // actually reached the wire. Dropping `sent` here leaves the peers
+        // showing us as typing until the TTL runs out.
+        let mut s = TypingSender::default();
+        let now = t0();
+        let due = s.on_activity(tui(), "net/#rust", true, now);
+        flush(&mut s, &due, now);
+
+        s.on_activity(tui(), "net/#rust", false, now + Duration::from_secs(1));
+        assert!(
+            s.on_submit(&tui(), "net/#rust", false, now + Duration::from_secs(2))
+                .is_empty(),
+            "still inside the 3s throttle window"
+        );
+
+        let at3 = now + Duration::from_secs(3);
+        assert_eq!(
+            s.on_tick(at3),
+            vec![("net/#rust".to_string(), TypingState::Done)],
+            "the done we owe the channel must survive a local command"
+        );
     }
 
     #[test]
