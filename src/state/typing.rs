@@ -14,17 +14,28 @@ use std::time::Instant;
 use crate::irc::typing::TypingState;
 
 /// One peer's typing state in one buffer.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct TypingEntry {
     pub state: TypingState,
     /// When this state was last refreshed — the TTL clock (spec §1.2).
     pub since: Instant,
+    /// The nick as the network spelled it, for display. The map key is this
+    /// folded to lowercase — see [`TypingTracker`].
+    pub nick: String,
 }
 
 /// `buffer_id -> nick -> entry`. Buffer ids are `{conn_id}/{name}`
 /// (`src/state/buffer.rs:213`), which is what makes connection-scoped cleanup
 /// a prefix match.
+///
+/// The nick key is **lowercase**, like `Buffer.users`: IRC nicks are
+/// case-insensitive and the clears do not all come from the same place the
+/// entries do. An entry is created from a TAGMSG's prefix (server-canonical
+/// case), but `handle_kick` clears with the KICK's `<user>` *parameter* —
+/// whatever case the kicker typed. Matching on exact case would leave a kicked
+/// user's indicator up for the full TTL. The entry carries the display spelling
+/// so the status line still shows the nick as the network sent it.
 #[derive(Debug, Default)]
 pub struct TypingTracker {
     entries: HashMap<String, HashMap<String, TypingEntry>>,
@@ -36,16 +47,21 @@ impl TypingTracker {
     ///
     /// Returns `true` when the **visible set** of typing nicks changed — that is
     /// what decides whether the web clients need a push. Refreshing a nick who is
-    /// already shown as typing changes nothing on screen.
+    /// already shown as typing changes nothing on screen (unless the network has
+    /// started spelling them differently, which does).
     pub fn set(&mut self, buffer_id: &str, nick: &str, state: TypingState, now: Instant) -> bool {
         if state == TypingState::Done {
             return self.clear(buffer_id, nick);
         }
-        self.entries
-            .entry(buffer_id.to_string())
-            .or_default()
-            .insert(nick.to_string(), TypingEntry { state, since: now })
-            .is_none()
+        let previous = self.entries.entry(buffer_id.to_string()).or_default().insert(
+            nick.to_lowercase(),
+            TypingEntry {
+                state,
+                since: now,
+                nick: nick.to_string(),
+            },
+        );
+        previous.is_none_or(|p| p.nick != nick)
     }
 
     /// Stop showing `nick` as typing in `buffer_id`. Returns `true` if they were.
@@ -53,7 +69,7 @@ impl TypingTracker {
         let Some(buf) = self.entries.get_mut(buffer_id) else {
             return false;
         };
-        let removed = buf.remove(nick).is_some();
+        let removed = buf.remove(&nick.to_lowercase()).is_some();
         if buf.is_empty() {
             self.entries.remove(buffer_id);
         }
@@ -67,12 +83,32 @@ impl TypingTracker {
     /// nick may well be typing on another network. Returns the buffers changed.
     pub fn clear_nick_on_connection(&mut self, conn_id: &str, nick: &str) -> Vec<String> {
         let prefix = format!("{conn_id}/");
+        let nick_lower = nick.to_lowercase();
         let mut changed = Vec::new();
         self.entries.retain(|buffer_id, buf| {
-            if buffer_id.starts_with(&prefix) && buf.remove(nick).is_some() {
+            if buffer_id.starts_with(&prefix) && buf.remove(&nick_lower).is_some() {
                 changed.push(buffer_id.clone());
             }
             !buf.is_empty()
+        });
+        changed
+    }
+
+    /// Forget every peer typing anywhere **on one connection** — it dropped.
+    ///
+    /// No `done` can arrive over a socket that is gone, so without this the
+    /// indicators would sit there for the full TTL (30s for `paused`) and, worse,
+    /// survive into the reconnect. Returns the buffers changed, so the caller can
+    /// push the cleared set to the web clients.
+    pub fn clear_connection(&mut self, conn_id: &str) -> Vec<String> {
+        let prefix = format!("{conn_id}/");
+        let mut changed = Vec::new();
+        self.entries.retain(|buffer_id, _| {
+            if buffer_id.starts_with(&prefix) {
+                changed.push(buffer_id.clone());
+                return false;
+            }
+            true
         });
         changed
     }
@@ -109,16 +145,21 @@ impl TypingTracker {
         changed
     }
 
-    /// Nicks currently typing in `buffer_id`, sorted so the status line does not
-    /// reorder itself between frames.
+    /// Nicks currently typing in `buffer_id`, in their display spelling, sorted
+    /// so the status line does not reorder itself between frames.
     #[must_use]
     pub fn nicks(&self, buffer_id: &str) -> Vec<&str> {
         let Some(buf) = self.entries.get(buffer_id) else {
             return Vec::new();
         };
-        let mut nicks: Vec<&str> = buf.keys().map(String::as_str).collect();
+        // Ordered by the lowercase key, not the display spelling: `Bob` must not
+        // sort ahead of `alice` just because it is capitalised.
+        let mut nicks: Vec<(&str, &str)> = buf
+            .iter()
+            .map(|(key, entry)| (key.as_str(), entry.nick.as_str()))
+            .collect();
         nicks.sort_unstable();
-        nicks
+        nicks.into_iter().map(|(_, nick)| nick).collect()
     }
 }
 
@@ -214,6 +255,59 @@ mod tests {
         assert!(tr.remove_buffer("net/alice"));
         assert!(tr.nicks("net/alice").is_empty());
         assert!(!tr.remove_buffer("net/alice"));
+    }
+
+    #[test]
+    fn clear_connection_drops_every_buffer_on_that_connection() {
+        // A connection that drops takes its peers' typing state with it: the
+        // socket is gone, no `done` will ever arrive, and the indicator would
+        // otherwise sit there for the full 30s paused TTL.
+        let mut tr = TypingTracker::default();
+        let now = t0();
+        tr.set("libera/#rust", "alice", TypingState::Active, now);
+        tr.set("libera/bob", "bob", TypingState::Paused, now);
+        tr.set("oftc/#rust", "carol", TypingState::Active, now);
+
+        let mut cleared = tr.clear_connection("libera");
+        cleared.sort();
+        assert_eq!(cleared, vec!["libera/#rust", "libera/bob"]);
+        assert!(tr.nicks("libera/#rust").is_empty());
+        assert!(tr.nicks("libera/bob").is_empty());
+        // Another network is untouched — one connection dropping says nothing
+        // about the others.
+        assert_eq!(tr.nicks("oftc/#rust"), vec!["carol"]);
+        // And a second call has nothing left to report.
+        assert!(tr.clear_connection("libera").is_empty());
+    }
+
+    #[test]
+    fn a_nick_is_matched_case_insensitively_but_displayed_as_the_network_sent_it() {
+        // IRC nicks are case-insensitive. The tracker is filled from the TAGMSG
+        // prefix, but the clears come from elsewhere: a KICK carries whatever
+        // case the kicker typed. Matching by exact case would leave the
+        // indicator up for someone who has just been kicked out of the channel.
+        let mut tr = TypingTracker::default();
+        let now = t0();
+        tr.set("net/#rust", "Alice", TypingState::Active, now);
+        assert_eq!(tr.nicks("net/#rust"), vec!["Alice"]);
+
+        // Refreshing under a different case is the same person, not a second one.
+        tr.set("net/#rust", "ALICE", TypingState::Active, now);
+        assert_eq!(tr.nicks("net/#rust").len(), 1);
+
+        assert!(tr.clear("net/#rust", "alice"));
+        assert!(tr.nicks("net/#rust").is_empty());
+    }
+
+    #[test]
+    fn clear_nick_on_connection_is_case_insensitive() {
+        let mut tr = TypingTracker::default();
+        tr.set("libera/#rust", "Alice", TypingState::Active, t0());
+        assert_eq!(
+            tr.clear_nick_on_connection("libera", "aLiCe"),
+            vec!["libera/#rust"]
+        );
+        assert!(tr.nicks("libera/#rust").is_empty());
     }
 
     #[test]
