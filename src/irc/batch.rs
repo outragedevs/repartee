@@ -593,6 +593,14 @@ fn process_netsplit_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo
                     .push(nick.clone());
             }
 
+            // A split nick is gone from the channel — they are not typing in it.
+            // Batched netsplit QUITs never pass through `handle_quit`, which is
+            // where the clear otherwise lives, so it has to happen here too or
+            // the indicator survives for the full TTL (30s after a `paused`).
+            for buf_id in state.typing.clear_nick_on_connection(conn_id, &nick) {
+                crate::irc::events::push_typing_web_event(state, &buf_id);
+            }
+
             if nick_seen.insert(nick.clone()) {
                 nicks.push(nick);
             }
@@ -2082,6 +2090,49 @@ mod tests {
         assert!(last_msg.text.contains("Netsplit"));
         assert!(last_msg.text.contains("Alice"));
         assert!(last_msg.text.contains("BOB"));
+    }
+
+    #[test]
+    fn a_netsplit_stops_showing_the_split_nicks_as_typing() {
+        // Batched netsplit QUITs never reach `handle_quit`, where the typing
+        // clear lives — so without this the status line kept rendering
+        // "alice is typing…" for the full 30s paused TTL for someone the very
+        // same batch had already removed from the nicklist.
+        let conn_id = "test";
+        let (mut state, _rx, buf_id) = setup_ingest_state(conn_id);
+        let now = Instant::now();
+        state
+            .typing
+            .set(&buf_id, "Alice", crate::irc::typing::TypingState::Paused, now);
+        // Someone who did not split keeps their indicator.
+        state
+            .typing
+            .set(&buf_id, "carol", crate::irc::typing::TypingState::Active, now);
+        state.pending_web_events.clear();
+
+        let batch = BatchInfo {
+            batch_type: "NETSPLIT".to_string(),
+            params: vec!["hub.net".to_string(), "leaf.net".to_string()],
+            started_at: Instant::now(),
+            opener_tags: None,
+            dropped_messages: 0,
+            messages: vec![make_quit_msg("Alice", "hub.net leaf.net", "ref1")],
+        };
+        process_completed_batch(&mut state, conn_id, &batch, true);
+
+        assert_eq!(
+            state.typing.nicks(&buf_id),
+            vec!["carol"],
+            "the split nick must stop typing; the others must not"
+        );
+        assert!(
+            state.pending_web_events.iter().any(|e| matches!(
+                e,
+                crate::web::protocol::WebEvent::Typing { buffer_id, nicks }
+                    if buffer_id == &buf_id && nicks == &vec!["carol".to_string()]
+            )),
+            "the browser clients must be told the new set"
+        );
     }
 
     fn multiline_frag(text: &str, concat: bool) -> IrcMessage {
