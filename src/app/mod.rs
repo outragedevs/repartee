@@ -16,7 +16,7 @@ mod irc;
 mod log_browser;
 mod maintenance;
 mod mentions;
-mod scripting;
+pub mod scripting;
 mod session;
 mod shell;
 pub mod shrink;

@@ -812,36 +812,10 @@ impl App {
             ::irc::proto::Command::Raw(verb, args)
                 if verb.eq_ignore_ascii_case("TAGMSG") && !args.is_empty() =>
             {
-                let tags: HashMap<String, String> = msg
-                    .tags
-                    .as_ref()
-                    .map(|ts| {
-                        ts.iter()
-                            .filter_map(|t| Some((t.0.clone(), t.1.clone()?)))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                // Mirror the display path's live-only guards (spec §3.2/§3.3): a
-                // script should not observe our own echoed typing or chathistory
-                // replays.
-                if tags.contains_key("batch") {
-                    return false;
-                }
-                let Some(typing_state) = crate::irc::typing::parse_typing(&tags) else {
+                let Some(typing) = typing_script_params(&self.state, conn_id, msg) else {
                     return false;
                 };
-                let nick = extract_nick(msg.prefix.as_ref());
-                let our_nick = self
-                    .state
-                    .connections
-                    .get(conn_id)
-                    .map_or("", |c| c.nick.as_str());
-                if nick.eq_ignore_ascii_case(our_nick) {
-                    return false;
-                }
-                params.insert("nick".to_string(), nick);
-                params.insert("target".to_string(), args[0].clone());
-                params.insert("state".to_string(), typing_state.as_str().to_string());
+                params.extend(typing);
                 events::TYPING
             }
             // For non-scriptable events, don't emit
@@ -850,4 +824,67 @@ impl App {
 
         self.emit_script_event(event_name, params)
     }
+}
+
+/// The `irc.typing` params for an inbound TAGMSG, or `None` if a script must not
+/// see it at all.
+///
+/// Free, and over borrowed state, so the arm that feeds `events::TYPING` is
+/// testable without an `App` (whose constructor touches disk). It mirrors the
+/// display path (`handle_tagmsg`) on every question they must agree on:
+///
+/// * a `batch` tag means chathistory / event-playback replay — typing is a
+///   live-only signal (spec §3.3), and a script must not act on a stale one;
+/// * `echo-message` reflects our own TAGMSG back at us (spec §3.2);
+/// * a `STATUSMSG` prefix is stripped, because `target` is documented to scripts
+///   as "Channel or your nick" — a script matching `target == "#rust"` would
+///   otherwise silently miss every `TAGMSG @#rust` the status line does show.
+///
+/// It does NOT mirror the `typing.show` gate: that is a *display* preference,
+/// and a script that reacts to typing (an away-responder, a logger) has no
+/// reason to stop because the user hid the status-line item.
+pub fn typing_script_params(
+    state: &crate::state::AppState,
+    conn_id: &str,
+    msg: &::irc::proto::Message,
+) -> Option<HashMap<String, String>> {
+    let ::irc::proto::Command::Raw(verb, args) = &msg.command else {
+        return None;
+    };
+    if !verb.eq_ignore_ascii_case("TAGMSG") || args.is_empty() {
+        return None;
+    }
+
+    let tags: HashMap<String, String> = msg
+        .tags
+        .as_ref()
+        .map(|ts| {
+            ts.iter()
+                .filter_map(|t| Some((t.0.clone(), t.1.clone()?)))
+                .collect()
+        })
+        .unwrap_or_default();
+    if tags.contains_key("batch") {
+        return None;
+    }
+    let typing_state = crate::irc::typing::parse_typing(&tags)?;
+
+    let nick = match msg.prefix.as_ref() {
+        Some(::irc::proto::Prefix::Nickname(nick, _, _)) => nick.clone(),
+        Some(::irc::proto::Prefix::ServerName(name)) => name.clone(),
+        None => String::new(),
+    };
+    let conn = state.connections.get(conn_id);
+    if nick.eq_ignore_ascii_case(conn.map_or("", |c| c.nick.as_str())) {
+        return None;
+    }
+
+    let statusmsg = conn.map_or("", |c| c.isupport_parsed.statusmsg());
+    let target = crate::irc::typing::strip_statusmsg(&args[0], statusmsg);
+
+    Some(HashMap::from([
+        ("nick".to_string(), nick),
+        ("target".to_string(), target.to_string()),
+        ("state".to_string(), typing_state.as_str().to_string()),
+    ]))
 }

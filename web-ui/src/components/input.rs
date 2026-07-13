@@ -179,12 +179,7 @@ pub fn InputLine() -> impl IntoView {
         let Some(buffer_id) = state.active_buffer.get() else {
             return;
         };
-        // Mirrors `irc::typing::should_type` (core, `src/irc/typing.rs`): the
-        // command parser lowercases command names before dispatch, so `/ME
-        // waves` executes as a `/me` action and must count as typing too.
-        let typing = !text.is_empty()
-            && (!text.starts_with('/')
-                || text.get(..4).is_some_and(|prefix| prefix.eq_ignore_ascii_case("/me ")));
+        let typing = should_type(&text);
         let now = js_sys::Date::now();
         // A change of state OR of target buffer always reports immediately; a
         // steady state is rate-limited. The core still enforces the 3s IRC
@@ -917,6 +912,31 @@ fn history_step(len: usize, current: Option<usize>, up: bool) -> Option<Option<u
     }
 }
 
+/// The slash commands that are *messages* rather than commands, with the
+/// trailing space that proves they carry text. `/action` is a registered alias
+/// of `/me` and produces the identical CTCP ACTION.
+///
+/// Mirrors `MESSAGE_COMMANDS` in the core (`src/irc/typing.rs`).
+const MESSAGE_COMMANDS: [&str; 2] = ["/me ", "/action "];
+
+/// Whether this input text should announce typing.
+///
+/// Mirrors `irc::typing::should_type` (core, `src/irc/typing.rs`): the spec's
+/// carve-out is "the text is not a '/slash command'", and an action is a
+/// message, not a command. The core's command parser lowercases command names
+/// before dispatch, so `/ME waves` and `/ACTION waves` both execute as actions
+/// and must count as typing too.
+fn should_type(text: &str) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+    !text.starts_with('/')
+        || MESSAGE_COMMANDS.iter().any(|cmd| {
+            text.get(..cmd.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(cmd))
+        })
+}
+
 /// Decide whether the typing predicate must be reported now.
 /// A change of predicate OR of target buffer always reports immediately;
 /// an unchanged steady state is rate-limited to one report per second.
@@ -1426,6 +1446,38 @@ mod tests {
             None,
             "down while not browsing"
         );
+    }
+
+    // ── the typing predicate ────────────────────────────────────────────
+
+    #[test]
+    fn plain_text_types_and_slash_commands_do_not() {
+        assert!(should_type("hello"));
+        assert!(!should_type(""));
+        assert!(!should_type("/join #rust"));
+    }
+
+    #[test]
+    fn actions_type_under_either_name_and_in_any_case() {
+        // `/me` and its `/action` alias are messages, not commands: both put a
+        // CTCP ACTION on the wire, so both must announce typing. The core
+        // lowercases the verb before dispatch, so case must not matter here.
+        for text in [
+            "/me waves",
+            "/ME waves",
+            "/action waves",
+            "/ACTION waves",
+            "/AcTiOn waves",
+        ] {
+            assert!(should_type(text), "{text} is a message, not a command");
+        }
+        // Bare, with no text, is just a command.
+        assert!(!should_type("/me"));
+        assert!(!should_type("/action"));
+        // And a longer command that merely shares a prefix is still a command —
+        // the trailing space in the pattern is what separates them.
+        assert!(!should_type("/actionfoo bar"));
+        assert!(!should_type("/mention bob"));
     }
 
     // ── typing report debounce ──────────────────────────────────────────

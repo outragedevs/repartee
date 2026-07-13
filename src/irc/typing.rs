@@ -1,4 +1,3 @@
-#![allow(dead_code, missing_docs)]
 //! `IRCv3` `typing` client tag — <https://ircv3.net/specs/client-tags/typing>.
 //!
 //! Typing status rides on `TAGMSG` and depends only on the `message-tags`
@@ -103,12 +102,21 @@ pub fn build_tagmsg(target: &str, state: TypingState) -> irc::proto::Message {
     }
 }
 
+/// The slash commands that are *messages* rather than commands, with the
+/// trailing space that proves they carry text.
+///
+/// `/action` is a registered alias of `/me` (`src/commands/registry.rs`), so it
+/// produces exactly the same CTCP ACTION on the wire. Anything that is true of
+/// one must be true of the other, or composing `/action waves` announces no
+/// typing while `/me waves` does.
+const MESSAGE_COMMANDS: [&str; 2] = ["/me ", "/action "];
+
 /// Whether the current input text should produce typing notifications.
 ///
 /// Spec: `typing=active` is sent "while the user is making updates to the
-/// text-input field **and the text is not a '/slash command'**". `/me` is a
-/// message rather than a command, so it counts as typing; a bare `/me` with no
-/// text does not.
+/// text-input field **and the text is not a '/slash command'**". `/me` (and its
+/// `/action` alias) is a message rather than a command, so it counts as typing;
+/// a bare `/me` with no text does not.
 ///
 /// The command parser lowercases command names before dispatch
 /// (`src/commands/parser.rs`), so `/ME waves` executes as a `/me` action —
@@ -120,9 +128,11 @@ pub fn should_type(input: &str) -> bool {
         return false;
     }
     !input.starts_with('/')
-        || input
-            .get(..4)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("/me "))
+        || MESSAGE_COMMANDS.iter().any(|cmd| {
+            input
+                .get(..cmd.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(cmd))
+        })
 }
 
 /// Resolve a `TAGMSG` target that may carry a `STATUSMSG` prefix (`@#chan`).
@@ -245,6 +255,21 @@ mod tests {
         // or an action typed in caps never announces typing.
         assert!(should_type("/ME waves"));
         assert!(!should_type("/ME")); // bare command, no text, still not typing
+    }
+
+    #[test]
+    fn should_type_recognizes_the_action_alias_of_me() {
+        // `/action` is a registered alias of `/me` (registry.rs) and produces
+        // the identical CTCP ACTION. Treating it as a plain command meant
+        // `/action waves` announced no typing at all while `/me waves` did.
+        assert!(should_type("/action waves"));
+        assert!(should_type("/ACTION waves")); // the parser lowercases the verb
+        assert!(should_type("/AcTiOn waves"));
+        assert!(!should_type("/action")); // bare command, no text
+        // A longer command that merely starts with the same letters is still a
+        // command: the trailing space in the pattern is what separates them.
+        assert!(!should_type("/actionfoo bar"));
+        assert!(!should_type("/mention bob"));
     }
 
     #[test]

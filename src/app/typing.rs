@@ -440,6 +440,45 @@ impl App {
     }
 }
 
+/// Drop the sender's state for every buffer the `typing.send_*` switches no
+/// longer cover. Called after `/set typing.send_channels` or
+/// `typing.send_queries` (`src/commands/settings.rs`).
+///
+/// Turning a switch **off** makes [`typing_send_target`] start returning `None`
+/// for that class of buffer, so `send_typing` refuses every frame and
+/// `confirm_sent` — which only runs when a send actually happened — never runs
+/// again. Two things then go wrong at once, and both last for the life of the
+/// process: a `done` we still owed is never confirmed, and `prune` retains any
+/// target with `sent.is_some()`, so the machine re-proposes and the guard
+/// re-refuses it on every 1-second tick, forever.
+///
+/// Forgetting the buffer settles both. It is written as "forget whatever the
+/// config does not cover" rather than "forget what this switch just turned off"
+/// so it is idempotent and cannot drift from the `allowed` decision in
+/// [`typing_send_target`] — the two must agree by construction.
+///
+/// **Residual:** an indicator already on the wire is *not* retracted. Peers fall
+/// back on the spec TTL — 6s if our last state was `active`, 30s if `paused`.
+/// Sending a final `done` before the switch takes effect would be nicer, but it
+/// would mean putting a frame on the wire on behalf of a setting the user has
+/// just switched off, and the TTL already bounds the damage.
+pub fn forget_switched_off_buffers(
+    sender: &mut TypingSender,
+    buffers: &indexmap::IndexMap<String, crate::state::buffer::Buffer>,
+    config: &crate::config::TypingConfig,
+) {
+    for buf in buffers.values() {
+        let covered = match buf.buffer_type {
+            BufferType::Channel => config.send_channels,
+            BufferType::Query => config.send_queries,
+            _ => false,
+        };
+        if !covered {
+            sender.forget_buffer(&buf.id);
+        }
+    }
+}
+
 /// The whole of [`App::send_typing`], over borrowed state and an injected clock
 /// so the guard chain — the thing that decides whether the user's keystrokes
 /// leave this process — is testable against a capturing sender.
@@ -618,10 +657,44 @@ mod tests {
     }
 
     #[test]
-    fn slash_commands_never_type() {
-        // The caller applies `should_type`; this asserts the wiring of that.
-        assert!(!crate::irc::typing::should_type("/join #x"));
-        assert!(crate::irc::typing::should_type("/me waves"));
+    fn a_slash_command_in_the_input_never_reaches_the_wire() {
+        // The composition the callers actually feed the machine:
+        // `on_activity(.., should_type(text), ..)` (`App::on_input_changed`,
+        // and the browser's own copy of the predicate). The old test here just
+        // called `should_type` twice — a duplicate of its own unit test, which
+        // would have passed even if nothing ever called it.
+        let now = t0();
+
+        // A command typed into a quiet buffer proposes nothing at all.
+        let mut s = TypingSender::default();
+        for text in ["/join #rust", "/whois alice", "/me", ""] {
+            assert!(
+                s.on_activity(tui(), "net/#rust", typing::should_type(text), now)
+                    .is_empty(),
+                "{text:?} must not announce typing"
+            );
+        }
+
+        // An action is a message, under either of its names and in any case.
+        for text in ["hello", "/me waves", "/action waves", "/ACTION waves"] {
+            let mut s = TypingSender::default();
+            assert_eq!(
+                s.on_activity(tui(), "net/#rust", typing::should_type(text), now),
+                vec![("net/#rust".to_string(), TypingState::Active)],
+                "{text:?} is a message and must announce typing"
+            );
+        }
+
+        // And a command typed while we are already shown as typing retracts —
+        // it does not merely stop refreshing.
+        let mut s = TypingSender::default();
+        let due = s.on_activity(tui(), "net/#rust", typing::should_type("hi"), now);
+        flush(&mut s, &due, now);
+        let t4 = now + Duration::from_secs(4);
+        assert_eq!(
+            s.on_activity(tui(), "net/#rust", typing::should_type("/join #other"), t4),
+            vec![("net/#rust".to_string(), TypingState::Done)]
+        );
     }
 
     #[test]
@@ -1172,6 +1245,97 @@ mod tests {
         let later = now + Duration::from_secs(10);
         assert!(w.send("net/#rust", TypingState::Active, later));
         assert_eq!(w.wire().len(), 3);
+    }
+
+    #[test]
+    fn switching_send_channels_off_leaves_nothing_outstanding() {
+        // The regression. `/set typing.send_channels false` makes the guard chain
+        // start refusing the channel, so `confirm_sent` never runs again: the
+        // `done` we owe #rust is never confirmed, and `prune` keeps any target
+        // with `sent.is_some()`. The machine would re-propose it and the guard
+        // would re-refuse it on every 1s tick for the life of the process.
+        // The terminal types in the channel; a browser tab types in the query.
+        // (Two SOURCES: `TypingSource::Tui` is one source and can only point at
+        // one buffer at a time — driving both buffers from it would just move it.)
+        let mut w = Wired::new();
+        let mut s = TypingSender::default();
+        let now = t0();
+        let tab = TypingSource::Web("tab-1".to_string());
+
+        for (source, buffer_id) in [(tui(), "net/#rust"), (tab.clone(), "net/bob")] {
+            let due = s.on_activity(source, buffer_id, true, now);
+            for (id, state) in &due {
+                assert!(w.send(id, *state, now), "{id} must reach the wire");
+                s.confirm_sent(id, *state, now);
+            }
+        }
+        assert_eq!(s.sent_state("net/#rust"), Some(TypingState::Active));
+        assert_eq!(s.sent_state("net/bob"), Some(TypingState::Active));
+
+        // The user switches channel typing off. Queries are untouched.
+        w.config.send_channels = false;
+        forget_switched_off_buffers(&mut s, &w.buffers, &w.config);
+
+        assert_eq!(
+            s.sent_state("net/#rust"),
+            None,
+            "nothing may be left outstanding for a buffer we can no longer send to"
+        );
+        // Clearing the input in the channel proposes nothing — there is no
+        // `done` to owe, because the target is gone.
+        assert!(
+            s.on_activity(tui(), "net/#rust", false, now + Duration::from_secs(4))
+                .is_empty()
+        );
+        // And no tick, now or ever, re-proposes it.
+        for secs in [4, 8, 60, 600] {
+            let due = s.on_tick(now + Duration::from_secs(secs));
+            assert!(
+                due.iter().all(|(id, _)| id != "net/#rust"),
+                "a switched-off channel must never be re-proposed (t+{secs}s)"
+            );
+        }
+
+        // The query still works, and its own state was left alone.
+        assert_eq!(s.sent_state("net/bob"), Some(TypingState::Active));
+        let t8 = now + Duration::from_secs(8);
+        assert_eq!(
+            s.on_activity(tab, "net/bob", false, t8),
+            vec![("net/bob".to_string(), TypingState::Done)],
+            "the switch the user did not touch must still retract normally"
+        );
+        assert!(w.send("net/bob", TypingState::Done, t8));
+    }
+
+    #[test]
+    fn switching_send_queries_off_leaves_nothing_outstanding() {
+        // The mirror image — swapping the two config branches must not pass.
+        let mut w = Wired::new();
+        let mut s = TypingSender::default();
+        let now = t0();
+        let tab = TypingSource::Web("tab-1".to_string());
+
+        for (source, buffer_id) in [(tui(), "net/#rust"), (tab, "net/bob")] {
+            let due = s.on_activity(source, buffer_id, true, now);
+            for (id, state) in &due {
+                assert!(w.send(id, *state, now));
+                s.confirm_sent(id, *state, now);
+            }
+        }
+
+        w.config.send_queries = false;
+        forget_switched_off_buffers(&mut s, &w.buffers, &w.config);
+
+        assert_eq!(s.sent_state("net/bob"), None);
+        assert_eq!(s.sent_state("net/#rust"), Some(TypingState::Active));
+        for secs in [4, 8, 60, 600] {
+            assert!(
+                s.on_tick(now + Duration::from_secs(secs))
+                    .iter()
+                    .all(|(id, _)| id != "net/bob"),
+                "a switched-off query must never be re-proposed (t+{secs}s)"
+            );
+        }
     }
 
     #[test]

@@ -1175,16 +1175,17 @@ fn handle_tagmsg(
     if tags.is_some_and(|t| t.contains_key("batch")) {
         return;
     }
-    // 2. A script suppressed this event.
-    if state.suppress_event_display {
-        return;
-    }
-    // 3. The user asked not to see typing. This gates INGESTION, not rendering:
+    // (Script suppression is NOT checked here. A TAGMSG arrives as `Command::Raw`,
+    //  which is not in `state_mutating` (`src/app/irc.rs`), so a script that
+    //  suppresses it returns from the dispatcher before `handle_irc_message` is
+    //  ever called — `state.suppress_event_display` is only ever set for the
+    //  state-mutating commands, and would always read `false` here.)
+    // 2. The user asked not to see typing. This gates INGESTION, not rendering:
     //    tracking it anyway would keep feeding the web clients (spec §5).
     if !state.typing_show {
         return;
     }
-    // 4. No typing tag: nothing else is implemented.
+    // 3. No typing tag: nothing else is implemented.
     let Some(typing_state) = tags.and_then(crate::irc::typing::parse_typing) else {
         return;
     };
@@ -1193,7 +1194,7 @@ fn handle_tagmsg(
     if nick.is_empty() {
         return;
     }
-    // 5. echo-message reflects our own TAGMSG back at us (spec §3.2).
+    // 4. echo-message reflects our own TAGMSG back at us (spec §3.2).
     if nick.eq_ignore_ascii_case(our_nick) {
         return;
     }
@@ -1209,7 +1210,7 @@ fn handle_tagmsg(
     let target = crate::irc::typing::strip_statusmsg(target, &statusmsg);
     let target_is_channel = is_channel(target);
 
-    // 6. Ignore list.
+    // 5. Ignore list.
     let ignore_level = if target_is_channel {
         IgnoreLevel::Public
     } else {
@@ -1232,7 +1233,7 @@ fn handle_tagmsg(
     let buffer_name = if target_is_channel { target } else { &nick };
     let buffer_id = make_buffer_id(conn_id, buffer_name);
 
-    // 7. Typing never creates a buffer: otherwise any stranger could pop a query
+    // 6. Typing never creates a buffer: otherwise any stranger could pop a query
     //    window open on your screen without ever sending a message.
     if !state.buffers.contains_key(&buffer_id) {
         return;
@@ -10453,15 +10454,39 @@ mod tests {
         assert_eq!(state.typing.nicks("test/#rust"), vec!["bob"]);
     }
 
+    /// A second network alongside `make_test_state`'s `test`, so a per-connection
+    /// claim can actually be falsified.
+    fn add_second_connection(state: &mut AppState, id: &str) {
+        let mut conn = state.connections["test"].clone();
+        conn.id = id.to_string();
+        conn.label = format!("{id}Server");
+        state.add_connection(conn);
+    }
+
     #[test]
     fn quit_clears_typing_only_on_that_connection() {
+        // The same nick is typing in the same channel name on two networks —
+        // an everyday thing on #rust. A QUIT belongs to ONE connection, so it
+        // must not clear the other's indicator. With a single-connection
+        // fixture this test would pass even if `handle_quit` cleared every
+        // connection, which is exactly what it is here to rule out.
         let mut state = make_test_state();
+        add_second_connection(&mut state, "other");
         state.add_buffer(make_channel_buffer("test", "#rust"));
+        state.add_buffer(make_channel_buffer("other", "#rust"));
         handle_irc_message(&mut state, "test", &tagmsg("alice", "#rust", "+typing", "active"));
+        handle_irc_message(&mut state, "other", &tagmsg("alice", "#rust", "+typing", "active"));
+        assert_eq!(state.typing.nicks("test/#rust"), vec!["alice"]);
+        assert_eq!(state.typing.nicks("other/#rust"), vec!["alice"]);
 
         let quit: IrcMessage = ":alice!u@h QUIT :bye\r\n".parse().expect("valid");
         handle_irc_message(&mut state, "test", &quit);
         assert!(state.typing.nicks("test/#rust").is_empty());
+        assert_eq!(
+            state.typing.nicks("other/#rust"),
+            vec!["alice"],
+            "a QUIT on one network says nothing about the other"
+        );
     }
 
     #[test]
@@ -10606,8 +10631,109 @@ mod tests {
         assert!(state.typing.nicks("test/#rust").is_empty());
     }
 
+    // === The `irc.typing` script event ===
+    //
+    // `emit_irc_to_scripts` needs an `App` (whose constructor touches disk), so
+    // the arm that builds the event is a free function over `&AppState`. These
+    // drive it directly — the old test here asserted `events::TYPING ==
+    // "irc.typing"`, a tautology about a constant that would have passed with
+    // the whole arm deleted.
+
+    use crate::app::scripting::typing_script_params;
+
     #[test]
-    fn typing_is_exposed_to_scripts() {
-        assert_eq!(crate::scripting::api::events::TYPING, "irc.typing");
+    fn a_tagmsg_hands_a_script_the_documented_params() {
+        // `docs/src/content/scripting-api.md` documents `nick`, `target` and
+        // `state`. (`connection_id` is added by the caller for every event.)
+        let state = make_test_state();
+        let params = typing_script_params(&state, "test", &tagmsg("alice", "#rust", "+typing", "active"))
+            .expect("a typing TAGMSG is scriptable");
+        assert_eq!(params["nick"], "alice");
+        assert_eq!(params["target"], "#rust");
+        assert_eq!(params["state"], "active");
+        assert_eq!(params.len(), 3);
+
+        // Every state reaches the script under its spec name — a script that
+        // only ever saw `active` could not tell when to take an indicator down.
+        for value in ["paused", "done"] {
+            let params =
+                typing_script_params(&state, "test", &tagmsg("alice", "#rust", "+typing", value))
+                    .expect("scriptable");
+            assert_eq!(params["state"], value);
+        }
+        // And the legacy pre-ratification tag is understood here too.
+        let params =
+            typing_script_params(&state, "test", &tagmsg("alice", "#rust", "+draft/typing", "active"))
+                .expect("scriptable");
+        assert_eq!(params["state"], "active");
+    }
+
+    #[test]
+    fn a_replayed_tagmsg_is_never_handed_to_a_script() {
+        // chathistory / event-playback replay (spec §3.3). Without the batch
+        // guard a script would act on typing from hours ago — the display path
+        // drops it, and the two must not disagree.
+        let state = make_test_state();
+        let msg: IrcMessage = "@batch=1;+typing=active :alice!u@h TAGMSG #rust\r\n"
+            .parse()
+            .expect("valid");
+        assert!(typing_script_params(&state, "test", &msg).is_none());
+    }
+
+    #[test]
+    fn our_own_echoed_tagmsg_is_never_handed_to_a_script() {
+        // `echo-message` reflects our own TAGMSG back at us (spec §3.2). A
+        // script told that we are typing at ourselves is a feedback loop.
+        let state = make_test_state();
+        let our_nick = state.connections["test"].nick.clone();
+        let msg = tagmsg(&our_nick, "#rust", "+typing", "active");
+        assert!(typing_script_params(&state, "test", &msg).is_none());
+        // Case-insensitively — the network may spell our nick differently.
+        let msg = tagmsg(&our_nick.to_uppercase(), "#rust", "+typing", "active");
+        assert!(typing_script_params(&state, "test", &msg).is_none());
+    }
+
+    #[test]
+    fn a_tagmsg_with_nothing_scriptable_in_it_emits_nothing() {
+        let state = make_test_state();
+        // No typing tag at all.
+        assert!(
+            typing_script_params(&state, "test", &tagmsg("alice", "#rust", "+example", "x"))
+                .is_none()
+        );
+        // An unparseable value.
+        assert!(
+            typing_script_params(&state, "test", &tagmsg("alice", "#rust", "+typing", "wat"))
+                .is_none()
+        );
+        // Not a TAGMSG.
+        let privmsg: IrcMessage = ":alice!u@h PRIVMSG #rust :hi\r\n".parse().expect("valid");
+        assert!(typing_script_params(&state, "test", &privmsg).is_none());
+    }
+
+    #[test]
+    fn the_script_target_is_statusmsg_stripped_like_the_display_path() {
+        // The display path resolves `@#rust` to `#rust`, and `target` is
+        // documented to scripts as "Channel or your nick". Handing over the raw
+        // `@#rust` means a script matching `target == "#rust"` silently misses
+        // every status-prefixed notification the status line does show.
+        let mut state = make_test_state();
+        state
+            .connections
+            .get_mut("test")
+            .expect("conn")
+            .isupport_parsed
+            .parse_tokens(&["STATUSMSG=@+"]);
+
+        let params = typing_script_params(&state, "test", &tagmsg("alice", "@#rust", "+typing", "active"))
+            .expect("scriptable");
+        assert_eq!(params["target"], "#rust");
+
+        // And `&local` is a CHANNEL, not a status-prefixed one — stripping it
+        // would hand the script a query name for a channel event.
+        let params =
+            typing_script_params(&state, "test", &tagmsg("alice", "&local", "+typing", "active"))
+                .expect("scriptable");
+        assert_eq!(params["target"], "&local");
     }
 }

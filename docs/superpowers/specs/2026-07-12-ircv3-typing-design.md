@@ -403,14 +403,16 @@ remains is still a channel. Otherwise use the target as-is.
 Then, in order, a message is **dropped** if any of these holds:
 
 1. it carries a `batch` tag (§3.3 — history replay)
-2. a script suppressed the event (`state.suppress_event_display`, §4.8)
-3. `typing.show` is off (§5 — the setting gates *ingestion*, not just rendering)
+2. `typing.show` is off (§5 — the setting gates *ingestion*, not just rendering)
+3. it carries no valid `+typing` tag (unknown/absent/empty value)
 4. the sender is us (§3.2 — `echo-message`)
 5. the sender is on the ignore list (`src/irc/ignore.rs`)
-6. it carries no valid `+typing` tag (unknown/absent/empty value)
-7. the target buffer does not already exist
+6. the target buffer does not already exist
 
-Rule 5 is deliberate: **typing never creates a buffer.** Otherwise any stranger could pop
+Script suppression is **not** one of them — it is enforced a layer up, before
+`handle_tagmsg` is reached at all. See §4.8.
+
+Rule 6 is deliberate: **typing never creates a buffer.** Otherwise any stranger could pop
 a query window open on your screen just by starting to type, with no message ever sent —
 a spam vector with no analogue in PRIVMSG handling, since we would have nothing to show.
 
@@ -629,10 +631,13 @@ New event constant `events::TYPING = "irc.typing"` (`src/scripting/api.rs:10`), 
 where script events are dispatched (`match &msg.command`, `:686-810`), and today every
 `Command::Raw`, TAGMSG included, falls into its `_ => return false` arm and emits nothing.
 
-`EventResult::Suppress` suppresses the state update. This comes for free: the dispatcher's
-verdict already lands in `state.suppress_event_display`, which `src/app/irc.rs:930-936` sets
-around the `handle_irc_message` call, and a TAGMSG carries nothing *but* the typing tag — so
-`handle_tagmsg` need only check that flag and return.
+`EventResult::Suppress` suppresses the state update, and it comes for free — but **not** via
+`state.suppress_event_display`, as an earlier draft of this document claimed. That flag is
+`script_suppressed && state_mutating`, and a TAGMSG arrives as `Command::Raw`, which is not
+in the `state_mutating` list (`src/app/irc.rs`). A script that suppresses a TAGMSG therefore
+takes the dispatcher's *early return* — `handle_irc_message` is never called, so
+`handle_tagmsg` never runs and has no flag to check. (Adding `Raw` to `state_mutating` would
+change the handling of every other raw command, so we do not.)
 
 ### 4.9 Persistence and sessions
 

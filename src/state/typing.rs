@@ -15,7 +15,6 @@ use crate::irc::typing::TypingState;
 
 /// One peer's typing state in one buffer.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct TypingEntry {
     pub state: TypingState,
     /// When this state was last refreshed — the TTL clock (spec §1.2).
@@ -41,7 +40,6 @@ pub struct TypingTracker {
     entries: HashMap<String, HashMap<String, TypingEntry>>,
 }
 
-#[allow(dead_code)]
 impl TypingTracker {
     /// Record a peer's typing state.
     ///

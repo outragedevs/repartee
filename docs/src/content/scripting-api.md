@@ -197,7 +197,7 @@ IRCv3 `+typing` client tag on a `TAGMSG`: someone started, paused, or stopped ty
 |---|---|---|
 | `connection_id` | string | |
 | `nick` | string | Who is typing |
-| `target` | string | Channel or your nick |
+| `target` | string | Channel or your nick — any `STATUSMSG` prefix (`@#chan`) is stripped, so this is what the status line shows |
 | `state` | string | `"active"`, `"paused"`, or `"done"` |
 
 Suppressing this event drops the typing indicator for that notification entirely — the tracker is never updated, so it behaves as if the `TAGMSG` was never received.

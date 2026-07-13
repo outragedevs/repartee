@@ -209,6 +209,8 @@ Inline spell checking. When `enabled = true`, misspelled words are underlined in
 
 IRCv3 `+typing` client tag support (typing indicators). `show = true` (default) receives and displays other people's typing status in the TUI status line and the web UI; set to `false` to stop showing it, both live and after reload. `send_channels` and `send_queries` independently control whether Repartee sends its own `+typing` while you type in a channel or a private query, respectively — turn either off if you'd rather not announce your own typing in that context. All three are booleans, so use `/set typing.show false` (not `off`) to disable one at runtime.
 
+Turning a send switch off at runtime stops all further notifications immediately, but it does **not** retract an indicator that is already on the wire: an indicator you have just sent lapses at the peer's own timeout — 6 seconds after your last `active`, or 30 seconds after a `paused` — rather than being taken down with an explicit `done`.
+
 ### `[web]`
 
 Embedded web frontend. When `enabled = true` and `WEB_PASSWORD` is set in `.env`, the app starts an HTTPS server alongside the terminal interface. Both share the same state — read a message on web, it's marked read on terminal, and vice versa.

@@ -894,6 +894,19 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                 }
             }
 
+            // The send switches need the same post-`/set` sync as `typing.show`.
+            // Turning one off makes the guard chain refuse that class of buffer,
+            // and `confirm_sent` only runs on a send that happened — so anything
+            // still outstanding would be re-proposed and re-refused on every tick
+            // for the life of the process. See `forget_switched_off_buffers`.
+            if path == "typing.send_channels" || path == "typing.send_queries" {
+                crate::app::typing::forget_switched_off_buffers(
+                    &mut app.typing,
+                    &app.state.buffers,
+                    &app.config.typing,
+                );
+            }
+
             if path == "display.mentions_buffer" {
                 if app.config.display.mentions_buffer {
                     app.create_mentions_buffer();
