@@ -1372,6 +1372,18 @@ fn handle_privmsg(
     let is_ctcp = text.starts_with('\x01') && text.ends_with('\x01');
     let is_action = is_ctcp && text.len() > 2 && text[1..text.len() - 1].starts_with("ACTION ");
 
+    // A message from this nick means they are no longer typing (spec §1.2).
+    //
+    // BEFORE the ignore check, like PART/KICK/QUIT/NICK: ignore suppresses the
+    // notification, not the state change. The levels do not even line up — a
+    // TAGMSG is gated at `Public`/`Msgs`, but this handler returns early on
+    // `Actions` and `Ctcps` too, so `/ignore alice ACTIONS` would let her typing
+    // in and then drop the very `/me` that retracts it, leaving the indicator up
+    // for the full TTL.
+    if state.typing.clear(&buffer_id, &nick) {
+        push_typing_web_event(state, &buffer_id);
+    }
+
     // --- Ignore check ---
     {
         let ignore_level = if is_action {
@@ -1398,11 +1410,6 @@ fn handle_privmsg(
         ) {
             return;
         }
-    }
-
-    // A message from this nick means they are no longer typing (spec §1.2).
-    if state.typing.clear(&buffer_id, &nick) {
-        push_typing_web_event(state, &buffer_id);
     }
 
     // Create query buffer if it doesn't exist for PMs. When we create or
@@ -1771,6 +1778,56 @@ fn handle_notice(
     // Server notices or pre-registration notices go to status buffer
     let is_server_notice = nick.is_none() || is_server_prefix(prefix);
 
+    // Resolved up here because the typing clear below needs it, and that has to
+    // happen before the ignore check can return.
+    //
+    // echo-message: when the server echoes our own notice to a user, the target
+    // is the recipient (e.g. "bob"). Route to that buffer, not ours.
+    let our_nick = state
+        .connections
+        .get(conn_id)
+        .map(|c| c.nick.as_str())
+        .unwrap_or_default();
+    let is_own = nick.as_deref() == Some(our_nick);
+
+    // For channel notices and echo-message echoes (is_own), the buffer is
+    // the target.  For incoming user notices the buffer is the sender's nick.
+    let buffer_name = if is_server_notice {
+        state
+            .connections
+            .get(conn_id)
+            .map_or("Status", |c| c.label.as_str())
+    } else if is_channel(target) || is_own {
+        target
+    } else {
+        nick.as_deref().unwrap_or("Status")
+    };
+
+    let buffer_id = make_buffer_id(conn_id, buffer_name);
+    // Fallback to server buffer if target buffer doesn't exist
+    let buffer_id = if state.buffers.contains_key(&buffer_id) {
+        buffer_id
+    } else {
+        let label = state
+            .connections
+            .get(conn_id)
+            .map_or("Status", |c| c.label.as_str());
+        make_buffer_id(conn_id, label)
+    };
+
+    // A message from this nick means they are no longer typing (spec §1.2).
+    //
+    // BEFORE the ignore check, like PART/KICK/QUIT/NICK: ignore suppresses the
+    // notification, not the state change. A TAGMSG is gated at `Public`/`Msgs`
+    // while this handler returns early on `Notices`, so `/ignore alice NOTICES`
+    // would otherwise let her typing in and then drop the notice that retracts
+    // it, leaving the indicator up for the full TTL.
+    if let Some(sender) = nick.as_deref()
+        && state.typing.clear(&buffer_id, sender)
+    {
+        push_typing_web_event(state, &buffer_id);
+    }
+
     // --- Ignore check (skip for server notices) ---
     if !is_server_notice {
         let (n, ident, host) = extract_nick_userhost(prefix);
@@ -1810,47 +1867,6 @@ fn handle_notice(
             "suppressing RPE2E ciphertext delivered in a NOTICE (protocol violation)"
         );
         return;
-    }
-
-    // echo-message: when the server echoes our own notice to a user, the
-    // target is the recipient (e.g. "bob"). Route to that buffer, not ours.
-    let our_nick = state
-        .connections
-        .get(conn_id)
-        .map(|c| c.nick.as_str())
-        .unwrap_or_default();
-    let is_own = nick.as_deref() == Some(our_nick);
-
-    // For channel notices and echo-message echoes (is_own), the buffer is
-    // the target.  For incoming user notices the buffer is the sender's nick.
-    let buffer_name = if is_server_notice {
-        state
-            .connections
-            .get(conn_id)
-            .map_or("Status", |c| c.label.as_str())
-    } else if is_channel(target) || is_own {
-        target
-    } else {
-        nick.as_deref().unwrap_or("Status")
-    };
-
-    let buffer_id = make_buffer_id(conn_id, buffer_name);
-    // Fallback to server buffer if target buffer doesn't exist
-    let buffer_id = if state.buffers.contains_key(&buffer_id) {
-        buffer_id
-    } else {
-        let label = state
-            .connections
-            .get(conn_id)
-            .map_or("Status", |c| c.label.as_str());
-        make_buffer_id(conn_id, label)
-    };
-
-    // A message from this nick means they are no longer typing (spec §1.2).
-    if let Some(sender) = nick.as_deref()
-        && state.typing.clear(&buffer_id, sender)
-    {
-        push_typing_web_event(state, &buffer_id);
     }
 
     let mode_prefix = nick
@@ -10437,6 +10453,129 @@ mod tests {
         });
         let quit: IrcMessage = ":alice!u@h QUIT :bye\r\n".parse().expect("valid");
         handle_irc_message(&mut state, "test", &quit);
+        assert!(state.typing.nicks("test/#rust").is_empty());
+    }
+
+    fn ignore(state: &mut AppState, mask: &str, levels: Vec<IgnoreLevel>) {
+        state.ignores.push(crate::config::IgnoreEntry {
+            mask: mask.to_string(),
+            levels,
+            channels: None,
+        });
+    }
+
+    #[test]
+    fn an_ignored_users_channel_typing_never_enters_the_tracker() {
+        // A channel TAGMSG is gated at `Public`, the same level as their PRIVMSGs.
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#rust"));
+        ignore(&mut state, "alice", vec![IgnoreLevel::Public]);
+
+        handle_irc_message(&mut state, "test", &tagmsg("alice", "#rust", "+typing", "active"));
+        assert!(
+            state.typing.nicks("test/#rust").is_empty(),
+            "an ignored user must not appear in the typing indicator"
+        );
+
+        // ...and the gate is the LEVEL, not the mere presence of an ignore:
+        // ignoring someone's notices says nothing about their channel typing.
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#rust"));
+        ignore(&mut state, "alice", vec![IgnoreLevel::Notices]);
+        handle_irc_message(&mut state, "test", &tagmsg("alice", "#rust", "+typing", "active"));
+        assert_eq!(state.typing.nicks("test/#rust"), vec!["alice"]);
+    }
+
+    #[test]
+    fn an_ignored_users_query_typing_never_enters_the_tracker() {
+        // A TAGMSG aimed at us is gated at `Msgs`, like a PM.
+        let mut state = make_test_state();
+        let our_nick = state.connections["test"].nick.clone();
+        let mut buf = make_channel_buffer("test", "alice");
+        buf.buffer_type = crate::state::buffer::BufferType::Query;
+        buf.id = "test/alice".to_string();
+        buf.name = "alice".to_string();
+        state.add_buffer(buf);
+        ignore(&mut state, "alice", vec![IgnoreLevel::Msgs]);
+
+        handle_irc_message(&mut state, "test", &tagmsg("alice", &our_nick, "+typing", "active"));
+        assert!(state.typing.nicks("test/alice").is_empty());
+    }
+
+    #[test]
+    fn an_ignored_action_still_clears_the_senders_typing() {
+        // The levels do not line up: a TAGMSG is gated at `Public`, but a CTCP
+        // ACTION is gated at `Actions`. `/ignore alice ACTIONS` therefore lets
+        // her typing in and then drops the very message that retracts it — so
+        // the clear must happen BEFORE the ignore returns, as it does for
+        // PART/KICK/QUIT/NICK.
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#rust"));
+        handle_irc_message(&mut state, "test", &tagmsg("alice", "#rust", "+typing", "active"));
+        assert_eq!(state.typing.nicks("test/#rust"), vec!["alice"]);
+
+        ignore(&mut state, "alice", vec![IgnoreLevel::Actions]);
+        let action: IrcMessage = ":alice!u@h PRIVMSG #rust :\x01ACTION waves\x01\r\n"
+            .parse()
+            .expect("valid");
+        handle_irc_message(&mut state, "test", &action);
+
+        assert!(
+            state.typing.nicks("test/#rust").is_empty(),
+            "her message arrived — she is no longer typing, ignored or not"
+        );
+        // The ignore still suppressed the line itself.
+        assert!(
+            state.buffers["test/#rust"]
+                .messages
+                .iter()
+                .all(|m| !m.text.contains("waves")),
+            "the ignore must still hide the message"
+        );
+    }
+
+    #[test]
+    fn an_ignored_notice_still_clears_the_senders_typing() {
+        // Same mismatch: TAGMSG at `Msgs`, NOTICE at `Notices`.
+        let mut state = make_test_state();
+        let mut buf = make_channel_buffer("test", "alice");
+        buf.buffer_type = crate::state::buffer::BufferType::Query;
+        buf.id = "test/alice".to_string();
+        buf.name = "alice".to_string();
+        state.add_buffer(buf);
+        let our_nick = state.connections["test"].nick.clone();
+        handle_irc_message(&mut state, "test", &tagmsg("alice", &our_nick, "+typing", "active"));
+        assert_eq!(state.typing.nicks("test/alice"), vec!["alice"]);
+
+        ignore(&mut state, "alice", vec![IgnoreLevel::Notices]);
+        let notice: IrcMessage = format!(":alice!u@h NOTICE {our_nick} :heads up\r\n")
+            .parse()
+            .expect("valid");
+        handle_irc_message(&mut state, "test", &notice);
+
+        assert!(state.typing.nicks("test/alice").is_empty());
+        assert!(
+            state.buffers["test/alice"]
+                .messages
+                .iter()
+                .all(|m| !m.text.contains("heads up")),
+            "the ignore must still hide the notice"
+        );
+    }
+
+    #[test]
+    fn kick_clears_typing_whatever_case_the_kicker_typed() {
+        // The KICK <user> parameter is not the server-canonical spelling the
+        // TAGMSG prefix carried — it is whatever the kicker typed. The nicklist
+        // removal right next to it already folds case; the typing clear must too,
+        // or a kicked user keeps "typing" in a channel they are no longer in.
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#rust"));
+        handle_irc_message(&mut state, "test", &tagmsg("Alice", "#rust", "+typing", "active"));
+        assert_eq!(state.typing.nicks("test/#rust"), vec!["Alice"]);
+
+        let kick: IrcMessage = ":bob!u@h KICK #rust aLiCe :out\r\n".parse().expect("valid");
+        handle_irc_message(&mut state, "test", &kick);
         assert!(state.typing.nicks("test/#rust").is_empty());
     }
 
