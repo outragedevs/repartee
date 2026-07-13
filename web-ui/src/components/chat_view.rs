@@ -136,6 +136,9 @@ pub fn ChatView() -> impl IntoView {
     let pending_anchor = StoredValue::new(None::<(String, String, f64)>);
 
     let do_pin = move |el: &web_sys::Element| {
+        if !state.is_at_bottom.get_untracked() {
+            state.is_at_bottom.set(true);
+        }
         let target = (el.scroll_height() - el.client_height()).max(0);
         if el.scroll_top() == target {
             pending_scroll_top.set_value(None);
