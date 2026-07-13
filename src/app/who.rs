@@ -108,14 +108,14 @@ impl App {
         tracing::trace!(conn_id, %chanlist, has_whox, "send_channel_query_batch: sending WHO+MODE");
         if let Some(fields) = crate::irc::events::build_whox_fields(&mut self.state, conn_id) {
             tracing::trace!(conn_id, %chanlist, %fields, "WHOX command");
-            let _ = handle.sender.send(::irc::proto::Command::Raw(
+            let _ = handle.sender().send(::irc::proto::Command::Raw(
                 "WHO".to_string(),
                 vec![chanlist.clone(), fields],
             ));
         } else {
             tracing::trace!(conn_id, %chanlist, "standard WHO (no WHOX)");
             let _ = handle
-                .sender
+                .sender()
                 .send(::irc::proto::Command::WHO(Some(chanlist.clone()), None));
         }
 
@@ -126,20 +126,20 @@ impl App {
             .get(conn_id)
             .is_some_and(|c| c.isupport_parsed.supports_multi_target_mode());
         if multi_mode {
-            let _ = handle.sender.send(::irc::proto::Command::Raw(
+            let _ = handle.sender().send(::irc::proto::Command::Raw(
                 "MODE".to_string(),
                 vec![chanlist],
             ));
         } else {
             for ch in &batch {
-                let _ = handle.sender.send(::irc::proto::Command::Raw(
+                let _ = handle.sender().send(::irc::proto::Command::Raw(
                     "MODE".to_string(),
                     vec![ch.clone()],
                 ));
             }
         }
         for ch in &batch {
-            let _ = handle.sender.send(::irc::proto::Command::Raw(
+            let _ = handle.sender().send(::irc::proto::Command::Raw(
                 "MODE".to_string(),
                 vec![ch.clone(), "b".to_string()],
             ));

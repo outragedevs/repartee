@@ -68,14 +68,6 @@ pub struct Connection {
     pub multiline: Option<crate::irc::multiline::MultilineLimits>,
     /// Monotonic counter for outbound multiline BATCH reference tags.
     pub batch_ref_counter: u64,
-    /// Snapshot of `general.flood_protection` at the moment this connection was
-    /// created. `flood_penalty_threshold` is baked into the crate's `Config`
-    /// at connect time and cannot be changed at runtime (`src/irc/mod.rs`), so
-    /// this is the only way to know whether the LIVE sender for this
-    /// connection still throttles — a later `/flood off` only affects
-    /// connections made after the toggle. See
-    /// `App::recompute_typing_flood_gate`.
-    pub flood_protected: bool,
 }
 
 impl Connection {

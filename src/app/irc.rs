@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use chrono::Utc;
 
 use crate::config;
-use crate::irc::{IrcEvent, IrcHandle};
+use crate::irc::IrcEvent;
 use crate::state::buffer::{
     ActivityLevel, Buffer, BufferType, Message, MessageType, make_buffer_id,
 };
@@ -59,9 +59,7 @@ impl App {
             batch_ref_counter: 0,
             silent_who_channels: HashSet::new(),
             silent_banlist_channels: HashSet::new(),
-            flood_protected: self.config.general.flood_protection,
         });
-        self.recompute_typing_flood_gate();
 
         // A newly registered connection may add a network the keyring's
         // configured-network set (snapshotted at startup) doesn't know about —
@@ -261,14 +259,7 @@ impl App {
             tokio::spawn(async move {
                 match crate::irc::connect_server(&id, &cfg, &general).await {
                     Ok((handle, mut rx)) => {
-                        let _ = tx
-                            .send(IrcEvent::HandleReady(
-                                handle.conn_id.clone(),
-                                handle.sender,
-                                handle.local_ip,
-                                handle.outgoing_handle,
-                            ))
-                            .await;
+                        let _ = tx.send(IrcEvent::HandleReady(Box::new(handle))).await;
                         while let Some(event) = rx.recv().await {
                             if tx.send(event).await.is_err() {
                                 break;
@@ -336,20 +327,12 @@ impl App {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn handle_irc_event(&mut self, event: IrcEvent) {
         match event {
-            IrcEvent::HandleReady(conn_id, sender, local_ip, outgoing_handle) => {
+            IrcEvent::HandleReady(handle) => {
                 // Store local IP on Connection state (for DCC own-IP fallback)
-                if let Some(conn) = self.state.connections.get_mut(&conn_id) {
-                    conn.local_ip = local_ip;
+                if let Some(conn) = self.state.connections.get_mut(&handle.conn_id) {
+                    conn.local_ip = handle.local_ip;
                 }
-                self.irc_handles.insert(
-                    conn_id.clone(),
-                    IrcHandle {
-                        conn_id,
-                        sender,
-                        local_ip,
-                        outgoing_handle,
-                    },
-                );
+                self.irc_handles.insert(handle.conn_id.clone(), *handle);
             }
             IrcEvent::NegotiationInfo(conn_id, diag) => {
                 // Display CAP/SASL diagnostics in status buffer — fires immediately
@@ -503,7 +486,7 @@ impl App {
                     if !extra.is_empty() {
                         let chanlist = extra.join(",");
                         let _ = handle
-                            .sender
+                            .sender()
                             .send(::irc::proto::Command::JOIN(chanlist, None, None));
                     }
                 }
@@ -586,7 +569,7 @@ impl App {
                             {
                                 let req_str = to_request.join(" ");
                                 tracing::info!("sending CAP REQ for new caps: {req_str}");
-                                let _ = handle.sender.send(::irc::proto::Command::CAP(
+                                let _ = handle.sender().send(::irc::proto::Command::CAP(
                                     None,
                                     CapSubCommand::REQ,
                                     None,
@@ -777,7 +760,7 @@ impl App {
                         if self.state.e2e_manager.is_some()
                             && let Some(handle) = self.irc_handles.get(&conn_id)
                         {
-                            let _ = handle.sender.send(::irc::proto::Command::Raw(
+                            let _ = handle.sender().send(::irc::proto::Command::Raw(
                                 "USERHOST".to_string(),
                                 vec![confirmed_nick.clone()],
                             ));

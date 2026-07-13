@@ -22,16 +22,6 @@ use crate::app::App;
 use crate::irc::typing::{self, THROTTLE, TypingState};
 use crate::state::buffer::BufferType;
 
-/// Mirrors `flood_penalty_threshold` in `src/irc/mod.rs:396`.
-const PENALTY_THRESHOLD_MS: u64 = 10_000;
-/// `command_penalty` for `Command::Raw` (2000) + `length_penalty` for a short
-/// frame (1000) — `irc-repartee-1.5.1/src/client/mod.rs:992-1045`.
-const TAGMSG_COST_MS: u64 = 3_000;
-/// The same, for a short PRIVMSG.
-const MESSAGE_COST_MS: u64 = 3_000;
-/// Budget we refuse to spend on typing, so the user's real messages keep theirs.
-const RESERVED_MS: u64 = 4_000;
-
 /// Where a typing signal came from. Each web session is its own source.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypingSource {
@@ -56,68 +46,18 @@ struct TargetState {
     last_sent: Option<Instant>,
 }
 
-/// A conservative mirror of the crate's outgoing penalty counter.
-///
-/// This has to exist because `Sender::send` feeds an `UnboundedSender`
-/// (`client/mod.rs:940-947`): a frame handed over while the penalty is high is
-/// not dropped, it is **buffered and delayed** (`client/mod.rs:1166-1180`). A
-/// typing notification that arrives late is worse than none, and it spends
-/// budget the user's next real message needs. So the decision not to send has to
-/// be taken here, before the frame reaches the queue.
-///
-/// If the crate's penalty formula changes, this must change with it.
-#[derive(Debug, Default)]
-struct FloodEstimate {
-    penalty_ms: u64,
-    last_drain: Option<Instant>,
-}
-
-impl FloodEstimate {
-    fn drain(&mut self, now: Instant) {
-        if let Some(last) = self.last_drain {
-            let elapsed = u64::try_from(now.duration_since(last).as_millis()).unwrap_or(u64::MAX);
-            self.penalty_ms = self.penalty_ms.saturating_sub(elapsed);
-        }
-        self.last_drain = Some(now);
-    }
-
-    fn charge(&mut self, now: Instant, cost_ms: u64) {
-        self.drain(now);
-        self.penalty_ms = self.penalty_ms.saturating_add(cost_ms);
-    }
-
-    /// Room for one more TAGMSG without eating into the reserve?
-    fn has_headroom(&mut self, now: Instant) -> bool {
-        self.drain(now);
-        self.penalty_ms + TAGMSG_COST_MS <= PENALTY_THRESHOLD_MS.saturating_sub(RESERVED_MS)
-    }
-}
-
 /// Proposes typing notifications. Pure — no clock, no I/O.
-#[derive(Debug)]
+///
+/// It holds **no flood state**. The budget is the *connection's*, not the
+/// machine's: each `IrcHandle` carries its own mirror of that connection's
+/// penalty counter and charges it on every send, so the headroom question can
+/// only be answered where the connection is known — `App::send_typing`.
+#[derive(Debug, Default)]
 pub struct TypingSender {
     sources: HashMap<TypingSource, SourceState>,
     targets: HashMap<String, TargetState>,
     /// Real messages we sent, per target — for the §3.1 suppression window.
     last_message: HashMap<String, Instant>,
-    flood: FloodEstimate,
-    /// Mirrors `general.flood_protection`. When the user disables flood
-    /// protection the crate applies no penalty at all (`flood_penalty_threshold:
-    /// 0`, `src/irc/mod.rs:396-399`), so the headroom check must be skipped —
-    /// otherwise the mirror would suppress typing the crate itself never throttles.
-    pub flood_enabled: bool,
-}
-
-impl Default for TypingSender {
-    fn default() -> Self {
-        Self {
-            sources: HashMap::new(),
-            targets: HashMap::new(),
-            last_message: HashMap::new(),
-            flood: FloodEstimate::default(),
-            flood_enabled: true,
-        }
-    }
 }
 
 impl TypingSender {
@@ -154,15 +94,11 @@ impl TypingSender {
     /// A source submitted something. Sends nothing itself: a real message's
     /// own PRIVMSG clears typing at the receivers.
     ///
-    /// `sent_message` distinguishes the two effects a submit can have:
-    /// * The flood charge is unconditional — `/help`, `/whois`, etc. all
-    ///   consume real crate budget too (some, like `/whois`, cost more than a
-    ///   PRIVMSG), so the mirror must stay conservative and charge for every
-    ///   submit, command or not.
-    /// * The §3.1 suppression window (`last_message`) is recorded only when
-    ///   `sent_message` is true — a local command like `/set` never reaches
-    ///   the network, so it must not falsely suppress typing in the current
-    ///   buffer for the next 3 seconds.
+    /// `sent_message` gates the §3.1 suppression window (`last_message`): a
+    /// local command like `/set` never reaches the network, so it must not
+    /// falsely suppress typing in the current buffer for the next 3 seconds.
+    /// (The flood budget needs no help from here — whatever the submit puts on
+    /// the wire is charged by `IrcSender::send` itself.)
     pub fn on_submit(
         &mut self,
         source: &TypingSource,
@@ -173,7 +109,6 @@ impl TypingSender {
         if sent_message {
             self.last_message.insert(buffer_id.to_string(), now);
         }
-        self.flood.charge(now, MESSAGE_COST_MS);
         if let Some(s) = self.sources.get_mut(source) {
             s.active = false;
             s.last_activity = now;
@@ -213,15 +148,14 @@ impl TypingSender {
     }
 
     /// Record that a proposal actually reached the wire. `App` calls this only
-    /// after every guard passed and `Sender::send` succeeded.
+    /// after every guard passed and the send succeeded.
     pub fn confirm_sent(&mut self, buffer_id: &str, state: TypingState, now: Instant) {
-        self.flood.charge(now, TAGMSG_COST_MS);
         let entry = self.targets.entry(buffer_id.to_string()).or_default();
         entry.last_sent = Some(now);
         entry.sent = (state != TypingState::Done).then_some(state);
     }
 
-    fn propose(&mut self, buffer_ids: &[String], now: Instant) -> Vec<(String, TypingState)> {
+    fn propose(&self, buffer_ids: &[String], now: Instant) -> Vec<(String, TypingState)> {
         let mut out = Vec::new();
         for buffer_id in buffer_ids {
             if let Some(state) = self.next_state(buffer_id, now) {
@@ -232,7 +166,7 @@ impl TypingSender {
     }
 
     /// The notification this target needs right now, if any.
-    fn next_state(&mut self, buffer_id: &str, now: Instant) -> Option<TypingState> {
+    fn next_state(&self, buffer_id: &str, now: Instant) -> Option<TypingState> {
         let desired = self.desired(buffer_id, now);
         let sent = self.targets.get(buffer_id).and_then(|t| t.sent);
 
@@ -259,12 +193,11 @@ impl TypingSender {
         if self.suppressed_by_message(buffer_id, now) {
             return None;
         }
-        // Never hand a frame to the transport when the budget is tight (§3.1).
-        // Skipped entirely when the user disabled flood protection — the crate
-        // applies no penalty in that case, so there is no headroom to run out of.
-        if self.flood_enabled && !self.flood.has_headroom(now) {
-            return None;
-        }
+        // The flood gate is NOT here: it belongs to the target's connection, and
+        // this machine does not know which connection a buffer is on.
+        // `App::send_typing` asks that connection's handle and simply declines to
+        // send; the proposal is then reconsidered on the next tick, exactly like
+        // one blocked by the throttle above.
         Some(needed)
     }
 
@@ -329,16 +262,6 @@ impl TypingSender {
 }
 
 impl App {
-    /// The machine's flood gate mirrors what the LIVE senders actually do.
-    /// `flood_penalty_threshold` is baked into each connection at creation and
-    /// cannot be changed at runtime, so a toggle only affects FUTURE connections:
-    /// the gate must stay on while any live sender still throttles (or the config
-    /// says the next connection will).
-    pub(crate) fn recompute_typing_flood_gate(&mut self) {
-        self.typing.flood_enabled = self.config.general.flood_protection
-            || self.state.connections.values().any(|c| c.flood_protected);
-    }
-
     /// The terminal's input changed — a keystroke or a paste.
     pub(crate) fn on_input_changed(&mut self) {
         let Some(buffer_id) = self.state.active_buffer_id.clone() else {
@@ -458,8 +381,18 @@ impl App {
         let Some(handle) = self.irc_handles.get(&conn_id) else {
             return false;
         };
+        // Never hand a frame to the transport when THIS connection's budget is
+        // tight (§3.1). A frame accepted under pressure is not dropped by the
+        // crate — it is buffered and delayed, so it would land stale AND push
+        // the user's next real message further back in the queue. The handle's
+        // budget sees every send on this connection (the WHO/MODE burst on
+        // autojoin, lag PINGs, multiline pastes), and it is a no-op on a
+        // connection opened with flood protection off.
+        if !handle.sender().has_typing_headroom() {
+            return false;
+        }
         if handle
-            .sender
+            .sender()
             .send(typing::build_tagmsg(&target, state))
             .is_err()
         {
@@ -473,6 +406,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::irc::handle::{FLOOD_PENALTY_THRESHOLD_MS, IrcSender};
     use std::time::Duration;
 
     fn t0() -> Instant {
@@ -712,8 +646,8 @@ mod tests {
     #[test]
     fn a_local_command_does_not_suppress_typing() {
         // /help, /set etc. send nothing to the network: typing right after must
-        // not be suppressed (the flood charge still applies, but the budget has
-        // room for one frame).
+        // not be suppressed. (Whatever a command *does* put on the wire is
+        // charged by the connection's own sender, not by this machine.)
         let mut s = TypingSender::default();
         let now = t0();
         s.on_submit(&tui(), "net/#rust", false, now);
@@ -724,49 +658,83 @@ mod tests {
     }
 
     #[test]
-    fn typing_stops_when_the_flood_budget_runs_low() {
-        // A frame handed to Sender::send under pressure is QUEUED and delayed,
-        // not dropped (client/mod.rs:1166-1180). So we must refuse to send here.
-        let mut s = TypingSender::default();
-        let mut now = t0();
-        // Burn the budget with real messages in another buffer.
-        for _ in 0..3 {
-            s.on_submit(&tui(), "net/#other", true, now);
-            now += Duration::from_millis(100);
+    fn typing_stops_when_the_connections_flood_budget_runs_low() {
+        // A frame handed to the transport under pressure is QUEUED and delayed,
+        // not dropped, so `App::send_typing` must refuse it up front. The gate
+        // it consults is the connection's own budget.
+        let now = t0();
+        let conn = IrcSender::capturing(u64::from(FLOOD_PENALTY_THRESHOLD_MS));
+        // Two channel WHOs — an ordinary autojoin — cost 6000ms.
+        for chan in ["#other", "#more"] {
+            conn.send_at(
+                ::irc::proto::Command::WHO(Some(chan.to_string()), None),
+                now,
+            )
+            .unwrap();
         }
-        // Typing in a fresh buffer is now refused: no headroom left.
         assert!(
-            s.on_activity(tui(), "net/#rust", true, now).is_empty(),
+            !conn.has_typing_headroom_at(now),
             "typing must not be handed to the transport when the budget is tight"
         );
 
         // Once the penalty has drained, typing resumes.
-        let later = now + Duration::from_secs(10);
-        assert_eq!(
-            s.on_activity(tui(), "net/#rust", true, later),
-            vec![("net/#rust".to_string(), TypingState::Active)]
-        );
+        assert!(conn.has_typing_headroom_at(now + Duration::from_secs(10)));
     }
 
     #[test]
-    fn flood_gate_is_skipped_when_flood_protection_is_disabled() {
-        // The crate applies zero penalty when `general.flood_protection` is
-        // off (`flood_penalty_threshold: 0`), so mirroring the gate here would
-        // needlessly suppress typing. `flood_enabled = false` must bypass it.
-        let mut s = TypingSender {
-            flood_enabled: false,
-            ..TypingSender::default()
-        };
+    fn typing_is_suppressed_only_on_the_busy_connection() {
+        // The regression. The crate's penalty counter lives inside each
+        // connection's `Outgoing`, so a burst on Libera says nothing about
+        // OFTC's budget. The old app-side mirror was ONE global estimate: two
+        // messages on Libera silenced typing in an OFTC query whose budget was
+        // untouched.
+        let now = t0();
+        let threshold = u64::from(FLOOD_PENALTY_THRESHOLD_MS);
+        let libera = IrcSender::capturing(threshold);
+        let oftc = IrcSender::capturing(threshold);
+
+        // Autojoin on Libera: a WHO per channel. None of this went through the
+        // old mirror, which is the second half of the bug — it read 0.
+        for chan in ["#rust", "#tokio", "#linux"] {
+            libera
+                .send_at(
+                    ::irc::proto::Command::WHO(Some(chan.to_string()), None),
+                    now,
+                )
+                .unwrap();
+        }
+        assert!(
+            !libera.has_typing_headroom_at(now),
+            "the connection that actually spent the budget must be gated"
+        );
+        assert!(
+            oftc.has_typing_headroom_at(now),
+            "an idle connection's budget must be untouched by another's traffic"
+        );
+
+        // And a TAGMSG for a query on OFTC still reaches the wire.
+        oftc.send_at(typing::build_tagmsg("bob", TypingState::Active), now)
+            .unwrap();
+        let sent = oftc.captured();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].to_string(), "@+typing=active TAGMSG bob\r\n");
+    }
+
+    #[test]
+    fn the_machine_holds_no_cross_connection_flood_state() {
+        // Submits in a buffer on one network must not gate typing in a buffer
+        // on another. The budget is the connection's, not the machine's — the
+        // machine proposes, `App::send_typing` asks the target's own handle.
+        let mut s = TypingSender::default();
         let mut now = t0();
-        // Burn the budget with real messages, same as the enabled-gate test.
         for _ in 0..3 {
-            s.on_submit(&tui(), "net/#other", true, now);
+            s.on_submit(&tui(), "libera/#other", true, now);
             now += Duration::from_millis(100);
         }
-        // With the gate disabled, typing is still proposed despite the budget.
         assert_eq!(
-            s.on_activity(tui(), "net/#rust", true, now),
-            vec![("net/#rust".to_string(), TypingState::Active)]
+            s.on_activity(tui(), "oftc/#rust", true, now),
+            vec![("oftc/#rust".to_string(), TypingState::Active)],
+            "traffic on one connection must not suppress typing on another"
         );
     }
 

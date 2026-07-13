@@ -301,7 +301,7 @@ impl App {
                         },
                     );
                     if let Some(handle) = self.irc_handles.get(&conn_id) {
-                        let _ = handle.sender.send(::irc::proto::Command::QUIT(Some(
+                        let _ = handle.sender().send(::irc::proto::Command::QUIT(Some(
                             "Ping timeout".to_string(),
                         )));
                     }
@@ -322,7 +322,7 @@ impl App {
                     .to_string();
                 if let Some(handle) = self.irc_handles.get(&conn_id) {
                     let _ = handle
-                        .sender
+                        .sender()
                         .send(::irc::proto::Command::Raw("PING".to_string(), vec![ts]));
                 }
                 self.lag_pings.insert(conn_id.clone(), now);

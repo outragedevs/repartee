@@ -813,7 +813,6 @@ impl App {
             cli_bind_override: None,
             typing: crate::app::typing::TypingSender::default(),
         };
-        app.recompute_typing_flood_gate();
         app.recompute_wrap_indent();
 
         if app.config.spellcheck.enabled {
@@ -1103,9 +1102,6 @@ impl App {
             batch_ref_counter: 0,
             silent_who_channels: HashSet::new(),
             silent_banlist_channels: HashSet::new(),
-            // Synthetic placeholder — never a live IRC sender, so it must
-            // never force the typing flood gate on.
-            flood_protected: false,
         });
         state.add_buffer(Buffer {
             id: buf_id.clone(),
@@ -1570,7 +1566,7 @@ impl App {
         let default_quit = crate::constants::default_quit_message();
         let quit_msg = self.quit_message.as_deref().unwrap_or(&default_quit);
         for handle in self.irc_handles.values() {
-            let _ = handle.sender.send_quit(quit_msg);
+            let _ = handle.sender().send_quit(quit_msg);
         }
         for _ in 0..10 {
             tokio::task::yield_now().await;

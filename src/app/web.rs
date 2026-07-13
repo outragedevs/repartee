@@ -360,7 +360,7 @@ impl App {
                 }
                 continue;
             };
-            if let Err(e) = handle.sender.send_notice(&send.target, &send.notice_text) {
+            if let Err(e) = handle.sender().send_notice(&send.target, &send.notice_text) {
                 tracing::warn!(
                     target = %send.target,
                     error = %e,

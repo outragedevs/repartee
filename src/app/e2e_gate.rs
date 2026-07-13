@@ -741,7 +741,7 @@ impl super::App {
                 .get(conn_id)
                 .ok_or_else(|| "connection unavailable".to_string())
                 .and_then(|h| {
-                    h.sender
+                    h.sender()
                         .send_privmsg(target, wire)
                         .map_err(|e| e.to_string())
                 });
@@ -962,7 +962,6 @@ mod tests {
             batch_ref_counter: 0,
             silent_who_channels: std::collections::HashSet::new(),
             silent_banlist_channels: std::collections::HashSet::new(),
-            flood_protected: false,
         });
         state.e2e_manager = Some(Arc::new(make_manager()));
         state

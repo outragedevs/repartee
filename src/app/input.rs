@@ -1582,7 +1582,7 @@ impl App {
                     crate::irc::multiline::multiline_frames(&buffer_name, &batch_ref, batch);
                 if let Some(handle) = self.irc_handles.get(&conn_id) {
                     for frame in frames {
-                        if handle.sender.send(frame).is_err() {
+                        if handle.sender().send(frame).is_err() {
                             send_failed = true;
                             break 'batches;
                         }
@@ -1647,7 +1647,7 @@ impl App {
                 };
                 for chunk in chunks {
                     if let Some(handle) = self.irc_handles.get(&conn_id)
-                        && handle.sender.send_privmsg(&buffer_name, &chunk).is_err()
+                        && handle.sender().send_privmsg(&buffer_name, &chunk).is_err()
                     {
                         crate::commands::helpers::add_local_event(self, "Failed to send message");
                         return;
@@ -1681,7 +1681,7 @@ impl App {
         for wire in wire_lines {
             // Try to send via IRC if connected
             if let Some(handle) = self.irc_handles.get(&conn_id)
-                && handle.sender.send_privmsg(&buffer_name, &wire).is_err()
+                && handle.sender().send_privmsg(&buffer_name, &wire).is_err()
             {
                 crate::commands::helpers::add_local_event(self, "Failed to send message");
                 return;
@@ -1755,10 +1755,13 @@ impl App {
     }
 
     /// Get the IRC sender for the active buffer's connection, if connected.
-    pub fn active_irc_sender(&self) -> Option<&::irc::client::Sender> {
+    ///
+    /// The returned [`crate::irc::IrcSender`] charges the connection's flood
+    /// budget on every send — there is no way to reach the socket around it.
+    pub fn active_irc_sender(&self) -> Option<&crate::irc::IrcSender> {
         let buf = self.state.active_buffer()?;
         let handle = self.irc_handles.get(&buf.connection_id)?;
-        Some(&handle.sender)
+        Some(handle.sender())
     }
 
     /// Get the connection ID of the active buffer.

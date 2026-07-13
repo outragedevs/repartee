@@ -994,7 +994,6 @@ mod tests {
             batch_ref_counter: 0,
             silent_who_channels: std::collections::HashSet::new(),
             silent_banlist_channels: std::collections::HashSet::new(),
-            flood_protected: false,
         }
     }
 

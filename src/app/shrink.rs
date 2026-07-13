@@ -536,7 +536,7 @@ impl App {
                 send_ok = false;
                 break;
             };
-            if handle.sender.send_privmsg(&out.buffer_name, &wire).is_err() {
+            if handle.sender().send_privmsg(&out.buffer_name, &wire).is_err() {
                 tracing::warn!(
                     conn_id = %out.conn_id,
                     target = %out.buffer_name,

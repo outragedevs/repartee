@@ -370,8 +370,8 @@ impl App {
     }
 
     /// Get an IRC sender for a resolved connection ID.
-    fn irc_sender_for(&self, conn_id: &str) -> Option<&::irc::client::Sender> {
-        self.irc_handles.get(conn_id).map(|h| &h.sender)
+    fn irc_sender_for(&self, conn_id: &str) -> Option<&crate::irc::IrcSender> {
+        self.irc_handles.get(conn_id).map(crate::irc::IrcHandle::sender)
     }
 
     /// Process a single `ScriptAction` from the scripting channel.

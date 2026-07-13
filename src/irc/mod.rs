@@ -5,6 +5,7 @@ pub mod events;
 pub mod extban;
 pub mod flood;
 pub mod formatting;
+pub mod handle;
 pub mod ignore;
 pub mod isupport;
 pub mod multiline;
@@ -21,6 +22,8 @@ use irc::client::prelude::*;
 use tokio::sync::mpsc;
 
 use crate::irc::cap::{DESIRED_CAPS, ServerCaps};
+pub use crate::irc::handle::{IrcHandle, IrcSender};
+use crate::irc::handle::FLOOD_PENALTY_THRESHOLD_MS;
 
 const IRC_PING_TIMEOUT_SECS: u32 = 60;
 
@@ -38,14 +41,10 @@ pub enum IrcEvent {
     ),
     /// The connection was lost, optionally with an error description.
     Disconnected(String, Option<String>),
-    /// An IRC handle (sender) is ready after async connection completes.
-    /// Fields: `conn_id`, `sender`, `local_ip`, `outgoing_task_handle`.
-    HandleReady(
-        String,
-        irc::client::Sender,
-        Option<std::net::IpAddr>,
-        Option<tokio::task::JoinHandle<()>>,
-    ),
+    /// An IRC handle is ready after async connection completes. Boxed because
+    /// it is by far the largest variant, and it carries the connection's flood
+    /// budget — the raw `irc::client::Sender` never leaves `crate::irc`.
+    HandleReady(Box<IrcHandle>),
     /// Diagnostic messages from CAP/SASL negotiation (fires immediately).
     NegotiationInfo(String, Vec<String>),
 }
@@ -61,17 +60,6 @@ struct NegotiateResult {
     early_messages: Vec<irc::proto::Message>,
     /// Parsed `draft/multiline` limits when the cap was enabled, else `None`.
     multiline_limits: Option<crate::irc::multiline::MultilineLimits>,
-}
-
-/// Handle to a connected IRC client, holding the connection ID and send-side.
-pub struct IrcHandle {
-    pub conn_id: String,
-    pub sender: irc::client::Sender,
-    /// Local IP of the TCP socket (for DCC own-IP fallback).
-    pub local_ip: Option<std::net::IpAddr>,
-    /// Handle to the outgoing message task spawned by the irc crate.
-    /// Aborted on disconnect to prevent CLOSE-WAIT socket leaks.
-    pub outgoing_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// SASL authentication mechanism.
@@ -359,6 +347,15 @@ pub async fn connect_server(
         .map(|i| format!("{nick}{}", "_".repeat(i)))
         .collect();
 
+    // Baked into this connection's `Outgoing` for its whole life — a later
+    // `/flood off` only affects connections opened after the toggle, so the
+    // handle's own budget carries the same number.
+    let penalty_threshold = if general.flood_protection {
+        FLOOD_PENALTY_THRESHOLD_MS
+    } else {
+        0 // disabled: the crate applies no penalty at all
+    };
+
     let irc_config = Config {
         nickname: Some(nick.to_string()),
         alt_nicks,
@@ -393,11 +390,7 @@ pub async fn connect_server(
         client_cert_path: server_config.client_cert_path.clone(),
         bind_address: server_config.bind_ip.clone(),
         ping_timeout: Some(IRC_PING_TIMEOUT_SECS),
-        flood_penalty_threshold: Some(if general.flood_protection {
-            10_000 // default: 10s, matches IRCd excess flood limit
-        } else {
-            0 // disabled
-        }),
+        flood_penalty_threshold: Some(penalty_threshold),
         ..Config::default()
     };
 
@@ -497,12 +490,13 @@ pub async fn connect_server(
     });
 
     Ok((
-        IrcHandle {
-            conn_id: id2,
+        IrcHandle::new(
+            id2,
             sender,
             local_ip,
             outgoing_handle,
-        },
+            u64::from(penalty_threshold),
+        ),
         rx,
     ))
 }

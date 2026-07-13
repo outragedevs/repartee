@@ -116,7 +116,6 @@ pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
             // Sync derived state from new config
             app.state.scrollback_limit = app.config.display.scrollback_lines;
             app.state.flood_protection = app.config.general.flood_protection;
-            app.recompute_typing_flood_gate();
             app.state
                 .flood_exemptions
                 .clone_from(&app.config.general.flood_exemptions);
@@ -202,7 +201,6 @@ pub(crate) fn cmd_flood(app: &mut App, args: &[String]) {
     if subcmd.eq_ignore_ascii_case("on") || subcmd.eq_ignore_ascii_case("enable") {
         app.config.general.flood_protection = true;
         app.state.flood_protection = true;
-        app.recompute_typing_flood_gate();
         save_flood_settings(app);
         add_local_event(app, &format!("{C_OK}Flood protection enabled{C_RST}"));
         return;
@@ -211,12 +209,11 @@ pub(crate) fn cmd_flood(app: &mut App, args: &[String]) {
     if subcmd.eq_ignore_ascii_case("off") || subcmd.eq_ignore_ascii_case("disable") {
         app.config.general.flood_protection = false;
         app.state.flood_protection = false;
-        // Do NOT force flood_enabled off here: any LIVE connection created
-        // while flood protection was on still has its penalty threshold
-        // baked in (the crate has no runtime reconfig) and is still
-        // throttling. recompute_typing_flood_gate() keeps the gate on as
-        // long as such a connection exists.
-        app.recompute_typing_flood_gate();
+        // Only affects FUTURE connections: `flood_penalty_threshold` is baked
+        // into the crate's `Config` at connect time and there is no runtime
+        // reconfig, so a live connection keeps throttling — and keeps the
+        // matching threshold on its own `IrcSender` budget — until it is
+        // reopened.
         save_flood_settings(app);
         add_local_event(app, &format!("{C_OK}Flood protection disabled{C_RST}"));
         return;

@@ -213,7 +213,7 @@ pub(crate) fn cmd_close(app: &mut App, args: &[String]) {
             };
             if let Some(handle) = app.irc_handles.get(&conn_id) {
                 let _ = handle
-                    .sender
+                    .sender()
                     .send(irc::proto::Command::PART(buf_name, Some(reason)));
             }
             app.state.remove_buffer(&buf_id);

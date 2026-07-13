@@ -5591,7 +5591,6 @@ mod tests {
             who_token_counter: 0,
             multiline: None,
             batch_ref_counter: 0,
-            flood_protected: false,
             silent_who_channels: std::collections::HashSet::new(),
             silent_banlist_channels: std::collections::HashSet::new(),
         });
@@ -9768,7 +9767,6 @@ mod tests {
             who_token_counter: 0,
             multiline: None,
             batch_ref_counter: 0,
-            flood_protected: false,
             silent_who_channels: std::collections::HashSet::new(),
             silent_banlist_channels: std::collections::HashSet::new(),
         });
