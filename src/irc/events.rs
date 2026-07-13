@@ -339,7 +339,8 @@ pub fn handle_connected(state: &mut AppState, conn_id: &str) {
     // Do NOT clear enabled_caps — the caller sets them from the CAP negotiation
     // result (IrcEvent::Connected carries the negotiated caps). On reconnect,
     // `conn.enabled_caps = enabled_caps` at the call site replaces the old set
-    // entirely, so stale caps from a previous session are already gone.
+    // entirely, and `handle_disconnected` already emptied it when the previous
+    // session ended, so stale caps are gone either way.
     if let Some(conn) = state.connections.get_mut(conn_id) {
         conn.reconnect_attempts = 0;
         conn.next_reconnect = None;
@@ -435,11 +436,26 @@ pub fn handle_disconnected(state: &mut AppState, conn_id: &str, error: Option<&s
         state.update_connection_status(conn_id, ConnectionStatus::Disconnected);
     }
 
+    // Nobody is typing over a socket that is gone. No `done` can ever arrive, so
+    // without this the indicators sit there for the full TTL (30s after a
+    // `paused`) and survive into the reconnect.
+    for buf_id in state.typing.clear_connection(conn_id) {
+        push_typing_web_event(state, &buf_id);
+    }
+
     // Store joined channels and set up reconnect schedule
     if let Some(conn) = state.connections.get_mut(conn_id) {
         if !current_channels.is_empty() {
             conn.joined_channels = current_channels;
         }
+        // The negotiated caps and ISUPPORT belong to the session that just
+        // ended; both are only ever repopulated at RPL_WELCOME. The IRC handle,
+        // however, comes back at `HandleReady` — as soon as the socket is up,
+        // before CAP negotiation — so anything consulting them in between (the
+        // `+typing` gate, on every tick) would be answering with the previous
+        // server's rules. Drop them with the connection.
+        conn.enabled_caps.clear();
+        conn.isupport_parsed = crate::irc::isupport::Isupport::default();
         if conn.should_reconnect {
             let delay =
                 calculate_reconnect_delay(conn.reconnect_delay_secs, conn.reconnect_attempts);
@@ -6391,6 +6407,54 @@ mod tests {
         assert_eq!(
             state.connections.get("test").unwrap().status,
             ConnectionStatus::Disconnected
+        );
+    }
+
+    #[test]
+    fn disconnect_drops_the_negotiated_caps_and_isupport() {
+        // Both are only ever (re)populated at RPL_WELCOME, but the IRC handle is
+        // re-inserted at `HandleReady` — as soon as the socket is up, long before
+        // CAP negotiation. Anything that consults the caps between the two (the
+        // `+typing` gate does, on every tick) would be reading the PREVIOUS
+        // session's answer, on a server that may have changed it.
+        let mut state = make_test_state();
+        {
+            let conn = state.connections.get_mut("test").expect("conn");
+            conn.enabled_caps.insert("message-tags".to_string());
+            conn.isupport_parsed.parse_tokens(&["CLIENTTAGDENY=*"]);
+        }
+
+        handle_disconnected(&mut state, "test", None);
+
+        let conn = state.connections.get("test").expect("conn");
+        assert!(conn.enabled_caps.is_empty(), "stale caps survived the drop");
+        assert!(
+            conn.isupport_parsed.client_tag_allowed("typing"),
+            "stale ISUPPORT survived the drop"
+        );
+    }
+
+    #[test]
+    fn disconnect_clears_typing_on_that_connection_only() {
+        // No `done` can arrive over a socket that is gone: without this the peers
+        // stay "typing" for the full TTL and survive into the reconnect.
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#rust"));
+        handle_irc_message(&mut state, "test", &tagmsg("alice", "#rust", "+typing", "active"));
+        assert_eq!(state.typing.nicks("test/#rust"), vec!["alice"]);
+        state.pending_web_events.clear();
+
+        handle_disconnected(&mut state, "test", None);
+
+        assert!(state.typing.nicks("test/#rust").is_empty());
+        // The web clients are told, or their indicator hangs there forever.
+        assert!(
+            state.pending_web_events.iter().any(|e| matches!(
+                e,
+                crate::web::protocol::WebEvent::Typing { buffer_id, nicks }
+                    if buffer_id == "test/#rust" && nicks.is_empty()
+            )),
+            "the cleared set must be pushed to the web clients"
         );
     }
 

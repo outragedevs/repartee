@@ -208,12 +208,11 @@ impl IrcSender {
 
     /// Is there room for one more `+typing` notification on **this** connection
     /// without eating into the budget the user's real messages need?
+    ///
+    /// The clock is injected: the caller (`App::send_typing`) charges the same
+    /// `now` to the send that follows, and its tests drive both from a fixed
+    /// origin rather than the wall clock.
     #[must_use]
-    pub fn has_typing_headroom(&self) -> bool {
-        self.has_typing_headroom_at(Instant::now())
-    }
-
-    /// [`Self::has_typing_headroom`] with an injected clock.
     pub(crate) fn has_typing_headroom_at(&self, now: Instant) -> bool {
         if self.threshold_ms == 0 {
             return true;

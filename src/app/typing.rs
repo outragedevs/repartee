@@ -363,38 +363,56 @@ impl App {
     /// Send one typing notification if every guard allows it.
     /// Returns whether it reached the wire — the machine only records confirmed sends.
     fn send_typing(&self, buffer_id: &str, state: TypingState) -> bool {
-        let Some((target, conn_id)) = typing_send_target(
+        send_typing_frame(
             &self.state.buffers,
             &self.state.connections,
             &self.config.typing,
+            &self.irc_handles,
             buffer_id,
-        ) else {
-            return false;
-        };
-
-        let Some(handle) = self.irc_handles.get(&conn_id) else {
-            return false;
-        };
-        // Never hand a frame to the transport when THIS connection's budget is
-        // tight (§3.1). A frame accepted under pressure is not dropped by the
-        // crate — it is buffered and delayed, so it would land stale AND push
-        // the user's next real message further back in the queue. The handle's
-        // budget sees every send on this connection (registration, the WHO/MODE
-        // burst on autojoin, lag PINGs, multiline pastes), and it is a no-op on
-        // a connection opened with flood protection off.
-        if !handle.sender().has_typing_headroom() {
-            return false;
-        }
-        if handle
-            .sender()
-            .send(typing::build_tagmsg(&target, state))
-            .is_err()
-        {
-            tracing::debug!("failed to send +typing={} to {target}", state.as_str());
-            return false;
-        }
-        true
+            state,
+            Instant::now(),
+        )
     }
+}
+
+/// The whole of [`App::send_typing`], over borrowed state and an injected clock
+/// so the guard chain — the thing that decides whether the user's keystrokes
+/// leave this process — is testable against a capturing sender.
+fn send_typing_frame(
+    buffers: &indexmap::IndexMap<String, crate::state::buffer::Buffer>,
+    connections: &HashMap<String, crate::state::connection::Connection>,
+    config: &crate::config::TypingConfig,
+    handles: &HashMap<String, crate::irc::handle::IrcHandle>,
+    buffer_id: &str,
+    state: TypingState,
+    now: Instant,
+) -> bool {
+    let Some((target, conn_id)) = typing_send_target(buffers, connections, config, buffer_id) else {
+        return false;
+    };
+
+    let Some(handle) = handles.get(&conn_id) else {
+        return false;
+    };
+    // Never hand a frame to the transport when THIS connection's budget is
+    // tight (§3.1). A frame accepted under pressure is not dropped by the
+    // crate — it is buffered and delayed, so it would land stale AND push
+    // the user's next real message further back in the queue. The handle's
+    // budget sees every send on this connection (registration, the WHO/MODE
+    // burst on autojoin, lag PINGs, multiline pastes), and it is a no-op on
+    // a connection opened with flood protection off.
+    if !handle.sender().has_typing_headroom_at(now) {
+        return false;
+    }
+    if handle
+        .sender()
+        .send_at(typing::build_tagmsg(&target, state), now)
+        .is_err()
+    {
+        tracing::debug!("failed to send +typing={} to {target}", state.as_str());
+        return false;
+    }
+    true
 }
 
 /// Where — if anywhere — a typing notification for `buffer_id` should go.
@@ -423,6 +441,15 @@ fn typing_send_target(
     }
 
     let conn = connections.get(&buf.connection_id)?;
+    // The handle is inserted at `HandleReady`, as soon as the socket is up and
+    // BEFORE CAP negotiation — while a target left holding `sent` by the drop
+    // keeps re-proposing on every tick. Without this, the first tick after a
+    // reconnect puts a TAGMSG on an unregistered connection (ERR_NOTREGISTERED),
+    // and does it against the *previous* session's caps and ISUPPORT — bypassing
+    // the two gates below exactly when the server may have changed them.
+    if conn.status != crate::state::connection::ConnectionStatus::Connected {
+        return None;
+    }
     // No `message-tags` cap: the server would reject or ignore a TAGMSG.
     if !conn.enabled_caps.contains("message-tags") {
         return None;
@@ -438,7 +465,9 @@ fn typing_send_target(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::irc::handle::{FLOOD_PENALTY_THRESHOLD_MS, IrcSender};
+    use crate::irc::handle::{FLOOD_PENALTY_THRESHOLD_MS, IrcHandle, IrcSender};
+    use crate::state::buffer::Buffer;
+    use crate::state::connection::{Connection, ConnectionStatus};
     use std::time::Duration;
 
     fn t0() -> Instant {
@@ -797,6 +826,287 @@ mod tests {
             vec![("oftc/#rust".to_string(), TypingState::Active)],
             "traffic on one connection must not suppress typing on another"
         );
+    }
+
+    // ── The privacy gate: `send_typing`'s guard chain ──
+    //
+    // Everything below drives the real chain over a capturing sender, so each
+    // test asserts what did (or did not) reach the wire, not just a bool.
+
+    /// A registered connection `net` with `message-tags` negotiated, one buffer
+    /// of every type on it, and a capturing sender behind its handle.
+    struct Wired {
+        buffers: indexmap::IndexMap<String, Buffer>,
+        connections: HashMap<String, Connection>,
+        handles: HashMap<String, IrcHandle>,
+        config: crate::config::TypingConfig,
+        sender: IrcSender,
+    }
+
+    impl Wired {
+        fn new() -> Self {
+            let sender = IrcSender::capturing(u64::from(FLOOD_PENALTY_THRESHOLD_MS));
+            let mut buffers = indexmap::IndexMap::new();
+            for (name, buffer_type) in [
+                ("#rust", BufferType::Channel),
+                ("bob", BufferType::Query),
+                ("NetServer", BufferType::Server),
+                ("carol", BufferType::DccChat),
+                ("shell", BufferType::Shell),
+                ("Mentions", BufferType::Mentions),
+                ("#logged", BufferType::Log),
+            ] {
+                buffers.insert(format!("net/{name}"), make_buffer(name, buffer_type));
+            }
+            let mut handles = HashMap::new();
+            handles.insert(
+                "net".to_string(),
+                IrcHandle::new("net".to_string(), sender.clone(), None, None),
+            );
+            Self {
+                buffers,
+                connections: HashMap::from([("net".to_string(), make_connection())]),
+                handles,
+                config: crate::config::TypingConfig::default(),
+                sender,
+            }
+        }
+
+        fn send(&self, buffer_id: &str, state: TypingState, now: Instant) -> bool {
+            send_typing_frame(
+                &self.buffers,
+                &self.connections,
+                &self.config,
+                &self.handles,
+                buffer_id,
+                state,
+                now,
+            )
+        }
+
+        /// Exactly what went out, as wire lines.
+        fn wire(&self) -> Vec<String> {
+            self.sender
+                .captured()
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        }
+
+        fn conn_mut(&mut self) -> &mut Connection {
+            self.connections.get_mut("net").expect("connection")
+        }
+    }
+
+    fn make_buffer(name: &str, buffer_type: BufferType) -> Buffer {
+        Buffer {
+            id: format!("net/{name}"),
+            connection_id: "net".to_string(),
+            buffer_type,
+            name: name.to_string(),
+            messages: std::collections::VecDeque::new(),
+            activity: crate::state::buffer::ActivityLevel::None,
+            unread_count: 0,
+            last_read: chrono::Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
+            peer_handle: None,
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
+            log_initial_loaded: false,
+            pin_backlog: false,
+        }
+    }
+
+    fn make_connection() -> Connection {
+        Connection {
+            id: "net".to_string(),
+            label: "NetServer".to_string(),
+            status: ConnectionStatus::Connected,
+            own_handle: None,
+            nick: "me".to_string(),
+            user_modes: String::new(),
+            isupport: HashMap::new(),
+            isupport_parsed: crate::irc::isupport::Isupport::new(),
+            error: None,
+            lag: None,
+            lag_pending: false,
+            reconnect_attempts: 0,
+            reconnect_delay_secs: 30,
+            next_reconnect: None,
+            should_reconnect: true,
+            joined_channels: Vec::new(),
+            origin_config: crate::config::ServerConfig {
+                label: "NetServer".to_string(),
+                address: "irc.test.net".to_string(),
+                port: 6697,
+                tls: true,
+                tls_verify: true,
+                autoconnect: false,
+                channels: vec![],
+                nick: None,
+                username: None,
+                realname: None,
+                password: None,
+                sasl_user: None,
+                sasl_pass: None,
+                bind_ip: None,
+                encoding: None,
+                auto_reconnect: Some(true),
+                reconnect_delay: None,
+                reconnect_max_retries: None,
+                autosendcmd: None,
+                sasl_mechanism: None,
+                client_cert_path: None,
+            },
+            local_ip: None,
+            enabled_caps: std::collections::HashSet::from(["message-tags".to_string()]),
+            chathistory: crate::irc::chathistory::HistoryState::new(),
+            who_token_counter: 0,
+            silent_who_channels: std::collections::HashSet::new(),
+            silent_banlist_channels: std::collections::HashSet::new(),
+            multiline: None,
+            batch_ref_counter: 0,
+        }
+    }
+
+    #[test]
+    fn a_channel_and_a_query_are_the_only_things_we_ever_type_into() {
+        let w = Wired::new();
+        let now = t0();
+
+        assert!(w.send("net/#rust", TypingState::Active, now));
+        assert!(w.send("net/bob", TypingState::Done, now));
+        assert_eq!(
+            w.wire(),
+            vec![
+                "@+typing=active TAGMSG #rust\r\n",
+                "@+typing=done TAGMSG bob\r\n",
+            ]
+        );
+
+        // Everything else has no channel or nick to address a TAGMSG to, and
+        // typing into it would leak keystrokes to a peer that never asked.
+        for buffer_id in [
+            "net/NetServer",
+            "net/carol",
+            "net/shell",
+            "net/Mentions",
+            "net/#logged",
+            "net/nonexistent",
+        ] {
+            assert!(
+                !w.send(buffer_id, TypingState::Active, now),
+                "{buffer_id} must never emit a typing notification"
+            );
+        }
+        assert_eq!(w.wire().len(), 2, "nothing else reached the wire");
+    }
+
+    #[test]
+    fn send_channels_off_silences_channels_and_leaves_queries_alone() {
+        // Swapping the two config branches would still pass a test that only
+        // looked at one of them.
+        let mut w = Wired::new();
+        w.config.send_channels = false;
+        let now = t0();
+
+        assert!(!w.send("net/#rust", TypingState::Active, now));
+        assert!(w.send("net/bob", TypingState::Active, now));
+        assert_eq!(w.wire(), vec!["@+typing=active TAGMSG bob\r\n"]);
+    }
+
+    #[test]
+    fn send_queries_off_silences_queries_and_leaves_channels_alone() {
+        let mut w = Wired::new();
+        w.config.send_queries = false;
+        let now = t0();
+
+        assert!(!w.send("net/bob", TypingState::Active, now));
+        assert!(w.send("net/#rust", TypingState::Active, now));
+        assert_eq!(w.wire(), vec!["@+typing=active TAGMSG #rust\r\n"]);
+    }
+
+    #[test]
+    fn without_the_message_tags_cap_nothing_is_sent() {
+        // The server would reject or ignore the TAGMSG.
+        let mut w = Wired::new();
+        w.conn_mut().enabled_caps.clear();
+        assert!(!w.send("net/#rust", TypingState::Active, t0()));
+        assert!(w.wire().is_empty());
+    }
+
+    #[test]
+    fn clienttagdeny_blocks_typing() {
+        // `CLIENTTAGDENY=*` blocks everything; `-typing` exempts us again.
+        let mut w = Wired::new();
+        w.conn_mut().isupport_parsed.parse_tokens(&["CLIENTTAGDENY=*"]);
+        assert!(!w.send("net/#rust", TypingState::Active, t0()));
+        assert!(w.wire().is_empty());
+
+        w.conn_mut()
+            .isupport_parsed
+            .parse_tokens(&["CLIENTTAGDENY=*,-typing"]);
+        assert!(w.send("net/#rust", TypingState::Active, t0()));
+        assert_eq!(w.wire(), vec!["@+typing=active TAGMSG #rust\r\n"]);
+    }
+
+    #[test]
+    fn an_unregistered_connection_is_never_sent_a_tagmsg() {
+        // The handle is re-inserted at `HandleReady` — as soon as the socket is
+        // up, BEFORE CAP negotiation and registration. A target still holding
+        // `sent = Some(Active)` from before the drop keeps re-proposing on every
+        // tick, so without a status check the first tick after the reconnect
+        // writes a TAGMSG to an unregistered connection (ERR_NOTREGISTERED),
+        // using the PREVIOUS session's caps and ISUPPORT.
+        let now = t0();
+        for status in [
+            ConnectionStatus::Connecting,
+            ConnectionStatus::Disconnected,
+            ConnectionStatus::Error,
+        ] {
+            let mut w = Wired::new();
+            w.conn_mut().status = status.clone();
+            assert!(
+                !w.send("net/#rust", TypingState::Active, now),
+                "typing must not be sent while the connection is {status:?}"
+            );
+            assert!(w.wire().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_connection_without_a_handle_sends_nothing() {
+        let mut w = Wired::new();
+        w.handles.clear();
+        assert!(!w.send("net/#rust", TypingState::Active, t0()));
+    }
+
+    #[test]
+    fn a_tight_flood_budget_keeps_the_tagmsg_off_the_wire() {
+        // The handle's budget is the gate — a frame accepted under pressure is
+        // queued and delayed, not dropped.
+        let w = Wired::new();
+        let now = t0();
+        for chan in ["#other", "#more"] {
+            w.sender
+                .send_at(::irc::proto::Command::WHO(Some(chan.to_string()), None), now)
+                .expect("capture");
+        }
+        assert!(!w.send("net/#rust", TypingState::Active, now));
+        assert_eq!(w.wire().len(), 2, "only the two WHOs went out");
+
+        // And it resumes once the penalty has drained.
+        let later = now + Duration::from_secs(10);
+        assert!(w.send("net/#rust", TypingState::Active, later));
+        assert_eq!(w.wire().len(), 3);
     }
 
     #[test]
