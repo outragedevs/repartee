@@ -356,6 +356,41 @@ pub async fn connect_server(
         0 // disabled: the crate applies no penalty at all
     };
 
+    // Pass channels to the irc crate so it handles batched autojoin
+    // on ENDOFMOTD. Entries like "#channel key" are split into the
+    // channels vec (name only) and channel_keys map.
+    //
+    // Hoisted out of the `Config` literal because `CrateEcho` has to predict the
+    // JOIN batch the crate will build from exactly these two values — see
+    // `crate::irc::handle`. Two copies of this could drift; one cannot.
+    let autojoin_channels: Vec<String> = server_config
+        .channels
+        .iter()
+        .map(|e| {
+            e.split_once(' ')
+                .map_or_else(|| e.clone(), |(c, _)| c.to_string())
+        })
+        .collect();
+    let autojoin_keys: std::collections::HashMap<String, String> = server_config
+        .channels
+        .iter()
+        .filter_map(|e| {
+            e.split_once(' ')
+                .map(|(c, k)| (c.to_string(), k.to_string()))
+        })
+        .collect();
+
+    // Everything the crate will auto-send from, mirrored so the flood budget can
+    // charge frames that never pass through `IrcSender`.
+    let echo_config = crate::irc::handle::CrateEchoConfig {
+        ctcp_version: general.ctcp_version.clone(),
+        username: username.to_string(),
+        realname: realname.to_string(),
+        channels: autojoin_channels.clone(),
+        channel_keys: autojoin_keys.clone(),
+        alt_nicks: alt_nicks.clone(),
+    };
+
     let irc_config = Config {
         nickname: Some(nick.to_string()),
         alt_nicks,
@@ -366,25 +401,8 @@ pub async fn connect_server(
         use_tls: Some(server_config.tls),
         dangerously_accept_invalid_certs: Some(!server_config.tls_verify),
         password: server_config.password.clone(),
-        // Pass channels to the irc crate so it handles batched autojoin
-        // on ENDOFMOTD. Entries like "#channel key" are split into the
-        // channels vec (name only) and channel_keys map.
-        channels: server_config
-            .channels
-            .iter()
-            .map(|e| {
-                e.split_once(' ')
-                    .map_or_else(|| e.clone(), |(c, _)| c.to_string())
-            })
-            .collect(),
-        channel_keys: server_config
-            .channels
-            .iter()
-            .filter_map(|e| {
-                e.split_once(' ')
-                    .map(|(c, k)| (c.to_string(), k.to_string()))
-            })
-            .collect(),
+        channels: autojoin_channels,
+        channel_keys: autojoin_keys,
         encoding: server_config.encoding.clone(),
         version: Some(general.ctcp_version.clone()),
         client_cert_path: server_config.client_cert_path.clone(),
@@ -423,6 +441,15 @@ pub async fn connect_server(
     let id = conn_id.to_string();
     let id2 = id.clone();
 
+    // The crate emits frames of its own from `ClientState::handle_message`,
+    // which runs inside `stream.poll_next` — i.e. exactly when a message pops
+    // out of the loop below. Those frames go on the same charged lane as ours
+    // but never pass through `IrcSender`, so the budget has to book them here or
+    // it under-reads and we hand typing to a queue that is already throttling.
+    // The clone shares the budget: it IS this connection. See `crate::irc::handle`.
+    let echo_sender = sender.clone();
+    let mut echo = crate::irc::handle::CrateEcho::new(echo_config);
+
     // Spawn reader task
     tokio::spawn(async move {
         // Send negotiation diagnostics immediately so they're visible even if
@@ -437,7 +464,14 @@ pub async fn connect_server(
         // Replay messages consumed during capability negotiation.
         // Non-IRCv3 servers that silently ignore CAP send RPL_WELCOME during
         // negotiation; pre-registration NOTICEs may also be collected here.
+        //
+        // These already went through the crate's `handle_message` (negotiation
+        // reads the same stream), so anything they made it send has already been
+        // charged to the real counter — the mirror has to catch up on them too.
         for message in neg.early_messages {
+            for frame in echo.frames_for(&message) {
+                echo_sender.charge(&frame, std::time::Instant::now());
+            }
             if !sent_connected && let Command::Response(Response::RPL_WELCOME, _) = &message.command
             {
                 sent_connected = true;
@@ -462,6 +496,13 @@ pub async fn connect_server(
         while let Some(result) = stream.next().await {
             match result {
                 Ok(message) => {
+                    // The crate has just handled this message inside `poll_next`
+                    // and may already have queued a CTCP reply, the autojoin
+                    // batch or a NICK retry. Book them before anything else can
+                    // ask this connection for typing headroom.
+                    for frame in echo.frames_for(&message) {
+                        echo_sender.charge(&frame, std::time::Instant::now());
+                    }
                     if !sent_connected
                         && let Command::Response(Response::RPL_WELCOME, _) = &message.command
                     {

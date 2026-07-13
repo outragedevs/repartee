@@ -8,16 +8,55 @@
 //!
 //! Opportunistic traffic (`+typing` notifications) therefore has to decide
 //! *before* the frame reaches the queue, which means keeping a faithful mirror
-//! of that counter on this side. A mirror is only worth anything if it sees
-//! **every** send, so the raw `irc::client::Sender` is private to this module
-//! and the only way to reach the socket is [`IrcSender::send`], which charges
-//! the budget on the way through. There is no bypass to forget about.
+//! of that counter on this side.
+//!
+//! # The governing rule: the mirror must never under-read
+//!
+//! Over-charging is safe — it only suppresses **our own** typing, which is
+//! opportunistic by definition. Under-charging is harmful: it lets us hand a
+//! TAGMSG to a queue that is already throttling, where it is buffered, arrives
+//! stale, and pushes the user's next real message further back. Wherever a
+//! frame's exact cost cannot be computed, round **up**.
+//!
+//! # What actually reaches the socket
+//!
+//! Two writers share this connection's charged lane (`tx_outgoing`), and the
+//! mirror has to see both:
+//!
+//! 1. **Us.** The raw `irc::client::Sender` is private to this module, so the
+//!    only way out of repartee is [`IrcSender::send`], which charges on the way
+//!    through.
+//! 2. **The crate itself.** `client.sender()` hands us a *clone* of
+//!    `tx_outgoing`; the crate keeps its own clone inside `ClientState` and
+//!    emits frames from `ClientState::handle_message` on every inbound message
+//!    — CTCP auto-replies, the autojoin JOIN batch at `ENDOFMOTD`, NICK retries
+//!    on `ERR_NICKNAMEINUSE`. Those never pass through [`IrcSender`], but they
+//!    DO charge the real counter. [`CrateEcho`] predicts them from the inbound
+//!    message that triggers them and [`IrcSender::charge`] books them, so the
+//!    mirror stays level with reality.
+//!
+//! The crate's internal pinger is **not** a third writer: `Connection::new` is
+//! given `tx_priority_outgoing`, and `Outgoing::poll_priority_message` writes
+//! that lane without touching `penalty`. Its PINGs and PONGs cost nothing, so
+//! there is nothing to mirror.
+//!
+//! # The one place the mirror can still under-read
+//!
+//! At `ENDOFMOTD` the crate also re-joins any channel in its own `chanlists`
+//! that is not in the config. `chanlists` is populated from inbound JOIN and
+//! `RPL_NAMREPLY`, so it is empty until we are actually in a channel — which
+//! means the rejoin batch is empty on the first `ENDOFMOTD` of a connection,
+//! and a connection only ever sees one. A server that sent a second MOTD on a
+//! live connection would leave us under-charged by that batch until it drained.
+//! Bounded, and the crate builds a fresh `Client` per connect, so it does not
+//! arise in practice.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
-use irc::proto::{Command, Message};
+use irc::proto::{Command, Message, Response};
 
 use crate::irc::typing::{self, TypingState};
 
@@ -206,6 +245,24 @@ impl IrcSender {
         }
     }
 
+    /// Book a frame against this connection's budget **without sending it**.
+    ///
+    /// For the frames the *crate* puts on our charged lane by itself (see the
+    /// module docs): the socket write already happened inside the crate, so all
+    /// that is left is to keep the mirror level with the real counter. Charging
+    /// nothing here is exactly the bypass this module exists to close.
+    pub(crate) fn charge(&self, message: &Message, now: Instant) {
+        // Threshold 0 = the crate skips its whole penalty block, so there is no
+        // counter to mirror.
+        if self.threshold_ms == 0 {
+            return;
+        }
+        let cost = message_cost(message);
+        if cost > 0 {
+            self.budget_mut().charge(now, cost);
+        }
+    }
+
     /// Is there room for one more `+typing` notification on **this** connection
     /// without eating into the budget the user's real messages need?
     ///
@@ -262,6 +319,270 @@ impl IrcSender {
     pub fn send_quit<S: fmt::Display>(&self, msg: S) -> irc::error::Result<()> {
         self.send(Command::QUIT(Some(msg.to_string())))
     }
+}
+
+/// The crate's default CTCP SOURCE reply (`Config::source`). We never set
+/// `source`, so this is what it answers with.
+const CRATE_DEFAULT_SOURCE: &str = "https://github.com/aatxe/irc";
+
+/// The crate's default CTCP USERINFO reply (`Config::user_info`). We never set
+/// `user_info`, so this is what it answers with.
+const CRATE_DEFAULT_USER_INFO: &str = "";
+
+/// Everything the crate needs in order to decide what to send on its own,
+/// mirrored from the `Config` we hand `Client::from_config` in
+/// [`crate::irc::connect_server`]. If that `Config` grows a field the crate auto-sends
+/// from (`umodes`, `nick_password`, …), it has to be mirrored here too or the
+/// budget under-reads.
+#[derive(Debug, Clone)]
+pub struct CrateEchoConfig {
+    pub ctcp_version: String,
+    pub username: String,
+    pub realname: String,
+    pub channels: Vec<String>,
+    pub channel_keys: HashMap<String, String>,
+    pub alt_nicks: Vec<String>,
+}
+
+/// Predicts the frames the crate emits by itself, from the inbound message that
+/// triggers them.
+///
+/// A verbatim mirror of `ClientState::handle_message`
+/// (`irc-repartee-1.5.1/src/client/mod.rs`) — every arm of that match which can
+/// reach `self.send`. Feed it **every** inbound message, in order, and charge
+/// what it returns; see the module docs for why.
+///
+/// Two of the crate's arms are omitted because they cannot fire for us:
+/// `send_nick_password` and `send_umodes` both early-return on an empty config
+/// field, and [`crate::irc::connect_server`] sets neither (`..Config::default()`).
+#[derive(Debug)]
+pub struct CrateEcho {
+    config: CrateEchoConfig,
+    /// Mirrors `ClientState::alt_nick_index` — the crate walks the alt-nick list
+    /// once and then gives up, so retry N costs nothing after the list runs out.
+    alt_nick_index: usize,
+}
+
+impl CrateEcho {
+    pub(crate) const fn new(config: CrateEchoConfig) -> Self {
+        Self {
+            config,
+            alt_nick_index: 0,
+        }
+    }
+
+    /// The frames the crate will put on the charged lane in response to
+    /// `inbound`. Empty for the overwhelming majority of messages.
+    pub(crate) fn frames_for(&mut self, inbound: &Message) -> Vec<Message> {
+        match &inbound.command {
+            Command::PRIVMSG(target, body) => self
+                .ctcp_reply(inbound, target, body)
+                .into_iter()
+                .collect(),
+            Command::Response(Response::RPL_ENDOFMOTD | Response::ERR_NOMOTD, _) => {
+                self.autojoin_frames()
+            }
+            Command::Response(Response::ERR_NICKNAMEINUSE | Response::ERR_ERRONEOUSNICKNAME, _) => {
+                self.nick_retry().into_iter().collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The NOTICE the crate's `handle_ctcp` auto-answers an inbound CTCP query
+    /// with — `None` if it will stay quiet.
+    fn ctcp_reply(&self, inbound: &Message, target: &str, body: &str) -> Option<Message> {
+        if !body.starts_with('\u{001}') {
+            return None;
+        }
+        // Verbatim from the crate: strip the leading \x01 and a trailing one.
+        let end = if body.ends_with('\u{001}') && body.len() > 1 {
+            body.len() - 1
+        } else {
+            body.len()
+        };
+        let tokens: Vec<&str> = body.get(1..end)?.split(' ').collect();
+
+        // The crate keys the reply target off a literal '#', not the full
+        // channel-prefix set, and falls back to the sender's nick otherwise.
+        // Mirror what it does, not what it arguably should do.
+        let resp = if target.starts_with('#') {
+            target
+        } else {
+            inbound.source_nickname()?
+        };
+
+        let reply = self.ctcp_answer(&tokens)?;
+        Some(Command::NOTICE(resp.to_string(), format!("\u{001}{reply}\u{001}")).into())
+    }
+
+    /// The crate's `handle_ctcp` reply body, format string for format string.
+    fn ctcp_answer(&self, tokens: &[&str]) -> Option<String> {
+        let query = tokens.first()?;
+        let cfg = &self.config;
+        if query.eq_ignore_ascii_case("FINGER") {
+            Some(format!("FINGER :{} ({})", cfg.realname, cfg.username))
+        } else if query.eq_ignore_ascii_case("VERSION") {
+            Some(format!("VERSION {}", cfg.ctcp_version))
+        } else if query.eq_ignore_ascii_case("SOURCE") {
+            Some(format!("SOURCE {CRATE_DEFAULT_SOURCE}"))
+        } else if query.eq_ignore_ascii_case("PING") && tokens.len() > 1 {
+            // The echoed token is peer-controlled and can be ~490 bytes, which
+            // is worth several length steps — so it is measured, never assumed.
+            Some(format!("PING {}", tokens[1]))
+        } else if query.eq_ignore_ascii_case("TIME") {
+            // The crate stamps `Local::now().to_rfc2822()`. Only the *length*
+            // reaches the budget and rfc2822 is fixed-width to within a byte, so
+            // our own clock reading costs what the crate's will.
+            Some(format!("TIME :{}", chrono::Local::now().to_rfc2822()))
+        } else if query.eq_ignore_ascii_case("USERINFO") {
+            Some(format!("USERINFO :{CRATE_DEFAULT_USER_INFO}"))
+        } else {
+            None
+        }
+    }
+
+    /// The batched autojoin the crate sends at `ENDOFMOTD`.
+    fn autojoin_frames(&self) -> Vec<Message> {
+        build_batched_joins(&self.config.channels, &self.config.channel_keys)
+            .into_iter()
+            .map(|(chanlist, keylist)| Command::JOIN(chanlist, keylist, None).into())
+            .collect()
+    }
+
+    /// The NICK the crate retries with after `ERR_NICKNAMEINUSE`.
+    fn nick_retry(&mut self) -> Option<Message> {
+        let alt = self.config.alt_nicks.get(self.alt_nick_index)?;
+        let message = Command::NICK(alt.clone()).into();
+        self.alt_nick_index += 1;
+        Some(message)
+    }
+}
+
+/// The crate's autojoin batcher, mirrored from `Client::build_batched_joins`
+/// (`irc-repartee-1.5.1/src/client/mod.rs`).
+///
+/// Mirrored exactly rather than bounded from above, because the bound is not
+/// tight: ten channels go out as *one* ~7000ms JOIN, but charging them as ten
+/// separate `JOIN`s would book 31 seconds and mute typing for the first minute
+/// of every session. Rounding up is the rule where the exact cost is unknowable
+/// — this one is knowable.
+fn build_batched_joins(
+    channels: &[String],
+    channel_keys: &HashMap<String, String>,
+) -> Vec<(String, Option<String>)> {
+    // "JOIN " = 5 bytes, "\r\n" = 2 bytes → 505 bytes for payload.
+    const BUDGET: usize = 512 - 7;
+
+    /// Total payload size: chanlist [+ " " + keylist].
+    const fn payload(chans: usize, keys: usize, has_keys: bool) -> usize {
+        if has_keys { chans + 1 + keys } else { chans }
+    }
+
+    /// Close the batch under construction and start a fresh one.
+    fn flush<'a>(
+        chans: &mut Vec<&'a str>,
+        keys: &mut Vec<&'a str>,
+        chan_len: &mut usize,
+        key_len: &mut usize,
+        out: &mut Vec<(String, Option<String>)>,
+    ) {
+        if chans.is_empty() {
+            return;
+        }
+        let chanlist = chans.join(",");
+        let keylist = (!keys.is_empty()).then(|| keys.join(","));
+        out.push((chanlist, keylist));
+        chans.clear();
+        keys.clear();
+        *chan_len = 0;
+        *key_len = 0;
+    }
+
+    if channels.is_empty() {
+        return Vec::new();
+    }
+
+    // Partition into keyed and keyless, preserving config order within groups.
+    let mut keyed: Vec<(&str, &str)> = Vec::new();
+    let mut keyless: Vec<&str> = Vec::new();
+    for chan in channels {
+        match channel_keys.get(chan.as_str()) {
+            Some(key) => keyed.push((chan, key)),
+            None => keyless.push(chan),
+        }
+    }
+
+    let mut batches: Vec<(String, Option<String>)> = Vec::new();
+    let mut batch_chans: Vec<&str> = Vec::new();
+    let mut batch_keys: Vec<&str> = Vec::new();
+    let mut chan_len: usize = 0;
+    let mut key_len: usize = 0;
+
+    // Keyed channels first — they must precede keyless for positional keys.
+    for (chan, key) in &keyed {
+        let grown_chans = if batch_chans.is_empty() {
+            chan.len()
+        } else {
+            chan_len + 1 + chan.len()
+        };
+        let grown_keys = if batch_keys.is_empty() {
+            key.len()
+        } else {
+            key_len + 1 + key.len()
+        };
+
+        if !batch_chans.is_empty() && payload(grown_chans, grown_keys, true) > BUDGET {
+            flush(
+                &mut batch_chans,
+                &mut batch_keys,
+                &mut chan_len,
+                &mut key_len,
+                &mut batches,
+            );
+            chan_len = chan.len();
+            key_len = key.len();
+        } else {
+            chan_len = grown_chans;
+            key_len = grown_keys;
+        }
+        batch_chans.push(chan);
+        batch_keys.push(key);
+    }
+
+    // Keyless channels fill the remaining space in the current batch.
+    for chan in &keyless {
+        let grown_chans = if batch_chans.is_empty() {
+            chan.len()
+        } else {
+            chan_len + 1 + chan.len()
+        };
+        let has_keys = !batch_keys.is_empty();
+
+        if !batch_chans.is_empty() && payload(grown_chans, key_len, has_keys) > BUDGET {
+            flush(
+                &mut batch_chans,
+                &mut batch_keys,
+                &mut chan_len,
+                &mut key_len,
+                &mut batches,
+            );
+            chan_len = chan.len();
+        } else {
+            chan_len = grown_chans;
+        }
+        batch_chans.push(chan);
+    }
+
+    flush(
+        &mut batch_chans,
+        &mut batch_keys,
+        &mut chan_len,
+        &mut key_len,
+        &mut batches,
+    );
+
+    batches
 }
 
 /// Handle to a connected IRC client, holding the connection ID and send half.
@@ -512,6 +833,272 @@ mod tests {
         }
         assert_eq!(sender.captured().len(), 3, "frames still reach the wire");
         assert!(!sender.has_typing_headroom_at(now));
+    }
+
+    // ── The crate's own frames (see the module docs) ──
+
+    fn echo_config() -> CrateEchoConfig {
+        CrateEchoConfig {
+            ctcp_version: "repartee 1.2.3".to_string(),
+            username: "bob".to_string(),
+            realname: "Bob Bobson".to_string(),
+            channels: vec!["#rust".to_string()],
+            channel_keys: HashMap::new(),
+            alt_nicks: vec!["bob_".to_string(), "bob__".to_string()],
+        }
+    }
+
+    /// An inbound CTCP query from `carol`, as the crate sees it.
+    fn inbound_ctcp(target: &str, body: &str) -> Message {
+        Message {
+            tags: None,
+            prefix: Some(irc::proto::Prefix::Nickname(
+                "carol".to_string(),
+                "~carol".to_string(),
+                "example.org".to_string(),
+            )),
+            command: Command::PRIVMSG(target.to_string(), format!("\u{001}{body}\u{001}")),
+        }
+    }
+
+    fn response(code: Response) -> Message {
+        Command::Response(code, vec!["bob".to_string(), "done".to_string()]).into()
+    }
+
+    #[test]
+    fn an_inbound_ctcp_version_charges_the_connection_budget() {
+        // The bypass this closes: the crate answers VERSION with a NOTICE from
+        // its own clone of `tx_outgoing`. That frame never passes through
+        // `IrcSender`, but it DOES charge the real penalty counter — so a mirror
+        // that ignored it would read 0 while the connection was already loaded.
+        let now = Instant::now();
+        let sender = IrcSender::capturing(u64::from(FLOOD_PENALTY_THRESHOLD_MS));
+        let mut echo = CrateEcho::new(echo_config());
+        assert_eq!(sender.penalty_ms(), 0);
+
+        for frame in echo.frames_for(&inbound_ctcp("bob", "VERSION")) {
+            sender.charge(&frame, now);
+        }
+
+        // NOTICE (2000) + the length step (1000): the reply is well under 100b.
+        assert_eq!(sender.penalty_ms(), 3000);
+        // And nothing was *sent* — the crate already wrote it to the socket.
+        assert!(sender.captured().is_empty());
+    }
+
+    #[test]
+    fn a_burst_of_inbound_ctcp_pings_closes_the_typing_headroom() {
+        // The reported failure, verbatim: a peer sends 6 CTCP PINGs in a second,
+        // the crate auto-replies to all 6, the real counter is ~18_000ms — over
+        // the 10_000ms threshold, so `Outgoing` is already buffering. Before this
+        // fix the mirror read 0 and we kept feeding it a TAGMSG every 3s.
+        let now = Instant::now();
+        let sender = IrcSender::capturing(u64::from(FLOOD_PENALTY_THRESHOLD_MS));
+        let mut echo = CrateEcho::new(echo_config());
+        assert!(sender.has_typing_headroom_at(now));
+
+        for _ in 0..6 {
+            for frame in echo.frames_for(&inbound_ctcp("bob", "PING 1234567890")) {
+                sender.charge(&frame, now);
+            }
+        }
+
+        assert_eq!(sender.penalty_ms(), 6 * 3000);
+        assert!(
+            !sender.has_typing_headroom_at(now),
+            "typing must not be handed to a queue the crate is already throttling"
+        );
+    }
+
+    #[test]
+    fn the_ctcp_queries_the_crate_answers_are_exactly_these() {
+        // Pinned against `handle_ctcp`. A query the crate ignores must charge
+        // nothing (over-charging every inbound PRIVMSG would mute typing on any
+        // busy channel), and one it answers must charge.
+        let mut echo = CrateEcho::new(echo_config());
+        for query in [
+            "VERSION",
+            "SOURCE",
+            "PING token",
+            "TIME",
+            "FINGER",
+            "USERINFO",
+            // Case-insensitive, like the crate's `eq_ignore_ascii_case`.
+            "version",
+            "uSeRiNfO",
+        ] {
+            assert_eq!(
+                echo.frames_for(&inbound_ctcp("bob", query)).len(),
+                1,
+                "the crate auto-answers {query}"
+            );
+        }
+        for query in [
+            "ACTION waves",
+            "DCC CHAT chat 1 2",
+            "CLIENTINFO",
+            // PING with no token: the crate requires `tokens.len() > 1`.
+            "PING",
+            "",
+        ] {
+            assert!(
+                echo.frames_for(&inbound_ctcp("bob", query)).is_empty(),
+                "the crate stays quiet for {query:?}"
+            );
+        }
+        // And an ordinary, non-CTCP PRIVMSG is free.
+        assert!(
+            echo.frames_for(&Command::PRIVMSG("#rust".into(), "hello".into()).into())
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_ctcp_ping_echo_is_measured_not_assumed() {
+        // The echoed token is peer-controlled. A ~400-byte one costs four extra
+        // length steps, and assuming the 1000ms floor would under-read by 4000.
+        let mut echo = CrateEcho::new(echo_config());
+        let frames = echo.frames_for(&inbound_ctcp("bob", &format!("PING {}", "x".repeat(400))));
+        assert_eq!(frames.len(), 1);
+        // `NOTICE bob :\x01PING <400 x's>\x01\r\n` → 425 bytes → 5 length steps.
+        assert_eq!(message_cost(&frames[0]), 2000 + 5000);
+    }
+
+    #[test]
+    fn a_channel_ctcp_is_answered_to_the_channel_not_the_sender() {
+        // The crate keys the reply target off a literal '#'. Mirroring it wrongly
+        // would only change the target's length, but the whole point of this file
+        // is that it mirrors what the crate does, not what we assume.
+        let mut echo = CrateEcho::new(echo_config());
+        let frames = echo.frames_for(&inbound_ctcp("#rust", "VERSION"));
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            frames[0].to_string(),
+            "NOTICE #rust :\u{001}VERSION repartee 1.2.3\u{001}\r\n"
+        );
+
+        let frames = echo.frames_for(&inbound_ctcp("bob", "VERSION"));
+        assert_eq!(
+            frames[0].to_string(),
+            "NOTICE carol :\u{001}VERSION repartee 1.2.3\u{001}\r\n"
+        );
+    }
+
+    #[test]
+    fn the_autojoin_batch_is_charged_at_endofmotd() {
+        // repartee hands `channels` to the crate on purpose, so the JOIN batch is
+        // the crate's frame, not ours — nothing charged it before.
+        let now = Instant::now();
+        let sender = IrcSender::capturing(u64::from(FLOOD_PENALTY_THRESHOLD_MS));
+        let mut config = echo_config();
+        config.channels = vec!["#rust".to_string(), "#tokio".to_string()];
+        let mut echo = CrateEcho::new(config);
+
+        let frames = echo.frames_for(&response(Response::RPL_ENDOFMOTD));
+        assert_eq!(frames.len(), 1, "both channels ride one batched JOIN");
+        assert_eq!(frames[0].to_string(), "JOIN #rust,#tokio\r\n");
+
+        for frame in &frames {
+            sender.charge(frame, now);
+        }
+        assert_eq!(sender.penalty_ms(), 2000 + 1000);
+
+        // ERR_NOMOTD is the crate's other trigger for the same batch.
+        assert_eq!(echo.frames_for(&response(Response::ERR_NOMOTD)).len(), 1);
+        // Nothing else in the stream moves the budget.
+        assert!(
+            echo.frames_for(&response(Response::RPL_WELCOME))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn autojoin_keys_come_first_and_batches_split_at_the_crates_budget() {
+        // Mirrors `build_batched_joins`: keyed channels precede keyless (their
+        // keys are positional), and a batch flushes when the payload would pass
+        // 505 bytes. Getting the split wrong changes the frame count and so the
+        // charge — the whole reason this is mirrored rather than bounded.
+        let mut keys = HashMap::new();
+        keys.insert("#secret".to_string(), "hunter2".to_string());
+        let batches = build_batched_joins(
+            &[
+                "#open".to_string(),
+                "#secret".to_string(),
+                "#other".to_string(),
+            ],
+            &keys,
+        );
+        assert_eq!(
+            batches,
+            vec![(
+                "#secret,#open,#other".to_string(),
+                Some("hunter2".to_string())
+            )]
+        );
+
+        // 60 channels of 9 bytes each ("#chan0000") → 599 payload bytes, so the
+        // crate splits: 50 fit in 505 (50*9 + 49 commas = 499), the 51st does not.
+        let many: Vec<String> = (0..60).map(|i| format!("#chan{i:04}")).collect();
+        let batches = build_batched_joins(&many, &HashMap::new());
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].0.split(',').count(), 50);
+        assert_eq!(batches[0].0.len(), 499);
+        assert_eq!(batches[1].0.split(',').count(), 10);
+
+        assert!(build_batched_joins(&[], &HashMap::new()).is_empty());
+    }
+
+    #[test]
+    fn nick_retries_walk_the_alt_list_once_and_then_cost_nothing() {
+        // The crate bumps `alt_nick_index` per retry and returns `NoUsableNick`
+        // once the list runs out — it stops sending, so we must stop charging.
+        let mut echo = CrateEcho::new(echo_config());
+        let first = echo.frames_for(&response(Response::ERR_NICKNAMEINUSE));
+        assert_eq!(first[0].to_string(), "NICK bob_\r\n");
+        let second = echo.frames_for(&response(Response::ERR_ERRONEOUSNICKNAME));
+        assert_eq!(second[0].to_string(), "NICK bob__\r\n");
+        assert!(
+            echo.frames_for(&response(Response::ERR_NICKNAMEINUSE))
+                .is_empty(),
+            "the alt list is exhausted — the crate sends nothing more"
+        );
+    }
+
+    #[test]
+    fn a_cloned_sender_shares_the_connections_budget() {
+        // The load-bearing invariant of the wiring in `connect_server`: the reader
+        // task books the crate's frames through a CLONE of the connection's
+        // sender, and the handle keeps the original. A clone with a budget of its
+        // own would charge them where nobody reads — the bypass would still be
+        // wide open, and every test above would still pass.
+        let now = Instant::now();
+        let sender = IrcSender::capturing(u64::from(FLOOD_PENALTY_THRESHOLD_MS));
+        let reader_task_copy = sender.clone();
+
+        let mut echo = CrateEcho::new(echo_config());
+        for frame in echo.frames_for(&inbound_ctcp("bob", "VERSION")) {
+            reader_task_copy.charge(&frame, now);
+        }
+
+        // The handle is built from the ORIGINAL, and must see the charge.
+        let handle = IrcHandle::new("net".to_string(), sender, None, None);
+        assert_eq!(
+            handle.sender().penalty_ms(),
+            3000,
+            "a clone IS the connection — it must charge the same counter"
+        );
+    }
+
+    #[test]
+    fn a_disabled_flood_protection_charges_nothing_for_the_crates_frames_either() {
+        let now = Instant::now();
+        let sender = IrcSender::capturing(0);
+        let mut echo = CrateEcho::new(echo_config());
+        for frame in echo.frames_for(&inbound_ctcp("bob", "VERSION")) {
+            sender.charge(&frame, now);
+        }
+        assert_eq!(sender.penalty_ms(), 0);
+        assert!(sender.has_typing_headroom_at(now));
     }
 
     #[test]
