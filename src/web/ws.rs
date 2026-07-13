@@ -170,9 +170,12 @@ fn build_sync_init_from_snapshot(state: &AppHandle, active_buffer_id: Option<Str
             timestamp_format: snap.timestamp_format.clone(),
             emotes_enabled: snap.emotes_enabled,
             typing: snap.typing.clone(),
+            statusbar_items: snap.statusbar_items.clone(),
+            statusbar_enabled: snap.statusbar_enabled,
         };
     }
     // Fallback: empty init.
+    let statusbar = crate::config::StatusbarConfig::default();
     WebEvent::SyncInit {
         buffers: Vec::new(),
         connections: Vec::new(),
@@ -181,6 +184,8 @@ fn build_sync_init_from_snapshot(state: &AppHandle, active_buffer_id: Option<Str
         timestamp_format: crate::config::WebConfig::default().timestamp_format,
         emotes_enabled: true,
         typing: std::collections::HashMap::new(),
+        statusbar_items: crate::web::snapshot::statusbar_item_names(&statusbar),
+        statusbar_enabled: statusbar.enabled,
     }
 }
 

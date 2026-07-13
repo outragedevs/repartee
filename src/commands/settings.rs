@@ -1019,6 +1019,13 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                 );
             }
 
+            // The web status line renders from `statusbar.items` / `.enabled`
+            // too, so a `/set statusbar.…` has to reach open tabs — otherwise
+            // turning the bar off in the terminal leaves it up in the browser.
+            if path.starts_with("statusbar.") {
+                super::handlers_ui::push_statusbar_web_event(app);
+            }
+
             // Resize shells when sidebar layout changes (affects chat area dimensions).
             if path.starts_with("sidepanel.") {
                 app.resize_all_shells();
@@ -1132,6 +1139,7 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
             ],
         ),
         ("emotes", &["enabled", "render", "lang"]),
+        ("typing", &["show", "send_channels", "send_queries"]),
     ];
 
     for &(section, fields) in sections {

@@ -404,9 +404,7 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
                         return;
                     }
                     app.config.statusbar.items.push(item);
-                    app.cached_config_toml = None;
-                    let _ =
-                        crate::config::save_config(&crate::constants::config_path(), &app.config);
+                    save_statusbar(app);
                     add_local_event(app, &format!("{C_OK}Added {item_name} to statusbar{C_RST}"));
                 }
                 None => {
@@ -429,11 +427,7 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
                 Some(item) => {
                     if let Some(pos) = app.config.statusbar.items.iter().position(|i| *i == item) {
                         app.config.statusbar.items.remove(pos);
-                        app.cached_config_toml = None;
-                        let _ = crate::config::save_config(
-                            &crate::constants::config_path(),
-                            &app.config,
-                        );
+                        save_statusbar(app);
                         add_local_event(
                             app,
                             &format!("{C_OK}Removed {item_name} from statusbar{C_RST}"),
@@ -494,8 +488,7 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
             }
             let removed = app.config.statusbar.items.remove(current_pos);
             app.config.statusbar.items.insert(new_pos - 1, removed);
-            app.cached_config_toml = None;
-            let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
+            save_statusbar(app);
             add_local_event(
                 app,
                 &format!("{C_OK}Moved {item_name} to position {new_pos}{C_RST}"),
@@ -535,8 +528,7 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
                 .statusbar
                 .item_formats
                 .insert(item_name.clone(), fmt.clone());
-            app.cached_config_toml = None;
-            let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
+            save_statusbar(app);
             add_local_event(app, &format!("{C_OK}Set {item_name} format: {fmt}{C_RST}"));
         }
         "separator" => {
@@ -551,8 +543,7 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
                 return;
             }
             app.config.statusbar.separator.clone_from(&args[1]);
-            app.cached_config_toml = None;
-            let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
+            save_statusbar(app);
             add_local_event(app, &format!("{C_OK}Separator set to: {}{C_RST}", args[1]));
         }
         "available" => {
@@ -565,8 +556,7 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
             app.config.statusbar.items = crate::config::StatusbarConfig::default().items;
             app.config.statusbar.item_formats.clear();
             app.config.statusbar.separator = " | ".to_string();
-            app.cached_config_toml = None;
-            let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
+            save_statusbar(app);
             add_local_event(app, &format!("{C_OK}Statusbar reset to defaults{C_RST}"));
         }
         _ => {
@@ -580,7 +570,32 @@ pub(crate) fn cmd_items(app: &mut App, args: &[String]) {
 
 const AVAILABLE_ITEMS: &str = "time, nick_info, channel_info, typing, lag, active_windows";
 
-fn parse_statusbar_item(name: &str) -> Option<crate::config::StatusbarItem> {
+/// Persist a statusbar change and tell open browser tabs about it.
+///
+/// The web status line renders from `statusbar.items` too, so a mutation that
+/// only touched the config would take effect in the terminal and nowhere else
+/// until the tab was reloaded — the two UIs must not be able to drift.
+fn save_statusbar(app: &mut App) {
+    app.cached_config_toml = None;
+    let _ = crate::config::save_config(&crate::constants::config_path(), &app.config);
+    push_statusbar_web_event(app);
+}
+
+/// Queue the current status-line config for the connected web clients.
+/// Also called from `/set statusbar.*` and `/reload`, which change the same
+/// state by other routes.
+pub(crate) fn push_statusbar_web_event(app: &mut App) {
+    app.state
+        .pending_web_events
+        .push(crate::web::protocol::WebEvent::StatusbarConfig {
+            items: crate::web::snapshot::statusbar_item_names(&app.config.statusbar),
+            enabled: app.config.statusbar.enabled,
+        });
+}
+
+/// The inverse of [`statusbar_item_name`]. Shared with the web layer so the
+/// names on the wire are exactly the names `/items` speaks.
+pub(crate) fn parse_statusbar_item(name: &str) -> Option<crate::config::StatusbarItem> {
     use crate::config::StatusbarItem;
     match name.to_lowercase().as_str() {
         "time" => Some(StatusbarItem::Time),
@@ -593,7 +608,8 @@ fn parse_statusbar_item(name: &str) -> Option<crate::config::StatusbarItem> {
     }
 }
 
-const fn statusbar_item_name(item: &crate::config::StatusbarItem) -> &'static str {
+/// The name `/items` (and the web protocol) uses for an item.
+pub(crate) const fn statusbar_item_name(item: &crate::config::StatusbarItem) -> &'static str {
     use crate::config::StatusbarItem;
     match item {
         StatusbarItem::Time => "time",

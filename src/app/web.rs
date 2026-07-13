@@ -135,6 +135,10 @@ impl App {
                 timestamp_format: self.config.web.timestamp_format.clone(),
                 emotes_enabled: self.config.emotes.web_enabled(),
                 typing: std::collections::HashMap::new(),
+                statusbar_items: crate::web::snapshot::statusbar_item_names(
+                    &self.config.statusbar,
+                ),
+                statusbar_enabled: self.config.statusbar.enabled,
             },
         ));
         self.web_state_snapshot = Some(std::sync::Arc::clone(&snapshot));
@@ -240,7 +244,11 @@ impl App {
                     }
                 }
                 crate::web::protocol::WebEvent::ConnectionStatus { .. }
-                | crate::web::protocol::WebEvent::SettingsChanged { .. } => {
+                | crate::web::protocol::WebEvent::SettingsChanged { .. }
+                // Structural so the shared snapshot — the source of a
+                // *connecting* session's SyncInit — picks up the new item list
+                // immediately, not up to a tick later.
+                | crate::web::protocol::WebEvent::StatusbarConfig { .. } => {
                     structural_change = true;
                 }
                 _ => {}
@@ -286,6 +294,7 @@ impl App {
             mention_count,
             &self.config.web.timestamp_format,
             self.config.emotes.web_enabled(),
+            &self.config.statusbar,
         );
         if let crate::web::protocol::WebEvent::SyncInit {
             buffers,
@@ -295,6 +304,8 @@ impl App {
             timestamp_format,
             emotes_enabled,
             typing,
+            statusbar_items,
+            statusbar_enabled,
             ..
         } = init
         {
@@ -306,6 +317,8 @@ impl App {
             snap.timestamp_format = timestamp_format;
             snap.emotes_enabled = emotes_enabled;
             snap.typing = typing;
+            snap.statusbar_items = statusbar_items;
+            snap.statusbar_enabled = statusbar_enabled;
         }
     }
 

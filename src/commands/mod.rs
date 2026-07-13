@@ -5,7 +5,7 @@ mod handlers_e2e;
 mod handlers_irc;
 pub(crate) mod handlers_logs;
 mod handlers_shrink;
-mod handlers_ui;
+pub(crate) mod handlers_ui;
 pub mod helpers;
 pub mod parser;
 pub mod registry;

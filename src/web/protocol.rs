@@ -35,6 +35,27 @@ pub enum WebEvent {
         /// up to that long while the TUI shows the indicator throughout.
         #[serde(default)]
         typing: HashMap<String, Vec<String>>,
+        /// The status line's items, in `statusbar.items` order, named exactly as
+        /// `/items` names them (`parse_statusbar_item` round-trips these). The
+        /// browser renders by iterating this list — hardcoding the sequence in
+        /// the frontend is what made `/items …` and `statusbar.enabled` no-ops
+        /// in the tab, and let the two UIs disagree out of the box.
+        ///
+        /// A name the client does not know is skipped, not fatal: an older
+        /// bundle must survive a newer core.
+        #[serde(default)]
+        statusbar_items: Vec<String>,
+        /// `statusbar.enabled` — `false` renders no status line at all.
+        #[serde(default = "default_true")]
+        statusbar_enabled: bool,
+    },
+    /// The status-line configuration changed at runtime (`/items …`,
+    /// `/set statusbar.enabled …`, `/reload`), so open tabs re-render without
+    /// needing a refresh. Same names and semantics as [`WebEvent::SyncInit`]'s
+    /// `statusbar_items` / `statusbar_enabled`.
+    StatusbarConfig {
+        items: Vec<String>,
+        enabled: bool,
     },
     /// A new message was received in a buffer.
     NewMessage {
@@ -486,6 +507,8 @@ mod tests {
             timestamp_format: "%H:%M".to_string(),
             emotes_enabled: true,
             typing: HashMap::new(),
+            statusbar_items: Vec::new(),
+            statusbar_enabled: true,
         }
     }
 
@@ -526,6 +549,8 @@ mod tests {
             timestamp_format,
             emotes_enabled,
             typing,
+            statusbar_items: Vec::new(),
+            statusbar_enabled: true,
         };
 
         let json = serde_json::to_string(&event).expect("serializes");

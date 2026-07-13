@@ -55,91 +55,170 @@ pub fn StatusLine() -> impl IntoView {
             .with(|bufs| activity_numbers(bufs, active_id.as_deref()))
     };
 
+    // One closure for the whole line, because the separators are positional:
+    // a `|` is owed only *between* items that actually produced content, so
+    // nothing can be decided per-item in isolation. It re-runs when the
+    // statusbar config, buffers, connections or typing set change — the same
+    // signals the per-item closures used to read individually. The clock is
+    // deliberately NOT read here (it stays nested below), so ticking the second
+    // does not rebuild the line.
     view! {
-        <div class="status-line">
-            <span class="bracket">"["</span>
-            <span class="muted">{time_str}</span>
-            <span class="sep">"|"</span>
-            // Nick (+modes)
-            {move || active_conn().map(|c| {
-                let modes = if c.user_modes.is_empty() {
-                    String::new()
-                } else {
-                    format!("(+{})", c.user_modes)
-                };
-                view! {
-                    <span class="nick">{c.nick}</span>
-                    <span class="muted">{modes}</span>
-                }
-            })}
-            <span class="sep">"|"</span>
-            // Channel (+modes)
-            {move || active_buf().map(|b| {
-                let modes = b.modes.as_deref()
-                    .filter(|m| !m.is_empty())
-                    .map(|m| format!("(+{m})"))
-                    .unwrap_or_default();
-                view! {
-                    <span class="nick">{b.name}</span>
-                    <span class="muted">{modes}</span>
-                }
-            })}
-            // Typing — same slot as the TUI: after the buffer name, before lag.
-            {move || {
-                let buf = active_buf()?;
-                let nicks = state.typing.get().get(&buf.id).cloned()?;
-                let phrase = typing_phrase(&nicks)?;
-                Some(view! {
-                    <span class="sep">"|"</span>
-                    <span class="muted">{phrase}</span>
-                })
-            }}
-            // Lag
-            {move || {
-                let conn = active_conn()?;
-                let lag = conn.lag?;
-                #[expect(clippy::cast_precision_loss, reason = "u64 lag ms to f64 seconds, precision loss acceptable")]
-                let secs = lag as f64 / 1000.0;
-                Some(view! {
-                    <span class="sep">"|"</span>
-                    <span class="muted">"Lag: "</span>
-                    <span class="nick">{format!("{secs:.1}s")}</span>
-                })
-            }}
-            // Activity
-            {move || {
-                let items = activity_items();
-                if items.is_empty() {
-                    return None;
-                }
-                Some(view! {
-                    <span class="sep">"|"</span>
-                    <span class="muted">"Act: "</span>
-                    {items.into_iter().enumerate().map(|(i, (num, level, id))| {
-                        // Clamp unknown levels to the highest tier, matching
-                        // the buffer list's `activity-4` fallback.
-                        let class = match level {
-                            1 => "act-green",
-                            2 => "act-red",
-                            3 => "act-yellow",
-                            _ => "act-purple",
+        {move || {
+            let items = status_items(
+                state.statusbar_enabled.get(),
+                &state.statusbar_items.get(),
+            );
+            if items.is_empty() {
+                // `statusbar.enabled = false` (or an empty item list): no line
+                // at all, matching the TUI's early return.
+                return None;
+            }
+
+            let mut spans: Vec<AnyView> = Vec::new();
+            for item in items {
+                let content: Option<AnyView> = match item {
+                    StatusItem::Time => Some(
+                        // Nested closure: only this text node re-renders per second.
+                        view! { <span class="muted">{move || time_str.get()}</span> }.into_any(),
+                    ),
+                    StatusItem::NickInfo => active_conn().map(|c| {
+                        let modes = if c.user_modes.is_empty() {
+                            String::new()
+                        } else {
+                            format!("(+{})", c.user_modes)
                         };
-                        let sep = if i > 0 { "," } else { "" };
-                        let on_click = move |_| state.switch_to_buffer(&id);
                         view! {
-                            <span class="sep">{sep}</span>
-                            <button type="button"
-                                class=format!("act-num {class}")
-                                title="Jump to this window"
-                                on:click=on_click
-                            >{num.to_string()}</button>
+                            <span class="nick">{c.nick}</span>
+                            <span class="muted">{modes}</span>
                         }
-                    }).collect::<Vec<_>>()}
-                })
-            }}
-            <span class="bracket">"]"</span>
-        </div>
+                        .into_any()
+                    }),
+                    StatusItem::ChannelInfo => active_buf().map(|b| {
+                        let modes = b.modes.as_deref()
+                            .filter(|m| !m.is_empty())
+                            .map(|m| format!("(+{m})"))
+                            .unwrap_or_default();
+                        view! {
+                            <span class="nick">{b.name}</span>
+                            <span class="muted">{modes}</span>
+                        }
+                        .into_any()
+                    }),
+                    StatusItem::Typing => active_buf()
+                        .and_then(|buf| state.typing.get().get(&buf.id).cloned())
+                        .and_then(|nicks| typing_phrase(&nicks))
+                        .map(|phrase| {
+                            view! { <span class="muted">{phrase}</span> }.into_any()
+                        }),
+                    StatusItem::Lag => active_conn().and_then(|conn| conn.lag).map(|lag| {
+                        #[expect(clippy::cast_precision_loss, reason = "u64 lag ms to f64 seconds, precision loss acceptable")]
+                        let secs = lag as f64 / 1000.0;
+                        view! {
+                            <span class="muted">"Lag: "</span>
+                            <span class="nick">{format!("{secs:.1}s")}</span>
+                        }
+                        .into_any()
+                    }),
+                    StatusItem::ActiveWindows => {
+                        let windows = activity_items();
+                        if windows.is_empty() {
+                            None
+                        } else {
+                            Some(view! {
+                                <span class="muted">"Act: "</span>
+                                {windows.into_iter().enumerate().map(|(i, (num, level, id))| {
+                                    // Clamp unknown levels to the highest tier, matching
+                                    // the buffer list's `activity-4` fallback.
+                                    let class = match level {
+                                        1 => "act-green",
+                                        2 => "act-red",
+                                        3 => "act-yellow",
+                                        _ => "act-purple",
+                                    };
+                                    let sep = if i > 0 { "," } else { "" };
+                                    let on_click = move |_| state.switch_to_buffer(&id);
+                                    view! {
+                                        <span class="sep">{sep}</span>
+                                        <button type="button"
+                                            class=format!("act-num {class}")
+                                            title="Jump to this window"
+                                            on:click=on_click
+                                        >{num.to_string()}</button>
+                                    }
+                                }).collect::<Vec<_>>()}
+                            }
+                            .into_any())
+                        }
+                    }
+                };
+
+                // Separator only in front of an item that produced something,
+                // and only if something came before it — exactly the TUI's rule
+                // (`src/ui/status_line.rs`: insert the separator after the fact,
+                // once the item is known to have pushed spans).
+                if let Some(content) = content {
+                    if !spans.is_empty() {
+                        spans.push(view! { <span class="sep">"|"</span> }.into_any());
+                    }
+                    spans.push(content);
+                }
+            }
+
+            Some(view! {
+                <div class="status-line">
+                    <span class="bracket">"["</span>
+                    {spans}
+                    <span class="bracket">"]"</span>
+                </div>
+            })
+        }}
     }
+}
+
+/// One rendered status-line item. The wire carries these as the names `/items`
+/// uses; this enum is the client's view of that vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusItem {
+    Time,
+    NickInfo,
+    ChannelInfo,
+    Typing,
+    Lag,
+    ActiveWindows,
+}
+
+impl StatusItem {
+    /// Mirrors `parse_statusbar_item` in `src/commands/handlers_ui.rs`.
+    /// `None` for a name this bundle does not know.
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "time" => Some(Self::Time),
+            "nick_info" => Some(Self::NickInfo),
+            "channel_info" => Some(Self::ChannelInfo),
+            "typing" => Some(Self::Typing),
+            "lag" => Some(Self::Lag),
+            "active_windows" => Some(Self::ActiveWindows),
+            _ => None,
+        }
+    }
+}
+
+/// The items to render, in the server's configured order — the DOM-free core of
+/// the status line.
+///
+/// `enabled == false` renders nothing at all (the TUI returns early on
+/// `statusbar.enabled`, and the two must agree). An unrecognised name is
+/// skipped rather than fatal: an older bundle must survive a newer core that
+/// has learned a new item.
+#[must_use]
+pub fn status_items(enabled: bool, names: &[String]) -> Vec<StatusItem> {
+    if !enabled {
+        return Vec::new();
+    }
+    names
+        .iter()
+        .filter_map(|name| StatusItem::parse(name))
+        .collect()
 }
 
 /// Mirrors `src/ui/status_line.rs::typing_phrase`. Kept in step by test.
@@ -219,6 +298,69 @@ mod tests {
         ];
         let items = activity_numbers(&buffers, Some("#a"));
         assert_eq!(items, vec![(3, 4, "#c".to_string())]);
+    }
+
+    fn names(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn items_render_in_the_configured_order() {
+        // The status line is rendered from the server's `statusbar.items`, not
+        // from a sequence hardcoded here — that hardcoding is what made
+        // `/items move|remove` and `statusbar.enabled` no-ops in the browser.
+        let items = status_items(
+            true,
+            &names(&[
+                "time",
+                "nick_info",
+                "channel_info",
+                "typing",
+                "lag",
+                "active_windows",
+            ]),
+        );
+        assert_eq!(
+            items,
+            vec![
+                StatusItem::Time,
+                StatusItem::NickInfo,
+                StatusItem::ChannelInfo,
+                StatusItem::Typing,
+                StatusItem::Lag,
+                StatusItem::ActiveWindows,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_reordered_config_is_honoured_verbatim() {
+        let items = status_items(true, &names(&["lag", "typing", "time"]));
+        assert_eq!(
+            items,
+            vec![StatusItem::Lag, StatusItem::Typing, StatusItem::Time]
+        );
+    }
+
+    #[test]
+    fn a_removed_typing_item_is_not_rendered() {
+        // `/items remove typing` in the terminal must switch it off in the tab.
+        let items = status_items(true, &names(&["time", "lag"]));
+        assert!(!items.contains(&StatusItem::Typing));
+    }
+
+    #[test]
+    fn a_disabled_statusbar_renders_nothing() {
+        let items = status_items(false, &names(&["time", "typing", "lag"]));
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_item_name_is_skipped_not_fatal() {
+        // An older bundle against a newer core: a name it has never heard of
+        // must not take the whole status line down with it.
+        let items = status_items(true, &names(&["time", "quantum_flux", "typing"]));
+        assert_eq!(items, vec![StatusItem::Time, StatusItem::Typing]);
     }
 
     #[test]

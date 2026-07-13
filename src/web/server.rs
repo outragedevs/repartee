@@ -33,6 +33,13 @@ pub struct WebStateSnapshot {
     /// a *change*, so it never tells a fresh client what is already on screen.
     /// Up to 1 s stale (the refresh tick), which is well inside the 6s/30s TTLs.
     pub typing: std::collections::HashMap<String, Vec<String>>,
+    /// `statusbar.items` as wire names, in order — the web status line renders
+    /// by iterating this. Must be threaded through here, not just into
+    /// `build_sync_init`: the client-facing `SyncInit` is assembled from this
+    /// snapshot (see `ws::build_sync_init_from_snapshot`).
+    pub statusbar_items: Vec<String>,
+    /// `statusbar.enabled` — `false` means the browser renders no status line.
+    pub statusbar_enabled: bool,
 }
 
 /// Shared state passed to all axum handlers.

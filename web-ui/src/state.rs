@@ -99,6 +99,13 @@ pub struct AppState {
     pub backlog_fetching: RwSignal<HashSet<String>>,
     /// buffer_id -> nicks currently typing (IRCv3 `+typing`).
     pub typing: RwSignal<HashMap<String, Vec<String>>>,
+    /// The status line's items, in the server's `statusbar.items` order, under
+    /// the names `/items` uses. Seeded by `SyncInit`, updated live by
+    /// `StatusbarConfig`. The status line renders from this — it is the whole
+    /// reason `/items …` and `statusbar.enabled` take effect in the browser.
+    pub statusbar_items: RwSignal<Vec<String>>,
+    /// `statusbar.enabled` — `false` renders no status line at all.
+    pub statusbar_enabled: RwSignal<bool>,
 }
 
 impl AppState {
@@ -173,6 +180,11 @@ impl AppState {
             backlog_has_more: RwSignal::new(HashMap::new()),
             backlog_fetching: RwSignal::new(HashSet::new()),
             typing: RwSignal::new(HashMap::new()),
+            // Empty until SyncInit lands: the server owns this list, and
+            // guessing a default here would resurrect the very hardcoding this
+            // replaces (a tab would briefly show items the config removed).
+            statusbar_items: RwSignal::new(Vec::new()),
+            statusbar_enabled: RwSignal::new(true),
         }
     }
 
@@ -225,6 +237,8 @@ impl AppState {
                 timestamp_format,
                 emotes_enabled,
                 typing,
+                statusbar_items,
+                statusbar_enabled,
             } => {
                 // Clear cached messages, nick lists, and backlog-loaded flags —
                 // forces re-fetch. Handles both initial connect and lag-recovery resync.
@@ -242,6 +256,8 @@ impl AppState {
                 // Blanking here left a reconnecting tab with no indicator for up
                 // to that long while the TUI showed it the whole time.
                 self.typing.set(typing);
+                self.statusbar_items.set(statusbar_items);
+                self.statusbar_enabled.set(statusbar_enabled);
 
                 self.buffers.set(buffers);
                 self.connections.set(connections);
@@ -681,6 +697,10 @@ impl AppState {
                 self.nick_color_saturation.set(nick_color_saturation);
                 self.nick_color_lightness.set(nick_color_lightness);
                 self.emotes_enabled.set(emotes_enabled);
+            }
+            WebEvent::StatusbarConfig { items, enabled } => {
+                self.statusbar_items.set(items);
+                self.statusbar_enabled.set(enabled);
             }
             WebEvent::Error { message, .. } => {
                 self.error.set(Some(message));
@@ -1141,9 +1161,45 @@ mod tests {
             timestamp_format: None,
             emotes_enabled: true,
             typing: HashMap::new(),
+            statusbar_items: Vec::new(),
+            statusbar_enabled: true,
         });
 
         assert!(state.typing.get_untracked().is_empty());
+    }
+
+    #[test]
+    fn sync_init_seeds_the_statusbar_config() {
+        // The browser must render the status line from the server's config —
+        // this is the wire half of that (the renderer half is in
+        // `components::status_line`).
+        let state = headless_state();
+        let json = r#"{"type":"SyncInit","buffers":[],"connections":[],"mention_count":0,
+            "timestamp_format":"%H:%M",
+            "statusbar_items":["time","channel_info","typing","lag"],
+            "statusbar_enabled":false}"#;
+        let event: WebEvent = serde_json::from_str(json).expect("parses");
+        state.handle_event(event);
+        assert_eq!(
+            state.statusbar_items.get_untracked(),
+            vec!["time", "channel_info", "typing", "lag"]
+        );
+        assert!(!state.statusbar_enabled.get_untracked());
+    }
+
+    #[test]
+    fn a_statusbar_config_push_updates_an_open_tab() {
+        // `/items remove typing` (or `/set statusbar.enabled false`) in the
+        // terminal must reach a tab that is already open, with no refresh.
+        let state = headless_state();
+        state
+            .statusbar_items
+            .set(vec!["time".to_string(), "typing".to_string()]);
+        state.handle_event(WebEvent::StatusbarConfig {
+            items: vec!["time".to_string()],
+            enabled: true,
+        });
+        assert_eq!(state.statusbar_items.get_untracked(), vec!["time"]);
     }
 
     #[test]

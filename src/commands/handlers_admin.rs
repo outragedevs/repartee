@@ -132,6 +132,8 @@ pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
                     crate::irc::events::push_typing_web_event(&mut app.state, &buffer_id);
                 }
             }
+            // A hand-edited `[statusbar]` section must reach open tabs too.
+            super::handlers_ui::push_statusbar_web_event(app);
             add_local_event(app, &format!("{C_OK}Config reloaded{C_RST}"));
         }
         Err(e) => {

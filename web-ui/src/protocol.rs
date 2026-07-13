@@ -25,6 +25,20 @@ pub enum WebEvent {
         /// mid-typing shows nothing for up to that long.
         #[serde(default)]
         typing: std::collections::HashMap<String, Vec<String>>,
+        /// The status line's items, in the server's `statusbar.items` order,
+        /// under the names `/items` uses. The status line renders by iterating
+        /// this — an unknown name is skipped, never fatal.
+        #[serde(default)]
+        statusbar_items: Vec<String>,
+        /// `statusbar.enabled` — `false` means: render no status line.
+        #[serde(default = "default_true")]
+        statusbar_enabled: bool,
+    },
+    /// The status-line config changed at runtime (`/items …`,
+    /// `/set statusbar.enabled …`, `/reload`) — no refresh needed.
+    StatusbarConfig {
+        items: Vec<String>,
+        enabled: bool,
     },
     NewMessage {
         buffer_id: String,
