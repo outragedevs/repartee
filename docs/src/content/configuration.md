@@ -54,7 +54,7 @@ width = 18
 visible = true
 
 [statusbar]
-items = ["active_windows", "nick_info", "channel_info", "lag", "time"]
+items = ["active_windows", "nick_info", "channel_info", "typing", "lag", "time"]
 
 [servers.libera]
 label = "Libera"
@@ -115,6 +115,11 @@ enabled = true
 languages = ["en_US"]              # Hunspell language codes
 dictionary_dir = ""                # default: ~/.repartee/dicts
 
+[typing]
+show = true                        # receive and display others' typing indicators
+send_channels = true               # send +typing while typing in a channel
+send_queries = true                # send +typing while typing in a private query
+
 [web]
 enabled = false                    # enable embedded web frontend
 bind_address = "127.0.0.1"        # listen address (0.0.0.0 for LAN)
@@ -151,7 +156,7 @@ Left panel shows buffer list, right panel shows nick list. Set `visible = false`
 
 ### `[statusbar]`
 
-Configure which items appear in the status line. Available items: `active_windows`, `nick_info`, `channel_info`, `lag`, `time`.
+Configure which items appear in the status line. Available items: `active_windows`, `nick_info`, `channel_info`, `typing`, `lag`, `time`. The `typing` item shows who is currently typing in the active buffer (see `[typing]` below).
 
 ### `[servers.*]`
 
@@ -199,6 +204,12 @@ DCC (Direct Client-to-Client) chat settings. DCC CHAT establishes peer-to-peer T
 ### `[spellcheck]`
 
 Inline spell checking. When `enabled = true`, misspelled words are underlined in red while typing. Press Tab to cycle suggestions, Space to accept, Escape to revert. `languages` is a list of Hunspell language codes (e.g., `en_US`, `pl_PL`, `de_DE`) — a word is correct if **any** active dictionary accepts it. Place `.dic`/`.aff` files in `~/.repartee/dicts/` (or set `dictionary_dir` to a custom path).
+
+### `[typing]`
+
+IRCv3 `+typing` client tag support (typing indicators). `show = true` (default) receives and displays other people's typing status in the TUI status line and the web UI; set to `false` to stop showing it, both live and after reload. `send_channels` and `send_queries` independently control whether Repartee sends its own `+typing` while you type in a channel or a private query, respectively — turn either off if you'd rather not announce your own typing in that context. All three are booleans, so use `/set typing.show false` (not `off`) to disable one at runtime.
+
+Turning a send switch off at runtime stops all further notifications immediately, but it does **not** retract an indicator that is already on the wire: an indicator you have just sent lapses at the peer's own timeout — 6 seconds after your last `active`, or 30 seconds after a `paused` — rather than being taken down with an explicit `done`.
 
 ### `[web]`
 

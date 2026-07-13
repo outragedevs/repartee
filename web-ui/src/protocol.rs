@@ -15,6 +15,30 @@ pub enum WebEvent {
         timestamp_format: Option<String>,
         #[serde(default = "default_true")]
         emotes_enabled: bool,
+        /// Who is typing right now, per buffer: `buffer_id -> nicks` — the same
+        /// full sets (same order) `Typing` carries, for every buffer that has
+        /// one. The client REPLACES its typing map with this; `{}` means nobody.
+        ///
+        /// Seeded here because the live `Typing` push only fires on a *change*:
+        /// a sender's 3s `active` refresh is not one, and `paused` is sent once
+        /// and then lives 30s at the receiver. Without this, a tab connecting
+        /// mid-typing shows nothing for up to that long.
+        #[serde(default)]
+        typing: std::collections::HashMap<String, Vec<String>>,
+        /// The status line's items, in the server's `statusbar.items` order,
+        /// under the names `/items` uses. The status line renders by iterating
+        /// this — an unknown name is skipped, never fatal.
+        #[serde(default)]
+        statusbar_items: Vec<String>,
+        /// `statusbar.enabled` — `false` means: render no status line.
+        #[serde(default = "default_true")]
+        statusbar_enabled: bool,
+    },
+    /// The status-line config changed at runtime (`/items …`,
+    /// `/set statusbar.enabled …`, `/reload`) — no refresh needed.
+    StatusbarConfig {
+        items: Vec<String>,
+        enabled: bool,
     },
     NewMessage {
         buffer_id: String,
@@ -126,6 +150,14 @@ pub enum WebEvent {
         #[serde(default)]
         session_id: Option<String>,
     },
+    /// Who is currently typing in a buffer (`IRCv3` `+typing`). Mirrors
+    /// `src/web/protocol.rs::WebEvent::Typing`. Carries the buffer's complete
+    /// set, not a delta; empty `nicks` clears the buffer. Only sent when the set
+    /// *changes* — the state on connect comes from `SyncInit::typing` instead.
+    Typing {
+        buffer_id: String,
+        nicks: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +205,14 @@ pub enum WebCommand {
     /// Add or edit a server from the web wizard (mirrors the server-side
     /// variant). Boxed because the payload dwarfs the other variants.
     SaveServer(Box<SaveServerCmd>),
+    /// The browser's input field changed. `typing` is a predicate ("my input
+    /// holds non-empty, non-slash text"), never a state — the core owns the
+    /// throttle and flood budget. Mirrors
+    /// `src/web/protocol.rs::WebCommand::Typing`.
+    Typing {
+        buffer_id: String,
+        typing: bool,
+    },
 }
 
 /// Payload of [`WebCommand::SaveServer`]. `id` None = add (id derived from

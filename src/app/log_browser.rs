@@ -134,6 +134,7 @@ impl App {
                 batch_ref_counter: 0,
                 silent_who_channels: HashSet::new(),
                 silent_banlist_channels: HashSet::new(),
+                // Synthetic per-network log-browser header — never a live IRC sender.
             });
 
             // Server-type header buffer for the pseudo-network. Buffer-list

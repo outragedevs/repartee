@@ -148,6 +148,33 @@ impl Isupport {
         self.tokens.get("STATUSMSG").map_or("", String::as_str)
     }
 
+    /// Whether the server will relay a given client-only tag, per the
+    /// `CLIENTTAGDENY` token (message-tags spec, `RPL_ISUPPORT` Tokens).
+    ///
+    /// `tag` is given without the `+` prefix, e.g. `"typing"` — that is the form
+    /// the token itself uses. An absent or empty token means everything is
+    /// allowed. `*` blocks all; a `-` entry negates a block.
+    #[must_use]
+    pub fn client_tag_allowed(&self, tag: &str) -> bool {
+        let Some(value) = self.tokens.get("CLIENTTAGDENY") else {
+            return true;
+        };
+        if value.is_empty() {
+            return true;
+        }
+
+        let mut allowed = true;
+        for entry in value.split(',') {
+            match entry.strip_prefix('-') {
+                // `-foo` — exempt from a catch-all block.
+                Some(exempt) if exempt == tag => allowed = true,
+                None if entry == "*" || entry == tag => allowed = false,
+                _ => {}
+            }
+        }
+        allowed
+    }
+
     /// The case-mapping model used by the server for nick/channel comparison.
     /// Common values: `rfc1459`, `ascii`, `strict-rfc1459`.
     /// Defaults to `rfc1459`.
@@ -545,5 +572,57 @@ mod tests {
         let mut is = Isupport::new();
         is.parse_tokens(&["MSGREFTYPES=Timestamp,,MSGID"]);
         assert_eq!(is.msgreftypes(), vec!["timestamp", "msgid"]);
+    }
+
+    #[test]
+    fn client_tag_allowed_by_default() {
+        // Absent token = everything allowed ("An empty or missing CLIENTTAGDENY
+        // matches the default case").
+        let isupport = Isupport::new();
+        assert!(isupport.client_tag_allowed("typing"));
+    }
+
+    #[test]
+    fn client_tag_allowed_with_empty_token() {
+        let mut isupport = Isupport::new();
+        isupport.parse_tokens(&["CLIENTTAGDENY="]);
+        assert!(isupport.client_tag_allowed("typing"));
+    }
+
+    #[test]
+    fn client_tag_blocked_by_wildcard() {
+        let mut isupport = Isupport::new();
+        isupport.parse_tokens(&["CLIENTTAGDENY=*"]);
+        assert!(!isupport.client_tag_allowed("typing"));
+    }
+
+    #[test]
+    fn client_tag_exempted_from_wildcard_block() {
+        let mut isupport = Isupport::new();
+        isupport.parse_tokens(&["CLIENTTAGDENY=*,-typing,-example/bar"]);
+        assert!(isupport.client_tag_allowed("typing"));
+        assert!(isupport.client_tag_allowed("example/bar"));
+        assert!(!isupport.client_tag_allowed("react"));
+    }
+
+    #[test]
+    fn client_tag_blocked_by_explicit_list() {
+        let mut isupport = Isupport::new();
+        isupport.parse_tokens(&["CLIENTTAGDENY=typing,example/bar"]);
+        assert!(!isupport.client_tag_allowed("typing"));
+        assert!(isupport.client_tag_allowed("react"));
+    }
+
+    #[test]
+    fn statusmsg_defaults_to_empty() {
+        let isupport = Isupport::new();
+        assert_eq!(isupport.statusmsg(), "");
+    }
+
+    #[test]
+    fn statusmsg_returns_the_advertised_prefixes() {
+        let mut isupport = Isupport::new();
+        isupport.parse_tokens(&["STATUSMSG=@+"]);
+        assert_eq!(isupport.statusmsg(), "@+");
     }
 }

@@ -370,8 +370,8 @@ impl App {
     }
 
     /// Get an IRC sender for a resolved connection ID.
-    fn irc_sender_for(&self, conn_id: &str) -> Option<&::irc::client::Sender> {
-        self.irc_handles.get(conn_id).map(|h| &h.sender)
+    fn irc_sender_for(&self, conn_id: &str) -> Option<&crate::irc::IrcSender> {
+        self.irc_handles.get(conn_id).map(crate::irc::IrcHandle::sender)
     }
 
     /// Process a single `ScriptAction` from the scripting channel.
@@ -807,10 +807,84 @@ impl App {
                 params.insert("from_server".to_string(), from_server.to_string());
                 events::WALLOPS
             }
+            // IRCv3 `+typing` arrives as Raw (no TAGMSG variant in the proto crate).
+            // A TAGMSG with no typing tag carries nothing a script can act on.
+            ::irc::proto::Command::Raw(verb, args)
+                if verb.eq_ignore_ascii_case("TAGMSG") && !args.is_empty() =>
+            {
+                let Some(typing) = typing_script_params(&self.state, conn_id, msg) else {
+                    return false;
+                };
+                params.extend(typing);
+                events::TYPING
+            }
             // For non-scriptable events, don't emit
             _ => return false,
         };
 
         self.emit_script_event(event_name, params)
     }
+}
+
+/// The `irc.typing` params for an inbound TAGMSG, or `None` if a script must not
+/// see it at all.
+///
+/// Free, and over borrowed state, so the arm that feeds `events::TYPING` is
+/// testable without an `App` (whose constructor touches disk). It mirrors the
+/// display path (`handle_tagmsg`) on every question they must agree on:
+///
+/// * a `batch` tag means chathistory / event-playback replay — typing is a
+///   live-only signal (spec §3.3), and a script must not act on a stale one;
+/// * `echo-message` reflects our own TAGMSG back at us (spec §3.2);
+/// * a `STATUSMSG` prefix is stripped, because `target` is documented to scripts
+///   as "Channel or your nick" — a script matching `target == "#rust"` would
+///   otherwise silently miss every `TAGMSG @#rust` the status line does show.
+///
+/// It does NOT mirror the `typing.show` gate: that is a *display* preference,
+/// and a script that reacts to typing (an away-responder, a logger) has no
+/// reason to stop because the user hid the status-line item.
+pub fn typing_script_params(
+    state: &crate::state::AppState,
+    conn_id: &str,
+    msg: &::irc::proto::Message,
+) -> Option<HashMap<String, String>> {
+    let ::irc::proto::Command::Raw(verb, args) = &msg.command else {
+        return None;
+    };
+    if !verb.eq_ignore_ascii_case("TAGMSG") || args.is_empty() {
+        return None;
+    }
+
+    let tags: HashMap<String, String> = msg
+        .tags
+        .as_ref()
+        .map(|ts| {
+            ts.iter()
+                .filter_map(|t| Some((t.0.clone(), t.1.clone()?)))
+                .collect()
+        })
+        .unwrap_or_default();
+    if tags.contains_key("batch") {
+        return None;
+    }
+    let typing_state = crate::irc::typing::parse_typing(&tags)?;
+
+    let nick = match msg.prefix.as_ref() {
+        Some(::irc::proto::Prefix::Nickname(nick, _, _)) => nick.clone(),
+        Some(::irc::proto::Prefix::ServerName(name)) => name.clone(),
+        None => String::new(),
+    };
+    let conn = state.connections.get(conn_id);
+    if nick.eq_ignore_ascii_case(conn.map_or("", |c| c.nick.as_str())) {
+        return None;
+    }
+
+    let statusmsg = conn.map_or("", |c| c.isupport_parsed.statusmsg());
+    let target = crate::irc::typing::strip_statusmsg(&args[0], statusmsg);
+
+    Some(HashMap::from([
+        ("nick".to_string(), nick),
+        ("target".to_string(), target.to_string()),
+        ("state".to_string(), typing_state.as_str().to_string()),
+    ]))
 }

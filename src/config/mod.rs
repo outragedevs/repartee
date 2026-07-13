@@ -36,6 +36,7 @@ pub enum StatusbarItem {
     ActiveWindows,
     NickInfo,
     ChannelInfo,
+    Typing,
     Lag,
     Time,
 }
@@ -58,9 +59,30 @@ pub enum IgnoreLevel {
 
 // === Config Structs ===
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Schema version of the config file this build writes.
+///
+/// Bump whenever a change to the *defaults* has to be back-filled into config
+/// files that already exist on disk (a `#[serde(default)]` only fills fields
+/// the file omits — it cannot touch a list the user's file already pins).
+/// Every bump needs a matching arm in [`migrate_config`].
+///
+/// * 1 — the `typing` statusbar item, inserted after `channel_info`.
+pub const CONFIG_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
+    /// Schema version of the file on disk, so one-time default back-fills know
+    /// whether they have already run. Must stay **first**: TOML requires scalar
+    /// values before any table, and every other field of this struct is one.
+    ///
+    /// The field-level `#[serde(default)]` is load-bearing and deliberately
+    /// shadows the container-level one: it resolves to `u32::default()` (0),
+    /// not to `AppConfig::default().config_version` (the current version). A
+    /// file written before this field existed must read back as 0, otherwise
+    /// nothing is ever migrated.
+    #[serde(default)]
+    pub config_version: u32,
     pub general: GeneralConfig,
     pub display: DisplayConfig,
     pub sidepanel: SidepanelConfig,
@@ -77,6 +99,38 @@ pub struct AppConfig {
     pub e2e: E2eConfig,
     pub shrink: ShrinkConfig,
     pub emotes: EmotesConfig,
+    #[serde(default)]
+    pub typing: TypingConfig,
+}
+
+/// Hand-written (not derived) for one reason: `config_version` must be
+/// [`CONFIG_VERSION`] here, so a config born from the defaults is already
+/// current and no migration ever touches it. Everything else is its own
+/// `Default`. The derived impl would hand out version 0 and make first run
+/// look like a stale file.
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            config_version: CONFIG_VERSION,
+            general: GeneralConfig::default(),
+            display: DisplayConfig::default(),
+            sidepanel: SidepanelConfig::default(),
+            statusbar: StatusbarConfig::default(),
+            image_preview: ImagePreviewConfig::default(),
+            servers: HashMap::new(),
+            aliases: HashMap::new(),
+            ignores: Vec::new(),
+            scripts: ScriptsConfig::default(),
+            logging: LoggingConfig::default(),
+            dcc: DccConfig::default(),
+            spellcheck: SpellcheckConfig::default(),
+            web: WebConfig::default(),
+            e2e: E2eConfig::default(),
+            shrink: ShrinkConfig::default(),
+            emotes: EmotesConfig::default(),
+            typing: TypingConfig::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,6 +288,7 @@ impl Default for StatusbarConfig {
                 StatusbarItem::Time,
                 StatusbarItem::NickInfo,
                 StatusbarItem::ChannelInfo,
+                StatusbarItem::Typing,
                 StatusbarItem::Lag,
                 StatusbarItem::ActiveWindows,
             ],
@@ -664,6 +719,31 @@ impl Default for EmotesConfig {
     }
 }
 
+/// `IRCv3` `+typing`. Split three ways because the spec asks clients to "provide
+/// appropriate privacy controls": you may watch without broadcasting, or
+/// broadcast in DMs but not in public channels.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TypingConfig {
+    /// Receive and display other people's typing indicators. Gates ingestion,
+    /// not just rendering (spec §5).
+    pub show: bool,
+    /// Send `+typing` in channels.
+    pub send_channels: bool,
+    /// Send `+typing` in private queries.
+    pub send_queries: bool,
+}
+
+impl Default for TypingConfig {
+    fn default() -> Self {
+        Self {
+            show: true,
+            send_channels: true,
+            send_queries: true,
+        }
+    }
+}
+
 // === Load / Save ===
 
 /// Load config from TOML file, merging with defaults for missing fields.
@@ -677,6 +757,83 @@ pub fn load_config(path: &Path) -> Result<AppConfig> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(default_config()),
         Err(e) => Err(e.into()),
     }
+}
+
+/// Startup config load: parse and migrate **in memory**. Writes nothing.
+///
+/// Deliberately not persisted. A startup write-back would rewrite the config of
+/// every user upgrading into this version, none of whom asked for a write, and
+/// the rewrite is lossy: `AppConfig` has no `deny_unknown_fields` and
+/// `toml::to_string_pretty` emits only the fields this build knows, so every
+/// comment and every unknown key in a hand-maintained `config.toml` would be
+/// destroyed on first launch.
+///
+/// Persistence rides the next save the user actually triggers, which is enough
+/// to make a deliberate removal stick, because [`save_config`] serializes
+/// `config_version` along with everything else:
+///
+/// * existing user who never touches a setting → the migration re-runs in memory
+///   on every start. Harmless: no file write, comments intact.
+/// * user runs `/items remove typing` → `save_config` writes the list without
+///   `typing` **and** `config_version = CONFIG_VERSION` → the next start sees a
+///   current file, [`migrate_config`] returns early, and the removal sticks.
+///
+/// A missing file yields the defaults — creating the initial `config.toml` is
+/// `constants::ensure_config_dir`'s job, not the migration's.
+pub fn load_and_migrate(path: &Path) -> Result<AppConfig> {
+    let mut config = load_config(path)?;
+    if migrate_config(&mut config) {
+        tracing::info!(
+            path = %path.display(),
+            version = CONFIG_VERSION,
+            "config migrated in memory; will persist on the next save"
+        );
+    }
+    Ok(config)
+}
+
+/// Bring a freshly-parsed config up to [`CONFIG_VERSION`], returning `true`
+/// if anything changed — the caller then persists it (see `App::new_with_mode`).
+///
+/// Pure and side-effect-free on purpose: the file I/O lives at the call site so
+/// this stays unit-testable and so `load_config` (also used by tests and by
+/// `/reload`) keeps its current semantics.
+///
+/// Why a version gate rather than "append the item if it is missing": the
+/// blind version resurrects an item the user deliberately dropped with
+/// `/items remove typing` on the very next start. The version — persisted with
+/// the config — is what makes the back-fill happen exactly once.
+///
+/// Placement is relative to whatever the user already has; their order is never
+/// reshuffled. `typing` goes right after `channel_info`, else right before
+/// `lag`, else at the end.
+pub fn migrate_config(config: &mut AppConfig) -> bool {
+    if config.config_version >= CONFIG_VERSION {
+        return false;
+    }
+
+    // v0 → v1: the `typing` statusbar item. Existing files pin an explicit
+    // `items` list, so `#[serde(default)]` cannot reach them.
+    if !config.statusbar.items.contains(&StatusbarItem::Typing) {
+        let items = &mut config.statusbar.items;
+        let at = items
+            .iter()
+            .position(|i| *i == StatusbarItem::ChannelInfo)
+            .map_or_else(
+                || {
+                    items
+                        .iter()
+                        .position(|i| *i == StatusbarItem::Lag)
+                        .unwrap_or(items.len())
+                },
+                |channel| channel + 1,
+            );
+        items.insert(at, StatusbarItem::Typing);
+        tracing::info!(position = at, "config migration: added the typing statusbar item");
+    }
+
+    config.config_version = CONFIG_VERSION;
+    true
 }
 
 /// Save config to TOML file.
@@ -1024,5 +1181,266 @@ channels = ["#general"]
         );
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn typing_defaults_are_on() {
+        let config = AppConfig::default();
+        assert!(config.typing.show);
+        assert!(config.typing.send_channels);
+        assert!(config.typing.send_queries);
+    }
+
+    #[test]
+    fn typing_item_sits_between_channel_and_lag() {
+        let config = AppConfig::default();
+        let items = &config.statusbar.items;
+        let channel = items.iter().position(|i| *i == StatusbarItem::ChannelInfo);
+        let typing = items.iter().position(|i| *i == StatusbarItem::Typing);
+        let lag = items.iter().position(|i| *i == StatusbarItem::Lag);
+        assert!(channel < typing, "typing must come after the buffer name");
+        assert!(typing < lag, "typing must come before lag");
+    }
+
+    #[test]
+    fn typing_config_round_trips_through_toml() {
+        let toml = "[typing]\nshow = false\nsend_channels = false\nsend_queries = true\n";
+        let config: AppConfig = toml::from_str(toml).expect("parses");
+        assert!(!config.typing.show);
+        assert!(!config.typing.send_channels);
+        assert!(config.typing.send_queries);
+    }
+
+    // === Config migration (statusbar `typing` item) ===
+
+    /// The list every pre-`typing` install has pinned in its `config.toml`.
+    const LEGACY_STATUSBAR: &str = r#"
+[statusbar]
+items = ["time", "nick_info", "channel_info", "lag", "active_windows"]
+"#;
+
+    #[test]
+    fn legacy_config_deserializes_at_version_zero() {
+        // The whole migration hinges on this: a file written before the
+        // schema-version field existed must read back as 0, NOT as
+        // `AppConfig::default().config_version`.
+        let config: AppConfig = toml::from_str(LEGACY_STATUSBAR).expect("parses");
+        assert_eq!(config.config_version, 0);
+    }
+
+    #[test]
+    fn migration_inserts_typing_after_channel_info() {
+        let mut config: AppConfig = toml::from_str(LEGACY_STATUSBAR).expect("parses");
+        assert!(migrate_config(&mut config), "legacy config must be migrated");
+        assert_eq!(
+            config.statusbar.items,
+            vec![
+                StatusbarItem::Time,
+                StatusbarItem::NickInfo,
+                StatusbarItem::ChannelInfo,
+                StatusbarItem::Typing,
+                StatusbarItem::Lag,
+                StatusbarItem::ActiveWindows,
+            ]
+        );
+        assert_eq!(config.config_version, CONFIG_VERSION);
+    }
+
+    #[test]
+    fn migration_is_idempotent() {
+        let mut config: AppConfig = toml::from_str(LEGACY_STATUSBAR).expect("parses");
+        assert!(migrate_config(&mut config));
+        assert!(
+            !migrate_config(&mut config),
+            "a second run must report no change"
+        );
+        assert_eq!(
+            config
+                .statusbar
+                .items
+                .iter()
+                .filter(|i| **i == StatusbarItem::Typing)
+                .count(),
+            1,
+            "typing must not be inserted twice"
+        );
+    }
+
+    #[test]
+    fn migration_does_not_resurrect_a_deliberately_removed_item() {
+        // `/items remove typing` saves the list without it — at the current
+        // version. The migration must leave that alone forever.
+        let toml = format!(
+            "config_version = {CONFIG_VERSION}\n{LEGACY_STATUSBAR}"
+        );
+        let mut config: AppConfig = toml::from_str(&toml).expect("parses");
+        assert!(!migrate_config(&mut config), "already migrated");
+        assert!(!config.statusbar.items.contains(&StatusbarItem::Typing));
+    }
+
+    #[test]
+    fn migration_falls_back_to_before_lag_without_channel_info() {
+        let mut config: AppConfig =
+            toml::from_str("[statusbar]\nitems = [\"time\", \"lag\"]\n").expect("parses");
+        assert!(migrate_config(&mut config));
+        assert_eq!(
+            config.statusbar.items,
+            vec![StatusbarItem::Time, StatusbarItem::Typing, StatusbarItem::Lag]
+        );
+    }
+
+    #[test]
+    fn migration_appends_when_neither_anchor_is_present() {
+        let mut config: AppConfig =
+            toml::from_str("[statusbar]\nitems = [\"time\", \"active_windows\"]\n")
+                .expect("parses");
+        assert!(migrate_config(&mut config));
+        assert_eq!(
+            config.statusbar.items,
+            vec![
+                StatusbarItem::Time,
+                StatusbarItem::ActiveWindows,
+                StatusbarItem::Typing,
+            ]
+        );
+    }
+
+    #[test]
+    fn migration_appends_to_an_empty_item_list_without_panicking() {
+        let mut config: AppConfig =
+            toml::from_str("[statusbar]\nitems = []\n").expect("parses");
+        assert!(migrate_config(&mut config));
+        assert_eq!(config.statusbar.items, vec![StatusbarItem::Typing]);
+    }
+
+    #[test]
+    fn migration_preserves_a_customised_order() {
+        // A user who moved things around keeps their order — typing is only
+        // *inserted*, never a reshuffle.
+        let mut config: AppConfig = toml::from_str(
+            "[statusbar]\nitems = [\"active_windows\", \"channel_info\", \"lag\", \"time\"]\n",
+        )
+        .expect("parses");
+        assert!(migrate_config(&mut config));
+        assert_eq!(
+            config.statusbar.items,
+            vec![
+                StatusbarItem::ActiveWindows,
+                StatusbarItem::ChannelInfo,
+                StatusbarItem::Typing,
+                StatusbarItem::Lag,
+                StatusbarItem::Time,
+            ]
+        );
+    }
+
+    #[test]
+    fn default_config_is_already_current_and_needs_no_migration() {
+        let mut config = default_config();
+        assert_eq!(config.config_version, CONFIG_VERSION);
+        assert_eq!(config.statusbar.items.get(3), Some(&StatusbarItem::Typing));
+        assert!(
+            !migrate_config(&mut config),
+            "a fresh config must not be migrated"
+        );
+    }
+
+    #[test]
+    fn load_and_migrate_never_rewrites_the_users_file() {
+        // THE REGRESSION. The migration used to write the result back at startup,
+        // for a user who never asked for a write. `AppConfig` has no
+        // `deny_unknown_fields` and `to_string_pretty` emits only known fields, so
+        // that rewrite silently destroyed every comment and every unknown key in a
+        // hand-maintained config — on the first launch after an upgrade.
+        //
+        // Migrating in memory costs nothing: it re-runs on each start until a save
+        // the user actually triggered persists the new version.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let original = format!(
+            "# my hand-written config — keep me\n\
+             a_key_this_build_does_not_know = 42\n\
+             {LEGACY_STATUSBAR}"
+        );
+        std::fs::write(&path, &original).expect("write legacy config");
+
+        let config = load_and_migrate(&path).expect("loads");
+        assert_eq!(
+            config.statusbar.items.get(3),
+            Some(&StatusbarItem::Typing),
+            "the migration still applies — in memory"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("re-read"),
+            original,
+            "startup must not touch the user's file: comments and unknown keys survive"
+        );
+    }
+
+    #[test]
+    fn a_removal_sticks_because_save_config_writes_the_current_version() {
+        // What makes the in-memory migration safe. The user runs
+        // `/items remove typing`; `save_config` serializes `AppConfig`, which
+        // carries `config_version`, so the next start sees a current file and the
+        // back-fill does not run — the removal sticks without startup ever writing.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, LEGACY_STATUSBAR).expect("write legacy config");
+
+        // Start once: migrated in memory, nothing written.
+        let mut config = load_and_migrate(&path).expect("loads");
+        assert!(config.statusbar.items.contains(&StatusbarItem::Typing));
+
+        // `/items remove typing` — a save the user actually asked for.
+        config.statusbar.items.retain(|i| *i != StatusbarItem::Typing);
+        save_config(&path, &config).expect("saves");
+        assert_eq!(
+            load_config(&path).expect("reloads").config_version,
+            CONFIG_VERSION,
+            "save_config must persist the version, or the back-fill runs forever"
+        );
+
+        // Restart: the removal survives.
+        let after_restart = load_and_migrate(&path).expect("loads");
+        assert!(
+            !after_restart.statusbar.items.contains(&StatusbarItem::Typing),
+            "a deliberate `/items remove typing` must not be resurrected"
+        );
+    }
+
+    #[test]
+    fn load_and_migrate_leaves_a_current_file_untouched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        save_config(&path, &default_config()).expect("saves");
+        let before = std::fs::metadata(&path).expect("stat").modified().ok();
+        let config = load_and_migrate(&path).expect("loads");
+        assert_eq!(config.config_version, CONFIG_VERSION);
+        let after = std::fs::metadata(&path).expect("stat").modified().ok();
+        assert_eq!(before, after, "a current config must not be rewritten");
+    }
+
+    #[test]
+    fn load_and_migrate_on_a_missing_file_yields_defaults_and_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("does-not-exist.toml");
+        let config = load_and_migrate(&path).expect("loads defaults");
+        assert_eq!(config.config_version, CONFIG_VERSION);
+        assert!(
+            !path.exists(),
+            "first-run config creation belongs to ensure_config_dir, not the migration"
+        );
+    }
+
+    #[test]
+    fn migrated_config_version_survives_a_save_load_round_trip() {
+        // If the version does not persist, the migration re-runs forever and
+        // `/items remove typing` never sticks.
+        let mut config: AppConfig = toml::from_str(LEGACY_STATUSBAR).expect("parses");
+        assert!(migrate_config(&mut config));
+        let serialized = toml::to_string_pretty(&config).expect("serializes");
+        let reloaded: AppConfig = toml::from_str(&serialized).expect("parses back");
+        assert_eq!(reloaded.config_version, CONFIG_VERSION);
+        assert!(reloaded.statusbar.items.contains(&StatusbarItem::Typing));
     }
 }

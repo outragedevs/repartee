@@ -159,12 +159,7 @@ fn spawn_connection(app: &mut App, conn_id: &str, server_config: &crate::config:
         match crate::irc::connect_server(&id, &cfg, &general).await {
             Ok((handle, mut rx)) => {
                 let _ = tx
-                    .send(crate::irc::IrcEvent::HandleReady(
-                        handle.conn_id.clone(),
-                        handle.sender,
-                        handle.local_ip,
-                        handle.outgoing_handle,
-                    ))
+                    .send(crate::irc::IrcEvent::HandleReady(Box::new(handle)))
                     .await;
                 while let Some(event) = rx.recv().await {
                     if tx.send(event).await.is_err() {
@@ -210,7 +205,7 @@ pub(crate) fn cmd_disconnect(app: &mut App, args: &[String]) {
     // This matches the /quit pattern where QUIT is sent while handles
     // are still alive.
     if let Some(handle) = app.irc_handles.get(&conn_id) {
-        let _ = handle.sender.send_quit(quit_msg);
+        let _ = handle.sender().send_quit(quit_msg);
     }
 }
 

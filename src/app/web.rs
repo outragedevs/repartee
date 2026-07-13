@@ -134,6 +134,11 @@ impl App {
                 active_buffer_id: None,
                 timestamp_format: self.config.web.timestamp_format.clone(),
                 emotes_enabled: self.config.emotes.web_enabled(),
+                typing: std::collections::HashMap::new(),
+                statusbar_items: crate::web::snapshot::statusbar_item_names(
+                    &self.config.statusbar,
+                ),
+                statusbar_enabled: self.config.statusbar.enabled,
             },
         ));
         self.web_state_snapshot = Some(std::sync::Arc::clone(&snapshot));
@@ -239,7 +244,11 @@ impl App {
                     }
                 }
                 crate::web::protocol::WebEvent::ConnectionStatus { .. }
-                | crate::web::protocol::WebEvent::SettingsChanged { .. } => {
+                | crate::web::protocol::WebEvent::SettingsChanged { .. }
+                // Structural so the shared snapshot — the source of a
+                // *connecting* session's SyncInit — picks up the new item list
+                // immediately, not up to a tick later.
+                | crate::web::protocol::WebEvent::StatusbarConfig { .. } => {
                     structural_change = true;
                 }
                 _ => {}
@@ -285,6 +294,7 @@ impl App {
             mention_count,
             &self.config.web.timestamp_format,
             self.config.emotes.web_enabled(),
+            &self.config.statusbar,
         );
         if let crate::web::protocol::WebEvent::SyncInit {
             buffers,
@@ -293,6 +303,9 @@ impl App {
             active_buffer_id,
             timestamp_format,
             emotes_enabled,
+            typing,
+            statusbar_items,
+            statusbar_enabled,
             ..
         } = init
         {
@@ -303,6 +316,9 @@ impl App {
             snap.active_buffer_id = active_buffer_id;
             snap.timestamp_format = timestamp_format;
             snap.emotes_enabled = emotes_enabled;
+            snap.typing = typing;
+            snap.statusbar_items = statusbar_items;
+            snap.statusbar_enabled = statusbar_enabled;
         }
     }
 
@@ -360,7 +376,7 @@ impl App {
                 }
                 continue;
             };
-            if let Err(e) = handle.sender.send_notice(&send.target, &send.notice_text) {
+            if let Err(e) = handle.sender().send_notice(&send.target, &send.notice_text) {
                 tracing::warn!(
                     target = %send.target,
                     error = %e,
@@ -425,8 +441,22 @@ impl App {
                         .insert(session_id.to_string(), buffer_id);
                 }
             }
+            WebCommand::Typing { buffer_id, typing } => {
+                // One source per session. Collapsing all sessions into one
+                // predicate would let a freshly-opened, empty second tab retract
+                // the typing that the terminal is doing right now.
+                self.on_web_typing(session_id, &buffer_id, typing);
+            }
             WebCommand::SendMessage { buffer_id, text } => {
-                self.web_send_message(&buffer_id, &text);
+                // Run the submit FIRST and report what it actually put on the
+                // wire — a message the E2E gate refuses (or a dead connection
+                // swallows) must leave the `done` we owe the peers outstanding.
+                let sent_message = self.web_send_message(&buffer_id, &text);
+                self.on_typing_submit(
+                    &crate::app::typing::TypingSource::Web(session_id.to_string()),
+                    &buffer_id,
+                    sent_message,
+                );
             }
             WebCommand::SwitchBuffer { buffer_id } => {
                 // Flip the GLOBAL active buffer so the TUI and every other web
@@ -489,7 +519,12 @@ impl App {
                 self.web_fetch_mentions(session_id);
             }
             WebCommand::RunCommand { buffer_id, text } => {
-                self.web_run_command(&buffer_id, &text);
+                let sent_message = self.web_run_command(&buffer_id, &text);
+                self.on_typing_submit(
+                    &crate::app::typing::TypingSource::Web(session_id.to_string()),
+                    &buffer_id,
+                    sent_message,
+                );
             }
             WebCommand::ShellInput { buffer_id, data } => {
                 if self.web_active_buffers.get(session_id) != Some(&buffer_id) {
@@ -514,6 +549,7 @@ impl App {
             }
             WebCommand::WebDisconnect => {
                 self.web_active_buffers.remove(session_id);
+                self.on_web_session_gone(session_id);
                 self.shell_mgr.close_web_by_session(session_id);
             }
             WebCommand::ShellResize {
@@ -641,15 +677,17 @@ impl App {
     /// every `handle_submit` callee — would be a cross-cutting refactor
     /// for no functional change, since the flip is already invisible
     /// outside the synchronous call.
-    fn web_run_command(&mut self, buffer_id: &str, text: &str) {
+    /// Returns whether a real message reached the wire — see `App::handle_submit`.
+    fn web_run_command(&mut self, buffer_id: &str, text: &str) -> bool {
         let prior = self.state.active_buffer_id.clone();
         self.set_active_buffer_silent(buffer_id);
-        self.handle_submit(text);
+        let sent_message = self.handle_submit(text);
         if let Some(id) = prior {
             self.set_active_buffer_silent(&id);
         } else {
             self.state.active_buffer_id = None;
         }
+        sent_message
     }
 
     fn set_active_buffer_silent(&mut self, buffer_id: &str) {
@@ -663,9 +701,9 @@ impl App {
         }
     }
 
-    /// Send a message from a web client to IRC.
-    fn web_send_message(&mut self, buffer_id: &str, text: &str) {
-        self.web_run_command(buffer_id, text);
+    /// Send a message from a web client to IRC. Returns whether it reached the wire.
+    fn web_send_message(&mut self, buffer_id: &str, text: &str) -> bool {
+        self.web_run_command(buffer_id, text)
     }
 
     /// Mark a buffer as read from a web client.

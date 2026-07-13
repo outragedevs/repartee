@@ -114,6 +114,7 @@ impl App {
             batch_ref_counter: 0,
             silent_who_channels: HashSet::new(),
             silent_banlist_channels: HashSet::new(),
+            // Synthetic PTY header — never a live IRC sender.
         });
         // Add a Server-type buffer so the sidebar header renders.
         let header_id = make_buffer_id(Self::SHELL_CONN_ID, "Shell");

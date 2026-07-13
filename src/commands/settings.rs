@@ -256,6 +256,18 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 is_credential: false,
             })
         }
+        "typing" => {
+            let val = match parts[1] {
+                "show" => config.typing.show.to_string(),
+                "send_channels" => config.typing.send_channels.to_string(),
+                "send_queries" => config.typing.send_queries.to_string(),
+                _ => return None,
+            };
+            Some(Resolved {
+                value: val,
+                is_credential: false,
+            })
+        }
         _ => None,
     }
 }
@@ -597,6 +609,12 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
             }
             _ => return Err(format!("Unknown field: {path}")),
         },
+        "typing" => match parts[1] {
+            "show" => config.typing.show = parse_bool(raw)?,
+            "send_channels" => config.typing.send_channels = parse_bool(raw)?,
+            "send_queries" => config.typing.send_queries = parse_bool(raw)?,
+            _ => return Err(format!("Unknown field: {path}")),
+        },
         _ => return Err(format!("Unknown section: {}", parts[0])),
     }
 
@@ -713,6 +731,9 @@ const BASE_PATHS: &[&str] = &[
     "emotes.enabled",
     "emotes.render",
     "emotes.lang",
+    "typing.show",
+    "typing.send_channels",
+    "typing.send_queries",
 ];
 
 const SERVER_FIELDS: &[&str] = &[
@@ -862,6 +883,14 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                 app.state.nick_color_lit = app.config.display.nick_color_lightness;
             }
 
+            // Every `typing.*` switch goes through the one sync `/reload` also
+            // runs, rather than an arm per key: the sync is idempotent (it
+            // re-derives from the config rather than undoing a specific switch),
+            // and a per-key arm is exactly what let `/reload` drift out of step.
+            if path.starts_with("typing.") {
+                app.sync_typing_from_config();
+            }
+
             if path == "display.mentions_buffer" {
                 if app.config.display.mentions_buffer {
                     app.create_mentions_buffer();
@@ -987,6 +1016,13 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                 );
             }
 
+            // The web status line renders from `statusbar.items` / `.enabled`
+            // too, so a `/set statusbar.…` has to reach open tabs — otherwise
+            // turning the bar off in the terminal leaves it up in the browser.
+            if path.starts_with("statusbar.") {
+                super::handlers_ui::push_statusbar_web_event(app);
+            }
+
             // Resize shells when sidebar layout changes (affects chat area dimensions).
             if path.starts_with("sidepanel.") {
                 app.resize_all_shells();
@@ -1100,6 +1136,7 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
             ],
         ),
         ("emotes", &["enabled", "render", "lang"]),
+        ("typing", &["show", "send_channels", "send_queries"]),
     ];
 
     for &(section, fields) in sections {
@@ -1418,6 +1455,60 @@ mod tests {
         assert_eq!(config.emotes.lang, crate::config::EmoteLang::Pl);
         assert!(set_config_value(&mut config, "emotes.lang", "fr").is_err());
         assert!(BASE_PATHS.contains(&"emotes.lang"));
+    }
+
+    #[test]
+    fn get_set_typing() {
+        let mut config = default_config();
+        // All three keys read back "true" on a default config.
+        assert_eq!(
+            get_config_value(&config, "typing.show").unwrap().value,
+            "true"
+        );
+        assert_eq!(
+            get_config_value(&config, "typing.send_channels")
+                .unwrap()
+                .value,
+            "true"
+        );
+        assert_eq!(
+            get_config_value(&config, "typing.send_queries")
+                .unwrap()
+                .value,
+            "true"
+        );
+        // Set each to false and read it back through the getter.
+        set_config_value(&mut config, "typing.show", "false").unwrap();
+        assert!(!config.typing.show);
+        assert_eq!(
+            get_config_value(&config, "typing.show").unwrap().value,
+            "false"
+        );
+        set_config_value(&mut config, "typing.send_channels", "false").unwrap();
+        assert!(!config.typing.send_channels);
+        assert_eq!(
+            get_config_value(&config, "typing.send_channels")
+                .unwrap()
+                .value,
+            "false"
+        );
+        set_config_value(&mut config, "typing.send_queries", "false").unwrap();
+        assert!(!config.typing.send_queries);
+        assert_eq!(
+            get_config_value(&config, "typing.send_queries")
+                .unwrap()
+                .value,
+            "false"
+        );
+        // Non-boolean value is rejected by parse_bool.
+        assert!(set_config_value(&mut config, "typing.show", "bogus").is_err());
+        // Unknown field in the typing section is rejected / not resolvable.
+        assert!(set_config_value(&mut config, "typing.nope", "true").is_err());
+        assert!(get_config_value(&config, "typing.nope").is_none());
+        // typing.* paths are advertised as settable.
+        assert!(BASE_PATHS.contains(&"typing.show"));
+        assert!(BASE_PATHS.contains(&"typing.send_channels"));
+        assert!(BASE_PATHS.contains(&"typing.send_queries"));
     }
 
     #[test]

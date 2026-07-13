@@ -585,7 +585,7 @@ impl App {
             return false;
         };
         if handle
-            .sender
+            .sender()
             .send(::irc::proto::Command::Raw(line.clone(), vec![]))
             .is_err()
         {

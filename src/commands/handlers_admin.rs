@@ -94,6 +94,40 @@ fn manual_cred(value: Option<String>) -> CredUpdate {
     }
 }
 
+/// Swap in a freshly-loaded config and re-derive everything the running app
+/// caches from it.
+///
+/// Split out of [`cmd_reload`] so it is reachable from a test: `cmd_reload`
+/// itself reads `constants::config_path()`, i.e. the user's real
+/// `~/.repartee/config.toml`, so it cannot be driven from one.
+///
+/// A reload replaces `app.config` **wholesale**, which makes it exactly as much
+/// of a config change as `/set` is — every post-`/set` sync in
+/// `commands::settings` has to have a counterpart here, or the two routes to the
+/// same state disagree.
+pub(crate) fn apply_reloaded_config(app: &mut App, new_config: crate::config::AppConfig) {
+    app.config = new_config;
+    app.cached_config_toml = None;
+    // A reload swaps out config.servers wholesale; an open edit-wizard
+    // captured the old map and would resolve "keep" credentials against
+    // a stale/absent entry on save, so close it.
+    app.wizard = None;
+    // Sync derived state from new config
+    app.state.scrollback_limit = app.config.display.scrollback_lines;
+    app.state.flood_protection = app.config.general.flood_protection;
+    app.state
+        .flood_exemptions
+        .clone_from(&app.config.general.flood_exemptions);
+    app.state.ignores.clone_from(&app.config.ignores);
+    app.state.nick_color_sat = app.config.display.nick_color_saturation;
+    app.state.nick_color_lit = app.config.display.nick_color_lightness;
+    // The same post-config-change sync `/set typing.*` runs — a hand-edited
+    // `send_channels = false` has to reach the machine by this route too.
+    app.sync_typing_from_config();
+    // A hand-edited `[statusbar]` section must reach open tabs too.
+    super::handlers_ui::push_statusbar_web_event(app);
+}
+
 pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
     // Snapshot the pre-reload shrink api_key state so we can detect
     // a transition from empty → populated and tell the user that
@@ -104,24 +138,14 @@ pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
     // deliver receiver is owned by the main tokio::select! loop.)
     let shrink_was_inactive = app.shrink_client.is_none();
 
-    // Reload config.toml
-    match crate::config::load_config(&crate::constants::config_path()) {
+    // Reload config.toml. Same in-memory migration as startup: a file restored
+    // from an old backup must not silently lose the items the current schema
+    // expects. Like startup, it writes nothing — the user's comments and unknown
+    // keys survive a `/reload`, and the migrated version persists on the next
+    // save they actually ask for (see `config::load_and_migrate`).
+    match crate::config::load_and_migrate(&crate::constants::config_path()) {
         Ok(new_config) => {
-            app.config = new_config;
-            app.cached_config_toml = None;
-            // A reload swaps out config.servers wholesale; an open edit-wizard
-            // captured the old map and would resolve "keep" credentials against
-            // a stale/absent entry on save, so close it.
-            app.wizard = None;
-            // Sync derived state from new config
-            app.state.scrollback_limit = app.config.display.scrollback_lines;
-            app.state.flood_protection = app.config.general.flood_protection;
-            app.state
-                .flood_exemptions
-                .clone_from(&app.config.general.flood_exemptions);
-            app.state.ignores.clone_from(&app.config.ignores);
-            app.state.nick_color_sat = app.config.display.nick_color_saturation;
-            app.state.nick_color_lit = app.config.display.nick_color_lightness;
+            apply_reloaded_config(app, new_config);
             add_local_event(app, &format!("{C_OK}Config reloaded{C_RST}"));
         }
         Err(e) => {
@@ -203,6 +227,11 @@ pub(crate) fn cmd_flood(app: &mut App, args: &[String]) {
     if subcmd.eq_ignore_ascii_case("off") || subcmd.eq_ignore_ascii_case("disable") {
         app.config.general.flood_protection = false;
         app.state.flood_protection = false;
+        // Only affects FUTURE connections: `flood_penalty_threshold` is baked
+        // into the crate's `Config` at connect time and there is no runtime
+        // reconfig, so a live connection keeps throttling — and keeps the
+        // matching threshold on its own `IrcSender` budget — until it is
+        // reopened.
         save_flood_settings(app);
         add_local_event(app, &format!("{C_OK}Flood protection disabled{C_RST}"));
         return;

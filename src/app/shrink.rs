@@ -530,13 +530,14 @@ impl App {
             .first()
             .is_some_and(|w| w.starts_with("+RPE2E01"));
         let mut send_ok = true;
+        let mut sent_any = false;
         for wire in wire_lines {
             let Some(handle) = self.irc_handles.get(&out.conn_id) else {
                 self.deliver_outgoing_error(out, "Failed to send message — connection dropped");
                 send_ok = false;
                 break;
             };
-            if handle.sender.send_privmsg(&out.buffer_name, &wire).is_err() {
+            if handle.sender().send_privmsg(&out.buffer_name, &wire).is_err() {
                 tracing::warn!(
                     conn_id = %out.conn_id,
                     target = %out.buffer_name,
@@ -546,6 +547,15 @@ impl App {
                 send_ok = false;
                 break;
             }
+            sent_any = true;
+        }
+        // The Enter that queued this reported NOTHING sent (the wire was still
+        // empty then, and the shrink can fail or be refused seconds later). This
+        // is the moment the message actually reaches the peers, so this is where
+        // the `+typing` machine is told: the `done` we owed is retired and §3.1's
+        // window opens.
+        if sent_any {
+            self.note_message_sent(&out.buffer_id);
         }
         // Only drain pending_e2e_sends on success. Inline
         // handle_plain_message returns early on send failure WITHOUT

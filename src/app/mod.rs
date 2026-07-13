@@ -16,10 +16,11 @@ mod irc;
 mod log_browser;
 mod maintenance;
 mod mentions;
-mod scripting;
+pub mod scripting;
 mod session;
 mod shell;
 pub mod shrink;
+pub mod typing;
 mod web;
 mod who;
 
@@ -502,6 +503,8 @@ pub struct App {
     /// stored config so a one-off override doesn't leak into later
     /// sessions.
     pub cli_bind_override: Option<String>,
+    /// Outbound `IRCv3` `+typing` state machine.
+    pub typing: crate::app::typing::TypingSender,
 }
 
 impl App {
@@ -529,7 +532,9 @@ impl App {
     #[allow(clippy::too_many_lines)]
     pub fn new_with_mode(log_browser: bool) -> Result<Self> {
         constants::ensure_config_dir();
-        let mut config = config::load_config(&constants::config_path())?;
+        // Migrate *before* credentials are merged in: the migration may rewrite
+        // config.toml, and the merged-in `.env` passwords must never reach it.
+        let mut config = config::load_and_migrate(&constants::config_path())?;
 
         let env_vars = config::load_env(&constants::env_path())?;
         config::apply_credentials(&mut config.servers, &env_vars);
@@ -547,6 +552,7 @@ impl App {
         state.scrollback_limit = config.display.scrollback_lines;
         state.nick_color_sat = config.display.nick_color_saturation;
         state.nick_color_lit = config.display.nick_color_lightness;
+        state.typing_show = config.typing.show;
         let (irc_tx, irc_rx) = mpsc::channel(4096);
 
         let storage = if log_browser {
@@ -807,6 +813,7 @@ impl App {
             shrink_deliver_tx,
             shrink_deliver_rx,
             cli_bind_override: None,
+            typing: crate::app::typing::TypingSender::default(),
         };
         app.recompute_wrap_indent();
 
@@ -1235,6 +1242,15 @@ impl App {
         tokio::pin!(emote_anim_sleep);
 
         while !self.should_quit {
+            // Runs after EVERY dispatch below, whatever the dispatch was. The
+            // active buffer is global and a dozen things flip it with no keyboard
+            // event in sight — a phone tapping a tab, a Lua `/window`, an accepted
+            // DCC chat, an IRC event opening a query — and the TUI has one input
+            // box with no per-buffer drafts, so the terminal's typing source has
+            // to follow it. Hooking each call site would leave the next one free
+            // to forget; this cannot be forgotten. See `sync_tui_typing_source`.
+            self.sync_tui_typing_source();
+
             if self.should_detach {
                 self.perform_detach();
             }
@@ -1457,6 +1473,8 @@ impl App {
                         self.load_initial_messages(&active_id);
                     }
                     self.handle_netsplit_tick();
+                    self.typing_tick();
+                    self.expire_typing();
                     self.purge_expired_batches();
                     self.purge_stale_chathistory_requests();
                     self.check_reconnects();
@@ -1559,7 +1577,7 @@ impl App {
         let default_quit = crate::constants::default_quit_message();
         let quit_msg = self.quit_message.as_deref().unwrap_or(&default_quit);
         for handle in self.irc_handles.values() {
-            let _ = handle.sender.send_quit(quit_msg);
+            let _ = handle.sender().send_quit(quit_msg);
         }
         for _ in 0..10 {
             tokio::task::yield_now().await;

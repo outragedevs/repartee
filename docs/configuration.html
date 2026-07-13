@@ -145,7 +145,7 @@ width = 18
 visible = true
 
 [statusbar]
-items = [&quot;active_windows&quot;, &quot;nick_info&quot;, &quot;channel_info&quot;, &quot;lag&quot;, &quot;time&quot;]
+items = [&quot;active_windows&quot;, &quot;nick_info&quot;, &quot;channel_info&quot;, &quot;typing&quot;, &quot;lag&quot;, &quot;time&quot;]
 
 [servers.libera]
 label = &quot;Libera&quot;
@@ -206,6 +206,11 @@ enabled = true
 languages = [&quot;en_US&quot;]              # Hunspell language codes
 dictionary_dir = &quot;&quot;                # default: ~/.repartee/dicts
 
+[typing]
+show = true                        # receive and display others&#39; typing indicators
+send_channels = true               # send +typing while typing in a channel
+send_queries = true                # send +typing while typing in a private query
+
 [web]
 enabled = false                    # enable embedded web frontend
 bind_address = &quot;127.0.0.1&quot;        # listen address (0.0.0.0 for LAN)
@@ -231,7 +236,7 @@ levels = [&quot;ALL&quot;]
 <h3><code>[sidepanel]</code></h3>
 <p>Left panel shows buffer list, right panel shows nick list. Set <code>visible = false</code> to hide a panel. Widths are in terminal columns.</p>
 <h3><code>[statusbar]</code></h3>
-<p>Configure which items appear in the status line. Available items: <code>active_windows</code>, <code>nick_info</code>, <code>channel_info</code>, <code>lag</code>, <code>time</code>.</p>
+<p>Configure which items appear in the status line. Available items: <code>active_windows</code>, <code>nick_info</code>, <code>channel_info</code>, <code>typing</code>, <code>lag</code>, <code>time</code>. The <code>typing</code> item shows who is currently typing in the active buffer (see <code>[typing]</code> below).</p>
 <h3><code>[servers.*]</code></h3>
 <p>Each server gets a unique identifier (the key after <code>servers.</code>). The <code>channels</code> array lists channels to auto-join on connect. Channels with keys use the format <code>&quot;#channel key&quot;</code>.</p>
 <p>Set <code>sasl_mechanism</code> to override automatic mechanism selection. Available: <code>PLAIN</code> (default), <code>EXTERNAL</code> (client TLS certificate), <code>SCRAM-SHA-256</code> (secure challenge-response).</p>
@@ -258,6 +263,8 @@ w = &quot;/who $C&quot;
 <p><code>autochat_masks</code> is a list of <code>nick!ident@host</code> wildcard patterns. Incoming DCC CHAT offers matching any pattern are auto-accepted without prompting.</p>
 <h3><code>[spellcheck]</code></h3>
 <p>Inline spell checking. When <code>enabled = true</code>, misspelled words are underlined in red while typing. Press Tab to cycle suggestions, Space to accept, Escape to revert. <code>languages</code> is a list of Hunspell language codes (e.g., <code>en_US</code>, <code>pl_PL</code>, <code>de_DE</code>) — a word is correct if <strong>any</strong> active dictionary accepts it. Place <code>.dic</code>/<code>.aff</code> files in <code>~/.repartee/dicts/</code> (or set <code>dictionary_dir</code> to a custom path).</p>
+<h3><code>[typing]</code></h3>
+<p>IRCv3 <code>+typing</code> client tag support (typing indicators). <code>show = true</code> (default) receives and displays other people&#39;s typing status in the TUI status line and the web UI; set to <code>false</code> to stop showing it, both live and after reload. <code>send_channels</code> and <code>send_queries</code> independently control whether Repartee sends its own <code>+typing</code> while you type in a channel or a private query, respectively — turn either off if you&#39;d rather not announce your own typing in that context. All three are booleans, so use <code>/set typing.show false</code> (not <code>off</code>) to disable one at runtime.</p>
 <h3><code>[web]</code></h3>
 <p>Embedded web frontend. When <code>enabled = true</code> and <code>WEB_PASSWORD</code> is set in <code>.env</code>, the app starts an HTTPS server alongside the terminal interface. Both share the same state — read a message on web, it&#39;s marked read on terminal, and vice versa.</p>
 <p>Set <code>bind_address = &quot;0.0.0.0&quot;</code> to allow LAN access. TLS is always on — if no custom cert/key is provided, a self-signed certificate is auto-generated in <code>~/.repartee/certs/</code>.</p>

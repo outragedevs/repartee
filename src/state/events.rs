@@ -29,6 +29,8 @@ impl AppState {
             pending_e2e_sends: Vec::new(),
             pending_e2e_gapfills: Vec::new(),
             pending_userhost_requests: Vec::new(),
+            typing: crate::state::typing::TypingTracker::default(),
+            typing_show: true,
             nick_color_sat: 0.65,
             nick_color_lit: 0.65,
             e2e_manager: None,
@@ -97,6 +99,7 @@ impl AppState {
                 buffer_id: id.to_string(),
             });
         self.buffers.shift_remove(id);
+        self.typing.remove_buffer(id);
         // Clean up per-buffer flood tracking to prevent unbounded map growth.
         self.flood_state.remove_buffer(id);
 

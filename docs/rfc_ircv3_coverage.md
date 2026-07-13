@@ -130,7 +130,8 @@ Track implementation status of IRC protocol features in repartee.
 | `invite-notify` | Done | 3.2 | Channel members see invites; third-party INVITE shown in channel buffer |
 | `batch` | Done | 3.2 | `BatchTracker` per connection; NETSPLIT/NETJOIN produce summary messages; unknown batch types replay normally; wired in app event loop |
 | `userhost-in-names` | Done | 3.2 | `nick!user@host` parsing in NAMES, stored on `NickEntry` |
-| `message-tags` | Done | 3.2 | Plumbing: tags extracted from IRC messages, stored in buffer `Message` and DB |
+| `message-tags` | Done | 3.2 | Tags extracted from inbound messages, stored on buffer `Message` and in the DB. Outbound tags via `Message { tags: … }`. `TAGMSG` in/out via `Command::Raw`. `CLIENTTAGDENY` honoured from ISUPPORT |
+| `+typing` client tag | Done | — | Ratified client tag on `TAGMSG`. Send + receive, 3s throttle, 6s/30s expiry, status-line indicator in TUI and web UI, `[typing]` config with separate channel/query send switches. Legacy `+draft/typing` accepted on receive |
 
 ---
 

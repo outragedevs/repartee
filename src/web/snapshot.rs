@@ -7,12 +7,14 @@ use crate::web::protocol::{BufferMeta, ConnectionMeta, WebEvent, WireMessage, Wi
 /// Build a `SyncInit` event from the current `AppState`.
 ///
 /// Buffers are sorted to match terminal order: connection label → `sort_group` → name.
-/// `timestamp_format` and `emotes_enabled` come from config (not in `AppState`).
+/// `timestamp_format`, `emotes_enabled` and `statusbar` come from config (not in
+/// `AppState`).
 pub fn build_sync_init(
     state: &AppState,
     mention_count: u32,
     timestamp_format: &str,
     emotes_enabled: bool,
+    statusbar: &crate::config::StatusbarConfig,
 ) -> WebEvent {
     // Sort buffers in the same order as the terminal sidebar.
     let buf_refs: Vec<_> = state.buffers.values().collect();
@@ -51,6 +53,20 @@ pub fn build_sync_init(
         })
         .collect();
 
+    // Seed the client's typing indicators. Without this a tab that connects (or
+    // lag-resyncs) while someone is mid-sentence shows nothing until the visible
+    // set next changes: the sender's 3s refresh is not a change, and `paused`
+    // is never resent at all.
+    //
+    // `typing.show = false` already keeps the tracker empty (ingestion is gated
+    // in `handle_tagmsg`), but the snapshot must not depend on that — state left
+    // over from before the setting was switched off must not leak to the client.
+    let typing = if state.typing_show {
+        state.typing.snapshot()
+    } else {
+        std::collections::HashMap::new()
+    };
+
     WebEvent::SyncInit {
         buffers,
         connections,
@@ -58,7 +74,21 @@ pub fn build_sync_init(
         active_buffer_id: state.active_buffer_id.clone(),
         timestamp_format: timestamp_format.to_string(),
         emotes_enabled,
+        typing,
+        statusbar_items: statusbar_item_names(statusbar),
+        statusbar_enabled: statusbar.enabled,
     }
+}
+
+/// The status line's items as the wire names `/items` uses — the browser
+/// renders straight from this list, so it must never grow a second naming
+/// scheme (`parse_statusbar_item` is the inverse, and a test pins the trip).
+pub fn statusbar_item_names(statusbar: &crate::config::StatusbarConfig) -> Vec<String> {
+    statusbar
+        .items
+        .iter()
+        .map(|item| crate::commands::handlers_ui::statusbar_item_name(item).to_string())
+        .collect()
 }
 
 /// Build a `NickList` event for a specific buffer.
@@ -149,9 +179,75 @@ pub fn split_buffer_id(buffer_id: &str) -> (&str, &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{StatusbarConfig, StatusbarItem};
     use crate::state::buffer::{ActivityLevel, Buffer, BufferType, MessageType};
     use chrono::Utc;
     use std::collections::{HashMap, VecDeque};
+    use std::time::Instant;
+
+    /// Every `build_sync_init` call in these tests that doesn't care about the
+    /// statusbar passes this.
+    fn statusbar() -> StatusbarConfig {
+        StatusbarConfig::default()
+    }
+
+    fn sync_init_statusbar(event: &WebEvent) -> (&[String], bool) {
+        match event {
+            WebEvent::SyncInit {
+                statusbar_items,
+                statusbar_enabled,
+                ..
+            } => (statusbar_items, *statusbar_enabled),
+            _ => panic!("expected SyncInit"),
+        }
+    }
+
+    #[test]
+    fn sync_init_carries_the_statusbar_items_in_config_order() {
+        // The browser must render from the config, not from a hardcoded
+        // sequence — otherwise `/items move`, `/items remove` and
+        // `statusbar.enabled = false` are no-ops in the tab, and the two UIs
+        // disagree the moment either is touched.
+        let state = make_test_state();
+        let event = build_sync_init(&state, 0, "%H:%M", false, &statusbar());
+        let (items, enabled) = sync_init_statusbar(&event);
+        assert!(enabled);
+        assert_eq!(
+            items,
+            ["time", "nick_info", "channel_info", "typing", "lag", "active_windows"]
+        );
+    }
+
+    #[test]
+    fn sync_init_statusbar_names_round_trip_through_the_parser() {
+        // The wire names are the ones `/items` speaks. A second naming scheme
+        // would drift silently.
+        let state = make_test_state();
+        let event = build_sync_init(&state, 0, "%H:%M", false, &statusbar());
+        let (items, _) = sync_init_statusbar(&event);
+        let parsed: Vec<StatusbarItem> = items
+            .iter()
+            .map(|name| {
+                crate::commands::handlers_ui::parse_statusbar_item(name)
+                    .unwrap_or_else(|| panic!("{name} must round-trip"))
+            })
+            .collect();
+        assert_eq!(parsed, StatusbarConfig::default().items);
+    }
+
+    #[test]
+    fn sync_init_carries_a_customised_statusbar_verbatim() {
+        let state = make_test_state();
+        let custom = StatusbarConfig {
+            enabled: false,
+            items: vec![StatusbarItem::Lag, StatusbarItem::Time],
+            ..StatusbarConfig::default()
+        };
+        let event = build_sync_init(&state, 0, "%H:%M", false, &custom);
+        let (items, enabled) = sync_init_statusbar(&event);
+        assert!(!enabled, "statusbar.enabled = false must reach the browser");
+        assert_eq!(items, ["lag", "time"]);
+    }
 
     fn make_test_state() -> AppState {
         let mut state = AppState::new();
@@ -188,7 +284,7 @@ mod tests {
     #[test]
     fn sync_init_includes_buffers() {
         let state = make_test_state();
-        let event = build_sync_init(&state, 5, "%H:%M", false);
+        let event = build_sync_init(&state, 5, "%H:%M", false, &statusbar());
         match event {
             WebEvent::SyncInit {
                 buffers,
@@ -208,6 +304,102 @@ mod tests {
             }
             _ => panic!("expected SyncInit"),
         }
+    }
+
+    /// A second channel buffer, so "only buffers with typers appear" is a real
+    /// assertion and not a tautology.
+    fn add_channel(state: &mut AppState, id: &str, name: &str) {
+        let mut buf = state.buffers["libera/#rust"].clone();
+        buf.id = id.to_string();
+        buf.name = name.to_string();
+        state.buffers.insert(id.to_string(), buf);
+    }
+
+    fn sync_init_typing(event: &WebEvent) -> &std::collections::HashMap<String, Vec<String>> {
+        match event {
+            WebEvent::SyncInit { typing, .. } => typing,
+            _ => panic!("expected SyncInit"),
+        }
+    }
+
+    #[test]
+    fn sync_init_seeds_typing_only_for_buffers_that_have_typers() {
+        // A browser tab that connects mid-typing must be told who is already
+        // typing: the sender's 3s refresh is not a visible change, so it pushes
+        // nothing, and a `paused` peer is never resent at all.
+        let mut state = make_test_state();
+        add_channel(&mut state, "libera/#tokio", "#tokio");
+        state.typing.set(
+            "libera/#rust",
+            "alice",
+            crate::irc::typing::TypingState::Active,
+            Instant::now(),
+        );
+
+        let event = build_sync_init(&state, 0, "%H:%M", false, &statusbar());
+        let typing = sync_init_typing(&event);
+        assert_eq!(typing.len(), 1, "#tokio has no typers, so it has no entry");
+        assert_eq!(typing["libera/#rust"], vec!["alice"]);
+    }
+
+    #[test]
+    fn sync_init_typing_matches_the_live_push_exactly() {
+        // The snapshot seeds the client; the live `Typing` event replaces it.
+        // If they can disagree on order or spelling, the indicator jumps as soon
+        // as the first live event lands. Both go through `TypingTracker::nicks`.
+        let mut state = make_test_state();
+        let now = Instant::now();
+        state.typing.set(
+            "libera/#rust",
+            "Bob",
+            crate::irc::typing::TypingState::Active,
+            now,
+        );
+        state.typing.set(
+            "libera/#rust",
+            "alice",
+            crate::irc::typing::TypingState::Paused,
+            now,
+        );
+
+        let event = build_sync_init(&state, 0, "%H:%M", false, &statusbar());
+        let seeded = sync_init_typing(&event)["libera/#rust"].clone();
+
+        crate::irc::events::push_typing_web_event(&mut state, "libera/#rust");
+        let pushed = match state.pending_web_events.last() {
+            Some(WebEvent::Typing { nicks, .. }) => nicks.clone(),
+            _ => panic!("expected a Typing event"),
+        };
+
+        assert_eq!(seeded, pushed);
+        assert_eq!(seeded, vec!["alice", "Bob"]);
+    }
+
+    #[test]
+    fn sync_init_carries_no_typing_when_typing_display_is_off() {
+        // `typing.show = false` gates ingestion, so the tracker is normally
+        // empty here anyway — the gate is explicit so the snapshot cannot leak
+        // state left over from before the setting was switched off.
+        let mut state = make_test_state();
+        state.typing_show = false;
+        state.typing.set(
+            "libera/#rust",
+            "alice",
+            crate::irc::typing::TypingState::Active,
+            Instant::now(),
+        );
+
+        let event = build_sync_init(&state, 0, "%H:%M", false, &statusbar());
+        assert!(sync_init_typing(&event).is_empty());
+    }
+
+    #[test]
+    fn sync_init_typing_is_present_but_empty_when_nobody_is_typing() {
+        // Pinned: the field is always emitted (`"typing":{}`), never omitted —
+        // see the JSON test in `protocol.rs`.
+        let state = make_test_state();
+        let event = build_sync_init(&state, 0, "%H:%M", false, &statusbar());
+        assert!(sync_init_typing(&event).is_empty());
     }
 
     #[test]
