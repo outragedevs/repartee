@@ -759,34 +759,35 @@ pub fn load_config(path: &Path) -> Result<AppConfig> {
     }
 }
 
-/// Startup config load: parse, migrate, and — only if the migration actually
-/// changed something — write the result back.
+/// Startup config load: parse and migrate **in memory**. Writes nothing.
 ///
-/// The write-back is what makes the migration a *one-time* event: without it
-/// the version on disk stays stale, the back-fill re-runs on every start, and
-/// `/items remove typing` is undone the next time the client is launched.
+/// Deliberately not persisted. A startup write-back would rewrite the config of
+/// every user upgrading into this version, none of whom asked for a write, and
+/// the rewrite is lossy: `AppConfig` has no `deny_unknown_fields` and
+/// `toml::to_string_pretty` emits only the fields this build knows, so every
+/// comment and every unknown key in a hand-maintained `config.toml` would be
+/// destroyed on first launch.
 ///
-/// Call this before credentials are merged in from `.env`, so the rewrite can
-/// never bake a password into `config.toml`.
+/// Persistence rides the next save the user actually triggers, which is enough
+/// to make a deliberate removal stick, because [`save_config`] serializes
+/// `config_version` along with everything else:
 ///
-/// A missing file yields the defaults and writes nothing — creating the initial
-/// `config.toml` is `constants::ensure_config_dir`'s job. A failed write-back is
-/// logged, not fatal: a read-only config dir must not stop the client starting
-/// (the migrated config still applies for this run).
+/// * existing user who never touches a setting → the migration re-runs in memory
+///   on every start. Harmless: no file write, comments intact.
+/// * user runs `/items remove typing` → `save_config` writes the list without
+///   `typing` **and** `config_version = CONFIG_VERSION` → the next start sees a
+///   current file, [`migrate_config`] returns early, and the removal sticks.
+///
+/// A missing file yields the defaults — creating the initial `config.toml` is
+/// `constants::ensure_config_dir`'s job, not the migration's.
 pub fn load_and_migrate(path: &Path) -> Result<AppConfig> {
     let mut config = load_config(path)?;
-    if migrate_config(&mut config) && path.exists() {
-        match save_config(path, &config) {
-            Ok(()) => tracing::info!(
-                path = %path.display(),
-                version = CONFIG_VERSION,
-                "config migrated"
-            ),
-            Err(e) => tracing::warn!(
-                path = %path.display(),
-                "config migrated in memory but could not be saved: {e}"
-            ),
-        }
+    if migrate_config(&mut config) {
+        tracing::info!(
+            path = %path.display(),
+            version = CONFIG_VERSION,
+            "config migrated in memory; will persist on the next save"
+        );
     }
     Ok(config)
 }
@@ -1345,26 +1346,61 @@ items = ["time", "nick_info", "channel_info", "lag", "active_windows"]
     }
 
     #[test]
-    fn load_and_migrate_persists_the_migration_so_a_removal_can_stick() {
-        // The end-to-end shape of the upgrade: an existing file is rewritten
-        // once, with the item AND the version. Without the write-back, the
-        // next `/items remove typing` would be undone on the following start.
+    fn load_and_migrate_never_rewrites_the_users_file() {
+        // THE REGRESSION. The migration used to write the result back at startup,
+        // for a user who never asked for a write. `AppConfig` has no
+        // `deny_unknown_fields` and `to_string_pretty` emits only known fields, so
+        // that rewrite silently destroyed every comment and every unknown key in a
+        // hand-maintained config — on the first launch after an upgrade.
+        //
+        // Migrating in memory costs nothing: it re-runs on each start until a save
+        // the user actually triggered persists the new version.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let original = format!(
+            "# my hand-written config — keep me\n\
+             a_key_this_build_does_not_know = 42\n\
+             {LEGACY_STATUSBAR}"
+        );
+        std::fs::write(&path, &original).expect("write legacy config");
+
+        let config = load_and_migrate(&path).expect("loads");
+        assert_eq!(
+            config.statusbar.items.get(3),
+            Some(&StatusbarItem::Typing),
+            "the migration still applies — in memory"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("re-read"),
+            original,
+            "startup must not touch the user's file: comments and unknown keys survive"
+        );
+    }
+
+    #[test]
+    fn a_removal_sticks_because_save_config_writes_the_current_version() {
+        // What makes the in-memory migration safe. The user runs
+        // `/items remove typing`; `save_config` serializes `AppConfig`, which
+        // carries `config_version`, so the next start sees a current file and the
+        // back-fill does not run — the removal sticks without startup ever writing.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         std::fs::write(&path, LEGACY_STATUSBAR).expect("write legacy config");
 
-        let config = load_and_migrate(&path).expect("loads");
-        assert_eq!(config.statusbar.items.get(3), Some(&StatusbarItem::Typing));
+        // Start once: migrated in memory, nothing written.
+        let mut config = load_and_migrate(&path).expect("loads");
+        assert!(config.statusbar.items.contains(&StatusbarItem::Typing));
 
-        // Re-read from disk: the migration must be *on disk*, not just in RAM.
-        let on_disk = load_config(&path).expect("reloads");
-        assert_eq!(on_disk.config_version, CONFIG_VERSION);
-        assert!(on_disk.statusbar.items.contains(&StatusbarItem::Typing));
+        // `/items remove typing` — a save the user actually asked for.
+        config.statusbar.items.retain(|i| *i != StatusbarItem::Typing);
+        save_config(&path, &config).expect("saves");
+        assert_eq!(
+            load_config(&path).expect("reloads").config_version,
+            CONFIG_VERSION,
+            "save_config must persist the version, or the back-fill runs forever"
+        );
 
-        // Now the user removes it. That must survive the next start.
-        let mut removed = on_disk;
-        removed.statusbar.items.retain(|i| *i != StatusbarItem::Typing);
-        save_config(&path, &removed).expect("saves");
+        // Restart: the removal survives.
         let after_restart = load_and_migrate(&path).expect("loads");
         assert!(
             !after_restart.statusbar.items.contains(&StatusbarItem::Typing),
