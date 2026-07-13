@@ -432,13 +432,15 @@ impl App {
                 self.on_web_typing(session_id, &buffer_id, typing);
             }
             WebCommand::SendMessage { buffer_id, text } => {
-                let sent_message = crate::irc::typing::should_type(&text);
+                // Run the submit FIRST and report what it actually put on the
+                // wire — a message the E2E gate refuses (or a dead connection
+                // swallows) must leave the `done` we owe the peers outstanding.
+                let sent_message = self.web_send_message(&buffer_id, &text);
                 self.on_typing_submit(
                     &crate::app::typing::TypingSource::Web(session_id.to_string()),
                     &buffer_id,
                     sent_message,
                 );
-                self.web_send_message(&buffer_id, &text);
             }
             WebCommand::SwitchBuffer { buffer_id } => {
                 // Flip the GLOBAL active buffer so the TUI and every other web
@@ -501,13 +503,12 @@ impl App {
                 self.web_fetch_mentions(session_id);
             }
             WebCommand::RunCommand { buffer_id, text } => {
-                let sent_message = crate::irc::typing::should_type(&text);
+                let sent_message = self.web_run_command(&buffer_id, &text);
                 self.on_typing_submit(
                     &crate::app::typing::TypingSource::Web(session_id.to_string()),
                     &buffer_id,
                     sent_message,
                 );
-                self.web_run_command(&buffer_id, &text);
             }
             WebCommand::ShellInput { buffer_id, data } => {
                 if self.web_active_buffers.get(session_id) != Some(&buffer_id) {
@@ -660,15 +661,17 @@ impl App {
     /// every `handle_submit` callee — would be a cross-cutting refactor
     /// for no functional change, since the flip is already invisible
     /// outside the synchronous call.
-    fn web_run_command(&mut self, buffer_id: &str, text: &str) {
+    /// Returns whether a real message reached the wire — see `App::handle_submit`.
+    fn web_run_command(&mut self, buffer_id: &str, text: &str) -> bool {
         let prior = self.state.active_buffer_id.clone();
         self.set_active_buffer_silent(buffer_id);
-        self.handle_submit(text);
+        let sent_message = self.handle_submit(text);
         if let Some(id) = prior {
             self.set_active_buffer_silent(&id);
         } else {
             self.state.active_buffer_id = None;
         }
+        sent_message
     }
 
     fn set_active_buffer_silent(&mut self, buffer_id: &str) {
@@ -682,9 +685,9 @@ impl App {
         }
     }
 
-    /// Send a message from a web client to IRC.
-    fn web_send_message(&mut self, buffer_id: &str, text: &str) {
-        self.web_run_command(buffer_id, text);
+    /// Send a message from a web client to IRC. Returns whether it reached the wire.
+    fn web_send_message(&mut self, buffer_id: &str, text: &str) -> bool {
+        self.web_run_command(buffer_id, text)
     }
 
     /// Mark a buffer as read from a web client.

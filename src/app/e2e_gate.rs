@@ -753,6 +753,17 @@ impl super::App {
                 return false;
             }
         }
+        // A real message reached TARGET, so the `+typing` machine owes its peers
+        // no `done` (the message is the retraction) and must mute typing there
+        // for 3s (§3.1) — exactly as when the same text is typed in the buffer
+        // rather than addressed by name. The command handlers this runs behind
+        // (`/me`, `/msg`, `/query <nick> <text>`, the Lua senders) are
+        // `fn(&mut App, &[String])` and have no outcome to return, so the report
+        // is made here, where both the outcome and the target are known. Charging
+        // the TARGET's buffer — not the active one — is also what makes `/msg
+        // <other>` leave the typing we owe the CURRENT buffer alone.
+        self.note_message_sent(&crate::state::buffer::make_buffer_id(conn_id, target));
+
         // Lazy-rotate REKEYs queued by the gate must reach the peers on the
         // same tick (same policy as handle_plain_message: drain only after
         // ALL wires went out, never after a failed send).

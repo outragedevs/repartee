@@ -6454,15 +6454,33 @@ mod tests {
     fn disconnect_clears_typing_on_that_connection_only() {
         // No `done` can arrive over a socket that is gone: without this the peers
         // stay "typing" for the full TTL and survive into the reconnect.
+        //
+        // The "…only" half needs a SECOND connection to mean anything: one
+        // network dropping says nothing about another's peers, whose sockets are
+        // still up and will send their own `done`. (The tracker-level scoping is
+        // covered by `clear_connection_drops_every_buffer_on_that_connection` in
+        // `state/typing.rs`; this pins the wiring of it to `handle_disconnected`.)
         let mut state = make_test_state();
+        let mut other = state.connections.get("test").expect("conn").clone();
+        other.id = "other".to_string();
+        other.label = "OtherServer".to_string();
+        state.add_connection(other);
         state.add_buffer(make_channel_buffer("test", "#rust"));
+        state.add_buffer(make_channel_buffer("other", "#rust"));
         handle_irc_message(&mut state, "test", &tagmsg("alice", "#rust", "+typing", "active"));
+        handle_irc_message(&mut state, "other", &tagmsg("bob", "#rust", "+typing", "active"));
         assert_eq!(state.typing.nicks("test/#rust"), vec!["alice"]);
+        assert_eq!(state.typing.nicks("other/#rust"), vec!["bob"]);
         state.pending_web_events.clear();
 
         handle_disconnected(&mut state, "test", None);
 
         assert!(state.typing.nicks("test/#rust").is_empty());
+        assert_eq!(
+            state.typing.nicks("other/#rust"),
+            vec!["bob"],
+            "a drop on one connection must not clear another's typing"
+        );
         // The web clients are told, or their indicator hangs there forever.
         assert!(
             state.pending_web_events.iter().any(|e| matches!(
@@ -6471,6 +6489,15 @@ mod tests {
                     if buffer_id == "test/#rust" && nicks.is_empty()
             )),
             "the cleared set must be pushed to the web clients"
+        );
+        // ...and only about the buffer that actually changed.
+        assert!(
+            !state.pending_web_events.iter().any(|e| matches!(
+                e,
+                crate::web::protocol::WebEvent::Typing { buffer_id, .. }
+                    if buffer_id == "other/#rust"
+            )),
+            "the untouched connection must not be broadcast as cleared"
         );
     }
 

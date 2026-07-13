@@ -308,8 +308,7 @@ impl App {
                 self.input.spell_state = None;
                 let text = self.input.submit();
                 if !text.is_empty() {
-                    self.note_tui_submit(&text);
-                    self.handle_submit(&text);
+                    self.submit_from_tui(&text);
                 }
             }
             (_, KeyCode::Backspace) => {
@@ -505,8 +504,7 @@ impl App {
                 format!("{current_input}{}", raw.join("\n"))
             };
             if !joined.is_empty() {
-                self.note_tui_submit(&joined);
-                self.handle_submit(&joined);
+                self.submit_from_tui(&joined);
             }
             return;
         }
@@ -524,8 +522,7 @@ impl App {
         };
 
         // Send first line immediately
-        self.note_tui_submit(&first);
-        self.handle_submit(&first);
+        self.submit_from_tui(&first);
 
         // Queue remaining lines
         for line in &non_empty[1..] {
@@ -543,8 +540,7 @@ impl App {
     /// Send one queued paste line. Called every 500ms by the paste timer.
     pub(crate) fn drain_paste_queue(&mut self) {
         if let Some(line) = self.paste_queue.pop_front() {
-            self.note_tui_submit(&line);
-            self.handle_submit(&line);
+            self.submit_from_tui(&line);
         }
     }
 
@@ -1183,21 +1179,32 @@ impl App {
         );
     }
 
-    pub(crate) fn handle_submit(&mut self, text: &str) {
-        if let Some(parsed) = crate::commands::parser::parse_command(text) {
+    /// Returns whether a real message reached the wire **for the buffer that was
+    /// active when the submit started** — what the `+typing` machine needs (see
+    /// [`App::submit_from_tui`]). A command reports `false` here even when it
+    /// speaks (a `/me`, a `/msg`): command handlers are `fn(&mut App, &[String])`
+    /// and cannot return an outcome, so the ones that put a message on the wire
+    /// call `App::note_message_sent` from `send_gated_message` — which knows the
+    /// target buffer, and so also gets `/msg <other>` right (it charges the
+    /// message to the OTHER buffer, not the one we typed the command in).
+    pub(crate) fn handle_submit(&mut self, text: &str) -> bool {
+        let sent_message = if let Some(parsed) = crate::commands::parser::parse_command(text) {
             self.execute_command_with_depth(&parsed, 0);
+            false
         } else if self.log_browser_mode {
             // Spec: log mode rejects plain text — there is no IRC
             // connection to send to, and routing through
             // `handle_plain_message` would produce the unrelated
             // "Cannot send messages to this buffer" line.
             crate::commands::helpers::add_local_event(self, "log mode: only slash commands. /help");
+            false
         } else {
-            self.handle_plain_message(text);
-        }
+            self.handle_plain_message(text)
+        };
         self.scroll_offset = 0;
         // Submitted text may change state (command or sent message).
         self.script_snapshot_dirty = true;
+        sent_message
     }
 
     pub(crate) fn execute_command(&mut self, parsed: &crate::commands::parser::ParsedCommand) {
@@ -1309,18 +1316,25 @@ impl App {
         })
     }
 
+    /// Returns whether the message reached the wire. Every path that ends
+    /// without a frame leaving the process — a refusal from the outbound E2E
+    /// gate, a dead connection, a failed send, a buffer we cannot speak into —
+    /// reports `false`, because the `+typing` machine keys BOTH the owed `done`
+    /// and the §3.1 suppression window on it (see [`App::submit_from_tui`]).
+    /// A partial multi-frame send counts as sent: those frames DID reach the
+    /// peers, and they retract our typing exactly like a whole one.
     #[expect(
         clippy::too_many_lines,
         reason = "flat dispatch for DCC/channel/query message routing"
     )]
-    fn handle_plain_message(&mut self, text: &str) {
+    fn handle_plain_message(&mut self, text: &str) -> bool {
         let Some(active_id) = self.state.active_buffer_id.clone() else {
-            return;
+            return false;
         };
 
         let (conn_id, nick, buffer_name, buf_type) = {
             let Some(buf) = self.state.active_buffer() else {
-                return;
+                return false;
             };
             // Only send to channels and queries, not server/status buffers
             if !matches!(
@@ -1331,7 +1345,7 @@ impl App {
                     self,
                     "Cannot send messages to this buffer",
                 );
-                return;
+                return false;
             }
             let conn = self.state.connections.get(&buf.connection_id);
             let nick = conn.map(|c| c.nick.clone()).unwrap_or_default();
@@ -1345,6 +1359,7 @@ impl App {
 
         // DCC CHAT routing: send via DCC channel, not IRC.
         if buf_type == BufferType::DccChat {
+            let mut sent_any = false;
             let dcc_nick = buffer_name.strip_prefix('=').unwrap_or(&buffer_name);
             if let Some(record) = self.dcc.find_connected(dcc_nick) {
                 let record_id = record.id.clone();
@@ -1366,8 +1381,9 @@ impl App {
                             self,
                             &format!("DCC send error: {e}"),
                         );
-                        return;
+                        return sent_any;
                     }
+                    sent_any = true;
                     let msg_id = self.state.next_message_id();
                     self.state.add_message(
                         &active_id,
@@ -1393,7 +1409,7 @@ impl App {
                     "No active DCC CHAT session for this buffer",
                 );
             }
-            return;
+            return sent_any;
         }
 
         // Same precheck as send_gated_message: the E2E gate below may
@@ -1405,7 +1421,7 @@ impl App {
                 self,
                 "Failed to send message: connection unavailable",
             );
-            return;
+            return false;
         }
 
         // Outgoing shrink is the FIRST step for any message that
@@ -1489,7 +1505,12 @@ impl App {
             // alike warnings. Either way we fall through to the
             // synchronous send path below with the original text.
             match self.shrink_outgoing_tx.try_send(pending) {
-                Ok(()) => return,
+                // Nothing is on the wire YET — the worker posts the substituted
+                // text back and `send_outgoing_substituted` sends it seconds
+                // later, reporting the outcome itself via `note_message_sent`.
+                // Claiming a send here would discard the `done` we still owe if
+                // that deferred send never lands.
+                Ok(()) => return false,
                 Err(TrySendError::Full(_)) => {
                     tracing::warn!("shrink: outgoing queue full, sending unshrunk");
                 }
@@ -1530,7 +1551,7 @@ impl App {
                 Ok(v) => v,
                 Err(reason) => {
                     crate::commands::helpers::add_local_event(self, &reason.user_message());
-                    return;
+                    return false;
                 }
             };
 
@@ -1566,6 +1587,7 @@ impl App {
             && let Some(batches) = crate::irc::multiline::partition(text, &limits)
         {
             let mut send_failed = false;
+            let mut sent_any = false;
             'batches: for batch in &batches {
                 // Allocate the ref under the mutable conn borrow FIRST, then take
                 // the immutable handle borrow to send (avoids a borrow conflict).
@@ -1586,6 +1608,7 @@ impl App {
                             send_failed = true;
                             break 'batches;
                         }
+                        sent_any = true;
                     }
                 } else {
                     send_failed = true;
@@ -1594,7 +1617,9 @@ impl App {
             }
             if send_failed {
                 crate::commands::helpers::add_local_event(self, "Failed to send message");
-                return;
+                // Frames from an earlier batch may already be at the peers —
+                // those retract our typing whether or not the rest made it.
+                return sent_any;
             }
             // Local echo (echo-message off): ONE message PER BATCH so local
             // history/logging matches the wire. A multi-batch send (text longer
@@ -1624,7 +1649,7 @@ impl App {
                     );
                 }
             }
-            return;
+            return sent_any;
         }
 
         // --- Case C: non-E2E plaintext with embedded `\n` but no usable
@@ -1635,6 +1660,7 @@ impl App {
         // blank line; interior blanks are only representable inside a multiline
         // batch (Case B). This matches the legacy paste path's empty-line filter.
         if !is_e2e_encrypted && text.contains('\n') {
+            let mut sent_any = false;
             for line in text.split('\n') {
                 let line = line.trim_end_matches('\r');
                 if line.is_empty() {
@@ -1646,11 +1672,15 @@ impl App {
                     crate::irc::split_irc_message(line, crate::irc::MESSAGE_MAX_BYTES)
                 };
                 for chunk in chunks {
-                    if let Some(handle) = self.irc_handles.get(&conn_id)
-                        && handle.sender().send_privmsg(&buffer_name, &chunk).is_err()
-                    {
-                        crate::commands::helpers::add_local_event(self, "Failed to send message");
-                        return;
+                    if let Some(handle) = self.irc_handles.get(&conn_id) {
+                        if handle.sender().send_privmsg(&buffer_name, &chunk).is_err() {
+                            crate::commands::helpers::add_local_event(
+                                self,
+                                "Failed to send message",
+                            );
+                            return sent_any;
+                        }
+                        sent_any = true;
                     }
                     if !echo_message_enabled {
                         let id = self.state.next_message_id();
@@ -1674,17 +1704,19 @@ impl App {
                     }
                 }
             }
-            return;
+            return sent_any;
         }
 
         // --- Else: E2E, or single-line plaintext (the common hot path). ---
+        let mut sent_any = false;
         for wire in wire_lines {
             // Try to send via IRC if connected
-            if let Some(handle) = self.irc_handles.get(&conn_id)
-                && handle.sender().send_privmsg(&buffer_name, &wire).is_err()
-            {
-                crate::commands::helpers::add_local_event(self, "Failed to send message");
-                return;
+            if let Some(handle) = self.irc_handles.get(&conn_id) {
+                if handle.sender().send_privmsg(&buffer_name, &wire).is_err() {
+                    crate::commands::helpers::add_local_event(self, "Failed to send message");
+                    return sent_any;
+                }
+                sent_any = true;
             }
         }
 
@@ -1752,6 +1784,7 @@ impl App {
                 }
             }
         }
+        sent_any
     }
 
     /// Get the IRC sender for the active buffer's connection, if connected.
@@ -2240,5 +2273,505 @@ mod tests {
             ),
             vec![0x1b, 0x03]
         );
+    }
+}
+
+/// The submit → `+typing` hook, driven through the REAL submit path.
+///
+/// The bug these exist for cannot be caught below this level: the state
+/// machine (`app::typing`) is already proven to keep an owed `done` when told
+/// `sent_message = false` — what was wrong was the *value* handed to it. It
+/// was `should_type(text)`, a predicate over the text the user typed, so a
+/// message that was composed and then REFUSED (E2E gate, dead connection,
+/// failed send) still reported "sent". Only a test that runs the actual
+/// `handle_submit` can tell the two apart.
+///
+/// `App::new` touches disk (config dir, theme, storage, terminal query), so
+/// the fixture builds the struct directly — the same reason `send_typing_frame`
+/// exists as a free function over borrowed state.
+#[cfg(test)]
+mod submit_typing_tests {
+    #![allow(clippy::unwrap_used, reason = "test code")]
+
+    use super::{App, BufferType};
+    use crate::app::typing::TypingSource;
+    use crate::irc::handle::{FLOOD_PENALTY_THRESHOLD_MS, IrcHandle, IrcSender};
+    use crate::irc::typing::TypingState;
+    use crate::state::buffer::Buffer;
+    use crate::state::connection::{Connection, ConnectionStatus};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+    use tokio::sync::mpsc;
+
+    /// An `App` on a registered connection `net`, with `#rust` (channel) and
+    /// `bob` (query) open and a capturing sender behind the IRC handle.
+    struct Wired {
+        app: App,
+        sender: IrcSender,
+    }
+
+    impl Wired {
+        fn new() -> Self {
+            let mut app = test_app();
+            app.state.add_connection(make_connection());
+            app.state.add_buffer(make_buffer("#rust", BufferType::Channel));
+            app.state.add_buffer(make_buffer("bob", BufferType::Query));
+            let sender = IrcSender::capturing(u64::from(FLOOD_PENALTY_THRESHOLD_MS));
+            app.irc_handles.insert(
+                "net".to_string(),
+                IrcHandle::new("net".to_string(), sender.clone(), None, None),
+            );
+            Self { app, sender }
+        }
+
+        /// A submit from the terminal, exactly as the Enter key does it.
+        fn submit(&mut self, text: &str) {
+            self.app.submit_from_tui(text);
+        }
+
+        /// Exactly what left the process, as wire lines.
+        fn wire(&self) -> Vec<String> {
+            self.sender
+                .captured()
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        }
+
+        /// The state we last put on the wire for `buffer_id` — `Some` means a
+        /// retraction is still OWED to the peers.
+        fn owed(&self, buffer_id: &str) -> Option<TypingState> {
+            self.app.typing.sent_state(buffer_id)
+        }
+
+        /// Whether the §3.1 "we just said something" window is open — it mutes
+        /// typing in this buffer for 3s, so a phantom one silences a real retype.
+        fn suppressed(&self, buffer_id: &str) -> bool {
+            self.app.typing.last_message_at(buffer_id).is_some()
+        }
+
+        /// Enable E2E on the DM under a nick-keyed row while the peer's
+        /// `ident@host` stays unknown — the ordinary state of an `/e2e on` query
+        /// before the peer has spoken this session. The gate refuses
+        /// (`E2eRefusal::NoPeerHandle`) rather than leak plaintext.
+        fn enable_e2e_on_bob(&self) {
+            self.app
+                .state
+                .e2e_manager
+                .as_ref()
+                .unwrap()
+                .keyring()
+                .set_channel_config(&crate::e2e::keyring::ChannelConfig {
+                    channel: "bob".to_string(),
+                    enabled: true,
+                    mode: crate::e2e::keyring::ChannelMode::Normal,
+                })
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn an_e2e_refused_submit_still_owes_the_typing_done() {
+        // THE REGRESSION. `/query bob`, `/e2e on`, bob has not spoken yet.
+        // Alice types (an `active` goes out), pauses (a `paused` goes out), then
+        // hits Enter. The E2E gate REFUSES — nothing reaches the wire — so the
+        // `paused` is still the last thing bob heard: the `done` is owed. The
+        // old hook read the TEXT (`should_type`), called it a sent message, and
+        // threw the owed `done` away — bob showed "alice is typing…" for the
+        // full 30s paused TTL, and alice's retype was muted for 3s on top.
+        let mut w = Wired::new();
+        w.enable_e2e_on_bob();
+        w.app.state.set_active_buffer("net/bob");
+        w.app
+            .typing
+            .confirm_sent("net/bob", TypingState::Paused, Instant::now());
+
+        w.submit("are you there?");
+
+        assert!(
+            w.wire().is_empty(),
+            "the E2E gate refused: nothing may reach the wire"
+        );
+        assert_eq!(
+            w.owed("net/bob"),
+            Some(TypingState::Paused),
+            "a refused send retracts nothing, so the done is still owed"
+        );
+        assert!(
+            !w.suppressed("net/bob"),
+            "a message that was never sent must not open the 3s suppression window"
+        );
+    }
+
+    #[test]
+    fn a_send_on_a_dead_connection_still_owes_the_typing_done() {
+        // Same class, no E2E: the handle is gone, `handle_plain_message` prints
+        // "connection unavailable" and returns without sending.
+        let mut w = Wired::new();
+        w.app.irc_handles.clear();
+        w.app.state.set_active_buffer("net/#rust");
+        w.app
+            .typing
+            .confirm_sent("net/#rust", TypingState::Active, Instant::now());
+
+        w.submit("hello");
+
+        assert!(w.wire().is_empty());
+        assert_eq!(w.owed("net/#rust"), Some(TypingState::Active));
+        assert!(!w.suppressed("net/#rust"));
+    }
+
+    #[test]
+    fn a_message_that_reaches_the_wire_retires_the_target_and_suppresses_typing() {
+        // The other half: a real PRIVMSG clears typing at the receivers all by
+        // itself, so no `done` is owed — and §3.1 mutes typing here for 3s.
+        let mut w = Wired::new();
+        w.app.state.set_active_buffer("net/#rust");
+        w.app
+            .typing
+            .confirm_sent("net/#rust", TypingState::Active, Instant::now());
+
+        w.submit("hello");
+
+        assert_eq!(w.wire(), vec!["PRIVMSG #rust hello\r\n"]);
+        assert_eq!(
+            w.owed("net/#rust"),
+            None,
+            "the PRIVMSG is the retraction — nothing is owed"
+        );
+        assert!(w.suppressed("net/#rust"), "§3.1 window must be open");
+    }
+
+    #[test]
+    fn a_local_command_charges_nothing_even_when_it_writes_to_the_wire() {
+        // `/whois` puts a WHOIS on the wire but says nothing to the CHANNEL, so
+        // it neither retracts our typing there nor announces us: the `done` is
+        // still owed and no suppression window opens. (The gate is not "did any
+        // byte leave" — it is "did a message to THIS target leave".)
+        let mut w = Wired::new();
+        w.app.state.set_active_buffer("net/#rust");
+        w.app
+            .typing
+            .confirm_sent("net/#rust", TypingState::Active, Instant::now());
+
+        w.submit("/whois bob");
+
+        assert!(
+            w.wire().iter().any(|l| l.starts_with("WHOIS")),
+            "the command itself must still run: {:?}",
+            w.wire()
+        );
+        assert_eq!(w.owed("net/#rust"), Some(TypingState::Active));
+        assert!(!w.suppressed("net/#rust"));
+    }
+
+    #[test]
+    fn an_action_counts_as_a_message_only_when_it_reaches_the_wire() {
+        // `/me` is the one command that speaks INTO the active buffer, so a
+        // successful one retires the target like any message — and a refused one
+        // (E2E, same gate as above) must not.
+        let mut w = Wired::new();
+        w.app.state.set_active_buffer("net/#rust");
+        let now = Instant::now();
+        w.app.typing.confirm_sent("net/#rust", TypingState::Active, now);
+
+        w.submit("/me waves");
+
+        assert_eq!(w.wire(), vec!["PRIVMSG #rust :\u{1}ACTION waves\u{1}\r\n"]);
+        assert_eq!(w.owed("net/#rust"), None);
+        assert!(w.suppressed("net/#rust"));
+
+        // The refused twin.
+        w.enable_e2e_on_bob();
+        w.app.state.set_active_buffer("net/bob");
+        w.app.typing.confirm_sent("net/bob", TypingState::Paused, now);
+
+        w.submit("/me waves");
+
+        assert_eq!(w.wire().len(), 1, "the refused ACTION must not reach bob");
+        assert_eq!(w.owed("net/bob"), Some(TypingState::Paused));
+        assert!(!w.suppressed("net/bob"));
+    }
+
+    #[test]
+    fn the_typing_update_lands_on_the_buffer_we_typed_in_not_the_one_we_end_up_in() {
+        // A submit can MOVE the active buffer: `/query bob` opens and switches.
+        // The typing state we owe belongs to the buffer the text was typed in.
+        let mut w = Wired::new();
+        w.app.state.set_active_buffer("net/#rust");
+        w.app
+            .typing
+            .confirm_sent("net/#rust", TypingState::Active, Instant::now());
+
+        w.submit("/query bob");
+
+        assert_eq!(w.app.state.active_buffer_id.as_deref(), Some("net/bob"));
+        assert_eq!(
+            w.owed("net/#rust"),
+            Some(TypingState::Active),
+            "the done owed to #rust must not follow us into the query"
+        );
+        assert!(!w.suppressed("net/#rust"));
+        assert!(!w.suppressed("net/bob"));
+    }
+
+    #[test]
+    fn a_web_submit_reports_the_real_outcome_too() {
+        // `WebCommand::SendMessage` runs the same submit path; a browser session
+        // is its own typing source, and a refused send must leave ITS owed `done`
+        // outstanding exactly like the terminal's.
+        let mut w = Wired::new();
+        w.enable_e2e_on_bob();
+        let now = Instant::now();
+        w.app.typing.confirm_sent("net/bob", TypingState::Paused, now);
+        w.app.on_web_typing("s1", "net/bob", true);
+
+        w.app.handle_web_command(
+            crate::web::protocol::WebCommand::SendMessage {
+                buffer_id: "net/bob".to_string(),
+                text: "are you there?".to_string(),
+            },
+            "s1",
+        );
+
+        assert!(w.wire().is_empty(), "the E2E gate refused");
+        assert_eq!(w.owed("net/bob"), Some(TypingState::Paused));
+        assert!(!w.suppressed("net/bob"));
+
+        // ...and a web message that DOES reach the wire behaves like the TUI's.
+        w.app.handle_web_command(
+            crate::web::protocol::WebCommand::SendMessage {
+                buffer_id: "net/#rust".to_string(),
+                text: "hello".to_string(),
+            },
+            "s1",
+        );
+        assert_eq!(w.wire(), vec!["PRIVMSG #rust hello\r\n"]);
+        assert_eq!(w.owed("net/#rust"), None);
+        assert!(w.suppressed("net/#rust"));
+        // The web source itself was released by the submit.
+        assert!(
+            w.app
+                .typing
+                .source_is_active(&TypingSource::Web("s1".to_string()))
+                == Some(false),
+            "the submitting source must be marked idle"
+        );
+    }
+
+    // ── fixtures ──
+
+    fn make_buffer(name: &str, buffer_type: BufferType) -> Buffer {
+        Buffer {
+            id: format!("net/{name}"),
+            connection_id: "net".to_string(),
+            buffer_type,
+            name: name.to_string(),
+            messages: std::collections::VecDeque::new(),
+            activity: crate::state::buffer::ActivityLevel::None,
+            unread_count: 0,
+            last_read: chrono::Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
+            peer_handle: None,
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
+            log_initial_loaded: false,
+            pin_backlog: false,
+        }
+    }
+
+    fn make_connection() -> Connection {
+        Connection {
+            id: "net".to_string(),
+            label: "NetServer".to_string(),
+            status: ConnectionStatus::Connected,
+            own_handle: None,
+            nick: "me".to_string(),
+            user_modes: String::new(),
+            isupport: HashMap::new(),
+            isupport_parsed: crate::irc::isupport::Isupport::new(),
+            error: None,
+            lag: None,
+            lag_pending: false,
+            reconnect_attempts: 0,
+            reconnect_delay_secs: 30,
+            next_reconnect: None,
+            should_reconnect: true,
+            joined_channels: Vec::new(),
+            origin_config: crate::config::ServerConfig {
+                label: "NetServer".to_string(),
+                address: "irc.test.net".to_string(),
+                port: 6697,
+                tls: true,
+                tls_verify: true,
+                autoconnect: false,
+                channels: vec![],
+                nick: None,
+                username: None,
+                realname: None,
+                password: None,
+                sasl_user: None,
+                sasl_pass: None,
+                bind_ip: None,
+                encoding: None,
+                auto_reconnect: Some(true),
+                reconnect_delay: None,
+                reconnect_max_retries: None,
+                autosendcmd: None,
+                sasl_mechanism: None,
+                client_cert_path: None,
+            },
+            local_ip: None,
+            enabled_caps: std::collections::HashSet::from(["message-tags".to_string()]),
+            chathistory: crate::irc::chathistory::HistoryState::new(),
+            who_token_counter: 0,
+            silent_who_channels: std::collections::HashSet::new(),
+            silent_banlist_channels: std::collections::HashSet::new(),
+            multiline: None,
+            batch_ref_counter: 0,
+        }
+    }
+
+    /// `App` with every service inert: no storage, no scripts, no shrink client,
+    /// no terminal. Only the pieces the submit path reads are real — the state,
+    /// the config, the IRC handles and the typing machine.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one line per App field — a struct literal cannot be shortened"
+    )]
+    fn test_app() -> App {
+        let mut state = crate::state::AppState::new();
+        let db = crate::storage::db::open_database(false).unwrap();
+        let keyring = crate::e2e::keyring::Keyring::new(Arc::new(Mutex::new(db)));
+        state.e2e_manager = Some(Arc::new(
+            crate::e2e::manager::E2eManager::load_or_init(keyring).unwrap(),
+        ));
+
+        let config = crate::config::AppConfig::default();
+        let (irc_tx, irc_rx) = mpsc::channel(16);
+        let (preview_tx, preview_rx) = mpsc::channel(16);
+        let (dict_tx, dict_rx) = mpsc::channel(16);
+        let (web_cmd_tx, web_cmd_rx) = mpsc::channel(16);
+        let (script_action_tx, script_action_rx) = mpsc::channel(16);
+        let (dcc, dcc_rx) = crate::dcc::DccManager::new();
+        let (shell_mgr, shell_rx) = crate::shell::ShellManager::new();
+        let script_state = Arc::new(std::sync::RwLock::new(state.script_snapshot()));
+        // Hand-rolled instead of `ShrinkRuntime::build`, which spawns its
+        // drain/worker tasks and so needs a tokio reactor. `shrink_client:
+        // None` is what makes the submit path skip the deferred shrink
+        // entirely, so nothing here is ever read.
+        let (shrink_outgoing_tx, _shrink_outgoing_rx) = mpsc::channel(16);
+        let (shrink_deliver_tx, shrink_deliver_rx) = mpsc::channel(16);
+
+        App {
+            state,
+            config,
+            theme: crate::theme::loader::default_theme(),
+            input: crate::ui::input::InputState::new(),
+            should_quit: false,
+            script_snapshot_dirty: false,
+            splash_visible: 0,
+            splash_done: true,
+            scroll_offset: 0,
+            chat_scroll_at_top: false,
+            ui_regions: None,
+            irc_handles: HashMap::new(),
+            forwarder_handles: HashMap::new(),
+            irc_tx,
+            irc_rx,
+            last_esc_time: None,
+            buffer_list_scroll: 0,
+            buffer_list_total: 0,
+            nick_list_scroll: 0,
+            nick_list_total: 0,
+            lag_pings: HashMap::new(),
+            batch_trackers: HashMap::new(),
+            storage: None,
+            last_event_purge: Instant::now(),
+            last_mention_purge: Instant::now(),
+            quit_message: None,
+            image_preview: crate::image_preview::PreviewStatus::default(),
+            image_clear_rect: None,
+            preview_rx,
+            preview_tx,
+            http_client: reqwest::Client::new(),
+            picker: ratatui_image::picker::Picker::halfblocks(),
+            in_tmux: false,
+            emote_placements: Vec::new(),
+            emote_animator: crate::app::emote_anim::EmoteAnimator::default(),
+            emote_anim_start: Instant::now(),
+            emote_picker: crate::ui::emote_picker::EmotePickerState::default(),
+            wizard: None,
+            needs_full_redraw: false,
+            outer_terminal: "xterm".to_string(),
+            color_support: crate::nick_color::ColorSupport::TrueColor,
+            image_proto_source: "test".to_string(),
+            shim_term_env: None,
+            channel_query_queues: HashMap::new(),
+            channel_query_in_flight: HashMap::new(),
+            channel_query_sent_at: HashMap::new(),
+            paste_queue: std::collections::VecDeque::new(),
+            script_manager: None,
+            script_api: None,
+            script_state,
+            script_action_rx,
+            script_commands: HashMap::new(),
+            script_config: HashMap::new(),
+            active_timers: HashMap::new(),
+            script_action_tx,
+            wrap_indent: 0,
+            cached_config_toml: None,
+            terminal: None,
+            detached: false,
+            should_detach: false,
+            log_browser_mode: false,
+            log_db: None,
+            socket_listener: None,
+            socket_output_tx: None,
+            shim_event_rx: None,
+            is_socket_attached: false,
+            term_reader_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            term_rx: None,
+            shim_output_handle: None,
+            shim_input_handle: None,
+            cached_term_cols: 80,
+            cached_term_rows: 24,
+            dcc,
+            dcc_rx,
+            shell_mgr,
+            shell_rx,
+            shell_input_active: false,
+            last_shell_web_broadcast: Instant::now(),
+            shell_broadcast_pending: None,
+            spellchecker: None,
+            dict_rx,
+            dict_tx,
+            web_broadcaster: Arc::new(crate::web::broadcast::WebBroadcaster::new(16)),
+            web_cmd_rx,
+            web_cmd_tx,
+            web_server_handle: None,
+            web_sessions: None,
+            web_rate_limiter: None,
+            web_state_snapshot: None,
+            web_active_buffers: HashMap::new(),
+            web_restart_pending: false,
+            last_day: chrono::Local::now().date_naive(),
+            shrink_client: None,
+            shrink_cache: Arc::new(parking_lot::Mutex::new(crate::shrink::ShrinkCache::new(4))),
+            shrink_outgoing_tx,
+            shrink_deliver_tx,
+            shrink_deliver_rx,
+            cli_bind_override: None,
+            typing: crate::app::typing::TypingSender::default(),
+        }
     }
 }

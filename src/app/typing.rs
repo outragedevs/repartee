@@ -94,17 +94,24 @@ impl TypingSender {
     /// A source submitted something. A real message needs no `done` of its own:
     /// its PRIVMSG clears typing at the receivers.
     ///
-    /// `sent_message` — whether the submission actually goes to the network, as
-    /// opposed to a local command like `/set` — gates BOTH of the things that
-    /// happen here, and for the same reason: nothing was said on the wire.
+    /// `sent_message` is **what actually reached the wire**, never what the text
+    /// looked like. The two are not the same thing: an E2E-enabled DM whose peer
+    /// has not spoken yet is refused by the outbound gate, and a message composed
+    /// on a connection that just dropped never leaves either — in both cases the
+    /// user pressed Enter on perfectly ordinary text and nothing was said. The
+    /// caller therefore runs the submit FIRST and reports its outcome (see
+    /// [`App::submit_from_tui`]).
+    ///
+    /// It gates BOTH of the things that happen here, and for the same reason —
+    /// nothing was said on the wire:
     ///
     /// * the §3.1 suppression window (`last_message`), which would otherwise
     ///   falsely mute typing in this buffer for the next 3 seconds; and
     /// * retiring the target (`sent = None`), which throws away the record that
-    ///   a `done` is **owed** to the peers. A `/whois` submitted while a `done`
-    ///   is still waiting out its throttle would take that `done` with it, and
-    ///   the peers would show us as typing until the TTL — 30s if the last state
-    ///   on the wire was `paused`.
+    ///   a `done` is **owed** to the peers. A `/whois` — or a refused message —
+    ///   submitted while a `done` is still waiting out its throttle would take
+    ///   that `done` with it, and the peers would show us as typing until the
+    ///   TTL: 30s if the last state on the wire was `paused`.
     ///
     /// (The flood budget needs no help from here — whatever the submit puts on
     /// the wire is charged by `IrcSender::send` itself.)
@@ -120,14 +127,37 @@ impl TypingSender {
             s.last_activity = now;
         }
         if sent_message {
-            self.last_message.insert(buffer_id.to_string(), now);
-            // The message itself is the retraction. Retire the target without a
-            // `done`, and coalesce away any `done` that was still pending.
-            if let Some(t) = self.targets.get_mut(buffer_id) {
-                t.sent = None;
-            }
+            return self.on_message_sent(buffer_id, now);
         }
         // Another source may still be typing here, so re-derive rather than assume.
+        self.propose(&[buffer_id.to_string()], now)
+    }
+
+    /// A real message reached the wire for `buffer_id`, from a path that is not
+    /// a submit of this buffer's input: a `/me` or `/msg <peer>` (which speak
+    /// into a buffer without being typed in it — the command was), a Lua script
+    /// send, or the deferred shrink delivery, which puts the message on the wire
+    /// seconds AFTER the Enter that queued it.
+    ///
+    /// Same two effects as a submit that sent something, minus the source: the
+    /// message is the retraction, so the target is retired without a `done`
+    /// (coalescing away one that was still pending), and §3.1's window opens.
+    ///
+    /// Emits nothing itself: `last_message` is recorded before the re-derive, so
+    /// the proposal it triggers is always suppressed by the very message we are
+    /// recording. It is called anyway, so a target left dirty by a source that is
+    /// still typing here is reconsidered at once rather than at the next tick.
+    pub fn on_message_sent(
+        &mut self,
+        buffer_id: &str,
+        now: Instant,
+    ) -> Vec<(String, TypingState)> {
+        self.last_message.insert(buffer_id.to_string(), now);
+        // The message itself is the retraction. Retire the target without a
+        // `done`, and coalesce away any `done` that was still pending.
+        if let Some(t) = self.targets.get_mut(buffer_id) {
+            t.sent = None;
+        }
         self.propose(&[buffer_id.to_string()], now)
     }
 
@@ -249,6 +279,26 @@ impl TypingSender {
             .is_some_and(|t| now.duration_since(*t) < THROTTLE)
     }
 
+    /// The state we last put on the wire for `buffer_id`. `Some` means a
+    /// retraction is still **owed** to that target's peers.
+    #[cfg(test)]
+    pub(crate) fn sent_state(&self, buffer_id: &str) -> Option<TypingState> {
+        self.targets.get(buffer_id).and_then(|t| t.sent)
+    }
+
+    /// When a real message last went out for `buffer_id` — the §3.1 suppression
+    /// window. `None` means nothing has been said here.
+    #[cfg(test)]
+    pub(crate) fn last_message_at(&self, buffer_id: &str) -> Option<Instant> {
+        self.last_message.get(buffer_id).copied()
+    }
+
+    /// Whether `source` currently reports itself as typing.
+    #[cfg(test)]
+    pub(crate) fn source_is_active(&self, source: &TypingSource) -> Option<bool> {
+        self.sources.get(source).map(|s| s.active)
+    }
+
     /// Forget a buffer entirely — its sources and target. Called when the
     /// buffer has been closed: there is nothing left to notify.
     pub fn forget_buffer(&mut self, buffer_id: &str) {
@@ -295,9 +345,8 @@ impl App {
         self.dispatch_typing(due);
     }
 
-    /// Something was submitted from `source`. `sent_message` is whether it was
-    /// an actual message to the network (as opposed to a local command like
-    /// `/help` or `/set`) — see `TypingSender::on_submit`.
+    /// Something was submitted from `source`. `sent_message` is whether a real
+    /// message **reached the wire** — see `TypingSender::on_submit`.
     pub(crate) fn on_typing_submit(
         &mut self,
         source: &TypingSource,
@@ -310,18 +359,34 @@ impl App {
         self.dispatch_typing(due);
     }
 
-    /// Note a TUI-driven submit for the active buffer. Every `handle_submit`
-    /// call site in `input.rs` must go through this first, or the machine keeps
-    /// an `Active` recorded for the target and the next input change retracts
-    /// it with a spurious `done` right after the real PRIVMSG.
+    /// A real message reached the wire for `buffer_id` outside a submit of that
+    /// buffer's input — see `TypingSender::on_message_sent`.
+    pub(crate) fn note_message_sent(&mut self, buffer_id: &str) {
+        let due = self.typing.on_message_sent(buffer_id, Instant::now());
+        self.dispatch_typing(due);
+    }
+
+    /// Run a TUI submit and tell the typing machine what it actually did. Every
+    /// `handle_submit` call site in `input.rs` goes through here, or the machine
+    /// keeps an `Active` recorded for the target and the next input change
+    /// retracts it with a spurious `done` right after the real PRIVMSG.
     ///
-    /// `text` is the exact string being submitted, so we can tell a real
-    /// message from a local command (`/help`, `/set`, ...): only a real
-    /// message should suppress typing for the next 3 seconds in this buffer.
-    pub(crate) fn note_tui_submit(&mut self, text: &str) {
-        if let Some(buffer_id) = self.state.active_buffer_id.clone() {
-            let sent_message = crate::irc::typing::should_type(text);
-            self.on_typing_submit(&TypingSource::Tui, &buffer_id, sent_message);
+    /// The submit runs FIRST because only its outcome — not the text — says
+    /// whether anything was said: a message the outbound E2E gate refuses, or one
+    /// a dead connection swallows, is ordinary text that never left the process.
+    /// Reporting it as sent would clear the `done` we still owe the peers (who
+    /// would show us typing until the TTL) and mute our retype for 3 seconds.
+    ///
+    /// The target buffer is captured BEFORE the submit: a submit can move the
+    /// active buffer (`/join`, `/query`), and the typing state belongs to the
+    /// buffer the text was typed in. A command's own sends report themselves
+    /// through [`App::note_message_sent`] — the handlers are plain
+    /// `fn(&mut App, &[String])` and have no outcome to return.
+    pub(crate) fn submit_from_tui(&mut self, text: &str) {
+        let target = self.state.active_buffer_id.clone();
+        let sent_message = self.handle_submit(text);
+        if let Some(target) = target {
+            self.on_typing_submit(&TypingSource::Tui, &target, sent_message);
         }
     }
 
