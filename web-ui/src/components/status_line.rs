@@ -221,9 +221,14 @@ pub fn status_items(enabled: bool, names: &[String]) -> Vec<StatusItem> {
         .collect()
 }
 
-/// Mirrors `src/ui/status_line.rs::typing_phrase`. Kept in step by test.
-#[must_use]
-pub fn typing_phrase(nicks: &[String]) -> Option<String> {
+/// How the status line words a set of typing nicks. `None` when nobody is
+/// typing — the caller then renders no item *and no separator*.
+///
+/// Duplicated verbatim from the core (`src/ui/status_line.rs::typing_phrase`),
+/// which is a separate compilation target and cannot share code with this one.
+/// The two are held in step by `fixtures/typing_phrases.txt`, which BOTH crates'
+/// tests assert against: reword one of them and the *other* crate's test fails.
+fn typing_phrase(nicks: &[String]) -> Option<String> {
     match nicks {
         [] => None,
         [one] => Some(format!("{one} is typing…")),
@@ -363,26 +368,52 @@ mod tests {
         assert_eq!(items, vec![StatusItem::Time, StatusItem::Typing]);
     }
 
+    // ── `typing_phrase`, pinned against the SHARED fixture ────────────────
+    //
+    // This function is a verbatim copy of the TUI's (`src/ui/status_line.rs`)
+    // and cannot share code with it — separate compilation targets.
+    // `fixtures/typing_phrases.txt` is the tie: both crates assert against
+    // these literals, so rewording the phrase here fails the TUI test, and
+    // rewording it there fails this one. `make test` runs both.
+    //
+    // Before this, each crate asserted its own copy against its own hard-coded
+    // strings, and the comment claiming they were "kept in step by test" was
+    // simply false — the web copy could silently drift.
+
+    const PHRASE_FIXTURE: &str = include_str!("../../../fixtures/typing_phrases.txt");
+
+    /// `(nicks, phrase)` for every case in the shared fixture.
+    fn phrase_cases() -> Vec<(Vec<String>, String)> {
+        let cases: Vec<(Vec<String>, String)> = PHRASE_FIXTURE
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|line| {
+                let (nicks, phrase) = line.split_once(" => ").expect("`nicks => phrase`");
+                (
+                    nicks.split(',').map(str::to_string).collect(),
+                    phrase.to_string(),
+                )
+            })
+            .collect();
+        assert!(!cases.is_empty(), "the shared fixture must not be empty");
+        cases
+    }
+
     #[test]
     fn typing_phrases_match_the_tui() {
+        for (nicks, expected) in phrase_cases() {
+            assert_eq!(
+                typing_phrase(&nicks).as_deref(),
+                Some(expected.as_str()),
+                "{nicks:?} — the TUI asserts this same literal"
+            );
+        }
+    }
+
+    #[test]
+    fn no_typers_renders_nothing() {
+        // Not in the fixture: there is no string here to drift.
         assert_eq!(typing_phrase(&[]), None);
-        assert_eq!(
-            typing_phrase(&["alice".to_string()]).unwrap(),
-            "alice is typing…"
-        );
-        assert_eq!(
-            typing_phrase(&["alice".to_string(), "bob".to_string()]).unwrap(),
-            "alice and bob are typing…"
-        );
-        assert_eq!(
-            typing_phrase(&[
-                "alice".to_string(),
-                "bob".to_string(),
-                "carol".to_string(),
-                "dave".to_string()
-            ])
-            .unwrap(),
-            "alice, bob and 2 others are typing…"
-        );
     }
 }
