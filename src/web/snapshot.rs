@@ -51,6 +51,20 @@ pub fn build_sync_init(
         })
         .collect();
 
+    // Seed the client's typing indicators. Without this a tab that connects (or
+    // lag-resyncs) while someone is mid-sentence shows nothing until the visible
+    // set next changes: the sender's 3s refresh is not a change, and `paused`
+    // is never resent at all.
+    //
+    // `typing.show = false` already keeps the tracker empty (ingestion is gated
+    // in `handle_tagmsg`), but the snapshot must not depend on that — state left
+    // over from before the setting was switched off must not leak to the client.
+    let typing = if state.typing_show {
+        state.typing.snapshot()
+    } else {
+        std::collections::HashMap::new()
+    };
+
     WebEvent::SyncInit {
         buffers,
         connections,
@@ -58,6 +72,7 @@ pub fn build_sync_init(
         active_buffer_id: state.active_buffer_id.clone(),
         timestamp_format: timestamp_format.to_string(),
         emotes_enabled,
+        typing,
     }
 }
 
@@ -152,6 +167,7 @@ mod tests {
     use crate::state::buffer::{ActivityLevel, Buffer, BufferType, MessageType};
     use chrono::Utc;
     use std::collections::{HashMap, VecDeque};
+    use std::time::Instant;
 
     fn make_test_state() -> AppState {
         let mut state = AppState::new();
@@ -208,6 +224,102 @@ mod tests {
             }
             _ => panic!("expected SyncInit"),
         }
+    }
+
+    /// A second channel buffer, so "only buffers with typers appear" is a real
+    /// assertion and not a tautology.
+    fn add_channel(state: &mut AppState, id: &str, name: &str) {
+        let mut buf = state.buffers["libera/#rust"].clone();
+        buf.id = id.to_string();
+        buf.name = name.to_string();
+        state.buffers.insert(id.to_string(), buf);
+    }
+
+    fn sync_init_typing(event: &WebEvent) -> &std::collections::HashMap<String, Vec<String>> {
+        match event {
+            WebEvent::SyncInit { typing, .. } => typing,
+            _ => panic!("expected SyncInit"),
+        }
+    }
+
+    #[test]
+    fn sync_init_seeds_typing_only_for_buffers_that_have_typers() {
+        // A browser tab that connects mid-typing must be told who is already
+        // typing: the sender's 3s refresh is not a visible change, so it pushes
+        // nothing, and a `paused` peer is never resent at all.
+        let mut state = make_test_state();
+        add_channel(&mut state, "libera/#tokio", "#tokio");
+        state.typing.set(
+            "libera/#rust",
+            "alice",
+            crate::irc::typing::TypingState::Active,
+            Instant::now(),
+        );
+
+        let event = build_sync_init(&state, 0, "%H:%M", false);
+        let typing = sync_init_typing(&event);
+        assert_eq!(typing.len(), 1, "#tokio has no typers, so it has no entry");
+        assert_eq!(typing["libera/#rust"], vec!["alice"]);
+    }
+
+    #[test]
+    fn sync_init_typing_matches_the_live_push_exactly() {
+        // The snapshot seeds the client; the live `Typing` event replaces it.
+        // If they can disagree on order or spelling, the indicator jumps as soon
+        // as the first live event lands. Both go through `TypingTracker::nicks`.
+        let mut state = make_test_state();
+        let now = Instant::now();
+        state.typing.set(
+            "libera/#rust",
+            "Bob",
+            crate::irc::typing::TypingState::Active,
+            now,
+        );
+        state.typing.set(
+            "libera/#rust",
+            "alice",
+            crate::irc::typing::TypingState::Paused,
+            now,
+        );
+
+        let event = build_sync_init(&state, 0, "%H:%M", false);
+        let seeded = sync_init_typing(&event)["libera/#rust"].clone();
+
+        crate::irc::events::push_typing_web_event(&mut state, "libera/#rust");
+        let pushed = match state.pending_web_events.last() {
+            Some(WebEvent::Typing { nicks, .. }) => nicks.clone(),
+            _ => panic!("expected a Typing event"),
+        };
+
+        assert_eq!(seeded, pushed);
+        assert_eq!(seeded, vec!["alice", "Bob"]);
+    }
+
+    #[test]
+    fn sync_init_carries_no_typing_when_typing_display_is_off() {
+        // `typing.show = false` gates ingestion, so the tracker is normally
+        // empty here anyway — the gate is explicit so the snapshot cannot leak
+        // state left over from before the setting was switched off.
+        let mut state = make_test_state();
+        state.typing_show = false;
+        state.typing.set(
+            "libera/#rust",
+            "alice",
+            crate::irc::typing::TypingState::Active,
+            Instant::now(),
+        );
+
+        let event = build_sync_init(&state, 0, "%H:%M", false);
+        assert!(sync_init_typing(&event).is_empty());
+    }
+
+    #[test]
+    fn sync_init_typing_is_present_but_empty_when_nobody_is_typing() {
+        // Pinned: the field is always emitted (`"typing":{}`), never omitted —
+        // see the JSON test in `protocol.rs`.
+        let state = make_test_state();
+        let event = build_sync_init(&state, 0, "%H:%M", false);
+        assert!(sync_init_typing(&event).is_empty());
     }
 
     #[test]

@@ -134,6 +134,7 @@ impl App {
                 active_buffer_id: None,
                 timestamp_format: self.config.web.timestamp_format.clone(),
                 emotes_enabled: self.config.emotes.web_enabled(),
+                typing: std::collections::HashMap::new(),
             },
         ));
         self.web_state_snapshot = Some(std::sync::Arc::clone(&snapshot));
@@ -293,6 +294,7 @@ impl App {
             active_buffer_id,
             timestamp_format,
             emotes_enabled,
+            typing,
             ..
         } = init
         {
@@ -303,6 +305,7 @@ impl App {
             snap.active_buffer_id = active_buffer_id;
             snap.timestamp_format = timestamp_format;
             snap.emotes_enabled = emotes_enabled;
+            snap.typing = typing;
         }
     }
 

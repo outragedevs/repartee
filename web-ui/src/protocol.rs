@@ -15,6 +15,16 @@ pub enum WebEvent {
         timestamp_format: Option<String>,
         #[serde(default = "default_true")]
         emotes_enabled: bool,
+        /// Who is typing right now, per buffer: `buffer_id -> nicks` — the same
+        /// full sets (same order) `Typing` carries, for every buffer that has
+        /// one. The client REPLACES its typing map with this; `{}` means nobody.
+        ///
+        /// Seeded here because the live `Typing` push only fires on a *change*:
+        /// a sender's 3s `active` refresh is not one, and `paused` is sent once
+        /// and then lives 30s at the receiver. Without this, a tab connecting
+        /// mid-typing shows nothing for up to that long.
+        #[serde(default)]
+        typing: std::collections::HashMap<String, Vec<String>>,
     },
     NewMessage {
         buffer_id: String,
@@ -127,9 +137,9 @@ pub enum WebEvent {
         session_id: Option<String>,
     },
     /// Who is currently typing in a buffer (`IRCv3` `+typing`). Mirrors
-    /// `src/web/protocol.rs::WebEvent::Typing`. Deliberately absent from
-    /// `SyncInit` — see `AppState::handle_event`'s `SyncInit` arm for why the
-    /// client clears its typing map there.
+    /// `src/web/protocol.rs::WebEvent::Typing`. Carries the buffer's complete
+    /// set, not a delta; empty `nicks` clears the buffer. Only sent when the set
+    /// *changes* — the state on connect comes from `SyncInit::typing` instead.
     Typing {
         buffer_id: String,
         nicks: Vec<String>,

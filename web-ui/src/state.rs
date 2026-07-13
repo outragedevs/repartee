@@ -110,6 +110,31 @@ impl AppState {
             .and_then(|s: web_sys::Storage| s.get_item(&theme_key).ok().flatten())
             .unwrap_or_else(|| "nightfall".to_string());
 
+        Self::with_persisted(
+            saved_theme,
+            // Clamp on load: the Aa menu clamps on write, but a stale or
+            // hand-edited stored value (e.g. "999") would otherwise apply
+            // raw and could make the UI — including the reset button —
+            // unusable.
+            load_stored_parsed::<i64>(&crate::constants::storage_key("font-size"))
+                .map(crate::components::appearance::clamp_font),
+            load_stored_parsed::<f32>(&crate::constants::storage_key("line-height"))
+                .map(crate::components::appearance::clamp_line_h),
+            load_dismissed_previews(),
+        )
+    }
+
+    /// The half of [`Self::new`] that touches no browser storage.
+    ///
+    /// Split out so host-side tests can build a state at all: every
+    /// `localStorage` read in `new()` goes through `web_sys::window()`, which
+    /// panics outside wasm.
+    fn with_persisted(
+        saved_theme: String,
+        font_size_override: Option<u32>,
+        line_height_override: Option<f32>,
+        dismissed_previews: HashSet<(u64, String)>,
+    ) -> Self {
         Self {
             authenticated: RwSignal::new(false),
             connected: RwSignal::new(false),
@@ -125,18 +150,8 @@ impl AppState {
             error: RwSignal::new(None),
             timestamp_format: RwSignal::new("%H:%M".to_string()),
             line_height: RwSignal::new(1.35),
-            // Clamp on load: the Aa menu clamps on write, but a stale or
-            // hand-edited stored value (e.g. "999") would otherwise apply
-            // raw and could make the UI — including the reset button —
-            // unusable.
-            font_size_override: RwSignal::new(
-                load_stored_parsed::<i64>(&crate::constants::storage_key("font-size"))
-                    .map(crate::components::appearance::clamp_font),
-            ),
-            line_height_override: RwSignal::new(
-                load_stored_parsed::<f32>(&crate::constants::storage_key("line-height"))
-                    .map(crate::components::appearance::clamp_line_h),
-            ),
+            font_size_override: RwSignal::new(font_size_override),
+            line_height_override: RwSignal::new(line_height_override),
             appearance_open: RwSignal::new(false),
             nick_column_width: RwSignal::new(12),
             nick_max_length: RwSignal::new(9),
@@ -148,7 +163,7 @@ impl AppState {
             sync_version: RwSignal::new(0),
             backlog_loaded: RwSignal::new(HashSet::new()),
             is_at_bottom: RwSignal::new(true),
-            dismissed_previews: RwSignal::new(load_dismissed_previews()),
+            dismissed_previews: RwSignal::new(dismissed_previews),
             emotes_enabled: RwSignal::new(true),
             wizard_open: RwSignal::new(false),
             emote_picker_open: RwSignal::new(false),
@@ -209,6 +224,7 @@ impl AppState {
                 active_buffer_id,
                 timestamp_format,
                 emotes_enabled,
+                typing,
             } => {
                 // Clear cached messages, nick lists, and backlog-loaded flags —
                 // forces re-fetch. Handles both initial connect and lag-recovery resync.
@@ -218,10 +234,14 @@ impl AppState {
                 self.backlog_loaded.set(HashSet::new());
                 self.backlog_has_more.set(HashMap::new());
                 self.backlog_fetching.set(HashSet::new());
-                // Typing is not carried in SyncInit — it is ephemeral and refills
-                // within 3s from live traffic. Anything we are still showing is by
-                // definition stale across a reconnect.
-                self.typing.set(HashMap::new());
+                // REPLACE the typing map with the snapshot's — never blank it.
+                // Whatever we were showing is stale across a resync, but the
+                // server's set is not: the live `Typing` push only fires when the
+                // visible set *changes*, so a refresh of an already-typing nick
+                // sends nothing and `paused` is sent once and then sits for 30s.
+                // Blanking here left a reconnecting tab with no indicator for up
+                // to that long while the TUI showed it the whole time.
+                self.typing.set(typing);
 
                 self.buffers.set(buffers);
                 self.connections.set(connections);
@@ -1074,6 +1094,70 @@ pub fn save_dismissed_previews(dismissed: &HashSet<(u64, String)>) {
 mod tests {
     use super::*;
 
+    /// `AppState::new()` reads `localStorage` through `web_sys`, which panics
+    /// off-wasm — build the storage-free half instead.
+    fn headless_state() -> AppState {
+        AppState::with_persisted("nightfall".to_string(), None, None, HashSet::new())
+    }
+
+    #[test]
+    fn sync_init_seeds_typing_from_the_snapshot() {
+        // The regression: a tab that connects (or lag-resyncs) while alice is
+        // mid-sentence used to blank its typing map and wait for a push that
+        // never comes — a 3s `active` refresh is not a change server-side, and
+        // `paused` is sent once and lives 30s.
+        let state = headless_state();
+        // Exactly the JSON the server emits, so a field/serde-name drift between
+        // the two hand-mirrored protocol.rs files fails here.
+        let json = r#"{"type":"SyncInit","buffers":[],"connections":[],"mention_count":0,
+            "active_buffer_id":null,"timestamp_format":"%H:%M","emotes_enabled":true,
+            "typing":{"libera/#rust":["alice","Bob"]}}"#;
+        let event: WebEvent = serde_json::from_str(json).expect("mirrors the server's SyncInit");
+
+        state.handle_event(event);
+
+        assert_eq!(
+            state.typing.get_untracked()["libera/#rust"],
+            vec!["alice", "Bob"],
+            "SyncInit must seed the typing map, not blank it"
+        );
+    }
+
+    #[test]
+    fn sync_init_without_typing_clears_a_stale_map() {
+        // The snapshot REPLACES the map: an empty payload still has to wipe
+        // whatever the previous session left on screen.
+        let state = headless_state();
+        state.typing.set(HashMap::from([(
+            "libera/#rust".to_string(),
+            vec!["ghost".to_string()],
+        )]));
+
+        state.handle_event(WebEvent::SyncInit {
+            buffers: Vec::new(),
+            connections: Vec::new(),
+            mention_count: 0,
+            active_buffer_id: None,
+            timestamp_format: None,
+            emotes_enabled: true,
+            typing: HashMap::new(),
+        });
+
+        assert!(state.typing.get_untracked().is_empty());
+    }
+
+    #[test]
+    fn sync_init_from_a_server_that_omits_typing_still_applies() {
+        // `#[serde(default)]` on both sides: an older server must not fail the
+        // deserialization of the WHOLE SyncInit.
+        let state = headless_state();
+        let json = r#"{"type":"SyncInit","buffers":[],"connections":[],"mention_count":0,
+            "timestamp_format":"%H:%M"}"#;
+        let event: WebEvent = serde_json::from_str(json).expect("parses without typing");
+        state.handle_event(event);
+        assert!(state.typing.get_untracked().is_empty());
+    }
+
     #[test]
     fn active_buffer_changed_preserves_same_buffer() {
         assert!(!active_buffer_changed(Some("shell:1"), Some("shell:1")));
@@ -1348,3 +1432,4 @@ mod tests {
         assert!(!message_already_present(&existing, &incoming));
     }
 }
+

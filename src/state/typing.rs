@@ -161,6 +161,32 @@ impl TypingTracker {
         nicks.sort_unstable();
         nicks.into_iter().map(|(_, nick)| nick).collect()
     }
+
+    /// A point-in-time copy of every buffer that has at least one typer:
+    /// `buffer_id -> nicks`, each list exactly as [`Self::nicks`] returns it.
+    ///
+    /// This is what seeds a web client on `SyncInit`. It has to go through
+    /// `nicks()` — the live `WebEvent::Typing` push does too, and the two must
+    /// not be able to disagree on spelling or order. Buffers are never left in
+    /// the map with an empty set (every mutator prunes), so no entry here is
+    /// empty.
+    ///
+    /// Point-in-time is enough: entries are TTL-bounded and the `expire()` tick
+    /// sweeps them, so a stale copy cannot outlive the state it copied.
+    #[must_use]
+    pub fn snapshot(&self) -> HashMap<String, Vec<String>> {
+        self.entries
+            .keys()
+            .map(|buffer_id| {
+                let nicks = self
+                    .nicks(buffer_id)
+                    .into_iter()
+                    .map(ToString::to_string)
+                    .collect();
+                (buffer_id.clone(), nicks)
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -308,6 +334,36 @@ mod tests {
             vec!["libera/#rust"]
         );
         assert!(tr.nicks("libera/#rust").is_empty());
+    }
+
+    #[test]
+    fn snapshot_carries_every_buffer_with_a_typer_in_nicks_order() {
+        // What a freshly connected web client is seeded with. It must agree, key
+        // for key and element for element, with what `nicks()` feeds the live
+        // `WebEvent::Typing` push — otherwise the browser's set flips the moment
+        // the first live event lands.
+        let mut tr = TypingTracker::default();
+        let now = t0();
+        tr.set("net/#rust", "Bob", TypingState::Active, now);
+        tr.set("net/#rust", "alice", TypingState::Paused, now);
+        tr.set("net/#tokio", "carol", TypingState::Active, now);
+
+        let snap = tr.snapshot();
+        assert_eq!(snap.len(), 2, "only buffers with typers appear");
+        assert_eq!(snap["net/#rust"], tr.nicks("net/#rust"));
+        assert_eq!(snap["net/#tokio"], tr.nicks("net/#tokio"));
+        // Sorted by the lowercase key, display spelling preserved — as `nicks()`.
+        assert_eq!(snap["net/#rust"], vec!["alice", "Bob"]);
+    }
+
+    #[test]
+    fn snapshot_of_an_empty_tracker_is_empty() {
+        let mut tr = TypingTracker::default();
+        assert!(tr.snapshot().is_empty());
+        // And a buffer emptied by a `done` leaves no empty husk behind.
+        tr.set("net/#rust", "alice", TypingState::Active, t0());
+        tr.clear("net/#rust", "alice");
+        assert!(tr.snapshot().is_empty());
     }
 
     #[test]

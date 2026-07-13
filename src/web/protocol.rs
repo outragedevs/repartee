@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// serde default for forward-compatible bool fields that should default to `true`.
@@ -21,6 +23,18 @@ pub enum WebEvent {
         /// for a `SettingsChanged`).
         #[serde(default = "default_true")]
         emotes_enabled: bool,
+        /// Who is typing right now, per buffer: `buffer_id -> nicks`, same full
+        /// set (and same order) [`WebEvent::Typing`] carries. Only buffers with
+        /// at least one typer appear; the field itself is always sent, so `{}`
+        /// means "nobody", and the client REPLACES its typing map with this.
+        ///
+        /// Typing cannot be left to the live push alone: a sender's 3s `active`
+        /// refresh does not change the visible set, so nothing is pushed for it,
+        /// and `paused` is sent exactly once and then lives 30s at the receiver.
+        /// A tab that connects (or lag-resyncs) mid-typing would sit blank for
+        /// up to that long while the TUI shows the indicator throughout.
+        #[serde(default)]
+        typing: HashMap<String, Vec<String>>,
     },
     /// A new message was received in a buffer.
     NewMessage {
@@ -145,11 +159,14 @@ pub enum WebEvent {
     },
     /// Who is currently typing in a buffer (`IRCv3` `+typing`).
     ///
-    /// Carries the **complete** set, not a delta: deltas drift when a client
-    /// reconnects mid-stream; a full set is idempotent and self-healing.
-    /// Deliberately absent from `SyncInit` — typing is ephemeral, and a fresh
-    /// client learns about it on the sender's next 3s refresh. That is exactly
-    /// why the client must CLEAR its typing map when it processes `SyncInit`.
+    /// Carries the **complete** set for that buffer, not a delta: deltas drift
+    /// when a client reconnects mid-stream; a full set is idempotent and
+    /// self-healing. An empty `nicks` means "nobody" and clears the buffer.
+    ///
+    /// Only sent when the visible set actually *changes* — a sender's 3s refresh
+    /// of an already-shown nick is not a change (see `TypingTracker::set`), so a
+    /// client that connects mid-typing cannot learn the current state from this
+    /// event. It is seeded from [`WebEvent::SyncInit`]'s `typing` map instead.
     Typing {
         buffer_id: String,
         nicks: Vec<String>,
@@ -458,6 +475,80 @@ mod tests {
         let json = serde_json::to_string(&ev).expect("serializes");
         assert!(json.contains(r#""type":"Typing""#));
         assert!(json.contains(r#""nicks":["alice","bob"]"#));
+    }
+
+    fn empty_sync_init() -> WebEvent {
+        WebEvent::SyncInit {
+            buffers: Vec::new(),
+            connections: Vec::new(),
+            mention_count: 0,
+            active_buffer_id: None,
+            timestamp_format: "%H:%M".to_string(),
+            emotes_enabled: true,
+            typing: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn sync_init_always_emits_typing_even_when_empty() {
+        // Pinned shape: an object, always present. The web client's mirror
+        // declares it `#[serde(default)]`, so it also tolerates absence — but the
+        // server never omits it, and a fresh client must be able to tell "nobody
+        // is typing" from "this server is too old to say".
+        let json = serde_json::to_string(&empty_sync_init()).expect("serializes");
+        assert!(json.contains(r#""typing":{}"#), "got {json}");
+    }
+
+    #[test]
+    fn sync_init_typing_round_trips() {
+        let mut typing = HashMap::new();
+        typing.insert(
+            "net/#rust".to_string(),
+            vec!["alice".to_string(), "Bob".to_string()],
+        );
+        let WebEvent::SyncInit {
+            buffers,
+            connections,
+            mention_count,
+            active_buffer_id,
+            timestamp_format,
+            emotes_enabled,
+            ..
+        } = empty_sync_init()
+        else {
+            panic!("wrong variant")
+        };
+        let event = WebEvent::SyncInit {
+            buffers,
+            connections,
+            mention_count,
+            active_buffer_id,
+            timestamp_format,
+            emotes_enabled,
+            typing,
+        };
+
+        let json = serde_json::to_string(&event).expect("serializes");
+        let decoded: WebEvent = serde_json::from_str(&json).expect("round-trips");
+        match decoded {
+            WebEvent::SyncInit { typing, .. } => {
+                assert_eq!(typing["net/#rust"], vec!["alice", "Bob"]);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn sync_init_without_typing_still_deserializes() {
+        // The field must be `#[serde(default)]` on both sides: a payload from a
+        // build that predates it must not fail the WHOLE SyncInit.
+        let json = r#"{"type":"SyncInit","buffers":[],"connections":[],"mention_count":0,
+            "active_buffer_id":null,"timestamp_format":"%H:%M","emotes_enabled":true}"#;
+        let event: WebEvent = serde_json::from_str(json).expect("parses without typing");
+        match event {
+            WebEvent::SyncInit { typing, .. } => assert!(typing.is_empty()),
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]
