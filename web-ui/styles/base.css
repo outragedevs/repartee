@@ -241,6 +241,36 @@ textarea {
 .scroll-bottom-btn:hover { opacity: 1; }
 .scroll-bottom-btn.hidden { display: none; }
 
+/* Scroll-state overlay, shown only when localStorage['repartee-scroll-debug']
+   is "1". A phone has no debugger attached, so the device has to be able to
+   show its own scroll state. `pointer-events: none` so it can never intercept
+   the very gestures it is there to observe. */
+.scroll-debug {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    right: 4px;
+    max-height: 45%;
+    overflow-y: auto;
+    z-index: 20;
+    pointer-events: none;
+    background: rgba(0, 0, 0, 0.82);
+    color: #7ee2a8;
+    font-size: 10px;
+    line-height: 1.35;
+    padding: 5px 7px;
+    border-radius: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.scroll-debug-head {
+    color: #ffd479;
+    font-weight: bold;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+    margin-bottom: 3px;
+    padding-bottom: 3px;
+}
+
 /* Chat line — flex row, all items on same baseline.
    No `content-visibility` here: while it skips layout for off-screen
    lines, the deferred measurement makes scrollHeight grow whenever a

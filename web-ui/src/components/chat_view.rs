@@ -1,13 +1,59 @@
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-use crate::state::AppState;
+use crate::state::{AppState, ScrollMode, is_drag_gesture, mode_after_reader_scroll};
 
 /// Distance in pixels from the absolute bottom that still counts as
 /// "user is at bottom". Mirrors thelounge's value — generous enough
 /// to absorb sub-pixel measurement noise but tight enough that the
 /// user has to actively scroll up before stickiness flips off.
 const SCROLL_THRESHOLD: f64 = 30.0;
+
+/// `localStorage` key that turns on the scroll-state overlay.
+///
+/// This bug has never been observed on a real iPhone — every diagnosis so far,
+/// including this module's, is inference from code plus a headless harness that
+/// does not reproduce it (Linux WebKit has neither iOS text inflation nor its
+/// visual viewport). If following the tail still fails on the device, the way to
+/// find out why is to read what the device did, not to guess a fifth time.
+const SCROLL_DEBUG_KEY: &str = "repartee-scroll-debug";
+
+fn scroll_debug_enabled() -> bool {
+    web_sys::window()
+        .and_then(|w| w.local_storage().ok().flatten())
+        .and_then(|s| s.get_item(SCROLL_DEBUG_KEY).ok().flatten())
+        .is_some_and(|v| v == "1")
+}
+
+/// Record a scroll-mode transition, with the geometry at the moment it happened.
+/// A no-op unless the overlay is switched on.
+fn debug_log(state: AppState, why: &str) {
+    if !scroll_debug_enabled() {
+        return;
+    }
+    let geom = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.query_selector(".chat-messages").ok().flatten())
+        .map_or_else(
+            || "no scroller".to_string(),
+            |el| {
+                format!(
+                    "top={} h={} ch={} fromBottom={}",
+                    el.scroll_top(),
+                    el.scroll_height(),
+                    el.client_height(),
+                    el.scroll_height() - el.scroll_top() - el.client_height(),
+                )
+            },
+        );
+    state.scroll_debug.update(|log| {
+        log.push(format!("{why} | {geom}"));
+        // Keep the tail: on a phone the interesting moments are the last few.
+        if log.len() > 40 {
+            log.remove(0);
+        }
+    });
+}
 
 /// Distance from the top (px) at which scrolling up triggers an on-demand
 /// fetch of an older backlog page from the server. Generous so the page is
@@ -135,10 +181,17 @@ pub fn ChatView() -> impl IntoView {
     // view. `None` = no fetch pending.
     let pending_anchor = StoredValue::new(None::<(String, String, f64)>);
 
+    // Bumped on every buffer switch. A RAF or observer callback scheduled while
+    // buffer A was active must not move the viewport after the reader has moved
+    // on to B — it would scroll B to a position measured in A.
+    let switch_generation = StoredValue::new(0_u64);
+
+    // Scrolls. That is all it does. It deliberately does NOT decide whether the
+    // reader wants to be at the bottom — an earlier fix had it force
+    // `is_at_bottom = true` from in here, which meant a function whose job is to
+    // move the viewport was quietly overwriting the reader's intent. Intent lives
+    // in `state.scroll_mode` and only a gesture changes it.
     let do_pin = move |el: &web_sys::Element| {
-        if !state.is_at_bottom.get_untracked() {
-            state.is_at_bottom.set(true);
-        }
         let target = (el.scroll_height() - el.client_height()).max(0);
         if el.scroll_top() == target {
             pending_scroll_top.set_value(None);
@@ -146,6 +199,21 @@ pub fn ChatView() -> impl IntoView {
         }
         pending_scroll_top.set_value(Some(target));
         pin_to_bottom(el);
+    };
+
+    // Every deferred pin funnels through here: it runs only if we are still
+    // following the tail AND still in the buffer the callback was scheduled for.
+    let pin_if_following = move |generation: u64| {
+        if !state.scroll_mode.get_untracked().is_following_tail() {
+            return;
+        }
+        if switch_generation.get_value() != generation {
+            return;
+        }
+        let Some(el) = chat_ref.get_untracked() else {
+            return;
+        };
+        do_pin(&web_sys::Element::from(el));
     };
 
     // Send an older-history `FetchMessages` for the active buffer using the
@@ -234,9 +302,19 @@ pub fn ChatView() -> impl IntoView {
         true
     };
 
-    // Buffer-switch: always reset `is_at_bottom = true` and snap to
-    // the bottom on the next animation frame (so the `<For>` has had a
-    // chance to render the new buffer's messages).
+    // Buffer-switch: opening a buffer means "show me the end of this
+    // conversation", so it re-enters `FollowingTail` and snaps to the bottom on
+    // the next animation frame (giving the `<For>` a chance to render the new
+    // buffer's messages first).
+    //
+    // Following the tail then persists with NO timeout. Everything that arrives
+    // afterwards — a preview image three seconds later, the webfont swapping, iOS
+    // inflating the font and re-wrapping every line — grows the content, and each
+    // of those growths re-pins through the ResizeObserver below. A settle timer
+    // ("stop pinning once the height has been stable for 250ms") was considered
+    // and rejected: a stable height only means nothing has happened yet, not that
+    // the layout is finished, and the late arrivals are exactly the ones that
+    // knocked the view off the last line.
     Effect::new(move || {
         let active_id = state.active_buffer.get();
         let old_id = prev_buffer_id.get_value();
@@ -252,50 +330,48 @@ pub fn ChatView() -> impl IntoView {
         if let Some(old_id) = old_id {
             state.collapse_backlog(&old_id);
         }
-        state.is_at_bottom.set(true);
-        let Some(el) = chat_ref.get() else { return };
-        let el_dom: web_sys::Element = el.into();
+        let generation = switch_generation.get_value().wrapping_add(1);
+        switch_generation.set_value(generation);
+        state.scroll_mode.set(ScrollMode::FollowingTail);
+        debug_log(state, "switch → FollowingTail");
         let Some(window) = web_sys::window() else {
             return;
         };
-        let cb = wasm_bindgen::prelude::Closure::once(move || do_pin(&el_dom));
+        let cb = wasm_bindgen::prelude::Closure::once(move || pin_if_following(generation));
         let _ = window.request_animation_frame(cb.as_ref().unchecked_ref());
         cb.forget();
     });
 
-    // Re-pin on every message-list mutation, but only if the user is
-    // already at the bottom. Subscribes to `state.messages` so any
-    // append (or backlog batch) triggers; `pin_scheduled` debounces
-    // bursts so we pin at most once per animation frame. RAF lets
-    // Leptos commit the DOM patch first, so we measure against the
-    // final scrollHeight. Also subscribes to the appearance signals —
-    // changing font size / line spacing reflows every line and would
-    // otherwise leave the viewport mid-history with is_at_bottom still
-    // true (visible snap on the next append).
+    // Re-pin on every message-list mutation while following the tail. Subscribes
+    // to `state.messages` so any append (or backlog batch) triggers;
+    // `pin_scheduled` debounces bursts so we pin at most once per animation
+    // frame. RAF lets Leptos commit the DOM patch first, so we measure against
+    // the final scrollHeight. Also subscribes to the appearance signals —
+    // changing font size / line spacing reflows every line and would otherwise
+    // leave the viewport mid-history (a visible snap on the next append).
     Effect::new(move || {
         state.messages.with(|_| ());
         let _ = state.active_buffer.get();
         let _ = state.font_size_override.get();
         let _ = state.line_height_override.get();
         let _ = state.line_height.get();
-        if !state.is_at_bottom.get_untracked() {
+        if !state.scroll_mode.get().is_following_tail() {
             return;
         }
         if pin_scheduled.get_value() {
             return;
         }
-        pin_scheduled.set_value(true);
+        // Claim the debounce slot only once the frame is actually booked: setting
+        // it before this `else` branch would latch it forever if scheduling ever
+        // failed, and every future pin would be silently dropped.
         let Some(window) = web_sys::window() else {
             return;
         };
+        pin_scheduled.set_value(true);
+        let generation = switch_generation.get_value();
         let cb = wasm_bindgen::prelude::Closure::once(move || {
             pin_scheduled.set_value(false);
-            if !state.is_at_bottom.get_untracked() {
-                return;
-            }
-            let Some(el) = chat_ref.get() else { return };
-            let el_dom: web_sys::Element = el.into();
-            do_pin(&el_dom);
+            pin_if_following(generation);
         });
         let _ = window.request_animation_frame(cb.as_ref().unchecked_ref());
         cb.forget();
@@ -318,11 +394,10 @@ pub fn ChatView() -> impl IntoView {
         let Some((anchor_buf, anchor_mid, anchor_off)) = pending_anchor.get_value() else {
             return;
         };
-        // If the user jumped back to the bottom while the fetch was in flight
-        // (e.g. the scroll-to-bottom button, which doesn't run `on_scroll`), the
-        // anchor is stale — restoring it would yank them back up into the
-        // backlog and undo the jump. Drop it.
-        if state.is_at_bottom.get_untracked() {
+        // If the reader returned to the tail while the fetch was in flight (the
+        // scroll-to-bottom button, or a buffer switch), the anchor is stale —
+        // restoring it would yank them back up into the backlog. Drop it.
+        if state.scroll_mode.get_untracked().is_following_tail() {
             pending_anchor.set_value(None);
             return;
         }
@@ -367,7 +442,7 @@ pub fn ChatView() -> impl IntoView {
     // it pulls the next older page. Subscribes to `messages` + `active_buffer`
     // so it re-checks after every prepend, looping (one page per render) until
     // the viewport overflows, `has_more` turns false, or the window cap is hit.
-    // Gated on `is_at_bottom`: once the user scrolls up, the container is
+    // Gated on `FollowingTail`: once the reader scrolls up, the container is
     // overflowing by definition and `on_scroll` takes over.
     Effect::new(move || {
         state.messages.with(|_| ());
@@ -380,7 +455,7 @@ pub fn ChatView() -> impl IntoView {
         if still_fetching {
             return;
         }
-        if !state.is_at_bottom.get_untracked() {
+        if !state.scroll_mode.get_untracked().is_following_tail() {
             return;
         }
         let Some(id) = active else { return };
@@ -396,7 +471,7 @@ pub fn ChatView() -> impl IntoView {
         // RAF so Leptos has committed the latest prepend before we measure
         // scrollHeight against the viewport.
         let cb = wasm_bindgen::prelude::Closure::once(move || {
-            if !state.is_at_bottom.get_untracked() {
+            if !state.scroll_mode.get_untracked().is_following_tail() {
                 return;
             }
             let Some(el) = chat_ref.get() else { return };
@@ -435,10 +510,11 @@ pub fn ChatView() -> impl IntoView {
     // input into view itself. (A VisualViewport listener was tried and
     // reverted: it fired mid-animation and produced visible hops.)
     //
-    // The callback body never re-measures `is_at_bottom` — it only re-pins
-    // when we were already at the bottom, with `pending_scroll_top` set (via
-    // `do_pin`), so per-frame firing during a keyboard animation glues the
-    // view to the bottom instead of jittering it.
+    // This is the mechanism that absorbs everything that lands AFTER the
+    // buffer-switch pin — a preview image seconds later, the webfont swapping,
+    // iOS re-wrapping every line — for as long as the reader is following the
+    // tail. It never re-measures geometry to decide whether to act: geometry is
+    // exactly what a browser-initiated scroll corrupts. It acts on intent.
     type ObserverHandle = Option<(
         web_sys::ResizeObserver,
         wasm_bindgen::prelude::Closure<dyn Fn()>,
@@ -472,16 +548,25 @@ pub fn ChatView() -> impl IntoView {
             if resize_throttle.get_value() {
                 return;
             }
-            resize_throttle.set_value(true);
+            // Same reasoning as `pin_scheduled`: claim the throttle only once the
+            // frame is booked, or a failure here latches it and kills every
+            // future resize re-pin.
             let Some(window) = web_sys::window() else {
                 return;
             };
+            resize_throttle.set_value(true);
+            let generation = switch_generation.get_value();
             let raf_cb = wasm_bindgen::prelude::Closure::once(move || {
                 resize_throttle.set_value(false);
-                if !state.is_at_bottom.get_untracked() {
+                if !state.scroll_mode.get_untracked().is_following_tail() {
                     return;
                 }
-                let Some(el) = chat_ref.get() else { return };
+                if switch_generation.get_value() != generation {
+                    return;
+                }
+                let Some(el) = chat_ref.get_untracked() else {
+                    return;
+                };
                 let el_dom: web_sys::Element = el.into();
                 do_pin(&el_dom);
                 if viewport_needs_backlog(el_dom.scroll_height(), el_dom.client_height()) {
@@ -514,7 +599,23 @@ pub fn ChatView() -> impl IntoView {
         drop(cb);
     });
 
-    // The scroll handler is the ONLY place that flips `is_at_bottom` off.
+    // Last `clientHeight` seen by a scroll event. A container that shrinks (the
+    // composer growing as you type, the keyboard sliding up, the URL bar
+    // collapsing, an orientation change) makes the browser clamp `scrollTop` and
+    // emit a scroll event that arrives BEFORE the ResizeObserver notification.
+    // Running the usual distance-from-bottom maths on those values — new
+    // clientHeight against a stale scrollTop — crosses the threshold and reports
+    // a reader who has scrolled away when nobody touched anything. The resize
+    // path owns the correction in that case. (Same guard lurker uses, from
+    // stackblitz-labs/use-stick-to-bottom.)
+    let last_client_height = StoredValue::new(0_i32);
+
+    // A scroll event is evidence of nothing. The browser emits them when it
+    // clamps a scroll position after we swap a buffer's DOM, when the container
+    // resizes, when content is prepended — none of which is the reader deciding
+    // to read back. So while we are following the tail this handler does not
+    // touch the mode and does not fetch backlog; the gesture handlers below are
+    // the only things that can end `FollowingTail`.
     let on_scroll = move |ev: web_sys::Event| {
         let target = ev.target().unwrap();
         let el: &web_sys::Element = target.unchecked_ref();
@@ -523,12 +624,27 @@ pub fn ChatView() -> impl IntoView {
         if requested == Some(el.scroll_top()) {
             return;
         }
-        let next = is_near_bottom(el);
-        if state.is_at_bottom.get_untracked() != next {
-            state.is_at_bottom.set(next);
-            // Returned to the live bottom: collapse the loaded backlog window
-            // (free the older lines, re-arm scroll-up).
-            if next && let Some(id) = state.active_buffer.get_untracked() {
+
+        let client_height = el.client_height();
+        let resized = client_height != last_client_height.get_value();
+        last_client_height.set_value(client_height);
+
+        if state.scroll_mode.get_untracked().is_following_tail() {
+            return;
+        }
+        if resized {
+            return;
+        }
+
+        // ReadingHistory: the reader owns the viewport, so geometry decides
+        // whether they have come back to the live tail.
+        let next = mode_after_reader_scroll(is_near_bottom(el));
+        if next.is_following_tail() {
+            state.scroll_mode.set(next);
+            debug_log(state, "scrolled back to bottom → FollowingTail");
+            // Collapse the loaded backlog window (free the older lines, re-arm
+            // scroll-up).
+            if let Some(id) = state.active_buffer.get_untracked() {
                 state.collapse_backlog(&id);
             }
         }
@@ -538,6 +654,51 @@ pub fn ChatView() -> impl IntoView {
         // view put).
         if f64::from(el.scroll_top()) < BACKLOG_TRIGGER_PX {
             trigger_backlog_fetch(el);
+        }
+    };
+
+    // ---- The only things that may end `FollowingTail`: the reader's own hands.
+
+    let start_reading = move |why: &'static str| {
+        if !state.scroll_mode.get_untracked().is_following_tail() {
+            return;
+        }
+        state.scroll_mode.set(ScrollMode::ReadingHistory);
+        debug_log(state, why);
+    };
+
+    // Upward wheel/trackpad. Handled synchronously rather than waiting for the
+    // scroll event it produces: a message arriving in between would otherwise be
+    // pinned on top of a reader who has already started scrolling away.
+    let on_wheel = move |ev: web_sys::WheelEvent| {
+        if ev.delta_y() < 0.0 {
+            start_reading("wheel up → ReadingHistory");
+        }
+    };
+
+    // Touch. `touchstart` is NOT intent — it also fires on tapping a link, a
+    // nick, a preview's dismiss button, or starting a text selection. Only a
+    // drag that actually travels vertically is the reader taking the viewport.
+    // Nothing here calls `preventDefault`, so native momentum scrolling is
+    // untouched.
+    let touch_origin = StoredValue::new(None::<f64>);
+    let on_touch_start = move |ev: web_sys::TouchEvent| {
+        touch_origin.set_value(ev.touches().get(0).map(|t| f64::from(t.client_y())));
+    };
+    let on_touch_move = move |ev: web_sys::TouchEvent| {
+        let (Some(start_y), Some(touch)) = (touch_origin.get_value(), ev.touches().get(0)) else {
+            return;
+        };
+        if is_drag_gesture(start_y, f64::from(touch.client_y())) {
+            touch_origin.set_value(None);
+            start_reading("touch drag → ReadingHistory");
+        }
+    };
+
+    // Keyboard scrolling, when the container has focus.
+    let on_key_down = move |ev: web_sys::KeyboardEvent| {
+        if matches!(ev.key().as_str(), "PageUp" | "Home" | "ArrowUp") {
+            start_reading("key up → ReadingHistory");
         }
     };
 
@@ -612,7 +773,16 @@ pub fn ChatView() -> impl IntoView {
                 }
                 view! {
             <div class="chat-messages-outer">
-                <div class="chat-messages" node_ref=chat_ref on:scroll=on_scroll on:copy=on_copy>
+                <div
+                    class="chat-messages"
+                    node_ref=chat_ref
+                    on:scroll=on_scroll
+                    on:copy=on_copy
+                    on:wheel=on_wheel
+                    on:touchstart=on_touch_start
+                    on:touchmove=on_touch_move
+                    on:keydown=on_key_down
+                >
                     <div class="chat-messages-inner">
                         <For
                             each=move || messages().unwrap_or_default()
@@ -638,9 +808,10 @@ pub fn ChatView() -> impl IntoView {
                     </div>
                 </div>
                 <button type="button" class="scroll-bottom-btn" aria-label="Jump to latest message"
-                    class:hidden=move || state.is_at_bottom.get()
+                    class:hidden=move || state.scroll_mode.get().is_following_tail()
                     on:click=move |_| {
-                        state.is_at_bottom.set(true);
+                        state.scroll_mode.set(ScrollMode::FollowingTail);
+                        debug_log(state, "jump-to-bottom → FollowingTail");
                         // Mirror the `on_scroll` return-to-bottom path: collapse
                         // the pinned backlog window. `do_pin` sets
                         // `pending_scroll_top`, so the resulting scroll event
@@ -658,6 +829,33 @@ pub fn ChatView() -> impl IntoView {
                 >
                     "\u{25BC}"
                 </button>
+                <Show when=scroll_debug_enabled>
+                    <div class="scroll-debug">
+                        <div class="scroll-debug-head">
+                            {move || {
+                                let mode = if state.scroll_mode.get().is_following_tail() {
+                                    "FollowingTail"
+                                } else {
+                                    "ReadingHistory"
+                                };
+                                let buf = state.active_buffer.get().unwrap_or_default();
+                                format!("{mode} | {buf}")
+                            }}
+                        </div>
+                        <For
+                            each=move || {
+                                state
+                                    .scroll_debug
+                                    .get()
+                                    .into_iter()
+                                    .enumerate()
+                                    .collect::<Vec<_>>()
+                            }
+                            key=|(i, line)| (*i, line.clone())
+                            children=|(_, line)| view! { <div>{line}</div> }
+                        />
+                    </div>
+                </Show>
             </div>
                 }.into_any()
             }}
