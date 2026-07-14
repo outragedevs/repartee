@@ -1037,9 +1037,21 @@ textarea {
 
 @media (max-width: 720px) {
     .msg-previews { margin-left: 0; }
+    .msg-preview-card {
+        /* The card is a flex item, so its width comes from its content — the
+           <img>. The img below asks for `width: 100%` OF THE CARD, so before
+           the image has decoded (no intrinsic width) that is circular and the
+           card shrink-to-fits to ~3px: the box is reserved only once the image
+           lands, reflowing the chat by ~250px per preview and yanking a
+           freshly-switched buffer off the bottom. A definite width breaks the
+           cycle — the img's percentage now resolves against the row, so the
+           box is its final size from the first layout. */
+        width: 100%;
+    }
     .msg-preview-thumb {
-        /* Full-width on mobile; `aspect-ratio` reserves vertical space
-           proportionally so the layout doesn't jump when the image loads. */
+        /* Full-width on mobile. `aspect-ratio` (a bare ratio, so it overrides
+           the image's intrinsic one) then fixes the height for a width that is
+           already known — both before and after the image loads. */
         width: 100%;
         height: auto;
         aspect-ratio: 16 / 10;
