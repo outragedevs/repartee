@@ -23,6 +23,20 @@ html, body {
        Chrome with `interactive-widget=resizes-content`, which we
        removed because it added more state changes than it solved). */
     height: 100%;
+    /* iOS Safari's Text Autosizing inflates the font of any block it judges
+       too wide for its text size — and a full-width column of 13-14px
+       monospace is its favourite target. The inflation lands AFTER first
+       layout, so every chat line re-wraps, scrollHeight grows underneath the
+       scroll pin, and a freshly-switched buffer drifts off the last line (the
+       scroll-to-bottom arrow appears seconds after the switch looked fine).
+       It also renders the whole page a notch larger than the screen — the
+       "it loads slightly zoomed until I double-tap" symptom. `100%` (not
+       `none`) disables the automatic boost while leaving the user's own pinch
+       zoom and accessibility text scaling intact. Blink only boosts when a
+       page has no `width=device-width` viewport, which is why Android was
+       never affected. */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
     background: var(--bg);
     color: var(--fg);
     font-family: 'FiraCode Nerd Font Mono', 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', monospace;
