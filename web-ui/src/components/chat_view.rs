@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-use crate::state::{AppState, ScrollMode, is_drag_gesture, mode_after_reader_scroll};
+use crate::state::{AppState, ScrollMode, is_history_drag, is_resize, mode_after_reader_scroll};
 
 /// Distance in pixels from the absolute bottom that still counts as
 /// "user is at bottom". Mirrors thelounge's value — generous enough
@@ -608,7 +608,7 @@ pub fn ChatView() -> impl IntoView {
     // a reader who has scrolled away when nobody touched anything. The resize
     // path owns the correction in that case. (Same guard lurker uses, from
     // stackblitz-labs/use-stick-to-bottom.)
-    let last_client_height = StoredValue::new(0_i32);
+    let last_client_height = StoredValue::new(None::<i32>);
 
     // A scroll event is evidence of nothing. The browser emits them when it
     // clamps a scroll position after we swap a buffer's DOM, when the container
@@ -626,8 +626,8 @@ pub fn ChatView() -> impl IntoView {
         }
 
         let client_height = el.client_height();
-        let resized = client_height != last_client_height.get_value();
-        last_client_height.set_value(client_height);
+        let resized = is_resize(last_client_height.get_value(), client_height);
+        last_client_height.set_value(Some(client_height));
 
         if state.scroll_mode.get_untracked().is_following_tail() {
             return;
@@ -678,9 +678,10 @@ pub fn ChatView() -> impl IntoView {
 
     // Touch. `touchstart` is NOT intent — it also fires on tapping a link, a
     // nick, a preview's dismiss button, or starting a text selection. Only a
-    // drag that actually travels vertically is the reader taking the viewport.
-    // Nothing here calls `preventDefault`, so native momentum scrolling is
-    // untouched.
+    // drag that travels far enough *and toward history* (the finger moving down,
+    // revealing older lines) is the reader taking the viewport; a drag toward the
+    // already-pinned bottom is ignored — see `is_history_drag`. Nothing here calls
+    // `preventDefault`, so native momentum scrolling is untouched.
     let touch_origin = StoredValue::new(None::<f64>);
     let on_touch_start = move |ev: web_sys::TouchEvent| {
         touch_origin.set_value(ev.touches().get(0).map(|t| f64::from(t.client_y())));
@@ -689,7 +690,7 @@ pub fn ChatView() -> impl IntoView {
         let (Some(start_y), Some(touch)) = (touch_origin.get_value(), ev.touches().get(0)) else {
             return;
         };
-        if is_drag_gesture(start_y, f64::from(touch.client_y())) {
+        if is_history_drag(start_y, f64::from(touch.client_y())) {
             touch_origin.set_value(None);
             start_reading("touch drag → ReadingHistory");
         }
@@ -776,6 +777,12 @@ pub fn ChatView() -> impl IntoView {
                 <div
                     class="chat-messages"
                     node_ref=chat_ref
+                    // Focusable so PageUp/Home/ArrowUp reach `on_key_down`: a plain
+                    // overflow container takes no keyboard focus, and since
+                    // `on_scroll` ignores geometry while following the tail, this
+                    // handler is the only way a keyboard user leaves it. Touch/mouse
+                    // focus shows no ring (`:focus-visible` gates it to keyboard).
+                    tabindex="0"
                     on:scroll=on_scroll
                     on:copy=on_copy
                     on:wheel=on_wheel
@@ -843,12 +850,17 @@ pub fn ChatView() -> impl IntoView {
                             }}
                         </div>
                         <For
+                            // Newest first: the overlay is capped in height and
+                            // `pointer-events: none`, so entries past the fold are
+                            // unreachable. The freshest transition — the whole point
+                            // on a phone with no debugger — must sit at the top.
                             each=move || {
                                 state
                                     .scroll_debug
                                     .get()
                                     .into_iter()
                                     .enumerate()
+                                    .rev()
                                     .collect::<Vec<_>>()
                             }
                             key=|(i, line)| (*i, line.clone())

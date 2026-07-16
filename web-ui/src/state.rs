@@ -62,10 +62,34 @@ pub(crate) const fn mode_after_reader_scroll(near_bottom: bool) -> ScrollMode {
     }
 }
 
-/// Whether a touch has travelled far enough vertically to be a scroll gesture
-/// rather than a tap.
-pub(crate) fn is_drag_gesture(start_y: f64, current_y: f64) -> bool {
-    (current_y - start_y).abs() >= TOUCH_DRAG_PX
+/// Whether a touch drag is the reader pulling the viewport *into history* — the
+/// only gesture that ends `FollowingTail`.
+///
+/// The direction matters. To reveal older lines the finger travels **down**, so
+/// `current_y` grows past `start_y`. A drag the other way — toward the bottom the
+/// view is already pinned to — cannot move the viewport (it is clamped there) and
+/// must not disengage: on engines that emit no scroll event for that clamped drag
+/// (iOS/Android with `overscroll-behavior: contain`, which this container sets)
+/// nothing would ever flip the mode back, freezing the chat in `ReadingHistory`
+/// while new lines pile up unseen. This mirrors the wheel handler, which
+/// disengages only on `deltaY < 0`. The old `.abs()` test caught both directions
+/// and hit exactly that trap.
+pub(crate) fn is_history_drag(start_y: f64, current_y: f64) -> bool {
+    current_y - start_y >= TOUCH_DRAG_PX
+}
+
+/// Whether a scroll event's `clientHeight` shows the container was resized (the
+/// composer growing, the keyboard or URL bar sliding, an orientation change)
+/// rather than the reader scrolling. The very first event has no prior height to
+/// compare against (`prev` = `None`) and is therefore not a resize — treating it
+/// as one would swallow the reader's first real gesture after a fresh load, where
+/// no earlier scroll (our own programmatic pins return before seeding the height)
+/// has recorded a value to differ from.
+pub(crate) const fn is_resize(prev: Option<i32>, current: i32) -> bool {
+    match prev {
+        Some(p) => p != current,
+        None => false,
+    }
 }
 
 /// Client-side application state, stored as Leptos signals.
@@ -1565,18 +1589,47 @@ mod tests {
     /// that counted as scrolling, tapping anything in the chat would stop the
     /// view following the conversation.
     #[test]
-    fn a_tap_is_not_a_scroll_gesture() {
-        assert!(!is_drag_gesture(300.0, 300.0));
-        assert!(!is_drag_gesture(300.0, 303.5));
-        assert!(!is_drag_gesture(300.0, 296.5));
+    fn a_tap_is_not_a_history_drag() {
+        assert!(!is_history_drag(300.0, 300.0));
+        assert!(!is_history_drag(300.0, 303.5));
+        assert!(!is_history_drag(300.0, 296.5));
+    }
+
+    /// Dragging the finger down past the threshold reveals older lines — the
+    /// reader taking over the viewport. That, and only that, ends `FollowingTail`.
+    #[test]
+    fn a_downward_drag_into_history_is_a_gesture() {
+        assert!(is_history_drag(300.0, 350.0));
+        assert!(is_history_drag(300.0, 300.0 + TOUCH_DRAG_PX));
+    }
+
+    /// A drag toward the bottom the view is already pinned to must NOT disengage,
+    /// however far it travels: the viewport is clamped, it cannot move away from
+    /// the tail, and on some engines it emits no scroll event to flip the mode
+    /// back. This is the case the old `.abs()` gesture test got wrong.
+    #[test]
+    fn an_upward_drag_toward_the_pinned_bottom_is_not_a_gesture() {
+        assert!(!is_history_drag(300.0, 250.0));
+        assert!(!is_history_drag(300.0, 300.0 - TOUCH_DRAG_PX));
+    }
+
+    /// The first scroll event after a fresh load has no prior height to differ
+    /// from, so it is not a resize — else the reader's first real gesture (a Home
+    /// key, a drag to the top) is eaten and the backlog fetch never fires.
+    #[test]
+    fn the_first_scroll_event_is_not_a_resize() {
+        assert!(!is_resize(None, 800));
     }
 
     #[test]
-    fn a_real_drag_is_a_scroll_gesture_in_either_direction() {
-        assert!(is_drag_gesture(300.0, 250.0));
-        assert!(is_drag_gesture(300.0, 350.0));
-        assert!(is_drag_gesture(300.0, 300.0 - TOUCH_DRAG_PX));
-        assert!(is_drag_gesture(300.0, 300.0 + TOUCH_DRAG_PX));
+    fn an_unchanged_client_height_is_not_a_resize() {
+        assert!(!is_resize(Some(800), 800));
+    }
+
+    #[test]
+    fn a_changed_client_height_is_a_resize() {
+        assert!(is_resize(Some(800), 600));
+        assert!(is_resize(Some(600), 800));
     }
 
     #[test]
