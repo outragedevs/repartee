@@ -16,12 +16,12 @@ const SCROLL_THRESHOLD: f64 = 30.0;
 /// does not reproduce it (Linux WebKit has neither iOS text inflation nor its
 /// visual viewport). If following the tail still fails on the device, the way to
 /// find out why is to read what the device did, not to guess a fifth time.
-const SCROLL_DEBUG_KEY: &str = "repartee-scroll-debug";
-
 fn scroll_debug_enabled() -> bool {
+    // "<APP_NAME>-scroll-debug" — set it to "1" on the device to show the overlay.
+    let key = crate::constants::storage_key("scroll-debug");
     web_sys::window()
         .and_then(|w| w.local_storage().ok().flatten())
-        .and_then(|s| s.get_item(SCROLL_DEBUG_KEY).ok().flatten())
+        .and_then(|s| s.get_item(&key).ok().flatten())
         .is_some_and(|v| v == "1")
 }
 
@@ -186,6 +186,18 @@ pub fn ChatView() -> impl IntoView {
     // on to B — it would scroll B to a position measured in A.
     let switch_generation = StoredValue::new(0_u64);
 
+    // Armed by a mousedown in the scrollbar gutter (a classic scrollbar sits
+    // between `clientWidth` and the border edge). Dragging the thumb or clicking
+    // the track emits only scroll events — no wheel, touch, or key — so without
+    // this flag those scrolls are indistinguishable from the browser's own and
+    // `on_scroll` would ignore the one input path a mouse user has left.
+    // Consumed by the first scroll it explains, cleared on mouseup and on buffer
+    // switch (a release outside the window can leak one stale flag; the switch
+    // reset and the consume-once semantics bound the damage to a single scroll).
+    // Overlay scrollbars (macOS, mobile) have no gutter, so this never arms
+    // there — behaviour is unchanged where the gutter doesn't exist.
+    let scrollbar_grab = StoredValue::new(false);
+
     // Scrolls. That is all it does. It deliberately does NOT decide whether the
     // reader wants to be at the bottom — an earlier fix had it force
     // `is_at_bottom = true` from in here, which meant a function whose job is to
@@ -332,6 +344,7 @@ pub fn ChatView() -> impl IntoView {
         }
         let generation = switch_generation.get_value().wrapping_add(1);
         switch_generation.set_value(generation);
+        scrollbar_grab.set_value(false);
         state.scroll_mode.set(ScrollMode::FollowingTail);
         debug_log(state, "switch → FollowingTail");
         let Some(window) = web_sys::window() else {
@@ -630,7 +643,18 @@ pub fn ChatView() -> impl IntoView {
         last_client_height.set_value(Some(client_height));
 
         if state.scroll_mode.get_untracked().is_following_tail() {
-            return;
+            // One exception to "scroll events mean nothing here": a scroll that
+            // arrives under an armed scrollbar grab IS the reader — thumb drags
+            // and track clicks produce no wheel/touch/key event, only this.
+            if !scrollbar_grab.get_value() {
+                return;
+            }
+            scrollbar_grab.set_value(false);
+            state.scroll_mode.set(ScrollMode::ReadingHistory);
+            debug_log(state, "scrollbar drag → ReadingHistory");
+            // Fall through: the geometry below decides whether the drag actually
+            // left the bottom (a track click that lands back near the tail flips
+            // straight back to FollowingTail, same as any reader scroll).
         }
         if resized {
             return;
@@ -661,6 +685,18 @@ pub fn ChatView() -> impl IntoView {
 
     let start_reading = move |why: &'static str| {
         if !state.scroll_mode.get_untracked().is_following_tail() {
+            return;
+        }
+        // A gesture only means "reading history" if there is history to move
+        // into. On a buffer too short to overflow nothing can scroll, so no
+        // scroll event would ever run the near-bottom correction that restores
+        // `FollowingTail` — the mode would stick (arrow up, pinning dead) until
+        // the reader pressed the jump button.
+        let Some(el) = chat_ref.get_untracked() else {
+            return;
+        };
+        let el: web_sys::Element = el.into();
+        if el.scroll_height() <= el.client_height() {
             return;
         }
         state.scroll_mode.set(ScrollMode::ReadingHistory);
@@ -694,6 +730,24 @@ pub fn ChatView() -> impl IntoView {
             touch_origin.set_value(None);
             start_reading("touch drag → ReadingHistory");
         }
+    };
+
+    // Mouse, for the scrollbar only. A press whose x falls past `clientWidth`
+    // (measured from the padding edge) is on the classic scrollbar gutter; arm
+    // the flag `on_scroll` consumes above. A press on the content arms nothing —
+    // text selection and link clicks stay inert, exactly like a tap. `offsetX`
+    // can't be used directly: it is relative to the event *target*, which for
+    // content clicks is some inner span, not the scroller.
+    let on_mouse_down = move |ev: web_sys::MouseEvent| {
+        let Some(el) = chat_ref.get_untracked() else {
+            return;
+        };
+        let el: web_sys::Element = el.into();
+        let x = f64::from(ev.client_x()) - el.get_bounding_client_rect().left();
+        scrollbar_grab.set_value(x >= f64::from(el.client_left() + el.client_width()));
+    };
+    let on_mouse_up = move |_: web_sys::MouseEvent| {
+        scrollbar_grab.set_value(false);
     };
 
     // Keyboard scrolling, when the container has focus.
@@ -788,6 +842,8 @@ pub fn ChatView() -> impl IntoView {
                     on:wheel=on_wheel
                     on:touchstart=on_touch_start
                     on:touchmove=on_touch_move
+                    on:mousedown=on_mouse_down
+                    on:mouseup=on_mouse_up
                     on:keydown=on_key_down
                 >
                     <div class="chat-messages-inner">

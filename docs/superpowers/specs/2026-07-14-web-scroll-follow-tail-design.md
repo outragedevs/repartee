@@ -92,7 +92,9 @@ landing at 700ms must still be absorbed. Only the reader ends `FollowingTail`.
   ResizeObservers (container **and** content wrapper), and the appearance signals.
   **Unconditionally** — no geometry check, because the geometry check is the bug.
 - `on_scroll` does nothing: it must not change the mode and must not fetch backlog.
-  Every scroll event in this mode is the browser's, not the reader's.
+  Every scroll event in this mode is the browser's, not the reader's — with one
+  exception: a scroll under an armed scrollbar grab (see below) is the reader's
+  hand on the one input device that produces no other event.
 - A pin runs only if the callback still belongs to the buffer it was scheduled for
   (generation guard) **and** the mode is still `FollowingTail`.
 
@@ -103,12 +105,21 @@ preview's dismiss button, or when selecting text. The signals are:
 
 - `wheel` with `deltaY < 0`
 - `touchmove` past a vertical threshold (`TOUCH_DRAG_PX = 8.0`) from the `touchstart`
-  point — no `preventDefault`, so native momentum scrolling is untouched
-- `PageUp` / `Home` / `ArrowUp`
+  point, **toward history only** (finger moving down) — no `preventDefault`, so native
+  momentum scrolling is untouched
+- `PageUp` / `Home` / `ArrowUp` (the container carries `tabindex="0"` so these can
+  reach it at all)
+- a scroll event arriving under an armed scrollbar grab — a `mousedown` in the classic
+  scrollbar gutter (`x ≥ clientWidth`) arms a flag that `on_scroll` consumes once;
+  thumb drags and track clicks emit no wheel/touch/key event, only scrolls
 
-A downward drag while already at the bottom flips to `ReadingHistory` too; the very next
-scroll event finds the viewport near the bottom and flips it straight back. That is
-acceptable and self-correcting.
+Two boundary cases deliberately do **not** disengage, for the same reason: at the
+clamped edge no scroll event ever fires, so nothing would flip the mode back and the
+chat would freeze in `ReadingHistory` with the pin dead until the jump button:
+
+- a drag toward the already-pinned bottom (the original `.abs()` distance test hit
+  this; the check is now directional, mirroring the wheel's `deltaY < 0`)
+- any gesture on a buffer too short to overflow (`scrollHeight ≤ clientHeight`)
 
 ### While in ReadingHistory
 
@@ -117,7 +128,10 @@ acceptable and self-correcting.
   backlog window, as today).
 - Guard from lurker: if `clientHeight` changed since the last scroll event, that event
   came from a resize (keyboard, URL bar, textarea growth), not the reader — return
-  without touching the mode. The resize path owns the correction.
+  without touching the mode. The resize path owns the correction. The stored height
+  starts unseeded (`None`), because our own pin scrolls return before recording it: a
+  `0` seed would classify the reader's first real gesture after a fresh load as a
+  resize and swallow the backlog trigger with it.
 - Nothing re-pins the viewport. A late image or a new message must not move the reader.
 
 ### Kept as-is
