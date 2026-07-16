@@ -23,6 +23,75 @@ const MAX_BUFFER_MESSAGES: usize = 1000;
 /// the buffer back down. Mirrors the TUI's `PINNED_BACKLOG_CAP`.
 pub(crate) const PINNED_WEB_CAP: usize = 5000;
 
+/// What the reader wants the viewport to do.
+///
+/// The distinction this type exists to make: the browser can move the viewport
+/// without the reader touching anything (a buffer switch clamps `scrollTop`, the
+/// keyboard resizes the container, an image decodes and grows the content). Those
+/// arrive as `scroll` events and are indistinguishable from a gesture by geometry
+/// alone — so intent is tracked separately and only a gesture can change it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ScrollMode {
+    /// Stay at the end of the conversation. Every content-height change re-pins,
+    /// for as long as it takes — there is no timeout, because "the height stopped
+    /// changing" never means "the layout is finished": a preview image can land
+    /// three seconds after the switch and must still be absorbed.
+    FollowingTail,
+    /// The reader is reading back. Nothing may move their viewport.
+    ReadingHistory,
+}
+
+impl ScrollMode {
+    pub const fn is_following_tail(self) -> bool {
+        matches!(self, Self::FollowingTail)
+    }
+}
+
+/// A `touchstart` is not a scroll: it also fires on tapping a link, a nick, a
+/// preview's dismiss button, or when starting a text selection. Only a drag that
+/// travels this far vertically counts as the reader taking over the viewport.
+pub(crate) const TOUCH_DRAG_PX: f64 = 8.0;
+
+/// Where a scroll event in `ReadingHistory` leaves us: back to following the tail
+/// once the reader has returned to the bottom, otherwise still reading.
+pub(crate) const fn mode_after_reader_scroll(near_bottom: bool) -> ScrollMode {
+    if near_bottom {
+        ScrollMode::FollowingTail
+    } else {
+        ScrollMode::ReadingHistory
+    }
+}
+
+/// Whether a touch drag is the reader pulling the viewport *into history* — the
+/// only gesture that ends `FollowingTail`.
+///
+/// The direction matters. To reveal older lines the finger travels **down**, so
+/// `current_y` grows past `start_y`. A drag the other way — toward the bottom the
+/// view is already pinned to — cannot move the viewport (it is clamped there) and
+/// must not disengage: on engines that emit no scroll event for that clamped drag
+/// (iOS/Android with `overscroll-behavior: contain`, which this container sets)
+/// nothing would ever flip the mode back, freezing the chat in `ReadingHistory`
+/// while new lines pile up unseen. This mirrors the wheel handler, which
+/// disengages only on `deltaY < 0`. The old `.abs()` test caught both directions
+/// and hit exactly that trap.
+pub(crate) fn is_history_drag(start_y: f64, current_y: f64) -> bool {
+    current_y - start_y >= TOUCH_DRAG_PX
+}
+
+/// Whether a scroll event's `clientHeight` shows the container was resized (the
+/// composer growing, the keyboard or URL bar sliding, an orientation change)
+/// rather than the reader scrolling. The very first event has no prior height to
+/// compare against (`prev` = `None`) and is therefore not a resize — treating it
+/// as one would swallow the reader's first real gesture after a fresh load, where
+/// no earlier scroll (our own programmatic pins return before seeding the height)
+/// has recorded a value to differ from.
+pub(crate) const fn is_resize(prev: Option<i32>, current: i32) -> bool {
+    match prev {
+        Some(p) => p != current,
+        None => false,
+    }
+}
+
 /// Client-side application state, stored as Leptos signals.
 #[derive(Clone, Copy)]
 pub struct AppState {
@@ -66,10 +135,25 @@ pub struct AppState {
     /// Prevents the Layout Effect from skipping the fetch when only live
     /// NewMessage events are cached (the root cause of empty-buffer-on-switch).
     pub backlog_loaded: RwSignal<HashSet<String>>,
-    /// Whether the chat view is scrolled to (or near) the bottom.
-    /// When true, new messages auto-scroll. When false, the user is reading
-    /// backlog and the view stays put.
-    pub is_at_bottom: RwSignal<bool>,
+    /// Whether the reader wants to stay at the end of the conversation.
+    ///
+    /// This is an *intent*, not a measurement. It is deliberately NOT "the
+    /// viewport currently sits at the bottom": the browser moves the viewport
+    /// on its own (clamping `scrollTop` when we swap a buffer's DOM, resizing
+    /// the container when the keyboard or the URL bar appears), and every one
+    /// of those looks exactly like a scroll. Treating those as the reader
+    /// scrolling away is what left the chat a few lines short of the last line
+    /// on iOS — the pins that should have absorbed a late image or font swap
+    /// were all gated on a flag the browser had already knocked over.
+    ///
+    /// Only the reader leaves `FollowingTail`, and only through a real gesture.
+    /// See `chat_view::on_scroll` and the intent handlers there.
+    pub scroll_mode: RwSignal<ScrollMode>,
+    /// Rolling log of scroll-mode transitions, rendered by an on-screen overlay
+    /// when `localStorage['repartee-scroll-debug'] = '1'`. Empty and untouched
+    /// otherwise. Exists because this bug only manifests on real iOS hardware,
+    /// where no debugger is at hand.
+    pub scroll_debug: RwSignal<Vec<String>>,
     /// Per-message preview dismissals: `(message_id, link)` pairs. Persisted
     /// to localStorage so a "hide this thumbnail" decision survives reload.
     pub dismissed_previews: RwSignal<HashSet<(u64, String)>>,
@@ -169,7 +253,8 @@ impl AppState {
             shell_screen: RwSignal::new(None),
             sync_version: RwSignal::new(0),
             backlog_loaded: RwSignal::new(HashSet::new()),
-            is_at_bottom: RwSignal::new(true),
+            scroll_mode: RwSignal::new(ScrollMode::FollowingTail),
+            scroll_debug: RwSignal::new(Vec::new()),
             dismissed_previews: RwSignal::new(dismissed_previews),
             emotes_enabled: RwSignal::new(true),
             wizard_open: RwSignal::new(false),
@@ -301,7 +386,7 @@ impl AppState {
                 // trims to the normal cap.
                 let active = self.active_buffer.get_untracked();
                 let pinned =
-                    active.as_deref() == Some(&buffer_id) && !self.is_at_bottom.get_untracked();
+                    active.as_deref() == Some(&buffer_id) && !self.scroll_mode.get_untracked().is_following_tail();
                 let cap = if pinned {
                     PINNED_WEB_CAP
                 } else {
@@ -347,7 +432,7 @@ impl AppState {
                 // backlog, not new activity.
                 let active = self.active_buffer.get_untracked();
                 let pinned =
-                    active.as_deref() == Some(&buffer_id) && !self.is_at_bottom.get_untracked();
+                    active.as_deref() == Some(&buffer_id) && !self.scroll_mode.get_untracked().is_following_tail();
                 let cap = if pinned {
                     PINNED_WEB_CAP
                 } else {
@@ -496,7 +581,7 @@ impl AppState {
                 // initial load arrives at the bottom and uses the normal cap.
                 let active = self.active_buffer.get_untracked();
                 let cap = if active.as_deref() == Some(&buffer_id)
-                    && !self.is_at_bottom.get_untracked()
+                    && !self.scroll_mode.get_untracked().is_following_tail()
                 {
                     PINNED_WEB_CAP
                 } else {
@@ -1486,6 +1571,71 @@ mod tests {
         let existing = vec![live_msg(0, JUN9_12)];
         let incoming = live_msg(0, JUN9_13);
         assert!(!message_already_present(&existing, &incoming));
+    }
+
+    // --- Scroll intent ------------------------------------------------------
+
+    #[test]
+    fn reader_scrolling_back_to_the_bottom_resumes_following_the_tail() {
+        assert_eq!(mode_after_reader_scroll(true), ScrollMode::FollowingTail);
+    }
+
+    #[test]
+    fn reader_scrolled_away_from_the_bottom_keeps_reading_history() {
+        assert_eq!(mode_after_reader_scroll(false), ScrollMode::ReadingHistory);
+    }
+
+    /// A tap — on a link, a nick, a preview's dismiss button — barely moves. If
+    /// that counted as scrolling, tapping anything in the chat would stop the
+    /// view following the conversation.
+    #[test]
+    fn a_tap_is_not_a_history_drag() {
+        assert!(!is_history_drag(300.0, 300.0));
+        assert!(!is_history_drag(300.0, 303.5));
+        assert!(!is_history_drag(300.0, 296.5));
+    }
+
+    /// Dragging the finger down past the threshold reveals older lines — the
+    /// reader taking over the viewport. That, and only that, ends `FollowingTail`.
+    #[test]
+    fn a_downward_drag_into_history_is_a_gesture() {
+        assert!(is_history_drag(300.0, 350.0));
+        assert!(is_history_drag(300.0, 300.0 + TOUCH_DRAG_PX));
+    }
+
+    /// A drag toward the bottom the view is already pinned to must NOT disengage,
+    /// however far it travels: the viewport is clamped, it cannot move away from
+    /// the tail, and on some engines it emits no scroll event to flip the mode
+    /// back. This is the case the old `.abs()` gesture test got wrong.
+    #[test]
+    fn an_upward_drag_toward_the_pinned_bottom_is_not_a_gesture() {
+        assert!(!is_history_drag(300.0, 250.0));
+        assert!(!is_history_drag(300.0, 300.0 - TOUCH_DRAG_PX));
+    }
+
+    /// The first scroll event after a fresh load has no prior height to differ
+    /// from, so it is not a resize — else the reader's first real gesture (a Home
+    /// key, a drag to the top) is eaten and the backlog fetch never fires.
+    #[test]
+    fn the_first_scroll_event_is_not_a_resize() {
+        assert!(!is_resize(None, 800));
+    }
+
+    #[test]
+    fn an_unchanged_client_height_is_not_a_resize() {
+        assert!(!is_resize(Some(800), 800));
+    }
+
+    #[test]
+    fn a_changed_client_height_is_a_resize() {
+        assert!(is_resize(Some(800), 600));
+        assert!(is_resize(Some(600), 800));
+    }
+
+    #[test]
+    fn following_tail_is_the_only_mode_that_pins() {
+        assert!(ScrollMode::FollowingTail.is_following_tail());
+        assert!(!ScrollMode::ReadingHistory.is_following_tail());
     }
 }
 

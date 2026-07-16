@@ -23,6 +23,20 @@ html, body {
        Chrome with `interactive-widget=resizes-content`, which we
        removed because it added more state changes than it solved). */
     height: 100%;
+    /* iOS Safari's Text Autosizing inflates the font of any block it judges
+       too wide for its text size — and a full-width column of 13-14px
+       monospace is its favourite target. The inflation lands AFTER first
+       layout, so every chat line re-wraps, scrollHeight grows underneath the
+       scroll pin, and a freshly-switched buffer drifts off the last line (the
+       scroll-to-bottom arrow appears seconds after the switch looked fine).
+       It also renders the whole page a notch larger than the screen — the
+       "it loads slightly zoomed until I double-tap" symptom. `100%` (not
+       `none`) disables the automatic boost while leaving the user's own pinch
+       zoom and accessibility text scaling intact. Blink only boosts when a
+       page has no `width=device-width` viewport, which is why Android was
+       never affected. */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
     background: var(--bg);
     color: var(--fg);
     font-family: 'FiraCode Nerd Font Mono', 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', monospace;
@@ -226,6 +240,36 @@ textarea {
 
 .scroll-bottom-btn:hover { opacity: 1; }
 .scroll-bottom-btn.hidden { display: none; }
+
+/* Scroll-state overlay, shown only when localStorage['repartee-scroll-debug']
+   is "1". A phone has no debugger attached, so the device has to be able to
+   show its own scroll state. `pointer-events: none` so it can never intercept
+   the very gestures it is there to observe. */
+.scroll-debug {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    right: 4px;
+    max-height: 45%;
+    overflow-y: auto;
+    z-index: 20;
+    pointer-events: none;
+    background: rgba(0, 0, 0, 0.82);
+    color: #7ee2a8;
+    font-size: 10px;
+    line-height: 1.35;
+    padding: 5px 7px;
+    border-radius: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.scroll-debug-head {
+    color: #ffd479;
+    font-weight: bold;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+    margin-bottom: 3px;
+    padding-bottom: 3px;
+}
 
 /* Chat line — flex row, all items on same baseline.
    No `content-visibility` here: while it skips layout for off-screen
@@ -1037,9 +1081,21 @@ textarea {
 
 @media (max-width: 720px) {
     .msg-previews { margin-left: 0; }
+    .msg-preview-card {
+        /* The card is a flex item, so its width comes from its content — the
+           <img>. The img below asks for `width: 100%` OF THE CARD, so before
+           the image has decoded (no intrinsic width) that is circular and the
+           card shrink-to-fits to ~3px: the box is reserved only once the image
+           lands, reflowing the chat by ~250px per preview and yanking a
+           freshly-switched buffer off the bottom. A definite width breaks the
+           cycle — the img's percentage now resolves against the row, so the
+           box is its final size from the first layout. */
+        width: 100%;
+    }
     .msg-preview-thumb {
-        /* Full-width on mobile; `aspect-ratio` reserves vertical space
-           proportionally so the layout doesn't jump when the image loads. */
+        /* Full-width on mobile. `aspect-ratio` (a bare ratio, so it overrides
+           the image's intrinsic one) then fixes the height for a width that is
+           already known — both before and after the image loads. */
         width: 100%;
         height: auto;
         aspect-ratio: 16 / 10;
