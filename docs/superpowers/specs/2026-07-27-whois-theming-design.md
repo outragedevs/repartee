@@ -62,9 +62,9 @@ Added:
 
 | Numeric | Key | Kind |
 |---|---|---|
-| 401 `ERR_NOSUCHNICK` | `whois_no_such_nick` | new key |
-| 402 `ERR_NOSUCHSERVER` | `whois_no_such_server` | new key |
-| 263 `RPL_TRYAGAIN` | `whois_try_again` | new key, **and** routed to the WHOIS buffer instead of the server buffer |
+| 401 `ERR_NOSUCHNICK` | `no_such_nick` | new key, **not** whois-prefixed — see below |
+| 402 `ERR_NOSUCHSERVER` | `no_such_server` | new key |
+| 263 `RPL_TRYAGAIN` | `try_again` | new key, **and** routed to the active window instead of the server buffer |
 | 326 | `whois_modes` | reuse |
 | 327 `RPL_WHOISHOST` (rusnet) | `whois_host` | reuse |
 | 337 `RPL_WHOISTEXT` (hybrid) | `whois_special` | reuse |
@@ -95,14 +95,24 @@ one line in the table.
 
 ### 2. Error routing and framing
 
-The three error keys render as a single line in the WHOIS buffer
-(`whois_buffer`, i.e. the active window). No `whois_header` / `end_of_whois`
-frame is synthesised around them: an error reply carries no 311, so there is no
-block to frame, and inventing one would misrepresent the wire.
+**The three error keys are deliberately *not* `whois_`-prefixed.** 401, 402 and
+263 are not WHOIS-specific: 401 also answers a PRIVMSG, NOTICE, INVITE or KICK
+aimed at a nick that does not exist, 402 answers any command taking a server
+parameter, and 263 throttles any command at all. Because detection is stateless
+(§1), the handler cannot know which command provoked the reply. Naming the keys
+`whois_no_such_nick` would assert a context we cannot verify and would drag
+WHOIS block styling onto a failed `/msg`. Generic names state exactly what is
+known.
+
+They render as a single line, styled through the theme's existing `error`
+abstract rather than the `whois` abstract, e.g. `no_such_nick = "{error $1}"`.
+No `whois_header` / `end_of_whois` frame is synthesised around them: an error
+reply carries no 311, so there is no block to frame, and inventing one would
+misrepresent the wire.
 
 401 and 402 keep today's destination (active window, via `is_error()`); only
 their `event_key` changes from `None` to the new keys. 263 changes destination
-from the server buffer to the WHOIS buffer, which is the behaviour change that
+from the server buffer to the active window, which is the behaviour change that
 makes the rate-limit notice visible where the user is looking.
 
 ### 3. The `whois` abstract
@@ -133,9 +143,14 @@ path and cannot reference theme abstracts.
 
 ### 4. Parameter convention
 
-`$0` is always the nick. `$1` is the line's primary value. Further parameters
-are detail. This already holds for most keys by accident; the design makes it a
-tested invariant and documents it.
+For every `whois_*` key: `$0` is always the nick, `$1` is the line's primary
+value, and further parameters are detail. This already holds for most keys by
+accident; the design makes it a tested invariant and documents it.
+
+The three generic error keys are outside that invariant — they are not part of
+the block. `no_such_nick` gets `$0` = the nick that was not found, `$1` = the
+server's reason text; `no_such_server` gets `$0` = the server name, `$1` =
+reason; `try_again` gets `$0` = the command that was throttled, `$1` = reason.
 
 `whois_secure` keeps `$1 = "TLS"` with the server's own text in `$2`. Changing
 `$1` to the server text would silently alter the output of every existing user
