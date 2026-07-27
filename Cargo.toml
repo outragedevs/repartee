@@ -52,8 +52,11 @@ aes-gcm = "0.10"
 rand = "0.10"
 base64 = "0.22"
 sha2 = "0.10"
+sha1 = "0.10"
 hmac = "0.12"
 pbkdf2 = { version = "0.12", features = ["simple"] }
+# SASLprep (RFC 4013) for SASL credentials.
+stringprep = "0.1"
 uuid = { version = "1.21", features = ["v4"] }
 hex = "0.4"
 # E2E encryption (RPE2E v1.0)

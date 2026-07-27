@@ -96,14 +96,37 @@ impl ServerCaps {
     /// (e.g. `PLAIN,EXTERNAL`).  If `sasl` is advertised without a value,
     /// returns `["PLAIN"]` as the default.  Returns an empty vec if `sasl`
     /// is not advertised at all.
+    ///
+    /// Prefer [`Self::sasl_mechanisms_advertised`] when the difference between
+    /// "the server offers only PLAIN" and "the server named no mechanisms"
+    /// matters — this accessor flattens the two together.
     #[must_use]
     pub fn sasl_mechanisms(&self) -> Vec<String> {
         if !self.has("sasl") {
             return Vec::new();
         }
+        self.sasl_mechanisms_advertised()
+            .unwrap_or_else(|| vec!["PLAIN".to_string()])
+    }
+
+    /// The SASL mechanism list the server actually named, if it named one.
+    ///
+    /// `Some(list)` when the `sasl` cap carries a value; `None` when `sasl` is
+    /// advertised bare **or** not advertised at all — in both cases the server
+    /// has told us nothing about which mechanisms it speaks. Callers that need
+    /// to distinguish those two check [`Self::has`] first.
+    ///
+    /// This distinction is load-bearing: a bare `sasl` used to be reported as
+    /// `["PLAIN"]`, which is indistinguishable from a server that genuinely
+    /// offers only PLAIN, and it caused a configured `SCRAM-SHA-512` to be
+    /// dropped instead of attempted.
+    #[must_use]
+    pub fn sasl_mechanisms_advertised(&self) -> Option<Vec<String>> {
         match self.value("sasl") {
-            Some(value) if !value.is_empty() => value.split(',').map(str::to_uppercase).collect(),
-            _ => vec!["PLAIN".to_string()],
+            Some(value) if !value.is_empty() => {
+                Some(value.split(',').map(str::to_uppercase).collect())
+            }
+            _ => None,
         }
     }
 
@@ -163,6 +186,36 @@ mod tests {
         let caps = ServerCaps::parse("multi-prefix server-time");
         let mechs = caps.sasl_mechanisms();
         assert!(mechs.is_empty());
+    }
+
+    #[test]
+    fn advertised_list_distinguishes_bare_sasl_from_a_plain_only_server() {
+        // A server that names its mechanisms.
+        let named = ServerCaps::parse("sasl=PLAIN,SCRAM-SHA-512");
+        assert_eq!(
+            named.sasl_mechanisms_advertised(),
+            Some(vec!["PLAIN".to_string(), "SCRAM-SHA-512".to_string()])
+        );
+
+        // A server that offers only PLAIN — a real, closed list.
+        let plain_only = ServerCaps::parse("sasl=PLAIN");
+        assert_eq!(
+            plain_only.sasl_mechanisms_advertised(),
+            Some(vec!["PLAIN".to_string()])
+        );
+
+        // A server that advertises sasl without saying what it speaks. The
+        // flattened accessor guesses PLAIN; this one admits it does not know,
+        // which is what lets a configured mechanism still be attempted.
+        let bare = ServerCaps::parse("sasl multi-prefix");
+        assert!(bare.has("sasl"));
+        assert_eq!(bare.sasl_mechanisms_advertised(), None);
+        assert_eq!(bare.sasl_mechanisms(), vec!["PLAIN".to_string()]);
+
+        // No sasl at all.
+        let absent = ServerCaps::parse("multi-prefix");
+        assert!(!absent.has("sasl"));
+        assert_eq!(absent.sasl_mechanisms_advertised(), None);
     }
 
     #[test]

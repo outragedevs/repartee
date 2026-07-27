@@ -65,105 +65,267 @@ struct NegotiateResult {
 /// SASL authentication mechanism.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaslMechanism {
-    /// SASL PLAIN — username + password, base64-encoded.
-    Plain,
     /// SASL EXTERNAL — client TLS certificate (`CertFP`) based.
     External,
-    /// SASL SCRAM-SHA-256 — challenge-response (RFC 5802 / RFC 7677).
-    ScramSha256,
+    /// `ECDSA-NIST256P-CHALLENGE` — sign a server challenge with a P-256
+    /// private key. No secret leaves the client at all.
+    EcdsaNist256pChallenge,
+    /// SCRAM over one of SHA-1 / SHA-256 / SHA-512 — challenge-response
+    /// (RFC 5802 / RFC 7677); the password is never sent.
+    Scram(sasl_scram::ScramHash),
+    /// SASL PLAIN — username + password, base64-encoded. The password crosses
+    /// the wire, so this ranks last.
+    Plain,
 }
 
-impl std::fmt::Display for SaslMechanism {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+/// Every mechanism we implement, **strongest first**.
+///
+/// This is the order auto-detection walks and the order the wizards list.
+/// Certificate and key mechanisms put no secret on the wire at all; SCRAM never
+/// sends the password; `PLAIN` does, so it comes last. `SCRAM-SHA-1` still
+/// outranks `PLAIN` — SHA-1's collision weakness does not touch its use inside
+/// HMAC and PBKDF2 here, and it beats a cleartext password.
+pub const SASL_MECHANISMS: &[SaslMechanism] = &[
+    SaslMechanism::External,
+    SaslMechanism::EcdsaNist256pChallenge,
+    SaslMechanism::Scram(sasl_scram::ScramHash::Sha512),
+    SaslMechanism::Scram(sasl_scram::ScramHash::Sha256),
+    SaslMechanism::Scram(sasl_scram::ScramHash::Sha1),
+    SaslMechanism::Plain,
+];
+
+impl SaslMechanism {
+    /// The mechanism name as it appears in the `sasl` capability and in
+    /// `AUTHENTICATE`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
-            Self::Plain => write!(f, "PLAIN"),
-            Self::External => write!(f, "EXTERNAL"),
-            Self::ScramSha256 => write!(f, "SCRAM-SHA-256"),
+            Self::External => "EXTERNAL",
+            Self::EcdsaNist256pChallenge => "ECDSA-NIST256P-CHALLENGE",
+            Self::Scram(hash) => hash.mechanism(),
+            Self::Plain => "PLAIN",
+        }
+    }
+
+    /// Parse a mechanism name, case-insensitively.
+    ///
+    /// Whole-token match, so `SCRAM-SHA-256-PLUS` resolves to nothing: we do not
+    /// implement channel binding and must not answer a `-PLUS` offer with a
+    /// plain exchange.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        SASL_MECHANISMS
+            .iter()
+            .copied()
+            .find(|m| m.name().eq_ignore_ascii_case(name))
+    }
+
+    /// Does this connection hold the credential this mechanism needs?
+    #[must_use]
+    const fn prerequisite_met(self, have: SaslCapabilities) -> bool {
+        match self {
+            Self::External => have.client_cert,
+            Self::EcdsaNist256pChallenge => have.sasl_key,
+            Self::Scram(_) | Self::Plain => have.password,
         }
     }
 }
 
-/// Select the best SASL mechanism given server capabilities and local config.
+impl std::fmt::Display for SaslMechanism {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// What this connection can actually authenticate *with* — the local half of
+/// mechanism selection, as opposed to what the server offers.
 ///
-/// Priority when `sasl_mechanism` is `None` (auto-detect):
-/// 1. `EXTERNAL` — only if a `client_cert_path` is configured and the server advertises it.
-/// 2. `SCRAM-SHA-256` — if `sasl_user` + `sasl_pass` are configured and the server advertises it.
-/// 3. `PLAIN` — if `sasl_user` + `sasl_pass` are configured and the server advertises it.
+/// A struct rather than three positional `bool` arguments: the three are easy
+/// to transpose at a call site and impossible to tell apart in a stack trace.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SaslCapabilities {
+    /// A TLS client certificate is configured — `EXTERNAL` / `CertFP`.
+    pub client_cert: bool,
+    /// An ECDSA private key is configured — `ECDSA-NIST256P-CHALLENGE`.
+    pub sasl_key: bool,
+    /// Both `sasl_user` and `sasl_pass` are set — `PLAIN` and every SCRAM.
+    pub password: bool,
+}
+
+/// Select the best SASL mechanism given what the server offers and what we hold.
 ///
-/// When `sasl_mechanism` is explicitly set, that mechanism is used if the server supports it.
-/// Returns `None` if no suitable mechanism can be selected.
+/// `advertised` is the mechanism list from the `sasl` capability, or `None` when
+/// the server advertised `sasl` without naming one (or did not advertise it —
+/// callers check that separately).
+///
+/// With an explicit `sasl_mechanism_override`, that mechanism is used if we hold
+/// its credential **and** the server either advertises it or named nothing at
+/// all. Attempting a configured mechanism against a silent server beats
+/// authenticating with nothing; an override that cannot be satisfied returns
+/// `None` rather than quietly falling back to something weaker.
+///
+/// Without an override, auto-detection walks [`SASL_MECHANISMS`] and takes the
+/// first mechanism we hold the credential for *and* the server named. A server
+/// that named nothing gets `PLAIN` when credentials exist — the only mechanism
+/// a server that predates mechanism advertisement is likely to speak.
 #[must_use]
 pub fn select_sasl_mechanism(
-    server_mechanisms: &[String],
+    advertised: Option<&[String]>,
     sasl_mechanism_override: Option<&str>,
-    has_client_cert: bool,
-    has_credentials: bool,
+    have: SaslCapabilities,
 ) -> Option<SaslMechanism> {
-    let server_has = |mech: &str| {
-        server_mechanisms
-            .iter()
-            .any(|m| m.eq_ignore_ascii_case(mech))
+    let named = |list: &[String], mech: SaslMechanism| {
+        list.iter().any(|m| m.eq_ignore_ascii_case(mech.name()))
     };
 
-    // Explicit override from config
     if let Some(override_mech) = sasl_mechanism_override {
-        return match override_mech.to_ascii_uppercase().as_str() {
-            "EXTERNAL" if server_has("EXTERNAL") && has_client_cert => {
-                Some(SaslMechanism::External)
-            }
-            "SCRAM-SHA-256" if server_has("SCRAM-SHA-256") && has_credentials => {
-                Some(SaslMechanism::ScramSha256)
-            }
-            "PLAIN" if server_has("PLAIN") && has_credentials => Some(SaslMechanism::Plain),
-            _ => {
-                tracing::warn!(
-                    "configured SASL mechanism '{override_mech}' not available \
-                     (server offers: {}, cert={has_client_cert}, creds={has_credentials})",
-                    server_mechanisms.join(",")
-                );
-                None
-            }
+        let Some(mech) = SaslMechanism::from_name(override_mech) else {
+            tracing::warn!(
+                "unknown SASL mechanism '{override_mech}' in config — not authenticating"
+            );
+            return None;
         };
+        // `is_none_or`: a server that named no mechanisms cannot contradict us.
+        if mech.prerequisite_met(have) && advertised.is_none_or(|list| named(list, mech)) {
+            return Some(mech);
+        }
+        tracing::warn!(
+            "configured SASL mechanism '{override_mech}' not available (server offers: {}, {have:?})",
+            advertised.map_or_else(|| "(unspecified)".to_string(), |l| l.join(","))
+        );
+        return None;
     }
 
-    // Auto-detect: prefer EXTERNAL, then SCRAM-SHA-256, then PLAIN
-    if has_client_cert && server_has("EXTERNAL") {
-        return Some(SaslMechanism::External);
-    }
-    if has_credentials && server_has("SCRAM-SHA-256") {
-        return Some(SaslMechanism::ScramSha256);
-    }
-    if has_credentials && server_has("PLAIN") {
-        return Some(SaslMechanism::Plain);
-    }
+    // Auto-detect against a server that named nothing: guessing a
+    // challenge-response mechanism would burn the one exchange we get.
+    let Some(list) = advertised else {
+        return have.password.then_some(SaslMechanism::Plain);
+    };
 
-    None
+    SASL_MECHANISMS
+        .iter()
+        .copied()
+        .find(|m| m.prerequisite_met(have) && named(list, *m))
 }
 
 /// Timeout in seconds for SASL authentication steps.
 const SASL_TIMEOUT_SECS: u64 = 30;
 
+/// Maximum size of a single `AUTHENTICATE` chunk, per the `IRCv3` SASL spec.
+/// A chunk of exactly this length means "more follows".
+const AUTHENTICATE_CHUNK_BYTES: usize = 400;
+
+/// Cap on a reassembled inbound `AUTHENTICATE` payload.
+///
+/// An order of magnitude above any real SCRAM or challenge message, so it only
+/// bites a server that streams 400-byte chunks forever.
+const MAX_AUTHENTICATE_BYTES: usize = 8192;
+
+/// Map a SASL failure numeric to its message, if this response is one.
+const fn sasl_failure(response: Response) -> Option<&'static str> {
+    match response {
+        Response::ERR_SASLFAIL => Some("SASL authentication failed"),
+        Response::ERR_SASLTOOLONG => Some("SASL message too long"),
+        Response::ERR_SASLABORT => Some("SASL authentication aborted"),
+        Response::ERR_SASLALREADY => Some("already authenticated with SASL"),
+        _ => None,
+    }
+}
+
+/// Concatenate `AUTHENTICATE` chunks and base64-decode the result.
+///
+/// A bare `+` carries no data: it is both the empty payload and the terminator
+/// that follows a chunk of exactly [`AUTHENTICATE_CHUNK_BYTES`], so it is
+/// skipped rather than appended.
+fn reassemble_authenticate(chunks: &[String]) -> Result<Vec<u8>> {
+    let mut payload = String::new();
+    for chunk in chunks {
+        if chunk == "+" {
+            continue;
+        }
+        if payload.len() + chunk.len() > MAX_AUTHENTICATE_BYTES {
+            return Err(eyre!(
+                "SASL: AUTHENTICATE payload exceeds {MAX_AUTHENTICATE_BYTES} bytes"
+            ));
+        }
+        payload.push_str(chunk);
+    }
+    if payload.is_empty() {
+        return Ok(Vec::new());
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(&payload)
+        .map_err(|e| eyre!("SASL: invalid base64 in AUTHENTICATE: {e}"))
+}
+
+/// Read one inbound `AUTHENTICATE` payload, reassembling chunked continuations.
+///
+/// The server may split a payload into 400-byte chunks; a chunk shorter than
+/// that ends the payload. Without this, a long server-first message decodes as
+/// truncated base64 and the exchange dies for no visible reason.
+async fn await_authenticate_payload(stream: &mut irc::client::ClientStream) -> Result<Vec<u8>> {
+    let result = tokio::time::timeout(std::time::Duration::from_secs(SASL_TIMEOUT_SECS), async {
+        let mut chunks: Vec<String> = Vec::new();
+        let mut total = 0usize;
+        while let Some(msg_result) = stream.next().await {
+            let msg = msg_result?;
+            match &msg.command {
+                Command::AUTHENTICATE(param) => {
+                    total += param.len();
+                    if total > MAX_AUTHENTICATE_BYTES {
+                        return Err(eyre!(
+                            "SASL: AUTHENTICATE payload exceeds {MAX_AUTHENTICATE_BYTES} bytes"
+                        ));
+                    }
+                    let is_final = param.len() < AUTHENTICATE_CHUNK_BYTES;
+                    chunks.push(param.clone());
+                    if is_final {
+                        return reassemble_authenticate(&chunks);
+                    }
+                }
+                Command::Response(response, _) => {
+                    if let Some(err) = sasl_failure(*response) {
+                        return Err(eyre!("{err}"));
+                    }
+                    // Success where a challenge was due. For SCRAM this means
+                    // the server never sent its server-final message, so its
+                    // signature cannot be checked — and an unverified 903 is
+                    // exactly what a man in the middle would send. Refuse it
+                    // rather than sit here until the timeout.
+                    if *response == Response::RPL_SASLSUCCESS {
+                        return Err(eyre!(
+                            "SASL: server reported success without sending the challenge \
+                             response we need to verify it"
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Err(eyre!("connection closed waiting for AUTHENTICATE payload"))
+    })
+    .await;
+
+    result.unwrap_or_else(|_| Err(eyre!("SASL authentication timed out waiting for a challenge")))
+}
+
 /// Wait for the server's `AUTHENTICATE +` reply with a timeout.
 ///
-/// Handles SASL error numerics and connection closure. Used by all three
-/// SASL mechanism implementations to avoid duplicating the timeout + error
-/// handling logic.
+/// Handles SASL error numerics and connection closure. Used by every SASL
+/// mechanism implementation to avoid duplicating the timeout + error handling
+/// logic. Mechanisms that expect *data* back use
+/// [`await_authenticate_payload`] instead.
 async fn await_authenticate_plus(stream: &mut irc::client::ClientStream) -> Result<()> {
     let result = tokio::time::timeout(std::time::Duration::from_secs(SASL_TIMEOUT_SECS), async {
         while let Some(msg_result) = stream.next().await {
             let msg = msg_result?;
             match &msg.command {
                 Command::AUTHENTICATE(param) if param == "+" => return Ok(()),
-                Command::Response(response, _) => match response {
-                    Response::ERR_SASLFAIL => return Err(eyre!("SASL authentication failed")),
-                    Response::ERR_SASLABORT => {
-                        return Err(eyre!("SASL authentication aborted"));
+                Command::Response(response, _) => {
+                    if let Some(err) = sasl_failure(*response) {
+                        return Err(eyre!("{err}"));
                     }
-                    Response::ERR_SASLTOOLONG => {
-                        return Err(eyre!("SASL message too long"));
-                    }
-                    _ => {}
-                },
+                }
                 _ => {}
             }
         }
@@ -178,6 +340,22 @@ async fn await_authenticate_plus(stream: &mut irc::client::ClientStream) -> Resu
             "SASL authentication timed out waiting for AUTHENTICATE +"
         )),
     }
+}
+
+/// Wait for the terminal `903` / `904` of a SASL exchange.
+async fn await_sasl_result(stream: &mut irc::client::ClientStream) -> Result<()> {
+    while let Some(result) = stream.next().await {
+        let msg = result?;
+        if let Command::Response(response, _) = &msg.command {
+            if *response == Response::RPL_SASLSUCCESS {
+                return Ok(());
+            }
+            if let Some(err) = sasl_failure(*response) {
+                return Err(eyre!("{err}"));
+            }
+        }
+    }
+    Err(eyre!("SASL authentication: connection closed unexpectedly"))
 }
 
 /// Default maximum message body length in bytes.
@@ -660,20 +838,27 @@ async fn negotiate_caps(
 
     if cap_supported {
         // Determine whether we can authenticate via SASL
-        let has_credentials = params.sasl_user.is_some() && params.sasl_pass.is_some();
-        let server_mechanisms = server_caps.sasl_mechanisms();
+        let have = SaslCapabilities {
+            client_cert: params.has_client_cert,
+            sasl_key: false,
+            password: params.sasl_user.is_some() && params.sasl_pass.is_some(),
+        };
+        let advertised = server_caps.sasl_mechanisms_advertised();
         let selected_mechanism = select_sasl_mechanism(
-            &server_mechanisms,
+            advertised.as_deref(),
             params.sasl_mechanism_override,
-            params.has_client_cert,
-            has_credentials,
+            have,
         );
         let want_sasl = selected_mechanism.is_some();
 
         diag.push(format!(
-            "CAP: server advertises sasl={}, has_credentials={has_credentials}, mechanism={:?}",
+            "CAP: server advertises sasl={} ({}), {have:?}, mechanism={}",
             server_caps.has("sasl"),
-            selected_mechanism,
+            advertised.as_ref().map_or_else(
+                || "mechanisms unspecified".to_string(),
+                |list| list.join(",")
+            ),
+            selected_mechanism.map_or_else(|| "none".to_string(), |m| m.to_string()),
         ));
 
         // Compute capabilities to request
@@ -735,12 +920,15 @@ async fn negotiate_caps(
                         diag.push("SASL: authenticating via EXTERNAL".to_string());
                         run_sasl_external(sender, stream).await
                     }
-                    SaslMechanism::ScramSha256 => {
+                    SaslMechanism::EcdsaNist256pChallenge => Err(eyre!(
+                        "SASL ECDSA-NIST256P-CHALLENGE selected but no key is configured"
+                    )),
+                    SaslMechanism::Scram(hash) => {
                         if let (Some(user), Some(pass)) = (params.sasl_user, params.sasl_pass) {
-                            diag.push(format!("SASL: authenticating via SCRAM-SHA-256 as {user}"));
-                            run_sasl_scram(sender, stream, user, pass).await
+                            diag.push(format!("SASL: authenticating via {hash} as {user}"));
+                            run_sasl_scram(sender, stream, hash, user, pass).await
                         } else {
-                            Err(eyre!("SASL SCRAM-SHA-256 selected but credentials missing"))
+                            Err(eyre!("SASL {hash} selected but credentials missing"))
                         }
                     }
                     SaslMechanism::Plain => {
@@ -764,7 +952,7 @@ async fn negotiate_caps(
             }
         } else if sasl_requested && !sasl_acked {
             diag.push("SASL: requested but server did not ACK".to_string());
-        } else if !sasl_requested && has_credentials {
+        } else if !sasl_requested && have.password {
             diag.push("SASL: credentials available but server does not advertise sasl".to_string());
         }
 
@@ -802,45 +990,40 @@ async fn run_sasl_plain(
     sasl_pass: &str,
 ) -> Result<()> {
     // Send AUTHENTICATE PLAIN
-    sender.send(Command::AUTHENTICATE("PLAIN".to_string()))?;
+    sender.send(Command::AUTHENTICATE(
+        SaslMechanism::Plain.name().to_string(),
+    ))?;
 
     // Wait for AUTHENTICATE + from server (with timeout and error handling)
     await_authenticate_plus(stream).await?;
 
-    // Send base64-encoded credentials: authzid\0authcid\0password
-    let auth_string = format!("{sasl_user}\x00{sasl_user}\x00{sasl_pass}");
+    // Send base64-encoded credentials: authzid\0authcid\0password.
+    // RFC 4616 requires SASLprep on both the authcid and the password.
+    let user = sasl_scram::saslprep(sasl_user);
+    let pass = sasl_scram::saslprep(sasl_pass);
+    let auth_string = format!("{user}\x00{user}\x00{pass}");
     let encoded = base64::engine::general_purpose::STANDARD.encode(auth_string);
-    sender.send(Command::AUTHENTICATE(encoded))?;
-
-    // Wait for 903 (success) or 904/905/906 (failure)
-    while let Some(result) = stream.next().await {
-        let msg = result?;
-        if let Command::Response(response, _) = &msg.command {
-            match response {
-                Response::RPL_SASLSUCCESS => return Ok(()),
-                Response::ERR_SASLFAIL => return Err(eyre!("SASL authentication failed")),
-                Response::ERR_SASLTOOLONG => return Err(eyre!("SASL message too long")),
-                Response::ERR_SASLABORT => return Err(eyre!("SASL authentication aborted")),
-                _ => {}
-            }
-        }
+    for chunk in sasl_scram::chunk_authenticate(&encoded) {
+        sender.send(Command::AUTHENTICATE(chunk))?;
     }
 
-    Err(eyre!("SASL authentication: connection closed unexpectedly"))
+    // Wait for 903 (success) or 904/905/906/907 (failure)
+    await_sasl_result(stream).await
 }
 
-/// Execute the SASL SCRAM-SHA-256 authentication handshake.
+/// Execute a SASL SCRAM authentication handshake over the given hash.
 ///
 /// Assumes SASL has already been ACK'd.  Performs the three-step
 /// challenge-response protocol:
 ///
-/// 1. Send `AUTHENTICATE SCRAM-SHA-256`, wait for `+`
+/// 1. Send `AUTHENTICATE SCRAM-SHA-<n>`, wait for `+`
 /// 2. Send base64-encoded client-first message, receive server-first
 /// 3. Send base64-encoded client-final message, receive server-final
 /// 4. Verify server signature and wait for 903/904
 async fn run_sasl_scram(
     sender: &IrcSender,
     stream: &mut irc::client::ClientStream,
+    hash: sasl_scram::ScramHash,
     sasl_user: &str,
     sasl_pass: &str,
 ) -> Result<()> {
@@ -848,8 +1031,8 @@ async fn run_sasl_scram(
 
     let b64 = &base64::engine::general_purpose::STANDARD;
 
-    // Step 1: Initiate SCRAM-SHA-256
-    sender.send(Command::AUTHENTICATE("SCRAM-SHA-256".to_string()))?;
+    // Step 1: Initiate SCRAM over the selected hash
+    sender.send(Command::AUTHENTICATE(hash.mechanism().to_string()))?;
 
     // Wait for AUTHENTICATE + from server (with timeout and error handling)
     await_authenticate_plus(stream).await?;
@@ -861,81 +1044,39 @@ async fn run_sasl_scram(
         sender.send(Command::AUTHENTICATE(chunk))?;
     }
 
-    // Step 3: Receive server-first message
-    let server_first = loop {
-        if let Some(result) = stream.next().await {
-            let msg = result?;
-            match &msg.command {
-                Command::AUTHENTICATE(param) if param != "+" => {
-                    // Decode base64 server-first
-                    let decoded = b64
-                        .decode(param)
-                        .map_err(|e| eyre!("SCRAM: invalid base64 in server-first: {e}"))?;
-                    break String::from_utf8(decoded)
-                        .map_err(|e| eyre!("SCRAM: non-UTF-8 server-first: {e}"))?;
-                }
-                Command::Response(response, _) => match response {
-                    irc::proto::Response::ERR_SASLFAIL => {
-                        return Err(eyre!("SASL SCRAM-SHA-256 authentication failed"));
-                    }
-                    irc::proto::Response::ERR_SASLABORT => {
-                        return Err(eyre!("SASL SCRAM-SHA-256 authentication aborted"));
-                    }
-                    _ => {}
-                },
-                _ => {}
-            }
-        } else {
-            return Err(eyre!(
-                "SASL SCRAM-SHA-256: connection closed waiting for server-first"
-            ));
-        }
-    };
+    // Step 3: Receive server-first message, reassembling chunked continuations
+    let server_first_bytes = await_authenticate_payload(stream).await?;
+    let server_first = String::from_utf8(server_first_bytes)
+        .map_err(|e| eyre!("SCRAM: non-UTF-8 server-first: {e}"))?;
 
     // Step 4: Compute and send client-final message
-    let (client_final_msg, expected_server_sig) =
-        sasl_scram::client_final(&server_first, &client_first_bare, &client_nonce, sasl_pass)?;
+    let (client_final_msg, expected_server_sig) = sasl_scram::client_final(
+        hash,
+        &server_first,
+        &client_first_bare,
+        &client_nonce,
+        sasl_pass,
+    )?;
     let encoded_final = b64.encode(&client_final_msg);
     for chunk in sasl_scram::chunk_authenticate(&encoded_final) {
         sender.send(Command::AUTHENTICATE(chunk))?;
     }
 
-    // Step 5: Receive server-final and verify, then wait for 903/904
-    let mut server_verified = false;
-    while let Some(result) = stream.next().await {
-        let msg = result?;
-        match &msg.command {
-            Command::AUTHENTICATE(param) if !server_verified && param != "+" => {
-                let decoded = b64
-                    .decode(param)
-                    .map_err(|e| eyre!("SCRAM: invalid base64 in server-final: {e}"))?;
-                let server_final = String::from_utf8(decoded)
-                    .map_err(|e| eyre!("SCRAM: non-UTF-8 server-final: {e}"))?;
-                if !sasl_scram::verify_server(&server_final, &expected_server_sig) {
-                    return Err(eyre!(
-                        "SCRAM: server signature verification failed — possible MITM"
-                    ));
-                }
-                server_verified = true;
-            }
-            Command::Response(response, _) => match response {
-                irc::proto::Response::RPL_SASLSUCCESS => return Ok(()),
-                irc::proto::Response::ERR_SASLFAIL => {
-                    return Err(eyre!("SASL SCRAM-SHA-256 authentication failed"));
-                }
-                irc::proto::Response::ERR_SASLTOOLONG => {
-                    return Err(eyre!("SASL SCRAM-SHA-256 message too long"));
-                }
-                irc::proto::Response::ERR_SASLABORT => {
-                    return Err(eyre!("SASL SCRAM-SHA-256 authentication aborted"));
-                }
-                _ => {}
-            },
-            _ => {}
-        }
+    // Step 5: Receive server-final and verify it before accepting 903.
+    //
+    // The verification is the point of SCRAM: it proves the peer knows the
+    // stored key, so a 903 from an attacker who intercepted the exchange is
+    // worthless without it.
+    let server_final_bytes = await_authenticate_payload(stream).await?;
+    let server_final = String::from_utf8(server_final_bytes)
+        .map_err(|e| eyre!("SCRAM: non-UTF-8 server-final: {e}"))?;
+    if !sasl_scram::verify_server(&server_final, &expected_server_sig) {
+        return Err(eyre!(
+            "SCRAM: server signature verification failed — possible MITM"
+        ));
     }
 
-    Err(eyre!("SASL SCRAM-SHA-256: connection closed unexpectedly"))
+    await_sasl_result(stream).await
 }
 
 /// Execute the SASL EXTERNAL authentication handshake.
@@ -952,7 +1093,9 @@ async fn run_sasl_external(
     stream: &mut irc::client::ClientStream,
 ) -> Result<()> {
     // Send AUTHENTICATE EXTERNAL
-    sender.send(Command::AUTHENTICATE("EXTERNAL".to_string()))?;
+    sender.send(Command::AUTHENTICATE(
+        SaslMechanism::External.name().to_string(),
+    ))?;
 
     // Wait for AUTHENTICATE + from server (with timeout and error handling)
     await_authenticate_plus(stream).await?;
@@ -960,23 +1103,8 @@ async fn run_sasl_external(
     // Send AUTHENTICATE + (base64 encoding of an empty string is "+")
     sender.send(Command::AUTHENTICATE("+".to_string()))?;
 
-    // Wait for 903 (success) or 904/905/906 (failure)
-    while let Some(result) = stream.next().await {
-        let msg = result?;
-        if let Command::Response(response, _) = &msg.command {
-            match response {
-                Response::RPL_SASLSUCCESS => return Ok(()),
-                Response::ERR_SASLFAIL => return Err(eyre!("SASL EXTERNAL authentication failed")),
-                Response::ERR_SASLTOOLONG => return Err(eyre!("SASL EXTERNAL message too long")),
-                Response::ERR_SASLABORT => {
-                    return Err(eyre!("SASL EXTERNAL authentication aborted"));
-                }
-                _ => {}
-            }
-        }
-    }
-
-    Err(eyre!("SASL EXTERNAL: connection closed unexpectedly"))
+    // Wait for 903 (success) or 904/905/906/907 (failure)
+    await_sasl_result(stream).await
 }
 
 #[cfg(test)]
@@ -1080,122 +1208,287 @@ mod tests {
         assert!(sender.has_typing_headroom_at(now));
     }
 
+    // ── SASL mechanism selection ────────────────────────────
+
+    use crate::irc::sasl_scram::ScramHash;
+
+    /// Server-advertised mechanism list, as `select_sasl_mechanism` takes it.
+    fn offers(mechs: &[&str]) -> Vec<String> {
+        mechs.iter().map(|m| (*m).to_string()).collect()
+    }
+
+    /// Everything configured: cert, ECDSA key, and user+pass.
+    const ALL_CREDS: SaslCapabilities = SaslCapabilities {
+        client_cert: true,
+        sasl_key: true,
+        password: true,
+    };
+    /// Only a password — the common case.
+    const PASSWORD_ONLY: SaslCapabilities = SaslCapabilities {
+        client_cert: false,
+        sasl_key: false,
+        password: true,
+    };
+
     #[test]
-    fn select_external_when_cert_configured() {
-        let server_mechs = vec!["PLAIN".to_string(), "EXTERNAL".to_string()];
-        let result = select_sasl_mechanism(&server_mechs, None, true, true);
-        // EXTERNAL is preferred over PLAIN when cert is available
-        assert_eq!(result, Some(SaslMechanism::External));
+    fn auto_detect_walks_the_ladder_strongest_first() {
+        // With every credential and every mechanism on offer, the strongest
+        // wins; strike the winner off the server's list and the next one does.
+        let ladder = [
+            (
+                vec![
+                    "PLAIN",
+                    "SCRAM-SHA-1",
+                    "SCRAM-SHA-256",
+                    "SCRAM-SHA-512",
+                    "ECDSA-NIST256P-CHALLENGE",
+                    "EXTERNAL",
+                ],
+                SaslMechanism::External,
+            ),
+            (
+                vec![
+                    "PLAIN",
+                    "SCRAM-SHA-1",
+                    "SCRAM-SHA-256",
+                    "SCRAM-SHA-512",
+                    "ECDSA-NIST256P-CHALLENGE",
+                ],
+                SaslMechanism::EcdsaNist256pChallenge,
+            ),
+            (
+                vec!["PLAIN", "SCRAM-SHA-1", "SCRAM-SHA-256", "SCRAM-SHA-512"],
+                SaslMechanism::Scram(ScramHash::Sha512),
+            ),
+            (
+                vec!["PLAIN", "SCRAM-SHA-1", "SCRAM-SHA-256"],
+                SaslMechanism::Scram(ScramHash::Sha256),
+            ),
+            (
+                vec!["PLAIN", "SCRAM-SHA-1"],
+                SaslMechanism::Scram(ScramHash::Sha1),
+            ),
+            (vec!["PLAIN"], SaslMechanism::Plain),
+            (vec![], SaslMechanism::Plain),
+        ];
+
+        for (server, expected) in ladder {
+            let list = offers(&server);
+            let got = select_sasl_mechanism(Some(&list), None, ALL_CREDS);
+            if server.is_empty() {
+                // A server that offers nothing gets nothing, credentials or not.
+                assert_eq!(got, None, "empty offer list must select nothing");
+            } else {
+                assert_eq!(got, Some(expected), "server offering {server:?}");
+            }
+        }
     }
 
     #[test]
-    fn select_plain_when_only_credentials() {
-        let server_mechs = vec!["PLAIN".to_string(), "EXTERNAL".to_string()];
-        let result = select_sasl_mechanism(&server_mechs, None, false, true);
-        assert_eq!(result, Some(SaslMechanism::Plain));
+    fn every_mechanism_needs_its_own_credential() {
+        let all = offers(&[
+            "PLAIN",
+            "SCRAM-SHA-256",
+            "ECDSA-NIST256P-CHALLENGE",
+            "EXTERNAL",
+        ]);
+        // No cert → EXTERNAL is skipped even though the server offers it.
+        let no_cert = SaslCapabilities {
+            client_cert: false,
+            ..ALL_CREDS
+        };
+        assert_eq!(
+            select_sasl_mechanism(Some(&all), None, no_cert),
+            Some(SaslMechanism::EcdsaNist256pChallenge)
+        );
+        // No key either → falls to SCRAM.
+        let password_only = PASSWORD_ONLY;
+        assert_eq!(
+            select_sasl_mechanism(Some(&all), None, password_only),
+            Some(SaslMechanism::Scram(ScramHash::Sha256))
+        );
+        // Nothing configured → no SASL at all.
+        assert_eq!(
+            select_sasl_mechanism(Some(&all), None, SaslCapabilities::default()),
+            None
+        );
+        // An ECDSA key alone is enough for the key mechanism.
+        let key_only = SaslCapabilities {
+            client_cert: false,
+            sasl_key: true,
+            password: false,
+        };
+        assert_eq!(
+            select_sasl_mechanism(Some(&all), None, key_only),
+            Some(SaslMechanism::EcdsaNist256pChallenge)
+        );
     }
 
     #[test]
-    fn explicit_override_plain() {
-        let server_mechs = vec!["PLAIN".to_string(), "EXTERNAL".to_string()];
-        // Even though cert is available, explicit override to PLAIN
-        let result = select_sasl_mechanism(&server_mechs, Some("PLAIN"), true, true);
-        assert_eq!(result, Some(SaslMechanism::Plain));
+    fn channel_binding_variants_are_never_selected() {
+        // We do not implement channel binding; answering a -PLUS offer with a
+        // plain exchange would be a downgrade the server cannot detect.
+        let plus_only = offers(&["SCRAM-SHA-256-PLUS", "SCRAM-SHA-512-PLUS"]);
+        assert_eq!(select_sasl_mechanism(Some(&plus_only), None, ALL_CREDS), None);
+        assert_eq!(
+            select_sasl_mechanism(Some(&plus_only), Some("SCRAM-SHA-256"), ALL_CREDS),
+            None
+        );
+        assert_eq!(SaslMechanism::from_name("SCRAM-SHA-256-PLUS"), None);
     }
 
     #[test]
-    fn explicit_override_external() {
-        let server_mechs = vec!["PLAIN".to_string(), "EXTERNAL".to_string()];
-        let result = select_sasl_mechanism(&server_mechs, Some("EXTERNAL"), true, false);
-        assert_eq!(result, Some(SaslMechanism::External));
+    fn an_override_outranks_the_ladder() {
+        let all = offers(&["PLAIN", "SCRAM-SHA-512", "EXTERNAL"]);
+        // PLAIN would never win auto-detection here — the override forces it.
+        assert_eq!(
+            select_sasl_mechanism(Some(&all), Some("PLAIN"), ALL_CREDS),
+            Some(SaslMechanism::Plain)
+        );
+        // Case-insensitively.
+        assert_eq!(
+            select_sasl_mechanism(Some(&all), Some("scram-sha-512"), ALL_CREDS),
+            Some(SaslMechanism::Scram(ScramHash::Sha512))
+        );
     }
 
     #[test]
-    fn explicit_override_unavailable_mechanism() {
-        let server_mechs = vec!["PLAIN".to_string()];
-        // Server doesn't offer EXTERNAL
-        let result = select_sasl_mechanism(&server_mechs, Some("EXTERNAL"), true, true);
-        assert_eq!(result, None);
+    fn an_unsatisfiable_override_authenticates_with_nothing() {
+        let plain_only = offers(&["PLAIN"]);
+        // Server does not offer it → no silent downgrade to PLAIN.
+        assert_eq!(
+            select_sasl_mechanism(Some(&plain_only), Some("SCRAM-SHA-512"), ALL_CREDS),
+            None
+        );
+        // We do not hold its credential → likewise.
+        let all = offers(&["PLAIN", "EXTERNAL", "ECDSA-NIST256P-CHALLENGE"]);
+        assert_eq!(
+            select_sasl_mechanism(Some(&all), Some("EXTERNAL"), PASSWORD_ONLY),
+            None
+        );
+        assert_eq!(
+            select_sasl_mechanism(Some(&all), Some("ECDSA-NIST256P-CHALLENGE"), PASSWORD_ONLY),
+            None
+        );
+        // A name we do not implement at all.
+        assert_eq!(
+            select_sasl_mechanism(Some(&all), Some("OAUTHBEARER"), ALL_CREDS),
+            None
+        );
     }
 
     #[test]
-    fn no_credentials_no_cert() {
-        let server_mechs = vec!["PLAIN".to_string(), "EXTERNAL".to_string()];
-        let result = select_sasl_mechanism(&server_mechs, None, false, false);
-        assert_eq!(result, None);
+    fn a_server_that_names_no_mechanisms_still_honours_an_override() {
+        // `sasl` advertised bare: we know nothing, so a configured mechanism is
+        // attempted rather than dropped. This is the case that used to lose a
+        // configured SCRAM to the "assume PLAIN" default.
+        assert_eq!(
+            select_sasl_mechanism(None, Some("SCRAM-SHA-512"), ALL_CREDS),
+            Some(SaslMechanism::Scram(ScramHash::Sha512))
+        );
+        assert_eq!(
+            select_sasl_mechanism(None, Some("EXTERNAL"), ALL_CREDS),
+            Some(SaslMechanism::External)
+        );
+        // But the credential still has to be there.
+        assert_eq!(
+            select_sasl_mechanism(None, Some("EXTERNAL"), PASSWORD_ONLY),
+            None
+        );
+        // And auto-detect does not guess a challenge-response mechanism — it
+        // falls back to the one such a server is likely to speak.
+        assert_eq!(
+            select_sasl_mechanism(None, None, ALL_CREDS),
+            Some(SaslMechanism::Plain)
+        );
+        assert_eq!(
+            select_sasl_mechanism(None, None, SaslCapabilities::default()),
+            None
+        );
     }
 
     #[test]
-    fn server_no_mechanisms() {
-        let server_mechs: Vec<String> = vec![];
-        let result = select_sasl_mechanism(&server_mechs, None, true, true);
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn external_only_when_server_supports() {
-        // Server only offers PLAIN, but we have a cert
-        let server_mechs = vec!["PLAIN".to_string()];
-        let result = select_sasl_mechanism(&server_mechs, None, true, true);
-        // Falls through to PLAIN since server doesn't advertise EXTERNAL
-        assert_eq!(result, Some(SaslMechanism::Plain));
-    }
-
-    #[test]
-    fn case_insensitive_override() {
-        let server_mechs = vec!["PLAIN".to_string(), "EXTERNAL".to_string()];
-        let result = select_sasl_mechanism(&server_mechs, Some("external"), true, false);
-        assert_eq!(result, Some(SaslMechanism::External));
-    }
-
-    #[test]
-    fn sasl_mechanism_display() {
+    fn mechanism_names_round_trip() {
+        for mech in SASL_MECHANISMS.iter().copied() {
+            assert_eq!(SaslMechanism::from_name(mech.name()), Some(mech));
+            assert_eq!(
+                SaslMechanism::from_name(&mech.name().to_lowercase()),
+                Some(mech)
+            );
+            assert_eq!(mech.to_string(), mech.name());
+        }
         assert_eq!(SaslMechanism::Plain.to_string(), "PLAIN");
         assert_eq!(SaslMechanism::External.to_string(), "EXTERNAL");
-        assert_eq!(SaslMechanism::ScramSha256.to_string(), "SCRAM-SHA-256");
+        assert_eq!(
+            SaslMechanism::Scram(ScramHash::Sha256).to_string(),
+            "SCRAM-SHA-256"
+        );
+        assert_eq!(
+            SaslMechanism::EcdsaNist256pChallenge.to_string(),
+            "ECDSA-NIST256P-CHALLENGE"
+        );
+    }
+
+    // ── inbound AUTHENTICATE reassembly ─────────────────────
+
+    fn b64(data: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(data)
     }
 
     #[test]
-    fn scram_preferred_over_plain() {
-        // When both SCRAM-SHA-256 and PLAIN are available, SCRAM wins
-        let server_mechs = vec!["PLAIN".to_string(), "SCRAM-SHA-256".to_string()];
-        let result = select_sasl_mechanism(&server_mechs, None, false, true);
-        assert_eq!(result, Some(SaslMechanism::ScramSha256));
+    fn a_single_short_chunk_is_the_whole_payload() {
+        let encoded = b64(b"r=nonce,s=c2FsdA==,i=4096");
+        assert_eq!(
+            reassemble_authenticate(&[encoded]).unwrap(),
+            b"r=nonce,s=c2FsdA==,i=4096"
+        );
     }
 
     #[test]
-    fn scram_falls_back_to_plain() {
-        // Server only offers PLAIN, no SCRAM-SHA-256
-        let server_mechs = vec!["PLAIN".to_string()];
-        let result = select_sasl_mechanism(&server_mechs, None, false, true);
-        assert_eq!(result, Some(SaslMechanism::Plain));
+    fn chunks_are_concatenated_before_decoding() {
+        // A payload long enough that the server has to split it. Decoding the
+        // chunks individually would fail or truncate — the whole point.
+        let payload = vec![b'x'; 700];
+        let encoded = b64(&payload);
+        assert!(encoded.len() > AUTHENTICATE_CHUNK_BYTES);
+        let chunks: Vec<String> = encoded
+            .as_bytes()
+            .chunks(AUTHENTICATE_CHUNK_BYTES)
+            .map(|c| String::from_utf8(c.to_vec()).unwrap())
+            .collect();
+        assert!(chunks.len() > 1, "payload must actually be split");
+        assert_eq!(reassemble_authenticate(&chunks).unwrap(), payload);
     }
 
     #[test]
-    fn explicit_override_scram() {
-        let server_mechs = vec!["PLAIN".to_string(), "SCRAM-SHA-256".to_string()];
-        let result = select_sasl_mechanism(&server_mechs, Some("SCRAM-SHA-256"), false, true);
-        assert_eq!(result, Some(SaslMechanism::ScramSha256));
+    fn a_bare_plus_carries_no_data() {
+        assert_eq!(reassemble_authenticate(&["+".to_string()]).unwrap(), Vec::<u8>::new());
+
+        // A payload that lands on exactly 400 base64 bytes is terminated by a
+        // trailing "+", which must not be appended to the base64.
+        let exact = "A".repeat(AUTHENTICATE_CHUNK_BYTES);
+        let with_terminator = vec![exact.clone(), "+".to_string()];
+        assert_eq!(
+            reassemble_authenticate(&with_terminator).unwrap(),
+            reassemble_authenticate(&[exact]).unwrap()
+        );
     }
 
     #[test]
-    fn scram_override_unavailable() {
-        // Server doesn't offer SCRAM-SHA-256, override fails
-        let server_mechs = vec!["PLAIN".to_string()];
-        let result = select_sasl_mechanism(&server_mechs, Some("SCRAM-SHA-256"), false, true);
-        assert_eq!(result, None);
+    fn an_endless_stream_of_chunks_is_refused() {
+        let flood: Vec<String> = (0..40)
+            .map(|_| "A".repeat(AUTHENTICATE_CHUNK_BYTES))
+            .collect();
+        let err = reassemble_authenticate(&flood).unwrap_err().to_string();
+        assert!(err.contains("exceeds"), "unexpected error: {err}");
     }
 
     #[test]
-    fn external_still_preferred_over_scram() {
-        // EXTERNAL > SCRAM-SHA-256 when cert is available
-        let server_mechs = vec![
-            "PLAIN".to_string(),
-            "SCRAM-SHA-256".to_string(),
-            "EXTERNAL".to_string(),
-        ];
-        let result = select_sasl_mechanism(&server_mechs, None, true, true);
-        assert_eq!(result, Some(SaslMechanism::External));
+    fn undecodable_base64_is_reported_not_silently_dropped() {
+        let err = reassemble_authenticate(&["not base64!!!".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("base64"), "unexpected error: {err}");
     }
 
     // ── split_irc_message tests ─────────────────────────────
