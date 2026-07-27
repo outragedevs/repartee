@@ -4364,6 +4364,37 @@ fn handle_whois_account(state: &mut AppState, conn_id: &str, args: &[String]) {
     }
 }
 
+/// Every theme key the WHOIS path can emit, plus the three generic error keys
+/// a WHOIS can provoke. `shipped_themes_define_every_whois_key` tests both
+/// bundled themes against this list, so a new key cannot ship with only one
+/// theme updated — add new keys here.
+#[cfg(test)]
+pub const WHOIS_EVENT_KEYS: &[&str] = &[
+    "whois_header",
+    "whois",
+    "whois_server",
+    "whois_oper",
+    "whois_idle",
+    "whois_idle_signon",
+    "whois_channels",
+    "whois_away",
+    "whois_account",
+    "whois_secure",
+    "whois_certfp",
+    "whois_keyvalue",
+    "whois_special",
+    "whois_registered",
+    "whois_help",
+    "whois_bot",
+    "whois_actually",
+    "whois_host",
+    "whois_modes",
+    "end_of_whois",
+    "no_such_nick",
+    "no_such_server",
+    "try_again",
+];
+
 /// Theme event key for WHOIS numerics whose payload is freeform prose and
 /// which irc-proto has no `Response` variant for. Single source of truth for
 /// both the dispatch guard and the per-numeric theming.
@@ -9191,6 +9222,23 @@ mod tests {
                 Some(&["alice".to_string(), text.to_string()][..]),
                 "numeric {numeric} params"
             );
+        }
+    }
+
+    #[test]
+    fn shipped_themes_define_every_whois_key() {
+        for (name, src) in [
+            ("default.theme", include_str!("../../themes/default.theme")),
+            ("spring.theme", include_str!("../../themes/spring.theme")),
+        ] {
+            let theme: crate::theme::ThemeFile =
+                toml::from_str(src).unwrap_or_else(|e| panic!("{name} must parse: {e}"));
+            for key in WHOIS_EVENT_KEYS {
+                assert!(
+                    theme.formats.events.contains_key(*key),
+                    "{name} is missing event format `{key}`"
+                );
+            }
         }
     }
 

@@ -324,6 +324,91 @@ mod tests {
         }
     }
 
+    fn shipped_theme(src: &str) -> crate::theme::ThemeFile {
+        toml::from_str(src).expect("shipped theme must parse")
+    }
+
+    fn render_event_text(theme_src: &str, event_key: &str, params: &[&str]) -> String {
+        let theme = shipped_theme(theme_src);
+        let msg = Message {
+            id: 1,
+            timestamp: Utc::now(),
+            message_type: MessageType::Event,
+            nick: None,
+            nick_mode: None,
+            text: String::new(),
+            highlight: false,
+            event_key: Some(event_key.to_string()),
+            event_params: Some(params.iter().map(|p| (*p).to_string()).collect()),
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: None,
+        };
+        render_event(&msg, &theme)
+            .into_iter()
+            .map(|s| s.text)
+            .collect()
+    }
+
+    #[test]
+    fn whois_abstract_renders_the_same_visible_text_as_literal_formats() {
+        // The WHOIS formats were rewritten in terms of the `whois` /
+        // `whois_value` abstracts. `substitute_vars` joins an abstract's
+        // arguments with a single space, so the rewrite is only safe if the
+        // visible output is byte-identical to the literal formats it replaced.
+        for src in [
+            include_str!("../../themes/default.theme"),
+            include_str!("../../themes/spring.theme"),
+        ] {
+            assert_eq!(
+                render_event_text(src, "whois_channels", &["alice", "#one #two"]),
+                "  channels: #one #two"
+            );
+            assert_eq!(
+                render_event_text(src, "whois_special", &["alice", "is a Cloaked Connection"]),
+                "  is a Cloaked Connection"
+            );
+            assert_eq!(
+                render_event_text(
+                    src,
+                    "whois_idle_signon",
+                    &["alice", "34m 1s", "2026-07-14 16:08:49"]
+                ),
+                "  idle: 34m 1s, signon: 2026-07-14 16:08:49"
+            );
+            assert_eq!(
+                render_event_text(
+                    src,
+                    "whois_server",
+                    &["alice", "gallium.libera.chat", "Manchester, UK", " (Manchester, UK)"]
+                ),
+                "  server: gallium.libera.chat (Manchester, UK)"
+            );
+            assert_eq!(
+                render_event_text(src, "whois_keyvalue", &["alice", "Languages", "*", "en"]),
+                "  Languages: en"
+            );
+        }
+    }
+
+    #[test]
+    fn whois_error_keys_render_through_the_error_abstract() {
+        for src in [
+            include_str!("../../themes/default.theme"),
+            include_str!("../../themes/spring.theme"),
+        ] {
+            let rendered = render_event_text(src, "no_such_nick", &["ghost", "No such nick/channel"]);
+            assert!(
+                rendered.contains("ghost") && rendered.contains("No such nick/channel"),
+                "no_such_nick lost content: {rendered}"
+            );
+            assert!(
+                !rendered.starts_with("  "),
+                "errors are not WHOIS block lines and must not take the block indent: {rendered}"
+            );
+        }
+    }
+
     #[test]
     fn render_own_message_contains_nick_and_text() {
         let msg = test_message("me", "hello world", MessageType::Message);
