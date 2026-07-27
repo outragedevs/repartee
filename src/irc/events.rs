@@ -4158,6 +4158,33 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
         // Silently consume RPL_ENDOFNAMES — we already have the nick list
         Response::RPL_ENDOFNAMES => {}
 
+        // 401/402/263 can answer a WHOIS but are not WHOIS-specific: 401 also
+        // answers PRIVMSG/NOTICE/INVITE/KICK aimed at a missing nick, 402 any
+        // command taking a server parameter, and 263 throttles any command at
+        // all. Numeric dispatch here is stateless, so it cannot know which
+        // command provoked the reply — the keys stay generic rather than
+        // asserting a WHOIS context we cannot verify, which would also drag
+        // WHOIS block styling onto a failed /msg.
+        Response::ERR_NOSUCHNICK | Response::ERR_NOSUCHSERVER | Response::RPL_TRYAGAIN => {
+            if args.len() >= 3 {
+                let key = match response {
+                    Response::ERR_NOSUCHNICK => "no_such_nick",
+                    Response::ERR_NOSUCHSERVER => "no_such_server",
+                    _ => "try_again",
+                };
+                // RPL_TRYAGAIN is a 2xx, so the catch-all below would route it
+                // to the server buffer — away from the command that provoked it.
+                let target_buf = active_or_server_buffer(state, conn_id);
+                emit_event(
+                    state,
+                    &target_buf,
+                    key,
+                    format!("%Zf7768e! %Za9b1d6{}%N %Z565f89{}%N", args[1], args[2]),
+                    vec![args[1].clone(), args[2].clone()],
+                );
+            }
+        }
+
         _ => {
             if matches!(
                 response,
@@ -9216,6 +9243,75 @@ mod tests {
         let buf = state.buffers.get("test/testserver").unwrap();
 
         assert_eq!(buf.messages[0].event_key.as_deref(), Some("whois_idle"));
+    }
+
+    #[test]
+    fn whois_error_numerics_get_event_keys() {
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+
+        for (response, args, expected_key) in [
+            (
+                Response::ERR_NOSUCHNICK,
+                vec!["me", "ghost", "No such nick/channel"],
+                "no_such_nick",
+            ),
+            (
+                Response::ERR_NOSUCHSERVER,
+                vec!["me", "irc.example.net", "No such server"],
+                "no_such_server",
+            ),
+            (
+                Response::RPL_TRYAGAIN,
+                vec!["me", "WHOIS", "Please wait a while and try again."],
+                "try_again",
+            ),
+        ] {
+            let msg = make_irc_msg(
+                None,
+                Command::Response(response, args.iter().map(|s| (*s).to_string()).collect()),
+            );
+            handle_irc_message(&mut state, "test", &msg);
+
+            let buf = state.buffers.get("test/testserver").unwrap();
+            let m = buf.messages.back().unwrap();
+            assert_eq!(
+                m.event_key.as_deref(),
+                Some(expected_key),
+                "{response:?} should map to {expected_key}"
+            );
+            assert_eq!(
+                m.event_params.as_deref(),
+                Some(&[args[1].to_string(), args[2].to_string()][..]),
+                "{response:?} params"
+            );
+        }
+    }
+
+    #[test]
+    fn try_again_lands_in_active_window_not_server_buffer() {
+        // 263 is a 2xx, so the generic catch-all sent it to the server buffer
+        // while the rest of the WHOIS reply went to the active window —
+        // splitting one logical reply across two buffers.
+        let mut state = make_test_state();
+        state.set_active_buffer("test/#test");
+
+        let msg = make_irc_msg(
+            None,
+            Command::Response(
+                Response::RPL_TRYAGAIN,
+                vec![
+                    "me".to_string(),
+                    "WHOIS".to_string(),
+                    "Please wait a while and try again.".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/#test").expect("active buffer");
+        let m = buf.messages.back().expect("263 must land in active window");
+        assert_eq!(m.event_key.as_deref(), Some("try_again"));
     }
 
     #[test]
