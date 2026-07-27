@@ -4422,7 +4422,12 @@ fn whois_freeform_key(numeric: &str, args: &[String]) -> Option<&'static str> {
         // 379 is Unreal's `RPL_WHOISMODES`; 326 carries oper privileges as a
         // mode string; 377 is the `<me> usermodes <nick> <modes>` form.
         "326" | "379" => Some("whois_modes"),
-        "377" if args.get(1).is_some_and(|a| a == "usermodes") => Some("whois_modes"),
+        // The 4-arg length check is load-bearing: 377's nick sits at args[2],
+        // so a 3-arg `<me> usermodes <nick>` has nothing left for the text
+        // slot. Claiming it here would make `handle_whois_freeform` bail and
+        // drop the line entirely; returning None lets it reach the generic
+        // catch-all and still display.
+        "377" if args.len() >= 4 && args[1] == "usermodes" => Some("whois_modes"),
         _ => None,
     }
 }
@@ -9375,6 +9380,36 @@ mod tests {
                 "numeric {numeric} must put the nick in $0"
             );
         }
+    }
+
+    #[test]
+    fn whois_377_short_form_still_displays() {
+        // `<me> usermodes <nick>` with no mode string passes the usermodes
+        // guard but has nothing left for the text slot. It must fall through
+        // to the generic catch-all rather than being silently dropped.
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+
+        let msg = make_irc_msg(
+            None,
+            Command::Raw(
+                "377".to_string(),
+                vec![
+                    "me".to_string(),
+                    "usermodes".to_string(),
+                    "alice".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let buf = state.buffers.get("test/testserver").unwrap();
+        let m = buf
+            .messages
+            .back()
+            .expect("short 377 must still display something");
+        assert_eq!(m.event_key, None);
+        assert_eq!(m.text, "usermodes alice");
     }
 
     #[test]

@@ -388,6 +388,40 @@ mod tests {
                 render_event_text(src, "whois_keyvalue", &["alice", "Languages", "*", "en"]),
                 "  Languages: en"
             );
+            assert_eq!(
+                render_event_text(src, "whois_away", &["alice", "back later"]),
+                "  away: back later"
+            );
+            assert_eq!(
+                render_event_text(src, "whois_account", &["alice", "alice"]),
+                "  account: alice"
+            );
+            assert_eq!(
+                render_event_text(src, "whois_secure", &["alice", "TLS", "is using TLS"]),
+                "  secure: TLS"
+            );
+            assert_eq!(
+                render_event_text(src, "whois_certfp", &["alice", "ab12cd"]),
+                "  certfp: ab12cd"
+            );
+            assert_eq!(
+                render_event_text(src, "whois_idle", &["alice", "34m 1s"]),
+                "  idle: 34m 1s"
+            );
+            for key in [
+                "whois_registered",
+                "whois_help",
+                "whois_bot",
+                "whois_actually",
+                "whois_host",
+                "whois_modes",
+            ] {
+                assert_eq!(
+                    render_event_text(src, key, &["alice", "some prose"]),
+                    "  some prose",
+                    "{key} must render as an indented block line"
+                );
+            }
         }
     }
 
