@@ -103,15 +103,15 @@ const SUBCOMMANDS: &[CliOption] = &[
         forms: "a, attach",
         value: "[PID]",
         help: &[
-            "Attach to a session already running in the background. With no",
-            "PID, attaches to the only live session, or lists them when there",
-            "is more than one.",
+            "Attach to a session running in the background. With",
+            "no PID, attaches to the only live session, or lists",
+            "them if more than one is up.",
         ],
     },
     CliOption {
         forms: "l, logs",
         value: "",
-        help: &["Browse stored message history read-only. Opens no connection."],
+        help: &["Browse stored message history. Opens no connection."],
     },
     CliOption {
         forms: "help",
@@ -125,18 +125,19 @@ const OPTIONS: &[CliOption] = &[
         forms: "-d, --detach",
         value: "",
         help: &[
-            "Start headless — no terminal, no splash. Servers connect and",
-            "scripts load immediately; attach whenever you want.",
+            "Start headless — no terminal, no splash. Servers",
+            "connect and scripts load immediately; attach later.",
         ],
     },
     CliOption {
         forms: "-h, --bind",
         value: "<IP>",
         help: &[
-            "Send outgoing IRC connections from this local address, as in",
-            "irssi. Also accepts --bind=<IP>. Applies to this run only and",
-            "never writes to config.toml. A server's own bind_ip still wins;",
-            "general.default_bind_ip is the persistent equivalent.",
+            "Send outgoing IRC connections from this local",
+            "address, as in irssi. Also accepts --bind=<IP>.",
+            "Applies to this run only, never written to",
+            "config.toml. A server's own bind_ip wins; the",
+            "persistent equivalent is general.default_bind_ip.",
         ],
     },
     CliOption {
@@ -274,6 +275,27 @@ fn try_reap(child_pid: u32) -> Option<String> {
     }
 }
 
+/// Print the help screen.
+///
+/// Write errors are dropped on purpose. `--help` is routinely piped into `head`
+/// or `less`, and when the reader closes early `println!` panics with
+/// "failed printing to stdout: Broken pipe" — a far worse answer to a request
+/// for usage than a truncated help screen.
+fn print_help() {
+    use std::io::Write as _;
+    let _ = writeln!(std::io::stdout(), "{}", help_text());
+}
+
+/// Did the user ask for usage?
+///
+/// `--help` counts anywhere in argv; `help` only as the first argument, because
+/// further right it is a value somebody typed (`--bind help` is a malformed
+/// bind, not a request for help).
+fn wants_help(args: &[String]) -> bool {
+    args.iter().skip(1).any(|a| a == "--help")
+        || args.get(1).map(String::as_str) == Some("help")
+}
+
 /// Parse `-h <ip>`, `--bind <ip>`, or `--bind=<ip>` out of the CLI
 /// argv. Returns `Ok(Some(ip))` if any form is present, `Ok(None)` if
 /// none is, and `Err(...)` if `-h` / `--bind` appears without a value.
@@ -315,6 +337,14 @@ fn parse_bind_override(args: &[String]) -> Result<Option<String>> {
 #[allow(clippy::too_many_lines)]
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
+
+    // Before everything else, including the bind parse below: that parse exits
+    // 2 on a malformed `-h`, so `repartee -h --help` would otherwise answer a
+    // request for help with a bind-address error.
+    if wants_help(&args) {
+        print_help();
+        return Ok(());
+    }
 
     // Parse the bind override early so we surface a usage error to the
     // user's TTY before forking (the daemon child has stderr redirected
@@ -530,7 +560,7 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CliOption, OPTIONS, SUBCOMMANDS, help_text, parse_bind_override};
+    use super::{CliOption, OPTIONS, SUBCOMMANDS, help_text, parse_bind_override, wants_help};
 
     /// Every form as the user would type it, across both tables.
     fn declared_forms() -> Vec<String> {
@@ -605,12 +635,99 @@ mod tests {
     }
 
     #[test]
+    fn help_fits_an_80_column_terminal() {
+        // A terminal client's own help must not wrap in the narrowest terminal
+        // anyone still uses. FILES lines are exempt: they print real absolute
+        // paths, whose length is the user's business rather than ours.
+        let home = crate::constants::home_dir().display().to_string();
+        for line in help_text().lines() {
+            if line.contains(&home) {
+                continue;
+            }
+            assert!(
+                line.chars().count() <= 80,
+                "help line is {} columns: {line:?}",
+                line.chars().count()
+            );
+        }
+    }
+
+    #[test]
     fn help_paths_come_from_the_constants() {
         // A hardcoded `~/.repartee/config.toml` would drift the moment the
         // layout changes; assert the real accessor output is what gets printed.
         let help = help_text();
         assert!(help.contains(&crate::constants::config_path().display().to_string()));
         assert!(help.contains(&crate::constants::env_path().display().to_string()));
+    }
+
+    #[test]
+    fn help_is_requested_by_long_flag_or_bare_subcommand() {
+        assert!(wants_help(&args(&["--help"])));
+        assert!(wants_help(&args(&["help"])));
+        // Help wins even when appended to a half-typed command line — that is
+        // exactly when it gets typed.
+        assert!(wants_help(&args(&["-h", "--help"])));
+        assert!(wants_help(&args(&["a", "--help"])));
+    }
+
+    #[test]
+    fn help_is_not_requested_by_anything_else() {
+        assert!(!wants_help(&args(&[])));
+        assert!(!wants_help(&args(&["-h", "192.0.2.10"])));
+        assert!(!wants_help(&args(&["-d"])));
+        // `help` is a subcommand, so only in first position. Further right it
+        // is somebody's value, and swallowing it would silently ignore a bad
+        // bind.
+        assert!(!wants_help(&args(&["--bind", "help"])));
+        // argv[0] is a path, not a request.
+        assert!(!wants_help(&["--help".to_string()]));
+    }
+
+    /// Pull every argv literal `main` compares against out of this file's own
+    /// source: `== "-x"` and `== Some("sub")`. Scans only the code above
+    /// `#[cfg(test)]`, which both excludes the tests and keeps this scanner's
+    /// own needles from matching themselves.
+    fn dispatched_literals(src: &str) -> Vec<&str> {
+        let code = src.split("#[cfg(test)]").next().unwrap();
+        let mut found = Vec::new();
+        for (idx, _) in code.match_indices("== ") {
+            let rest = &code[idx + 3..];
+            let Some(body) = rest
+                .strip_prefix('"')
+                .or_else(|| rest.strip_prefix("Some(\""))
+            else {
+                continue;
+            };
+            let Some(end) = body.find('"') else { continue };
+            let literal = &body[..end];
+            // A real flag or subcommand is one word. Anything else is a
+            // comparison this scanner has no business policing.
+            if !literal.is_empty() && !literal.contains(char::is_whitespace) {
+                found.push(literal);
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn every_dispatched_argv_literal_has_a_help_row() {
+        let literals = dispatched_literals(include_str!("main.rs"));
+        // Guard the scanner itself: if it silently stops matching, the
+        // assertion below passes vacuously.
+        assert!(
+            literals.len() >= 8,
+            "scanner found only {} literals — it has stopped working: {literals:?}",
+            literals.len()
+        );
+        let declared = declared_forms();
+        for literal in literals {
+            assert!(
+                declared.iter().any(|f| f == literal),
+                "main() dispatches on {literal:?} but no CliOption declares it — \
+                 add a row so --help stays complete"
+            );
+        }
     }
 
     fn args(xs: &[&str]) -> Vec<String> {
