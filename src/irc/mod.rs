@@ -226,14 +226,36 @@ const AUTHENTICATE_CHUNK_BYTES: usize = 400;
 const MAX_AUTHENTICATE_BYTES: usize = 8192;
 
 /// Map a SASL failure numeric to its message, if this response is one.
+///
+/// `907 ERR_SASLALREADY` is deliberately absent: it says the connection has
+/// **already completed** SASL successfully and the client asked again, so it is
+/// a statement about success, not a failure. Grouping it with 904/905/906 would
+/// report a live authentication as failed, drop `sasl` from the enabled caps,
+/// and abort an exchange that had in fact succeeded. See [`sasl_success`].
 const fn sasl_failure(response: Response) -> Option<&'static str> {
     match response {
         Response::ERR_SASLFAIL => Some("SASL authentication failed"),
         Response::ERR_SASLTOOLONG => Some("SASL message too long"),
         Response::ERR_SASLABORT => Some("SASL authentication aborted"),
-        Response::ERR_SASLALREADY => Some("already authenticated with SASL"),
         _ => None,
     }
+}
+
+/// Does this numeric end the exchange with the connection authenticated?
+///
+/// `903` is the ordinary success. `907` is one too — "you have already
+/// authenticated using SASL" is only ever sent to a connection that did.
+///
+/// Where such a numeric *arrives* decides what it means. At the end of the
+/// exchange it is the answer ([`await_sasl_result`]). Arriving while a
+/// challenge is still due it is premature, and the two mid-exchange waits
+/// refuse it: for SCRAM, accepting it would mean skipping the server-signature
+/// check the mechanism exists to perform.
+const fn sasl_success(response: Response) -> bool {
+    matches!(
+        response,
+        Response::RPL_SASLSUCCESS | Response::ERR_SASLALREADY
+    )
 }
 
 /// Concatenate `AUTHENTICATE` chunks and base64-decode the result.
@@ -293,10 +315,10 @@ async fn await_authenticate_payload(stream: &mut irc::client::ClientStream) -> R
                     }
                     // Success where a challenge was due. For SCRAM this means
                     // the server never sent its server-final message, so its
-                    // signature cannot be checked — and an unverified 903 is
-                    // exactly what a man in the middle would send. Refuse it
+                    // signature cannot be checked — and an unverified success
+                    // is exactly what a man in the middle would send. Refuse it
                     // rather than sit here until the timeout.
-                    if *response == Response::RPL_SASLSUCCESS {
+                    if sasl_success(*response) {
                         return Err(eyre!(
                             "SASL: server reported success without sending the challenge \
                              response we need to verify it"
@@ -329,6 +351,15 @@ async fn await_authenticate_plus(stream: &mut irc::client::ClientStream) -> Resu
                     if let Some(err) = sasl_failure(*response) {
                         return Err(eyre!("{err}"));
                     }
+                    // A terminal success before the exchange has even begun.
+                    // Named rather than ignored: falling through would wait out
+                    // the full timeout for an `AUTHENTICATE +` the server has
+                    // no reason left to send.
+                    if sasl_success(*response) {
+                        return Err(eyre!(
+                            "SASL: server reported the exchange complete before it started"
+                        ));
+                    }
                 }
                 _ => {}
             }
@@ -357,7 +388,7 @@ async fn await_sasl_result(stream: &mut irc::client::ClientStream) -> Result<()>
         while let Some(result) = stream.next().await {
             let msg = result?;
             if let Command::Response(response, _) = &msg.command {
-                if *response == Response::RPL_SASLSUCCESS {
+                if sasl_success(*response) {
                     return Ok(());
                 }
                 if let Some(err) = sasl_failure(*response) {
@@ -1525,6 +1556,35 @@ mod tests {
             SaslMechanism::EcdsaNist256pChallenge.to_string(),
             "ECDSA-NIST256P-CHALLENGE"
         );
+    }
+
+    // ── SASL terminal numerics ──────────────────────────────
+
+    #[test]
+    fn already_authenticated_is_a_success_not_a_failure() {
+        // 907 is only ever sent to a connection whose SASL already succeeded.
+        // Classed as a failure it would make `negotiate_caps` report the
+        // authentication as failed, strip `sasl` from the enabled caps, and
+        // send an abort — all while the connection is authenticated.
+        assert!(sasl_success(Response::ERR_SASLALREADY));
+        assert!(sasl_failure(Response::ERR_SASLALREADY).is_none());
+
+        assert!(sasl_success(Response::RPL_SASLSUCCESS));
+        assert!(sasl_failure(Response::RPL_SASLSUCCESS).is_none());
+
+        // The real failures stay failures, and none of them reads as success.
+        for response in [
+            Response::ERR_SASLFAIL,
+            Response::ERR_SASLTOOLONG,
+            Response::ERR_SASLABORT,
+        ] {
+            assert!(sasl_failure(response).is_some(), "{response:?}");
+            assert!(!sasl_success(response), "{response:?}");
+        }
+
+        // An unrelated numeric is neither, so the waits keep reading.
+        assert!(sasl_failure(Response::RPL_WELCOME).is_none());
+        assert!(!sasl_success(Response::RPL_WELCOME));
     }
 
     // ── inbound AUTHENTICATE reassembly ─────────────────────
