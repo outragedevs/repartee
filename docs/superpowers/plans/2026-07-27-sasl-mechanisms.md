@@ -317,6 +317,21 @@ git commit -m "feat(sasl): expose every mechanism in the wizards, /set and docs"
 
 ---
 
+## What actually shipped beyond the plan
+
+Two things surfaced during implementation and were folded in:
+
+1. **The SCRAM acknowledgement** (spec §3a). The shipped SCRAM-SHA-256 never
+   sent the empty `AUTHENTICATE +` that answers the server-final, and waited for
+   `903` in an untimed loop — so it hung rather than authenticating, against
+   both atheme and Ergo. Fixed, and every wait in the SASL path is now bounded.
+   Also `AUTHENTICATE *` now aborts an exchange we failed locally, instead of
+   leaving the server holding a half-open session across `CAP END`.
+2. **`/server add`** (Task 4 named only the wizards and `/set`). It gained
+   `-sasl-key=<path>` — without it there was no command-line route to an ECDSA
+   key at all — and `-sasl-mechanism=` is validated through the same helper
+   `/set` uses.
+
 ## Self-Review
 
 **Spec coverage:** §1 SCRAM-over-hash → Task 1. §2 SASLprep → Task 1. §3 inbound
