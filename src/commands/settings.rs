@@ -640,7 +640,7 @@ fn parse_u16(raw: &str) -> Result<u16, String> {
 /// Unvalidated, a typo here fails silently at connect time: the mechanism does
 /// not resolve, SASL is skipped, and the user is left staring at an
 /// unauthenticated connection with no hint that `SCRAM-SHA256` is not a name.
-fn parse_sasl_mechanism(raw: &str) -> Result<String, String> {
+pub fn parse_sasl_mechanism(raw: &str) -> Result<String, String> {
     crate::irc::SaslMechanism::from_name(raw)
         .map(|m| m.name().to_string())
         .ok_or_else(|| {

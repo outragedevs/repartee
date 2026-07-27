@@ -7,7 +7,7 @@ use crate::storage;
 
 // === Configuration ===
 
-const SERVER_ADD_USAGE: &str = "Usage: /server add <id> <address>[:<port>] [port] [-tls] [-notls] [-tlsverify] [-notlsverify] [-auto] [-noauto] [-label=<name>] [-nick=<nick>] [-username=<user>] [-realname=<name>] [-password=<pass>] [-sasl=<user>:<pass>] [-sasl-user=<user>] [-sasl-pass=<pass>] [-sasl-mechanism=<mechanism>] [-channels=<ch1,ch2>] [-bind=<ip>] [-encoding=<codec>] [-autoreconnect=<bool>] [-reconnect-delay=<secs>] [-reconnect-max-retries=<n>] [-autosendcmd=<cmds>] [-client-cert=<path>]";
+const SERVER_ADD_USAGE: &str = "Usage: /server add <id> <address>[:<port>] [port] [-tls] [-notls] [-tlsverify] [-notlsverify] [-auto] [-noauto] [-label=<name>] [-nick=<nick>] [-username=<user>] [-realname=<name>] [-password=<pass>] [-sasl=<user>:<pass>] [-sasl-user=<user>] [-sasl-pass=<pass>] [-sasl-mechanism=<mechanism>] [-channels=<ch1,ch2>] [-bind=<ip>] [-encoding=<codec>] [-autoreconnect=<bool>] [-reconnect-delay=<secs>] [-reconnect-max-retries=<n>] [-autosendcmd=<cmds>] [-client-cert=<path>] [-sasl-key=<path>]";
 
 /// How a credential should be persisted to `.env`.
 #[derive(Debug, Clone)]
@@ -613,6 +613,10 @@ pub(crate) fn cmd_server(app: &mut App, args: &[String]) {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "flat flag dispatcher — one arm per /server add flag"
+)]
 fn parse_server_add_config(args: &[String]) -> Result<crate::config::ServerConfig, String> {
     let raw_address = args
         .first()
@@ -684,7 +688,13 @@ fn parse_server_add_config(args: &[String]) -> Result<crate::config::ServerConfi
         } else if let Some(value) = arg.strip_prefix("-sasl-pass=") {
             config.sasl_pass = Some(value.to_string());
         } else if let Some(value) = arg.strip_prefix("-sasl-mechanism=") {
-            config.sasl_mechanism = Some(value.to_string());
+            // Validated here rather than at connect time: an unrecognised name
+            // resolves to no mechanism, which would silently mean "no SASL"
+            // on a server the user believes they are authenticating to.
+            config.sasl_mechanism =
+                Some(super::settings::parse_sasl_mechanism(value).map_err(|e| {
+                    format!("-sasl-mechanism: {e}")
+                })?);
         } else if let Some(value) = arg.strip_prefix("-channels=") {
             config.channels = parse_csv(value);
         } else if let Some(value) = arg.strip_prefix("-bind=") {
@@ -701,6 +711,8 @@ fn parse_server_add_config(args: &[String]) -> Result<crate::config::ServerConfi
             config.autosendcmd = Some(value.to_string());
         } else if let Some(value) = arg.strip_prefix("-client-cert=") {
             config.client_cert_path = Some(value.to_string());
+        } else if let Some(value) = arg.strip_prefix("-sasl-key=") {
+            config.sasl_key_path = Some(value.to_string());
         } else if arg.starts_with('-') {
             return Err(format!("Unknown /server add flag: {arg}"));
         } else {
@@ -1578,6 +1590,7 @@ mod server_add_tests {
             "-reconnect-max-retries=3",
             "-autosendcmd=/msg NickServ identify",
             "-client-cert=/tmp/client.pem",
+            "-sasl-key=libera.pem",
         ]))
         .unwrap();
 
@@ -1605,6 +1618,42 @@ mod server_add_tests {
         );
         assert_eq!(config.sasl_mechanism.as_deref(), Some("SCRAM-SHA-256"));
         assert_eq!(config.client_cert_path.as_deref(), Some("/tmp/client.pem"));
+        assert_eq!(config.sasl_key_path.as_deref(), Some("libera.pem"));
+    }
+
+    #[test]
+    fn every_sasl_mechanism_is_accepted_by_server_add() {
+        for mech in crate::irc::SASL_MECHANISMS {
+            let config = parse_server_add_config(&args(&[
+                "irc.example.net",
+                &format!("-sasl-mechanism={}", mech.name()),
+            ]))
+            .unwrap_or_else(|e| panic!("{} should be accepted: {e}", mech.name()));
+            assert_eq!(config.sasl_mechanism.as_deref(), Some(mech.name()));
+        }
+
+        // Normalised to the canonical spelling the protocol code compares on.
+        let lower = parse_server_add_config(&args(&[
+            "irc.example.net",
+            "-sasl-mechanism=ecdsa-nist256p-challenge",
+        ]))
+        .unwrap();
+        assert_eq!(
+            lower.sasl_mechanism.as_deref(),
+            Some("ECDSA-NIST256P-CHALLENGE")
+        );
+    }
+
+    #[test]
+    fn a_misspelled_sasl_mechanism_is_rejected_by_server_add() {
+        // Unvalidated this parses fine and then silently means "no SASL".
+        let err = parse_server_add_config(&args(&[
+            "irc.example.net",
+            "-sasl-mechanism=SCRAM-SHA512",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("SCRAM-SHA-512"), "{err}");
+        assert!(err.contains("PLAIN"), "{err}");
     }
 
     #[test]
