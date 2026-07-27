@@ -296,6 +296,17 @@ fn wants_help(args: &[String]) -> bool {
         || args.get(1).map(String::as_str) == Some("help")
 }
 
+/// Trailing nudge for a malformed bind flag, for `-h` only: `--bind` says what
+/// the user meant, whereas `-h` is the spelling they may have reached for
+/// wanting usage.
+fn bind_help_hint(arg: &str) -> String {
+    if arg == "-h" {
+        format!(" — for usage, run `{} --help`", constants::APP_NAME)
+    } else {
+        String::new()
+    }
+}
+
 /// Parse `-h <ip>`, `--bind <ip>`, or `--bind=<ip>` out of the CLI
 /// argv. Returns `Ok(Some(ip))` if any form is present, `Ok(None)` if
 /// none is, and `Err(...)` if `-h` / `--bind` appears without a value.
@@ -321,11 +332,14 @@ fn parse_bind_override(args: &[String]) -> Result<Option<String>> {
             return Ok(Some(value.to_string()));
         }
         if arg == "-h" || arg == "--bind" {
-            let value = args
-                .get(i + 1)
-                .ok_or_else(|| eyre!("{arg} requires an argument, e.g. {arg} 192.0.2.10"))?;
+            let hint = bind_help_hint(arg);
+            let value = args.get(i + 1).ok_or_else(|| {
+                eyre!("{arg} requires an IP address, e.g. {arg} 192.0.2.10{hint}")
+            })?;
             if value.starts_with('-') {
-                return Err(eyre!("{arg} requires an IP address, got flag '{value}'"));
+                return Err(eyre!(
+                    "{arg} requires an IP address, got flag '{value}'{hint}"
+                ));
             }
             return Ok(Some(value.clone()));
         }
@@ -742,6 +756,9 @@ mod tests {
         assert_eq!(parse_bind_override(&args(&[])).unwrap(), None);
         assert_eq!(parse_bind_override(&args(&["-d"])).unwrap(), None);
         assert_eq!(parse_bind_override(&args(&["a", "1234"])).unwrap(), None);
+        // Guards the case where `--help` reaches this parser anyway: it must
+        // not be mistaken for a bind flag or a bind value.
+        assert_eq!(parse_bind_override(&args(&["--help"])).unwrap(), None);
     }
 
     #[test]
@@ -793,6 +810,22 @@ mod tests {
         // a "bind to literal -d" mistake.
         assert!(parse_bind_override(&args(&["-h", "-d"])).is_err());
         assert!(parse_bind_override(&args(&["--bind", "--detach"])).is_err());
+    }
+
+    #[test]
+    fn bare_dash_h_points_at_help() {
+        // `-h` is the bind flag, but it is also what most people type when they
+        // want usage. The error has to name the flag that gives it.
+        let err = format!("{:#}", parse_bind_override(&args(&["-h"])).unwrap_err());
+        assert!(err.contains("--help"), "unhelpful -h error: {err}");
+        let err = format!(
+            "{:#}",
+            parse_bind_override(&args(&["-h", "-d"])).unwrap_err()
+        );
+        assert!(err.contains("--help"), "unhelpful -h error: {err}");
+        // --bind is unambiguous — the user meant bind, so no help nudge.
+        let err = format!("{:#}", parse_bind_override(&args(&["--bind"])).unwrap_err());
+        assert!(!err.contains("--help"), "noisy --bind error: {err}");
     }
 
     #[test]
