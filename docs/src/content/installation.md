@@ -28,13 +28,19 @@ make release
 ## Command-line usage
 
 ```
-repartee                  # normal start (fork + terminal)
-repartee -d / --detach    # start headless (no terminal)
-repartee a [pid]          # attach to a running session
-repartee attach [pid]     # same as above
-repartee l / logs         # open read-only log browser
-repartee -v / --version   # print version
+repartee                     # normal start (fork + terminal)
+repartee -d / --detach       # start headless (no terminal)
+repartee a [pid]             # attach to a running session
+repartee attach [pid]        # same as above
+repartee l / logs            # open read-only log browser
+repartee -h / --bind <ip>    # bind outgoing connections to a local IP
+repartee -v / --version      # print version
+repartee --help / help       # print usage for all of the above
 ```
+
+`-h` is the bind-address flag, as in irssi — usage is `--help`. Run
+`repartee --help` for the same list plus the environment variables and file
+paths repartee uses.
 
 See [Sessions & Detach](sessions.html) for details on background sessions.
 
