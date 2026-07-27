@@ -712,7 +712,14 @@ mod tests {
     /// `#[cfg(test)]`, which both excludes the tests and keeps this scanner's
     /// own needles from matching themselves.
     fn dispatched_literals(src: &str) -> Vec<&str> {
-        let code = src.split("#[cfg(test)]").next().unwrap();
+        // Split on the test module header specifically, not on any `cfg(test)`
+        // attribute: a test-only helper added above `main` would otherwise
+        // truncate the scan and quietly stop covering the dispatch below it.
+        // `expect` rather than a fallback — if the marker moves, this test has
+        // to fail loudly instead of degrading into a weaker check.
+        let (code, _) = src
+            .split_once("#[cfg(test)]\nmod tests")
+            .expect("test module header moved — update the scanner's split marker");
         let mut found = Vec::new();
         for (idx, _) in code.match_indices("== ") {
             let rest = &code[idx + 3..];
