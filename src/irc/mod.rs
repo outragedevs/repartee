@@ -347,19 +347,29 @@ async fn await_authenticate_plus(stream: &mut irc::client::ClientStream) -> Resu
 }
 
 /// Wait for the terminal `903` / `904` of a SASL exchange.
+///
+/// Bounded by the same timeout as every other step: an unbounded wait here
+/// turns any server that expects one more frame from us into a hang with no
+/// diagnostic, which is exactly how the missing SCRAM acknowledgement below
+/// used to present.
 async fn await_sasl_result(stream: &mut irc::client::ClientStream) -> Result<()> {
-    while let Some(result) = stream.next().await {
-        let msg = result?;
-        if let Command::Response(response, _) = &msg.command {
-            if *response == Response::RPL_SASLSUCCESS {
-                return Ok(());
-            }
-            if let Some(err) = sasl_failure(*response) {
-                return Err(eyre!("{err}"));
+    let result = tokio::time::timeout(std::time::Duration::from_secs(SASL_TIMEOUT_SECS), async {
+        while let Some(result) = stream.next().await {
+            let msg = result?;
+            if let Command::Response(response, _) = &msg.command {
+                if *response == Response::RPL_SASLSUCCESS {
+                    return Ok(());
+                }
+                if let Some(err) = sasl_failure(*response) {
+                    return Err(eyre!("{err}"));
+                }
             }
         }
-    }
-    Err(eyre!("SASL authentication: connection closed unexpectedly"))
+        Err(eyre!("SASL authentication: connection closed unexpectedly"))
+    })
+    .await;
+
+    result.unwrap_or_else(|_| Err(eyre!("SASL authentication timed out waiting for a result")))
 }
 
 /// Default maximum message body length in bytes.
@@ -1099,6 +1109,17 @@ async fn run_sasl_scram(
             "SCRAM: server signature verification failed — possible MITM"
         ));
     }
+
+    // Step 6: acknowledge the server-final with an empty response.
+    //
+    // SASL framing alternates strictly — the server-final is a challenge like
+    // any other, and the server holds the outcome until we answer it. Both
+    // reference implementations do this: atheme's `scram` module returns
+    // CONTINUE after emitting `v=…` and only succeeds on the next (empty)
+    // client message, and Ergo comments the same wait outright. Omitting this
+    // frame does not fail the exchange — it stalls it, with the server waiting
+    // for a message the client will never send.
+    sender.send(Command::AUTHENTICATE("+".to_string()))?;
 
     await_sasl_result(stream).await
 }

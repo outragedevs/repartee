@@ -120,6 +120,35 @@ server cannot stream chunks forever.
 challenge (`PLAIN`, `EXTERNAL`) — those want to reject a non-`+` payload rather
 than decode it.
 
+### 3a. SCRAM never completed — the missing acknowledgement
+
+*Found during implementation, verified against both reference servers.*
+
+SASL framing alternates strictly: every server message is a challenge the
+client must answer. The SCRAM server-final (`v=<ServerSignature>`) is no
+exception — the server holds `903` until the client answers it with an empty
+`AUTHENTICATE +`.
+
+The shipped SCRAM-SHA-256 client never sent that frame. It verified the
+signature and then waited for a `903` the server was never going to send,
+in a loop with **no timeout**. Against atheme
+(`modules/saslserv/scram.c`: `scram_step_clientproof` sets `s->complete` and
+returns `ASASL_MRESULT_CONTINUE`; only the next, empty client message reaches
+`scram_step_success`) and against Ergo (`authScramHandler`, commented "wait for
+a final `AUTHENTICATE +` from the client to conclude authentication") the
+result is the same: the connection stalls in negotiation forever.
+
+So `SCRAM-SHA-256` did not work either, despite being listed as supported.
+`run_sasl_scram` now sends the acknowledgement, and **every** wait in the SASL
+path — including the terminal `903`/`904` wait, which had none — is bounded by
+`SASL_TIMEOUT_SECS`. A protocol mismatch has to surface as a diagnostic, not as
+a hang.
+
+`ECDSA-NIST256P-CHALLENGE` does *not* take this shape: atheme's
+`sasl_mech_ecdsa_step_verify_signature` returns `ASASL_MRESULT_SUCCESS` on a
+valid signature, so `903` follows the signature directly. Neither do `PLAIN`
+or `EXTERNAL`.
+
 ### 4. ECDSA-NIST256P-CHALLENGE
 
 New module `src/irc/sasl_ecdsa.rs`, and a matching `run_sasl_ecdsa` in
