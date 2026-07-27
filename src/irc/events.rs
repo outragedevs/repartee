@@ -9329,6 +9329,55 @@ mod tests {
     }
 
     #[test]
+    fn every_whois_line_puts_the_nick_first() {
+        // $0 is the nick for every whois_* key, so a theme author can write
+        // "$0" without checking which numeric produced the line.
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+
+        for (numeric, args) in [
+            ("307", vec!["me", "alice", "is a registered nick"]),
+            ("310", vec!["me", "alice", "is available for help"]),
+            ("320", vec!["me", "alice", "is a Cloaked Connection (Spoof)"]),
+            ("326", vec!["me", "alice", "has oper privs: +Aa"]),
+            ("327", vec!["me", "alice", "real.host 1.2.3.4"]),
+            ("335", vec!["me", "alice", "is a Bot"]),
+            ("337", vec!["me", "alice", "webirc gateway"]),
+            ("338", vec!["me", "alice", "is actually using host"]),
+            ("275", vec!["me", "alice", "is using a secure connection (SSL)"]),
+            ("378", vec!["me", "alice", "is connecting from *@h 1.2.3.4"]),
+            ("379", vec!["me", "alice", "is using modes +iwx"]),
+            ("377", vec!["me", "usermodes", "alice", "+iwx"]),
+        ] {
+            let msg = make_irc_msg(
+                None,
+                Command::Raw(
+                    numeric.to_string(),
+                    args.iter().map(|s| (*s).to_string()).collect(),
+                ),
+            );
+            handle_irc_message(&mut state, "test", &msg);
+
+            let buf = state.buffers.get("test/testserver").unwrap();
+            let m = buf.messages.back().unwrap();
+            assert!(
+                m.event_key
+                    .as_deref()
+                    .is_some_and(|k| k.starts_with("whois")),
+                "numeric {numeric} lost its whois key"
+            );
+            assert_eq!(
+                m.event_params
+                    .as_ref()
+                    .and_then(|p| p.first())
+                    .map(String::as_str),
+                Some("alice"),
+                "numeric {numeric} must put the nick in $0"
+            );
+        }
+    }
+
+    #[test]
     fn whois_raw_320_short_form_falls_to_catch_all() {
         // A 2-arg freeform numeric (no separate nick token) must not be
         // swallowed — it should fall through to the generic numeric
