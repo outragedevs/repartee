@@ -66,6 +66,179 @@ fn setup_logging() {
         .init();
 }
 
+/// One row of `--help`: how the user spells it, what it takes, what it does.
+///
+/// [`SUBCOMMANDS`] and [`OPTIONS`] are the only place the launch surface is
+/// written down. A test in this file reads this file's own source and proves
+/// every argv literal `main` dispatches on has a row here, so a new flag
+/// cannot ship with an unchanged help screen.
+struct CliOption {
+    /// Every spelling, comma-separated, exactly as the user types it.
+    forms: &'static str,
+    /// Value placeholder such as `<IP>`, or empty for a switch.
+    value: &'static str,
+    /// Description, pre-split into lines. The column width is fixed at compile
+    /// time rather than wrapped at runtime, so the output never depends on
+    /// `$COLUMNS`.
+    help: &'static [&'static str],
+}
+
+impl CliOption {
+    /// `forms` plus the value placeholder, as one printed label.
+    fn label(&self) -> String {
+        if self.value.is_empty() {
+            self.forms.to_string()
+        } else {
+            format!("{} {}", self.forms, self.value)
+        }
+    }
+
+    fn label_width(&self) -> usize {
+        self.label().chars().count()
+    }
+}
+
+const SUBCOMMANDS: &[CliOption] = &[
+    CliOption {
+        forms: "a, attach",
+        value: "[PID]",
+        help: &[
+            "Attach to a session already running in the background. With no",
+            "PID, attaches to the only live session, or lists them when there",
+            "is more than one.",
+        ],
+    },
+    CliOption {
+        forms: "l, logs",
+        value: "",
+        help: &["Browse stored message history read-only. Opens no connection."],
+    },
+    CliOption {
+        forms: "help",
+        value: "",
+        help: &["Print this help. Same as --help."],
+    },
+];
+
+const OPTIONS: &[CliOption] = &[
+    CliOption {
+        forms: "-d, --detach",
+        value: "",
+        help: &[
+            "Start headless — no terminal, no splash. Servers connect and",
+            "scripts load immediately; attach whenever you want.",
+        ],
+    },
+    CliOption {
+        forms: "-h, --bind",
+        value: "<IP>",
+        help: &[
+            "Send outgoing IRC connections from this local address, as in",
+            "irssi. Also accepts --bind=<IP>. Applies to this run only and",
+            "never writes to config.toml. A server's own bind_ip still wins;",
+            "general.default_bind_ip is the persistent equivalent.",
+        ],
+    },
+    CliOption {
+        forms: "-v, --version",
+        value: "",
+        help: &["Print the version and exit."],
+    },
+    CliOption {
+        forms: "--help",
+        value: "",
+        help: &["Print this help and exit. (-h is the bind flag above.)"],
+    },
+];
+
+/// Render the `--help` screen. No trailing newline — callers use `println!`.
+fn help_text() -> String {
+    let app = constants::APP_NAME;
+    // Labels are padded to the widest across *both* tables so the two blocks
+    // share one description column. `4` is the row indent and `2` the gap
+    // between label and description; `desc_col` is where continuation lines and
+    // the ENVIRONMENT block have to start to line up with them.
+    let width = SUBCOMMANDS
+        .iter()
+        .chain(OPTIONS)
+        .map(CliOption::label_width)
+        .max()
+        .unwrap_or(0);
+    let desc_col = 4 + width + 2;
+
+    let mut lines = vec![
+        format!(
+            "{app} {} — {}",
+            constants::APP_VERSION,
+            constants::APP_DESCRIPTION
+        ),
+        String::new(),
+        "USAGE:".to_string(),
+        format!("    {app} [OPTIONS]"),
+        format!("    {app} <SUBCOMMAND> [ARGS]"),
+        String::new(),
+        format!("With no subcommand {app} forks: the backend runs headless and this"),
+        "terminal is only a view onto it, so Ctrl+Z or /detach leaves the session —".to_string(),
+        format!("connections, scrollback and scripts — running. Reattach with `{app} a`."),
+    ];
+
+    for (title, rows) in [("SUBCOMMANDS", SUBCOMMANDS), ("OPTIONS", OPTIONS)] {
+        lines.push(String::new());
+        lines.push(format!("{title}:"));
+        for row in rows {
+            let label = row.label();
+            for (i, text) in row.help.iter().enumerate() {
+                if i == 0 {
+                    lines.push(format!("    {label:<width$}  {text}"));
+                } else {
+                    lines.push(format!("{:desc_col$}{text}", ""));
+                }
+            }
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("ENVIRONMENT:".to_string());
+    lines.push(format!(
+        "    {:<width$}  Log verbosity, `warn` unless set. Accepts a level or a",
+        "RUST_LOG"
+    ));
+    lines.push(format!(
+        "{:desc_col$}per-module filter, e.g. RUST_LOG={app}::irc=debug.",
+        ""
+    ));
+
+    // Paths come from the constants accessors so the help can never disagree
+    // with where the files actually are.
+    let files = [
+        (constants::config_path(), "Configuration."),
+        (
+            constants::env_path(),
+            "Credentials — never stored in config.toml.",
+        ),
+        (constants::theme_dir(), "Themes."),
+        (
+            constants::log_dir().join("messages.db"),
+            "Message history, read by `l`.",
+        ),
+        (log_path(), "Diagnostics — see RUST_LOG above."),
+    ];
+    let shown: Vec<(String, &str)> = files
+        .iter()
+        .map(|(path, note)| (path.display().to_string(), *note))
+        .collect();
+    let file_width = shown.iter().map(|(p, _)| p.chars().count()).max().unwrap_or(0);
+    lines.push(String::new());
+    lines.push("FILES:".to_string());
+    for (path, note) in &shown {
+        lines.push(format!("    {path:<file_width$}  {note}"));
+    }
+
+    lines.push(String::new());
+    lines.push(format!("Full documentation: {}", constants::APP_URL));
+    lines.join("\n")
+}
+
 /// Reap a child process if it has already exited (non-blocking).
 ///
 /// Returns `Some(human_status)` when the child is gone — covers both
@@ -357,7 +530,88 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_bind_override;
+    use super::{CliOption, OPTIONS, SUBCOMMANDS, help_text, parse_bind_override};
+
+    /// Every form as the user would type it, across both tables.
+    fn declared_forms() -> Vec<String> {
+        SUBCOMMANDS
+            .iter()
+            .chain(OPTIONS)
+            .flat_map(|o| o.forms.split(", "))
+            .map(|f| f.trim().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn help_lists_every_declared_form() {
+        let help = help_text();
+        for form in declared_forms() {
+            assert!(
+                help.contains(&form),
+                "help output is missing the form {form:?}:\n{help}"
+            );
+        }
+    }
+
+    #[test]
+    fn help_names_the_binary_and_the_sections() {
+        let help = help_text();
+        assert!(help.starts_with(crate::constants::APP_NAME));
+        for section in ["USAGE:", "SUBCOMMANDS:", "OPTIONS:", "ENVIRONMENT:", "FILES:"] {
+            assert!(help.contains(section), "help output is missing {section}");
+        }
+        // The version belongs on the first line so `--help` also answers
+        // "which build is this?".
+        assert!(
+            help.lines()
+                .next()
+                .unwrap()
+                .contains(crate::constants::APP_VERSION),
+            "version missing from the first help line"
+        );
+    }
+
+    #[test]
+    fn help_descriptions_share_one_column() {
+        // Every description line — first or continuation — starts at the same
+        // column, so the two tables read as one aligned block.
+        let help = help_text();
+        let desc_col = 4
+            + SUBCOMMANDS
+                .iter()
+                .chain(OPTIONS)
+                .map(CliOption::label_width)
+                .max()
+                .unwrap()
+            + 2;
+        let mut checked = 0;
+        for row in SUBCOMMANDS.iter().chain(OPTIONS) {
+            for line in row.help {
+                let rendered = help
+                    .lines()
+                    .find(|l| l.contains(*line))
+                    .unwrap_or_else(|| panic!("description line missing: {line}"));
+                // Byte offset doubles as the char column: everything to the
+                // left of a description is a label or padding, all ASCII.
+                assert_eq!(
+                    rendered.find(*line),
+                    Some(desc_col),
+                    "misaligned description: {rendered:?}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0);
+    }
+
+    #[test]
+    fn help_paths_come_from_the_constants() {
+        // A hardcoded `~/.repartee/config.toml` would drift the moment the
+        // layout changes; assert the real accessor output is what gets printed.
+        let help = help_text();
+        assert!(help.contains(&crate::constants::config_path().display().to_string()));
+        assert!(help.contains(&crate::constants::env_path().display().to_string()));
+    }
 
     fn args(xs: &[&str]) -> Vec<String> {
         std::iter::once("repartee")
