@@ -240,7 +240,7 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
         // render unthemed outside the WHOIS block. Shorter-than-3-arg forms
         // (no separate nick token) intentionally fall through to that
         // catch-all so the line still displays.
-        Command::Raw(cmd, args) if args.len() >= 3 && whois_freeform_key(cmd).is_some() => {
+        Command::Raw(cmd, args) if args.len() >= 3 && whois_freeform_key(cmd, args).is_some() => {
             handle_whois_freeform(state, conn_id, cmd, args);
         }
         // ircnet.com/extended-join (IRCnet ircd 2.12.0):
@@ -4367,15 +4367,31 @@ fn handle_whois_account(state: &mut AppState, conn_id: &str, args: &[String]) {
 /// Theme event key for WHOIS numerics whose payload is freeform prose and
 /// which irc-proto has no `Response` variant for. Single source of truth for
 /// both the dispatch guard and the per-numeric theming.
-fn whois_freeform_key(numeric: &str) -> Option<&'static str> {
+///
+/// `args` is the full numeric argument list (`[our_nick, ...]`). It is only
+/// inspected for 377, which is `RPL_SPAM` (post-MOTD announcement text) in
+/// `AustHex` and a WHOIS usermode line elsewhere. The `usermodes` literal is a
+/// protocol token, not admin-authored prose, so keying on it is safe.
+fn whois_freeform_key(numeric: &str, args: &[String]) -> Option<&'static str> {
     match numeric {
         "307" => Some("whois_registered"),
         "310" => Some("whois_help"),
-        "320" => Some("whois_special"),
         "335" => Some("whois_bot"),
         "338" => Some("whois_actually"),
-        "378" => Some("whois_host"),
-        "379" => Some("whois_modes"),
+        // Prose with no dedicated key: 320 is IRCnet's catch-all
+        // `RPL_WHOISEXTRA` (cloak and TLS lines both, with server-configured
+        // text), 337 is hybrid's `RPL_WHOISTEXT` webirc info, and 275 is
+        // `RPL_USINGSSL` on Bahamut but `RPL_STATSDLINE` on hybrid/charybdis —
+        // stateless numeric dispatch cannot tell those two apart, so it
+        // renders 275 as prose rather than asserting "secure: TLS" over a
+        // /stats line.
+        "320" | "337" | "275" => Some("whois_special"),
+        // 378 is Unreal's `RPL_WHOISHOST`, 327 rusnet's.
+        "327" | "378" => Some("whois_host"),
+        // 379 is Unreal's `RPL_WHOISMODES`; 326 carries oper privileges as a
+        // mode string; 377 is the `<me> usermodes <nick> <modes>` form.
+        "326" | "379" => Some("whois_modes"),
+        "377" if args.get(1).is_some_and(|a| a == "usermodes") => Some("whois_modes"),
         _ => None,
     }
 }
@@ -4422,20 +4438,24 @@ pub fn join_fields(command: &Command) -> Option<JoinFields<'_>> {
 /// text...]. Middle args (338's host/ip values) join into the text so every
 /// known wire variant renders.
 fn handle_whois_freeform(state: &mut AppState, conn_id: &str, numeric: &str, args: &[String]) {
-    let Some(event_key) = whois_freeform_key(numeric) else {
+    let Some(event_key) = whois_freeform_key(numeric, args) else {
         return;
     };
-    if args.len() < 3 {
+    // 377's WHOIS form is `<me> usermodes <nick> <modes>` — the nick sits one
+    // position further right than in every other freeform numeric, so reading
+    // args[1] there would put the `usermodes` literal in the nick slot.
+    let (nick_idx, text_from) = if numeric == "377" { (2, 3) } else { (1, 2) };
+    if args.len() <= text_from {
         return;
     }
-    let text = args[2..].join(" ");
+    let text = args[text_from..].join(" ");
     let target_buf = whois_buffer(state, conn_id);
     emit_event(
         state,
         &target_buf,
         event_key,
         format!("%Z565f89  %Za9b1d6{text}%N"),
-        vec![args[1].clone(), text],
+        vec![args[nick_idx].clone(), text],
     );
 }
 
@@ -9172,6 +9192,92 @@ mod tests {
                 "numeric {numeric} params"
             );
         }
+    }
+
+    #[test]
+    fn whois_extra_freeform_numerics_get_event_keys() {
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+
+        for (numeric, expected_key, text) in [
+            ("326", "whois_modes", "has oper privs: +Aa"),
+            ("327", "whois_host", "real.host.example 1.2.3.4 Real hostname/IP"),
+            ("337", "whois_special", "is connected via a webirc gateway"),
+            ("275", "whois_special", "is using a secure connection (SSL)"),
+        ] {
+            let msg = make_irc_msg(
+                None,
+                Command::Raw(
+                    numeric.to_string(),
+                    vec!["me".to_string(), "alice".to_string(), text.to_string()],
+                ),
+            );
+            handle_irc_message(&mut state, "test", &msg);
+
+            let buf = state.buffers.get("test/testserver").unwrap();
+            let m = buf.messages.back().unwrap();
+            assert_eq!(
+                m.event_key.as_deref(),
+                Some(expected_key),
+                "numeric {numeric} should map to {expected_key}"
+            );
+            assert_eq!(
+                m.event_params.as_deref(),
+                Some(&["alice".to_string(), text.to_string()][..]),
+                "numeric {numeric} params"
+            );
+        }
+    }
+
+    #[test]
+    fn whois_377_maps_to_modes_only_with_usermodes_literal() {
+        // AustHex uses 377 as RPL_SPAM for post-MOTD announcement text. Only
+        // the `<me> usermodes <nick> <modes>` shape is a WHOIS usermode line,
+        // and `usermodes` is a protocol literal rather than admin-authored
+        // prose, so keying on it is safe.
+        let mut state = make_test_state();
+        state.set_active_buffer("test/testserver");
+
+        let whois_form = make_irc_msg(
+            None,
+            Command::Raw(
+                "377".to_string(),
+                vec![
+                    "me".to_string(),
+                    "usermodes".to_string(),
+                    "alice".to_string(),
+                    "+iwx".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &whois_form);
+        let buf = state.buffers.get("test/testserver").unwrap();
+        let m = buf.messages.back().unwrap();
+        assert_eq!(m.event_key.as_deref(), Some("whois_modes"));
+        assert_eq!(
+            m.event_params.as_deref(),
+            Some(&["alice".to_string(), "+iwx".to_string()][..]),
+            "377 must put the nick in $0, not the `usermodes` literal"
+        );
+
+        let spam_form = make_irc_msg(
+            None,
+            Command::Raw(
+                "377".to_string(),
+                vec![
+                    "me".to_string(),
+                    "alice".to_string(),
+                    "Network announcement text".to_string(),
+                ],
+            ),
+        );
+        handle_irc_message(&mut state, "test", &spam_form);
+        let buf = state.buffers.get("test/testserver").unwrap();
+        let m = buf.messages.back().unwrap();
+        assert_eq!(
+            m.event_key, None,
+            "RPL_SPAM form of 377 must not be themed as a WHOIS line"
+        );
     }
 
     #[test]
