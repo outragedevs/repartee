@@ -237,6 +237,7 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 "autosendcmd" => server.autosendcmd.clone().unwrap_or_default(),
                 "sasl_mechanism" => server.sasl_mechanism.clone().unwrap_or_default(),
                 "client_cert_path" => server.client_cert_path.clone().unwrap_or_default(),
+                "sasl_key_path" => server.sasl_key_path.clone().unwrap_or_default(),
                 _ => return None,
             };
             Some(Resolved {
@@ -585,8 +586,9 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
                     );
                 }
                 "autosendcmd" => server.autosendcmd = Some(raw.to_string()),
-                "sasl_mechanism" => server.sasl_mechanism = Some(raw.to_string()),
+                "sasl_mechanism" => server.sasl_mechanism = Some(parse_sasl_mechanism(raw)?),
                 "client_cert_path" => server.client_cert_path = Some(raw.to_string()),
+                "sasl_key_path" => server.sasl_key_path = Some(raw.to_string()),
                 _ => return Err(format!("Unknown field: {path}")),
             }
         }
@@ -631,6 +633,23 @@ fn parse_bool(raw: &str) -> Result<bool, String> {
 
 fn parse_u16(raw: &str) -> Result<u16, String> {
     raw.parse().map_err(|_| "Expected a number".to_string())
+}
+
+/// Validate a `sasl_mechanism` value, normalising it to its canonical spelling.
+///
+/// Unvalidated, a typo here fails silently at connect time: the mechanism does
+/// not resolve, SASL is skipped, and the user is left staring at an
+/// unauthenticated connection with no hint that `SCRAM-SHA256` is not a name.
+fn parse_sasl_mechanism(raw: &str) -> Result<String, String> {
+    crate::irc::SaslMechanism::from_name(raw)
+        .map(|m| m.name().to_string())
+        .ok_or_else(|| {
+            let names: Vec<&str> = crate::irc::SASL_MECHANISMS
+                .iter()
+                .map(|m| m.name())
+                .collect();
+            format!("Expected one of: {}", names.join(", "))
+        })
 }
 
 fn split_list(raw: &str) -> Vec<String> {
@@ -758,6 +777,7 @@ const SERVER_FIELDS: &[&str] = &[
     "autosendcmd",
     "sasl_mechanism",
     "client_cert_path",
+    "sasl_key_path",
 ];
 
 /// Get all valid setting paths for tab completion.
@@ -1410,6 +1430,112 @@ mod tests {
         let paths = get_setting_paths(&config);
         assert!(paths.contains(&"servers.test.port".to_string()));
         assert!(paths.contains(&"servers.test.tls".to_string()));
+        assert!(paths.contains(&"servers.test.sasl_key_path".to_string()));
+    }
+
+    /// A server entry that `/set` can be pointed at.
+    fn config_with_server() -> AppConfig {
+        let mut config = default_config();
+        config.servers.insert(
+            "net".to_string(),
+            crate::config::ServerConfig {
+                label: "Net".to_string(),
+                address: "irc.test.net".to_string(),
+                port: 6697,
+                tls: true,
+                tls_verify: true,
+                autoconnect: false,
+                channels: vec![],
+                nick: None,
+                username: None,
+                realname: None,
+                password: None,
+                sasl_user: None,
+                sasl_pass: None,
+                bind_ip: None,
+                encoding: None,
+                auto_reconnect: None,
+                reconnect_delay: None,
+                reconnect_max_retries: None,
+                autosendcmd: None,
+                sasl_mechanism: None,
+                client_cert_path: None,
+                sasl_key_path: None,
+            },
+        );
+        config
+    }
+
+    #[test]
+    fn every_sasl_mechanism_can_be_set_and_read_back() {
+        let mut config = config_with_server();
+        for mech in crate::irc::SASL_MECHANISMS {
+            set_config_value(&mut config, "servers.net.sasl_mechanism", mech.name())
+                .unwrap_or_else(|e| panic!("{} should be settable: {e}", mech.name()));
+            assert_eq!(
+                get_config_value(&config, "servers.net.sasl_mechanism")
+                    .unwrap()
+                    .value,
+                mech.name()
+            );
+        }
+
+        // Lowercase input is normalised to the canonical spelling, so the
+        // stored value always matches what the protocol code compares against.
+        set_config_value(&mut config, "servers.net.sasl_mechanism", "scram-sha-512").unwrap();
+        assert_eq!(
+            get_config_value(&config, "servers.net.sasl_mechanism")
+                .unwrap()
+                .value,
+            "SCRAM-SHA-512"
+        );
+    }
+
+    #[test]
+    fn a_misspelled_sasl_mechanism_is_rejected_with_the_valid_names() {
+        let mut config = config_with_server();
+        // Unvalidated, this would be accepted and then silently skip SASL at
+        // connect time — the failure mode this check exists to prevent.
+        let err = set_config_value(&mut config, "servers.net.sasl_mechanism", "SCRAM-SHA256")
+            .unwrap_err();
+        assert!(err.contains("SCRAM-SHA-256"), "{err}");
+        assert!(err.contains("PLAIN"), "{err}");
+        assert!(err.contains("ECDSA-NIST256P-CHALLENGE"), "{err}");
+        assert!(config.servers["net"].sasl_mechanism.is_none());
+
+        // We do not implement channel binding, so -PLUS must not be storable.
+        assert!(
+            set_config_value(&mut config, "servers.net.sasl_mechanism", "SCRAM-SHA-256-PLUS")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn the_ecdsa_key_path_is_settable_and_survives_a_config_round_trip() {
+        let mut config = config_with_server();
+        set_config_value(&mut config, "servers.net.sasl_key_path", "libera.pem").unwrap();
+        assert_eq!(
+            get_config_value(&config, "servers.net.sasl_key_path")
+                .unwrap()
+                .value,
+            "libera.pem"
+        );
+        // A path, not a credential — so unlike sasl_pass it belongs in
+        // config.toml and must survive being written and read back.
+        assert!(
+            !get_config_value(&config, "servers.net.sasl_key_path")
+                .unwrap()
+                .is_credential
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        crate::config::save_config(&path, &config).unwrap();
+        let reloaded = crate::config::load_config(&path).unwrap();
+        assert_eq!(
+            reloaded.servers["net"].sasl_key_path.as_deref(),
+            Some("libera.pem")
+        );
     }
 
     #[test]

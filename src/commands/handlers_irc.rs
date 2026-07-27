@@ -128,7 +128,7 @@ pub(crate) fn cmd_connect(app: &mut App, args: &[String]) {
         autosendcmd: None,
         sasl_mechanism: None,
         client_cert_path: None,
-                sasl_key_path: None,
+        sasl_key_path: None,
     };
 
     spawn_connection(app, &conn_id, &adhoc_config);

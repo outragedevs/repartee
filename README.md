@@ -25,7 +25,7 @@ Terminal, mobile web, and desktop web — all in real-time sync:
 
 - **Full IRC protocol** — channels, queries, CTCP, TLS, channel modes, ban/except/invex lists
 - **IRCv3** — server-time, echo-message, away-notify, account-notify, chghost, multi-prefix, BATCH netsplit grouping, message-tags, and more
-- **SASL** — PLAIN, EXTERNAL (client certificate), and SCRAM-SHA-256
+- **SASL** — PLAIN, EXTERNAL (client certificate), SCRAM-SHA-1/256/512, and ECDSA-NIST256P-CHALLENGE, auto-detected strongest-first
 - **irssi-style navigation** — Esc+1–9 window switching, aliases, familiar `/commands`
 - **Mouse support** — click buffers and nicks, scroll chat history
 - **Lua 5.4 scripting** — event bus, custom commands, full IRC and state access, sandboxed per-script environments

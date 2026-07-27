@@ -68,7 +68,9 @@ autosendcmd = "MSG NickServ identify pass; WAIT 2000; MODE $N +i"
 # nick = "othernick"           # per-server nick override
 # sasl_user = "mynick"
 # sasl_pass = "hunter2"
-# sasl_mechanism = "SCRAM-SHA-256"  # PLAIN (default), EXTERNAL, SCRAM-SHA-256
+# sasl_mechanism = "SCRAM-SHA-512"  # omit to auto-detect the strongest offered
+# client_cert_path = "libera-cert.pem"  # TLS client cert, for EXTERNAL/CertFP
+# sasl_key_path = "libera-key.pem"      # P-256 key, for ECDSA-NIST256P-CHALLENGE
 # bind_ip = "192.168.1.100"   # bind to specific local IP (vhost)
 # auto_reconnect = true
 # reconnect_delay = 30
@@ -162,7 +164,34 @@ Configure which items appear in the status line. Available items: `active_window
 
 Each server gets a unique identifier (the key after `servers.`). The `channels` array lists channels to auto-join on connect. Channels with keys use the format `"#channel key"`.
 
-Set `sasl_mechanism` to override automatic mechanism selection. Available: `PLAIN` (default), `EXTERNAL` (client TLS certificate), `SCRAM-SHA-256` (secure challenge-response).
+#### SASL
+
+Leave `sasl_mechanism` unset and repartee picks the strongest mechanism the server offers that it holds a credential for, in this order:
+
+| Mechanism | Needs | Notes |
+|---|---|---|
+| `EXTERNAL` | `client_cert_path` | CertFP — the TLS client certificate proves who you are. Nothing is sent. |
+| `ECDSA-NIST256P-CHALLENGE` | `sasl_key_path` + `sasl_user` | Signs a server challenge with a NIST P-256 key. Nothing is sent. |
+| `SCRAM-SHA-512` | `sasl_user` + `sasl_pass` | Challenge-response; the password never crosses the wire. |
+| `SCRAM-SHA-256` | `sasl_user` + `sasl_pass` | As above. |
+| `SCRAM-SHA-1` | `sasl_user` + `sasl_pass` | As above. Still beats `PLAIN`. |
+| `PLAIN` | `sasl_user` + `sasl_pass` | Sends the password. Last resort — always over TLS. |
+
+Set `sasl_mechanism` to one of those names to pin it. A pinned mechanism the server does not offer means **no SASL at all**, never a quiet downgrade to a weaker one. The `-PLUS` (channel-binding) variants are not implemented and are never selected.
+
+`client_cert_path` and `sasl_key_path` are separate keys with separate jobs: the first is presented during the TLS handshake, the second is only ever used to sign a challenge. Relative paths resolve against `~/.repartee/certs`.
+
+To use `ECDSA-NIST256P-CHALLENGE`, generate a key and register its public half:
+
+```bash
+openssl ecparam -genkey -name prime256v1 -noout -out ~/.repartee/certs/libera-key.pem
+chmod 600 ~/.repartee/certs/libera-key.pem
+# the compressed public key, base64 — what NickServ wants
+openssl ec -in ~/.repartee/certs/libera-key.pem -pubout -conv_form compressed -outform DER \
+  | tail -c 33 | base64
+```
+
+Then `/msg NickServ SET PUBKEY <that base64>` and set `sasl_key_path = "libera-key.pem"`. Both PEM encodings load — `ecdsatool`'s SEC1 (`BEGIN EC PRIVATE KEY`) and OpenSSL 3's PKCS#8 (`BEGIN PRIVATE KEY`).
 
 Set `bind_ip` to bind to a specific local IP address when connecting. Useful for multi-IP hosts (vhosts/bouncers). Supports both IPv4 and IPv6 — DNS resolution automatically filters to match the address family. Can also be set per-connection with `/connect -bind=<ip>` or `/server add -bind=<ip>`.
 
