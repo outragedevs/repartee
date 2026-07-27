@@ -35,6 +35,7 @@ pub fn ServerWizard() -> impl IntoView {
     let reconnect_max_retries = RwSignal::new(String::new());
     let autosendcmd = RwSignal::new(String::new());
     let client_cert_path = RwSignal::new(String::new());
+    let sasl_key_path = RwSignal::new(String::new());
     let page = RwSignal::new(0u8);
     let error = RwSignal::new(Option::<String>::None);
 
@@ -62,6 +63,7 @@ pub fn ServerWizard() -> impl IntoView {
             reconnect_max_retries.set(String::new());
             autosendcmd.set(String::new());
             client_cert_path.set(String::new());
+            sasl_key_path.set(String::new());
             page.set(0);
             error.set(None);
         }
@@ -118,6 +120,7 @@ pub fn ServerWizard() -> impl IntoView {
             sasl_mechanism: sasl_mechanism.get(),
             autosendcmd: autosendcmd.get(),
             client_cert_path: client_cert_path.get(),
+            sasl_key_path: sasl_key_path.get(),
             auto_reconnect: auto_reconnect.get(),
             reconnect_delay: reconnect_delay.get(),
             reconnect_max_retries: reconnect_max_retries.get(),
@@ -175,6 +178,7 @@ pub fn ServerWizard() -> impl IntoView {
                         {text_row("Reconnect max retries", reconnect_max_retries)}
                         {text_row("Autosendcmd", autosendcmd)}
                         {text_row("Client cert path", client_cert_path)}
+                        {text_row("SASL ECDSA key path", sasl_key_path)}
                     </Show>
                 </div>
                 {move || error.get().map(|e| view! { <p class="wizard-error" role="alert">{e}</p> })}
@@ -237,7 +241,19 @@ fn check_row(label: &'static str, sig: RwSignal<bool>) -> impl IntoView {
 }
 
 fn select_row(label: &'static str, sig: RwSignal<String>) -> impl IntoView {
-    let opts = ["Auto", "PLAIN", "EXTERNAL"];
+    // Mirrors `crate::irc::SASL_MECHANISMS` in the native crate, strongest
+    // first, with "Auto" leading. The two live in separate crates and cannot
+    // share the constant, so a test in the native crate reads this file and
+    // fails if a mechanism is missing here.
+    let opts = [
+        "Auto",
+        "EXTERNAL",
+        "ECDSA-NIST256P-CHALLENGE",
+        "SCRAM-SHA-512",
+        "SCRAM-SHA-256",
+        "SCRAM-SHA-1",
+        "PLAIN",
+    ];
     view! {
         <label class="wizard-row">
             <span class="wizard-label">{label}</span>

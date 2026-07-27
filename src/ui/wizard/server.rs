@@ -8,7 +8,18 @@ use super::{Field, FieldKind, FieldValue, WizardMode, WizardState};
 use crate::commands::handlers_admin::CredUpdate;
 use crate::config::ServerConfig;
 
-const SASL_MECHS: &[&str] = &["Auto", "PLAIN", "EXTERNAL"];
+/// The SASL mechanism picker: `Auto` plus every mechanism we implement, in the
+/// same strongest-first order auto-detection uses.
+///
+/// Built from [`crate::irc::SASL_MECHANISMS`] rather than written out, so a
+/// mechanism cannot be added to the protocol and forgotten in the UI. `Auto`
+/// leads, and is index 0 — [`mech_index`] and [`mech_from_choice`] derive
+/// everything else from this slice by position instead of hardcoding indices.
+fn sasl_mechs() -> Vec<&'static str> {
+    std::iter::once("Auto")
+        .chain(crate::irc::SASL_MECHANISMS.iter().map(|m| m.name()))
+        .collect()
+}
 
 /// Slugify a network name into a server id: lowercase, non-`[a-z0-9_]` runs
 /// collapse to a single `_`, leading/trailing `_` trimmed.
@@ -50,20 +61,21 @@ pub fn unique_id(base: &str, servers: &HashMap<String, ServerConfig>) -> String 
     }
 }
 
+/// Index of a configured mechanism in [`sasl_mechs`]; 0 (`Auto`) for anything
+/// unset or unrecognised, so a hand-edited `config.toml` cannot land the picker
+/// out of range.
 fn mech_index(m: Option<&str>) -> usize {
-    match m {
-        Some("PLAIN") => 1,
-        Some("EXTERNAL") => 2,
-        _ => 0,
-    }
+    m.and_then(|name| sasl_mechs().iter().position(|c| c.eq_ignore_ascii_case(name)))
+        .unwrap_or(0)
 }
 
+/// The picker's selection as a `sasl_mechanism` value: `None` for `Auto`.
 fn mech_from_choice(choice: &str) -> Option<String> {
-    match choice {
-        "PLAIN" => Some("PLAIN".to_string()),
-        "EXTERNAL" => Some("EXTERNAL".to_string()),
-        _ => None,
-    }
+    sasl_mechs()
+        .into_iter()
+        .skip(1)
+        .find(|c| c.eq_ignore_ascii_case(choice))
+        .map(str::to_string)
 }
 
 /// Trim and convert empty to `None`.
@@ -103,7 +115,7 @@ fn schema(edit: bool) -> Vec<Field> {
         Field { key: "password", label: "Server password", kind: FieldKind::Masked, page: 1, required: false, readonly: false },
         text("sasl_user", "SASL user", 1),
         Field { key: "sasl_pass", label: "SASL pass", kind: FieldKind::Masked, page: 1, required: false, readonly: false },
-        Field { key: "sasl_mechanism", label: "SASL mechanism", kind: FieldKind::Select(SASL_MECHS.to_vec()), page: 1, required: false, readonly: false },
+        Field { key: "sasl_mechanism", label: "SASL mechanism", kind: FieldKind::Select(sasl_mechs()), page: 1, required: false, readonly: false },
         text("encoding", "Encoding", 1),
         Field { key: "autoconnect", label: "Autoconnect", kind: FieldKind::Toggle, page: 1, required: false, readonly: false },
         Field { key: "auto_reconnect", label: "Auto-reconnect", kind: FieldKind::Toggle, page: 1, required: false, readonly: false },
@@ -111,6 +123,7 @@ fn schema(edit: bool) -> Vec<Field> {
         Field { key: "reconnect_max_retries", label: "Reconnect max retries", kind: FieldKind::Number, page: 1, required: false, readonly: false },
         text("autosendcmd", "Autosendcmd", 1),
         text("client_cert_path", "Client cert path", 1),
+        text("sasl_key_path", "SASL ECDSA key path", 1),
     ]
 }
 
@@ -162,6 +175,7 @@ fn edit_values(fields: &[Field], id: &str, s: &ServerConfig) -> Vec<FieldValue> 
             ("client_cert_path", _) => {
                 FieldValue::Text(s.client_cert_path.clone().unwrap_or_default())
             }
+            ("sasl_key_path", _) => FieldValue::Text(s.sasl_key_path.clone().unwrap_or_default()),
             (_, FieldKind::Toggle) => FieldValue::Bool(false),
             (_, FieldKind::Select(_)) => FieldValue::Choice(0),
             // Masked credential fields (password / sasl_pass) and any other
@@ -283,6 +297,7 @@ pub fn build(w: &WizardState, servers: &HashMap<String, ServerConfig>) -> Result
         autosendcmd: opt(w.text("autosendcmd")),
         sasl_mechanism: mech_from_choice(w.choice_str("sasl_mechanism")),
         client_cert_path: opt(w.text("client_cert_path")),
+        sasl_key_path: opt(w.text("sasl_key_path")),
     };
 
     Ok(BuiltServer {
@@ -320,6 +335,7 @@ pub struct WebServerForm {
     pub sasl_mechanism: String,
     pub autosendcmd: String,
     pub client_cert_path: String,
+    pub sasl_key_path: String,
     pub auto_reconnect: bool,
     pub reconnect_delay: String,
     pub reconnect_max_retries: String,
@@ -404,6 +420,7 @@ pub fn build_from_web(
         autosendcmd: opt(&form.autosendcmd),
         sasl_mechanism: mech_from_choice(&form.sasl_mechanism),
         client_cert_path: opt(&form.client_cert_path),
+        sasl_key_path: opt(&form.sasl_key_path),
     };
 
     Ok(BuiltServer {
@@ -464,6 +481,7 @@ mod tests {
             autosendcmd: None,
             sasl_mechanism: None,
             client_cert_path: None,
+                sasl_key_path: None,
         }
     }
 
@@ -522,11 +540,69 @@ mod tests {
         set_text(&mut w, "network", "Net");
         set_text(&mut w, "address", "host");
         set_text(&mut w, "channels", "#rust, #repartee ,, #ratatui");
+        // Pick PLAIN by name — the picker is ordered strongest-first, so its
+        // index moves whenever a mechanism is added.
         let mech_i = w.fields.iter().position(|f| f.key == "sasl_mechanism").unwrap();
-        w.values[mech_i] = FieldValue::Choice(1); // PLAIN
+        let plain = sasl_mechs().iter().position(|m| *m == "PLAIN").unwrap();
+        w.values[mech_i] = FieldValue::Choice(plain);
         let built = build(&w, &empty_servers()).unwrap();
         assert_eq!(built.config.channels, vec!["#rust", "#repartee", "#ratatui"]);
         assert_eq!(built.config.sasl_mechanism.as_deref(), Some("PLAIN"));
+    }
+
+    #[test]
+    fn the_picker_offers_every_mechanism_and_round_trips_each_one() {
+        let mechs = sasl_mechs();
+        assert_eq!(mechs[0], "Auto", "Auto must lead, at index 0");
+        for mech in crate::irc::SASL_MECHANISMS {
+            assert!(
+                mechs.contains(&mech.name()),
+                "the picker is missing {}",
+                mech.name()
+            );
+        }
+
+        // Every entry survives index → name → config value → index.
+        for (index, name) in mechs.iter().enumerate() {
+            let configured = mech_from_choice(name);
+            if index == 0 {
+                assert_eq!(configured, None, "Auto means 'no override'");
+            } else {
+                assert_eq!(configured.as_deref(), Some(*name));
+            }
+            assert_eq!(mech_index(configured.as_deref()), index, "{name}");
+        }
+
+        // A hand-edited config.toml cannot push the picker out of range.
+        assert_eq!(mech_index(Some("NOT-A-MECHANISM")), 0);
+        assert_eq!(mech_index(None), 0);
+        // …and is matched case-insensitively when it is a real one.
+        assert_eq!(
+            mech_index(Some("scram-sha-512")),
+            mech_index(Some("SCRAM-SHA-512"))
+        );
+    }
+
+    /// The web UI is a separate crate and cannot share
+    /// [`crate::irc::SASL_MECHANISMS`], so its picker is a hand-written mirror.
+    /// Read it here rather than trust it: a mechanism added to the protocol but
+    /// missing from the web wizard is invisible until a user goes looking for
+    /// it in a dropdown that does not have it.
+    #[test]
+    fn the_web_wizard_offers_the_same_mechanisms() {
+        let source = include_str!("../../../web-ui/src/components/wizard.rs");
+        for mech in crate::irc::SASL_MECHANISMS {
+            assert!(
+                source.contains(&format!("\"{}\"", mech.name())),
+                "web-ui/src/components/wizard.rs is missing {} — its mechanism \
+                 list has drifted from SASL_MECHANISMS",
+                mech.name()
+            );
+        }
+        assert!(
+            source.contains("sasl_key_path"),
+            "the web wizard has no ECDSA key field"
+        );
     }
 
     #[test]
@@ -647,8 +723,9 @@ mod tests {
             reconnect_delay: Some(42),
             reconnect_max_retries: Some(7),
             autosendcmd: Some("/msg NickServ identify".into()),
-            sasl_mechanism: Some("PLAIN".into()),
+            sasl_mechanism: Some("SCRAM-SHA-512".into()),
             client_cert_path: Some("/tmp/cert.pem".into()),
+            sasl_key_path: Some("libera.pem".into()),
         };
         servers.insert("full".into(), s.clone());
 
@@ -672,8 +749,9 @@ mod tests {
         assert_eq!(c.reconnect_delay, Some(42));
         assert_eq!(c.reconnect_max_retries, Some(7));
         assert_eq!(c.autosendcmd.as_deref(), Some("/msg NickServ identify"));
-        assert_eq!(c.sasl_mechanism.as_deref(), Some("PLAIN"));
+        assert_eq!(c.sasl_mechanism.as_deref(), Some("SCRAM-SHA-512"));
         assert_eq!(c.client_cert_path.as_deref(), Some("/tmp/cert.pem"));
+        assert_eq!(c.sasl_key_path.as_deref(), Some("libera.pem"));
         // Masked creds are untouched in edit → kept from the existing entry.
         assert_eq!(c.password.as_deref(), Some("secret"));
         assert_eq!(c.sasl_pass.as_deref(), Some("saslsecret"));

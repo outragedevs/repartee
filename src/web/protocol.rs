@@ -291,6 +291,8 @@ pub struct SaveServerCmd {
     #[serde(default)]
     pub client_cert_path: String,
     #[serde(default)]
+    pub sasl_key_path: String,
+    #[serde(default)]
     pub auto_reconnect: bool,
     #[serde(default)]
     pub reconnect_delay: String,

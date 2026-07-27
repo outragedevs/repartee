@@ -598,6 +598,7 @@ impl App {
                     sasl_mechanism: cmd.sasl_mechanism,
                     autosendcmd: cmd.autosendcmd,
                     client_cert_path: cmd.client_cert_path,
+                    sasl_key_path: cmd.sasl_key_path,
                     auto_reconnect: cmd.auto_reconnect,
                     reconnect_delay: cmd.reconnect_delay,
                     reconnect_max_retries: cmd.reconnect_max_retries,

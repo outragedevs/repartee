@@ -641,6 +641,7 @@ fn parse_server_add_config(args: &[String]) -> Result<crate::config::ServerConfi
         autosendcmd: None,
         sasl_mechanism: None,
         client_cert_path: None,
+                sasl_key_path: None,
     };
 
     for arg in args.iter().skip(1) {
@@ -1643,6 +1644,7 @@ mod server_add_tests {
             autosendcmd: None,
             sasl_mechanism: None,
             client_cert_path: None,
+                sasl_key_path: None,
         }
     }
 

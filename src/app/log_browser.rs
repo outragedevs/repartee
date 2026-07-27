@@ -125,6 +125,7 @@ impl App {
                     autosendcmd: None,
                     sasl_mechanism: None,
                     client_cert_path: None,
+                sasl_key_path: None,
                 },
                 local_ip: None,
                 enabled_caps: HashSet::new(),

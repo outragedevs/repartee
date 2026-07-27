@@ -1404,6 +1404,7 @@ mod tests {
                 autosendcmd: None,
                 sasl_mechanism: None,
                 client_cert_path: None,
+                sasl_key_path: None,
             },
         );
         let paths = get_setting_paths(&config);

@@ -10,6 +10,7 @@ pub mod ignore;
 pub mod isupport;
 pub mod multiline;
 pub mod netsplit;
+pub mod sasl_ecdsa;
 pub mod sasl_scram;
 pub mod typing;
 
@@ -146,7 +147,10 @@ impl std::fmt::Display for SaslMechanism {
 pub struct SaslCapabilities {
     /// A TLS client certificate is configured — `EXTERNAL` / `CertFP`.
     pub client_cert: bool,
-    /// An ECDSA private key is configured — `ECDSA-NIST256P-CHALLENGE`.
+    /// An ECDSA private key **and** an account name are configured —
+    /// `ECDSA-NIST256P-CHALLENGE`. The account name is part of the
+    /// prerequisite because the server needs it to look up which public key to
+    /// check the signature against; a key on its own authenticates nobody.
     pub sasl_key: bool,
     /// Both `sasl_user` and `sasl_pass` are set — `PLAIN` and every SCRAM.
     pub password: bool,
@@ -611,6 +615,7 @@ pub async fn connect_server(
         sasl_pass: server_config.sasl_pass.as_deref(),
         sasl_mechanism_override: server_config.sasl_mechanism.as_deref(),
         has_client_cert: server_config.client_cert_path.is_some(),
+        sasl_key_path: server_config.sasl_key_path.as_deref(),
     };
 
     let neg = negotiate_caps(&sender, &mut stream, &reg_params).await?;
@@ -724,6 +729,11 @@ struct RegistrationParams<'a> {
     sasl_pass: Option<&'a str>,
     sasl_mechanism_override: Option<&'a str>,
     has_client_cert: bool,
+    /// Configured `sasl_key_path`, if any — the P-256 key for
+    /// `ECDSA-NIST256P-CHALLENGE`. Not resolved to a path here: an unreadable
+    /// key must surface as a SASL diagnostic on the connection, not as a
+    /// startup failure.
+    sasl_key_path: Option<&'a str>,
 }
 
 /// The frames that open a connection, in order: `CAP LS 302`, optional `PASS`,
@@ -840,7 +850,7 @@ async fn negotiate_caps(
         // Determine whether we can authenticate via SASL
         let have = SaslCapabilities {
             client_cert: params.has_client_cert,
-            sasl_key: false,
+            sasl_key: params.sasl_key_path.is_some() && params.sasl_user.is_some(),
             password: params.sasl_user.is_some() && params.sasl_pass.is_some(),
         };
         let advertised = server_caps.sasl_mechanisms_advertised();
@@ -920,9 +930,23 @@ async fn negotiate_caps(
                         diag.push("SASL: authenticating via EXTERNAL".to_string());
                         run_sasl_external(sender, stream).await
                     }
-                    SaslMechanism::EcdsaNist256pChallenge => Err(eyre!(
-                        "SASL ECDSA-NIST256P-CHALLENGE selected but no key is configured"
-                    )),
+                    SaslMechanism::EcdsaNist256pChallenge => {
+                        match (params.sasl_key_path, params.sasl_user) {
+                            (Some(key_path), Some(user)) => {
+                                diag.push(format!(
+                                    "SASL: authenticating via ECDSA-NIST256P-CHALLENGE as {user}"
+                                ));
+                                run_sasl_ecdsa(sender, stream, key_path, user).await
+                            }
+                            (None, _) => Err(eyre!(
+                                "SASL ECDSA-NIST256P-CHALLENGE selected but sasl_key_path is unset"
+                            )),
+                            (_, None) => Err(eyre!(
+                                "SASL ECDSA-NIST256P-CHALLENGE selected but sasl_user is unset — \
+                                 the server needs an account name to look the public key up"
+                            )),
+                        }
+                    }
                     SaslMechanism::Scram(hash) => {
                         if let (Some(user), Some(pass)) = (params.sasl_user, params.sasl_pass) {
                             diag.push(format!("SASL: authenticating via {hash} as {user}"));
@@ -1079,6 +1103,49 @@ async fn run_sasl_scram(
     await_sasl_result(stream).await
 }
 
+/// Execute the SASL `ECDSA-NIST256P-CHALLENGE` handshake.
+///
+/// Assumes SASL has already been ACK'd.
+///
+/// 1. Send `AUTHENTICATE ECDSA-NIST256P-CHALLENGE`, wait for `+`
+/// 2. Send base64(`<authzid>\0<authcid>`) so the server knows whose public key
+///    to check against
+/// 3. Receive the challenge, sign it, send base64(DER signature)
+/// 4. Wait for 903/904
+///
+/// The key is read and parsed **before** the first `AUTHENTICATE` goes out: an
+/// unreadable key then aborts the mechanism cleanly instead of leaving a
+/// half-open exchange the server has to time out.
+async fn run_sasl_ecdsa(
+    sender: &IrcSender,
+    stream: &mut irc::client::ClientStream,
+    key_path: &str,
+    sasl_user: &str,
+) -> Result<()> {
+    let path = sasl_ecdsa::resolve_key_path(key_path);
+    let key = sasl_ecdsa::load_key_file(&path)?;
+
+    sender.send(Command::AUTHENTICATE(
+        SaslMechanism::EcdsaNist256pChallenge.name().to_string(),
+    ))?;
+    await_authenticate_plus(stream).await?;
+
+    let account = base64::engine::general_purpose::STANDARD
+        .encode(sasl_ecdsa::authcid_payload(sasl_user));
+    for chunk in sasl_scram::chunk_authenticate(&account) {
+        sender.send(Command::AUTHENTICATE(chunk))?;
+    }
+
+    let challenge = await_authenticate_payload(stream).await?;
+    let signature = sasl_ecdsa::sign_challenge(&key, &challenge)?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(signature);
+    for chunk in sasl_scram::chunk_authenticate(&encoded) {
+        sender.send(Command::AUTHENTICATE(chunk))?;
+    }
+
+    await_sasl_result(stream).await
+}
+
 /// Execute the SASL EXTERNAL authentication handshake.
 ///
 /// SASL EXTERNAL authenticates via the client TLS certificate already
@@ -1122,6 +1189,7 @@ mod tests {
             sasl_pass: None,
             sasl_mechanism_override: None,
             has_client_cert: false,
+            sasl_key_path: None,
         }
     }
 
@@ -1604,6 +1672,7 @@ mod tests {
             autosendcmd: None,
             sasl_mechanism: None,
             client_cert_path: None,
+                sasl_key_path: None,
         }
     }
 

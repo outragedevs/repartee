@@ -379,12 +379,24 @@ pub struct ServerConfig {
     pub reconnect_max_retries: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autosendcmd: Option<String>,
-    /// SASL mechanism to use: `"PLAIN"`, `"EXTERNAL"`, or `None` (auto-detect best).
+    /// SASL mechanism to use — `"PLAIN"`, `"EXTERNAL"`, `"SCRAM-SHA-1"`,
+    /// `"SCRAM-SHA-256"`, `"SCRAM-SHA-512"`, `"ECDSA-NIST256P-CHALLENGE"` — or
+    /// `None` to auto-detect the strongest the server offers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sasl_mechanism: Option<String>,
     /// Path to a client TLS certificate (PEM) for SASL EXTERNAL / `CertFP` auth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_cert_path: Option<String>,
+    /// Path to a PEM NIST P-256 private key for SASL
+    /// `ECDSA-NIST256P-CHALLENGE`. Distinct from `client_cert_path`, which is
+    /// the TLS client certificate: this key is never presented to TLS, only
+    /// used to sign the server's challenge.
+    ///
+    /// A path, not key material, so it is written to `config.toml` like
+    /// `client_cert_path` and unlike `sasl_pass`. Relative paths resolve
+    /// against `~/.repartee/certs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sasl_key_path: Option<String>,
 }
 
 #[expect(
@@ -1088,6 +1100,7 @@ channels = ["#general"]
                 autosendcmd: None,
                 sasl_mechanism: None,
                 client_cert_path: None,
+                sasl_key_path: None,
             },
         );
 
