@@ -981,6 +981,15 @@ async fn negotiate_caps(
                     Err(e) => {
                         diag.push(format!("SASL: {mechanism} authentication FAILED: {e}"));
                         enabled_caps.remove("sasl");
+                        // Abort the exchange before CAP END. A failure we
+                        // detected ourselves — a malformed challenge, a bad
+                        // signature, a timeout — leaves the server holding a
+                        // half-open SASL session it has no reason to close.
+                        // `AUTHENTICATE *` is how the IRCv3 spec says to say
+                        // "I am done trying"; against a server that already
+                        // ended the exchange it is answered with a harmless
+                        // 906 and nothing else.
+                        sender.send(Command::AUTHENTICATE("*".to_string()))?;
                     }
                 }
             }
