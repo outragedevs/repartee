@@ -152,7 +152,7 @@ const OPTIONS: &[CliOption] = &[
     },
 ];
 
-/// Render the `--help` screen. No trailing newline — callers use `println!`.
+/// Render the `--help` screen. No trailing newline — [`print_help`] adds it.
 fn help_text() -> String {
     let app = constants::APP_NAME;
     // Labels are padded to the widest across *both* tables so the two blocks
@@ -228,7 +228,11 @@ fn help_text() -> String {
         .iter()
         .map(|(path, note)| (path.display().to_string(), *note))
         .collect();
-    let file_width = shown.iter().map(|(p, _)| p.chars().count()).max().unwrap_or(0);
+    let file_width = shown
+        .iter()
+        .map(|(p, _)| p.chars().count())
+        .max()
+        .unwrap_or(0);
     lines.push(String::new());
     lines.push("FILES:".to_string());
     for (path, note) in &shown {
@@ -292,8 +296,7 @@ fn print_help() {
 /// further right it is a value somebody typed (`--bind help` is a malformed
 /// bind, not a request for help).
 fn wants_help(args: &[String]) -> bool {
-    args.iter().skip(1).any(|a| a == "--help")
-        || args.get(1).map(String::as_str) == Some("help")
+    args.iter().skip(1).any(|a| a == "--help") || args.get(1).map(String::as_str) == Some("help")
 }
 
 /// Trailing nudge for a malformed bind flag, for `-h` only: `--bind` says what
@@ -601,7 +604,13 @@ mod tests {
     fn help_names_the_binary_and_the_sections() {
         let help = help_text();
         assert!(help.starts_with(crate::constants::APP_NAME));
-        for section in ["USAGE:", "SUBCOMMANDS:", "OPTIONS:", "ENVIRONMENT:", "FILES:"] {
+        for section in [
+            "USAGE:",
+            "SUBCOMMANDS:",
+            "OPTIONS:",
+            "ENVIRONMENT:",
+            "FILES:",
+        ] {
             assert!(help.contains(section), "help output is missing {section}");
         }
         // The version belongs on the first line so `--help` also answers
@@ -707,19 +716,26 @@ mod tests {
         let mut found = Vec::new();
         for (idx, _) in code.match_indices("== ") {
             let rest = &code[idx + 3..];
-            let Some(body) = rest
-                .strip_prefix('"')
-                .or_else(|| rest.strip_prefix("Some(\""))
-            else {
+            // The two dispatch shapes are distinguished so an unrelated string
+            // comparison elsewhere in this file cannot demand a help row: a
+            // bare `== "…"` counts only when it looks like a flag, while
+            // `== Some("…")` is only ever how a subcommand is matched here.
+            let (body, flag_only) = if let Some(body) = rest.strip_prefix('"') {
+                (body, true)
+            } else if let Some(body) = rest.strip_prefix("Some(\"") {
+                (body, false)
+            } else {
                 continue;
             };
             let Some(end) = body.find('"') else { continue };
             let literal = &body[..end];
-            // A real flag or subcommand is one word. Anything else is a
-            // comparison this scanner has no business policing.
-            if !literal.is_empty() && !literal.contains(char::is_whitespace) {
-                found.push(literal);
+            if literal.is_empty() || literal.contains(char::is_whitespace) {
+                continue;
             }
+            if flag_only && !literal.starts_with('-') {
+                continue;
+            }
+            found.push(literal);
         }
         found
     }

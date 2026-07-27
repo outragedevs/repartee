@@ -86,6 +86,7 @@ Launch repartee:
 
 ```bash
 repartee
+repartee --help   # every launch flag, subcommand, and path repartee uses
 ```
 
 Add a server and connect:
