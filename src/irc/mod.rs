@@ -241,6 +241,55 @@ const fn sasl_failure(response: Response) -> Option<&'static str> {
     }
 }
 
+/// Outcome of the wait for the server's `AUTHENTICATE +`.
+///
+/// A plain `Result<()>` cannot express the second case, and getting it wrong is
+/// expensive: every caller sends credential material immediately after this
+/// wait returns, so an `Ok(())` on `907` would have `PLAIN` put the password on
+/// the wire for an exchange the server has already declared over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthenticateAck {
+    /// The server asked for our response — run the rest of the mechanism.
+    Proceed,
+    /// `907`: this connection had already completed SASL before we started.
+    /// There is nothing to authenticate and nothing further to send.
+    AlreadyAuthenticated,
+}
+
+/// What a numeric arriving *before* the server's first challenge means.
+///
+/// Deliberately not the same rule [`await_authenticate_payload`] applies. The
+/// difference is what we have said so far: before we have sent any credential
+/// material, `907` is a fact about the *connection* — it authenticated by some
+/// other route, and the mechanism we were about to run is simply moot. Once an
+/// exchange is under way, the same numeric would be an unverifiable claim about
+/// *that exchange*, which for SCRAM means discarding the server-signature check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreChallenge {
+    /// Not a SASL numeric — keep reading.
+    Unrelated,
+    /// The exchange cannot proceed, with this message.
+    Failed(&'static str),
+    /// `907` — already authenticated; the mechanism has nothing left to do.
+    AlreadyAuthenticated,
+    /// `903` with no challenge ever offered. Success we have no way to trust:
+    /// nothing was exchanged that could distinguish the server from anyone
+    /// able to inject a frame.
+    UnverifiableSuccess,
+}
+
+/// Classify a numeric received while waiting for the server's first challenge.
+const fn classify_pre_challenge(response: Response) -> PreChallenge {
+    match response {
+        Response::ERR_SASLALREADY => PreChallenge::AlreadyAuthenticated,
+        Response::RPL_SASLSUCCESS => PreChallenge::UnverifiableSuccess,
+        _ => match sasl_failure(response) {
+            Some(err) => PreChallenge::Failed(err),
+            None => PreChallenge::Unrelated,
+        },
+    }
+}
+
 /// Does this numeric end the exchange with the connection authenticated?
 ///
 /// `903` is the ordinary success. `907` is one too — "you have already
@@ -341,26 +390,40 @@ async fn await_authenticate_payload(stream: &mut irc::client::ClientStream) -> R
 /// mechanism implementation to avoid duplicating the timeout + error handling
 /// logic. Mechanisms that expect *data* back use
 /// [`await_authenticate_payload`] instead.
-async fn await_authenticate_plus(stream: &mut irc::client::ClientStream) -> Result<()> {
+///
+/// Returns [`AuthenticateAck::AlreadyAuthenticated`] when the server answers
+/// our `AUTHENTICATE <mechanism>` with `907` instead of a challenge — the
+/// caller must then stop, not carry on into the mechanism.
+async fn await_authenticate_plus(
+    stream: &mut irc::client::ClientStream,
+) -> Result<AuthenticateAck> {
     let result = tokio::time::timeout(std::time::Duration::from_secs(SASL_TIMEOUT_SECS), async {
         while let Some(msg_result) = stream.next().await {
             let msg = msg_result?;
             match &msg.command {
-                Command::AUTHENTICATE(param) if param == "+" => return Ok(()),
-                Command::Response(response, _) => {
-                    if let Some(err) = sasl_failure(*response) {
-                        return Err(eyre!("{err}"));
+                Command::AUTHENTICATE(param) if param == "+" => {
+                    return Ok(AuthenticateAck::Proceed);
+                }
+                Command::Response(response, _) => match classify_pre_challenge(*response) {
+                    PreChallenge::Unrelated => {}
+                    PreChallenge::Failed(err) => return Err(eyre!("{err}")),
+                    // The connection is authenticated — by whatever route. It
+                    // is not this exchange's success to claim, but it is
+                    // emphatically not a failure, and reporting one here would
+                    // strip `sasl` from the enabled caps and abort a connection
+                    // that is already logged in.
+                    PreChallenge::AlreadyAuthenticated => {
+                        return Ok(AuthenticateAck::AlreadyAuthenticated);
                     }
-                    // A terminal success before the exchange has even begun.
                     // Named rather than ignored: falling through would wait out
                     // the full timeout for an `AUTHENTICATE +` the server has
                     // no reason left to send.
-                    if sasl_success(*response) {
+                    PreChallenge::UnverifiableSuccess => {
                         return Err(eyre!(
-                            "SASL: server reported the exchange complete before it started"
+                            "SASL: server reported success before offering a challenge"
                         ));
                     }
-                }
+                },
                 _ => {}
             }
         }
@@ -368,13 +431,11 @@ async fn await_authenticate_plus(stream: &mut irc::client::ClientStream) -> Resu
     })
     .await;
 
-    match result {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err(eyre!(
+    result.unwrap_or_else(|_| {
+        Err(eyre!(
             "SASL authentication timed out waiting for AUTHENTICATE +"
-        )),
-    }
+        ))
+    })
 }
 
 /// Wait for the terminal `903` / `904` of a SASL exchange.
@@ -1068,8 +1129,13 @@ async fn run_sasl_plain(
         SaslMechanism::Plain.name().to_string(),
     ))?;
 
-    // Wait for AUTHENTICATE + from server (with timeout and error handling)
-    await_authenticate_plus(stream).await?;
+    // Wait for AUTHENTICATE + from server (with timeout and error handling).
+    // A 907 here ends the mechanism *before* the credentials below are built:
+    // the connection is already authenticated, and sending a password into an
+    // exchange the server has closed would put it on the wire for nothing.
+    if await_authenticate_plus(stream).await? == AuthenticateAck::AlreadyAuthenticated {
+        return Ok(());
+    }
 
     // Send base64-encoded credentials: authzid\0authcid\0password.
     // RFC 4616 requires SASLprep on both the authcid and the password.
@@ -1109,7 +1175,9 @@ async fn run_sasl_scram(
     sender.send(Command::AUTHENTICATE(hash.mechanism().to_string()))?;
 
     // Wait for AUTHENTICATE + from server (with timeout and error handling)
-    await_authenticate_plus(stream).await?;
+    if await_authenticate_plus(stream).await? == AuthenticateAck::AlreadyAuthenticated {
+        return Ok(());
+    }
 
     // Step 2: Send client-first message
     let (client_first_bare, client_first_full, client_nonce) = sasl_scram::client_first(sasl_user);
@@ -1189,7 +1257,9 @@ async fn run_sasl_ecdsa(
     sender.send(Command::AUTHENTICATE(
         SaslMechanism::EcdsaNist256pChallenge.name().to_string(),
     ))?;
-    await_authenticate_plus(stream).await?;
+    if await_authenticate_plus(stream).await? == AuthenticateAck::AlreadyAuthenticated {
+        return Ok(());
+    }
 
     let account = base64::engine::general_purpose::STANDARD
         .encode(sasl_ecdsa::authcid_payload(sasl_user));
@@ -1226,7 +1296,9 @@ async fn run_sasl_external(
     ))?;
 
     // Wait for AUTHENTICATE + from server (with timeout and error handling)
-    await_authenticate_plus(stream).await?;
+    if await_authenticate_plus(stream).await? == AuthenticateAck::AlreadyAuthenticated {
+        return Ok(());
+    }
 
     // Send AUTHENTICATE + (base64 encoding of an empty string is "+")
     sender.send(Command::AUTHENTICATE("+".to_string()))?;
@@ -1585,6 +1657,68 @@ mod tests {
         // An unrelated numeric is neither, so the waits keep reading.
         assert!(sasl_failure(Response::RPL_WELCOME).is_none());
         assert!(!sasl_success(Response::RPL_WELCOME));
+    }
+
+    #[test]
+    fn a_907_before_any_challenge_ends_the_mechanism_without_sending_credentials() {
+        // The server answers `AUTHENTICATE <mechanism>` with 907 when the
+        // connection already authenticated. That is not this exchange's
+        // success, but it is not a failure either — reporting one would strip
+        // `sasl` from the enabled caps and abort a logged-in connection.
+        assert_eq!(
+            classify_pre_challenge(Response::ERR_SASLALREADY),
+            PreChallenge::AlreadyAuthenticated
+        );
+
+        // 903 here is a different animal: nothing has been exchanged that could
+        // tell the real server from anyone able to inject one frame, so it is
+        // refused rather than believed.
+        assert_eq!(
+            classify_pre_challenge(Response::RPL_SASLSUCCESS),
+            PreChallenge::UnverifiableSuccess
+        );
+
+        for response in [
+            Response::ERR_SASLFAIL,
+            Response::ERR_SASLTOOLONG,
+            Response::ERR_SASLABORT,
+        ] {
+            assert!(
+                matches!(classify_pre_challenge(response), PreChallenge::Failed(_)),
+                "{response:?}"
+            );
+        }
+
+        // Anything else leaves the wait reading — a NOTICE mid-registration
+        // must not be mistaken for an outcome.
+        assert_eq!(
+            classify_pre_challenge(Response::RPL_WELCOME),
+            PreChallenge::Unrelated
+        );
+    }
+
+    /// The reason [`AuthenticateAck`] exists rather than a bare `Result<()>`:
+    /// every mechanism sends credential material immediately after that wait,
+    /// so the 907 short-circuit has to reach the mechanism, not just the wait.
+    /// `PLAIN` is the case with teeth — continuing would transmit the password.
+    #[test]
+    fn every_mechanism_stops_on_an_already_authenticated_ack() {
+        let source = include_str!("mod.rs");
+        let (code, _) = source
+            .split_once("#[cfg(test)]\nmod tests")
+            .expect("test module header moved — update the scanner's split marker");
+
+        let waits = code.matches("await_authenticate_plus(stream).await?").count();
+        let stops = code
+            .matches("await_authenticate_plus(stream).await? == AuthenticateAck::AlreadyAuthenticated")
+            .count();
+        assert_eq!(
+            waits, stops,
+            "a mechanism waits for AUTHENTICATE + without handling the \
+             already-authenticated ack — it would carry on sending credentials \
+             into an exchange the server has already closed"
+        );
+        assert_eq!(stops, 4, "PLAIN, SCRAM, EXTERNAL and ECDSA all wait");
     }
 
     // ── inbound AUTHENTICATE reassembly ─────────────────────
