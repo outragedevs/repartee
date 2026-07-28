@@ -8,6 +8,11 @@ use leptos::prelude::*;
 use crate::protocol::{SaveServerCmd, WebCommand};
 use crate::state::AppState;
 
+// The native crate's SASL mechanism list, verbatim. `web-ui` cannot depend on
+// the binary crate, and a hand-kept copy is exactly the thing that goes stale
+// the one time it matters — so the definition is shared instead of mirrored.
+include!("../../../src/irc/sasl_mechanism_names.rs");
+
 #[component]
 pub fn ServerWizard() -> impl IntoView {
     let state = use_context::<AppState>().unwrap();
@@ -241,19 +246,12 @@ fn check_row(label: &'static str, sig: RwSignal<bool>) -> impl IntoView {
 }
 
 fn select_row(label: &'static str, sig: RwSignal<String>) -> impl IntoView {
-    // Mirrors `crate::irc::SASL_MECHANISMS` in the native crate, strongest
-    // first, with "Auto" leading. The two live in separate crates and cannot
-    // share the constant, so a test in the native crate reads this file and
-    // fails if a mechanism is missing here.
-    let opts = [
-        "Auto",
-        "EXTERNAL",
-        "ECDSA-NIST256P-CHALLENGE",
-        "SCRAM-SHA-512",
-        "SCRAM-SHA-256",
-        "SCRAM-SHA-1",
-        "PLAIN",
-    ];
+    // `SASL_MECHANISM_NAMES` is the native crate's own list, included above
+    // rather than copied — this picker and the TUI's are the same definition,
+    // so a mechanism added to the protocol shows up in both or neither.
+    let opts: Vec<&str> = std::iter::once("Auto")
+        .chain(SASL_MECHANISM_NAMES.iter().copied())
+        .collect();
     view! {
         <label class="wizard-row">
             <span class="wizard-label">{label}</span>

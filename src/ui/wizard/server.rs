@@ -11,13 +11,15 @@ use crate::config::ServerConfig;
 /// The SASL mechanism picker: `Auto` plus every mechanism we implement, in the
 /// same strongest-first order auto-detection uses.
 ///
-/// Built from [`crate::irc::SASL_MECHANISMS`] rather than written out, so a
-/// mechanism cannot be added to the protocol and forgotten in the UI. `Auto`
-/// leads, and is index 0 — [`mech_index`] and [`mech_from_choice`] derive
-/// everything else from this slice by position instead of hardcoding indices.
+/// Built from [`crate::irc::SASL_MECHANISM_NAMES`] rather than written out, so
+/// a mechanism cannot be added to the protocol and forgotten in the UI — the
+/// web wizard `include!`s that same list, so both pickers are one definition.
+/// `Auto` leads, and is index 0 — [`mech_index`] and [`mech_from_choice`]
+/// derive everything else from this slice by position instead of hardcoding
+/// indices.
 fn sasl_mechs() -> Vec<&'static str> {
     std::iter::once("Auto")
-        .chain(crate::irc::SASL_MECHANISMS.iter().map(|m| m.name()))
+        .chain(crate::irc::SASL_MECHANISM_NAMES.iter().copied())
         .collect()
 }
 
@@ -583,22 +585,25 @@ mod tests {
         );
     }
 
-    /// The web UI is a separate crate and cannot share
-    /// [`crate::irc::SASL_MECHANISMS`], so its picker is a hand-written mirror.
-    /// Read it here rather than trust it: a mechanism added to the protocol but
-    /// missing from the web wizard is invisible until a user goes looking for
-    /// it in a dropdown that does not have it.
+    /// The web wizard now `include!`s `SASL_MECHANISM_NAMES` instead of copying
+    /// it, so its mechanism list cannot drift and needs no test. Its *fields*
+    /// still can, and `sasl_key_path` reaching the backend as an empty string
+    /// is indistinguishable from "not configured".
+    ///
+    /// Read at runtime rather than with `include_str!`: `web-ui` is a nested
+    /// package, which `cargo package` omits from the published crate, so a
+    /// compile-time include here would leave the packaged crate unable to build
+    /// its own tests. Absent file means we are running from that crate and
+    /// there is nothing to check; in a checkout it always runs.
     #[test]
-    fn the_web_wizard_offers_the_same_mechanisms() {
-        let source = include_str!("../../../web-ui/src/components/wizard.rs");
-        for mech in crate::irc::SASL_MECHANISMS {
-            assert!(
-                source.contains(&format!("\"{}\"", mech.name())),
-                "web-ui/src/components/wizard.rs is missing {} — its mechanism \
-                 list has drifted from SASL_MECHANISMS",
-                mech.name()
-            );
-        }
+    fn the_web_wizard_carries_the_ecdsa_key_field() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/web-ui/src/components/wizard.rs"
+        );
+        let Ok(source) = std::fs::read_to_string(path) else {
+            return;
+        };
         assert!(
             source.contains("sasl_key_path"),
             "the web wizard has no ECDSA key field"

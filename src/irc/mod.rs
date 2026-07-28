@@ -11,6 +11,7 @@ pub mod isupport;
 pub mod multiline;
 pub mod netsplit;
 pub mod sasl_ecdsa;
+mod sasl_mechanism_names;
 pub mod sasl_scram;
 pub mod typing;
 
@@ -24,6 +25,7 @@ use tokio::sync::mpsc;
 
 use crate::irc::cap::{DESIRED_CAPS, ServerCaps};
 pub use crate::irc::handle::{IrcHandle, IrcSender};
+pub use crate::irc::sasl_mechanism_names::SASL_MECHANISM_NAMES;
 use crate::irc::handle::FLOOD_PENALTY_THRESHOLD_MS;
 
 const IRC_PING_TIMEOUT_SECS: u32 = 60;
@@ -1616,6 +1618,22 @@ mod tests {
             select_sasl_mechanism(None, None, SaslCapabilities::default()),
             None
         );
+    }
+
+    #[test]
+    fn the_shared_name_list_matches_the_mechanism_table() {
+        // `SASL_MECHANISM_NAMES` is what both wizards list; `SASL_MECHANISMS`
+        // is what selection walks. They are separate because the web UI can
+        // include the first and not the second, so this is the seam where a
+        // mechanism could exist in the protocol but never appear in a picker.
+        let from_table: Vec<&str> = SASL_MECHANISMS.iter().map(|m| m.name()).collect();
+        assert_eq!(
+            from_table, SASL_MECHANISM_NAMES,
+            "the shared name list and the mechanism table have diverged"
+        );
+        // Order is meaningful in both: strongest first.
+        assert_eq!(SASL_MECHANISM_NAMES.first(), Some(&"EXTERNAL"));
+        assert_eq!(SASL_MECHANISM_NAMES.last(), Some(&"PLAIN"));
     }
 
     #[test]
