@@ -232,11 +232,21 @@ const MAX_AUTHENTICATE_BYTES: usize = 8192;
 /// a statement about success, not a failure. Grouping it with 904/905/906 would
 /// report a live authentication as failed, drop `sasl` from the enabled caps,
 /// and abort an exchange that had in fact succeeded. See [`sasl_success`].
+/// `900 RPL_LOGGEDIN` and `908 RPL_SASLMECHS` are absent for the opposite
+/// reason to 907: both are informational and *precede* a terminal numeric —
+/// `900` comes before `903`, `908` accompanies `904`. Ending a wait on either
+/// would cut the exchange short of the answer.
 const fn sasl_failure(response: Response) -> Option<&'static str> {
     match response {
         Response::ERR_SASLFAIL => Some("SASL authentication failed"),
         Response::ERR_SASLTOOLONG => Some("SASL message too long"),
         Response::ERR_SASLABORT => Some("SASL authentication aborted"),
+        // 902 ends the exchange as surely as 904 does, and says something the
+        // user can act on. Left out, it is not merely mislabelled: every wait
+        // reads past it to the 30-second timeout and then blames the timeout.
+        Response::ERR_NICKLOCKED => {
+            Some("you must use a nick assigned to you (the account is nick-locked)")
+        }
         _ => None,
     }
 }
@@ -1645,11 +1655,7 @@ mod tests {
         assert!(sasl_failure(Response::RPL_SASLSUCCESS).is_none());
 
         // The real failures stay failures, and none of them reads as success.
-        for response in [
-            Response::ERR_SASLFAIL,
-            Response::ERR_SASLTOOLONG,
-            Response::ERR_SASLABORT,
-        ] {
+        for response in TERMINAL_FAILURES {
             assert!(sasl_failure(response).is_some(), "{response:?}");
             assert!(!sasl_success(response), "{response:?}");
         }
@@ -1657,6 +1663,46 @@ mod tests {
         // An unrelated numeric is neither, so the waits keep reading.
         assert!(sasl_failure(Response::RPL_WELCOME).is_none());
         assert!(!sasl_success(Response::RPL_WELCOME));
+    }
+
+    /// Every numeric that ends a SASL exchange badly. Each has to terminate the
+    /// wait it lands in: an unrecognised terminal numeric does not merely get
+    /// the label wrong, it leaves the wait reading until the 30-second timeout
+    /// and then reports the timeout as the cause.
+    const TERMINAL_FAILURES: [Response; 4] = [
+        Response::ERR_NICKLOCKED,
+        Response::ERR_SASLFAIL,
+        Response::ERR_SASLTOOLONG,
+        Response::ERR_SASLABORT,
+    ];
+
+    #[test]
+    fn a_nick_locked_account_fails_the_exchange_rather_than_timing_out() {
+        // 902 is terminal and, unlike the rest, actionable: the account is
+        // bound to a nick other than the one we registered with.
+        let message = sasl_failure(Response::ERR_NICKLOCKED).expect("902 is a failure");
+        assert!(message.contains("nick"), "{message}");
+        assert!(!sasl_success(Response::ERR_NICKLOCKED));
+        assert!(matches!(
+            classify_pre_challenge(Response::ERR_NICKLOCKED),
+            PreChallenge::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn the_informational_sasl_numerics_do_not_end_a_wait() {
+        // 900 precedes 903 and 908 accompanies 904. Treating either as terminal
+        // would cut the exchange short of the numeric that actually answers it
+        // — the mirror image of the 902 bug, and easy to "fix" into existence.
+        for response in [Response::RPL_LOGGEDIN, Response::RPL_SASLMECHS] {
+            assert!(sasl_failure(response).is_none(), "{response:?}");
+            assert!(!sasl_success(response), "{response:?}");
+            assert_eq!(
+                classify_pre_challenge(response),
+                PreChallenge::Unrelated,
+                "{response:?}"
+            );
+        }
     }
 
     #[test]
@@ -1678,11 +1724,7 @@ mod tests {
             PreChallenge::UnverifiableSuccess
         );
 
-        for response in [
-            Response::ERR_SASLFAIL,
-            Response::ERR_SASLTOOLONG,
-            Response::ERR_SASLABORT,
-        ] {
+        for response in TERMINAL_FAILURES {
             assert!(
                 matches!(classify_pre_challenge(response), PreChallenge::Failed(_)),
                 "{response:?}"
