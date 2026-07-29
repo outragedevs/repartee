@@ -25,6 +25,33 @@ make release
 ./target/release/repartee
 ```
 
+## Troubleshooting
+
+### `<jemalloc>: Unsupported system page size`
+
+```text
+<jemalloc>: Unsupported system page size
+memory allocation of 4 bytes failed
+Aborted
+```
+
+The prebuilt Linux binary uses jemalloc, which fixes its page size at compile time and refuses to start when the running kernel's pages are larger. Affected releases are **v1.7.0 and earlier on ARM64**, where the binary was built for 4 KiB pages. It hits any aarch64 kernel with larger pages — most visibly Raspberry Pi OS on a Pi 5, which defaults to 16 KiB.
+
+Check what your kernel uses:
+
+```bash
+getconf PAGESIZE
+```
+
+`4096` means something else is wrong. `16384` or `65536` means you have hit this.
+
+Two ways out, in order of preference:
+
+1. **Use v1.7.1 or newer.** The ARM64 binary is now built for 64 KiB pages, which covers 4, 16, and 64 KiB kernels alike.
+2. **Build it yourself** with `cargo install repartee`. Compiling on the machine you will run on always matches its page size.
+
+Forcing the kernel back to 4 KiB pages (`kernel=kernel8.img` in `/boot/firmware/config.txt` on a Pi 5) also works, but it changes your system to suit one program — prefer either option above.
+
 ## Command-line usage
 
 ```
