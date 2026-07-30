@@ -49,8 +49,12 @@ clippy-web:
 # checked in, but nothing builds it automatically — so editing a .md
 # without running this ships a page nobody sees. Run it whenever you touch
 # either source directory.
+# Plain `bun install`, not `--frozen-lockfile` with a fallback: it already
+# uses docs/bun.lock when that is valid and refreshes it when it is not.
+# The lockfile is tracked and lives under docs/, so `docs-check` is what
+# enforces it — a refreshed lock shows up there as an uncommitted change.
 docs:
-	cd docs && bun install --frozen-lockfile 2>/dev/null || (cd docs && bun install)
+	cd docs && bun install
 	cd docs && bun run build.ts
 
 # Fail if the checked-in output is out of date with its sources. Intended
