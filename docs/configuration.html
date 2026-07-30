@@ -159,7 +159,9 @@ autosendcmd = &quot;MSG NickServ identify pass; WAIT 2000; MODE $N +i&quot;
 # nick = &quot;othernick&quot;           # per-server nick override
 # sasl_user = &quot;mynick&quot;
 # sasl_pass = &quot;hunter2&quot;
-# sasl_mechanism = &quot;SCRAM-SHA-256&quot;  # PLAIN (default), EXTERNAL, SCRAM-SHA-256
+# sasl_mechanism = &quot;SCRAM-SHA-512&quot;  # omit to auto-detect the strongest offered
+# client_cert_path = &quot;libera-cert.pem&quot;  # TLS client cert, for EXTERNAL/CertFP
+# sasl_key_path = &quot;libera-key.pem&quot;      # P-256 key, for ECDSA-NIST256P-CHALLENGE
 # bind_ip = &quot;192.168.1.100&quot;   # bind to specific local IP (vhost)
 # auto_reconnect = true
 # reconnect_delay = 30
@@ -239,7 +241,57 @@ levels = [&quot;ALL&quot;]
 <p>Configure which items appear in the status line. Available items: <code>active_windows</code>, <code>nick_info</code>, <code>channel_info</code>, <code>typing</code>, <code>lag</code>, <code>time</code>. The <code>typing</code> item shows who is currently typing in the active buffer (see <code>[typing]</code> below).</p>
 <h3><code>[servers.*]</code></h3>
 <p>Each server gets a unique identifier (the key after <code>servers.</code>). The <code>channels</code> array lists channels to auto-join on connect. Channels with keys use the format <code>&quot;#channel key&quot;</code>.</p>
-<p>Set <code>sasl_mechanism</code> to override automatic mechanism selection. Available: <code>PLAIN</code> (default), <code>EXTERNAL</code> (client TLS certificate), <code>SCRAM-SHA-256</code> (secure challenge-response).</p>
+<h4>SASL</h4>
+<p>Leave <code>sasl_mechanism</code> unset and repartee picks the strongest mechanism the server offers that it holds a credential for, in this order:</p>
+<table>
+<thead>
+<tr>
+<th>Mechanism</th>
+<th>Needs</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>EXTERNAL</code></td>
+<td><code>client_cert_path</code></td>
+<td>CertFP — the TLS client certificate proves who you are. Nothing is sent.</td>
+</tr>
+<tr>
+<td><code>ECDSA-NIST256P-CHALLENGE</code></td>
+<td><code>sasl_key_path</code> + <code>sasl_user</code></td>
+<td>Signs a server challenge with a NIST P-256 key. Nothing is sent.</td>
+</tr>
+<tr>
+<td><code>SCRAM-SHA-512</code></td>
+<td><code>sasl_user</code> + <code>sasl_pass</code></td>
+<td>Challenge-response; the password never crosses the wire.</td>
+</tr>
+<tr>
+<td><code>SCRAM-SHA-256</code></td>
+<td><code>sasl_user</code> + <code>sasl_pass</code></td>
+<td>As above.</td>
+</tr>
+<tr>
+<td><code>SCRAM-SHA-1</code></td>
+<td><code>sasl_user</code> + <code>sasl_pass</code></td>
+<td>As above. Still beats <code>PLAIN</code>.</td>
+</tr>
+<tr>
+<td><code>PLAIN</code></td>
+<td><code>sasl_user</code> + <code>sasl_pass</code></td>
+<td>Sends the password. Last resort — always over TLS.</td>
+</tr>
+</tbody></table>
+<p>Set <code>sasl_mechanism</code> to one of those names to pin it. A pinned mechanism the server does not offer means <strong>no SASL at all</strong>, never a quiet downgrade to a weaker one. The <code>-PLUS</code> (channel-binding) variants are not implemented and are never selected.</p>
+<p><code>client_cert_path</code> and <code>sasl_key_path</code> are separate keys with separate jobs: the first is presented during the TLS handshake, the second is only ever used to sign a challenge. Relative paths resolve against <code>~/.repartee/certs</code>.</p>
+<p>To use <code>ECDSA-NIST256P-CHALLENGE</code>, generate a key and register its public half:</p>
+<pre><code class="language-bash">openssl ecparam -genkey -name prime256v1 -noout -out ~/.repartee/certs/libera-key.pem
+chmod 600 ~/.repartee/certs/libera-key.pem
+# the compressed public key, base64 — what NickServ wants
+openssl ec -in ~/.repartee/certs/libera-key.pem -pubout -conv_form compressed -outform DER \
+  | tail -c 33 | base64
+</code></pre>
+<p>Then <code>/msg NickServ SET PUBKEY &lt;that base64&gt;</code> and set <code>sasl_key_path = &quot;libera-key.pem&quot;</code>. Both PEM encodings load — <code>ecdsatool</code>&#39;s SEC1 (<code>BEGIN EC PRIVATE KEY</code>) and OpenSSL 3&#39;s PKCS#8 (<code>BEGIN PRIVATE KEY</code>).</p>
 <p>Set <code>bind_ip</code> to bind to a specific local IP address when connecting. Useful for multi-IP hosts (vhosts/bouncers). Supports both IPv4 and IPv6 — DNS resolution automatically filters to match the address family. Can also be set per-connection with <code>/connect -bind=&lt;ip&gt;</code> or <code>/server add -bind=&lt;ip&gt;</code>.</p>
 <h3><code>[logging]</code></h3>
 <p>Chat logging to SQLite. When <code>encrypt = true</code>, messages are encrypted with AES-256-GCM. <code>retention_days = 0</code> keeps logs forever. <code>event_retention_hours</code> controls how long event messages (join/part/quit/nick/kick/mode) are kept before automatic pruning — defaults to 72 hours. Set to <code>0</code> to keep event messages forever. Event pruning runs hourly in the background and is independent of <code>retention_days</code>.</p>
@@ -265,6 +317,7 @@ w = &quot;/who $C&quot;
 <p>Inline spell checking. When <code>enabled = true</code>, misspelled words are underlined in red while typing. Press Tab to cycle suggestions, Space to accept, Escape to revert. <code>languages</code> is a list of Hunspell language codes (e.g., <code>en_US</code>, <code>pl_PL</code>, <code>de_DE</code>) — a word is correct if <strong>any</strong> active dictionary accepts it. Place <code>.dic</code>/<code>.aff</code> files in <code>~/.repartee/dicts/</code> (or set <code>dictionary_dir</code> to a custom path).</p>
 <h3><code>[typing]</code></h3>
 <p>IRCv3 <code>+typing</code> client tag support (typing indicators). <code>show = true</code> (default) receives and displays other people&#39;s typing status in the TUI status line and the web UI; set to <code>false</code> to stop showing it, both live and after reload. <code>send_channels</code> and <code>send_queries</code> independently control whether Repartee sends its own <code>+typing</code> while you type in a channel or a private query, respectively — turn either off if you&#39;d rather not announce your own typing in that context. All three are booleans, so use <code>/set typing.show false</code> (not <code>off</code>) to disable one at runtime.</p>
+<p>Turning a send switch off at runtime stops all further notifications immediately, but it does <strong>not</strong> retract an indicator that is already on the wire: an indicator you have just sent lapses at the peer&#39;s own timeout — 6 seconds after your last <code>active</code>, or 30 seconds after a <code>paused</code> — rather than being taken down with an explicit <code>done</code>.</p>
 <h3><code>[web]</code></h3>
 <p>Embedded web frontend. When <code>enabled = true</code> and <code>WEB_PASSWORD</code> is set in <code>.env</code>, the app starts an HTTPS server alongside the terminal interface. Both share the same state — read a message on web, it&#39;s marked read on terminal, and vice versa.</p>
 <p>Set <code>bind_address = &quot;0.0.0.0&quot;</code> to allow LAN access. TLS is always on — if no custom cert/key is provided, a self-signed certificate is auto-generated in <code>~/.repartee/certs/</code>.</p>

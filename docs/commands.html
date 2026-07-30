@@ -728,7 +728,8 @@ Server credentials (passwords, SASL) are stored in <code>.env</code>.</p>
 <li><code>-client-cert=&lt;path&gt;</code> — Client TLS certificate path for SASL EXTERNAL / CertFP</li>
 </ul>
 <p>Flag values are parsed as single command arguments, so values with spaces should
-be edited in <code>config.toml</code> or with <code>/set</code>.</p>
+be edited in <code>config.toml</code> or with <code>/set</code>. For a guided form instead of flags,
+use <code>/wizard server</code>.</p>
 <h3>remove</h3>
 <p>Remove a server and disconnect if connected.</p>
 <pre><code>/server remove &lt;id&gt;
@@ -745,7 +746,53 @@ be edited in <code>config.toml</code> or with <code>/set</code>.</p>
 /server remove libera
 </code></pre>
 <h2>See Also</h2>
-<p>/connect, /disconnect, /set</p>
+<p>/wizard, /connect, /disconnect, /set</p>
+</div>
+<div class="command-entry" data-command="wizard" data-category="Connection">
+<h1>/wizard</h1>
+<h2>Syntax</h2>
+<pre><code>/wizard server [id]
+</code></pre>
+<h2>Description</h2>
+<p>Open a guided popup form — a friendlier alternative to memorising <code>/server add</code>
+flags. The form is a fixed-size modal with two pages, <strong>Basics</strong> and
+<strong>Advanced</strong>, switched with the <code>◂ ▸</code> arrows or by clicking the tab row.</p>
+<p>Both keyboard and mouse work throughout:</p>
+<ul>
+<li><strong>Tab</strong> / <strong>Shift-Tab</strong> move between fields and the Save/Cancel buttons</li>
+<li><strong>Space</strong> toggles the focused checkbox</li>
+<li><strong>← →</strong> switch pages (or cycle the focused dropdown, e.g. SASL mechanism)</li>
+<li><strong>Enter</strong> on Save commits; <strong>Esc</strong> (or Cancel) closes without saving</li>
+<li><strong>Click</strong> a field to focus it, a checkbox to toggle, a tab to switch pages, or
+a button to press it</li>
+</ul>
+<p><strong>Basics:</strong> Network Name, server address/IP, port, Use TLS/SSL, Verify TLS
+certificate, Bind IP.</p>
+<p><strong>Advanced:</strong> server id, nick, username, realname, channels, server password,
+SASL user/pass/mechanism, encoding, autoconnect, auto-reconnect, reconnect delay
+and max retries, autosendcmd, client cert path.</p>
+<p>Passwords (server password, SASL pass) are stored in <code>.env</code>, never <code>config.toml</code>.
+The manual <code>/server add</code> command is unchanged and still available.</p>
+<h2>Subcommands</h2>
+<h3>server</h3>
+<p>Open the add-server form.</p>
+<pre><code>/wizard server
+</code></pre>
+<p>With an id, open the form pre-filled to <strong>edit</strong> that existing server (the id
+field is locked):</p>
+<pre><code>/wizard server libera
+</code></pre>
+<p>On edit, leaving a password field blank keeps the stored credential unchanged.</p>
+<h2>Web UI</h2>
+<p>The wizard is also available in the web UI: click <strong>&quot;+ Add network&quot;</strong> or type
+<code>/wizard server</code>. The web form is add-only (editing an existing server is a TUI
+feature).</p>
+<h2>Examples</h2>
+<pre><code>/wizard server
+/wizard server libera
+</code></pre>
+<h2>See Also</h2>
+<p>/server, /connect, /set</p>
 </div>
 <h2 id="cat-info">Info</h2>
 <div class="command-entry" data-command="admin" data-category="Info">
@@ -1392,18 +1439,22 @@ mask, then kicks with the given reason.</p>
 <div class="command-entry" data-command="kick" data-category="Moderation">
 <h1>/kick</h1>
 <h2>Syntax</h2>
-<pre><code>/kick &lt;nick&gt; [reason]
+<pre><code>/kick [#channel] &lt;nick&gt;[,nick2,...,nick6] [reason]
 </code></pre>
 <h2>Aliases</h2>
 <pre><code>/k
 </code></pre>
 <h2>Description</h2>
-<p>Kick a user from the current channel. If no reason is given, the
-user&#39;s nick is used as the reason. You must be a channel operator
-to use this command.</p>
+<p>Kick one or more users from the current channel (or <code>#channel</code> if
+given). Separate multiple nicks with commas — up to six per
+invocation. Everything after the nick list is the reason; no colon
+is needed. If no reason is given, the user&#39;s nick is used as the
+reason. You must be a channel operator to use this command.</p>
 <h2>Examples</h2>
 <pre><code>/kick troll
 /kick spammer Stop spamming
+/kick alice,bob,carol go away
+/kick #other troll Get out
 /k troll Get out
 </code></pre>
 <h2>See Also</h2>
@@ -1560,9 +1611,30 @@ channel operator to use this command.</p>
 <pre><code>/e2e verify &lt;nick&gt;
 </code></pre>
 <h3>reverify</h3>
-<p>Accept a changed fingerprint after manual verification.</p>
-<pre><code>/e2e reverify &lt;nick&gt;
+<p>Accept a peer&#39;s changed state after manual verification — either a new
+identity key, or a known key that has re-appeared under a different
+<code>ident@host</code>.</p>
+<pre><code>/e2e reverify &lt;nick|handle&gt; [fingerprint]
 </code></pre>
+<p>The warning prints the handle to pass, so the argument can be a full
+<code>ident@host</code> as well as a nick. Accepting a handle change keeps the
+existing fingerprint and trust and re-binds them to the new handle;
+accepting a fingerprint change replaces the key.</p>
+<p>Reverify acts on a warning repartee is currently holding. If the warning
+was raised in an earlier session, run <code>/e2e handshake &lt;nick&gt;</code> first to
+raise it again.</p>
+<p>If more than one unresolved identity change is waiting on the peer you
+named, reverify refuses and lists them instead of picking one — it cannot
+tell which fingerprint you compared. Nothing is changed and no warning is
+discarded.</p>
+<p>Resolve it by passing the fingerprint of the key you verified, which is
+what each line of the list starts with:</p>
+<pre><code>/e2e reverify ~bob@b.host c37c65c773314a48
+</code></pre>
+<p>Any unique prefix works, and case does not matter. Accepting one key
+settles the contest at that <code>ident@host</code>: the other claims are dropped,
+and their peers can re-handshake to raise a fresh warning. A fingerprint
+that matches nothing changes nothing.</p>
 <h3>rotate</h3>
 <p>Schedule outgoing key rotation.</p>
 <pre><code>/e2e rotate
@@ -1636,6 +1708,72 @@ switches away from the shell.</p>
 </ul>
 <h2>See Also</h2>
 <p>/close</p>
+</div>
+<div class="command-entry" data-command="shrink" data-category="Other">
+<h1>/shrink</h1>
+<h2>Syntax</h2>
+<pre><code>/shrink &lt;url&gt;
+</code></pre>
+<h2>Description</h2>
+<p>Send a single URL to the configured shrink service and print the
+shortened form into the current buffer as a local event line.</p>
+<p>Repartee can also shorten URLs automatically as you type them
+(<code>shrink.outgoing_enabled</code>) and when others post long URLs you
+receive (<code>shrink.incoming_enabled</code>). <code>/shrink</code> is the manual escape
+hatch for the one-off case, or when you want a copy-pasteable short
+URL without sending anything to a channel.</p>
+<p>URLs hit the in-memory cache first, so calling <code>/shrink</code> on a URL
+that was already shortened in this session returns instantly with
+<code>(cached)</code> appended.</p>
+<p>The API key is read from <code>.env</code> (<code>SHRINK_API_KEY=…</code>) — see
+<code>SHRINK_API.md</code> for the API spec. If the key is missing or
+<code>shrink.enabled = false</code>, <code>/shrink</code> prints an error instead of
+calling the API.</p>
+<h2>Examples</h2>
+<pre><code>/shrink https://example.com/very/long/path/to/article-2026-05-24
+/shrink https://x.com/foo/status/1234567890
+</code></pre>
+<h2>Configuration</h2>
+<pre><code>/set shrink.enabled                true
+/set shrink.api_url                https://shr.al
+/set shrink.outgoing_enabled       true
+/set shrink.incoming_enabled       true
+/set shrink.min_url_length         50      (≥ 25)
+/set shrink.outgoing_timeout_ms    2000
+/set shrink.incoming_timeout_ms    2000
+/set shrink.cache_max_entries      500
+</code></pre>
+<p><code>SHRINK_API_KEY</code> is loaded from <code>.env</code> only; it is never written to
+<code>config.toml</code>.</p>
+<h2>Known limitations (v1)</h2>
+<ul>
+<li><strong>Mentions buffer (<code>_mentions</code>)</strong> records the <strong>original</strong> URL even
+when the chat buffer shows the shortened form. The mention-buffer
+push runs synchronously inside the IRC handler before the deferred
+shrink worker substitutes the text. Look at the chat buffer for the
+shortened form; the mentions buffer is canonical for full URLs.</li>
+<li><strong>Multi-chunk outgoing messages</strong> (over ~510 bytes) fall through to
+the non-shrink path and ship with original URLs. Per-chunk
+substitution accounting is out of scope for v1; threshold of 50
+chars keeps this rare in practice.</li>
+<li><strong><code>/set shrink.{api_url,outgoing_timeout_ms,incoming_timeout_ms,cache_max_entries}</code></strong>
+changes config but the running workers captured these at startup —
+<code>/set</code> emits a <code>restart required</code> notice for these keys.</li>
+<li><strong><code>/set shrink.enabled true</code></strong> has no effect if <code>SHRINK_API_KEY</code>
+was missing at startup (no client was ever built). <code>/set</code> emits a
+diagnostic and the operator must restart with the key set in <code>.env</code>.</li>
+<li><strong>Multi-URL latency budget is per chunk, not per message.</strong> A
+message with N URLs that all miss the cache makes
+<code>ceil(N / 4)</code> sequential round-trips to the API (4 is the
+per-message concurrency cap chosen to keep shr.al rate limits
+happy). A 12-URL paste with a 2 s per-call timeout can therefore
+stall the outgoing pipeline for up to 6 s. The pipeline is
+sequential per direction, so a message typed during that stall
+falls through to the unshrunk path (visible in the buffer, but
+with original URLs).</li>
+</ul>
+<h2>See Also</h2>
+<p>/set, /preview</p>
 </div>
 <h2 id="cat-scripts">Scripts</h2>
 <div class="command-entry" data-command="script" data-category="Scripts">

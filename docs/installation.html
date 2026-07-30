@@ -100,13 +100,26 @@
         <h1>Installation</h1>
 <h2>Requirements</h2>
 <ul>
-<li><strong>Rust 1.85+</strong> — repartee uses the Rust 2024 edition. Install the toolchain with <code>curl --proto &#39;=https&#39; --tlsv1.2 -sSf https://sh.rustup.rs | sh</code>.</li>
+<li><strong>Rust 1.91+</strong> — the 2024 edition needs 1.85 and the dependency graph asks 1.90, but repartee itself uses APIs stabilised in 1.91. Install the toolchain with <code>curl --proto &#39;=https&#39; --tlsv1.2 -sSf https://sh.rustup.rs | sh</code>, or update an existing one with <code>rustup update stable</code>.</li>
 <li><strong>A terminal with 256-color or truecolor support</strong> — any modern terminal works: iTerm2, Alacritty, kitty, WezTerm, Windows Terminal, GNOME Terminal, etc.</li>
 </ul>
 <h2>Install from crates.io</h2>
 <p>The quickest way to get started:</p>
-<pre><code class="language-bash">cargo install repartee
+<pre><code class="language-bash">cargo install --locked repartee
 repartee
+</code></pre>
+<p><strong>Use <code>--locked</code>.</strong> <code>cargo install</code> ignores the published <code>Cargo.lock</code> by
+default and re-resolves every dependency to the newest semver-compatible
+version — which is not the set repartee was built and tested against. That
+is how a patch release of a transitive dependency can break your install
+while source and CI builds stay green. <code>--locked</code> uses the exact versions
+that shipped with the release, and every published repartee crate includes
+its lockfile.</p>
+<p>There is no way for a crate to require <code>--locked</code> from its side, and no
+Cargo config key for it either — <code>[install]</code> only accepts <code>root</code>. It has to
+be passed each time, so if you install crates often, a shell alias is the
+practical answer:</p>
+<pre><code class="language-bash">alias ci=&#39;cargo install --locked&#39;
 </code></pre>
 <h2>Install from source</h2>
 <p>If you want to hack on repartee or run the latest unreleased code:</p>
@@ -115,14 +128,36 @@ cd repartee
 make release
 ./target/release/repartee
 </code></pre>
-<h2>Command-line usage</h2>
-<pre><code>repartee                  # normal start (fork + terminal)
-repartee -d / --detach    # start headless (no terminal)
-repartee a [pid]          # attach to a running session
-repartee attach [pid]     # same as above
-repartee l / logs         # open read-only log browser
-repartee -v / --version   # print version
+<h2>Troubleshooting</h2>
+<h3><code>&lt;jemalloc&gt;: Unsupported system page size</code></h3>
+<pre><code class="language-text">&lt;jemalloc&gt;: Unsupported system page size
+memory allocation of 4 bytes failed
+Aborted
 </code></pre>
+<p>The prebuilt Linux binary uses jemalloc, which fixes its page size at compile time and refuses to start when the running kernel&#39;s pages are larger. Affected releases are <strong>v1.7.0 and earlier on ARM64</strong>, where the binary was built for 4 KiB pages. It hits any aarch64 kernel with larger pages — most visibly Raspberry Pi OS on a Pi 5, which defaults to 16 KiB.</p>
+<p>Check what your kernel uses:</p>
+<pre><code class="language-bash">getconf PAGESIZE
+</code></pre>
+<p><code>4096</code> means something else is wrong. <code>16384</code> or <code>65536</code> means you have hit this.</p>
+<p>Two ways out, in order of preference:</p>
+<ol>
+<li><strong>Use v1.7.1 or newer.</strong> The ARM64 binary is now built for 64 KiB pages, which covers 4, 16, and 64 KiB kernels alike.</li>
+<li><strong>Build it yourself</strong> with <code>cargo install --locked repartee</code>. Compiling on the machine you will run on always matches its page size.</li>
+</ol>
+<p>Forcing the kernel back to 4 KiB pages (<code>kernel=kernel8.img</code> in <code>/boot/firmware/config.txt</code> on a Pi 5) also works, but it changes your system to suit one program — prefer either option above.</p>
+<h2>Command-line usage</h2>
+<pre><code>repartee                     # normal start (fork + terminal)
+repartee -d / --detach       # start headless (no terminal)
+repartee a [pid]             # attach to a running session
+repartee attach [pid]        # same as above
+repartee l / logs            # open read-only log browser
+repartee -h / --bind &lt;ip&gt;    # bind outgoing connections to a local IP
+repartee -v / --version      # print version
+repartee --help / help       # print usage for all of the above
+</code></pre>
+<p><code>-h</code> is the bind-address flag, as in irssi — usage is <code>--help</code>. Run
+<code>repartee --help</code> for the same list plus the environment variables and file
+paths repartee uses.</p>
 <p>See <a href="sessions.html">Sessions &amp; Detach</a> for details on background sessions.</p>
 <h2>Binary size</h2>
 <p>The release binary is approximately 5MB (includes bundled SQLite and Lua). The <code>--release</code> profile enables LTO, single codegen unit, and symbol stripping for minimal size.</p>

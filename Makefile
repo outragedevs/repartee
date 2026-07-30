@@ -1,4 +1,4 @@
-.PHONY: all clean wasm build release install test clippy check test-web clippy-web
+.PHONY: all clean wasm build release install test clippy check test-web clippy-web docs docs-check
 
 # Full clean rebuild: clean → WASM → native release
 all: clean wasm release
@@ -43,3 +43,22 @@ test-web:
 # Run clippy on the web-ui crate
 clippy-web:
 	cargo clippy -p repartee-web --all-targets
+
+# Regenerate the static docs site from docs/src/content/*.md and
+# docs/commands/*.md. The HTML under docs/ is what repart.ee serves and is
+# checked in, but nothing builds it automatically — so editing a .md
+# without running this ships a page nobody sees. Run it whenever you touch
+# either source directory.
+docs:
+	cd docs && bun install --frozen-lockfile 2>/dev/null || (cd docs && bun install)
+	cd docs && bun run build.ts
+
+# Fail if the checked-in HTML is out of date with the markdown. Intended
+# for CI; locally, `make docs` then commit the result.
+docs-check: docs
+	@git diff --quiet -- docs/ || { \
+		echo "error: docs/ HTML is stale — run 'make docs' and commit the result:"; \
+		git diff --stat -- docs/; \
+		exit 1; \
+	}
+	@echo "docs/ HTML is up to date"
