@@ -94,9 +94,35 @@ Show side-by-side SAS for a peer.
 
 ### reverify
 
-Accept a changed fingerprint after manual verification.
+Accept a peer's changed state after manual verification — either a new
+identity key, or a known key that has re-appeared under a different
+`ident@host`.
 
-    /e2e reverify <nick>
+    /e2e reverify <nick|handle> [fingerprint]
+
+The warning prints the handle to pass, so the argument can be a full
+`ident@host` as well as a nick. Accepting a handle change keeps the
+existing fingerprint and trust and re-binds them to the new handle;
+accepting a fingerprint change replaces the key.
+
+Reverify acts on a warning repartee is currently holding. If the warning
+was raised in an earlier session, run `/e2e handshake <nick>` first to
+raise it again.
+
+If more than one unresolved identity change is waiting on the peer you
+named, reverify refuses and lists them instead of picking one — it cannot
+tell which fingerprint you compared. Nothing is changed and no warning is
+discarded.
+
+Resolve it by passing the fingerprint of the key you verified, which is
+what each line of the list starts with:
+
+    /e2e reverify ~bob@b.host c37c65c773314a48
+
+Any unique prefix works, and case does not matter. Accepting one key
+settles the contest at that `ident@host`: the other claims are dropped,
+and their peers can re-handshake to raise a fresh warning. A fingerprint
+that matches nothing changes nothing.
 
 ### rotate
 

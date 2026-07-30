@@ -832,6 +832,31 @@ impl Keyring {
     /// via `delete_incoming_sessions_for_handle` and
     /// `delete_outgoing_recipients_for_handle` so the two cleanups are
     /// visible side-by-side.
+    /// Unbind every peer at `handle` except `keep`, returning how many
+    /// rows were detached.
+    ///
+    /// Enforces one fingerprint per `ident@host`, which
+    /// `E2eManager::classify_peer_change` depends on: it resolves by
+    /// fingerprint first, so a loser still carrying `last_handle` keeps
+    /// classifying as `Known` there and can re-handshake as if it owned
+    /// the handle. The rows are kept and only unbound — a peer that has
+    /// lost a handle has not lost its key, and `last_handle = NULL`
+    /// classifies as a handle change on its next appearance, which
+    /// correctly asks the user again.
+    pub fn detach_other_peers_from_handle(
+        &self,
+        handle: &str,
+        keep: &Fingerprint,
+    ) -> Result<usize> {
+        let conn = self.db.lock().expect("keyring mutex poisoned");
+        let n = conn.execute(
+            "UPDATE e2e_peers SET last_handle = NULL
+             WHERE last_handle = ?1 AND fingerprint != ?2",
+            params![handle, keep.as_slice()],
+        )?;
+        Ok(n)
+    }
+
     pub fn delete_peer_by_fingerprint(&self, fp: &Fingerprint) -> Result<()> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
         conn.execute(
