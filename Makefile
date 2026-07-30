@@ -53,12 +53,21 @@ docs:
 	cd docs && bun install --frozen-lockfile 2>/dev/null || (cd docs && bun install)
 	cd docs && bun run build.ts
 
-# Fail if the checked-in HTML is out of date with the markdown. Intended
+# Fail if the checked-in output is out of date with its sources. Intended
 # for CI; locally, `make docs` then commit the result.
+#
+# Uses `git status`, not `git diff`: the builder also *copies* assets
+# (docs/src/js/*.js → docs/js/, css, images), so a newly added source
+# produces a brand-new output file. That file is untracked, and `git diff`
+# does not see untracked paths — the check would pass while the generated
+# file went uncommitted. `--untracked-files=all` lists them individually
+# instead of collapsing a new directory to one entry, and still honours
+# .gitignore, so docs/node_modules stays out of it.
 docs-check: docs
-	@git diff --quiet -- docs/ || { \
-		echo "error: docs/ HTML is stale — run 'make docs' and commit the result:"; \
-		git diff --stat -- docs/; \
+	@if [ -n "$$(git status --porcelain --untracked-files=all -- docs/)" ]; then \
+		echo "error: docs/ is not in sync with its sources —"; \
+		echo "       run 'make docs' and commit the result:"; \
+		git status --short --untracked-files=all -- docs/; \
 		exit 1; \
-	}
-	@echo "docs/ HTML is up to date"
+	fi
+	@echo "docs/ is up to date"
