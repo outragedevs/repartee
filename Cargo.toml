@@ -5,6 +5,18 @@ members = [".", "web-ui"]
 name = "repartee"
 version = "1.7.0"
 edition = "2024"
+# The real floor, not the edition's. Edition 2024 alone needs 1.85, and the
+# dependency graph asks 1.90 (`quantette`, via ratatui-image → icy_sixel),
+# but our own code uses `Duration::from_hours` and const APIs stabilised in
+# 1.91. Declaring it does two things for `cargo install`: it fails fast
+# with "requires rustc 1.91 or newer" instead of a compile error deep in a
+# dependency, and it lets the edition-2024 resolver pick dependency
+# versions that still build on 1.91 rather than always taking the newest.
+#
+# `clippy::incompatible_msrv` enforces this against our own code, so a use
+# of a newer API fails the 0-warnings gate rather than silently raising the
+# floor. Raise the value only together with the README and docs.
+rust-version = "1.91"
 description = "A modern terminal IRC client built with Ratatui and Tokio"
 license = "MIT"
 repository = "https://github.com/outragedevs/repartee"

@@ -91,7 +91,7 @@ A modern terminal IRC client built with Ratatui, Tokio, and Rust. Inspired by ir
 ## Quick Install
 
 ```bash
-cargo install repartee
+cargo install --locked repartee
 repartee
 ```
 

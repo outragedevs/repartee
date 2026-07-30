@@ -60,7 +60,7 @@ Download from [GitHub Releases](https://github.com/outragedevs/repartee/releases
 ### From crates.io
 
 ```bash
-cargo install repartee
+cargo install --locked repartee
 ```
 
 ### From source
@@ -74,7 +74,7 @@ make release
 
 ### Requirements
 
-- **Build**: Rust 1.85+ (2024 edition) — install via [rustup](https://rustup.rs)
+- **Build**: Rust 1.91+ — install via [rustup](https://rustup.rs). The 2024 edition needs 1.85 and the dependency graph 1.90; repartee itself uses 1.91 APIs.
 - A terminal with 256-color or truecolor support (iTerm2, Alacritty, kitty, WezTerm, Ghostty, Subterm, etc.)
 - A modern web browser for the web frontend (optional)
 
