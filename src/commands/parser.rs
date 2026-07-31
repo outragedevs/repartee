@@ -5,20 +5,31 @@ pub struct ParsedCommand {
 
 /// Greedy commands: the last arg consumes the rest of the line.
 /// - me, quit, quote: single arg (entire rest)
-/// - msg, query, notice, topic, kb, disconnect, set, alias: two args (first word, rest)
+/// - msg, query, notice, topic, disconnect, set, alias: two args (first word, rest)
 ///
 /// `kick` is intentionally NOT greedy: it accepts multiple nicks plus an
 /// optional `:reason` (everything from the first `:`-prefixed token onward).
 /// The handler reconstructs the reason from the tokenised args.
 ///
+/// `kb` is NOT greedy for the same reason. It takes `[#channel] <nick>
+/// [reason]` — three parts, where two-arg greedy parsing only ever yields
+/// two: `/kb #chan nick be nice` collapsed into `["#chan", "nick be nice"]`,
+/// so `cmd_kickban` took the entire tail as the nick and banned
+/// `nick be nice!*@*`. It joins the reason from the tokenised args itself.
+///
 /// `close` is likewise NOT greedy. It used to be, back when its whole
 /// argument was a free-text part reason — but it now takes an optional window
 /// number or range and a `-YES` flag ahead of that reason, and greedy parsing
 /// handed the handler one blob it could not split (`/close 22 see you` closed
-/// the active window instead of window 22). Its `/wc` alias was always
-/// tokenised, since greediness is decided by the name as typed and runs
-/// before alias resolution; dropping `close` here is what makes the two
-/// agree. `cmd_close` rejoins the tail into the reason.
+/// the active window instead of window 22). `cmd_close` rejoins the tail into
+/// the reason.
+///
+/// Entries are CANONICAL command names. The typed name is resolved through
+/// the registry first, so a built-in alias is parsed exactly like the command
+/// it stands for — `/m` splits like `/msg`, `/t` like `/topic`. Matching the
+/// typed name instead used to silently mangle every aliased greedy command:
+/// `/m nick hello world` tokenised into three args, and `cmd_msg` reads only
+/// `args[1]`, so the message went out as "hello" with "world" dropped.
 const GREEDY_COMMANDS: &[&str] = &[
     "msg",
     "query",
@@ -26,7 +37,6 @@ const GREEDY_COMMANDS: &[&str] = &[
     "me",
     "quit",
     "topic",
-    "kb",
     "disconnect",
     "set",
     "alias",
@@ -50,8 +60,12 @@ pub fn parse_command(input: &str) -> Option<ParsedCommand> {
         }
     };
 
-    if GREEDY_COMMANDS.contains(&command.as_str()) {
-        if matches!(command.as_str(), "me" | "quit" | "quote") {
+    // Greediness is a property of the command, not of the spelling used to
+    // reach it, so resolve built-in aliases before deciding.
+    let canonical = super::registry::resolve_alias(&command).unwrap_or(command.as_str());
+
+    if GREEDY_COMMANDS.contains(&canonical) {
+        if matches!(canonical, "me" | "quit" | "quote") {
             return Some(ParsedCommand {
                 name: command,
                 args: vec![rest.to_string()],
@@ -101,11 +115,66 @@ mod tests {
         assert_eq!(cmd.args, vec!["does a thing"]);
     }
 
+    /// Every built-in alias must parse its arguments exactly like the command
+    /// it stands for. Driven off the registry rather than a hand-written list,
+    /// so a newly added alias is covered the moment it lands.
+    #[test]
+    fn aliases_parse_like_their_canonical_command() {
+        let tail = "one two three four";
+        for &(name, ref def) in crate::commands::registry::get_commands() {
+            let canonical = parse_command(&format!("/{name} {tail}")).unwrap();
+            for alias in def.aliases {
+                let aliased = parse_command(&format!("/{alias} {tail}")).unwrap();
+                assert_eq!(
+                    aliased.args, canonical.args,
+                    "/{alias} must split like /{name}"
+                );
+                // The typed name still reaches dispatch unchanged — only the
+                // argument split is canonicalised.
+                assert_eq!(aliased.name, *alias);
+            }
+        }
+    }
+
+    #[test]
+    fn greedy_aliases_keep_the_tail_intact() {
+        // /m used to tokenise into ["nick","hello","world"], and cmd_msg reads
+        // args[1] only — the message went out as "hello".
+        let cmd = parse_command("/m nick hello world").unwrap();
+        assert_eq!(cmd.args, vec!["nick", "hello world"]);
+
+        let cmd = parse_command("/t #chan a new topic").unwrap();
+        assert_eq!(cmd.args, vec!["#chan", "a new topic"]);
+
+        let cmd = parse_command("/action waves at everyone").unwrap();
+        assert_eq!(cmd.args, vec!["waves at everyone"]);
+
+        let cmd = parse_command("/raw PRIVMSG #chan :hello there").unwrap();
+        assert_eq!(cmd.args, vec!["PRIVMSG #chan :hello there"]);
+    }
+
+    #[test]
+    fn kickban_keeps_channel_nick_and_reason_separable() {
+        // cmd_kickban reads `[#channel] <nick> [reason]` and joins the reason
+        // from the tail itself, exactly like /kick. Two-arg greedy parsing
+        // gave it "nick be nice" as one token, so it banned that whole string
+        // as the nick.
+        for line in ["/kb #chan nick be nice", "/kickban #chan nick be nice"] {
+            let cmd = parse_command(line).unwrap();
+            assert_eq!(cmd.args, vec!["#chan", "nick", "be", "nice"], "{line}");
+        }
+    }
+
+    #[test]
+    fn non_greedy_aliases_are_unaffected() {
+        let cmd = parse_command("/j #a #b #c").unwrap();
+        assert_eq!(cmd.args, vec!["#a", "#b", "#c"]);
+    }
+
     #[test]
     fn close_is_tokenised_like_its_wc_alias() {
-        // Greediness is decided by the name as typed, before aliases resolve,
-        // so putting `close` back on GREEDY_COMMANDS would silently break
-        // `/close <number> [reason]` while leaving `/wc` working.
+        // `close` takes a window selector ahead of its reason, so it must stay
+        // off GREEDY_COMMANDS — putting it back would break both spellings.
         for line in ["/close 22 see you", "/wc 22 see you"] {
             let cmd = parse_command(line).unwrap();
             assert_eq!(cmd.args, vec!["22", "see", "you"], "{line}");
