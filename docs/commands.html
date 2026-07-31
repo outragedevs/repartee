@@ -1443,10 +1443,11 @@ ALL       All of the above
 <div class="command-entry" data-command="kb" data-category="Moderation">
 <h1>/kb</h1>
 <h2>Syntax</h2>
-<pre><code>/kb &lt;nick&gt; [reason]
+<pre><code>/kb [#channel] &lt;nick&gt; [reason]
 </code></pre>
 <h2>Description</h2>
-<p>Kick and ban a user from the current channel. Looks up the user&#39;s ident
+<p>Kick and ban a user, from the named channel or the current one if you omit
+it. Looks up the user&#39;s ident
 and host from cached WHOX data to create a proper <code>*!*ident@host</code> ban
 mask, then kicks with the given reason.</p>
 <p>Falls back to <code>nick!*@*</code> if the user&#39;s ident and host are not available
@@ -1455,6 +1456,7 @@ mask, then kicks with the given reason.</p>
 <h2>Examples</h2>
 <pre><code>/kb troll
 /kb spammer Enough is enough
+/kb #other troll Take it elsewhere
 </code></pre>
 <h2>See Also</h2>
 <p>/kick, /ban, /unban, /mode</p>

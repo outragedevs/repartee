@@ -707,8 +707,13 @@ pub fn get_command_names() -> &'static [&'static str] {
     &NAMES
 }
 
-/// Resolve an alias to its canonical command name.
-#[allow(dead_code)]
+/// Resolve a built-in alias to its canonical command name.
+///
+/// `None` for anything the registry does not know — a user-defined
+/// `/alias`, a script command, or a typo. Built-ins are checked here in the
+/// same order `execute_command_with_depth` dispatches them (registry first,
+/// user aliases only as a fallback), so a user alias can never shadow a
+/// built-in name here either.
 pub fn resolve_alias(name: &str) -> Option<&'static str> {
     let commands = get_commands();
     for &(cmd_name, ref def) in commands {

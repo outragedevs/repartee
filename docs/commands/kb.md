@@ -7,11 +7,12 @@ description: Kickban a user (kick then ban *!*ident@host)
 
 ## Syntax
 
-    /kb <nick> [reason]
+    /kb [#channel] <nick> [reason]
 
 ## Description
 
-Kick and ban a user from the current channel. Looks up the user's ident
+Kick and ban a user, from the named channel or the current one if you omit
+it. Looks up the user's ident
 and host from cached WHOX data to create a proper `*!*ident@host` ban
 mask, then kicks with the given reason.
 
@@ -24,6 +25,7 @@ The reason defaults to the nick if not provided.
 
     /kb troll
     /kb spammer Enough is enough
+    /kb #other troll Take it elsewhere
 
 ## See Also
 
