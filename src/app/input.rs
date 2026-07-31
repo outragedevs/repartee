@@ -113,17 +113,7 @@ impl App {
             }
         } else {
             // 1..9 map to real buffers (excluding _default)
-            let real_ids: Vec<_> = self
-                .state
-                .sorted_buffer_ids()
-                .into_iter()
-                .filter(|id| {
-                    self.state
-                        .buffers
-                        .get(id.as_str())
-                        .is_none_or(|b| b.connection_id != Self::DEFAULT_CONN_ID)
-                })
-                .collect();
+            let real_ids = self.state.numbered_buffer_ids();
             let idx = n - 1; // 1 = index 0
             if idx < real_ids.len() {
                 self.state.set_active_buffer(&real_ids[idx]);
@@ -666,24 +656,14 @@ impl App {
         );
         self.buffer_list_scroll = clamped_scroll;
         let logical_row = y_offset + clamped_scroll;
-        let sorted_ids = self.state.sorted_buffer_ids();
-        // Every non-default buffer occupies one row — matches the renderer.
-        let mut row = 0usize;
-        for id in &sorted_ids {
-            let Some(buf) = self.state.buffers.get(id.as_str()) else {
-                continue;
-            };
-            if buf.connection_id == Self::DEFAULT_CONN_ID {
-                continue;
-            }
-            if row == logical_row {
-                self.state.set_active_buffer(id);
-                self.scroll_offset = 0;
-                self.nick_list_scroll = 0;
-                self.update_shell_input_state();
-                return;
-            }
-            row += 1;
+        // Every numbered buffer occupies exactly one row — matches the renderer.
+        let numbered = self.state.numbered_buffer_ids();
+        if let Some(id) = numbered.get(logical_row) {
+            let id = id.clone();
+            self.state.set_active_buffer(&id);
+            self.scroll_offset = 0;
+            self.nick_list_scroll = 0;
+            self.update_shell_input_state();
         }
     }
 

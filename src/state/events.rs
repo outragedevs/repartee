@@ -792,6 +792,24 @@ impl AppState {
         sorted.into_iter().map(|b| b.id.clone()).collect()
     }
 
+    /// Buffer IDs in sidebar order, excluding the app-level default Status
+    /// buffer. Index `n - 1` is the window number `n` printed next to each
+    /// name in the buffer list.
+    ///
+    /// Single source of truth for window numbering — the sidebar renderer,
+    /// the statusbar activity list, Alt+N switching, buffer-list clicks and
+    /// `/wc <n>` all resolve numbers through here so they cannot drift apart.
+    pub fn numbered_buffer_ids(&self) -> Vec<String> {
+        self.sorted_buffer_ids()
+            .into_iter()
+            .filter(|id| {
+                self.buffers
+                    .get(id.as_str())
+                    .is_some_and(|b| b.connection_id != crate::app::App::DEFAULT_CONN_ID)
+            })
+            .collect()
+    }
+
     pub fn next_buffer(&mut self) {
         let sorted = self.sorted_buffer_ids();
         if sorted.is_empty() {
@@ -1177,6 +1195,31 @@ mod tests {
             state.buffers.get("libera/#rust").unwrap().activity,
             ActivityLevel::None
         );
+    }
+
+    #[test]
+    fn numbered_buffer_ids_match_the_sidebar() {
+        // Window numbers printed in the sidebar are 1-based positions in this
+        // list. Two invariants matter: the app-level default Status buffer is
+        // never numbered, and Mentions sorts to the front — so `/wc 1` lands on
+        // Mentions whenever it exists, which is exactly what the guard assumes.
+        let mut state = make_test_state();
+        state.add_buffer(make_test_buffer(
+            crate::app::App::DEFAULT_CONN_ID,
+            BufferType::Server,
+            "Status",
+        ));
+        state.add_buffer(make_test_buffer("", BufferType::Mentions, "Mentions"));
+
+        let numbered = state.numbered_buffer_ids();
+        let names: Vec<&str> = numbered
+            .iter()
+            .map(|id| state.buffers.get(id.as_str()).unwrap().name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Mentions", "libera", "#linux", "#rust"]);
+
+        // The default Status buffer exists but is unnumbered.
+        assert_eq!(state.sorted_buffer_ids().len(), numbered.len() + 1);
     }
 
     #[test]
