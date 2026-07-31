@@ -484,6 +484,13 @@ async fn await_sasl_result(stream: &mut irc::client::ClientStream) -> Result<()>
 /// leaves safe headroom.
 pub const MESSAGE_MAX_BYTES: usize = 350;
 
+/// Maximum bytes in a single client→server protocol line, including `\r\n`.
+///
+/// Unlike [`MESSAGE_MAX_BYTES`] there is no relay prefix to budget for — the
+/// line we send is never echoed back to us verbatim — so commands that batch
+/// targets (e.g. `PART #a,#b,#c :reason`) may use the full RFC 1459 limit.
+pub const PROTOCOL_LINE_MAX_BYTES: usize = 512;
+
 /// Conservative fallback for `draft/multiline` `max-lines` when the server
 /// advertises the cap without that key (the spec marks it RECOMMENDED, not
 /// required).

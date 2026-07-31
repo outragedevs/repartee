@@ -125,17 +125,40 @@ searchable via <code>/log search</code>.</p>
 <h1>/close</h1>
 <h2>Syntax</h2>
 <pre><code>/close [reason]
+/close &lt;number&gt; [reason]
+/close &lt;from&gt;-&lt;to&gt; [reason]
+/close -YES ...
 </code></pre>
 <h2>Description</h2>
-<p>Close the current buffer. For channels, parts the channel with an
-optional reason. For query windows, closes the window. Server buffers
-cannot be closed.</p>
+<p>Close the active window, a window by its sidebar number, or a whole range
+of windows at once. Channels are parted with an optional reason; queries,
+DCC chats and log windows just close.</p>
+<p>The numbers are the ones printed next to each name in the buffer list, so
+<code>/wc 22-35</code> closes exactly what you see as 22 through 35, inclusive. A
+range that runs past the last window closes what exists rather than
+failing, which makes <code>/wc 20-999</code> a convenient &quot;everything from 20 on&quot;.</p>
+<p>Mentions is a protected window: closing it needs <code>-YES</code>. It only goes away
+for the current session — <code>display.mentions_buffer</code> stays on, so <code>/mentions</code>
+or the next restart brings it straight back.</p>
+<p>Server windows cannot be closed while connected; <code>/disconnect</code> first.
+Closing a disconnected server window drops the whole network along with all
+its windows, so a <em>range</em> refuses to touch server windows at all, and <code>-YES</code>
+does not override that. Close them one at a time instead.</p>
+<p>Anything that is not a number or a range is treated as the part reason, so
+the old <code>/wc going to bed</code> still works. A malformed range such as <code>22-</code> or
+<code>35-22</code> is reported as an error rather than quietly becoming a reason.</p>
 <h2>Examples</h2>
 <pre><code>/close
-/close Window closed
+/close going to bed
+/wc 22
+/wc 22 see you tomorrow
+/wc 22-35
+/wc 3-40 spring cleaning
+/wc -YES
+/wc 1 -YES
 </code></pre>
 <h2>See Also</h2>
-<p>/part, /quit</p>
+<p>/part, /mentions, /disconnect, /quit</p>
 </div>
 <div class="command-entry" data-command="cycle" data-category="Channel">
 <h1>/cycle</h1>
