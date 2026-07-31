@@ -1285,6 +1285,50 @@ mod close_tests {
         assert_eq!(parsed.reason.as_deref(), Some("-brb"));
     }
 
+    /// End-to-end through the real command parser: `/close` and its `/wc`
+    /// alias must produce identical arguments. They did not — `close` sat in
+    /// `GREEDY_COMMANDS`, so the canonical name handed the handler one blob
+    /// ("22 see you") while the alias handed it tokens.
+    fn parse_line(line: &str) -> CloseArgs {
+        let parsed = crate::commands::parser::parse_command(line).expect("is a command");
+        parse_close_args(&parsed.args).expect("should parse")
+    }
+
+    #[test]
+    fn close_and_wc_parse_identically() {
+        for (canonical, alias) in [
+            ("/close 22", "/wc 22"),
+            ("/close 22 see you", "/wc 22 see you"),
+            ("/close 3-5", "/wc 3-5"),
+            ("/close 3-5 bye", "/wc 3-5 bye"),
+            ("/close 1 -YES", "/wc 1 -YES"),
+            ("/close -YES", "/wc -YES"),
+            ("/close going to bed", "/wc going to bed"),
+            ("/close", "/wc"),
+        ] {
+            assert_eq!(
+                parse_line(canonical),
+                parse_line(alias),
+                "{canonical} and {alias} must agree"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_close_honours_a_selector_before_a_reason() {
+        let parsed = parse_line("/close 22 see you");
+        assert_eq!(parsed.target, CloseTarget::Window(22));
+        assert_eq!(parsed.reason.as_deref(), Some("see you"));
+
+        let parsed = parse_line("/close 3-5 bye");
+        assert_eq!(parsed.target, CloseTarget::Range { start: 3, end: 5 });
+        assert_eq!(parsed.reason.as_deref(), Some("bye"));
+
+        let parsed = parse_line("/close 1 -YES");
+        assert_eq!(parsed.target, CloseTarget::Window(1));
+        assert!(parsed.confirmed);
+    }
+
     #[test]
     fn window_id_maps_one_based_numbers() {
         let numbered = vec!["a".to_string(), "b".to_string(), "c".to_string()];
