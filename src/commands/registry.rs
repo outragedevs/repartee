@@ -628,7 +628,7 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
             "close",
             CommandDef {
                 handler: cmd_close,
-                description: "Close active buffer",
+                description: "Close a window, a range of windows, or the active one",
                 aliases: &["wc"],
                 category: CommandCategory::Other,
             },

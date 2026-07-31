@@ -253,6 +253,27 @@ impl Isupport {
         })
     }
 
+    /// `TARGMAX` limit for a command, e.g. `PART` in
+    /// `TARGMAX=NAMES:1,PART:4,PRIVMSG:4`.
+    ///
+    /// `None` means "no advertised limit": `TARGMAX` absent, the command not
+    /// listed, or listed with an empty/zero value (`ACCEPT:`) — all of which
+    /// mean unlimited targets per the `ISUPPORT` spec. Callers must still
+    /// respect the 512-byte line limit.
+    #[must_use]
+    pub fn targmax(&self, command: &str) -> Option<usize> {
+        let targmax = self.tokens.get("TARGMAX")?;
+        for entry in targmax.split(',') {
+            let Some((cmd, limit)) = entry.split_once(':') else {
+                continue;
+            };
+            if cmd.eq_ignore_ascii_case(command) {
+                return limit.parse::<usize>().ok().filter(|&n| n > 0);
+            }
+        }
+        None
+    }
+
     /// Maximum number of messages the server will return for a single
     /// `CHATHISTORY` request (`draft/chathistory`).
     ///
@@ -533,6 +554,25 @@ mod tests {
         let mut is = Isupport::new();
         is.parse_tokens(&["TARGMAX=MODE:,PRIVMSG:4"]);
         assert!(is.supports_multi_target_mode());
+    }
+
+    #[test]
+    fn targmax_lookup() {
+        let mut is = Isupport::new();
+        // No TARGMAX at all (IRCnet) → no advertised limit.
+        assert_eq!(is.targmax("PART"), None);
+
+        // Libera-style: PART is absent, which per spec means unlimited.
+        is.parse_tokens(&["TARGMAX=NAMES:1,LIST:1,PRIVMSG:4,ACCEPT:,MONITOR:"]);
+        assert_eq!(is.targmax("PART"), None);
+        assert_eq!(is.targmax("PRIVMSG"), Some(4));
+        assert_eq!(is.targmax("privmsg"), Some(4));
+        // Empty limit means unlimited, not zero.
+        assert_eq!(is.targmax("ACCEPT"), None);
+
+        let mut limited = Isupport::new();
+        limited.parse_tokens(&["TARGMAX=PART:4"]);
+        assert_eq!(limited.targmax("PART"), Some(4));
     }
 
     #[test]

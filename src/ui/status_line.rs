@@ -213,7 +213,7 @@ fn status_spans<'a>(ctx: &StatusCtx<'a>) -> Option<Vec<Span<'a>>> {
                 }
             }
             StatusbarItem::ActiveWindows => {
-                let sorted_ids = ctx.state.sorted_buffer_ids();
+                let sorted_ids = ctx.state.numbered_buffer_ids();
                 let active_id = ctx.state.active_buffer_id.as_deref();
                 let mut activity_spans: Vec<Span> = Vec::new();
                 let mut win_num = 1u32; // Real buffers start at 1
@@ -222,10 +222,6 @@ fn status_spans<'a>(ctx: &StatusCtx<'a>) -> Option<Vec<Span<'a>>> {
                     let Some(buf) = ctx.state.buffers.get(id.as_str()) else {
                         continue;
                     };
-                    // Skip default Status buffer
-                    if buf.connection_id == crate::app::App::DEFAULT_CONN_ID {
-                        continue;
-                    }
                     let current_num = win_num;
                     win_num += 1;
 
