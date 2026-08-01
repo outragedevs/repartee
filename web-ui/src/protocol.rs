@@ -135,6 +135,13 @@ pub enum WebEvent {
         #[serde(default = "default_true")]
         emotes_enabled: bool,
     },
+    /// A message this client submitted was refused; put the text back in the
+    /// composer. Targeted, so only its author receives it.
+    RestoreInput {
+        text: String,
+        #[serde(default)]
+        session_id: Option<String>,
+    },
     Error {
         message: String,
         #[serde(default)]

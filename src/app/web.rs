@@ -449,10 +449,16 @@ impl App {
                 self.on_web_typing(session_id, &buffer_id, typing);
             }
             WebCommand::SendMessage { buffer_id, text } => {
+                // Mark who is submitting for the duration of the command, so
+                // a refusal (translation, E2E) returns the text to THIS
+                // browser rather than the terminal's input line.
+                self.submit_origin =
+                    crate::app::translate::SubmitOrigin::Web(session_id.to_string());
                 // Run the submit FIRST and report what it actually put on the
                 // wire — a message the E2E gate refuses (or a dead connection
                 // swallows) must leave the `done` we owe the peers outstanding.
                 let sent_message = self.web_send_message(&buffer_id, &text);
+                self.submit_origin = crate::app::translate::SubmitOrigin::Tui;
                 self.on_typing_submit(
                     &crate::app::typing::TypingSource::Web(session_id.to_string()),
                     &buffer_id,

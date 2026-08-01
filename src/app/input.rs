@@ -2998,6 +2998,7 @@ pub mod submit_typing_tests {
             translate_in_flight: None,
             translate_in_flight_applied: 0,
             translate_in_flight_debt: 0,
+            submit_origin: crate::app::translate::SubmitOrigin::Tui,
             cli_bind_override: None,
             typing: crate::app::typing::TypingSender::default(),
         }

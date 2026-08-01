@@ -513,6 +513,10 @@ pub struct App {
     /// checked out. Retried from the tick — see
     /// `settle_translate_concurrency_debt`.
     pub(crate) translate_in_flight_debt: usize,
+    /// Which client is currently submitting. Set for the duration of a web
+    /// command so a refusal returns the text to that browser instead of the
+    /// terminal's input line.
+    pub(crate) submit_origin: crate::app::translate::SubmitOrigin,
     /// Both translation workers post their outcomes here; the main loop
     /// drains and routes them through `apply_translate_deliver`.
     pub(crate) translate_deliver_rx: mpsc::Receiver<translate::TranslateDeliver>,
@@ -864,6 +868,7 @@ impl App {
             translate_in_flight: Some(translate_in_flight),
             translate_in_flight_applied: translate_max_in_flight,
             translate_in_flight_debt: 0,
+            submit_origin: crate::app::translate::SubmitOrigin::Tui,
             cli_bind_override: None,
             typing: crate::app::typing::TypingSender::default(),
         };

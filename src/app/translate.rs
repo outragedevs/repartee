@@ -81,6 +81,19 @@ fn wrap_outgoing_body(body: &str, is_action: bool) -> Vec<String> {
 /// Bytes `\x01ACTION ` + `\x01` adds around an action's text.
 const ACTION_WRAPPER_BYTES: usize = "\x01ACTION \x01".len();
 
+/// Which client submitted a message.
+///
+/// Carried so a refusal returns the text to the person who typed it. Without
+/// it a message submitted from the browser was restored into the TERMINAL's
+/// input line: the web textarea had already been cleared, so the text was
+/// lost to its author and surfaced somewhere they were not looking.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SubmitOrigin {
+    #[default]
+    Tui,
+    Web(String),
+}
+
 /// How a translated outgoing message should echo locally.
 ///
 /// Carried from the submitting call site rather than re-derived at delivery.
@@ -153,6 +166,8 @@ pub struct PendingOutgoingTranslate {
     /// takes it so it renders at the position it was submitted from, not
     /// after the lines that arrived while it was translating.
     pub echo_id: u64,
+    /// Which client submitted this, so a refusal returns the text there.
+    pub origin: SubmitOrigin,
 }
 
 /// Posted by either worker, consumed by the main event loop.
@@ -193,6 +208,8 @@ pub struct OutgoingTranslateDeliver {
     /// takes it so it renders at the position it was submitted from, not
     /// after the lines that arrived while it was translating.
     pub echo_id: u64,
+    /// Which client submitted this, so a refusal returns the text there.
+    pub origin: SubmitOrigin,
 }
 
 /// Channels and shared state the translation workers need. Built once in
@@ -398,6 +415,7 @@ fn spawn_connection_lane(
                         is_action: pending.is_action,
                         echo: pending.echo,
                         echo_id: pending.echo_id,
+                        origin: pending.origin,
                     },
                 )))
                 .await;
@@ -432,6 +450,7 @@ async fn refuse_outgoing(
                 is_action: pending.is_action,
                 echo: pending.echo,
                 echo_id: pending.echo_id,
+                origin: pending.origin,
             },
         )))
         .await;
@@ -786,6 +805,7 @@ impl crate::app::App {
             is_action,
             echo,
             echo_id: id,
+            origin: self.submit_origin.clone(),
         })
     }
 
@@ -935,6 +955,19 @@ impl crate::app::App {
     /// Always returns `false` (nothing was sent) so submit paths can
     /// `return` it directly.
     pub(crate) fn refuse_untranslatable_send(&mut self, text: &str, reason: &str) -> bool {
+        let origin = self.submit_origin.clone();
+        self.refuse_untranslatable_send_to(text, reason, &origin)
+    }
+
+    /// [`Self::refuse_untranslatable_send`] for a send whose origin was
+    /// captured earlier — the deferred path, where the current origin is
+    /// whatever happens to be submitting now, not who typed this.
+    pub(crate) fn refuse_untranslatable_send_to(
+        &mut self,
+        text: &str,
+        reason: &str,
+        origin: &SubmitOrigin,
+    ) -> bool {
         crate::commands::helpers::add_local_event(
             self,
             &format!(
@@ -945,7 +978,7 @@ impl crate::app::App {
                 rst = crate::commands::types::C_RST,
             ),
         );
-        self.restore_input_text(text);
+        self.restore_input_text_to(text, origin);
         false
     }
 
@@ -955,10 +988,23 @@ impl crate::app::App {
     /// while a deferred send was in flight, and clobbering that would be a
     /// second, worse surprise. The text is still visible in the error row
     /// above either way, so it is never truly lost.
-    pub(crate) fn restore_input_text(&mut self, text: &str) {
-        if self.input.value.is_empty() {
-            self.input.value = text.to_string();
-            self.input.cursor_pos = self.input.value.chars().count();
+    pub(crate) fn restore_input_text_to(&mut self, text: &str, origin: &SubmitOrigin) {
+        match origin {
+            SubmitOrigin::Web(session_id) => {
+                // Back to the browser that sent it. Putting it in the TUI
+                // input instead loses it for its author and makes it appear
+                // where nobody is looking.
+                self.broadcast_web(crate::web::protocol::WebEvent::RestoreInput {
+                    text: text.to_string(),
+                    session_id: Some(session_id.clone()),
+                });
+            }
+            SubmitOrigin::Tui => {
+                if self.input.value.is_empty() {
+                    self.input.value = text.to_string();
+                    self.input.cursor_pos = self.input.value.chars().count();
+                }
+            }
         }
     }
 
@@ -971,7 +1017,8 @@ impl crate::app::App {
             ),
         );
         let original = out.original_text.clone();
-        self.restore_input_text(&original);
+        let origin = out.origin.clone();
+        self.restore_input_text_to(&original, &origin);
     }
 
     /// Emit the local echo for a successfully sent translated message.
@@ -1380,6 +1427,7 @@ mod app_tests {
             is_action: false,
             echo: OutgoingEchoPlan::BufferInput,
             echo_id: 1,
+            origin: SubmitOrigin::Tui,
         }
     }
 
@@ -1796,6 +1844,29 @@ mod app_tests {
     }
 
     #[test]
+    fn a_web_submission_is_returned_to_that_browser_not_the_terminal() {
+        // The browser cleared its composer on submit, so restoring into the
+        // TUI input loses the text for its author AND drops it somewhere
+        // nobody is looking.
+        let mut app = app_with_outgoing(Some("de"));
+        app.submit_origin = SubmitOrigin::Web("alice-session".to_string());
+        let mut rx = app.web_broadcaster.subscribe();
+
+        app.refuse_untranslatable_send("moje zdanie", "the translation queue is full");
+
+        assert!(
+            app.input.value.is_empty(),
+            "the terminal input must not be touched"
+        );
+        let (text, session) = match rx.try_recv().expect("an event was broadcast") {
+            crate::web::protocol::WebEvent::RestoreInput { text, session_id } => (text, session_id),
+            other => panic!("expected RestoreInput, got {other:?}"),
+        };
+        assert_eq!(text, "moje zdanie");
+        assert_eq!(session.as_deref(), Some("alice-session"));
+    }
+
+    #[test]
     fn a_refusal_does_not_clobber_something_typed_since() {
         let mut app = app_with_outgoing(Some("de"));
         app.input.value = "something else".to_string();
@@ -2175,6 +2246,7 @@ mod tests {
             is_action: false,
             echo: OutgoingEchoPlan::BufferInput,
             echo_id: 1,
+            origin: SubmitOrigin::Tui,
         }
     }
 
@@ -2236,6 +2308,7 @@ mod tests {
                     is_action: false,
                     echo: OutgoingEchoPlan::BufferInput,
                     echo_id: 1,
+                    origin: SubmitOrigin::Tui,
                 })
                 .await
                 .expect("worker alive");

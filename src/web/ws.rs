@@ -199,7 +199,10 @@ fn is_targeted_to_other(event: &WebEvent, session_id: &str) -> bool {
         | WebEvent::NickList { session_id, .. }
         | WebEvent::MentionsList { session_id, .. }
         | WebEvent::ShellScreen { session_id, .. }
-        | WebEvent::Error { session_id, .. } => session_id.as_deref(),
+        | WebEvent::Error { session_id, .. }
+        // A refused message goes back ONLY to whoever typed it; broadcasting
+        // it would drop one client's text into every other client's input.
+        | WebEvent::RestoreInput { session_id, .. } => session_id.as_deref(),
         _ => None,
     };
     // If target is Some and doesn't match, skip this event.
@@ -252,6 +255,19 @@ mod tests {
         };
         assert!(is_targeted_to_other(&event, "session-b"));
         assert!(!is_targeted_to_other(&event, "session-a"));
+    }
+
+    #[test]
+    fn a_restored_input_reaches_only_its_author() {
+        let ev = WebEvent::RestoreInput {
+            text: "moje zdanie".to_string(),
+            session_id: Some("alice".to_string()),
+        };
+        assert!(
+            is_targeted_to_other(&ev, "bob"),
+            "another client must not receive someone else's text"
+        );
+        assert!(!is_targeted_to_other(&ev, "alice"));
     }
 
     #[test]

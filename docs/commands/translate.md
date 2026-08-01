@@ -96,13 +96,22 @@ without bound.
 
 ## When translation does not happen
 
-A line that was not translated is shown as its original — never a guess, and
-never a partial translation. A fluent sentence that means something else is
-the one failure a reader cannot detect, so a visible gap is always preferred.
+A line that was not translated is shown as its original, marked with the
+reason:
+
+    11:32:33 alice> hola que tal [untranslated: timeout]
+
+Never a guess, never a partial translation. A fluent sentence that means
+something else is the one failure a reader cannot detect, so a visible gap is
+always preferred — and the gap has to be visible, or it is just the original
+text with nothing to say it is not a translation.
+
+The one exception carries no marker, because it is not a gap: see below.
 
 For **outgoing** messages the rule is stricter: if translation fails, the
-message is **not sent at all**. Your text goes back into the input line and
-an error explains why. Sending the untranslated original would put something
+message is **not sent at all**. Your text goes back into the input line you
+sent it from — the terminal or the browser tab that submitted it — and an
+error explains why. Sending the untranslated original would put something
 other than what you intended in front of the channel.
 
 That applies to every way of not translating, not just a provider error: a
@@ -117,9 +126,10 @@ typed in the buffer, so whether a line is translated depends on the buffer,
 never on which command you used. A `/me` is translated as its text; other
 CTCPs (`VERSION`, DCC negotiation) are protocol and pass through untouched.
 
-The exception is a line the translator deliberately skipped — already in the
-target language, or too short to be worth translating. That is a correct
-outcome, not a failure, so the original is sent and shown with no marker.
+A line the translator deliberately skipped — already in the target language,
+or too short to be worth translating — is a correct outcome, not a failure.
+It is sent and shown with no marker; marking it would cry wolf on a large
+share of ordinary traffic.
 
 ## What leaves your client
 

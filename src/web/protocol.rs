@@ -159,6 +159,16 @@ pub enum WebEvent {
         #[serde(default = "default_true")]
         emotes_enabled: bool,
     },
+    /// Hand a refused message back to the client that submitted it.
+    ///
+    /// Sent when an outgoing message is refused (translation could not run,
+    /// E2E refused) after the submitting client already cleared its input.
+    /// Targeted like [`Self::Error`]: only the author's session restores it.
+    RestoreInput {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
     /// Server-side error.
     Error {
         message: String,

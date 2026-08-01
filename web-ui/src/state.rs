@@ -38,6 +38,9 @@ pub struct AppState {
     pub session_hint: RwSignal<bool>,
     pub theme: RwSignal<String>,
     pub error: RwSignal<Option<String>>,
+    /// Text handed back by the server after a refused send, for the composer
+    /// to restore. Cleared by the input component once consumed.
+    pub restore_input: RwSignal<Option<String>>,
     pub timestamp_format: RwSignal<String>,
     pub line_height: RwSignal<f32>,
     /// Client-side appearance overrides (persisted in localStorage, applied
@@ -155,6 +158,7 @@ impl AppState {
             session_hint: RwSignal::new(false),
             theme: RwSignal::new(saved_theme),
             error: RwSignal::new(None),
+            restore_input: RwSignal::new(None),
             timestamp_format: RwSignal::new("%H:%M".to_string()),
             line_height: RwSignal::new(1.35),
             font_size_override: RwSignal::new(font_size_override),
@@ -704,6 +708,11 @@ impl AppState {
             }
             WebEvent::Error { message, .. } => {
                 self.error.set(Some(message));
+            }
+            WebEvent::RestoreInput { text, .. } => {
+                // The composer owns its own value signal, so hand the text
+                // over here and let the input component pick it up.
+                self.restore_input.set(Some(text));
             }
             WebEvent::ShellScreen {
                 buffer_id,
