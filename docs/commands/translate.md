@@ -110,6 +110,10 @@ A message of yours whose translation misses the deadline is not sent; the
 text comes back as with any other refusal. Losing the connection releases that server's queued lines at
 once rather than waiting the timeout out for a server that is gone.
 
+The queue is held to `translate.max_queue` as lines arrive, not on a timer,
+so a stalled translator cannot let a busy channel build a backlog between
+checks.
+
 `/translate delin` releases the lines it was still waiting on, shown
 untranslated. `/translate delout` releases nothing: it does not touch the
 incoming direction, and a message of yours already being translated is still
@@ -153,6 +157,13 @@ is the usual case rather than the exception. The error row always carries the
 refused text for exactly that reason, so it is recoverable either way.
 Sending the untranslated original would put something other than what you
 intended in front of the channel.
+
+If you have moved to a different conversation while it was translating, what
+comes back is re-addressed — a private message returns as
+`/msg <nick> <text>`, so pressing Enter cannot publish it to the channel you
+are now in. Where no such form exists (a `/me`, or a conversation that has
+since closed) nothing is put in the composer at all and the text stays in the
+error row, which names where it was going.
 
 A connection that drops and comes back while your message is being translated
 also refuses it, rather than sending a message you typed on the old session

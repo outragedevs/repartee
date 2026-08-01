@@ -190,6 +190,11 @@ pub struct PendingOutgoingTranslate {
     /// The text to hand back if this send is refused — a form that does the
     /// SAME thing when the user presses Enter on it, not the bare body.
     pub retry_text: String,
+    /// The bare body, kept alongside `retry_text` so a retry can be
+    /// RE-ADDRESSED at restore time. `retry_text` is a form that was correct
+    /// when the message was dispatched; where the user is looking by the
+    /// time it fails is a different question — see `deferred_retry_text`.
+    pub retry_body: String,
     /// When this line entered the pipeline. The whole `timeout_ms` budget
     /// runs from here, so time spent queueing counts against it — see
     /// `translate_isolated`.
@@ -246,6 +251,11 @@ pub struct OutgoingTranslateDeliver {
     /// The text to hand back if this send is refused — a form that does the
     /// SAME thing when the user presses Enter on it, not the bare body.
     pub retry_text: String,
+    /// The bare body, kept alongside `retry_text` so a retry can be
+    /// RE-ADDRESSED at restore time. `retry_text` is a form that was correct
+    /// when the message was dispatched; where the user is looking by the
+    /// time it fails is a different question — see `deferred_retry_text`.
+    pub retry_body: String,
     /// When this line entered the pipeline. The whole `timeout_ms` budget
     /// runs from here, so time spent queueing counts against it — see
     /// `translate_isolated`.
@@ -586,6 +596,7 @@ fn spawn_connection_lane(
                         echo_id: pending.echo_id,
                         origin: pending.origin,
                         retry_text: pending.retry_text,
+                        retry_body: pending.retry_body,
                         conn_generation: pending.conn_generation,
                         submitted_at: pending.submitted_at,
                     },
@@ -624,6 +635,7 @@ async fn refuse_outgoing(
                 echo_id: pending.echo_id,
                 origin: pending.origin,
                 retry_text: pending.retry_text,
+                retry_body: pending.retry_body,
                 conn_generation: pending.conn_generation,
                 submitted_at: pending.submitted_at,
             },
@@ -1067,18 +1079,77 @@ impl crate::app::App {
     /// for exactly this reason. The deferred paths did not, and they are the
     /// ones where it matters most.
     fn abandon_with_text(&mut self, out: &OutgoingTranslateDeliver, reason: &str) {
-        let retry = out.retry_text.clone();
+        let restore = self.deferred_retry_text(out);
+        // The row shows whatever would be restored; when nothing can be, it
+        // shows the bare body and says where it was headed, so the user can
+        // still see and re-send it deliberately.
+        let shown = restore.clone().unwrap_or_else(|| {
+            format!("{body} {dim}(to {target}){rst}",
+                body = out.retry_body,
+                target = out.buffer_name,
+                dim = crate::commands::types::C_DIM,
+                rst = crate::commands::types::C_RST,
+            )
+        });
         self.deliver_translate_error(
             &out.buffer_id,
             &format!(
-                "{err}Not sent — {reason}.{rst}\n{dim}Your text:{rst} {retry}",
+                "{err}Not sent — {reason}.{rst}\n{dim}Your text:{rst} {shown}",
                 err = crate::commands::types::C_ERR,
                 dim = crate::commands::types::C_DIM,
                 rst = crate::commands::types::C_RST,
             ),
         );
-        let origin = out.origin.clone();
-        self.restore_input_text_to(&retry, &origin);
+        if let Some(text) = restore {
+            let origin = out.origin.clone();
+            self.restore_input_text_to(&text, &origin);
+        }
+    }
+
+    /// The retry text to put back in the composer for a DEFERRED failure,
+    /// given where the submitting client is looking NOW.
+    ///
+    /// `retry_form_for` answers this question at DISPATCH time, which is the
+    /// wrong time. The whole point of a deferred send is that seconds pass,
+    /// and the user may well have moved to another conversation meanwhile —
+    /// switching away is the natural thing to do while waiting. Restoring a
+    /// bare body into a composer that now belongs to a different buffer
+    /// publishes it there the moment they press Enter: exactly the leak
+    /// `retry_form_for` was written to prevent, arriving through the one
+    /// door it cannot see.
+    ///
+    /// `None` means no form would do the right thing from where they are —
+    /// an action, whose `/me` acts on the active buffer and has no
+    /// re-addressed spelling. The text is in the error row either way, so
+    /// declining to restore loses nothing.
+    fn deferred_retry_text(&self, out: &OutgoingTranslateDeliver) -> Option<String> {
+        let looking_at = match &out.origin {
+            // Nobody typed it, so there is nowhere to put it back.
+            SubmitOrigin::Script => return None,
+            SubmitOrigin::Tui => self.state.active_buffer_id.as_deref(),
+            SubmitOrigin::Web(session) => {
+                self.web_active_buffers.get(session).map(String::as_str)
+            }
+        };
+        if looking_at == Some(out.buffer_id.as_str()) {
+            // Still in the conversation they addressed, so the form computed
+            // at dispatch is the one that belongs in this composer.
+            return Some(out.retry_text.clone());
+        }
+        if out.is_action {
+            return None;
+        }
+        if !self.state.buffers.contains_key(&out.buffer_id) {
+            // The conversation is gone, so its NAME is no longer proof of
+            // anything — on a query it may since have been claimed by
+            // somebody else. Re-addressing to it would hand the user a
+            // ready-to-send private message aimed at a stranger, which is
+            // the leak this whole function exists to prevent.
+            return None;
+        }
+        // Explicitly re-addressed, so it goes where it was always going no
+        // matter which buffer they are in when they press Enter.
+        Some(format!("/msg {} {}", out.buffer_name, out.retry_body))
     }
 
     /// Clean up after a send that failed AFTER the session check passed — the
@@ -1242,6 +1313,9 @@ impl crate::app::App {
             // Buffer input retries as itself; by-target sends overwrite this
             // with a re-addressed form in `dispatch_by_target_translation`.
             retry_text: text.to_string(),
+            // Never overwritten — this is the raw body a re-addressed retry
+            // is rebuilt from if the user has moved on by the time it fails.
+            retry_body: text.to_string(),
             submitted_at: std::time::Instant::now(),
             // Captured with everything else that could change during the
             // wait. A reconnect under this same id is a different session,
@@ -1697,6 +1771,7 @@ impl crate::app::App {
             .translate_my_lang
             .clone_from(&self.config.translate.my_lang);
         self.state.translate_show_original_in = self.config.translate.show_original_in;
+        self.state.translate_max_queue = self.config.translate.max_queue.max(1) as usize;
         if let Some(budget) = self.translate_timeout_ms.as_ref() {
             budget.store(
                 self.config.translate.timeout_ms.max(1),
@@ -2098,6 +2173,7 @@ mod app_tests {
             echo_id: 1,
             origin: SubmitOrigin::Tui,
             retry_text: text.to_string(),
+            retry_body: text.to_string(),
             conn_generation: None,
             submitted_at: std::time::Instant::now(),
         }
@@ -2107,6 +2183,11 @@ mod app_tests {
         let mut app = test_app();
         app.state
             .add_buffer(Buffer::for_test("test", BufferType::Channel, "#dupa"));
+        // A real client is always looking at SOMETHING, and for text typed
+        // into a buffer that something is the buffer it was typed into.
+        // Which conversation the composer belongs to decides how a refused
+        // message is handed back — see `deferred_retry_text`.
+        app.state.set_active_buffer(BUF);
         app
     }
 
@@ -2254,6 +2335,94 @@ mod app_tests {
             .collect()
     }
 
+    /// A failed private message, submitted from `bob`'s query.
+    fn refused_query_send(app: &mut crate::app::App) -> Box<OutgoingTranslateDeliver> {
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Query, "bob"));
+        let mut out = outgoing(
+            "sekret",
+            TranslateOutcome::Untranslated {
+                id: 1,
+                reason: crate::translate::UntranslatedReason::NoProvider,
+            },
+            false,
+        );
+        out.buffer_id = "test/bob".to_string();
+        out.buffer_name = "bob".to_string();
+        out.buffer_type = BufferType::Query;
+        Box::new(out)
+    }
+
+    #[test]
+    fn a_refused_private_message_is_not_left_aimed_at_another_conversation() {
+        // Switching away while a translation runs is the natural thing to do.
+        // Restoring the bare body into a composer that now belongs to a
+        // PUBLIC channel publishes the private message there the moment the
+        // user presses Enter.
+        let mut app = app_with_buffer(); // active buffer is #dupa
+        let out = refused_query_send(&mut app);
+        assert_eq!(
+            app.state.active_buffer_id.as_deref(),
+            Some(BUF),
+            "precondition: the user has moved to the channel"
+        );
+
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(out));
+
+        assert_eq!(
+            app.input.value, "/msg bob sekret",
+            "what comes back must address bob explicitly, so Enter cannot \
+             publish it to #dupa"
+        );
+    }
+
+    #[test]
+    fn a_refused_message_comes_back_bare_when_its_conversation_is_still_open() {
+        // The re-addressing must not fire when the user never left, or every
+        // ordinary refusal would hand back a `/msg` they did not type.
+        let mut app = app_with_buffer();
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Query, "bob"));
+        app.state.set_active_buffer("test/bob");
+        let mut out = refused_query_send(&mut app);
+        out.retry_text = "sekret".to_string();
+
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(out));
+
+        assert_eq!(
+            app.input.value, "sekret",
+            "still in bob's query, so the composer takes it as typed"
+        );
+    }
+
+    #[test]
+    fn a_refused_action_is_not_restored_from_another_conversation() {
+        // `/me` acts on whatever buffer is active, and there is no spelling
+        // that re-addresses one. Restoring it would perform the action in
+        // the wrong place; the error row keeps the text instead.
+        let mut app = app_with_buffer();
+        let mut out = refused_query_send(&mut app);
+        out.is_action = true;
+        out.retry_text = "/me wzdycha".to_string();
+
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(out));
+
+        assert!(
+            app.input.value.is_empty(),
+            "no safe form exists, so nothing is restored: {:?}",
+            app.input.value
+        );
+        let rows: Vec<String> = app.state.buffers["test/bob"]
+            .messages
+            .iter()
+            .map(|m| m.text.clone())
+            .collect();
+        assert!(
+            rows.iter().any(|t| t.contains("sekret") && t.contains("to bob")),
+            "and the row says what it was and where it was going: {rows:?}"
+        );
+    }
+
     #[test]
     fn a_backend_cannot_inject_an_irc_command_through_a_line_break() {
         // The backend is untrusted and its output goes on the socket.
@@ -2318,9 +2487,16 @@ mod app_tests {
             wire.is_empty(),
             "a private message must not go to whoever holds the old nick now: {wire:?}"
         );
-        assert_eq!(
-            app.input.value, "moje zdanie",
-            "and it comes back to its author"
+        assert!(
+            app.input.value.is_empty(),
+            "and it is NOT handed back as a ready-to-send `/msg frank …`, \
+             which would be the same leak one keystroke away: {:?}",
+            app.input.value
+        );
+        let rows = shown(&app);
+        assert!(
+            rows.iter().any(|t| t.contains("moje zdanie")),
+            "the text is still recoverable from the error row: {rows:?}"
         );
     }
 
@@ -3932,6 +4108,7 @@ mod tests {
             echo_id: 1,
             origin: SubmitOrigin::Tui,
             retry_text: text.to_string(),
+            retry_body: text.to_string(),
             conn_generation: None,
             submitted_at: std::time::Instant::now(),
         }
@@ -3997,6 +4174,7 @@ mod tests {
                     echo_id: 1,
                     origin: SubmitOrigin::Tui,
                     retry_text: "hello world".to_string(),
+                    retry_body: "hello world".to_string(),
                     conn_generation: None,
                     submitted_at: std::time::Instant::now(),
                 })

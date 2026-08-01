@@ -29,6 +29,7 @@ impl AppState {
             translate_buffers: std::collections::HashMap::new(),
             translate_my_lang: "en".to_string(),
             translate_show_original_in: true,
+            translate_max_queue: 200,
             own_echo_decorations: std::collections::HashMap::new(),
             buffer_redirects: std::collections::HashMap::new(),
             pending_buffer_rekeys: Vec::new(),
@@ -741,6 +742,10 @@ impl AppState {
         if let Some(queue) = self.translate_queues.get_mut(buffer_id) {
             let id = message.id;
             queue.push_resolved(id, message, level);
+            // A fallback row lands in the same queue and counts against the
+            // same ceiling — and these arrive exactly when the provider is
+            // already in trouble, which is when the bound matters.
+            self.enforce_translate_ceiling(buffer_id);
             return None;
         }
         // Deliver it here rather than handing it back. Returning `Some` puts
@@ -877,7 +882,40 @@ impl AppState {
                     show_original,
                 },
             );
+        self.enforce_translate_ceiling(buffer_id);
         None
+    }
+
+    /// Hold one buffer's queue to `max_queue`, releasing whatever that forces
+    /// out.
+    ///
+    /// Run on every insertion, not only on the maintenance tick. A stalled
+    /// provider and a busy channel can put hundreds of lines in a queue
+    /// between two one-second ticks, and `max_queue` is documented as a bound
+    /// on memory AND on how far behind the display is allowed to fall — a
+    /// bound checked once a second is neither.
+    fn enforce_translate_ceiling(&mut self, buffer_id: &str) {
+        let max_queue = self.translate_max_queue.max(1);
+        let ready = {
+            let Some(queue) = self.translate_queues.get_mut(buffer_id) else {
+                return;
+            };
+            if queue.len() <= max_queue {
+                return;
+            }
+            let forced = queue.enforce_ceiling(max_queue);
+            if forced > 0 {
+                tracing::debug!(
+                    buffer_id,
+                    forced,
+                    "translate: queue ceiling reached, releasing oldest untranslated"
+                );
+            }
+            queue.drain_ready()
+        };
+        for entry in ready {
+            self.add_message_with_activity_unshrunk(buffer_id, entry.message, entry.activity);
+        }
     }
 
     /// Same as `add_message_with_activity`, but bypasses the shrink
@@ -2742,8 +2780,20 @@ mod translate_gate_tests {
         AppState,
         mpsc::Receiver<crate::app::translate::PendingTranslate>,
     ) {
+        state_with_translation_capacity(16)
+    }
+
+    /// [`state_with_translation`] with a chosen worker-queue depth, so a test
+    /// about the DISPLAY ceiling is not confounded by the dispatch channel
+    /// filling up and turning later lines into ready rows.
+    fn state_with_translation_capacity(
+        capacity: usize,
+    ) -> (
+        AppState,
+        mpsc::Receiver<crate::app::translate::PendingTranslate>,
+    ) {
         let mut state = make_test_state();
-        let (tx, rx) = mpsc::channel(16);
+        let (tx, rx) = mpsc::channel(capacity);
         state.translate_incoming_tx = Some(tx);
         state.translate_active = true;
         state.translate_my_lang = "pl".to_string();
@@ -3066,6 +3116,46 @@ mod translate_gate_tests {
             shown.contains("[untranslated: error: multi-line message]"),
             "and marked, so it is not mistaken for a clean pass: {shown:?}"
         );
+    }
+
+    #[test]
+    fn the_ceiling_holds_during_a_burst_not_only_on_the_tick() {
+        // A stalled provider and a busy channel put far more than max_queue
+        // in a queue between two one-second ticks. `max_queue` is documented
+        // as a bound on memory AND on how far behind the display may fall —
+        // a bound checked once a second is neither.
+        // A deep worker channel, so every line really is dispatched and the
+        // only thing bounding the queue is the ceiling under test.
+        let (mut state, mut rx) = state_with_translation_capacity(64);
+        state.translate_max_queue = 4;
+
+        for i in 0..20 {
+            let msg = make_test_message(&mut state, &format!("linia {i}"));
+            state.add_message_with_activity(BUF, msg, ActivityLevel::Activity);
+        }
+
+        assert_eq!(
+            state.translate_queues[BUF].len(),
+            4,
+            "the queue is bounded the whole time, with no tick in sight"
+        );
+        // Nothing is lost: what the ceiling forced out is on screen.
+        let shown = state.buffers[BUF].messages.len();
+        assert_eq!(shown, 16, "the oldest sixteen were released: {shown}");
+        assert!(
+            state.buffers[BUF]
+                .messages
+                .iter()
+                .all(|m| m.text.contains("[untranslated:")),
+            "and released marked, so the gap is visible"
+        );
+        // Every line still reached the worker — the ceiling governs display,
+        // not dispatch.
+        let mut dispatched = 0;
+        while rx.try_recv().is_ok() {
+            dispatched += 1;
+        }
+        assert_eq!(dispatched, 20);
     }
 
     #[test]

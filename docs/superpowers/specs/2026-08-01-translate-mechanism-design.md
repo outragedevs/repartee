@@ -227,9 +227,13 @@ memory leak with a frozen channel behind it.
   `translate_isolated` bounds the call to the REMAINING budget and skips it entirely
   when none is left, and the outgoing deliver refuses anything that arrives past the
   deadline anyway.
-- **Queue ceiling**, default 200 entries per buffer. On overflow the oldest pending
-  entries resolve as `Untranslated { Timeout }` immediately and release, so the
-  channel keeps flowing untranslated instead of stalling.
+- **Queue ceiling**, default 200 entries per buffer, enforced **on every insertion**
+  rather than on the maintenance tick. On overflow the oldest pending entries resolve
+  as `Untranslated { Timeout }` immediately and release, so the channel keeps flowing
+  untranslated instead of stalling. Checking once a second is not a bound: a stalled
+  provider and a busy channel can put hundreds of lines in a queue between two ticks,
+  and this number is documented as a limit on memory *and* on how far behind the
+  display may fall.
 
 Late outcomes for an already-released id are dropped, with a `tracing::debug!`.
 
@@ -421,6 +425,7 @@ send got:
   discovered from the channel.
 
 "Whoever submitted it" is the origin captured at dispatch, never the current one —
+see §5.7. **What** is handed back is a different question, decided at restore time —
 see §5.6.
 
 Every deferred failure runs through `abandon_with_text`, so the rule cannot be
@@ -483,7 +488,30 @@ Details that follow from the shape:
   that rewrites what it reflects, a stranger's identical line. The mechanism can lose
   a suffix; it can never lose or duplicate a message.
 
-### 5.6 A refusal goes back to the client that typed it
+### 5.6 A retry must not be aimed at the wrong conversation
+
+`retry_form_for` decides what a refused message should look like in the composer:
+the bare body when the active buffer is already the target, an explicit
+`/msg <target> …` otherwise. That reasoning is right and its purpose is exactly this
+leak — `/msg bob secret` restored as `secret` publishes private content to whatever
+channel is open.
+
+But it runs at **dispatch** time, and a deferred send fails seconds later. Switching
+away while waiting is the natural thing to do, and by then the composer may belong to
+a public channel. So the form is chosen again at restore time, from where that client
+is looking now — the TUI's active buffer, or the submitting session's active buffer
+for a web client.
+
+Two cases have no safe form and are therefore **not restored at all**, with the text
+left in the error row:
+
+- **An action.** `/me` acts on the active buffer and has no re-addressed spelling.
+- **A target whose buffer is gone.** Its name is no longer proof of anything: on a
+  query, somebody else may have claimed the nick since (§3.6). Re-addressing would
+  hand the user a ready-to-send private message aimed at a stranger — the same leak,
+  one keystroke away.
+
+### 5.7 A refusal goes back to the client that typed it
 
 Every submitting path scopes `App::submit_origin` for the duration of the submit, so
 a refusal restores the text where its author is looking. That includes both web

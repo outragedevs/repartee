@@ -143,6 +143,12 @@ pub struct AppState {
     /// dispatch, so a mid-flight `/set` cannot make a queued line render
     /// differently from how it was queued.
     pub translate_show_original_in: bool,
+    /// Mirror of `config.translate.max_queue`. The ceiling has to be
+    /// enforced at INSERTION, not only on the maintenance tick: a stalled
+    /// provider plus a busy channel can put far more than this in a queue
+    /// between two ticks, and the setting is documented as a bound on memory
+    /// and on how far behind the display can fall.
+    pub translate_max_queue: usize,
     /// How to render `echo-message`'s reflection of a translated line we
     /// sent, keyed by buffer, oldest first.
     ///
