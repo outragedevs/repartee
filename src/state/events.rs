@@ -190,6 +190,14 @@ impl AppState {
         if self.suppress_event_display && message.message_type == MessageType::Event {
             return;
         }
+        // Same translation routing as `add_message_with_activity`. It matters
+        // here mostly for the queue-parking half: a JOIN or a notice arriving
+        // while lines are still translating must take its place in the queue
+        // rather than render ahead of them.
+        let Some(message) = self.route_through_translation(buffer_id, message, ActivityLevel::None)
+        else {
+            return;
+        };
         // Incoming-shrink dispatch for NOTICEs from a real user (not
         // server-origin events, not echoes of our own outgoing).
         // PRIVMSG/ACTION go through add_message_with_activity which
@@ -357,7 +365,11 @@ impl AppState {
         message: Message,
         level: ActivityLevel,
     ) {
-        // Incoming shrink: if the message text has URL(s) above the
+        // Translation dispatch runs BEFORE shrink: the two are mutually
+        // exclusive per line and translation wins. Two external round-trips
+        // on one line is worse than losing shrink on a translated buffer.
+        if let Some(message) = self.route_through_translation(buffer_id, message, level) {
+            // Incoming shrink: if the message text has URL(s) above the
         // configured threshold and shrink-incoming is wired up, hand
         // the message off to the background worker. The worker
         // substitutes the URLs (with `[host]` hint), then posts a
@@ -405,7 +417,157 @@ impl AppState {
                 }
             }
         }
-        self.add_message_with_activity_unshrunk(buffer_id, message, level);
+            self.add_message_with_activity_unshrunk(buffer_id, message, level);
+        }
+    }
+
+    /// Decide what happens to a message on a translation-enabled buffer.
+    ///
+    /// Returns `Some(message)` when the caller should deliver it normally,
+    /// and `None` when the message has been taken over — either dispatched
+    /// for translation or parked in the buffer's reorder queue.
+    ///
+    /// The E2E check uses the FAIL-CLOSED [`AppState::e2e_possible_for_target`],
+    /// never the advisory `e2e_enabled_for_target`. The advisory resolves a
+    /// keyring read error, an unresolved DM handle, and a pre-migration
+    /// multi-network row all to `false` — states the send gate still REFUSES
+    /// as E2E-enabled. Translating on any of them would ship the plaintext
+    /// of an end-to-end-protected conversation to a third-party provider
+    /// before the refusal ever ran. This is the same reasoning, and the same
+    /// predicate, as the outgoing shrink gate in `src/app/input.rs`, which
+    /// was written for the identical problem: an external service that
+    /// receives cleartext before the send gate runs may only be used when
+    /// E2E is definitively ruled out.
+    ///
+    /// Placing the check here rather than only in `/translate addin` is what
+    /// makes enabling order irrelevant: `/e2e on` after `/translate addin`
+    /// simply stops translation from the next line, with no state to keep in
+    /// sync.
+    fn route_through_translation(
+        &mut self,
+        buffer_id: &str,
+        message: Message,
+        level: ActivityLevel,
+    ) -> Option<Message> {
+        // A buffer with a non-empty queue takes EVERYTHING through the
+        // queue, translatable or not. Otherwise a JOIN renders before the
+        // lines queued ahead of it and the timeline reorders silently — the
+        // same failure the queue exists to prevent, from the other side.
+        if !self.translate_should_dispatch(buffer_id, &message) {
+            if self.translate_queues.contains_key(buffer_id) {
+                let id = message.id;
+                let queue = self.translate_queues.get_mut(buffer_id)?;
+                queue.push_resolved(id, message, level);
+                return None;
+            }
+            return Some(message);
+        }
+        self.dispatch_for_translation(buffer_id, message, level)
+    }
+
+    /// Whether this message on this buffer should be sent for translation.
+    fn translate_should_dispatch(&self, buffer_id: &str, message: &Message) -> bool {
+        if !self.translate_active || self.translate_incoming_tx.is_none() {
+            return false;
+        }
+        // Only real chat lines are translated. Events, notices from the
+        // server, and pre-formatted mention rows are structure, not prose.
+        if !matches!(message.message_type, MessageType::Message | MessageType::Action) {
+            return false;
+        }
+        if !self
+            .translate_buffers
+            .get(buffer_id)
+            .is_some_and(|c| c.incoming)
+        {
+            return false;
+        }
+        let Some(buffer) = self.buffers.get(buffer_id) else {
+            return false;
+        };
+        // Our own echo is already in the language we typed it in.
+        if let Some(conn) = self.connections.get(&buffer.connection_id)
+            && message
+                .nick
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(&conn.nick))
+        {
+            return false;
+        }
+        let conn_id = buffer.connection_id.clone();
+        let target = buffer.name.clone();
+        !self.e2e_possible_for_target(&conn_id, &target)
+    }
+
+    /// Reserve the line's place in the queue and hand it to the worker.
+    ///
+    /// On a full or dead worker queue the message is delivered untranslated
+    /// rather than dropped — the same fallback shrink uses.
+    fn dispatch_for_translation(
+        &mut self,
+        buffer_id: &str,
+        message: Message,
+        level: ActivityLevel,
+    ) -> Option<Message> {
+        let buffer = self.buffers.get(buffer_id)?;
+        let network = self
+            .connections
+            .get(&buffer.connection_id)
+            .map(|c| c.label.clone())
+            .unwrap_or_default();
+        let target = buffer.name.clone();
+        let known_nicks: Vec<String> = buffer.users.keys().cloned().collect();
+        let source_lang = self
+            .translate_buffers
+            .get(buffer_id)
+            .and_then(|c| c.source_lang.clone());
+
+        let id = message.id;
+        let original = message.text.clone();
+        let req = crate::translate::TranslateRequest {
+            id,
+            direction: crate::translate::Direction::Incoming,
+            network,
+            target,
+            nick: message.nick.clone().unwrap_or_default(),
+            text: original.clone(),
+            source_lang,
+            target_lang: self.translate_target_lang.clone(),
+            known_nicks,
+        };
+
+        let Some(tx) = self.translate_incoming_tx.as_ref() else {
+            return Some(message);
+        };
+        match tx.try_send(crate::app::translate::PendingTranslate {
+            buffer_id: buffer_id.to_string(),
+            req,
+        }) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                tracing::warn!("translate: incoming queue full, delivering untranslated");
+                return Some(message);
+            }
+            Err(TrySendError::Closed(_)) => {
+                tracing::error!("translate: incoming worker dead, delivering untranslated");
+                return Some(message);
+            }
+        }
+
+        let show_original = self.translate_show_original_in;
+        self.translate_queues
+            .entry(buffer_id.to_string())
+            .or_default()
+            .push_pending(
+                id,
+                original,
+                crate::translate::queue::PendingPayload {
+                    message,
+                    activity: level,
+                    show_original,
+                },
+            );
+        None
     }
 
     /// Same as `add_message_with_activity`, but bypasses the shrink
@@ -961,7 +1123,7 @@ fn enforce_scrollback(buf: &mut Buffer, limit: usize) {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::state::buffer::*;
     use crate::state::connection::*;
@@ -1022,7 +1184,7 @@ mod tests {
         }
     }
 
-    fn make_test_buffer(conn_id: &str, btype: BufferType, name: &str) -> Buffer {
+    pub fn make_test_buffer(conn_id: &str, btype: BufferType, name: &str) -> Buffer {
         Buffer {
             id: make_buffer_id(conn_id, name),
             connection_id: conn_id.to_string(),
@@ -1049,7 +1211,7 @@ mod tests {
         }
     }
 
-    fn make_test_message(state: &mut AppState, text: &str) -> Message {
+    pub fn make_test_message(state: &mut AppState, text: &str) -> Message {
         Message {
             id: state.next_message_id(),
             timestamp: Utc::now(),
@@ -1067,7 +1229,7 @@ mod tests {
         }
     }
 
-    fn make_test_state() -> AppState {
+    pub fn make_test_state() -> AppState {
         let mut state = AppState::new();
         state.add_connection(make_test_connection());
         state.add_buffer(make_test_buffer("libera", BufferType::Server, "libera"));
@@ -2127,6 +2289,213 @@ mod tests {
         assert!(
             !buf.messages.iter().any(|m| m.text == "secret plaintext"),
             "same-@msgid replay is deduped — proves the tag-strip in handle_privmsg is required"
+        );
+    }
+}
+
+#[cfg(test)]
+mod translate_gate_tests {
+    use super::tests::{make_test_message, make_test_state};
+    use crate::config::TranslateBufferConfig;
+    use crate::state::AppState;
+    use crate::state::buffer::{ActivityLevel, MessageType};
+    use tokio::sync::mpsc;
+
+    const BUF: &str = "libera/#rust";
+
+    /// State with translation live for `BUF`, plus the receiving end of the
+    /// worker channel so tests can assert on what was dispatched.
+    fn state_with_translation() -> (
+        AppState,
+        mpsc::Receiver<crate::app::translate::PendingTranslate>,
+    ) {
+        let mut state = make_test_state();
+        let (tx, rx) = mpsc::channel(16);
+        state.translate_incoming_tx = Some(tx);
+        state.translate_active = true;
+        state.translate_target_lang = "pl".to_string();
+        state.translate_buffers.insert(
+            BUF.to_string(),
+            TranslateBufferConfig {
+                incoming: true,
+                outgoing: false,
+                source_lang: Some("de".to_string()),
+            },
+        );
+        (state, rx)
+    }
+
+    fn shown(state: &AppState, buffer_id: &str) -> usize {
+        state.buffers[buffer_id].messages.len()
+    }
+
+    #[test]
+    fn an_enabled_buffer_queues_the_line_instead_of_showing_it() {
+        let (mut state, mut rx) = state_with_translation();
+        let msg = make_test_message(&mut state, "hola que tal");
+        state.add_message_with_activity(BUF, msg, ActivityLevel::Activity);
+
+        assert_eq!(shown(&state, BUF), 0, "the line waits for its translation");
+        let dispatched = rx.try_recv().expect("a request was dispatched");
+        assert_eq!(dispatched.buffer_id, BUF);
+        assert_eq!(dispatched.req.text, "hola que tal");
+        assert_eq!(dispatched.req.target_lang, "pl");
+        assert_eq!(dispatched.req.source_lang.as_deref(), Some("de"));
+        assert_eq!(state.translate_queues[BUF].pending_len(), 1);
+    }
+
+    #[test]
+    fn a_buffer_without_the_incoming_flag_is_untouched() {
+        let (mut state, mut rx) = state_with_translation();
+        let msg = make_test_message(&mut state, "hola que tal");
+        state.add_message_with_activity("libera/#linux", msg, ActivityLevel::Activity);
+
+        assert_eq!(shown(&state, "libera/#linux"), 1, "delivered immediately");
+        assert!(rx.try_recv().is_err(), "nothing was dispatched");
+    }
+
+    #[test]
+    fn the_master_switch_being_off_disables_every_buffer() {
+        let (mut state, mut rx) = state_with_translation();
+        state.translate_active = false;
+        let msg = make_test_message(&mut state, "hola que tal");
+        state.add_message_with_activity(BUF, msg, ActivityLevel::Activity);
+
+        assert_eq!(shown(&state, BUF), 1);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn our_own_echo_is_not_translated() {
+        // It is already in the language we typed it in.
+        let (mut state, mut rx) = state_with_translation();
+        let our_nick = state.connections["libera"].nick.clone();
+        let mut msg = make_test_message(&mut state, "hola que tal");
+        msg.nick = Some(our_nick);
+        state.add_message_with_activity(BUF, msg, ActivityLevel::Activity);
+
+        assert_eq!(shown(&state, BUF), 1);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn events_are_not_translated_but_do_take_their_place_in_the_queue() {
+        let (mut state, mut rx) = state_with_translation();
+        let chat = make_test_message(&mut state, "hola que tal");
+        state.add_message_with_activity(BUF, chat, ActivityLevel::Activity);
+        rx.try_recv().expect("the chat line dispatched");
+
+        let mut join = make_test_message(&mut state, "bob has joined");
+        join.message_type = MessageType::Event;
+        join.nick = None;
+        state.add_message(BUF, join);
+
+        assert!(rx.try_recv().is_err(), "an event is never sent to translate");
+        assert_eq!(
+            shown(&state, BUF),
+            0,
+            "but it must not overtake the line queued ahead of it"
+        );
+        assert_eq!(state.translate_queues[BUF].len(), 2);
+    }
+
+    #[test]
+    fn a_dead_worker_delivers_untranslated_rather_than_dropping_the_line() {
+        let (mut state, rx) = state_with_translation();
+        drop(rx);
+        let msg = make_test_message(&mut state, "hola que tal");
+        state.add_message_with_activity(BUF, msg, ActivityLevel::Activity);
+
+        assert_eq!(shown(&state, BUF), 1, "the line is never lost");
+        assert!(!state.translate_queues.contains_key(BUF));
+    }
+
+    /// Give `state` a real E2E manager and turn E2E on for `#rust`.
+    fn enable_e2e_on_rust(state: &mut AppState) {
+        let db = crate::storage::db::open_database(false).unwrap();
+        let keyring =
+            crate::e2e::keyring::Keyring::new(std::sync::Arc::new(std::sync::Mutex::new(db)));
+        let mgr = crate::e2e::manager::E2eManager::load_or_init(keyring).unwrap();
+        mgr.keyring()
+            .set_channel_config(&crate::e2e::keyring::ChannelConfig {
+                channel: crate::e2e::scoped_context("Libera", "#rust"),
+                enabled: true,
+                mode: crate::e2e::keyring::ChannelMode::Normal,
+            })
+            .unwrap();
+        state.e2e_manager = Some(std::sync::Arc::new(mgr));
+    }
+
+    #[test]
+    fn an_e2e_conversation_is_never_translated() {
+        // Translating would hand the plaintext of an end-to-end-protected
+        // conversation to a third-party provider, destroying the guarantee
+        // E2E exists to provide. There is no opt-in for this.
+        let (mut state, mut rx) = state_with_translation();
+        enable_e2e_on_rust(&mut state);
+
+        let msg = make_test_message(&mut state, "hola que tal");
+        state.add_message_with_activity(BUF, msg, ActivityLevel::Activity);
+
+        assert!(
+            rx.try_recv().is_err(),
+            "no request may be built for an E2E conversation"
+        );
+        assert_eq!(
+            shown(&state, BUF),
+            1,
+            "the line is delivered untranslated, in place"
+        );
+        assert!(!state.translate_queues.contains_key(BUF));
+    }
+
+    #[test]
+    fn enabling_e2e_after_translation_stops_it_from_the_next_line() {
+        // The gate lives at request-build time, not only in `/translate
+        // addin`, so enabling order cannot be used to get around it.
+        let (mut state, mut rx) = state_with_translation();
+        let first = make_test_message(&mut state, "hola que tal");
+        state.add_message_with_activity(BUF, first, ActivityLevel::Activity);
+        rx.try_recv().expect("translated while E2E was off");
+
+        enable_e2e_on_rust(&mut state);
+        let second = make_test_message(&mut state, "y ahora que");
+        state.add_message_with_activity(BUF, second, ActivityLevel::Activity);
+        assert!(
+            rx.try_recv().is_err(),
+            "the next line must not be dispatched"
+        );
+    }
+
+    #[test]
+    fn a_full_worker_queue_delivers_untranslated() {
+        let mut state = make_test_state();
+        let (tx, _rx) = mpsc::channel(1);
+        state.translate_incoming_tx = Some(tx);
+        state.translate_active = true;
+        state.translate_buffers.insert(
+            BUF.to_string(),
+            TranslateBufferConfig {
+                incoming: true,
+                outgoing: false,
+                source_lang: None,
+            },
+        );
+        // Fill the single slot, then send one more.
+        let first = make_test_message(&mut state, "line one");
+        state.add_message_with_activity(BUF, first, ActivityLevel::Activity);
+        let second = make_test_message(&mut state, "line two");
+        state.add_message_with_activity(BUF, second, ActivityLevel::Activity);
+
+        assert_eq!(
+            state.translate_queues[BUF].pending_len(),
+            1,
+            "only the line that fit is pending"
+        );
+        assert_eq!(
+            shown(&state, BUF),
+            1,
+            "the overflow line is delivered untranslated, not dropped"
         );
     }
 }
