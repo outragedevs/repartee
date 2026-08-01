@@ -378,8 +378,10 @@ impl AppState {
         // Translation dispatch runs BEFORE shrink: the two are mutually
         // exclusive per line and translation wins. Two external round-trips
         // on one line is worse than losing shrink on a translated buffer.
-        if let Some(message) = self.route_through_translation(buffer_id, message, level) {
-            // Incoming shrink: if the message text has URL(s) above the
+        let Some(message) = self.route_through_translation(buffer_id, message, level) else {
+            return;
+        };
+        // Incoming shrink: if the message text has URL(s) above the
         // configured threshold and shrink-incoming is wired up, hand
         // the message off to the background worker. The worker
         // substitutes the URLs (with `[host]` hint), then posts a
@@ -427,8 +429,29 @@ impl AppState {
                 }
             }
         }
-            self.add_message_with_activity_unshrunk(buffer_id, message, level);
+        self.add_message_with_activity_unshrunk(buffer_id, message, level);
+    }
+
+    /// Deliver a line we authored ourselves — a deferred local echo.
+    ///
+    /// It must never be sent for translation: we wrote it, and an outgoing
+    /// translated message has already been through the pipeline. It must
+    /// still take its place in the buffer's queue, so it cannot render ahead
+    /// of lines queued before it.
+    ///
+    /// This exists because the nick check in `translate_should_dispatch` is
+    /// not sufficient for a DEFERRED echo. Those carry the nick captured at
+    /// dispatch time — deliberately, so the echo matches what peers saw — so
+    /// a `/nick` during the wait leaves the echo's nick different from the
+    /// connection's, and the "is this ours" test would wrongly say no and
+    /// translate our own message a second time.
+    pub fn add_own_message(&mut self, buffer_id: &str, message: Message) {
+        if let Some(queue) = self.translate_queues.get_mut(buffer_id) {
+            let id = message.id;
+            queue.push_resolved(id, message, ActivityLevel::None);
+            return;
         }
+        self.add_message_unshrunk(buffer_id, message);
     }
 
     /// Decide what happens to a message on a translation-enabled buffer.
@@ -2475,6 +2498,44 @@ mod translate_gate_tests {
             rx.try_recv().is_err(),
             "the next line must not be dispatched"
         );
+    }
+
+    #[test]
+    fn a_deferred_echo_is_never_translated_even_after_a_nick_change() {
+        // A deferred local echo carries the nick captured at dispatch, so
+        // after a /nick during the wait it no longer matches the connection
+        // nick. Routing it through `add_own_message` is what stops the gate
+        // treating our own message as someone else's and translating it a
+        // second time.
+        let (mut state, mut rx) = state_with_translation();
+        let mut echo = make_test_message(&mut state, "moje zdanie");
+        echo.nick = Some("old_nick".to_string());
+        state.add_own_message(BUF, echo);
+
+        assert!(
+            rx.try_recv().is_err(),
+            "our own echo must never be sent for translation"
+        );
+        assert_eq!(shown(&state, BUF), 1, "and it is shown as written");
+    }
+
+    #[test]
+    fn a_deferred_echo_takes_its_place_in_a_live_queue() {
+        let (mut state, mut rx) = state_with_translation();
+        let incoming = make_test_message(&mut state, "hola que tal");
+        state.add_message_with_activity(BUF, incoming, ActivityLevel::Activity);
+        rx.try_recv().expect("the incoming line dispatched");
+
+        let mut echo = make_test_message(&mut state, "moje zdanie");
+        echo.nick = Some("old_nick".to_string());
+        state.add_own_message(BUF, echo);
+
+        assert_eq!(
+            shown(&state, BUF),
+            0,
+            "the echo must not render ahead of the line queued before it"
+        );
+        assert_eq!(state.translate_queues[BUF].len(), 2);
     }
 
     #[test]

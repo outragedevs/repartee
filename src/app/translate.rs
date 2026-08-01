@@ -567,7 +567,11 @@ impl crate::app::App {
         let single_chunk = local_chunks.len() == 1;
         for chunk in local_chunks {
             let id = self.state.next_message_id();
-            self.state.add_message(
+            // `add_own_message`, not `add_message`: this echo carries the
+            // nick captured at dispatch, so a `/nick` during the wait would
+            // make the dispatch gate mistake it for someone else's line and
+            // translate our own message a second time.
+            self.state.add_own_message(
                 &out.buffer_id,
                 crate::state::buffer::Message {
                     id,

@@ -607,7 +607,11 @@ impl App {
         let nick_mode_str = out.own_mode.map(|c| c.to_string());
         for chunk in local_chunks {
             let id = self.state.next_message_id();
-            self.state.add_message(
+            // `add_own_message` for the same reason as the translate echo:
+            // this carries the nick captured at dispatch, so after a `/nick`
+            // during the shrink wait the translation gate would otherwise
+            // treat our own echo as an incoming line worth translating.
+            self.state.add_own_message(
                 &out.buffer_id,
                 Message {
                     id,
