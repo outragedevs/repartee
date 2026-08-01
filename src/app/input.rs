@@ -1456,12 +1456,15 @@ impl App {
             }
             crate::app::translate::OutgoingTranslatePolicy::Translate => {
                 let Some(pending) = self.build_outgoing_translate(
-                    &conn_id,
-                    &active_id,
-                    &buffer_name,
-                    &buf_type,
-                    &nick,
-                    text,
+                    &crate::app::translate::OutgoingRequest {
+                        conn_id: &conn_id,
+                        buffer_id: &active_id,
+                        buffer_name: &buffer_name,
+                        buffer_type: &buf_type,
+                        nick: &nick,
+                        text,
+                        is_action: false,
+                    },
                 ) else {
                     // The policy said translate, so this is a race (the
                     // buffer closed, or E2E was enabled between the two

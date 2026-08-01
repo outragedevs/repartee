@@ -105,6 +105,18 @@ message is **not sent at all**. Your text goes back into the input line and
 an error explains why. Sending the untranslated original would put something
 other than what you intended in front of the channel.
 
+That applies to every way of not translating, not just a provider error: a
+full or dead translation queue, a message too long to translate in one piece,
+a multi-line paste, and a buffer with `outgoing` enabled but no language all
+refuse rather than sending as-is. `/translate delout <target>` is how you
+send something untranslated on purpose.
+
+It also applies however the message was submitted. `/msg`, `/query <nick>
+<text>`, `/me` and messages sent by scripts go through the same gate as text
+typed in the buffer, so whether a line is translated depends on the buffer,
+never on which command you used. A `/me` is translated as its text; other
+CTCPs (`VERSION`, DCC negotiation) are protocol and pass through untouched.
+
 The exception is a line the translator deliberately skipped — already in the
 target language, or too short to be worth translating. That is a correct
 outcome, not a failure, so the original is sent and shown with no marker.
@@ -175,7 +187,12 @@ precedence on buffers where both are enabled.
     /set translate.max_queue         200
 
 `translate.max_in_flight` caps concurrent translations. Raising it past what
-your provider actually allows makes throughput worse, not better.
+your provider actually allows makes throughput worse, not better. It takes
+effect immediately; lowering it applies as work already in flight finishes.
+
+Outgoing messages are translated one at a time **per connection**, so they
+reach IRC in the order you sent them without a slow request on one network
+holding up another.
 
 Per-buffer settings live under `[translate.buffers]` in `config.toml` and are
 managed with the `add*` / `del*` subcommands rather than `/set`.

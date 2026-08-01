@@ -34,6 +34,23 @@ use crate::state::buffer::BufferType;
 use crate::translate::backend::{SharedBackend, StubBackend};
 use crate::translate::{TranslateOutcome, TranslateRequest, UntranslatedReason};
 
+/// Everything needed to build one outgoing translation request.
+///
+/// A struct rather than seven positional parameters: the four `&str`s next
+/// to each other were an easy place to transpose a buffer id and a buffer
+/// name, and the compiler would not have noticed.
+#[derive(Debug, Clone, Copy)]
+pub struct OutgoingRequest<'a> {
+    pub conn_id: &'a str,
+    pub buffer_id: &'a str,
+    pub buffer_name: &'a str,
+    pub buffer_type: &'a BufferType,
+    pub nick: &'a str,
+    pub text: &'a str,
+    /// `true` for `/me`; `text` is then the ACTION's inner prose.
+    pub is_action: bool,
+}
+
 /// Outcome of the outgoing translation gate for one submitted line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutgoingTranslatePolicy {
@@ -72,6 +89,10 @@ pub struct PendingOutgoingTranslate {
     pub own_mode: Option<char>,
     pub peer_handle: Option<String>,
     pub show_original: bool,
+    /// `true` for `/me`. The request carries the ACTION's inner text —
+    /// translating the `\\x01ACTION …\\x01` framing would corrupt the CTCP —
+    /// and the deliver path re-wraps it.
+    pub is_action: bool,
 }
 
 /// Posted by either worker, consumed by the main event loop.
@@ -102,6 +123,10 @@ pub struct OutgoingTranslateDeliver {
     pub own_mode: Option<char>,
     pub peer_handle: Option<String>,
     pub show_original: bool,
+    /// `true` for `/me`. The request carries the ACTION's inner text —
+    /// translating the `\\x01ACTION …\\x01` framing would corrupt the CTCP —
+    /// and the deliver path re-wraps it.
+    pub is_action: bool,
 }
 
 /// Channels and shared state the translation workers need. Built once in
@@ -298,6 +323,7 @@ fn spawn_connection_lane(
                         own_mode: pending.own_mode,
                         peer_handle: pending.peer_handle,
                         show_original: pending.show_original,
+                        is_action: pending.is_action,
                     },
                 )))
                 .await;
@@ -329,6 +355,7 @@ async fn refuse_outgoing(
                 own_mode: pending.own_mode,
                 peer_handle: pending.peer_handle,
                 show_original: pending.show_original,
+                is_action: pending.is_action,
             },
         )))
         .await;
@@ -448,12 +475,22 @@ impl crate::app::App {
     /// leak plaintext for an E2E PM whose Query buffer is gone. Same
     /// reasoning as `send_outgoing_substituted` in `shrink.rs`.
     fn send_outgoing_translated(&mut self, out: &OutgoingTranslateDeliver) {
+        // Re-wrap here rather than translating the framing: the request
+        // carried the ACTION's inner text, because `\x01ACTION …\x01` handed
+        // to a translator comes back as anything but a valid CTCP.
+        let wrap = |body: &str| {
+            if out.is_action {
+                format!("\x01ACTION {body}\x01")
+            } else {
+                body.to_string()
+            }
+        };
         let wire_text = match &out.outcome {
-            TranslateOutcome::Translated { text, .. } => text.clone(),
+            TranslateOutcome::Translated { text, .. } => wrap(text),
             // The broker decided this line needed no translation, so the
             // original IS the correct thing to send.
             TranslateOutcome::Untranslated { reason, .. } if !reason.is_gap() => {
-                out.original_text.clone()
+                wrap(&out.original_text)
             }
             // Everything else is a genuine gap. Do NOT fall back to sending
             // the original: the user asked for this channel to be written in
@@ -549,13 +586,17 @@ impl crate::app::App {
     /// gone, in which case the caller falls through to the synchronous send.
     pub(crate) fn build_outgoing_translate(
         &mut self,
-        conn_id: &str,
-        buffer_id: &str,
-        buffer_name: &str,
-        buffer_type: &BufferType,
-        nick: &str,
-        text: &str,
+        req: &OutgoingRequest<'_>,
     ) -> Option<PendingOutgoingTranslate> {
+        let OutgoingRequest {
+            conn_id,
+            buffer_id,
+            buffer_name,
+            buffer_type,
+            nick,
+            text,
+            is_action,
+        } = *req;
         // Belt and braces. `handle_plain_message` already refuses to reach
         // this function when E2E cannot be ruled out, but this is the point
         // where cleartext becomes a payload bound for a third party, and
@@ -639,6 +680,7 @@ impl crate::app::App {
             own_mode: captured_own_mode,
             peer_handle: captured_peer_handle,
             show_original: self.config.translate.show_original_out,
+            is_action,
         })
     }
 
@@ -689,6 +731,94 @@ impl crate::app::App {
             );
         }
         OutgoingTranslatePolicy::Translate
+    }
+
+    /// Apply the outgoing translation policy to a send addressed by TARGET
+    /// NAME — `/msg`, `/query <nick> <text>`, `/me`, and the script senders.
+    ///
+    /// Returns `Some(result)` when translation took the send over (dispatched
+    /// or refused) and `None` when the caller should carry on with the
+    /// ordinary send.
+    ///
+    /// Gating here rather than at each call site is what stops the per-buffer
+    /// `addout` setting depending on HOW the message was submitted — typing
+    /// it in the buffer would translate, `/msg`ing the same text would not,
+    /// and nothing would say so.
+    pub(crate) fn gate_by_target_translation(
+        &mut self,
+        conn_id: &str,
+        target: &str,
+        wire_text: &str,
+    ) -> Option<bool> {
+        let body = crate::app::e2e_gate::translatable_outgoing_body(wire_text)?;
+        let buffer_id = crate::state::buffer::make_buffer_id(conn_id, target);
+        let e2e_possible = self.state.e2e_possible_for_target(conn_id, target);
+        match self.outgoing_translate_policy(&buffer_id, body, e2e_possible) {
+            OutgoingTranslatePolicy::NotApplicable => None,
+            OutgoingTranslatePolicy::Refuse(reason) => {
+                Some(self.refuse_untranslatable_send(body, reason))
+            }
+            OutgoingTranslatePolicy::Translate => {
+                // A shorter body than the wire means the framing was
+                // stripped, i.e. this is an ACTION.
+                let is_action = body.len() != wire_text.len();
+                Some(self.dispatch_by_target_translation(
+                    conn_id, &buffer_id, target, body, is_action,
+                ))
+            }
+        }
+    }
+
+    /// Dispatch a by-target send (`/msg`, `/query`, `/me`, a script) for
+    /// translation. Returns `false` — nothing is on the wire yet.
+    ///
+    /// Failure here refuses, exactly as the buffer-input path does. A
+    /// by-target send is not a lesser send: publishing it untranslated puts
+    /// the same wrong-language text on the same channel.
+    pub(crate) fn dispatch_by_target_translation(
+        &mut self,
+        conn_id: &str,
+        buffer_id: &str,
+        target: &str,
+        body: &str,
+        is_action: bool,
+    ) -> bool {
+        let buffer_type = if crate::e2e::is_channel_target(target) {
+            BufferType::Channel
+        } else {
+            BufferType::Query
+        };
+        let nick = self
+            .state
+            .connections
+            .get(conn_id)
+            .map(|c| c.nick.clone())
+            .unwrap_or_default();
+        let Some(pending) = self.build_outgoing_translate(&OutgoingRequest {
+            conn_id,
+            buffer_id,
+            buffer_name: target,
+            buffer_type: &buffer_type,
+            nick: &nick,
+            text: body,
+            is_action,
+        }) else {
+            return self.refuse_untranslatable_send(
+                body,
+                "this conversation can no longer be translated",
+            );
+        };
+        match self.translate_outgoing_tx.try_send(pending) {
+            Ok(()) => false,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                self.refuse_untranslatable_send(body, "the translation queue is full")
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => self
+                .refuse_untranslatable_send(
+                    body,
+                    "the translation worker has died — restart to restore it",
+                ),
+        }
     }
 
     /// Refuse an outgoing send that cannot be translated, before anything
@@ -751,11 +881,22 @@ impl crate::app::App {
             );
             return;
         }
+        // An action echoes as its inner text under `MessageType::Action`;
+        // showing the raw `\x01ACTION …\x01` would render the framing.
+        let echo_body = if out.is_action {
+            plain_echo
+                .strip_prefix('\x01')
+                .and_then(|t| t.strip_suffix('\x01'))
+                .and_then(|t| t.strip_prefix("ACTION "))
+                .unwrap_or(plain_echo)
+        } else {
+            plain_echo
+        };
         let (echo_text, orig_offset) = if matches!(out.outcome, TranslateOutcome::Translated { .. })
         {
-            crate::translate::compose_display(plain_echo, &out.original_text, out.show_original)
+            crate::translate::compose_display(echo_body, &out.original_text, out.show_original)
         } else {
-            (plain_echo.to_string(), None)
+            (echo_body.to_string(), None)
         };
         let local_chunks = if echo_text.len() <= crate::irc::MESSAGE_MAX_BYTES {
             vec![echo_text]
@@ -777,7 +918,11 @@ impl crate::app::App {
                 crate::state::buffer::Message {
                     id,
                     timestamp: chrono::Utc::now(),
-                    message_type: crate::state::buffer::MessageType::Message,
+                    message_type: if out.is_action {
+                        crate::state::buffer::MessageType::Action
+                    } else {
+                        crate::state::buffer::MessageType::Message
+                    },
                     nick: Some(out.nick.clone()),
                     nick_mode: nick_mode_str.clone(),
                     text: chunk,
@@ -1061,6 +1206,7 @@ mod app_tests {
             own_mode: None,
             peer_handle: None,
             show_original,
+            is_action: false,
         }
     }
 
@@ -1158,14 +1304,15 @@ mod app_tests {
     }
 
     fn build(app: &mut crate::app::App) -> Option<PendingOutgoingTranslate> {
-        app.build_outgoing_translate(
-            "test",
-            BUF,
-            "#dupa",
-            &BufferType::Channel,
-            "me",
-            "moje zdanie",
-        )
+        app.build_outgoing_translate(&OutgoingRequest {
+            conn_id: "test",
+            buffer_id: BUF,
+            buffer_name: "#dupa",
+            buffer_type: &BufferType::Channel,
+            nick: "me",
+            text: "moje zdanie",
+            is_action: false,
+        })
     }
 
     #[test]
@@ -1212,14 +1359,15 @@ mod app_tests {
 
         let de = build(&mut app).expect("german buffer");
         let es = app
-            .build_outgoing_translate(
-                "test",
-                "test/#otro",
-                "#otro",
-                &BufferType::Channel,
-                "me",
-                "moje zdanie",
-            )
+            .build_outgoing_translate(&OutgoingRequest {
+                conn_id: "test",
+                buffer_id: "test/#otro",
+                buffer_name: "#otro",
+                buffer_type: &BufferType::Channel,
+                nick: "me",
+                text: "moje zdanie",
+                is_action: false,
+            })
             .expect("spanish buffer");
         assert_eq!(de.req.target_lang, "de");
         assert_eq!(es.req.target_lang, "es");
@@ -1408,6 +1556,85 @@ mod app_tests {
     }
 
     #[test]
+    fn the_by_target_gate_takes_over_a_translatable_send() {
+        let mut app = app_with_outgoing(Some("de"));
+        let (tx, mut rx) = mpsc::channel(4);
+        app.translate_outgoing_tx = tx;
+        let handled = app.gate_by_target_translation("test", "#dupa", "moje zdanie");
+        assert_eq!(handled, Some(false), "taken over, nothing on the wire yet");
+        assert_eq!(rx.try_recv().expect("dispatched").req.text, "moje zdanie");
+    }
+
+    #[test]
+    fn the_by_target_gate_unwraps_an_action() {
+        let mut app = app_with_outgoing(Some("de"));
+        let (tx, mut rx) = mpsc::channel(4);
+        app.translate_outgoing_tx = tx;
+        let handled =
+            app.gate_by_target_translation("test", "#dupa", "\x01ACTION waves hello\x01");
+        assert_eq!(handled, Some(false));
+        let pending = rx.try_recv().expect("dispatched");
+        assert_eq!(pending.req.text, "waves hello");
+        assert!(pending.is_action);
+    }
+
+    #[test]
+    fn the_by_target_gate_steps_aside_for_an_untranslated_buffer() {
+        let mut app = app_with_buffer();
+        assert_eq!(
+            app.gate_by_target_translation("test", "#dupa", "hello there"),
+            None,
+            "the ordinary send must proceed"
+        );
+    }
+
+    #[test]
+    fn the_by_target_gate_ignores_non_action_ctcp() {
+        // Protocol, not prose — a translated VERSION reply is nonsense.
+        let mut app = app_with_outgoing(Some("de"));
+        assert_eq!(
+            app.gate_by_target_translation("test", "#dupa", "\x01VERSION\x01"),
+            None
+        );
+    }
+
+    #[test]
+    fn an_action_is_dispatched_as_its_inner_text() {
+        // `/me` must reach the broker as prose, not as CTCP framing.
+        let mut app = app_with_outgoing(Some("de"));
+        let (tx, mut rx) = mpsc::channel(4);
+        app.translate_outgoing_tx = tx;
+
+        let sent = app.dispatch_by_target_translation(
+            "test",
+            BUF,
+            "#dupa",
+            "waves hello",
+            true,
+        );
+        assert!(!sent, "nothing is on the wire yet");
+        let pending = rx.try_recv().expect("dispatched");
+        assert_eq!(pending.req.text, "waves hello", "no CTCP framing in the request");
+        assert!(pending.is_action, "the shape is carried for re-wrapping");
+        assert_eq!(pending.req.target_lang, "de");
+    }
+
+    #[test]
+    fn a_by_target_send_refuses_when_it_cannot_translate() {
+        // A by-target send is not a lesser send: publishing it untranslated
+        // puts the same wrong-language text on the same channel.
+        let mut app = app_with_outgoing(Some("de"));
+        let (tx, rx) = mpsc::channel(1);
+        app.translate_outgoing_tx = tx;
+        drop(rx);
+
+        let sent =
+            app.dispatch_by_target_translation("test", BUF, "#dupa", "moje zdanie", false);
+        assert!(!sent);
+        assert_eq!(app.input.value, "moje zdanie", "the text comes back");
+    }
+
+    #[test]
     fn build_outgoing_translate_refuses_a_possibly_e2e_target() {
         // The caller already gates, but this is where cleartext becomes a
         // payload bound for a third party, so the refusal must be a property
@@ -1433,14 +1660,15 @@ mod app_tests {
             .unwrap();
         app.state.e2e_manager = Some(std::sync::Arc::new(mgr));
 
-        let pending = app.build_outgoing_translate(
-            "test",
-            BUF,
-            "#dupa",
-            &BufferType::Channel,
-            "me",
-            "moje zdanie",
-        );
+        let pending = app.build_outgoing_translate(&OutgoingRequest {
+            conn_id: "test",
+            buffer_id: BUF,
+            buffer_name: "#dupa",
+            buffer_type: &BufferType::Channel,
+            nick: "me",
+            text: "moje zdanie",
+            is_action: false,
+        });
         assert!(
             pending.is_none(),
             "no payload may be built for a possibly-E2E target"
@@ -1589,6 +1817,7 @@ mod tests {
             own_mode: None,
             peer_handle: None,
             show_original: false,
+            is_action: false,
         }
     }
 
@@ -1647,6 +1876,7 @@ mod tests {
                     own_mode: None,
                     peer_handle: None,
                     show_original: false,
+                    is_action: false,
                 })
                 .await
                 .expect("worker alive");

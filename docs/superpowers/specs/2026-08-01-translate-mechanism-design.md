@@ -237,6 +237,13 @@ and an error row explains why. Sending the original would transmit something oth
 than what the user intended — the same reasoning that makes the E2E send gate refuse
 rather than downgrade (`src/app/e2e_gate.rs:474`).
 
+"Failure" means every way of not translating, not just a provider error: a full
+or dead worker queue, a multi-line or oversized message, and a buffer with
+`outgoing` set but no language all refuse. Each of those was originally a
+silent fall-through to a plaintext send, found in review. The whole decision is
+one enumerated function, `outgoing_translate_policy`, so "nothing falls
+through" can be checked by reading it rather than by tracing conditions.
+
 ### 5.1 The wire and the echo are ordered separately
 
 An outgoing message is sent **as soon as its own translation resolves**. It must not
@@ -246,9 +253,11 @@ worse failure than a cosmetic reordering.
 
 Ordering is therefore split:
 
-- **Wire order** — a separate per-connection FIFO ensures two outgoing messages reach
-  IRC in submission order, so a fast second message cannot overtake a slow first one.
-  Nothing incoming participates.
+- **Wire order** — a per-connection FIFO ensures two outgoing messages reach IRC
+  in submission order, so a fast second message cannot overtake a slow first one.
+  Nothing incoming participates, and neither does any other connection: a single
+  global queue would let one hung request on network A block translated sends on
+  network B.
 - **Echo order** — the local echo enters the buffer's display queue like any other
   row (§3.2), taking the `id` it was allocated at submission.
 
@@ -256,6 +265,19 @@ A consequence worth stating: with incoming lines pending, the user's own message
 appear on the wire before its echo appears on their screen. This is accepted. The
 alternative — holding the send — makes the user's own typing hostage to someone
 else's translation latency.
+
+### 5.2 Every sender goes through the same gate
+
+`/msg`, `/query <nick> <text>`, `/me` and the script senders address a target by
+NAME and never touch `handle_plain_message`, so gating only there made the
+per-buffer `outgoing` setting depend on HOW a message was submitted. The gate
+therefore also runs inside `send_gated_message`, the single chokepoint all of
+them share.
+
+A `/me` is translated as its inner text: handing the `\x01ACTION …\x01` framing
+to a translator returns anything but a valid CTCP, so the request carries the
+prose and the deliver path re-wraps it. Every other CTCP is protocol and passes
+through untouched.
 
 ---
 

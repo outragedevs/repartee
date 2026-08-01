@@ -103,6 +103,24 @@ fn rekey_notice_target(
     })
 }
 
+/// The prose inside an outgoing wire payload, or `None` when there is none
+/// to translate.
+///
+/// A plain message is entirely prose. A `\x01ACTION …\x01` is prose wrapped
+/// in CTCP framing, so the inner text is returned — handing the framing to a
+/// translator gets back anything but a valid CTCP. Every other CTCP
+/// (`VERSION`, `PING`, DCC negotiation) is protocol and must pass through
+/// untouched.
+pub fn translatable_outgoing_body(wire_text: &str) -> Option<&str> {
+    let Some(ctcp) = wire_text
+        .strip_prefix('\x01')
+        .and_then(|t| t.strip_suffix('\x01'))
+    else {
+        return Some(wire_text);
+    };
+    ctcp.strip_prefix("ACTION ")
+}
+
 impl AppState {
     /// Resolve a Query buffer's E2E peer handle: the live server-stamped
     /// `peer_handle` if the peer has spoken this session, otherwise the
@@ -723,6 +741,12 @@ impl super::App {
             return false;
         }
 
+        // Outgoing translation, for every sender that addresses a target by
+        // NAME. See `gate_by_target_translation`.
+        if let Some(handled) = self.gate_by_target_translation(conn_id, target, wire_text) {
+            return handled;
+        }
+
         let plan = match self.state.e2e_send_plan_for_target(conn_id, target, wire_text) {
             Ok(p) => p,
             Err(reason) => {
@@ -855,6 +879,83 @@ impl super::App {
                 tags: None,
                 orig_offset: None,
             },
+        );
+    }
+}
+
+#[cfg(test)]
+mod gate_wiring_tests {
+    /// `send_gated_message` is the single chokepoint every by-target sender
+    /// uses, and its connection precheck runs first, so the translation gate
+    /// cannot be reached in a unit test without a live `IrcHandle`.
+    ///
+    /// This reads the source instead — the same technique `main.rs` uses to
+    /// prove every dispatched CLI literal has a help row. Deleting the gate
+    /// call would otherwise silently restore the bypass where `/msg` and
+    /// `/me` sent untranslated text to a buffer configured for translation,
+    /// and no test would notice.
+    #[test]
+    fn send_gated_message_consults_the_translation_gate() {
+        let src = include_str!("e2e_gate.rs");
+        let start = src
+            .find("pub(crate) fn send_gated_message(")
+            .expect("send_gated_message exists");
+        let body = &src[start..];
+        let end = body
+            .find("\n    /// ")
+            .unwrap_or(body.len());
+        assert!(
+            // The CALL, not the name: a bare-name check was satisfied by the
+            // doc comment above the call even with the call itself deleted,
+            // which a mutation run caught.
+            body[..end].contains("self.gate_by_target_translation("),
+            "send_gated_message must route by-target sends through the \
+             translation gate; without it /msg and /me bypass it entirely"
+        );
+    }
+}
+
+#[cfg(test)]
+mod translatable_body_tests {
+    use super::translatable_outgoing_body;
+
+    #[test]
+    fn a_plain_message_is_all_prose() {
+        assert_eq!(translatable_outgoing_body("hello there"), Some("hello there"));
+    }
+
+    #[test]
+    fn an_action_yields_its_inner_text_only() {
+        // Handing the `\x01ACTION …\x01` framing to a translator gets back
+        // anything but a valid CTCP.
+        assert_eq!(
+            translatable_outgoing_body("\x01ACTION waves hello\x01"),
+            Some("waves hello")
+        );
+    }
+
+    #[test]
+    fn other_ctcps_are_protocol_and_never_translated() {
+        for wire in [
+            "\x01VERSION\x01",
+            "\x01PING 12345\x01",
+            "\x01DCC CHAT chat 1 2\x01",
+        ] {
+            assert_eq!(
+                translatable_outgoing_body(wire),
+                None,
+                "{wire} is protocol, not prose"
+            );
+        }
+    }
+
+    #[test]
+    fn a_message_merely_starting_with_the_ctcp_byte_is_not_a_ctcp() {
+        // Unterminated framing is not a CTCP, so it stays ordinary prose
+        // rather than being silently skipped.
+        assert_eq!(
+            translatable_outgoing_body("\x01not terminated"),
+            Some("\x01not terminated")
         );
     }
 }
