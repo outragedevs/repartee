@@ -2985,6 +2985,7 @@ pub mod submit_typing_tests {
             shrink_deliver_rx,
             translate_outgoing_tx,
             translate_deliver_rx,
+            translate_backend: None,
             cli_bind_override: None,
             typing: crate::app::typing::TypingSender::default(),
         }

@@ -606,6 +606,28 @@ impl crate::app::App {
         self.state.active_buffer_id = prior;
     }
 
+    /// Re-derive every translate mirror on `AppState` from the config.
+    ///
+    /// Idempotent by design — it re-derives rather than undoing a specific
+    /// switch — so `/set`, `/translate addin|delin`, and `/reload` can all
+    /// call the same function and never drift apart. A per-key arm is
+    /// exactly what let `/reload` fall out of step with `/set` for typing.
+    ///
+    /// `translate_active` stays false when no backend was built at startup:
+    /// the worker queues are bound in `App::new`, so flipping the switch at
+    /// runtime cannot materialise one.
+    pub(crate) fn sync_translate_from_config(&mut self) {
+        let has_backend = self.translate_backend.is_some();
+        self.state.translate_active = self.config.translate.enabled && has_backend;
+        self.state
+            .translate_buffers
+            .clone_from(&self.config.translate.buffers);
+        self.state
+            .translate_target_lang
+            .clone_from(&self.config.translate.target_lang);
+        self.state.translate_show_original_in = self.config.translate.show_original_in;
+    }
+
     /// Drop queues that have fully drained, so the tick has nothing to walk
     /// on an idle client.
     fn prune_empty_translate_queues(&mut self) {

@@ -497,6 +497,11 @@ pub struct App {
     /// drains it and posts an `OutgoingTranslateDeliver` back via
     /// `translate_deliver_rx`.
     pub(crate) translate_outgoing_tx: mpsc::Sender<translate::PendingOutgoingTranslate>,
+    /// The configured translation backend. `None` when translation was off
+    /// at startup — the workers are bound in `App::new`, so flipping
+    /// `translate.enabled` at runtime cannot materialise one. Mirrors the
+    /// role `shrink_client` plays for shrink.
+    pub(crate) translate_backend: Option<crate::translate::backend::SharedBackend>,
     /// Both translation workers post their outcomes here; the main loop
     /// drains and routes them through `apply_translate_deliver`.
     pub(crate) translate_deliver_rx: mpsc::Receiver<translate::TranslateDeliver>,
@@ -842,6 +847,7 @@ impl App {
             shrink_deliver_rx,
             translate_outgoing_tx,
             translate_deliver_rx,
+            translate_backend,
             cli_bind_override: None,
             typing: crate::app::typing::TypingSender::default(),
         };

@@ -154,6 +154,25 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
                 is_credential: false,
             })
         }
+        "translate" => {
+            // `buffers` is not exposed here: it is a per-buffer map, managed
+            // by `/translate addin|delin|addout|delout`, and a dotted-path
+            // setter has no sane spelling for it.
+            let val = match parts[1] {
+                "enabled" => config.translate.enabled.to_string(),
+                "target_lang" => config.translate.target_lang.clone(),
+                "show_original_in" => config.translate.show_original_in.to_string(),
+                "show_original_out" => config.translate.show_original_out.to_string(),
+                "timeout_ms" => config.translate.timeout_ms.to_string(),
+                "max_in_flight" => config.translate.max_in_flight.to_string(),
+                "max_queue" => config.translate.max_queue.to_string(),
+                _ => return None,
+            };
+            Some(Resolved {
+                value: val,
+                is_credential: false,
+            })
+        }
         "spellcheck" => {
             let val = match parts[1] {
                 "enabled" => config.spellcheck.enabled.to_string(),
@@ -431,6 +450,42 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
             "max_connections" => {
                 config.dcc.max_connections =
                     raw.parse().map_err(|_| "Expected a number".to_string())?;
+            }
+            _ => return Err(format!("Unknown field: {path}")),
+        },
+        "translate" => match parts[1] {
+            "enabled" => config.translate.enabled = parse_bool(raw)?,
+            "target_lang" => {
+                if raw.trim().is_empty() {
+                    return Err("translate.target_lang must not be empty".to_string());
+                }
+                config.translate.target_lang = raw.trim().to_string();
+            }
+            "show_original_in" => config.translate.show_original_in = parse_bool(raw)?,
+            "show_original_out" => config.translate.show_original_out = parse_bool(raw)?,
+            "timeout_ms" => {
+                let v: u64 = raw.parse().map_err(|_| "Expected a number".to_string())?;
+                // Floor 500: below that a healthy provider would be cut off
+                // mid-flight and every line would render untranslated, which
+                // looks like a broken feature rather than a tight budget.
+                if v < 500 {
+                    return Err("translate.timeout_ms must be at least 500".to_string());
+                }
+                config.translate.timeout_ms = v;
+            }
+            "max_in_flight" => {
+                let v: u32 = raw.parse().map_err(|_| "Expected a number".to_string())?;
+                if v < 1 {
+                    return Err("translate.max_in_flight must be at least 1".to_string());
+                }
+                config.translate.max_in_flight = v;
+            }
+            "max_queue" => {
+                let v: u32 = raw.parse().map_err(|_| "Expected a number".to_string())?;
+                if v < 1 {
+                    return Err("translate.max_queue must be at least 1".to_string());
+                }
+                config.translate.max_queue = v;
             }
             _ => return Err(format!("Unknown field: {path}")),
         },
@@ -916,6 +971,31 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                     app.create_mentions_buffer();
                 } else {
                     app.state.remove_buffer("_mentions");
+                }
+            }
+
+            // Mirror the translate config into state so the
+            // `add_message_with_activity` decision and the request payloads
+            // match the freshly-set config without a restart. The backend and
+            // worker queues are bound at startup, so flipping
+            // `translate.enabled` from off to on at runtime cannot
+            // materialise a backend — say so rather than silently doing
+            // nothing.
+            if path.starts_with("translate.") {
+                app.sync_translate_from_config();
+                if path == "translate.enabled"
+                    && app.config.translate.enabled
+                    && !app.state.translate_active
+                {
+                    crate::commands::helpers::add_local_event(
+                        app,
+                        &format!(
+                            "{warn}translate: enabled but no backend was built \
+                             at startup — restart to activate{rst}",
+                            warn = crate::commands::types::C_ERR,
+                            rst = crate::commands::types::C_RST,
+                        ),
+                    );
                 }
             }
 

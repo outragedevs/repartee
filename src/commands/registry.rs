@@ -15,6 +15,7 @@ use super::handlers_irc::{
     cmd_uninvex, cmd_unreop, cmd_version, cmd_voice, cmd_who, cmd_whois, cmd_whowas, cmd_wii,
 };
 use super::handlers_shrink::cmd_shrink;
+use super::handlers_translate::cmd_translate;
 use super::handlers_ui::{
     cmd_alias, cmd_clear, cmd_close, cmd_detach, cmd_emote, cmd_help, cmd_items, cmd_quit,
     cmd_shell, cmd_unalias, cmd_wizard,
@@ -677,6 +678,15 @@ static COMMANDS: LazyLock<Vec<(&'static str, CommandDef)>> = LazyLock::new(|| {
                 handler: cmd_shrink,
                 description: "Shorten a long URL via shr.al",
                 aliases: &[],
+                category: CommandCategory::Other,
+            },
+        ),
+        (
+            "translate",
+            CommandDef {
+                handler: cmd_translate,
+                description: "Translate a channel or query in near-real time",
+                aliases: &["tr"],
                 category: CommandCategory::Other,
             },
         ),
