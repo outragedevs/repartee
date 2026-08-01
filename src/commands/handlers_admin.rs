@@ -124,6 +124,12 @@ pub(crate) fn apply_reloaded_config(app: &mut App, new_config: crate::config::Ap
     // The same post-config-change sync `/set typing.*` runs — a hand-edited
     // `send_channels = false` has to reach the machine by this route too.
     app.sync_typing_from_config();
+    // Same for `[translate]`, and this one is privacy-sensitive rather than
+    // cosmetic: without it a hand-edited `enabled = false` leaves
+    // `translate_active` true and lines keep going to the provider after the
+    // user believes they turned it off. The per-buffer flags and languages
+    // would go stale the same way.
+    app.sync_translate_from_config();
     // A hand-edited `[statusbar]` section must reach open tabs too.
     super::handlers_ui::push_statusbar_web_event(app);
 }
@@ -1803,5 +1809,62 @@ mod server_add_tests {
         let s = config.servers.get("libera").unwrap();
         assert_eq!(s.address, "irc.libera.new");
         assert_eq!(s.password.as_deref(), Some("secret"));
+    }
+}
+
+#[cfg(test)]
+mod translate_reload_tests {
+    use crate::app::input::submit_typing_tests::test_app;
+    use crate::config::TranslateBufferConfig;
+
+    #[test]
+    fn reload_turning_translation_off_stops_it_immediately() {
+        // Privacy, not cosmetics: a stale `translate_active` keeps shipping
+        // lines to the provider after the user believes they turned it off
+        // in config.toml.
+        let mut app = test_app();
+        app.translate_backend = Some(std::sync::Arc::new(
+            crate::translate::backend::StubBackend::new(0, 0),
+        ));
+        app.config.translate.enabled = true;
+        app.sync_translate_from_config();
+        assert!(app.state.translate_active, "precondition: it is on");
+
+        let mut reloaded = crate::config::AppConfig::default();
+        reloaded.translate.enabled = false;
+        super::apply_reloaded_config(&mut app, reloaded);
+
+        assert!(
+            !app.state.translate_active,
+            "reloading with enabled=false must stop translation at once"
+        );
+    }
+
+    #[test]
+    fn reload_picks_up_hand_edited_buffers_and_languages() {
+        let mut app = test_app();
+        app.translate_backend = Some(std::sync::Arc::new(
+            crate::translate::backend::StubBackend::new(0, 0),
+        ));
+
+        let mut reloaded = crate::config::AppConfig::default();
+        reloaded.translate.enabled = true;
+        reloaded.translate.my_lang = "pl".to_string();
+        reloaded.translate.show_original_in = false;
+        reloaded.translate.buffers.insert(
+            "net/#german".to_string(),
+            TranslateBufferConfig {
+                incoming: true,
+                outgoing: false,
+                lang: Some("de".to_string()),
+                my_lang: None,
+            },
+        );
+        super::apply_reloaded_config(&mut app, reloaded);
+
+        assert!(app.state.translate_active);
+        assert_eq!(app.state.translate_my_lang, "pl");
+        assert!(!app.state.translate_show_original_in);
+        assert!(app.state.translate_buffers.contains_key("net/#german"));
     }
 }

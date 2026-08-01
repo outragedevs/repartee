@@ -34,6 +34,18 @@ use crate::state::buffer::BufferType;
 use crate::translate::backend::{SharedBackend, StubBackend};
 use crate::translate::{TranslateOutcome, TranslateRequest, UntranslatedReason};
 
+/// Outcome of the outgoing translation gate for one submitted line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutgoingTranslatePolicy {
+    /// Not a translated buffer — carry on with the ordinary send.
+    NotApplicable,
+    /// Translate first. Nothing may reach the wire until the outcome is back.
+    Translate,
+    /// Cannot be translated and must not be sent as-is. The text goes back
+    /// to the user with this reason.
+    Refuse(&'static str),
+}
+
 /// An incoming line handed to the translation worker.
 #[derive(Debug)]
 pub struct PendingTranslate {
@@ -543,6 +555,88 @@ impl crate::app::App {
         })
     }
 
+    /// What the outgoing gate has decided about one submitted line.
+    ///
+    /// Extracted so the whole outgoing policy is one readable, testable
+    /// statement rather than a chain of conditions inside the submit path.
+    /// Every way of NOT completing a required translation has to refuse, and
+    /// that is much easier to check when the options are enumerated.
+    pub(crate) fn outgoing_translate_policy(
+        &self,
+        buffer_id: &str,
+        text: &str,
+        e2e_possible: bool,
+    ) -> OutgoingTranslatePolicy {
+        // E2E wins: the conversation is simply not translated, and the
+        // ordinary (encrypted) send is exactly right.
+        if e2e_possible || !self.state.translate_active {
+            return OutgoingTranslatePolicy::NotApplicable;
+        }
+        let Some(cfg) = self.config.translate.buffers.get(buffer_id) else {
+            return OutgoingTranslatePolicy::NotApplicable;
+        };
+        if !cfg.outgoing {
+            return OutgoingTranslatePolicy::NotApplicable;
+        }
+        // From here translation is REQUIRED, so everything below refuses
+        // rather than falling through to a plaintext send. Putting text on a
+        // channel in a language the user did not choose is the failure the
+        // strict outgoing rule exists to prevent, and one they cannot see
+        // happen.
+        // These two are exactly `multiline::needs_multiline`, split apart so
+        // the refusal names the real reason: a long single-line paste is not
+        // a "multi-line message", and telling the user it is would send them
+        // looking for a newline that is not there.
+        if text.contains('\n') {
+            return OutgoingTranslatePolicy::Refuse("multi-line messages cannot be translated");
+        }
+        if text.len() > crate::irc::MESSAGE_MAX_BYTES {
+            return OutgoingTranslatePolicy::Refuse(
+                "message is too long to translate in one piece",
+            );
+        }
+        if cfg.lang.is_none() {
+            return OutgoingTranslatePolicy::Refuse(
+                "no target language set for this buffer — \
+                 /translate addout <target> <lang>",
+            );
+        }
+        OutgoingTranslatePolicy::Translate
+    }
+
+    /// Refuse an outgoing send that cannot be translated, before anything
+    /// reaches the wire.
+    ///
+    /// Always returns `false` (nothing was sent) so submit paths can
+    /// `return` it directly.
+    pub(crate) fn refuse_untranslatable_send(&mut self, text: &str, reason: &str) -> bool {
+        crate::commands::helpers::add_local_event(
+            self,
+            &format!(
+                "{err}Not sent — {reason}.{rst} {dim}Your text is back in the \
+                 input line; /translate delout this buffer to send it as-is.{rst}",
+                err = crate::commands::types::C_ERR,
+                dim = crate::commands::types::C_DIM,
+                rst = crate::commands::types::C_RST,
+            ),
+        );
+        self.restore_input_text(text);
+        false
+    }
+
+    /// Put a refused message back in the input line.
+    ///
+    /// Only into an EMPTY input: the user may have typed something else
+    /// while a deferred send was in flight, and clobbering that would be a
+    /// second, worse surprise. The text is still visible in the error row
+    /// above either way, so it is never truly lost.
+    pub(crate) fn restore_input_text(&mut self, text: &str) {
+        if self.input.value.is_empty() {
+            self.input.value = text.to_string();
+            self.input.cursor_pos = self.input.value.chars().count();
+        }
+    }
+
     /// Hand a refused message back to the user instead of losing it.
     fn restore_outgoing_input(&mut self, out: &OutgoingTranslateDeliver, reason: &str) {
         self.deliver_translate_error(
@@ -551,14 +645,8 @@ impl crate::app::App {
                 "Not sent — translation failed ({reason}). Your text is back in the input line."
             ),
         );
-        // Only restore into an empty input: the user may have typed
-        // something else during the wait, and clobbering that would be a
-        // second, worse surprise. Otherwise the text is still visible in the
-        // error row above, so it is never truly lost.
-        if self.input.value.is_empty() {
-            self.input.value.clone_from(&out.original_text);
-            self.input.cursor_pos = self.input.value.chars().count();
-        }
+        let original = out.original_text.clone();
+        self.restore_input_text(&original);
     }
 
     /// Emit the local echo for a successfully sent translated message.
@@ -1046,6 +1134,121 @@ mod app_tests {
         let mut app = app_with_buffer();
         set_buffer_langs(&mut app, None, None);
         assert!(build(&mut app).is_none());
+    }
+
+    use crate::app::translate::OutgoingTranslatePolicy as P;
+
+    /// App with `#dupa` configured for outgoing translation.
+    fn app_with_outgoing(lang: Option<&str>) -> crate::app::App {
+        let mut app = app_with_buffer();
+        app.state.set_active_buffer(BUF);
+        app.state.translate_active = true;
+        app.config.translate.enabled = true;
+        app.config.translate.my_lang = "pl".to_string();
+        set_buffer_langs(&mut app, lang, None);
+        app
+    }
+
+    #[test]
+    fn policy_translates_a_normal_line_on_an_enabled_buffer() {
+        // The happy path must hold, or the refusals below could all pass by
+        // refusing everything.
+        let app = app_with_outgoing(Some("de"));
+        assert_eq!(
+            app.outgoing_translate_policy(BUF, "moje zdanie", false),
+            P::Translate
+        );
+    }
+
+    #[test]
+    fn policy_refuses_multiline_rather_than_sending_it_untranslated() {
+        let app = app_with_outgoing(Some("de"));
+        let P::Refuse(reason) = app.outgoing_translate_policy(BUF, "pierwsza\ndruga", false)
+        else {
+            panic!("multi-line must be refused, not sent");
+        };
+        assert!(reason.contains("multi-line"), "got: {reason}");
+    }
+
+    #[test]
+    fn policy_refuses_a_line_too_long_to_translate() {
+        let app = app_with_outgoing(Some("de"));
+        let long = "a".repeat(crate::irc::MESSAGE_MAX_BYTES + 1);
+        let P::Refuse(reason) = app.outgoing_translate_policy(BUF, &long, false) else {
+            panic!("an oversized line must be refused, not sent");
+        };
+        assert!(reason.contains("too long"), "got: {reason}");
+    }
+
+    #[test]
+    fn policy_refuses_a_buffer_with_no_target_language() {
+        // `outgoing = true` with no language is reachable by hand-editing
+        // config.toml, and /translate list already reports it. A target
+        // cannot be guessed, so it is a refusal, not permission to send.
+        let app = app_with_outgoing(None);
+        let P::Refuse(reason) = app.outgoing_translate_policy(BUF, "moje zdanie", false) else {
+            panic!("a missing target language must be refused, not sent");
+        };
+        assert!(reason.contains("no target language"), "got: {reason}");
+    }
+
+    #[test]
+    fn policy_steps_aside_for_e2e_so_the_encrypted_send_proceeds() {
+        // Not a refusal: the conversation is simply never translated, and
+        // the ordinary encrypted send is exactly right.
+        let app = app_with_outgoing(Some("de"));
+        assert_eq!(
+            app.outgoing_translate_policy(BUF, "moje zdanie", true),
+            P::NotApplicable
+        );
+    }
+
+    #[test]
+    fn policy_steps_aside_when_the_buffer_has_no_outgoing_flag() {
+        let mut app = app_with_outgoing(Some("de"));
+        app.config
+            .translate
+            .buffers
+            .get_mut(BUF)
+            .expect("configured")
+            .outgoing = false;
+        assert_eq!(
+            app.outgoing_translate_policy(BUF, "moje zdanie", false),
+            P::NotApplicable
+        );
+    }
+
+    #[test]
+    fn policy_steps_aside_when_the_master_switch_is_off() {
+        let mut app = app_with_outgoing(Some("de"));
+        app.state.translate_active = false;
+        assert_eq!(
+            app.outgoing_translate_policy(BUF, "moje zdanie", false),
+            P::NotApplicable
+        );
+    }
+
+    #[test]
+    fn a_refusal_restores_the_text_and_names_the_reason() {
+        let mut app = app_with_outgoing(Some("de"));
+        let sent = app.refuse_untranslatable_send("moje zdanie", "the translation queue is full");
+        assert!(!sent, "a refusal never reports a send");
+        assert_eq!(app.input.value, "moje zdanie", "the text comes back");
+        let last = app.state.buffers[BUF]
+            .messages
+            .back()
+            .expect("an error row")
+            .text
+            .clone();
+        assert!(last.contains("queue is full"), "got: {last}");
+    }
+
+    #[test]
+    fn a_refusal_does_not_clobber_something_typed_since() {
+        let mut app = app_with_outgoing(Some("de"));
+        app.input.value = "something else".to_string();
+        app.refuse_untranslatable_send("moje zdanie", "the translation queue is full");
+        assert_eq!(app.input.value, "something else");
     }
 
     #[test]

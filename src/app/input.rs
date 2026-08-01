@@ -1442,48 +1442,52 @@ impl App {
         // Nothing reaches the wire here. The worker posts the outcome back
         // and `send_outgoing_translated` runs the rest of the pipeline
         // seconds later, or refuses and hands the text back to the user.
-        if !e2e_possible
-            && self.state.translate_active
-            && self
-                .config
-                .translate
-                .buffers
-                .get(&active_id)
-                .is_some_and(|c| c.outgoing)
-            && text.len() <= crate::irc::MESSAGE_MAX_BYTES
-            && !crate::irc::multiline::needs_multiline(text)
-            && let Some(pending) = self.build_outgoing_translate(
-                &conn_id,
-                &active_id,
-                &buffer_name,
-                &buf_type,
-                &nick,
-                text,
-            )
-        {
-            match self.translate_outgoing_tx.try_send(pending) {
-                // Same reasoning as the shrink arm below: nothing is on the
-                // wire yet, so we must not claim a send. The deferred path
-                // reports the outcome via `note_message_sent`.
-                Ok(()) => return false,
-                Err(TrySendError::Full(_)) => {
-                    tracing::warn!("translate: outgoing queue full, sending untranslated");
-                }
-                Err(TrySendError::Closed(_)) => {
-                    tracing::error!(
-                        "translate: outgoing worker dead, sending untranslated \
-                         (restart required to restore translation)"
+        // The whole outgoing policy lives in one place; see
+        // `outgoing_translate_policy`. Once translation is REQUIRED, every
+        // way of not completing it refuses — falling through would put text
+        // on a channel in a language the user did not choose.
+        //
+        // This is the opposite policy to shrink below, which falls through by
+        // design: an unshortened URL is still the message the user wrote.
+        match self.outgoing_translate_policy(&active_id, text, e2e_possible) {
+            crate::app::translate::OutgoingTranslatePolicy::NotApplicable => {}
+            crate::app::translate::OutgoingTranslatePolicy::Refuse(reason) => {
+                return self.refuse_untranslatable_send(text, reason);
+            }
+            crate::app::translate::OutgoingTranslatePolicy::Translate => {
+                let Some(pending) = self.build_outgoing_translate(
+                    &conn_id,
+                    &active_id,
+                    &buffer_name,
+                    &buf_type,
+                    &nick,
+                    text,
+                ) else {
+                    // The policy said translate, so this is a race (the
+                    // buffer closed, or E2E was enabled between the two
+                    // checks). Refuse — it is never permission to send.
+                    return self.refuse_untranslatable_send(
+                        text,
+                        "this conversation can no longer be translated",
                     );
-                    crate::commands::helpers::add_local_event(
-                        self,
-                        &format!(
-                            "{err}translate: outgoing worker has died — \
-                             restart to restore. Messages are being sent \
-                             untranslated.{rst}",
-                            err = crate::commands::types::C_ERR,
-                            rst = crate::commands::types::C_RST,
-                        ),
-                    );
+                };
+                match self.translate_outgoing_tx.try_send(pending) {
+                    // Nothing is on the wire yet, so we must not claim a
+                    // send. The deferred path reports the outcome via
+                    // `note_message_sent`.
+                    Ok(()) => return false,
+                    Err(TrySendError::Full(_)) => {
+                        tracing::warn!("translate: outgoing queue full, refusing to send");
+                        return self
+                            .refuse_untranslatable_send(text, "the translation queue is full");
+                    }
+                    Err(TrySendError::Closed(_)) => {
+                        tracing::error!("translate: outgoing worker dead, refusing to send");
+                        return self.refuse_untranslatable_send(
+                            text,
+                            "the translation worker has died — restart to restore it",
+                        );
+                    }
                 }
             }
         }
