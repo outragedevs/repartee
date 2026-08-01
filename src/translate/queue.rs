@@ -23,14 +23,14 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use super::UntranslatedReason;
-use crate::state::buffer::{ActivityLevel, Message};
+use crate::state::buffer::{ActivityLevel, Message, WireOrigin};
 
 /// A line awaiting its translation.
 #[derive(Debug, Clone)]
 pub struct PendingPayload {
     /// The message as it would have been delivered untranslated. On
     /// resolution its `text` is replaced by the composed display string and
-    /// its `orig_offset` is set.
+    /// its `wire_origin` records what the wire actually carried.
     pub message: Message,
     pub activity: ActivityLevel,
     /// Whether the original is appended in brackets. Captured per line at
@@ -232,7 +232,10 @@ impl TranslateQueue {
             Ok(translated) => {
                 let (text, offset) = super::compose_display(&translated, &original, show_original);
                 message.text = text;
-                message.orig_offset = offset;
+                message.wire_origin = Some(WireOrigin {
+                    text: original,
+                    suffix_at: offset,
+                });
                 None
             }
             Err(reason) => {
@@ -242,7 +245,10 @@ impl TranslateQueue {
                 // line the broker correctly decided to leave alone.
                 let (text, offset) = super::mark_untranslated(&original, &reason);
                 message.text = text;
-                message.orig_offset = offset;
+                message.wire_origin = Some(WireOrigin {
+                    text: original,
+                    suffix_at: offset,
+                });
                 Some(reason)
             }
         };
@@ -381,6 +387,15 @@ mod tests {
     use crate::state::buffer::MessageType;
     use chrono::Utc;
 
+    /// A resolved line must always record what the wire carried — that is
+    /// what keys it against its own CHATHISTORY replay.
+    fn orig(message: &Message) -> &WireOrigin {
+        message
+            .wire_origin
+            .as_ref()
+            .expect("a resolved line records its wire text")
+    }
+
     fn message(id: u64, text: &str) -> Message {
         Message {
             id,
@@ -395,7 +410,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            orig_offset: None,
+            wire_origin: None,
         }
     }
 
@@ -622,7 +637,7 @@ mod tests {
         q.resolve(1, Ok("albalb".into()));
         let ready = q.drain_ready();
         assert_eq!(ready[0].message.text, "albalb [blabla]");
-        assert_eq!(ready[0].message.orig_offset, Some(6));
+        assert_eq!(orig(&ready[0].message).suffix_at, Some(6));
     }
 
     #[test]
@@ -633,7 +648,7 @@ mod tests {
         let ready = q.drain_ready();
         assert_eq!(ready[0].message.text, "hola que tal [untranslated: no provider]");
         assert_eq!(
-            ready[0].message.orig_offset,
+            orig(&ready[0].message).suffix_at,
             Some("hola que tal".len()),
             "the marker carries an offset so the renderer dims it"
         );
@@ -648,7 +663,7 @@ mod tests {
         q.resolve(1, Err(UntranslatedReason::Filtered));
         let ready = q.drain_ready();
         assert_eq!(ready[0].message.text, "moin");
-        assert_eq!(ready[0].message.orig_offset, None);
+        assert_eq!(orig(&ready[0].message).suffix_at, None);
         assert_eq!(ready[0].reason, Some(UntranslatedReason::Filtered));
         assert!(
             !ready[0].reason.as_ref().unwrap().is_gap(),

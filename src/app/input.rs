@@ -1380,7 +1380,7 @@ impl App {
                             log_msg_id: None,
                             log_ref_id: None,
                             tags: None,
-                            orig_offset: None,
+                            wire_origin: None,
                         },
                     );
                 }
@@ -1695,7 +1695,7 @@ impl App {
                             log_msg_id: None,
                             log_ref_id: None,
                             tags: None,
-                            orig_offset: None,
+                            wire_origin: None,
                         },
                     );
                 }
@@ -1750,7 +1750,7 @@ impl App {
                                 log_msg_id: None,
                                 log_ref_id: None,
                                 tags: None,
-                                orig_offset: None,
+                                wire_origin: None,
                             },
                         );
                     }
@@ -1804,7 +1804,7 @@ impl App {
                         log_msg_id: None,
                         log_ref_id: None,
                         tags: None,
-                        orig_offset: None,
+                        wire_origin: None,
                     },
                 );
             } else {
@@ -1832,7 +1832,7 @@ impl App {
                             log_msg_id: None,
                             log_ref_id: None,
                             tags: None,
-                            orig_offset: None,
+                            wire_origin: None,
                         },
                     );
                 }
@@ -2809,7 +2809,9 @@ pub mod submit_typing_tests {
         }
     }
 
-    fn make_connection() -> Connection {
+    /// Also used by the translate tests, which need a connection whose
+    /// `enabled_caps` they can set.
+    pub fn make_connection() -> Connection {
         Connection {
             id: "net".to_string(),
             label: "NetServer".to_string(),

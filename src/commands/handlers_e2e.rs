@@ -64,7 +64,7 @@ fn e2e_event(app: &mut App, level: E2eEventLevel, text: &str) {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            orig_offset: None,
+            wire_origin: None,
         },
     );
 }
@@ -2183,7 +2183,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            orig_offset: None,
+            wire_origin: None,
         };
         assert_eq!(msg.event_key.as_deref(), Some("e2e_info"));
         assert_eq!(

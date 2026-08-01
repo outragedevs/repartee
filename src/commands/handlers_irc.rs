@@ -1044,7 +1044,7 @@ pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
                     log_msg_id: None,
                     log_ref_id: None,
                     tags: None,
-                    orig_offset: None,
+                    wire_origin: None,
                 },
             );
         } else {
@@ -1165,7 +1165,7 @@ pub(crate) fn cmd_me(app: &mut App, args: &[String]) {
                     log_msg_id: None,
                     log_ref_id: None,
                     tags: None,
-                    orig_offset: None,
+                    wire_origin: None,
                 },
             );
         } else {

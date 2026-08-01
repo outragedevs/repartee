@@ -1,5 +1,5 @@
 use indexmap::IndexMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use tokio::sync::mpsc;
 
@@ -125,6 +125,22 @@ pub struct AppState {
     /// dispatch, so a mid-flight `/set` cannot make a queued line render
     /// differently from how it was queued.
     pub translate_show_original_in: bool,
+    /// Wire lines we have already rendered locally and expect `echo-message`
+    /// to reflect back, keyed by buffer, oldest first.
+    ///
+    /// Normally a server that echoes our messages is exactly why we skip the
+    /// local echo. A translated send with `show_original_out` on cannot: the
+    /// wire carries only the translation, so the server's echo can never
+    /// produce the ` [original]` suffix the user asked to see, and it is the
+    /// echo — not the local row — that would reach `SQLite`. So that case
+    /// writes the local row and files the wire line here; the incoming
+    /// handler drops the reflection when it arrives.
+    ///
+    /// Bounded and time-limited, because a reflection that never comes (a
+    /// netsplit between send and echo) must not accumulate. Failing to match
+    /// shows the server's echo, which is the old behaviour — never a lost
+    /// message.
+    pub own_echo_suppressions: HashMap<String, VecDeque<(String, std::time::Instant)>>,
     /// Message types excluded from logging (e.g. "event" to skip quit/join/nick fan-out).
     pub log_exclude_types: Vec<String>,
     /// Maximum messages per buffer (FIFO eviction). 0 = unlimited.

@@ -319,9 +319,36 @@ send got:
   discovered from the channel.
 
 "Whoever submitted it" is the origin captured at dispatch, never the current one —
-see §5.4.
+see §5.5.
 
-### 5.4 A refusal goes back to the client that typed it
+### 5.4 `echo-message` cannot show the original
+
+A server advertising `echo-message` reflects our own PRIVMSGs back, which is
+normally exactly why the outgoing paths skip the local echo — the reflection *is*
+the row, and it reaches the buffer, the web clients and `SQLite` through the
+ordinary incoming path.
+
+A translated send with `show_original_out` on breaks that. The wire carries the
+translation and nothing else, so the reflection can never render the ` [original]`
+suffix the user configured, and the reflection is the copy that gets logged. Only
+the local echo knows the original.
+
+So that case — and only that case — writes the local row anyway and files each wire
+line it sent in `own_echo_suppressions`; `handle_privmsg` drops the reflection when
+it arrives. Matching is exact and **consuming**, so sending the same text twice
+files two records and each reflection takes one. A miss shows the reflection, which
+is the behaviour every other send has: the mechanism can duplicate nothing, only
+fail to suppress.
+
+Suppression, rather than decorating the reflection on arrival, because a long
+message is several wire lines and one display row: the local echo already joins
+them and places the suffix once, while decorating N reflections would have to split
+one original across them.
+
+`OutgoingEchoPlan::None` is untouched — a script that asked for no echo still gets
+none, and sees the undecorated reflection.
+
+### 5.5 A refusal goes back to the client that typed it
 
 Every submitting path scopes `App::submit_origin` for the duration of the submit, so
 a refusal restores the text where its author is looking. That includes both web
@@ -383,6 +410,33 @@ Consequences, accepted deliberately:
 
 An `Untranslated` line with any reason other than `Filtered` renders the original
 plus a dim marker.
+
+The offset travels to the browser as `WireMessage::orig_offset`, and the web renderer
+splits the body there and wraps the tail in its own element. Both frontends therefore
+show the same line, and neither guesses: a client that receives no offset renders the
+text whole. It is omitted from `stored_to_wire` for the same reason the TUI has none
+for a reloaded row.
+
+### 7.1 Display text is not identity
+
+A row whose displayed text is not the text that crossed the wire carries
+`Message::wire_origin`, holding the wire text alongside that offset. Both dedup paths
+key on it — `maybe_log`'s synthetic `msg_id` and `buffer_contains_history_row` — and
+never on the displayed text.
+
+Without it a msgid-less server duplicates every translated line. A CHATHISTORY replay
+bypasses translation entirely and carries what the network sent, so an identity
+derived from the display text differs between a line and its own replay: the unique
+`(network, msg_id)` index stops collapsing them, and the reconnect gap-fill splices a
+second copy into the buffer. Servers *with* `@msgid` were never affected, which is
+what made this invisible.
+
+Direction matters, and the field records the wire text rather than "the original" for
+exactly that reason: for an incoming line the wire carried the peer's original, for
+our own outgoing echo it carried our translation.
+
+Incoming shrink rewrites text the same way and had the same defect; it now records its
+wire text too.
 
 ---
 

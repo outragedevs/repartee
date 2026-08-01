@@ -134,6 +134,8 @@ pub fn message_to_wire(
         log_id: msg.log_msg_id.as_ref().and_then(|s| s.parse::<i64>().ok()),
         event_key: msg.event_key.clone(),
         previews: extractor.map(|e| e.extract(&msg.text)).unwrap_or_default(),
+        // Live-only, exactly as in the TUI: the log stores the flat text.
+        orig_offset: msg.wire_origin.as_ref().and_then(|o| o.suffix_at),
     }
 }
 
@@ -155,6 +157,9 @@ pub fn stored_to_wire(
         log_id: Some(msg.id),
         event_key: msg.event_key.clone(),
         previews: extractor.map(|e| e.extract(&msg.text)).unwrap_or_default(),
+        // A stored row's text is flat — the suffix is indistinguishable from
+        // any other trailing brackets, and must not be guessed at.
+        orig_offset: None,
     }
 }
 
@@ -423,7 +428,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            orig_offset: None,
+            wire_origin: None,
         };
         let wire = message_to_wire(&msg, None);
         assert_eq!(wire.id, 42);
@@ -449,7 +454,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            orig_offset: None,
+            wire_origin: None,
         };
         let wire = message_to_wire(&msg, None);
         assert_eq!(wire.event_key.as_deref(), Some("join"));
@@ -471,7 +476,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            orig_offset: None,
+            wire_origin: None,
         };
         let wire = message_to_wire(&msg, Some(&extractor));
         assert_eq!(wire.previews.len(), 1);
@@ -507,5 +512,62 @@ mod tests {
         let wire = stored_to_wire(&stored, None);
         assert_eq!(wire.event_key.as_deref(), Some("kicked"));
         assert!(wire.highlight);
+        assert_eq!(
+            wire.orig_offset, None,
+            "a stored row's text is flat — the suffix must never be guessed"
+        );
+    }
+
+    #[test]
+    fn a_translated_row_carries_its_dim_boundary_to_the_browser() {
+        // Without this the web client receives one undifferentiated string
+        // and renders the appended original in full brightness, while the
+        // TUI dims it — the documented display differing per frontend.
+        let msg = Message {
+            id: 1,
+            timestamp: chrono::Utc::now(),
+            message_type: crate::state::buffer::MessageType::Message,
+            nick: Some("alice".to_string()),
+            nick_mode: None,
+            text: "good morning [dzien dobry]".to_string(),
+            highlight: false,
+            event_key: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: None,
+            wire_origin: Some(crate::state::buffer::WireOrigin {
+                text: "dzien dobry".to_string(),
+                suffix_at: Some("good morning".len()),
+            }),
+        };
+        let wire = message_to_wire(&msg, None);
+        assert_eq!(wire.orig_offset, Some("good morning".len()));
+        assert_eq!(&wire.text[wire.orig_offset.unwrap()..], " [dzien dobry]");
+    }
+
+    #[test]
+    fn a_rewritten_row_with_no_suffix_sends_no_boundary() {
+        // `show_original_in = false` still replaces the text, but there is
+        // no appended original — so nothing to dim.
+        let msg = Message {
+            id: 1,
+            timestamp: chrono::Utc::now(),
+            message_type: crate::state::buffer::MessageType::Message,
+            nick: Some("alice".to_string()),
+            nick_mode: None,
+            text: "good morning".to_string(),
+            highlight: false,
+            event_key: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: None,
+            wire_origin: Some(crate::state::buffer::WireOrigin {
+                text: "dzien dobry".to_string(),
+                suffix_at: None,
+            }),
+        };
+        assert_eq!(message_to_wire(&msg, None).orig_offset, None);
     }
 }

@@ -101,19 +101,44 @@ pub struct Message {
     /// `IRCv3` message tags extracted from the incoming IRC message.
     /// `None` when no tags are present (the common case), avoiding a `HashMap` allocation per message.
     pub tags: Option<HashMap<String, String>>,
-    /// Byte offset where the appended ` [original]` suffix begins, when a
-    /// translated line is displayed alongside its original. The renderer
-    /// dims from here to the end.
+    /// Set when this row's displayed text is not the text that crossed the
+    /// IRC wire — today, only a translated line. `None` for everything else,
+    /// which is the overwhelming majority of rows.
     ///
-    /// Live-render only — deliberately NOT persisted. The stored text is
-    /// flat (the log records exactly what was on screen), so a row reloaded
-    /// from `SQLite` has no way to recover this and renders the same
-    /// characters undimmed.
+    /// Live-only, deliberately NOT persisted. The stored text is flat (the
+    /// log records exactly what was on screen), and a row reloaded from
+    /// `SQLite` has already been keyed and rendered once.
+    pub wire_origin: Option<WireOrigin>,
+}
+
+/// What the network carried for a row whose display differs from it.
+///
+/// Translation is the only producer today: an incoming line displays the
+/// translation while the wire carried the peer's original, and our own
+/// outgoing echo displays `translated [original]` while the wire carried
+/// just the translation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireOrigin {
+    /// The text as it crossed the wire.
+    ///
+    /// **Identity, not display.** `maybe_log`'s synthetic `msg_id` and the
+    /// in-memory history-dedup check both key on this, so one IRC message
+    /// keys identically whether it arrives live — and is rewritten on the
+    /// way in — or comes back later through CHATHISTORY, which bypasses
+    /// translation entirely. Keying on the displayed text instead makes a
+    /// reconnect gap-fill store and show the same message twice, and only on
+    /// servers with no `@msgid` to key on instead.
+    pub text: String,
+    /// Byte offset where an appended ` [original]` suffix begins, when the
+    /// display carries one. The renderer dims from here to the end.
+    ///
+    /// `None` when the display was rewritten without a visible suffix —
+    /// `show_original_in = false` still replaces the text.
     ///
     /// Never derive this by scanning for a trailing `[...]`: an ordinary
     /// message may legitimately end that way, and the renderer would dim
     /// someone else's brackets.
-    pub orig_offset: Option<usize>,
+    pub suffix_at: Option<usize>,
 }
 
 // === NickEntry ===

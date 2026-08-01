@@ -166,7 +166,7 @@ fn render_chat_message(
     }
 
     // Dim the ` [original]` suffix of a translated line, if there is one.
-    if let Some(offset) = msg.orig_offset
+    if let Some(offset) = msg.wire_origin.as_ref().and_then(|o| o.suffix_at)
         && offset <= msg.text.len()
         && msg.text.is_char_boundary(offset)
     {
@@ -383,7 +383,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            orig_offset: None,
+            wire_origin: None,
         }
     }
 
@@ -407,7 +407,10 @@ mod tests {
     #[test]
     fn translated_original_suffix_renders_dimmed() {
         let mut msg = test_message("alice", "albalb [blabla]", MessageType::Message);
-        msg.orig_offset = Some(6);
+        msg.wire_origin = Some(crate::state::buffer::WireOrigin {
+            text: "blabla".to_string(),
+            suffix_at: Some(6),
+        });
         let spans = chat_spans(&msg);
         let all: String = spans.iter().map(|s| s.text.as_str()).collect();
         assert!(
@@ -437,7 +440,10 @@ mod tests {
     fn dim_suffix_spanning_a_multibyte_boundary() {
         let mut msg = test_message("alice", "zażółć gęślą [jaźń]", MessageType::Message);
         let offset = "zażółć gęślą".len();
-        msg.orig_offset = Some(offset);
+        msg.wire_origin = Some(crate::state::buffer::WireOrigin {
+            text: "jaźń".to_string(),
+            suffix_at: Some(offset),
+        });
         let spans = chat_spans(&msg);
         assert_eq!(dim_text(&spans), " [jaźń]");
     }
@@ -504,7 +510,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            orig_offset: None,
+            wire_origin: None,
         };
         render_event(&msg, &theme)
             .into_iter()
@@ -715,7 +721,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            orig_offset: None,
+            wire_origin: None,
         };
         let theme = default_theme();
         let config = default_config();

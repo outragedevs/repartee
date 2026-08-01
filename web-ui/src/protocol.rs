@@ -325,6 +325,11 @@ pub struct WireMessage {
     /// disabled or the message contains no eligible URLs.
     #[serde(default)]
     pub previews: Vec<LinkPreview>,
+    /// Byte offset in `text` where an appended ` [original]` suffix begins,
+    /// for a translated line displayed alongside its original. Rendered
+    /// dimmed, matching the TUI. `None` for every other row.
+    #[serde(default)]
+    pub orig_offset: Option<usize>,
 }
 
 /// Mirror of `src/web/preview::LinkPreview`. Kept in sync manually because

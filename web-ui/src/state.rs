@@ -1019,6 +1019,7 @@ fn insert_date_separators(messages: Vec<WireMessage>) -> Vec<WireMessage> {
                     log_id: None,
                     event_key: Some("date_separator".to_string()),
                     previews: Vec::new(),
+                    orig_offset: None,
                 });
             }
             last_date = Some(date);
@@ -1263,6 +1264,7 @@ mod tests {
             log_id: Some(i64::try_from(id).unwrap_or_default()),
             event_key: None,
             previews: Vec::new(),
+            orig_offset: None,
         }
     }
 

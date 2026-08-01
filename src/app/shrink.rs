@@ -307,7 +307,21 @@ fn spawn_incoming_worker(
                     true,
                 )
                 .await;
-                pending.message.text = substituted_text;
+                let original = std::mem::replace(&mut pending.message.text, substituted_text);
+                // Incoming shrink has the same identity problem translation
+                // does, and predates it: what we display and log is the
+                // substituted text, but a CHATHISTORY replay of this line
+                // carries the URL the peer actually sent. Without recording
+                // the wire text, a msgid-less server's gap-fill stores and
+                // shows the same message twice. Only when substitution
+                // changed something — an unshrunk line IS its wire text.
+                if original != pending.message.text {
+                    pending.message.wire_origin = Some(crate::state::buffer::WireOrigin {
+                        text: original,
+                        // No appended suffix: shrink rewrites in place.
+                        suffix_at: None,
+                    });
+                }
                 ShrinkDeliver::Incoming(IncomingDeliver {
                     buffer_id: pending.buffer_id,
                     message: pending.message,
@@ -626,7 +640,7 @@ impl App {
                     log_msg_id: None,
                     log_ref_id: None,
                     tags: None,
-                    orig_offset: None,
+                    wire_origin: None,
                 },
             );
         }

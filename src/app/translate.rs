@@ -692,7 +692,7 @@ impl crate::app::App {
 
         let mut send_ok = true;
         let mut sent_any = false;
-        for wire in wire_lines {
+        for wire in &wire_lines {
             let Some(handle) = self.irc_handles.get(&out.conn_id) else {
                 self.deliver_translate_error(
                     &out.buffer_id,
@@ -701,7 +701,7 @@ impl crate::app::App {
                 send_ok = false;
                 break;
             };
-            if handle.sender().send_privmsg(&out.buffer_name, &wire).is_err() {
+            if handle.sender().send_privmsg(&out.buffer_name, wire).is_err() {
                 tracing::warn!(
                     conn_id = %out.conn_id,
                     target = %out.buffer_name,
@@ -724,53 +724,48 @@ impl crate::app::App {
             self.drain_pending_e2e_sends();
         }
         if !send_ok {
-            // The handle was there at the precheck and the send failed
-            // anyway — the writer task went away in between. No echo will be
-            // written, so the reservation has to go back or this buffer stays
-            // barricaded behind it until the queue timeout.
-            self.release_echo_slot_and_drain(&out.buffer_id, out.echo_id);
-            if sent_any {
-                // A split message that died halfway already put its first
-                // chunks on the channel. Restoring the whole line into the
-                // composer would invite the user to send those chunks a
-                // second time, so it goes to the error row and nowhere else.
-                let retry = out.retry_text.clone();
-                self.deliver_translate_error(
-                    &out.buffer_id,
-                    &format!(
-                        "{err}Part of the message was sent — the rest was not.{rst} \
-                         {dim}Not restored to the input line, to avoid sending the \
-                         first part twice.{rst}\n{dim}Your text:{rst} {retry}",
-                        err = crate::commands::types::C_ERR,
-                        dim = crate::commands::types::C_DIM,
-                        rst = crate::commands::types::C_RST,
-                    ),
-                );
-                return;
-            }
-            // Nothing reached the wire, and the composer was cleared at
-            // submission. Same as the connection-unavailable branch above:
-            // hand the text back rather than let the user watch a message
-            // they typed disappear without a trace.
-            let retry = out.retry_text.clone();
-            let origin = out.origin.clone();
-            self.restore_input_text_to(&retry, &origin);
+            self.abandon_translated_send(out, sent_any);
             return;
         }
+        // The server's echo carries the TRANSLATION and nothing else, so on a
+        // buffer configured to show the original it can never render the
+        // ` [original]` suffix the user asked for — and it is the echo, not
+        // any local row, that would reach SQLite. Only the local echo knows
+        // the original, so when it is wanted the local echo has to be the one
+        // that renders, and the reflection is dropped on arrival.
+        let wants_original =
+            out.show_original && matches!(out.outcome, TranslateOutcome::Translated { .. });
         // Honour the submitting call site's intent. `BufferInput` keeps the
         // rule typed text has always had; `Gated` mirrors
         // `send_gated_message`'s own condition exactly; `None` means the
         // caller (a script) never wanted a plaintext echo and inventing one
-        // would double-render for scripts that print their own output.
+        // would double-render for scripts that print their own output — and
+        // that stays true here: a caller that wants no echo gets none, and
+        // sees the server's undecorated reflection like it always has.
         let should_echo = match &out.echo {
             OutgoingEchoPlan::None => false,
-            OutgoingEchoPlan::BufferInput => !echo_message_enabled || is_e2e_encrypted,
+            OutgoingEchoPlan::BufferInput => {
+                !echo_message_enabled || is_e2e_encrypted || wants_original
+            }
             OutgoingEchoPlan::Gated {
                 even_without_encryption,
                 ..
-            } => is_e2e_encrypted || (*even_without_encryption && !echo_message_enabled),
+            } => {
+                is_e2e_encrypted
+                    || (*even_without_encryption && (!echo_message_enabled || wants_original))
+            }
         };
         if should_echo {
+            // File the reflection BEFORE writing the row, so a server that
+            // answers faster than we finish here still finds the record.
+            // Only when the server will actually send one: an E2E reflection
+            // is ciphertext and already swallowed, and with echo-message off
+            // there is nothing to swallow.
+            if echo_message_enabled && !is_e2e_encrypted {
+                for wire in &wire_lines {
+                    self.state.suppress_own_echo(&out.buffer_id, wire);
+                }
+            }
             self.write_translated_local_echo(out, &plain_echo);
         } else {
             // The server will echo it back for us, so no local row is
@@ -782,6 +777,44 @@ impl crate::app::App {
         // any lines that finished translating behind it are deliverable NOW,
         // and this arm is the one that never comes back to the queue.
         self.drain_translate_queue(&out.buffer_id);
+    }
+
+    /// Clean up after a send that failed AFTER the handle precheck passed —
+    /// the writer task went away between the two, which it can, because it
+    /// dies independently of the map entry.
+    ///
+    /// `sent_any` is what makes the two cases different, and it is the whole
+    /// point of this function.
+    fn abandon_translated_send(&mut self, out: &OutgoingTranslateDeliver, sent_any: bool) {
+        // No echo will be written either way, so the reservation has to go
+        // back or this buffer stays barricaded behind it until the queue
+        // timeout.
+        self.release_echo_slot_and_drain(&out.buffer_id, out.echo_id);
+        let retry = out.retry_text.clone();
+        if sent_any {
+            // A split message that died halfway already put its first chunks
+            // on the channel. Restoring the whole line into the composer
+            // would invite the user to send those chunks a second time, so it
+            // goes to the error row and nowhere else.
+            self.deliver_translate_error(
+                &out.buffer_id,
+                &format!(
+                    "{err}Part of the message was sent — the rest was not.{rst} \
+                     {dim}Not restored to the input line, to avoid sending the \
+                     first part twice.{rst}\n{dim}Your text:{rst} {retry}",
+                    err = crate::commands::types::C_ERR,
+                    dim = crate::commands::types::C_DIM,
+                    rst = crate::commands::types::C_RST,
+                ),
+            );
+            return;
+        }
+        // Nothing reached the wire, and the composer was cleared at
+        // submission. Same as the connection-unavailable branch: hand the
+        // text back rather than let the user watch a message they typed
+        // disappear without a trace.
+        let origin = out.origin.clone();
+        self.restore_input_text_to(&retry, &origin);
     }
 
     /// Assemble the outgoing translation request, capturing every
@@ -1262,9 +1295,19 @@ impl crate::app::App {
             crate::irc::split_irc_message(&echo_text, crate::irc::MESSAGE_MAX_BYTES)
         };
         let nick_mode_str = out.own_mode.map(|c| c.to_string());
-        // Only a single-chunk echo can carry the offset: splitting moves the
-        // suffix into the last chunk and the byte offset no longer maps.
+        // Only a single-chunk echo can carry this: splitting moves the suffix
+        // into the last chunk (so the offset no longer maps) and leaves each
+        // chunk holding a fraction of a wire line that was itself split
+        // differently (so no chunk's text is a wire text).
         let single_chunk = local_chunks.len() == 1;
+        // What the NETWORK carried for this row — our translation, not the
+        // original we typed. A CHATHISTORY replay of our own message brings
+        // back exactly this, so it is what the row must be keyed by. See
+        // `WireOrigin`.
+        let wire_origin = single_chunk.then(|| crate::state::buffer::WireOrigin {
+            text: echo_body.to_string(),
+            suffix_at: orig_offset,
+        });
         for (i, chunk) in local_chunks.into_iter().enumerate() {
             // The first chunk takes the id reserved at submission so it
             // lands in the right place; continuation chunks follow it and
@@ -1297,7 +1340,7 @@ impl crate::app::App {
                     log_msg_id: None,
                     log_ref_id: None,
                     tags: None,
-                    orig_offset: if single_chunk { orig_offset } else { None },
+                    wire_origin: wire_origin.clone(),
                 },
             );
         }
@@ -1530,7 +1573,7 @@ mod app_tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            orig_offset: None,
+            wire_origin: None,
         }
     }
 
@@ -2346,6 +2389,177 @@ mod app_tests {
         assert_eq!(session.as_deref(), Some("alice-session"));
     }
 
+    /// An app on an `echo-message` server, with `#dupa` set to show the
+    /// original on outgoing lines.
+    fn app_with_echo_message() -> crate::app::App {
+        let mut app = app_with_dying_handle(usize::MAX);
+        let mut conn = crate::app::input::submit_typing_tests::make_connection();
+        conn.id = "test".to_string();
+        conn.nick = "me".to_string();
+        conn.enabled_caps.insert("echo-message".to_string());
+        app.state.add_connection(conn);
+        app.config.translate.show_original_out = true;
+        app
+    }
+
+    /// The server reflecting one of our own PRIVMSGs back at us.
+    fn reflect(app: &mut crate::app::App, text: &str) {
+        let prefix = irc::proto::Prefix::Nickname(
+            "me".to_string(),
+            "me".to_string(),
+            "example.org".to_string(),
+        );
+        crate::irc::events::handle_irc_message(
+            &mut app.state,
+            "test",
+            &irc::proto::Message {
+                tags: None,
+                prefix: Some(prefix),
+                command: irc::proto::Command::PRIVMSG("#dupa".to_string(), text.to_string()),
+            },
+        );
+    }
+
+    #[test]
+    fn showing_the_original_outgoing_survives_echo_message() {
+        // The wire carries only the translation, so the server's reflection
+        // can never render the ` [original]` suffix the user configured —
+        // and the reflection is what would reach SQLite. The local echo has
+        // to be the row that renders, and the reflection has to go.
+        let mut app = app_with_echo_message();
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(outgoing(
+            "moje zdanie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "mein satz".to_string(),
+            },
+            true, // show_original
+        ))));
+        assert_eq!(
+            shown(&app),
+            vec!["mein satz [moje zdanie]".to_string()],
+            "the local row renders, carrying the original"
+        );
+
+        reflect(&mut app, "mein satz");
+
+        assert_eq!(
+            shown(&app),
+            vec!["mein satz [moje zdanie]".to_string()],
+            "and the server's undecorated copy of the same line is dropped"
+        );
+    }
+
+    #[test]
+    fn echo_message_still_owns_the_echo_when_the_original_is_not_shown() {
+        // Nothing is lost by letting the server echo when there is no suffix
+        // to add, and writing our own row as well would double every line.
+        let mut app = app_with_echo_message();
+        app.config.translate.show_original_out = false;
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(outgoing(
+            "moje zdanie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "mein satz".to_string(),
+            },
+            false, // show_original
+        ))));
+        assert!(
+            shown(&app).is_empty(),
+            "no local row: the server will send one: {:?}",
+            shown(&app)
+        );
+
+        reflect(&mut app, "mein satz");
+
+        assert_eq!(
+            shown(&app),
+            vec!["mein satz".to_string()],
+            "and it is shown, exactly as before"
+        );
+    }
+
+    #[test]
+    fn a_reflection_that_was_never_filed_is_still_shown() {
+        // Fail-open. A miss — a netsplit between send and echo, a server
+        // that rewrites what it reflects, a line we never sent — must show
+        // the message, never swallow it.
+        let mut app = app_with_echo_message();
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(outgoing(
+            "moje zdanie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "mein satz".to_string(),
+            },
+            true,
+        ))));
+
+        reflect(&mut app, "etwas ganz anderes");
+
+        assert_eq!(
+            shown(&app),
+            vec![
+                "mein satz [moje zdanie]".to_string(),
+                "etwas ganz anderes".to_string(),
+            ],
+            "an unmatched line is displayed, not dropped"
+        );
+    }
+
+    #[test]
+    fn each_reflection_consumes_one_record_so_the_second_send_still_shows() {
+        // Sending the same text twice files two records. If a reflection
+        // peeked instead of consuming, the second one would also be
+        // swallowed — and the user would see one of their two messages.
+        let mut app = app_with_echo_message();
+        for id in 1..=2u64 {
+            let mut out = outgoing(
+                "moje zdanie",
+                TranslateOutcome::Translated {
+                    id,
+                    text: "mein satz".to_string(),
+                },
+                true,
+            );
+            out.echo_id = id;
+            app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+        }
+        assert_eq!(shown(&app).len(), 2, "both local rows are written");
+
+        reflect(&mut app, "mein satz");
+        reflect(&mut app, "mein satz");
+        assert_eq!(shown(&app).len(), 2, "both reflections are dropped");
+
+        // A third, with nothing left filed, is a stranger's line.
+        reflect(&mut app, "mein satz");
+        assert_eq!(
+            shown(&app).len(),
+            3,
+            "once the records run out, a matching line is shown"
+        );
+    }
+
+    #[test]
+    fn a_script_send_that_wants_no_echo_still_gets_none_with_the_original_on() {
+        // `show_original_out` must not hand an echo to a caller that
+        // explicitly asked for none — that is the double-render the
+        // `None` plan exists to prevent.
+        let mut app = app_with_echo_message();
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(outgoing_with_echo(
+            "moje zdanie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "mein satz".to_string(),
+            },
+            OutgoingEchoPlan::None,
+        ))));
+        assert!(
+            shown(&app).is_empty(),
+            "no echo was wanted and none was written: {:?}",
+            shown(&app)
+        );
+    }
+
     #[test]
     fn a_refused_slash_command_from_the_web_goes_back_to_that_browser() {
         // The web composer dispatches `/msg` as `RunCommand`, not
@@ -2915,7 +3129,7 @@ mod ordering_integration {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            orig_offset: None,
+            wire_origin: None,
         }
     }
 

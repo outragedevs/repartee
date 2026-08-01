@@ -29,6 +29,7 @@ impl AppState {
             translate_buffers: std::collections::HashMap::new(),
             translate_my_lang: "en".to_string(),
             translate_show_original_in: true,
+            own_echo_suppressions: std::collections::HashMap::new(),
             log_exclude_types: Vec::new(),
             scrollback_limit: 2000,
             pending_web_events: Vec::new(),
@@ -446,6 +447,62 @@ impl AppState {
             .reserve(id);
     }
 
+    /// How long a filed reflection stays matchable. Generous — the round
+    /// trip is one server hop — but finite, so a reflection lost to a
+    /// netsplit does not sit there waiting to swallow an unrelated line the
+    /// user retypes verbatim much later.
+    const OWN_ECHO_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+    /// Cap per buffer. A user cannot outrun their own echoes by this much;
+    /// the bound exists so a server that stops echoing entirely cannot grow
+    /// this without limit.
+    const OWN_ECHO_MAX: usize = 32;
+
+    /// Record a wire line we rendered locally, so `echo-message`'s
+    /// reflection of it is dropped instead of shown twice.
+    ///
+    /// See [`AppState::own_echo_suppressions`] for why a translated send has
+    /// to do this at all.
+    pub fn suppress_own_echo(&mut self, buffer_id: &str, wire_text: &str) {
+        let now = std::time::Instant::now();
+        let entries = self
+            .own_echo_suppressions
+            .entry(buffer_id.to_string())
+            .or_default();
+        entries.retain(|(_, at)| now.duration_since(*at) < Self::OWN_ECHO_TTL);
+        while entries.len() >= Self::OWN_ECHO_MAX {
+            entries.pop_front();
+        }
+        entries.push_back((wire_text.to_string(), now));
+    }
+
+    /// Consume a filed reflection matching this line, if there is one.
+    ///
+    /// Consuming rather than peeking is what makes sending the same text
+    /// twice work: the first reflection takes the first record, the second
+    /// takes the second. Matching the OLDEST record first keeps that in send
+    /// order.
+    pub fn take_own_echo_suppression(&mut self, buffer_id: &str, wire_text: &str) -> bool {
+        let now = std::time::Instant::now();
+        let Some(entries) = self.own_echo_suppressions.get_mut(buffer_id) else {
+            return false;
+        };
+        entries.retain(|(_, at)| now.duration_since(*at) < Self::OWN_ECHO_TTL);
+        let Some(pos) = entries.iter().position(|(text, _)| text == wire_text) else {
+            // Nothing filed: this is an ordinary echo (or one we already
+            // consumed). Showing it is the behaviour every non-translated
+            // send has always had.
+            if entries.is_empty() {
+                self.own_echo_suppressions.remove(buffer_id);
+            }
+            return false;
+        };
+        entries.remove(pos);
+        if entries.is_empty() {
+            self.own_echo_suppressions.remove(buffer_id);
+        }
+        true
+    }
+
     /// Give up a reservation whose message will never arrive.
     pub fn release_echo_slot(&mut self, buffer_id: &str, id: u64) {
         if let Some(queue) = self.translate_queues.get_mut(buffer_id) {
@@ -561,8 +618,11 @@ impl AppState {
         // broker correctly decided to leave alone — the same invisible
         // failure the marker exists to prevent, just from the dispatch side.
         let (text, offset) = crate::translate::mark_untranslated(&message.text, reason);
-        message.text = text;
-        message.orig_offset = offset;
+        let original = std::mem::replace(&mut message.text, text);
+        message.wire_origin = Some(crate::state::buffer::WireOrigin {
+            text: original,
+            suffix_at: offset,
+        });
 
         if let Some(queue) = self.translate_queues.get_mut(buffer_id) {
             let id = message.id;
@@ -850,7 +910,13 @@ impl AppState {
                         message.timestamp.timestamp_millis(),
                         message.nick.as_deref(),
                         type_str,
-                        &message.text,
+                        // The WIRE text, which for a translated row is not
+                        // what we display or store. CHATHISTORY replay
+                        // bypasses translation, so keying on the display
+                        // text gives the live row and its own replay two
+                        // different ids and the unique index stops
+                        // collapsing them. See `WireOrigin`.
+                        dedup_text(message),
                     )
                 }),
         };
@@ -1214,8 +1280,22 @@ fn synthetic_msg_id(
     format!("synth:{h:016x}")
 }
 
+/// The text a row is IDENTIFIED by, which is not always the text it shows.
+///
+/// A translated row displays the translation (with the original in brackets
+/// when configured) while the wire carried something else, so the two sides
+/// of a dedup comparison only line up here. Everything else is its own wire
+/// text.
+fn dedup_text(message: &Message) -> &str {
+    message
+        .wire_origin
+        .as_ref()
+        .map_or(message.text.as_str(), |o| o.text.as_str())
+}
+
 fn buffer_contains_history_row(buf: &Buffer, candidate: &Message) -> bool {
     let candidate_msgid = candidate.tags.as_ref().and_then(|t| t.get("msgid"));
+    let candidate_text = dedup_text(candidate);
     buf.messages.iter().any(|m| {
         if let Some(cid) = candidate_msgid
             && let Some(mid) = m.tags.as_ref().and_then(|t| t.get("msgid"))
@@ -1225,7 +1305,10 @@ fn buffer_contains_history_row(buf: &Buffer, candidate: &Message) -> bool {
         m.timestamp == candidate.timestamp
             && m.nick == candidate.nick
             && m.message_type == candidate.message_type
-            && m.text == candidate.text
+            // Both sides through `dedup_text`: the in-memory row may be a
+            // translation of the very line being replayed, and comparing the
+            // display texts would never match, splicing a duplicate in.
+            && dedup_text(m) == candidate_text
     })
 }
 
@@ -1351,7 +1434,7 @@ pub mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            orig_offset: None,
+            wire_origin: None,
         }
     }
 
@@ -1409,7 +1492,7 @@ pub mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            orig_offset: None,
+            wire_origin: None,
         };
         state.add_message("libera/#rust", event_msg);
         assert!(
@@ -1444,7 +1527,7 @@ pub mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            orig_offset: None,
+            wire_origin: None,
         };
         state.add_message("libera/#rust", event_msg2);
         assert_eq!(
@@ -1651,7 +1734,7 @@ pub mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: Some(tags),
-            orig_offset: None,
+            wire_origin: None,
         };
         state.add_message("libera/#rust", msg);
 
@@ -1681,7 +1764,7 @@ pub mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            orig_offset: None,
+            wire_origin: None,
         };
 
         // Normal config: the row is queued, so ingest reports success.
@@ -1717,7 +1800,7 @@ pub mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            orig_offset: None,
+            wire_origin: None,
         };
         // First fills the single slot (kept unread via _rx), second overflows.
         assert!(state.ingest_history_message("libera/#rust", &msg));
@@ -1753,7 +1836,7 @@ pub mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
-            orig_offset: None,
+            wire_origin: None,
         };
 
         state.add_message("libera/#rust", build());
@@ -1786,6 +1869,106 @@ pub mod tests {
     }
 
     #[test]
+    fn a_translated_row_keys_on_the_wire_text_not_the_translation() {
+        // The live row displays and stores the translation; its CHATHISTORY
+        // replay carries what the peer actually sent and never goes near the
+        // translator. Keying on the displayed text gives the two different
+        // synthetic ids, and on a msgid-less server the unique index stops
+        // collapsing them — the same line stored twice after a gap-fill.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let mut state = make_test_state();
+        state.log_tx = Some(tx);
+
+        let ts = Utc::now();
+        let wire = || Message {
+            id: 0,
+            timestamp: ts,
+            message_type: MessageType::Message,
+            nick: Some("carol".to_string()),
+            nick_mode: None,
+            text: "dzien dobry".to_string(),
+            highlight: false,
+            event_key: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: None,
+            wire_origin: None,
+        };
+        // What the queue produces: display text replaced, wire text recorded.
+        let mut translated = wire();
+        translated.text = "good morning [dzien dobry]".to_string();
+        translated.wire_origin = Some(WireOrigin {
+            text: "dzien dobry".to_string(),
+            suffix_at: Some("good morning".len()),
+        });
+
+        state.add_message("libera/#rust", translated);
+        let live = rx.try_recv().expect("live row logged");
+        assert!(
+            state.ingest_history_message("libera/#rust", &wire()),
+            "history row stored"
+        );
+        let history = rx.try_recv().expect("history row logged");
+
+        assert_eq!(
+            live.msg_id, history.msg_id,
+            "a translated line and its own replay are ONE message"
+        );
+        assert_eq!(
+            live.text, "good morning [dzien dobry]",
+            "and what is stored is still what was on screen"
+        );
+    }
+
+    #[test]
+    fn a_translated_row_is_not_spliced_again_by_its_own_history_replay() {
+        // The in-memory half of the same problem: `surface_history_rows`
+        // compares the candidate against what is on screen, and on screen is
+        // the translation.
+        let mut state = make_test_state();
+        state.add_buffer(Buffer::for_test("libera", BufferType::Channel, "#rust"));
+        let ts = Utc::now();
+        let wire = Message {
+            id: 1,
+            timestamp: ts,
+            message_type: MessageType::Message,
+            nick: Some("carol".to_string()),
+            nick_mode: None,
+            text: "dzien dobry".to_string(),
+            highlight: false,
+            event_key: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: None,
+            wire_origin: None,
+        };
+        let mut translated = wire.clone();
+        translated.text = "good morning".to_string();
+        // `show_original_in = false`: the text is replaced with no suffix at
+        // all, which is the case a suffix-only marker would miss entirely.
+        translated.wire_origin = Some(WireOrigin {
+            text: "dzien dobry".to_string(),
+            suffix_at: None,
+        });
+        state.add_message_unshrunk("libera/#rust", translated);
+
+        state.surface_history_rows("libera/#rust", vec![wire]);
+
+        let texts: Vec<String> = state.buffers["libera/#rust"]
+            .messages
+            .iter()
+            .map(|m| m.text.clone())
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["good morning".to_string()],
+            "the gap-fill row is the line already on screen, translated"
+        );
+    }
+
+    #[test]
     fn maybe_log_preserves_explicit_id_over_server_msgid_for_fanout() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         let mut state = make_test_state();
@@ -1812,7 +1995,7 @@ pub mod tests {
             log_msg_id: Some("primary-gen-id".to_string()),
             log_ref_id: None,
             tags: Some(tags.clone()),
-            orig_offset: None,
+            wire_origin: None,
         };
         state.add_message("libera/#rust", primary);
 
@@ -1829,7 +2012,7 @@ pub mod tests {
             log_msg_id: None,
             log_ref_id: Some("primary-gen-id".to_string()),
             tags: Some(tags),
-            orig_offset: None,
+            wire_origin: None,
         };
         state.add_message("libera/#linux", reference);
 
@@ -1869,7 +2052,7 @@ pub mod tests {
             log_msg_id: Some(primary_id.clone()),
             log_ref_id: None,
             tags: None,
-            orig_offset: None,
+            wire_origin: None,
         };
         state.add_message("libera/#rust", msg1);
 
@@ -1887,7 +2070,7 @@ pub mod tests {
             log_msg_id: None,
             log_ref_id: Some(primary_id.clone()),
             tags: None,
-            orig_offset: None,
+            wire_origin: None,
         };
         state.add_message("libera/#linux", msg2);
 

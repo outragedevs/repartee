@@ -323,6 +323,11 @@ textarea {
 /* Action: * nick action text */
 .chat-line.action { color: var(--yellow); }
 
+/* Translated line: the appended " [original]" is dimmed, matching the TUI.
+   `opacity` rather than a fixed colour so the body's own mIRC colours stay
+   visible through it — the suffix is a de-emphasis, not a recolour. */
+.chat-line .translated-original { opacity: 0.55; }
+
 /* Notice: -nick- text */
 .chat-line.notice { color: var(--cyan); }
 .chat-line .notice-body { color: var(--fg-muted); }

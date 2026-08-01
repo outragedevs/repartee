@@ -504,7 +504,7 @@ pub(crate) fn rows_to_buffer_messages(
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: None,
-                orig_offset: None,
+                wire_origin: None,
             });
         }
         last_date = Some(local_date);
@@ -557,6 +557,6 @@ pub(crate) fn stored_to_message(
         log_msg_id: Some(stored.id.to_string()),
         log_ref_id: None,
         tags: None,
-        orig_offset: None,
+        wire_origin: None,
     }
 }

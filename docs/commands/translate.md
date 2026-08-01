@@ -82,6 +82,16 @@ translation and the original. The consequence is that changing
 `show_original_*` does not rewrite history: lines logged with brackets keep
 them.
 
+The bracketed original is dimmed in the terminal and in the browser alike. A
+line reloaded from history renders it undimmed in both: the stored text is
+flat, and the client will not guess which trailing brackets are an original —
+an ordinary message may simply end that way.
+
+Your own translated messages are shown by Repartee itself when the original
+is configured to be visible, even on servers that echo your messages back to
+you. The echo carries only the translation, so it cannot show the original;
+the copy the server sends back is dropped in favour of the one that can.
+
 ## Ordering
 
 Lines are sent for translation the instant they arrive and translate

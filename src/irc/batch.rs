@@ -633,7 +633,7 @@ fn process_netsplit_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: None,
-                orig_offset: None,
+                wire_origin: None,
             },
         );
     }
@@ -712,7 +712,7 @@ fn process_netjoin_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo)
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: None,
-                orig_offset: None,
+                wire_origin: None,
             },
         );
     }
@@ -1626,7 +1626,7 @@ mod tests {
                 log_msg_id: None,
                 log_ref_id: None,
                 tags: Some(live_tags),
-                orig_offset: None,
+                wire_origin: None,
             });
 
         // A reconnect AFTER gap-fill is in flight for this target.

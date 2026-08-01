@@ -167,7 +167,7 @@ impl App {
                         log_msg_id: None,
                         log_ref_id: None,
                         tags: None,
-                        orig_offset: None,
+                        wire_origin: None,
                     },
                 );
 
@@ -218,7 +218,7 @@ impl App {
                             log_msg_id: None,
                             log_ref_id: None,
                             tags: None,
-                            orig_offset: None,
+                            wire_origin: None,
                         },
                         ActivityLevel::Mention,
                     );
@@ -253,7 +253,7 @@ impl App {
                         log_msg_id: None,
                         log_ref_id: None,
                         tags: None,
-                        orig_offset: None,
+                        wire_origin: None,
                     },
                     ActivityLevel::Mention,
                 );
@@ -297,7 +297,7 @@ impl App {
                             log_msg_id: None,
                             log_ref_id: None,
                             tags: None,
-                            orig_offset: None,
+                            wire_origin: None,
                         },
                     );
                 }
