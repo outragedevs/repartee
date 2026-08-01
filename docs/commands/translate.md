@@ -112,17 +112,30 @@ once rather than waiting the timeout out for a server that is gone.
 
 The queue is held to `translate.max_queue` as lines arrive, not on a timer,
 so a stalled translator cannot let a busy channel build a backlog between
-checks.
+checks. If the queue reaches the cap while a message of yours is still being
+translated, that message can lose the place held for it and will then appear
+below the replies that arrived meanwhile. It is still sent — a full display
+queue never eats something you typed — and the client logs a warning saying
+so.
 
 `/translate delin` releases the lines it was still waiting on, shown
 untranslated. `/translate delout` releases nothing: it does not touch the
 incoming direction, and a message of yours already being translated is still
 sent when it comes back.
 
+Closing a window — `/close`, leaving the channel, or being kicked from it —
+also shows whatever it was still waiting on, untranslated, before the window
+goes. Those lines had already reached you; the queue only decides when they
+are allowed on screen, so they are displayed and written to your log rather
+than discarded.
+
 If the person you are talking to changes nick, the settings and any lines in
 flight follow the conversation — including a message of yours that was still
 being translated, which goes to them under their new nick and never to
-whoever may have picked up the old one. If their window has closed by then,
+whoever may have picked up the old one. That holds however many times the
+nick changes hands: each conversation that held it is tracked with the period
+it held it for, so a message you sent to the first person cannot be delivered
+to the second. If their window has closed by then,
 the message is refused and handed back rather than sent to a name that is no
 longer theirs. The saved setting still names the nick you typed, so it is
 that name a restart looks for.
@@ -263,7 +276,9 @@ precedence on buffers where both are enabled.
 
 `translate.max_in_flight` caps concurrent translations. Raising it past what
 your provider actually allows makes throughput worse, not better. It takes
-effect immediately; lowering it applies as work already in flight finishes.
+effect immediately. Lowering it applies as work already in flight finishes —
+including under sustained traffic, where the reduction is applied by the next
+translations to start rather than waiting for a lull that may never come.
 
 Outgoing messages are translated one at a time **per connection**, so they
 reach IRC in the order you sent them without a slow request on one network

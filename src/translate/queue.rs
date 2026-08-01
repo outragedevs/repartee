@@ -48,7 +48,20 @@ enum Slot {
     /// a queue, resolve, drain, and have the queue pruned before the echo
     /// arrives, leaving nothing to insert into. The barrier has to physically
     /// exist for the whole wait.
-    Reserved { queued_at: Instant },
+    Reserved {
+        queued_at: Instant,
+        /// Rows of a split message that have already come back.
+        ///
+        /// A translation long enough to split is reflected one wire line at a
+        /// time. Closing the reservation on the first lifts the barrier, so
+        /// everything queued behind it drains and the rest of the user's own
+        /// sentence lands after the replies to it. Earlier chunks wait here
+        /// and only the last one closes the slot.
+        ///
+        /// These are messages the server has already sent us, so every path
+        /// that ends a reservation has to RELEASE them rather than drop them.
+        held: Vec<(Message, ActivityLevel)>,
+    },
     Pending {
         original: String,
         payload: PendingPayload,
@@ -67,6 +80,21 @@ struct Entry {
     /// `None` only momentarily, while [`TranslateQueue::resolve`] converts a
     /// pending slot into a ready one.
     slot: Option<Slot>,
+}
+
+/// What [`TranslateQueue::enforce_ceiling`] had to give up.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CeilingForced {
+    /// Entries forced out of the queue.
+    pub forced: usize,
+    /// How many of those were outgoing RESERVATIONS.
+    ///
+    /// Counted apart because the consequence is different in kind: a forced
+    /// incoming line is shown untranslated, while a lifted barrier means the
+    /// user's own message will land after replies that arrived while it was
+    /// being translated. Silently folding the two into one number leaves an
+    /// operator no way to tell that ordering was sacrificed.
+    pub barriers_lifted: usize,
 }
 
 /// A line cleared for delivery.
@@ -175,8 +203,35 @@ impl TranslateQueue {
     pub fn reserve_at(&mut self, id: u64, now: Instant) {
         self.entries.push_back(Entry {
             id,
-            slot: Some(Slot::Reserved { queued_at: now }),
+            slot: Some(Slot::Reserved {
+                queued_at: now,
+                held: Vec::new(),
+            }),
         });
+    }
+
+    /// Park one row of a split message AT its reservation, without lifting
+    /// the barrier.
+    ///
+    /// Hands the row BACK when the reservation is gone — it timed out, was
+    /// flushed, or the buffer closed — so the caller can deliver it rather
+    /// than lose it.
+    pub fn hold_in_reserved(
+        &mut self,
+        id: u64,
+        message: Message,
+        activity: ActivityLevel,
+    ) -> Option<Message> {
+        let Some(Slot::Reserved { held, .. }) = self
+            .entries
+            .iter_mut()
+            .find(|e| e.id == id)
+            .and_then(|e| e.slot.as_mut())
+        else {
+            return Some(message);
+        };
+        held.push((message, activity));
+        None
     }
 
     /// Fill a reserved place with the rows it was held for, keeping them
@@ -205,7 +260,13 @@ impl TranslateQueue {
         else {
             return false;
         };
-        let mut rows = rows.into_iter();
+        // Chunks that arrived earlier were parked here and go back in front
+        // of this one — they are earlier parts of the same sentence.
+        let held = match self.entries[pos].slot.as_mut() {
+            Some(Slot::Reserved { held, .. }) => std::mem::take(held),
+            _ => unreachable!("position matched Reserved above"),
+        };
+        let mut rows = held.into_iter().chain(rows);
         let Some((first, activity)) = rows.next() else {
             // Nothing to put there after all; give the place back rather
             // than leave a barrier nothing will ever fill.
@@ -236,11 +297,49 @@ impl TranslateQueue {
         true
     }
 
-    /// Drop a reservation whose row will never arrive — a refused send.
-    /// Leaving it would block everything queued behind it until the timeout.
+    /// End a reservation whose remaining rows will never arrive — a refused
+    /// send, a timeout, a flush. Leaving it would block everything queued
+    /// behind it.
+    ///
+    /// Chunks already parked at the reservation are RELEASED in place, not
+    /// discarded: the server sent them, so they are received messages like
+    /// any other, and dropping them here would lose the first half of a split
+    /// message whose second half never came back.
     pub fn release_reserved(&mut self, id: u64) {
-        self.entries
-            .retain(|e| !(e.id == id && matches!(e.slot, Some(Slot::Reserved { .. }))));
+        let Some(pos) = self
+            .entries
+            .iter()
+            .position(|e| e.id == id && matches!(e.slot, Some(Slot::Reserved { .. })))
+        else {
+            return;
+        };
+        let held = match self.entries[pos].slot.as_mut() {
+            Some(Slot::Reserved { held, .. }) => std::mem::take(held),
+            _ => unreachable!("position matched Reserved above"),
+        };
+        let mut held = held.into_iter();
+        let Some((first, activity)) = held.next() else {
+            self.entries.remove(pos);
+            return;
+        };
+        self.entries[pos].slot = Some(Slot::Ready {
+            message: first,
+            activity,
+            reason: None,
+        });
+        for (offset, (message, activity)) in held.enumerate() {
+            self.entries.insert(
+                pos + 1 + offset,
+                Entry {
+                    id,
+                    slot: Some(Slot::Ready {
+                        message,
+                        activity,
+                        reason: None,
+                    }),
+                },
+            );
+        }
     }
 
     /// Fold an outcome into the matching entry.
@@ -335,7 +434,7 @@ impl TranslateQueue {
             .entries
             .iter()
             .filter_map(|e| match e.slot.as_ref() {
-                Some(Slot::Pending { queued_at, .. } | Slot::Reserved { queued_at })
+                Some(Slot::Pending { queued_at, .. } | Slot::Reserved { queued_at, .. })
                     if now.duration_since(*queued_at) >= timeout =>
                 {
                     Some(e.id)
@@ -353,29 +452,46 @@ impl TranslateQueue {
         expired.len()
     }
 
-    /// Force the oldest pending entries out until the queue fits `max`.
-    /// Returns how many were forced.
+    /// Force the oldest entries out until the queue fits `max`.
     ///
     /// A dead provider must not turn this queue into an unbounded memory
     /// leak with a frozen channel behind it — past the ceiling the channel
     /// keeps flowing untranslated instead of stalling.
-    pub fn enforce_ceiling(&mut self, max: usize) -> usize {
+    ///
+    /// Taking from the HEAD is what makes this work, and it is also why a
+    /// reservation can be ended here even though [`Self::release_reserved`]
+    /// otherwise belongs to "no echo will come". Forcing a pending line out
+    /// converts its slot in place; a row only ever LEAVES through the head.
+    /// So while a reservation holds the head, ending it is the single lever
+    /// that frees anything at all — see
+    /// `nothing_but_lifting_a_barrier_can_bound_a_queue_behind_one`. The cost
+    /// is that the echo, when it arrives, no longer has its place: it is
+    /// reported separately, because the alternatives are worse than an echo
+    /// out of position (an unbounded queue, or refusing to send a message the
+    /// user has already typed).
+    pub fn enforce_ceiling(&mut self, max: usize) -> CeilingForced {
         if self.entries.len() <= max {
-            return 0;
+            return CeilingForced::default();
         }
         let excess = self.entries.len() - max;
-        let ids: Vec<u64> = self
+        let ids: Vec<(u64, bool)> = self
             .entries
             .iter()
-            .filter(|e| matches!(e.slot, Some(Slot::Pending { .. } | Slot::Reserved { .. })))
+            .filter_map(|e| match e.slot {
+                Some(Slot::Pending { .. }) => Some((e.id, false)),
+                Some(Slot::Reserved { .. }) => Some((e.id, true)),
+                _ => None,
+            })
             .take(excess)
-            .map(|e| e.id)
             .collect();
-        for id in &ids {
-            self.release_reserved(*id);
-            self.resolve(*id, Err(UntranslatedReason::Timeout));
+        let mut out = CeilingForced::default();
+        for (id, was_barrier) in ids {
+            self.release_reserved(id);
+            self.resolve(id, Err(UntranslatedReason::Timeout));
+            out.forced += 1;
+            out.barriers_lifted += usize::from(was_barrier);
         }
-        ids.len()
+        out
     }
 
     /// Release everything, in order, untranslated where still pending.
@@ -487,6 +603,103 @@ mod tests {
     }
 
     #[test]
+    fn nothing_but_lifting_a_barrier_can_bound_a_queue_behind_one() {
+        // Why `enforce_ceiling` is permitted to end a reservation, against
+        // the reservation invariant that otherwise governs it.
+        //
+        // Forcing a pending line out does not shorten the queue: it turns a
+        // `Pending` slot into a `Ready` one IN PLACE, and a ready row only
+        // leaves through the head. So while a reservation holds the head,
+        // every other lever is a no-op and the queue grows without bound
+        // behind it — on a busy channel, for as long as one outgoing
+        // translation takes. Exempting reservations from the ceiling would
+        // trade a bounded display lag for unbounded memory.
+        let mut q = TranslateQueue::new();
+        q.reserve(1);
+        for id in 2..=12 {
+            q.push_pending(id, format!("linia {id}"), payload(id, &format!("linia {id}")));
+        }
+        for id in 2..=12 {
+            assert!(q.resolve(id, Err(UntranslatedReason::Timeout)));
+        }
+
+        assert!(
+            q.drain_ready().is_empty(),
+            "every line behind the barrier is ready and none of them can leave"
+        );
+        assert_eq!(
+            q.len(),
+            12,
+            "so forcing them out freed nothing at all: the queue is exactly \
+             as long as it was"
+        );
+
+        q.release_reserved(1);
+        assert_eq!(
+            q.drain_ready().len(),
+            11,
+            "ending the reservation is the only thing that empties it"
+        );
+        assert!(q.is_empty());
+    }
+
+    #[test]
+    fn the_ceiling_spares_a_barrier_that_has_older_work_ahead_of_it() {
+        // Taking from the HEAD is not only how the ceiling frees anything —
+        // it is also what keeps a reservation as the LAST thing sacrificed.
+        // With enough older pending lines in front of it, forcing those out
+        // meets the ceiling and the barrier stands.
+        let mut q = TranslateQueue::new();
+        for id in 1..=4 {
+            q.push_pending(id, format!("linia {id}"), payload(id, &format!("linia {id}")));
+        }
+        q.reserve(5);
+        for id in 6..=8 {
+            q.push_pending(id, format!("linia {id}"), payload(id, &format!("linia {id}")));
+        }
+
+        let forced = q.enforce_ceiling(4);
+        assert_eq!(forced.forced, 4);
+        assert_eq!(
+            forced.barriers_lifted, 0,
+            "the four older lines cover the excess, so the reservation is \
+             not touched"
+        );
+        assert_eq!(
+            q.drain_ready().len(),
+            4,
+            "and they leave, because they were ahead of the barrier"
+        );
+        assert_eq!(q.len(), 4, "the ceiling is met with the barrier intact");
+    }
+
+    #[test]
+    fn the_ceiling_reports_a_lifted_barrier_apart_from_a_forced_line() {
+        // When the reservation IS the oldest entry there is nothing else to
+        // give: see `nothing_but_lifting_a_barrier_can_bound_a_queue_behind_one`.
+        // What must not happen is that it goes unremarked — a forced incoming
+        // line is shown untranslated, a lifted barrier means the user's own
+        // message renders after the replies to it, and those are different
+        // failures.
+        let mut q = TranslateQueue::new();
+        q.reserve(1);
+        for id in 2..=8 {
+            q.push_pending(id, format!("linia {id}"), payload(id, &format!("linia {id}")));
+        }
+
+        let forced = q.enforce_ceiling(4);
+        assert_eq!(forced.barriers_lifted, 1, "the barrier had to go");
+        assert!(forced.forced > forced.barriers_lifted, "lines went too");
+        q.drain_ready();
+        assert_eq!(
+            q.len(),
+            4,
+            "and the ceiling is actually met: the reservation left directly, \
+             the lines it was blocking left through the head"
+        );
+    }
+
+    #[test]
     fn resolved_head_drains_immediately() {
         let mut q = TranslateQueue::new();
         q.push_pending(1, "hola".into(), payload(1, "hola"));
@@ -560,7 +773,7 @@ mod tests {
             q.push_pending(id, format!("l{id}"), payload(id, "x"));
         }
         let forced = q.enforce_ceiling(4);
-        assert_eq!(forced, 6, "six oldest forced out");
+        assert_eq!(forced.forced, 6, "six oldest forced out");
         let ready = q.drain_ready();
         assert_eq!(ids(&ready), vec![1, 2, 3, 4, 5, 6]);
         assert!(
@@ -575,7 +788,7 @@ mod tests {
     fn ceiling_is_a_no_op_below_the_limit() {
         let mut q = TranslateQueue::new();
         q.push_pending(1, "a".into(), payload(1, "a"));
-        assert_eq!(q.enforce_ceiling(4), 0);
+        assert_eq!(q.enforce_ceiling(4), CeilingForced::default());
         assert_eq!(q.pending_len(), 1);
     }
 

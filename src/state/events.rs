@@ -104,6 +104,19 @@ impl AppState {
             return;
         }
         let was_active = self.active_buffer_id.as_deref() == Some(id);
+        // Release whatever is still waiting on a translation BEFORE the
+        // buffer goes, and while it still exists to receive them.
+        //
+        // These lines already arrived from IRC — the queue governs only when
+        // they are allowed on screen, not whether they were received — so
+        // dropping them loses messages the user was sent and never writes
+        // them to storage. Ordering matters and is the whole fix: after
+        // `shift_remove` the buffer-existence guard in
+        // `add_message_with_activity_unshrunk` silently refuses every one of
+        // them, which is what "dropping is fine, delivery would be refused
+        // anyway" used to describe. The refusal was the bug.
+        self.flush_translate_queue(id);
+        self.own_echo_decorations.remove(id);
         self.pending_web_events
             .push(crate::web::protocol::WebEvent::BufferClosed {
                 buffer_id: id.to_string(),
@@ -112,15 +125,8 @@ impl AppState {
         self.typing.remove_buffer(id);
         // Clean up per-buffer flood tracking to prevent unbounded map growth.
         self.flood_state.remove_buffer(id);
-        // Drop any in-flight translation queue for this buffer.
-        //
-        // Dropping rather than releasing is deliberate, and matches what
-        // shrink already does for a buffer closed mid-wait: the buffer is
-        // gone, so `add_message_unshrunk` would refuse the delivery anyway,
-        // and logging the lines under a buffer the UI no longer knows about
-        // would orphan them. Without this the queue would outlive its
-        // buffer and grow unbounded across a long session of joins and
-        // parts.
+        // Nothing should be left, but a queue must never outlive its buffer:
+        // it would grow unbounded across a long session of joins and parts.
         self.translate_queues.remove(id);
 
         if was_active {
@@ -484,11 +490,13 @@ impl AppState {
         wire_text: String,
         echo_id: u64,
         display: Option<(String, crate::state::buffer::WireOrigin)>,
+        is_last: bool,
     ) -> OwnEchoDecoration {
         OwnEchoDecoration {
             wire_text,
             echo_id,
             display,
+            is_last,
             filed_at: std::time::Instant::now(),
         }
     }
@@ -525,6 +533,15 @@ impl AppState {
     /// redirect meant for its previous owner.
     const REDIRECT_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
+    /// How many occupancies of one buffer id are remembered at a time.
+    ///
+    /// A nick passed around inside the TTL would otherwise grow this list
+    /// without bound. Dropping the OLDEST is safe because every era carries
+    /// its own window: work that fell off resolves to no redirect at all,
+    /// which the delivery path treats as "the conversation is gone" and
+    /// refuses — the fail-closed answer.
+    const REDIRECT_ERAS_MAX: usize = 16;
+
     /// Where work dispatched against `buffer_id` at `dispatched_at` should go
     /// now, if that buffer has since been re-keyed.
     ///
@@ -542,17 +559,27 @@ impl AppState {
     /// which gets the second case right and the first case catastrophically
     /// wrong: it silently addresses the stale name, so a pending private
     /// message is delivered to the stranger who took the nick.
+    ///
+    /// The answer comes from the ERA that held the id at `dispatched_at`, not
+    /// from the most recent rename off it. A query id is a nick, and a nick
+    /// passes from one conversation to the next: keeping only the newest
+    /// mapping hands work dispatched under the first occupant to whoever
+    /// occupied it last.
     #[must_use]
     pub fn redirected_buffer_id(
         &self,
         buffer_id: &str,
         dispatched_at: std::time::Instant,
     ) -> Option<&str> {
-        let (new_id, renamed_at) = self.buffer_redirects.get(buffer_id)?;
-        if renamed_at.elapsed() >= Self::REDIRECT_TTL || *renamed_at < dispatched_at {
-            return None;
-        }
-        Some(new_id.as_str())
+        self.buffer_redirects
+            .get(buffer_id)?
+            .iter()
+            .find(|era| {
+                era.ended_at.elapsed() < Self::REDIRECT_TTL
+                    && era.started_at.is_none_or(|from| from <= dispatched_at)
+                    && dispatched_at <= era.ended_at
+            })
+            .map(|era| era.target.as_str())
     }
 
     /// Move every buffer-id-keyed map from `old_id` to `new_id`.
@@ -584,24 +611,46 @@ impl AppState {
         // repointed rather than chained, so a peer who renames twice while
         // one line is in flight still resolves in a single hop.
         let now = std::time::Instant::now();
-        for (target, _at) in self.buffer_redirects.values_mut() {
-            if target == old_id {
-                // Repoint WITHOUT restamping. The timestamp answers "which
-                // work does this redirect apply to", and that answer was
-                // fixed by the rename that created it — a second rename
-                // changes only where the conversation went.
+        for eras in self.buffer_redirects.values_mut() {
+            for era in eras.iter_mut().filter(|e| e.target == old_id) {
+                // Repoint WITHOUT touching the window. The window answers
+                // "which work does this apply to", and that was settled by
+                // the rename that created the era — a second rename changes
+                // only where the conversation went.
                 //
-                // Restamping widens it to cover work dispatched between the
-                // two renames, which may belong to somebody who claimed the
-                // abandoned nick in the meantime. Their private message
-                // would then be redirected to the original peer.
-                *target = new_id.to_string();
+                // Widening it would cover work dispatched between the two
+                // renames, which may belong to somebody who claimed the
+                // abandoned nick in the meantime. Their private message would
+                // then be redirected to the original peer.
+                //
+                // Only eras still pointing AT `old_id` are touched, and those
+                // are by construction the conversation that is renaming now:
+                // any earlier occupant's era was repointed away when IT
+                // renamed.
+                era.target = new_id.to_string();
             }
         }
-        self.buffer_redirects
-            .insert(old_id.to_string(), (new_id.to_string(), now));
-        self.buffer_redirects
-            .retain(|_, (_, at)| at.elapsed() < Self::REDIRECT_TTL);
+        let eras = self.buffer_redirects.entry(old_id.to_string()).or_default();
+        // This era began where the previous one ended. The id may have been
+        // handed from conversation to conversation, and each hand-off is the
+        // boundary that keeps one occupant's work from resolving to another's
+        // window.
+        let started_at = eras.last().map(|prev| prev.ended_at);
+        eras.push(crate::state::RedirectEra {
+            target: new_id.to_string(),
+            started_at,
+            ended_at: now,
+        });
+        // Oldest first, so a nick passed around quickly cannot grow this. The
+        // bound is on the FRONT because each era carries its own window: an
+        // expired one can be dropped without widening the one behind it.
+        while eras.len() > Self::REDIRECT_ERAS_MAX {
+            eras.remove(0);
+        }
+        for eras in self.buffer_redirects.values_mut() {
+            eras.retain(|era| era.ended_at.elapsed() < Self::REDIRECT_TTL);
+        }
+        self.buffer_redirects.retain(|_, eras| !eras.is_empty());
         self.pending_buffer_rekeys
             .push((old_id.to_string(), new_id.to_string()));
     }
@@ -628,6 +677,31 @@ impl AppState {
     /// translate our own message a second time.
     pub fn add_own_message(&mut self, buffer_id: &str, order_key: u64, message: Message) {
         self.add_own_message_chunks(buffer_id, order_key, vec![message]);
+    }
+
+    /// Park one row of a split own message at the place reserved for it,
+    /// leaving the barrier up.
+    ///
+    /// A translated send long enough to split comes back as several
+    /// reflections, one IRC message at a time. Treating each as a completed
+    /// echo closes the reservation on the first: the barrier lifts, every
+    /// line that finished translating behind it drains, and the remaining
+    /// chunks of the user's own sentence render after the replies to it. So
+    /// all but the last are held, and only the last calls
+    /// [`Self::add_own_message`].
+    ///
+    /// Falls back to delivering the row when there is no reservation to hold
+    /// it — timed out, flushed, or the buffer was closed. Holding a chunk of
+    /// a message the server has already sent us is a positioning device, and
+    /// it must never become a way to lose one.
+    pub fn hold_own_message_chunk(&mut self, buffer_id: &str, order_key: u64, message: Message) {
+        let unheld = match self.translate_queues.get_mut(buffer_id) {
+            Some(queue) => queue.hold_in_reserved(order_key, message, ActivityLevel::None),
+            None => Some(message),
+        };
+        if let Some(message) = unheld {
+            self.add_own_message_chunks(buffer_id, order_key, vec![message]);
+        }
     }
 
     /// [`Self::add_own_message`] for a message that became several rows.
@@ -949,6 +1023,42 @@ impl AppState {
         }
     }
 
+    /// Release every queued line for one buffer, untranslated where it is
+    /// still pending, and drop the queue.
+    ///
+    /// Called on buffer close, `/part`, `/kick`, disconnect, quit and detach.
+    /// Pending lines are released rather than dropped: the network already
+    /// delivered them, and losing them silently is worse than showing them
+    /// untranslated.
+    ///
+    /// Lives here and not only on `App` because `remove_buffer` is reached
+    /// from the IRC event path, which has no way back up to the App to ask
+    /// for a flush first.
+    pub fn flush_translate_queue(&mut self, buffer_id: &str) {
+        let Some(mut queue) = self.translate_queues.remove(buffer_id) else {
+            return;
+        };
+        let ready = queue.flush_all();
+        if !ready.is_empty() {
+            tracing::debug!(
+                buffer_id,
+                count = ready.len(),
+                "translate: flushed queued lines"
+            );
+        }
+        for entry in ready {
+            if let Some(reason) = entry.reason.as_ref().filter(|r| r.is_gap()) {
+                tracing::debug!(
+                    buffer_id,
+                    id = entry.id,
+                    reason = %reason.label(),
+                    "translate: line delivered untranslated"
+                );
+            }
+            self.add_message_with_activity_unshrunk(buffer_id, entry.message, entry.activity);
+        }
+    }
+
     /// Hold one buffer's queue to `max_queue`, releasing whatever that forces
     /// out.
     ///
@@ -967,11 +1077,24 @@ impl AppState {
                 return;
             }
             let forced = queue.enforce_ceiling(max_queue);
-            if forced > 0 {
+            if forced.forced > 0 {
                 tracing::debug!(
                     buffer_id,
-                    forced,
+                    forced = forced.forced,
                     "translate: queue ceiling reached, releasing oldest untranslated"
+                );
+            }
+            if forced.barriers_lifted > 0 {
+                // Louder than the rest, and separate: this one says an
+                // outgoing message lost the place held for it, so it will
+                // render after replies that arrived while it was being
+                // translated. See `TranslateQueue::enforce_ceiling` for why
+                // that is still the least-bad option at the ceiling.
+                tracing::warn!(
+                    buffer_id,
+                    barriers = forced.barriers_lifted,
+                    "translate: queue ceiling lifted an outgoing message's \
+                     reserved position; its echo will render out of order"
                 );
             }
             queue.drain_ready()
@@ -3097,6 +3220,115 @@ mod translate_gate_tests {
             "the echo must not render ahead of the line queued before it"
         );
         assert_eq!(state.translate_queues[BUF].len(), 2);
+    }
+
+    #[test]
+    fn a_split_reflection_holds_the_barrier_until_its_last_chunk() {
+        // An `echo-message` server reflects a split translated send one wire
+        // line at a time. Treating the first as a completed echo closes the
+        // reservation, so the reply that arrived DURING the translation
+        // drains between the two halves of the user's own sentence:
+        //
+        //   me> pierwsza polowa
+        //   alice> reply
+        //   me> druga polowa      <- wrong
+        //
+        // The earlier chunks are therefore parked AT the reservation and
+        // only the last one closes it.
+        let (mut state, _rx) = state_with_translation();
+        state.reserve_echo_slot(BUF, 100);
+        let reply = make_test_message(&mut state, "reply");
+        let reply_id = reply.id;
+        state
+            .translate_queues
+            .get_mut(BUF)
+            .expect("reserved above")
+            .push_resolved(reply_id, reply, ActivityLevel::Activity);
+
+        let mut first = make_test_message(&mut state, "pierwsza polowa");
+        first.nick = Some("me".to_string());
+        state.hold_own_message_chunk(BUF, 100, first);
+        assert_eq!(
+            shown(&state, BUF),
+            0,
+            "the first chunk must not lift the barrier — the reply is behind it"
+        );
+
+        let mut second = make_test_message(&mut state, "druga polowa");
+        second.nick = Some("me".to_string());
+        state.add_own_message(BUF, 100, second);
+
+        let rows: Vec<&str> = state.buffers[BUF]
+            .messages
+            .iter()
+            .map(|m| m.text.as_str())
+            .collect();
+        assert_eq!(
+            rows,
+            vec!["pierwsza polowa", "druga polowa", "reply"],
+            "both halves stay together, ahead of the reply that arrived \
+             while they were being translated"
+        );
+    }
+
+    #[test]
+    fn chunks_parked_at_a_reservation_survive_a_flush() {
+        // The parked rows are messages the server already sent us. If the
+        // rest of the split never comes back — a disconnect between two
+        // reflections — the flush has to RELEASE what arrived, not drop it
+        // with the barrier.
+        let (mut state, _rx) = state_with_translation();
+        state.reserve_echo_slot(BUF, 100);
+        let mut first = make_test_message(&mut state, "pierwsza polowa");
+        first.nick = Some("me".to_string());
+        state.hold_own_message_chunk(BUF, 100, first);
+        assert_eq!(shown(&state, BUF), 0, "held, not shown");
+
+        state.flush_translate_queue(BUF);
+
+        let rows: Vec<&str> = state.buffers[BUF]
+            .messages
+            .iter()
+            .map(|m| m.text.as_str())
+            .collect();
+        assert_eq!(
+            rows,
+            vec!["pierwsza polowa"],
+            "the half we did receive is not lost with the reservation"
+        );
+    }
+
+    #[test]
+    fn closing_a_buffer_releases_its_queued_lines_instead_of_dropping_them() {
+        // `/close`, a self-PART and a kick all reach `remove_buffer` while
+        // lines are still waiting on their translations. Those lines already
+        // arrived from IRC — the queue governs only WHEN they are allowed on
+        // screen — so dropping them loses received messages and never writes
+        // them to storage.
+        let (mut state, mut rx) = state_with_translation();
+        let msg = make_test_message(&mut state, "hola que tal");
+        state.add_message_with_activity(BUF, msg, ActivityLevel::Activity);
+        rx.try_recv().expect("dispatched");
+        assert_eq!(shown(&state, BUF), 0, "precondition: still queued");
+
+        state.remove_buffer(BUF);
+
+        let shown_before_close = state
+            .pending_web_events
+            .iter()
+            .take_while(|e| {
+                !matches!(
+                    e,
+                    crate::web::protocol::WebEvent::BufferClosed { .. }
+                )
+            })
+            .filter(|e| matches!(e, crate::web::protocol::WebEvent::NewMessage { .. }))
+            .count();
+        assert_eq!(
+            shown_before_close, 1,
+            "the queued line is released while its buffer still exists, so it \
+             is displayed and logged — and only then does the buffer close"
+        );
     }
 
     #[test]

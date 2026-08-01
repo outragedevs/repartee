@@ -88,7 +88,35 @@ pub struct OwnEchoDecoration {
     /// `None` when the reflection already reads correctly and only its
     /// POSITION needed arranging.
     pub display: Option<(String, buffer::WireOrigin)>,
+    /// Whether this is the LAST wire line of the message.
+    ///
+    /// A split translation is reflected one line at a time. Filling the
+    /// reservation on the first reflection lifts the barrier, so everything
+    /// queued behind it drains and the remaining chunks land after the
+    /// replies. The earlier chunks are therefore held AT the reservation and
+    /// only this one closes it. See
+    /// [`crate::translate::queue::TranslateQueue::hold_in_reserved`].
+    pub is_last: bool,
     filed_at: std::time::Instant,
+}
+
+/// One conversation's occupancy of a buffer id, and where it went.
+///
+/// See [`AppState::buffer_redirects`] for why a single mapping is not enough.
+#[derive(Debug, Clone)]
+pub struct RedirectEra {
+    /// Where the conversation that held the id during this era lives NOW.
+    /// Repointed in place when it renames again, so a peer who renames twice
+    /// still resolves in one hop.
+    pub target: String,
+    /// When this conversation took the id over — the previous era's end.
+    ///
+    /// `None` for the first era recorded under an id: nothing tracks when a
+    /// query buffer opened, and anything dispatched before the first rename
+    /// we ever saw belonged to it.
+    pub started_at: Option<std::time::Instant>,
+    /// When it gave the id up: the rename that created this era.
+    pub ended_at: std::time::Instant,
 }
 
 #[expect(
@@ -173,7 +201,7 @@ pub struct AppState {
     /// the reflection undecorated, which is exactly what every non-translated
     /// send does — the mechanism can lose a suffix, never a message.
     pub own_echo_decorations: HashMap<String, VecDeque<OwnEchoDecoration>>,
-    /// Query buffers that were re-keyed, `old_id -> (new_id, when)`.
+    /// Query buffers that were re-keyed, `old_id -> the eras of that id`.
     ///
     /// Work already handed to the translation workers carries the buffer id
     /// and target name it was dispatched with. A peer's `/nick` moves the
@@ -181,7 +209,15 @@ pub struct AppState {
     /// finds no queue and times out, and an outgoing send addresses a nick
     /// its owner no longer answers to — which, if somebody else has taken it
     /// in the meantime, means sending it to a stranger.
-    pub buffer_redirects: HashMap<String, (String, std::time::Instant)>,
+    ///
+    /// A **list** and not one entry, because a query id is a nick and a nick
+    /// can be occupied by one conversation after another. One entry keeps
+    /// only the newest occupancy, so a peer who renames away, a stranger who
+    /// claims the freed nick, and a second rename by that stranger leave the
+    /// first peer's in-flight private message pointing at the stranger's new
+    /// window. Each era carries the window it covers, and a result is matched
+    /// against the era that was current when it was dispatched.
+    pub buffer_redirects: HashMap<String, Vec<RedirectEra>>,
     /// Query buffers re-keyed by a peer's nick change, as `(old_id, new_id)`.
     ///
     /// Drained by the App after each IRC message, the same way

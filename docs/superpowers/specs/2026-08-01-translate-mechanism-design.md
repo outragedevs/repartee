@@ -166,11 +166,29 @@ concurrency cap. A lane that skipped it would make the real ceiling `max_in_flig
 one per connected network`.
 
 Lowering the limit can only take permits that are AVAILABLE, so the remainder is
-carried as a debt and retried from the tick. That debt is **abandoned** if the target
-returns to what is currently applied before it lands — otherwise the tick keeps
-forgetting permits as work returns them and the limiter settles at a number the config
-no longer asks for. The queue governs only *when a resolved line is allowed
-onto the screen*.
+carried as a **debt** — and where that debt is paid is load-bearing. Tokio hands a
+returned permit straight to the next waiter, so while anything is queued for a permit
+none ever becomes available: a reduction retried only from the tick would go on being
+ignored for as long as the traffic lasts, which is exactly when a provider's cap
+matters. The debt is therefore an atomic shared with the workers, and each pays a unit
+down at the one place permits are handed out (`acquire_translate_permit`) by retiring
+the permit it just took instead of using it. The traffic that blocks the reduction is
+what applies it. The tick still settles opportunistically, for the opposite case: a
+reduction made while requests were in flight, after which the traffic stops and nothing
+would acquire again.
+
+Both paths claim their units from the counter *before* touching the semaphore — the
+worker one at a time, the tick by taking the whole balance and handing back what it
+could not use — so the two cannot pay for the same unit twice and drop the ceiling
+below what was asked for. Every decision is made against the **effective** ceiling
+(`applied - debt`) rather than the last value written down: a worker that retires a
+permit lowers both numbers without telling the App side, so their difference stays
+exact while either alone drifts. Raising the target cancels outstanding debt before
+minting anything — those permits still exist, they were merely promised away — which
+is also what stops an abandoned reduction from settling the limiter at a number the
+config no longer asks for.
+
+The queue governs only *when a resolved line is allowed onto the screen*.
 
 This distinction is the crux. A serial queue — where line N waits for line N-1 to come
 back before being sent for translation — would make latency cumulative: ten queued
@@ -253,8 +271,22 @@ Late outcomes for an already-released id are dropped, with a `tracing::debug!`.
 ### 3.5 Flush points
 
 Pending entries must be released — untranslated, in order — rather than lost, when:
-the buffer is closed (`/close`, `/part`), the connection drops, or the app quits or
-detaches. `/translate delin` releases only its own direction — see §3.7.
+the buffer is closed (`/close`, `/part`, a kick), the connection drops, or the app
+quits or detaches. `/translate delin` releases only its own direction — see §3.7.
+
+The flush happens **inside `AppState::remove_buffer`, before the buffer is removed**,
+and the order is the whole point. Those lines already arrived from IRC — the queue
+governs only when they are allowed on screen, not whether they were received — so
+dropping them loses messages the user was sent and never writes them to storage.
+Afterwards is too late: the buffer-existence guard in
+`add_message_with_activity_unshrunk` refuses every delivery to a buffer that is gone,
+so a flush placed after `shift_remove` silently does nothing at all. An earlier
+version dropped the queue outright and justified it with exactly that guard — the
+refusal was the bug, not the reason.
+
+It lives on `AppState` and not only on `App` because `remove_buffer` is reached from
+the IRC event path (a `PART`, a `KICK`), which has no way back up to the App to ask
+for a flush first.
 
 ### 3.6 A buffer id is not a stable key
 
@@ -290,12 +322,27 @@ stale NAME, so a pending private message is handed to the stranger who claimed t
 nick. When a redirect applies but its target window is gone, the send is therefore
 **refused** rather than falling through to the old name.
 
-A peer who renames twice repoints the first redirect to the new destination but keeps
-its ORIGINAL timestamp. The timestamp answers "which work does this apply to", and
+A buffer id is a **nick**, and a nick passes from one conversation to the next, so one
+mapping per id is not enough. Consider: the user sends alice a translated private
+message; alice renames to alicia; a stranger claims the freed nick `alice`; the
+stranger renames too. Both renames are off `test/alice`, so a last-write-wins map keeps
+only the second — and the message still in the translator, dispatched to alice,
+resolves to the stranger's new window. `buffer_redirects` therefore holds a **list of
+eras** per id, each carrying the window it covers (`started_at`..`ended_at`) and where
+that occupant lives now; a result is matched against the era that was current when it
+was dispatched. The list is bounded and pruned from the front, which is safe precisely
+because every era carries its own start: dropping one cannot widen the one behind it,
+and work that falls off resolves to no redirect at all — which the delivery path treats
+as "the conversation is gone" and refuses.
+
+A peer who renames twice repoints the first era to the new destination but keeps
+its ORIGINAL window. The timestamp answers "which work does this apply to", and
 that was settled by the rename that created it; a second rename changes only where the
-conversation went. Restamping widens the redirect over the gap between the two
+conversation went. Widening it would cover the gap between the two
 renames — during which somebody may have claimed the abandoned nick — and a private
-message meant for them would follow the original peer instead.
+message meant for them would follow the original peer instead. Only eras still pointing
+AT the renaming id are repointed, and those are by construction the conversation that
+is renaming now: any earlier occupant's era was repointed away when IT renamed.
 
 The migrated key is not written to disk. `/translate add*|del*` writes the file and
 will carry it along next time; rewriting `config.toml` in response to somebody else's
@@ -321,7 +368,7 @@ An outgoing message holds a `Reserved` slot in its buffer's queue (§5.1). While
 sits at the head it is a barrier: every line that finishes translating behind it is
 `Resolved` but undeliverable.
 
-That reservation goes away in exactly two ways — it is **filled** by the local echo,
+That reservation goes away in two ordinary ways — it is **filled** by the local echo,
 or **released** because no echo will come. Both make the head deliverable, so both
 must be followed by a drain. They are the only release events that do not arrive
 through `resolve_incoming_translation`, and the outgoing delivery arm never revisits
@@ -333,6 +380,27 @@ without the other; the fill case drains explicitly at the end of
 `send_outgoing_translated`. Reservations released *at the tail* — a dispatch that
 fails its `try_send` the moment after reserving — need no drain, because a tail entry
 was never blocking anything.
+
+There is a third way, and it is a deliberate exception rather than an oversight: the
+queue **ceiling** (§3.4) may end a reservation that is among the oldest entries. It
+has no alternative. Forcing a pending line out converts its slot *in place*, and a row
+only ever leaves through the head — so while a reservation holds the head, ending it is
+the single lever that frees anything at all. Exempting reservations would trade a
+bounded display lag for unbounded memory, on precisely the busy channel where the
+bound exists. `nothing_but_lifting_a_barrier_can_bound_a_queue_behind_one` pins that
+down.
+
+The other candidate remedy — refusing the outgoing send so that "no echo will come"
+becomes true again — is worse. The message has not reached the wire yet, so it *could*
+be refused; but that eats a message the user has already typed, because unrelated
+incoming traffic overflowed a display queue. An echo that renders after the replies to
+it is a cosmetic fault in an already-degraded buffer; a silently unsent private
+message is not. What the ceiling owes instead is **honesty**: `CeilingForced` counts
+lifted barriers apart from forced lines and the release path logs them at `warn`,
+because "a line is shown untranslated" and "your own message lost its place" are
+different failures and folding them into one number leaves nobody able to tell which
+happened. Where the reservation is *not* the oldest entry, the older pending lines
+cover the excess and the barrier stands — `the_ceiling_spares_a_barrier_that_has_older_work_ahead_of_it`.
 
 ---
 
@@ -506,9 +574,17 @@ Details that follow from the shape:
   it on each would say the same thing N times, and putting it on the first would place
   it before the text it is the original of. The earlier records exist for POSITION
   alone.
-- **The reservation is not released — the reflection fills it.** Each record carries
-  the id reserved when the user pressed Enter, and the reflection uses it as its
-  ORDER key. Releasing the barrier at send time lets everything queued behind it drain
+- **The reservation is not released — the reflection fills it, and only the LAST
+  chunk closes it.** Each record carries the id reserved when the user pressed Enter,
+  and the reflection uses it as its ORDER key. A split send comes back as several
+  reflections, one IRC message at a time, so treating each as a completed echo closes
+  the reservation on the first: the barrier lifts, everything queued behind it drains,
+  and the rest of the user's own sentence lands after the replies to it. Earlier chunks
+  are therefore **parked at the reservation** (`hold_in_reserved`) with the barrier
+  still up, and `is_last` on the record is what tells the two apart. Parked rows are
+  messages the server already sent us, so every path that ends a reservation releases
+  them in place rather than dropping them with the barrier — a disconnect between two
+  reflections must not lose the half that arrived. Releasing the barrier at send time lets everything queued behind it drain
   first, and the user's own message then lands below the replies that arrived while it
   was translating: the exact reordering the reservation exists to prevent. If no
   reflection ever comes, the queue's expiry clears the barrier like any other stall.

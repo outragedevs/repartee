@@ -1583,14 +1583,22 @@ fn handle_privmsg(
                     // carried the translation alone.
                     wire_origin: own_origin,
             };
-            if let Some(echo_id) = decoration.as_ref().map(|d| d.echo_id) {
-                // Fills the place reserved when the user pressed Enter, so
+            if let Some(d) = decoration.as_ref() {
+                // Takes the place reserved when the user pressed Enter, so
                 // our own message keeps its position among the lines that
                 // arrived while it was being translated. The reserved id is
                 // the ORDER key only — the row keeps its own transport id,
                 // or the web client would take a second chunk of the same
                 // message for a duplicate and drop it.
-                state.add_own_message(&buffer_id, echo_id, action_row);
+                //
+                // A split send is several reflections: all but the last are
+                // parked at the reservation, because closing it early lets
+                // everything behind the barrier drain between the chunks.
+                if d.is_last {
+                    state.add_own_message(&buffer_id, d.echo_id, action_row);
+                } else {
+                    state.hold_own_message_chunk(&buffer_id, d.echo_id, action_row);
+                }
             } else {
                 state.add_message_with_activity(&buffer_id, action_row, activity);
             }
@@ -1772,12 +1780,17 @@ fn handle_privmsg(
     // persist; the decrypted replay is logged + surfaced under the real @msgid.
     if e2e_transient_line {
         state.add_transient_message_with_activity(&buffer_id, msg, activity);
-    } else if let Some(echo_id) = decoration.as_ref().map(|d| d.echo_id) {
-        // A reflection of our own send: fills the place reserved when the
+    } else if let Some(d) = decoration.as_ref() {
+        // A reflection of our own send: takes the place reserved when the
         // user pressed Enter, so it keeps its position among the lines that
         // arrived while it was being translated. See the ACTION branch on
-        // why the reserved id is the order key and not the row's own.
-        state.add_own_message(&buffer_id, echo_id, msg);
+        // why the reserved id is the order key and not the row's own, and on
+        // why every chunk but the last is parked rather than delivered.
+        if d.is_last {
+            state.add_own_message(&buffer_id, d.echo_id, msg);
+        } else {
+            state.hold_own_message_chunk(&buffer_id, d.echo_id, msg);
+        }
     } else {
         state.add_message_with_activity(&buffer_id, msg, activity);
     }
@@ -6197,6 +6210,7 @@ mod tests {
                         suffix_at: Some(9),
                     },
                 )),
+                true,
             ),
         );
 
