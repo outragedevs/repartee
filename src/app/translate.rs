@@ -139,6 +139,8 @@ pub enum OutgoingTranslatePolicy {
 pub struct PendingTranslate {
     pub buffer_id: String,
     pub req: TranslateRequest,
+    /// When this line entered the pipeline — see `translate_isolated`.
+    pub submitted_at: std::time::Instant,
 }
 
 /// An outgoing message handed to the translation worker.
@@ -175,6 +177,10 @@ pub struct PendingOutgoingTranslate {
     /// The text to hand back if this send is refused — a form that does the
     /// SAME thing when the user presses Enter on it, not the bare body.
     pub retry_text: String,
+    /// When this line entered the pipeline. The whole `timeout_ms` budget
+    /// runs from here, so time spent queueing counts against it — see
+    /// `translate_isolated`.
+    pub submitted_at: std::time::Instant,
     /// Which session of `conn_id` this was written for. Compared at delivery
     /// so a drop-and-reconnect under the same id cannot put this message on
     /// the replacement session. `None` when there was no handle at all.
@@ -224,6 +230,10 @@ pub struct OutgoingTranslateDeliver {
     /// The text to hand back if this send is refused — a form that does the
     /// SAME thing when the user presses Enter on it, not the bare body.
     pub retry_text: String,
+    /// When this line entered the pipeline. The whole `timeout_ms` budget
+    /// runs from here, so time spent queueing counts against it — see
+    /// `translate_isolated`.
+    pub submitted_at: std::time::Instant,
     /// Which session of `conn_id` this was written for. Compared at delivery
     /// so a drop-and-reconnect under the same id cannot put this message on
     /// the replacement session. `None` when there was no handle at all.
@@ -323,10 +333,32 @@ async fn translate_isolated(
     backend: &SharedBackend,
     req: TranslateRequest,
     timeout: &Arc<std::sync::atomic::AtomicU64>,
+    submitted_at: std::time::Instant,
 ) -> TranslateOutcome {
     let id = req.id;
-    let budget =
+    // The budget runs from SUBMISSION, not from the moment this request
+    // reaches the backend. A request can sit for a long time first — behind
+    // another on its connection's serial lane, or waiting on the shared
+    // `max_in_flight` permit — and starting the clock afterwards makes the
+    // configured deadline meaningless: the display reservation expires on
+    // schedule while the request keeps running, and the answer arrives long
+    // after the user gave up. For an outgoing message that means putting it
+    // on the channel minutes late, quite possibly after they retyped it.
+    //
+    // Read now rather than captured at submission, so `/set
+    // translate.timeout_ms` retunes work that is already waiting.
+    let total =
         std::time::Duration::from_millis(timeout.load(std::sync::atomic::Ordering::Relaxed).max(1));
+    let Some(budget) = total.checked_sub(submitted_at.elapsed()) else {
+        // The deadline passed while queueing. Calling the provider now buys
+        // an answer nobody can use — the incoming queue has already released
+        // this line, and an outgoing send is refused on arrival either way.
+        tracing::debug!(id, ?total, "translate: deadline passed while queued");
+        return TranslateOutcome::Untranslated {
+            id,
+            reason: UntranslatedReason::Timeout,
+        };
+    };
     // The boundary has to cover BUILDING the future, not just polling it. A
     // backend that panics synchronously inside `translate()` — before it ever
     // returns its `BoxFuture` — would otherwise unwind past this: the
@@ -379,7 +411,9 @@ fn spawn_incoming_worker(
             let timeout_ms = Arc::clone(&timeout_ms);
             tokio::spawn(async move {
                 let _permit = permit;
-                let outcome = translate_isolated(&backend, pending.req, &timeout_ms).await;
+                let outcome =
+                    translate_isolated(&backend, pending.req, &timeout_ms, pending.submitted_at)
+                        .await;
                 let _ = deliver
                     .send(TranslateDeliver::Incoming {
                         buffer_id: pending.buffer_id,
@@ -476,7 +510,8 @@ fn spawn_connection_lane(
             let Ok(_permit) = Arc::clone(&permits).acquire_owned().await else {
                 break;
             };
-            let outcome = translate_isolated(&backend, pending.req, &timeout_ms).await;
+            let outcome =
+                translate_isolated(&backend, pending.req, &timeout_ms, pending.submitted_at).await;
             let _ = deliver
                 .send(TranslateDeliver::Outgoing(Box::new(
                     OutgoingTranslateDeliver {
@@ -496,6 +531,7 @@ fn spawn_connection_lane(
                         origin: pending.origin,
                         retry_text: pending.retry_text,
                         conn_generation: pending.conn_generation,
+                        submitted_at: pending.submitted_at,
                     },
                 )))
                 .await;
@@ -533,6 +569,7 @@ async fn refuse_outgoing(
                 origin: pending.origin,
                 retry_text: pending.retry_text,
                 conn_generation: pending.conn_generation,
+                submitted_at: pending.submitted_at,
             },
         )))
         .await;
@@ -729,6 +766,26 @@ impl crate::app::App {
                 return;
             }
         };
+
+        // Late is the same as not at all. The display reservation this send
+        // holds expires `timeout_ms` after submission whether or not the
+        // translation is back, so once that has passed there is no place left
+        // for the echo and the user has already watched their line vanish.
+        // Putting it on the channel now would publish a message they may well
+        // have retyped.
+        //
+        // The lane bounds the provider call to the REMAINING budget, so this
+        // normally cannot fire; it does when the main loop itself was too
+        // busy to drain the deliver channel in time. Refusing then can throw
+        // away a translation that finished just inside the deadline — the
+        // right trade for a feature whose whole posture is fail-closed, and
+        // the user gets their text back either way.
+        let budget = std::time::Duration::from_millis(self.config.translate.timeout_ms.max(1));
+        if out.submitted_at.elapsed() >= budget {
+            self.release_echo_slot_and_drain(&out.buffer_id, out.echo_id);
+            self.abandon_with_text(out, "the translation took longer than the timeout");
+            return;
+        }
 
         // Two separate questions, both asked BEFORE `plan_translated_wires`.
         // Planning runs `e2e_encrypt_or_passthrough`, which creates or
@@ -1084,6 +1141,7 @@ impl crate::app::App {
             // Buffer input retries as itself; by-target sends overwrite this
             // with a re-addressed form in `dispatch_by_target_translation`.
             retry_text: text.to_string(),
+            submitted_at: std::time::Instant::now(),
             // Captured with everything else that could change during the
             // wait. A reconnect under this same id is a different session,
             // and this message was written for the one in front of the user.
@@ -1930,6 +1988,7 @@ mod app_tests {
             origin: SubmitOrigin::Tui,
             retry_text: text.to_string(),
             conn_generation: None,
+            submitted_at: std::time::Instant::now(),
         }
     }
 
@@ -2082,6 +2141,43 @@ mod app_tests {
             .iter()
             .map(|m| m.text.clone())
             .collect()
+    }
+
+    #[test]
+    fn a_translation_that_came_back_too_late_is_not_sent() {
+        // Its display reservation expired on schedule, so there is nowhere
+        // for the echo to go and the user has already watched the line
+        // vanish. Sending now publishes a message they may have retyped.
+        let mut app = app_with_dying_handle(usize::MAX);
+        app.conn_generations.insert("test".to_string(), 1);
+        app.config.translate.timeout_ms = 500;
+        let sender = app.irc_handles["test"].sender().clone();
+        let mut out = outgoing(
+            "moje zdanie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "mein satz".to_string(),
+            },
+            false,
+        );
+        out.conn_generation = Some(1);
+        out.submitted_at = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(30))
+            .expect("30s before now");
+        app.state.reserve_echo_slot(BUF, 1);
+
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+
+        assert!(
+            sender.captured().is_empty(),
+            "nothing may reach the wire this late: {:?}",
+            sender.captured()
+        );
+        assert_eq!(
+            app.input.value, "moje zdanie",
+            "and the text comes back rather than being lost"
+        );
+        assert_eq!(queued(&app), 0, "the reservation is given back");
     }
 
     #[test]
@@ -3527,6 +3623,7 @@ mod tests {
                 .send(PendingTranslate {
                     buffer_id: "libera/#dupa".to_string(),
                     req: req(id, "hello world"),
+                    submitted_at: std::time::Instant::now(),
                 })
                 .await
                 .expect("worker alive");
@@ -3560,6 +3657,7 @@ mod tests {
                 .send(PendingTranslate {
                     buffer_id: "b".to_string(),
                     req: req(id, "hello world"),
+                    submitted_at: std::time::Instant::now(),
                 })
                 .await
                 .expect("worker alive");
@@ -3592,6 +3690,7 @@ mod tests {
             origin: SubmitOrigin::Tui,
             retry_text: text.to_string(),
             conn_generation: None,
+            submitted_at: std::time::Instant::now(),
         }
     }
 
@@ -3656,6 +3755,7 @@ mod tests {
                     origin: SubmitOrigin::Tui,
                     retry_text: "hello world".to_string(),
                     conn_generation: None,
+                    submitted_at: std::time::Instant::now(),
                 })
                 .await
                 .expect("worker alive");
@@ -3729,6 +3829,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_request_that_waited_out_its_budget_is_not_sent_to_the_provider() {
+        // The budget runs from SUBMISSION. With one permit and a backend
+        // slower than the timeout, the second request's deadline is already
+        // gone by the time a permit frees up — calling the provider then buys
+        // an answer nobody can use, and (outgoing) would put the message on
+        // the channel long after the user gave up on it.
+        let mut cfg = cfg(1);
+        cfg.timeout_ms = 40;
+        let mut rt =
+            TranslateRuntime::with_backend(Some(Arc::new(StubBackend::with_jitter(&[80]))), &cfg);
+        for id in 1..=2u64 {
+            rt.incoming_tx
+                .send(PendingTranslate {
+                    buffer_id: "b".to_string(),
+                    req: req(id, "hello world"),
+                    submitted_at: std::time::Instant::now(),
+                })
+                .await
+                .expect("worker alive");
+        }
+        let started = tokio::time::Instant::now();
+        let mut outcomes = Vec::new();
+        for _ in 0..2 {
+            match rt.deliver_rx.recv().await {
+                Some(TranslateDeliver::Incoming { outcome, .. }) => outcomes.push(outcome),
+                other => panic!("expected an incoming deliver, got {other:?}"),
+            }
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            outcomes.iter().all(|o| matches!(
+                o,
+                TranslateOutcome::Untranslated {
+                    reason: crate::translate::UntranslatedReason::Timeout,
+                    ..
+                }
+            )),
+            "both must time out: {outcomes:?}"
+        );
+        // The point is WHERE the second one timed out. A budget that starts
+        // when the provider is called gives it a fresh 40 ms of its own, so
+        // the pair takes ~80 ms; a budget that runs from submission finds its
+        // deadline already gone and returns without calling out at all.
+        assert!(
+            elapsed < std::time::Duration::from_millis(70),
+            "the pair took {elapsed:?} — the second request was still sent to \
+             the provider after its deadline had passed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_inside_its_budget_still_reaches_the_provider() {
+        // The deadline check must not refuse the ordinary case, or it would
+        // pass by refusing everything.
+        let mut cfg = cfg(1);
+        cfg.timeout_ms = 500;
+        let mut rt =
+            TranslateRuntime::with_backend(Some(Arc::new(StubBackend::with_jitter(&[0]))), &cfg);
+        rt.incoming_tx
+            .send(PendingTranslate {
+                buffer_id: "b".to_string(),
+                req: req(1, "hello world"),
+                submitted_at: std::time::Instant::now(),
+            })
+            .await
+            .expect("worker alive");
+        match rt.deliver_rx.recv().await {
+            Some(TranslateDeliver::Incoming { outcome, .. }) => assert!(
+                matches!(outcome, TranslateOutcome::Translated { .. }),
+                "got {outcome:?}"
+            ),
+            other => panic!("expected an incoming deliver, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn disabled_runtime_drains_instead_of_backpressuring() {
         // With no backend the gates never dispatch, but a stale `try_send`
         // must not fill the channel and block the IRC path.
@@ -3740,6 +3916,7 @@ mod tests {
                 .send(PendingTranslate {
                     buffer_id: "b".to_string(),
                     req: req(id, "hello world"),
+                    submitted_at: std::time::Instant::now(),
                 })
                 .await
                 .expect("drain keeps the channel open");

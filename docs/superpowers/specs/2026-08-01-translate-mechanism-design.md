@@ -196,6 +196,17 @@ memory leak with a frozen channel behind it.
 - **Per-line timeout**, measured from entry into the queue, default 5000 ms (above
   the measured 4176 ms worst case). On expiry the line resolves as
   `Untranslated { Timeout }` and the head advances.
+
+  The **worker** measures from the same instant, not from the moment the request
+  reaches the backend. A request can wait a long time first — behind another on its
+  connection's serial lane, or on the shared `max_in_flight` permit — and starting
+  the clock afterwards makes the deadline meaningless: the reservation expires on
+  schedule while the request keeps running. For incoming that wastes a provider call
+  whose answer the queue has already discarded; for outgoing it puts the message on
+  the channel long after the user gave up, quite possibly after they retyped it. So
+  `translate_isolated` bounds the call to the REMAINING budget and skips it entirely
+  when none is left, and the outgoing deliver refuses anything that arrives past the
+  deadline anyway.
 - **Queue ceiling**, default 200 entries per buffer. On overflow the oldest pending
   entries resolve as `Untranslated { Timeout }` immediately and release, so the
   channel keeps flowing untranslated instead of stalling.
@@ -502,6 +513,14 @@ Consequences, accepted deliberately:
 
 An `Untranslated` line with any reason other than `Filtered` renders the original
 plus a dim marker.
+
+A line marked this way is **final**, and the fallback path delivers it through
+`add_message_with_activity_unshrunk` to keep it that way. Handing it back to
+`add_message_with_activity` would offer it to incoming URL shrinking: a second
+external service would rewrite text already marked as untranslated, and overwrite the
+`wire_origin` that carries both the marker offset and the identity (§7.1). Translation
+and shrink are mutually exclusive per line by design, and that has to hold on the
+failure path too.
 
 The offset travels to the browser as `WireMessage::orig_offset`, and the web renderer
 splits the body there and wraps the tail in its own element. Both frontends therefore

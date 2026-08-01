@@ -103,7 +103,11 @@ an answer can never appear above its question.
 A line that has waited longer than `translate.timeout_ms` is shown
 untranslated rather than holding up the channel, and the queue is capped at
 `translate.max_queue` so a dead provider cannot stall a busy channel or grow
-without bound. Losing the connection releases that server's queued lines at
+without bound. That deadline counts from the moment the line arrived — or,
+for your own messages, from the moment you pressed Enter — not from when the
+translator was actually reached, so a busy queue cannot quietly stretch it.
+A message of yours whose translation misses the deadline is not sent; the
+text comes back as with any other refusal. Losing the connection releases that server's queued lines at
 once rather than waiting the timeout out for a server that is gone.
 
 `/translate delin` releases the lines it was still waiting on, shown

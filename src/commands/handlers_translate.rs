@@ -238,6 +238,12 @@ fn del(app: &mut App, args: &[String], dir: Dir) {
 /// on the next restart or `/reload`. A write failure is surfaced rather than
 /// swallowed: the user needs to know the setting only holds for this session.
 fn persist(app: &mut App) {
+    // The script snapshot serialises `app.config` once and caches it. These
+    // commands mutate the config, so without this a Lua script keeps reading
+    // the `translate.buffers` map as it was before — until some unrelated
+    // `/set` or `/reload` happens to invalidate the cache. Every other
+    // config-changing command clears it; this one has to as well.
+    app.cached_config_toml = None;
     let path = app.config_path.clone();
     if let Err(e) = crate::config::save_config(&path, &app.config) {
         add_local_event(
@@ -602,6 +608,28 @@ mod tests {
             last_event(&app).contains("translate.enabled is off"),
             "the user must not think it is live: {}",
             last_event(&app)
+        );
+    }
+
+    #[test]
+    fn changing_a_buffer_invalidates_the_script_config_cache() {
+        // The script snapshot serialises `app.config` once and caches it, so
+        // without invalidation a Lua script keeps reading the OLD
+        // `translate.buffers` until some unrelated `/set` happens to clear
+        // it — and there is nothing to tell the user why.
+        let mut app = app_with_channel();
+        app.cached_config_toml = Some(toml::Value::Table(toml::map::Map::new()));
+        cmd_translate(&mut app, &args(&["addin", "#dupa"]));
+        assert!(
+            app.cached_config_toml.is_none(),
+            "addin changed the config, so the cached copy is stale"
+        );
+
+        app.cached_config_toml = Some(toml::Value::Table(toml::map::Map::new()));
+        cmd_translate(&mut app, &args(&["delin", "#dupa"]));
+        assert!(
+            app.cached_config_toml.is_none(),
+            "and so does delin"
         );
     }
 

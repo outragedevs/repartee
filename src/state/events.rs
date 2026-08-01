@@ -710,7 +710,16 @@ impl AppState {
             queue.push_resolved(id, message, level);
             return None;
         }
-        Some(message)
+        // Deliver it here rather than handing it back. Returning `Some` puts
+        // it back into `add_message_with_activity`, which then offers it to
+        // incoming SHRINK — so a line already marked `[untranslated: …]`
+        // would be sent to a second external service, come back rewritten,
+        // and have its `wire_origin` overwritten: the marker offset stops
+        // pointing at the marker and the wire text stops being the wire text.
+        // Translation and shrink are mutually exclusive per line by design,
+        // and that has to hold on the failure path too.
+        self.add_message_with_activity_unshrunk(buffer_id, message, level);
+        None
     }
 
     /// Whether this message on this buffer should be sent for translation.
@@ -797,6 +806,7 @@ impl AppState {
         match tx.try_send(crate::app::translate::PendingTranslate {
             buffer_id: buffer_id.to_string(),
             req,
+            submitted_at: std::time::Instant::now(),
         }) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
@@ -3022,6 +3032,54 @@ mod translate_gate_tests {
         assert!(
             shown.contains("[untranslated: error: multi-line message]"),
             "and marked, so it is not mistaken for a clean pass: {shown:?}"
+        );
+    }
+
+    #[test]
+    fn an_untranslated_fallback_is_never_handed_to_shrink() {
+        // Translation and shrink are mutually exclusive per line. On the
+        // FAILURE path that has to hold too: a line already marked
+        // `[untranslated: …]` must not be shipped to a second external
+        // service, come back rewritten, and have its `wire_origin`
+        // overwritten — the marker offset would stop pointing at the marker
+        // and the recorded wire text would stop being the wire text.
+        let (mut state, mut rx) = state_with_translation();
+        let (shrink_tx, mut shrink_rx) = mpsc::channel(8);
+        state.shrink_incoming_tx = Some(shrink_tx);
+        state.shrink_incoming_active = true;
+        state.shrink_min_url_length = 10;
+
+        // Multi-line, so translation refuses it, AND carrying a long URL, so
+        // shrink would take it if it were offered the chance.
+        let mut msg = make_test_message(&mut state, "x");
+        msg.text = "look https://example.com/a/very/long/path
+and a second line".to_string();
+        state.add_message_with_activity(BUF, msg, ActivityLevel::Activity);
+
+        assert!(
+            rx.try_recv().is_err(),
+            "a multi-line body must never become a translation request"
+        );
+        assert!(
+            shrink_rx.try_recv().is_err(),
+            "nor a shrink request — it is already marked and final"
+        );
+        let shown = state.buffers[BUF]
+            .messages
+            .back()
+            .expect("delivered inline")
+            .clone();
+        assert!(
+            shown.text.contains("https://example.com/a/very/long/path"),
+            "the URL is untouched: {:?}",
+            shown.text
+        );
+        let origin = shown.wire_origin.expect("the marker is recorded");
+        let at = origin.suffix_at.expect("and its offset");
+        assert!(
+            shown.text[at..].starts_with(" [untranslated:"),
+            "the offset still points at the marker: {:?}",
+            &shown.text[at..]
         );
     }
 
