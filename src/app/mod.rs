@@ -1616,6 +1616,12 @@ impl App {
             }
         }
 
+        // Release anything still waiting on a translation before the buffers
+        // go away. The lines already arrived on the network, and this is the
+        // last moment they can still reach the buffer and the SQLite log —
+        // after this they would be lost with no trace.
+        self.flush_all_translate_queues();
+
         for (_, handle) in self.active_timers.drain() {
             handle.abort();
         }

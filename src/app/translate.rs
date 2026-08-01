@@ -930,6 +930,19 @@ mod app_tests {
     }
 
     #[test]
+    fn closing_a_buffer_drops_its_queue() {
+        // The buffer is gone, so releasing into it would be refused anyway
+        // and logging under it would orphan the rows. What must not happen
+        // is the queue outliving the buffer.
+        let mut app = app_with_queue(3);
+        app.state.remove_buffer(BUF);
+        assert!(
+            !app.state.translate_queues.contains_key(BUF),
+            "the queue must not outlive its buffer"
+        );
+    }
+
+    #[test]
     fn flushing_all_queues_covers_every_buffer() {
         let mut app = app_with_queue(1);
         let other = "test/#other";
@@ -1081,5 +1094,136 @@ mod tests {
                 .await
                 .expect("drain keeps the channel open");
         }
+    }
+}
+
+#[cfg(test)]
+mod ordering_integration {
+    use super::*;
+    use crate::config::{TranslateBufferConfig, TranslateConfig};
+    use crate::state::buffer::{ActivityLevel, Buffer, BufferType, Message, MessageType};
+    use crate::translate::backend::StubBackend;
+
+    const BUF: &str = "test/#dupa";
+
+    fn message(id: u64, text: &str) -> Message {
+        Message {
+            id,
+            timestamp: chrono::Utc::now(),
+            message_type: MessageType::Message,
+            nick: Some("alice".to_string()),
+            nick_mode: None,
+            text: text.to_string(),
+            highlight: false,
+            event_key: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: None,
+            orig_offset: None,
+        }
+    }
+
+    /// The headline guarantee, end to end: a burst whose translations come
+    /// back deliberately out of order must still render in arrival order.
+    ///
+    /// The jitter sequence is what gives the test its teeth — with a uniform
+    /// delay the burst would finish in order by accident and prove nothing.
+    #[tokio::test]
+    async fn a_burst_with_out_of_order_returns_preserves_arrival_order() {
+        const LINES: u64 = 20;
+
+        let cfg = TranslateConfig {
+            enabled: true,
+            max_in_flight: 8,
+            show_original_in: false,
+            ..Default::default()
+        };
+        // Descending delays: the LAST line dispatched finishes first.
+        let delays: Vec<u64> = (0..LINES).map(|i| (LINES - i) * 4).collect();
+        let mut rt = TranslateRuntime::with_backend(
+            Some(Arc::new(StubBackend::with_jitter(&delays))),
+            &cfg,
+        );
+
+        let mut state = crate::state::AppState::new();
+        state.add_buffer(Buffer::for_test("test", BufferType::Channel, "#dupa"));
+        state.translate_incoming_tx = Some(rt.incoming_tx.clone());
+        state.translate_active = true;
+        state.translate_show_original_in = false;
+        state.translate_buffers.insert(
+            BUF.to_string(),
+            TranslateBufferConfig {
+                incoming: true,
+                outgoing: false,
+                source_lang: None,
+            },
+        );
+
+        // Each line's words are reversed by the stub, so "line N of burst"
+        // comes back as "burst of N line" — position N is still identifiable
+        // and we can prove the translation actually ran.
+        for i in 1..=LINES {
+            let id = state.next_message_id();
+            let msg = message(id, &format!("line {i} of burst"));
+            state.add_message_with_activity(BUF, msg, ActivityLevel::Activity);
+        }
+        assert_eq!(
+            state.buffers[BUF].messages.len(),
+            0,
+            "every line is queued, nothing shown yet"
+        );
+
+        // Drain outcomes exactly as the select! arm does.
+        let mut arrival_order = Vec::new();
+        for _ in 0..LINES {
+            let deliver = rt.deliver_rx.recv().await.expect("an outcome per line");
+            let TranslateDeliver::Incoming { buffer_id, outcome } = deliver else {
+                panic!("expected an incoming outcome");
+            };
+            arrival_order.push(outcome.id());
+            let resolution = match outcome {
+                TranslateOutcome::Translated { id, text } => (id, Ok(text)),
+                TranslateOutcome::Untranslated { id, reason } => (id, Err(reason)),
+            };
+            let ready = {
+                let queue = state
+                    .translate_queues
+                    .get_mut(&buffer_id)
+                    .expect("the queue exists");
+                queue.resolve(resolution.0, resolution.1);
+                queue.drain_ready()
+            };
+            for entry in ready {
+                state.add_message_with_activity_unshrunk(&buffer_id, entry.message, entry.activity);
+            }
+        }
+
+        // The test only means something if the outcomes really did come
+        // back out of order. Assert that, so a future change to the stub's
+        // timing cannot quietly turn this into a test of nothing.
+        assert!(
+            arrival_order.windows(2).any(|w| w[0] > w[1]),
+            "outcomes arrived in id order ({arrival_order:?}) — the jitter is \
+             not producing reordering, so this test proves nothing"
+        );
+
+        let shown: Vec<String> = state.buffers[BUF]
+            .messages
+            .iter()
+            .map(|m| m.text.clone())
+            .collect();
+        assert_eq!(shown.len() as u64, LINES, "every line surfaced");
+        for (idx, line) in shown.iter().enumerate() {
+            let expected = format!("burst of {} line", idx + 1);
+            assert_eq!(
+                line, &expected,
+                "position {idx} holds the wrong line — ordering broke"
+            );
+        }
+        assert!(
+            state.translate_queues[BUF].is_empty(),
+            "the queue fully drained"
+        );
     }
 }

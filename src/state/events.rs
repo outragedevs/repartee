@@ -108,6 +108,16 @@ impl AppState {
         self.typing.remove_buffer(id);
         // Clean up per-buffer flood tracking to prevent unbounded map growth.
         self.flood_state.remove_buffer(id);
+        // Drop any in-flight translation queue for this buffer.
+        //
+        // Dropping rather than releasing is deliberate, and matches what
+        // shrink already does for a buffer closed mid-wait: the buffer is
+        // gone, so `add_message_unshrunk` would refuse the delivery anyway,
+        // and logging the lines under a buffer the UI no longer knows about
+        // would orphan them. Without this the queue would outlive its
+        // buffer and grow unbounded across a long session of joins and
+        // parts.
+        self.translate_queues.remove(id);
 
         if was_active {
             // Try to fall back to previous buffer
