@@ -1432,6 +1432,62 @@ impl App {
         // cannot be ruled out and fall through to the synchronous path, where
         // the original URL is encrypted on the wire like the rest of the message.
         let e2e_possible = self.state.e2e_possible_for_target(&conn_id, &buffer_name);
+
+        // Outgoing translation runs BEFORE shrink and, like it, is skipped
+        // entirely whenever E2E cannot be ruled out — for exactly the same
+        // reason, and on the same fail-closed predicate: the translation
+        // worker sends the cleartext to a third-party provider before the
+        // E2E gate ever runs.
+        //
+        // Nothing reaches the wire here. The worker posts the outcome back
+        // and `send_outgoing_translated` runs the rest of the pipeline
+        // seconds later, or refuses and hands the text back to the user.
+        if !e2e_possible
+            && self.state.translate_active
+            && self
+                .config
+                .translate
+                .buffers
+                .get(&active_id)
+                .is_some_and(|c| c.outgoing)
+            && text.len() <= crate::irc::MESSAGE_MAX_BYTES
+            && !crate::irc::multiline::needs_multiline(text)
+            && let Some(pending) = self.build_outgoing_translate(
+                &conn_id,
+                &active_id,
+                &buffer_name,
+                &buf_type,
+                &nick,
+                text,
+            )
+        {
+            match self.translate_outgoing_tx.try_send(pending) {
+                // Same reasoning as the shrink arm below: nothing is on the
+                // wire yet, so we must not claim a send. The deferred path
+                // reports the outcome via `note_message_sent`.
+                Ok(()) => return false,
+                Err(TrySendError::Full(_)) => {
+                    tracing::warn!("translate: outgoing queue full, sending untranslated");
+                }
+                Err(TrySendError::Closed(_)) => {
+                    tracing::error!(
+                        "translate: outgoing worker dead, sending untranslated \
+                         (restart required to restore translation)"
+                    );
+                    crate::commands::helpers::add_local_event(
+                        self,
+                        &format!(
+                            "{err}translate: outgoing worker has died — \
+                             restart to restore. Messages are being sent \
+                             untranslated.{rst}",
+                            err = crate::commands::types::C_ERR,
+                            rst = crate::commands::types::C_RST,
+                        ),
+                    );
+                }
+            }
+        }
+
         if !e2e_possible
             && self.config.shrink.enabled
             && self.config.shrink.outgoing_enabled

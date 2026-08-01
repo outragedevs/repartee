@@ -20,10 +20,6 @@ pub mod scripting;
 mod session;
 mod shell;
 pub mod shrink;
-// The runtime lands before the App fields and gates that drive it, so it is
-// briefly dead. Removed once the incoming and outgoing paths are wired;
-// `make clippy` must be clean without it by then.
-#[allow(dead_code, reason = "consumed once the dispatch gates land")]
 pub mod translate;
 pub mod typing;
 mod web;
@@ -500,7 +496,6 @@ pub struct App {
     /// `handle_plain_message` enqueues here; the serial outgoing worker
     /// drains it and posts an `OutgoingTranslateDeliver` back via
     /// `translate_deliver_rx`.
-    #[allow(dead_code, reason = "read once the outgoing dispatch gate lands")]
     pub(crate) translate_outgoing_tx: mpsc::Sender<translate::PendingOutgoingTranslate>,
     /// Both translation workers post their outcomes here; the main loop
     /// drains and routes them through `apply_translate_deliver`.

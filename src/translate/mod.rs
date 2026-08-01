@@ -26,6 +26,10 @@ pub enum Direction {
 /// measured to degrade output, so there is no context field to misuse —
 /// its absence is the design, not an omission.
 #[derive(Debug, Clone)]
+#[expect(
+    dead_code,
+    reason = "seam contract — a real backend reads every field; the stub only needs id and text"
+)]
 pub struct TranslateRequest {
     /// Correlation key AND display-ordering key, taken from
     /// `AppState::next_message_id()` at the moment the line is queued.
@@ -53,7 +57,13 @@ pub enum UntranslatedReason {
     /// the target language, or it is noise. A CORRECT outcome, not a
     /// failure: it renders as a clean original with no marker.
     Filtered,
+    /// Broker-side outcomes. Nothing in-tree constructs these yet — the stub
+    /// has no quality gate and no quota — but they are part of the contract a
+    /// real broker answers with, and both are already handled everywhere an
+    /// outcome is consumed.
+    #[allow(dead_code, reason = "constructed by a real broker, not by the stub")]
     QualityGate,
+    #[allow(dead_code, reason = "constructed by a real broker, not by the stub")]
     DailyLimit,
     NoProvider,
     /// Raised by the mechanism (queue timeout or ceiling), never by the

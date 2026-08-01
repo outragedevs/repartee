@@ -66,6 +66,7 @@ impl StubBackend {
 
     /// Cycle through `delays_ms` instead of using a fixed delay, so a burst
     /// of lines completes out of order on purpose.
+    #[cfg(test)]
     #[must_use]
     pub fn with_jitter(delays_ms: &[u64]) -> Self {
         Self {

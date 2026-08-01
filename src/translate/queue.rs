@@ -77,6 +77,7 @@ pub struct TranslateQueue {
 }
 
 impl TranslateQueue {
+    #[cfg(test)]
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -270,6 +271,7 @@ impl TranslateQueue {
         self.entries.is_empty()
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -277,6 +279,7 @@ impl TranslateQueue {
 
     /// How many entries are still awaiting an outcome. Drives
     /// `/translate status`.
+    #[allow(dead_code, reason = "read by /translate status")]
     #[must_use]
     pub fn pending_len(&self) -> usize {
         self.entries

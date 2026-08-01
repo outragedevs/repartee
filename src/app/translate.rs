@@ -440,6 +440,83 @@ impl crate::app::App {
         }
     }
 
+    /// Assemble the outgoing translation request, capturing every
+    /// state-dependent value now.
+    ///
+    /// The user may `/nick`, close the buffer, or gain a channel mode during
+    /// the wait; reading current state at deliver time would produce a local
+    /// echo inconsistent with what hit the wire, and could strand the E2E
+    /// peer handle for a closed Query. Returns `None` when the buffer is
+    /// gone, in which case the caller falls through to the synchronous send.
+    pub(crate) fn build_outgoing_translate(
+        &mut self,
+        conn_id: &str,
+        buffer_id: &str,
+        buffer_name: &str,
+        buffer_type: &BufferType,
+        nick: &str,
+        text: &str,
+    ) -> Option<PendingOutgoingTranslate> {
+        let buffer = self.state.buffers.get(buffer_id)?;
+        let known_nicks: Vec<String> = buffer.users.keys().cloned().collect();
+        let network = self
+            .state
+            .connections
+            .get(conn_id)
+            .map(|c| c.label.clone())
+            .unwrap_or_default();
+        let captured_nick = self
+            .state
+            .connections
+            .get(conn_id)
+            .map_or_else(|| nick.to_string(), |c| c.nick.clone());
+        let captured_own_mode = self.state.nick_prefix(buffer_id, &captured_nick);
+        // Resolve the FULL peer handle now, while the buffer still exists —
+        // a `/close` during the wait would otherwise leave
+        // `e2e_encrypt_or_passthrough` unable to recover the network and
+        // fall through to plaintext for an E2E-enabled DM.
+        let captured_peer_handle = if *buffer_type == BufferType::Query {
+            self.state
+                .resolve_query_peer_handle(buffer_id, buffer_name)
+                .unwrap_or_else(|e| {
+                    tracing::warn!("e2e: failed to resolve DM peer handle for {buffer_name}: {e}");
+                    None
+                })
+        } else {
+            None
+        };
+        let source_lang = self
+            .config
+            .translate
+            .buffers
+            .get(buffer_id)
+            .and_then(|c| c.source_lang.clone());
+
+        let id = self.state.next_message_id();
+        Some(PendingOutgoingTranslate {
+            conn_id: conn_id.to_string(),
+            buffer_id: buffer_id.to_string(),
+            buffer_name: buffer_name.to_string(),
+            buffer_type: buffer_type.clone(),
+            original_text: text.to_string(),
+            req: TranslateRequest {
+                id,
+                direction: crate::translate::Direction::Outgoing,
+                network,
+                target: buffer_name.to_string(),
+                nick: captured_nick.clone(),
+                text: text.to_string(),
+                source_lang,
+                target_lang: self.config.translate.target_lang.clone(),
+                known_nicks,
+            },
+            nick: captured_nick,
+            own_mode: captured_own_mode,
+            peer_handle: captured_peer_handle,
+            show_original: self.config.translate.show_original_out,
+        })
+    }
+
     /// Hand a refused message back to the user instead of losing it.
     fn restore_outgoing_input(&mut self, out: &OutgoingTranslateDeliver, reason: &str) {
         self.deliver_translate_error(
@@ -539,6 +616,7 @@ impl crate::app::App {
 
     /// Release every queued line for one buffer, untranslated where still
     /// pending, and drop its queue.
+    #[allow(dead_code, reason = "called once the flush points are wired")]
     ///
     /// Called on buffer close, `/part`, disconnect, quit, detach, and
     /// `/translate delin`. Pending lines are released rather than dropped —
@@ -560,6 +638,7 @@ impl crate::app::App {
     }
 
     /// Flush every buffer's queue. Used on quit and detach.
+    #[allow(dead_code, reason = "called once the flush points are wired")]
     pub(crate) fn flush_all_translate_queues(&mut self) {
         let buffer_ids: Vec<String> = self.state.translate_queues.keys().cloned().collect();
         for buffer_id in buffer_ids {
@@ -714,6 +793,102 @@ mod app_tests {
         let mut app = test_app();
         app.tick_translate_queues();
         assert!(app.state.translate_queues.is_empty());
+    }
+
+    fn outgoing(text: &str, outcome: TranslateOutcome, show_original: bool) -> OutgoingTranslateDeliver {
+        OutgoingTranslateDeliver {
+            conn_id: "test".to_string(),
+            buffer_id: BUF.to_string(),
+            buffer_name: "#dupa".to_string(),
+            buffer_type: BufferType::Channel,
+            original_text: text.to_string(),
+            outcome,
+            nick: "me".to_string(),
+            own_mode: None,
+            peer_handle: None,
+            show_original,
+        }
+    }
+
+    fn app_with_buffer() -> crate::app::App {
+        let mut app = test_app();
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Channel, "#dupa"));
+        app
+    }
+
+    #[test]
+    fn a_failed_outgoing_translation_sends_nothing_and_returns_the_text() {
+        // Sending the original would transmit something other than what the
+        // user intended for this channel. Fail closed and hand it back.
+        let mut app = app_with_buffer();
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(outgoing(
+            "moje zdanie",
+            TranslateOutcome::Untranslated {
+                id: 1,
+                reason: crate::translate::UntranslatedReason::NoProvider,
+            },
+            false,
+        ))));
+
+        assert_eq!(
+            app.input.value, "moje zdanie",
+            "the text is back in the input line"
+        );
+        let last = app.state.buffers[BUF]
+            .messages
+            .back()
+            .expect("an error row explains why");
+        assert!(
+            last.text.contains("no provider"),
+            "the reason is named: {}",
+            last.text
+        );
+    }
+
+    #[test]
+    fn a_failed_outgoing_translation_does_not_clobber_new_typing() {
+        // The user may have typed something else during the wait; replacing
+        // it would be a second, worse surprise. The text is still visible in
+        // the error row, so it is never truly lost.
+        let mut app = app_with_buffer();
+        app.input.value = "something else".to_string();
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(outgoing(
+            "moje zdanie",
+            TranslateOutcome::Untranslated {
+                id: 1,
+                reason: crate::translate::UntranslatedReason::Timeout,
+            },
+            false,
+        ))));
+        assert_eq!(app.input.value, "something else");
+    }
+
+    #[test]
+    fn a_filtered_outgoing_line_is_sent_as_the_original() {
+        // Filtered means the broker correctly decided no translation was
+        // needed, so the original IS the right thing to send. With no IRC
+        // handle the send fails, which is exactly what proves we got as far
+        // as attempting it rather than refusing up front.
+        let mut app = app_with_buffer();
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(outgoing(
+            "moin",
+            TranslateOutcome::Untranslated {
+                id: 1,
+                reason: crate::translate::UntranslatedReason::Filtered,
+            },
+            false,
+        ))));
+        assert!(
+            app.input.value.is_empty(),
+            "a filtered line is not handed back to the user"
+        );
+        let last = app.state.buffers[BUF].messages.back().unwrap();
+        assert!(
+            last.text.contains("connection unavailable"),
+            "it reached the send attempt: {}",
+            last.text
+        );
     }
 
     #[test]
