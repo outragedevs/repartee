@@ -98,6 +98,19 @@ pub enum SubmitOrigin {
     Script,
 }
 
+/// What to do with a finished outgoing translation whose target may have
+/// been re-keyed while it was running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RedirectVerdict {
+    /// Send it — either nothing moved, or the deliver was pointed at where
+    /// the conversation is now.
+    Proceed,
+    /// Refuse. The conversation moved and its window is gone, so the only
+    /// name left to address is the abandoned one, which somebody else may
+    /// hold.
+    Refuse,
+}
+
 /// How a translated outgoing message should echo locally.
 ///
 /// Carried from the submitting call site rather than re-derived at delivery.
@@ -195,6 +208,9 @@ pub enum TranslateDeliver {
     Incoming {
         buffer_id: String,
         outcome: TranslateOutcome,
+        /// When this line was dispatched. Decides whether a query rename
+        /// that happened since applies to it — see `redirected_buffer_id`.
+        submitted_at: std::time::Instant,
     },
     /// An outgoing message's outcome. The loop runs the rest of the send
     /// pipeline — E2E encrypt, IRC send, local echo — or refuses.
@@ -374,7 +390,7 @@ async fn translate_isolated(
         tokio::time::timeout(budget, backend.translate(req)).await
     });
     match fut.catch_unwind().await {
-        Ok(Ok(outcome)) => outcome,
+        Ok(Ok(outcome)) => single_line_or_refuse(outcome),
         Ok(Err(_elapsed)) => {
             tracing::warn!(id, ?budget, "translate: backend timed out; abandoning it");
             TranslateOutcome::Untranslated {
@@ -389,6 +405,45 @@ async fn translate_isolated(
                 reason: UntranslatedReason::Error("backend panic".to_string()),
             }
         }
+    }
+}
+
+/// Reject a translation that is not one line.
+///
+/// **The backend is untrusted.** Its output goes onto the IRC socket, and
+/// `send_privmsg` only breaks on `\r\n` — a bare `\n` is copied into the
+/// trailing parameter verbatim, and a server that accepts bare-LF line
+/// endings then reads everything after it as a fresh command. A translation
+/// of `hello` coming back as `hello\nJOIN #x` would join a channel.
+///
+/// Trailing whitespace is trimmed rather than refused, because a model that
+/// ends its answer with a newline is producing a correct single-line
+/// translation with a stray byte on it. Anything embedded is refused: the
+/// contract is one line per request (§2), so a multi-line answer is a broken
+/// response whatever it says, and guessing which line the user meant is not
+/// something to do with text about to be published under their nick.
+fn single_line_or_refuse(outcome: TranslateOutcome) -> TranslateOutcome {
+    let TranslateOutcome::Translated { id, text } = outcome else {
+        return outcome;
+    };
+    let trimmed = text.trim_end_matches(['\r', '\n']);
+    if trimmed.contains(['\r', '\n']) {
+        tracing::error!(
+            id,
+            "translate: backend returned a multi-line answer; refusing it"
+        );
+        return TranslateOutcome::Untranslated {
+            id,
+            reason: UntranslatedReason::Error("backend returned multiple lines".to_string()),
+        };
+    }
+    TranslateOutcome::Translated {
+        id,
+        text: if trimmed.len() == text.len() {
+            text
+        } else {
+            trimmed.to_string()
+        },
     }
 }
 
@@ -418,6 +473,7 @@ fn spawn_incoming_worker(
                     .send(TranslateDeliver::Incoming {
                         buffer_id: pending.buffer_id,
                         outcome,
+                        submitted_at: pending.submitted_at,
                     })
                     .await;
             });
@@ -579,11 +635,26 @@ impl crate::app::App {
     /// Drain one translation deliver from the main-loop arm.
     pub(crate) fn apply_translate_deliver(&mut self, deliver: TranslateDeliver) {
         match deliver {
-            TranslateDeliver::Incoming { buffer_id, outcome } => {
-                self.resolve_incoming_translation(&buffer_id, outcome);
+            TranslateDeliver::Incoming {
+                buffer_id,
+                outcome,
+                submitted_at,
+            } => {
+                self.resolve_incoming_translation(&buffer_id, outcome, submitted_at);
             }
             TranslateDeliver::Outgoing(mut out) => {
-                self.redirect_outgoing_deliver(&mut out);
+                if self.redirect_outgoing_deliver(&mut out) == RedirectVerdict::Refuse {
+                    // The conversation this was addressed to has moved and
+                    // its new window is gone. Sending under the old NAME is
+                    // the one thing that must not happen: somebody else may
+                    // hold that nick now, and this is a private message.
+                    self.release_echo_slot_and_drain(&out.buffer_id, out.echo_id);
+                    self.abandon_with_text(
+                        &out,
+                        "the conversation it was addressed to is no longer open",
+                    );
+                    return;
+                }
                 self.send_outgoing_translated(&out);
             }
         }
@@ -596,16 +667,19 @@ impl crate::app::App {
     /// `send_privmsg` addresses, so leaving it stale sends the message to a
     /// nick its owner no longer answers to — and if somebody else has claimed
     /// it in the meantime, to a stranger.
-    fn redirect_outgoing_deliver(&self, out: &mut OutgoingTranslateDeliver) {
-        let Some(new_id) = self.state.redirected_buffer_id(&out.buffer_id) else {
-            return;
+    fn redirect_outgoing_deliver(&self, out: &mut OutgoingTranslateDeliver) -> RedirectVerdict {
+        let Some(new_id) = self
+            .state
+            .redirected_buffer_id(&out.buffer_id, out.submitted_at)
+        else {
+            return RedirectVerdict::Proceed;
         };
         let new_id = new_id.to_string();
         let Some(new_name) = self.state.buffers.get(&new_id).map(|b| b.name.clone()) else {
-            // Renamed and then closed. Leave it alone: the existing
-            // buffer-is-gone handling reports it and hands the text back,
-            // which is better than sending to a conversation with no window.
-            return;
+            // Renamed, then closed. The old NAME must not be used either way
+            // — somebody may hold that nick now — so this cannot fall through
+            // to the ordinary send. Refuse and hand the text back.
+            return RedirectVerdict::Refuse;
         };
         tracing::debug!(
             from = %out.buffer_id,
@@ -621,18 +695,24 @@ impl crate::app::App {
         }
         out.buffer_id = new_id;
         out.buffer_name = new_name;
+        RedirectVerdict::Proceed
     }
 
     /// Fold an incoming outcome into its buffer's queue and release whatever
     /// that unblocks.
-    fn resolve_incoming_translation(&mut self, buffer_id: &str, outcome: TranslateOutcome) {
+    fn resolve_incoming_translation(
+        &mut self,
+        buffer_id: &str,
+        outcome: TranslateOutcome,
+        submitted_at: std::time::Instant,
+    ) {
         // This line was dispatched under the id the buffer had at the time.
         // If the peer has since renamed, the queue holding its place moved
         // with the buffer, and without following it the outcome lands
         // nowhere and the line it belongs to sits until the timeout.
         let buffer_id = &self
             .state
-            .redirected_buffer_id(buffer_id)
+            .redirected_buffer_id(buffer_id, submitted_at)
             .map_or_else(|| buffer_id.to_string(), ToString::to_string);
         let ready = {
             let Some(queue) = self.state.translate_queues.get_mut(buffer_id) else {
@@ -766,6 +846,27 @@ impl crate::app::App {
                 return;
             }
         };
+
+        // Belt and braces on the injection guard. `single_line_or_refuse`
+        // already rejects a multi-line answer at the seam, but THIS is the
+        // last point before bytes reach the socket, and `send_privmsg` only
+        // breaks on `\r\n` — a bare `\n` rides into the trailing parameter
+        // and a server accepting bare-LF endings reads the remainder as a
+        // fresh command. Making the refusal a property of the send rather
+        // than of one upstream check is the same reasoning as re-running the
+        // E2E gate inside `build_outgoing_translate`.
+        if wire_texts
+            .iter()
+            .any(|w| w.contains(['\r', '\n']))
+        {
+            tracing::error!(
+                target = %out.buffer_name,
+                "translate: refusing a wire payload containing a line break"
+            );
+            self.release_echo_slot_and_drain(&out.buffer_id, out.echo_id);
+            self.abandon_with_text(out, "the translation contained a line break");
+            return;
+        }
 
         // Late is the same as not at all. The display reservation this send
         // holds expires `timeout_ms` after submission whether or not the
@@ -1522,42 +1623,40 @@ impl crate::app::App {
             text: echo_body.to_string(),
             suffix_at: orig_offset,
         });
-        for (i, chunk) in local_chunks.into_iter().enumerate() {
-            // The first chunk takes the id reserved at submission so it
-            // lands in the right place; continuation chunks follow it and
-            // get fresh ids.
-            let id = if i == 0 {
-                out.echo_id
-            } else {
-                self.state.next_message_id()
-            };
-            // `add_own_message`, not `add_message`: this echo carries the
-            // nick captured at dispatch, so a `/nick` during the wait would
-            // make the dispatch gate mistake it for someone else's line and
-            // translate our own message a second time.
-            self.state.add_own_message(
-                &echo_buffer,
-                crate::state::buffer::Message {
-                    id,
-                    timestamp: chrono::Utc::now(),
-                    message_type: match &out.echo {
-                        OutgoingEchoPlan::Gated { message_type, .. } => message_type.clone(),
-                        _ if out.is_action => crate::state::buffer::MessageType::Action,
-                        _ => crate::state::buffer::MessageType::Message,
-                    },
-                    nick: Some(out.nick.clone()),
-                    nick_mode: nick_mode_str.clone(),
-                    text: chunk,
-                    highlight: false,
-                    event_key: None,
-                    event_params: None,
-                    log_msg_id: None,
-                    log_ref_id: None,
-                    tags: None,
-                    wire_origin: wire_origin.clone(),
-                },
-            );
-        }
+        let message_type = match &out.echo {
+            OutgoingEchoPlan::Gated { message_type, .. } => message_type.clone(),
+            _ if out.is_action => crate::state::buffer::MessageType::Action,
+            _ => crate::state::buffer::MessageType::Message,
+        };
+        // EVERY chunk carries the id reserved at submission. They are one
+        // message and go into that one reserved place together — see
+        // `fill_reserved_with`. Allocating fresh ids for the continuations
+        // lets a line that arrived during the translation sort between them,
+        // so the buffer would show the first chunk, somebody else's reply,
+        // and then the rest of the user's own sentence.
+        let chunks: Vec<crate::state::buffer::Message> = local_chunks
+            .into_iter()
+            .map(|chunk| crate::state::buffer::Message {
+                id: out.echo_id,
+                timestamp: chrono::Utc::now(),
+                message_type: message_type.clone(),
+                nick: Some(out.nick.clone()),
+                nick_mode: nick_mode_str.clone(),
+                text: chunk,
+                highlight: false,
+                event_key: None,
+                event_params: None,
+                log_msg_id: None,
+                log_ref_id: None,
+                tags: None,
+                wire_origin: wire_origin.clone(),
+            })
+            .collect();
+        // `add_own_message_chunks`, not `add_message`: this echo carries the
+        // nick captured at dispatch, so a `/nick` during the wait would make
+        // the dispatch gate mistake it for someone else's line and translate
+        // our own message a second time.
+        self.state.add_own_message_chunks(&echo_buffer, chunks);
     }
 
     /// Route a translation-pipeline error to the right buffer, falling back
@@ -1829,6 +1928,14 @@ mod app_tests {
 
     const BUF: &str = "test/#dupa";
 
+    /// A dispatch instant safely before anything the test does afterwards,
+    /// so a rename that happens during the test counts as "after dispatch".
+    fn dispatched_long_ago() -> std::time::Instant {
+        std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .expect("a second before now")
+    }
+
     fn message(id: u64, text: &str) -> Message {
         Message {
             id,
@@ -1885,6 +1992,7 @@ mod app_tests {
                 id: 2,
                 text: "second".to_string(),
             },
+            submitted_at: dispatched_long_ago(),
         });
         assert!(
             shown(&app).is_empty(),
@@ -1896,6 +2004,7 @@ mod app_tests {
                 id: 1,
                 text: "first".to_string(),
             },
+            submitted_at: dispatched_long_ago(),
         });
         assert_eq!(
             shown(&app),
@@ -1913,6 +2022,7 @@ mod app_tests {
                 id: 1,
                 text: "x".to_string(),
             },
+            submitted_at: dispatched_long_ago(),
         });
         assert!(
             !app.state.translate_queues.contains_key(BUF),
@@ -1929,6 +2039,7 @@ mod app_tests {
                 id: 1,
                 text: "x".to_string(),
             },
+            submitted_at: dispatched_long_ago(),
         });
     }
 
@@ -2144,6 +2255,124 @@ mod app_tests {
     }
 
     #[test]
+    fn a_backend_cannot_inject_an_irc_command_through_a_line_break() {
+        // The backend is untrusted and its output goes on the socket.
+        // `send_privmsg` only breaks on \r\n, so a bare \n rides into the
+        // trailing parameter — and a server accepting bare-LF endings reads
+        // everything after it as a fresh command.
+        let mut app = app_with_dying_handle(usize::MAX);
+        app.conn_generations.insert("test".to_string(), 1);
+        let sender = app.irc_handles["test"].sender().clone();
+        let mut out = outgoing(
+            "moje zdanie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "hello\nJOIN #evil".to_string(),
+            },
+            false,
+        );
+        out.conn_generation = Some(1);
+        app.state.reserve_echo_slot(BUF, 1);
+
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+
+        let wire: Vec<String> = sender.captured().iter().map(ToString::to_string).collect();
+        assert!(
+            wire.is_empty(),
+            "nothing containing a line break may reach the socket: {wire:?}"
+        );
+        assert_eq!(
+            app.input.value, "moje zdanie",
+            "and the user's text comes back rather than being lost"
+        );
+    }
+
+    #[test]
+    fn a_stale_send_is_refused_rather_than_delivered_to_the_new_nick() {
+        // `frank` renamed to `frankie` while this was translating, and their
+        // window has since closed. The only name left to address is `frank`
+        // — which somebody else may now hold. This is a private message.
+        let mut app = app_with_dying_handle(usize::MAX);
+        app.conn_generations.insert("test".to_string(), 1);
+        app.state.rekey_buffer_state("test/frank", "test/frankie");
+        // Renamed, then closed: no `test/frankie` buffer exists.
+        let sender = app.irc_handles["test"].sender().clone();
+        let mut out = outgoing(
+            "moje zdanie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "mein satz".to_string(),
+            },
+            false,
+        );
+        out.buffer_id = "test/frank".to_string();
+        out.buffer_name = "frank".to_string();
+        out.buffer_type = BufferType::Query;
+        out.conn_generation = Some(1);
+        out.submitted_at = dispatched_long_ago();
+
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+
+        let wire: Vec<String> = sender.captured().iter().map(ToString::to_string).collect();
+        assert!(
+            wire.is_empty(),
+            "a private message must not go to whoever holds the old nick now: {wire:?}"
+        );
+        assert_eq!(
+            app.input.value, "moje zdanie",
+            "and it comes back to its author"
+        );
+    }
+
+    #[test]
+    fn a_split_echo_stays_in_one_piece_around_an_incoming_line() {
+        // `show_original_out` appends the original, which routinely pushes a
+        // translated echo past the byte budget. All its chunks belong to the
+        // ONE reserved place: fresh ids for the continuations let a line that
+        // arrived during the translation sort between them, splitting the
+        // user's own sentence around somebody else's reply.
+        let mut app = app_with_dying_handle(usize::MAX);
+        app.conn_generations.insert("test".to_string(), 1);
+        let mut queue = TranslateQueue::new();
+        queue.reserve(1); // our echo, submitted first
+        app.state.translate_queues.insert(BUF.to_string(), queue);
+        // A reply that arrived while we were translating: a LATER id.
+        let reply_id = app.state.next_message_id();
+        app.state.add_message_with_activity(
+            BUF,
+            message(reply_id, "a reply that arrived meanwhile"),
+            ActivityLevel::Activity,
+        );
+
+        let long = "wieloslowne zdanie ".repeat(30);
+        let mut out = outgoing(
+            "krotkie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: long.trim().to_string(),
+            },
+            true, // show_original — this is what makes it split
+        );
+        out.conn_generation = Some(1);
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+
+        let rows = shown(&app);
+        let reply_at = rows
+            .iter()
+            .position(|t| t.contains("a reply that arrived meanwhile"))
+            .expect("the reply is displayed");
+        assert!(
+            reply_at > 0,
+            "our own message comes first — it was submitted first: {rows:?}"
+        );
+        assert_eq!(
+            reply_at,
+            rows.len() - 1,
+            "and ALL of it comes first: the reply must not land inside it: {rows:?}"
+        );
+    }
+
+    #[test]
     fn a_translation_that_came_back_too_late_is_not_sent() {
         // Its display reservation expired on schedule, so there is nowhere
         // for the echo to go and the user has already watched the line
@@ -2232,6 +2461,9 @@ mod app_tests {
         out.buffer_name = "frank".to_string();
         out.buffer_type = BufferType::Query;
         out.conn_generation = Some(1);
+        // Submitted while they were still `frank` — which is what makes the
+        // rename apply to this message.
+        out.submitted_at = dispatched_long_ago();
 
         app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
 
@@ -2277,6 +2509,7 @@ mod app_tests {
                 id: 1,
                 text: "dzien dobry".to_string(),
             },
+            submitted_at: dispatched_long_ago(),
         });
 
         assert_eq!(
@@ -2288,17 +2521,27 @@ mod app_tests {
     }
 
     #[test]
-    fn a_redirect_never_hijacks_a_fresh_conversation_under_the_old_nick() {
+    fn a_redirect_applies_by_dispatch_time_not_by_which_buffers_exist() {
         // Somebody else takes the abandoned nick and the user opens a query
-        // with THEM. That buffer is live, so it wins: the redirect is about
-        // a different conversation entirely.
+        // with THEM. Both conversations now key off `test/frank` at
+        // different times, and only the timestamp separates them.
         let mut app = app_after_a_query_rename();
+        let before_the_rename = dispatched_long_ago();
         app.state
             .add_buffer(Buffer::for_test("test", BufferType::Query, "frank"));
+
         assert_eq!(
-            app.state.redirected_buffer_id("test/frank"),
+            app.state
+                .redirected_buffer_id("test/frank", before_the_rename),
+            Some("test/frankie"),
+            "work from before the rename belongs to the peer who moved — \
+             even though a live buffer now sits under the old id"
+        );
+        assert_eq!(
+            app.state
+                .redirected_buffer_id("test/frank", std::time::Instant::now()),
             None,
-            "a live buffer under the old id is not a stale reference"
+            "work dispatched since belongs to whoever holds the nick now"
         );
     }
 
@@ -3631,7 +3874,7 @@ mod tests {
         let mut seen = Vec::new();
         for _ in 0..3 {
             match rt.deliver_rx.recv().await {
-                Some(TranslateDeliver::Incoming { outcome, buffer_id }) => {
+                Some(TranslateDeliver::Incoming { outcome, buffer_id, .. }) => {
                     assert_eq!(buffer_id, "libera/#dupa");
                     seen.push(outcome.id());
                 }
@@ -3904,6 +4147,95 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_multi_line_answer_is_refused_but_a_trailing_newline_is_trimmed() {
+        use crate::translate::UntranslatedReason;
+        // Embedded breaks are a broken response whatever they say — the
+        // contract is one line per request, and guessing which line the user
+        // meant is not a thing to do with text about to be published under
+        // their nick. A TRAILING newline is a correct answer with a stray
+        // byte on it.
+        let refused = super::single_line_or_refuse(TranslateOutcome::Translated {
+            id: 1,
+            text: "hello\nJOIN #evil".to_string(),
+        });
+        assert!(
+            matches!(
+                refused,
+                TranslateOutcome::Untranslated {
+                    reason: UntranslatedReason::Error(_),
+                    ..
+                }
+            ),
+            "got {refused:?}"
+        );
+
+        let trimmed = super::single_line_or_refuse(TranslateOutcome::Translated {
+            id: 2,
+            text: "mein satz\r\n".to_string(),
+        });
+        assert!(
+            matches!(&trimmed, TranslateOutcome::Translated { text, .. } if text == "mein satz"),
+            "got {trimmed:?}"
+        );
+
+        let clean = super::single_line_or_refuse(TranslateOutcome::Translated {
+            id: 3,
+            text: "mein satz".to_string(),
+        });
+        assert!(
+            matches!(&clean, TranslateOutcome::Translated { text, .. } if text == "mein satz"),
+            "an ordinary answer is untouched: {clean:?}"
+        );
+    }
+
+    /// A backend that answers with whatever it is handed at construction —
+    /// standing in for a compromised or simply broken provider.
+    #[derive(Debug)]
+    struct EchoingBackend(String);
+
+    impl crate::translate::backend::TranslateBackend for EchoingBackend {
+        fn translate(
+            &self,
+            req: crate::translate::TranslateRequest,
+        ) -> futures::future::BoxFuture<'_, TranslateOutcome> {
+            let text = self.0.clone();
+            Box::pin(async move { TranslateOutcome::Translated { id: req.id, text } })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_multi_line_answer_never_leaves_the_worker_as_a_translation() {
+        // The guard has to be wired into the worker, not merely to exist:
+        // this is the boundary where a third party's bytes enter a process
+        // that will put them on an IRC socket.
+        let mut rt = TranslateRuntime::with_backend(
+            Some(Arc::new(EchoingBackend("hello\nJOIN #evil".to_string()))),
+            &cfg(4),
+        );
+        rt.incoming_tx
+            .send(PendingTranslate {
+                buffer_id: "b".to_string(),
+                req: req(1, "hello world"),
+                submitted_at: std::time::Instant::now(),
+            })
+            .await
+            .expect("worker alive");
+        match rt.deliver_rx.recv().await {
+            Some(TranslateDeliver::Incoming { outcome, .. }) => assert!(
+                matches!(
+                    outcome,
+                    TranslateOutcome::Untranslated {
+                        reason: crate::translate::UntranslatedReason::Error(_),
+                        ..
+                    }
+                ),
+                "a multi-line answer must not emerge as a Translated outcome: {outcome:?}"
+            ),
+            other => panic!("expected an incoming deliver, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn disabled_runtime_drains_instead_of_backpressuring() {
         // With no backend the gates never dispatch, but a stale `try_send`
@@ -4006,7 +4338,7 @@ mod ordering_integration {
         let mut arrival_order = Vec::new();
         for _ in 0..LINES {
             let deliver = rt.deliver_rx.recv().await.expect("an outcome per line");
-            let TranslateDeliver::Incoming { buffer_id, outcome } = deliver else {
+            let TranslateDeliver::Incoming { buffer_id, outcome, .. } = deliver else {
                 panic!("expected an incoming outcome");
             };
             arrival_order.push(outcome.id());

@@ -100,6 +100,26 @@ contract entirely rather than present-but-unused.
 `known_nicks` travels in the request because only the client knows the channel's
 nicklist, and masking (behind the seam) needs it.
 
+### 2.0 The backend is untrusted
+
+Its output goes onto an IRC socket under the user's nick, so it is validated on the
+way in, not assumed well-formed. **A `Translated` answer must be one line.**
+`IrcSender::send_privmsg` breaks only on `\r\n`; a bare `\n` is copied into the
+trailing parameter verbatim, and a server that accepts bare-LF line endings reads
+everything after it as a fresh command — `hello\nJOIN #evil` would join a channel.
+
+`single_line_or_refuse` trims trailing CR/LF (a model ending its answer with a
+newline has produced a correct translation with a stray byte on it) and refuses
+anything with a break embedded. Refusing rather than sanitising, because the contract
+is one line per request: a multi-line answer is a broken response whatever it says,
+and picking one of its lines to publish under the user's nick is not a guess worth
+making.
+
+The deliver path re-checks every wire payload immediately before sending. That is
+deliberate duplication — the last point before bytes reach the socket, making the
+refusal a property of the send rather than of one upstream check, exactly as
+`build_outgoing_translate` re-runs the E2E gate.
+
 ### 2.1 `Filtered` is not a failure
 
 `Untranslated { Filtered }` means the broker correctly decided this line needs no
@@ -241,10 +261,17 @@ queue and its line sits until the timeout, and — worse — an outgoing send ad
 nick its owner no longer answers to, which if somebody else has claimed it in the
 meantime means sending it to a stranger.
 
-A live buffer under the old id always beats the redirect: that is somebody who took
-the abandoned nick, and the conversation with them is not the one the redirect is
-about. Redirects also expire, so a stranger who claims the nick later inherits
-nothing.
+The redirect applies on **time**, not on which buffers exist: work dispatched before
+the rename belongs to the conversation that moved, work dispatched after belongs to
+whoever holds that nick now. Both questions have to be answered at once and only the
+timestamp answers them — which is why `submitted_at` (§3.4) is on both pending
+structs. Redirects also expire.
+
+An earlier version keyed on "is there a live buffer under the old id". That gets the
+second case right and the first case badly wrong: it leaves the deliver addressing the
+stale NAME, so a pending private message is handed to the stranger who claimed the
+nick. When a redirect applies but its target window is gone, the send is therefore
+**refused** rather than falling through to the old name.
 
 The migrated key is not written to disk. `/translate add*|del*` writes the file and
 will carry it along next time; rewriting `config.toml` in response to somebody else's
@@ -337,7 +364,12 @@ Ordering is therefore split:
   global queue would let one hung request on network A block translated sends on
   network B.
 - **Echo order** — the local echo enters the buffer's display queue like any other
-  row (§3.2), taking the `id` it was allocated at submission.
+  row (§3.2), taking the `id` it was allocated at submission. When it splits into
+  several rows — which `show_original_out` makes routine, because the appended
+  original pushes it past the byte budget — *all* of them occupy that one reserved
+  place. Fresh ids for the continuations would let a line that arrived during the
+  translation sort between them, so the buffer would show the first chunk, somebody
+  else's reply, then the rest of the user's own sentence.
 
 A consequence worth stating: with incoming lines pending, the user's own message can
 appear on the wire before its echo appears on their screen. This is accepted. The

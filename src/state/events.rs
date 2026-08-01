@@ -523,19 +523,31 @@ impl AppState {
     /// redirect meant for its previous owner.
     const REDIRECT_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
-    /// Where work dispatched against `buffer_id` should go now, if that
-    /// buffer has since been re-keyed.
+    /// Where work dispatched against `buffer_id` at `dispatched_at` should go
+    /// now, if that buffer has since been re-keyed.
     ///
-    /// A live buffer under the old id always wins: somebody has taken the
-    /// abandoned nick and opened a fresh conversation with them, and that
-    /// conversation is not the one the redirect is about.
+    /// The decision is made on TIME, not on whether a buffer still exists
+    /// under the old id. Both questions have to be answered at once and only
+    /// the timestamp answers them:
+    ///
+    /// - Work dispatched BEFORE the rename belongs to the conversation that
+    ///   moved, so it follows — even if somebody has since claimed the
+    ///   abandoned nick and opened a fresh query under the same id.
+    /// - Work dispatched AFTER belongs to whoever holds that nick now, so it
+    ///   stays put.
+    ///
+    /// An earlier version keyed on "is there a live buffer under the old id",
+    /// which gets the second case right and the first case catastrophically
+    /// wrong: it silently addresses the stale name, so a pending private
+    /// message is delivered to the stranger who took the nick.
     #[must_use]
-    pub fn redirected_buffer_id(&self, buffer_id: &str) -> Option<&str> {
-        if self.buffers.contains_key(buffer_id) {
-            return None;
-        }
-        let (new_id, at) = self.buffer_redirects.get(buffer_id)?;
-        if at.elapsed() >= Self::REDIRECT_TTL {
+    pub fn redirected_buffer_id(
+        &self,
+        buffer_id: &str,
+        dispatched_at: std::time::Instant,
+    ) -> Option<&str> {
+        let (new_id, renamed_at) = self.buffer_redirects.get(buffer_id)?;
+        if renamed_at.elapsed() >= Self::REDIRECT_TTL || *renamed_at < dispatched_at {
             return None;
         }
         Some(new_id.as_str())
@@ -605,18 +617,39 @@ impl AppState {
     /// connection's, and the "is this ours" test would wrongly say no and
     /// translate our own message a second time.
     pub fn add_own_message(&mut self, buffer_id: &str, message: Message) {
+        self.add_own_message_chunks(buffer_id, vec![message]);
+    }
+
+    /// [`Self::add_own_message`] for a message that became several rows.
+    ///
+    /// They take the ONE place reserved at submission, in order. Allocating
+    /// fresh ids for the continuations would let a line that arrived during
+    /// the translation sort between them, splitting the user's own sentence
+    /// around somebody else's reply.
+    pub fn add_own_message_chunks(&mut self, buffer_id: &str, chunks: Vec<Message>) {
+        let Some(first_id) = chunks.first().map(|m| m.id) else {
+            return;
+        };
         if let Some(queue) = self.translate_queues.get_mut(buffer_id) {
-            let id = message.id;
+            let rows: Vec<(Message, ActivityLevel)> = chunks
+                .iter()
+                .cloned()
+                .map(|m| (m, ActivityLevel::None))
+                .collect();
             // Fill the place held at submission when there is one. Failing
             // that, insert by id — a deferred echo's id was allocated when
             // the user pressed Enter, so appending would render their own
             // message after the replies to it.
-            if !queue.fill_reserved(id, message.clone(), ActivityLevel::None) {
-                queue.insert_resolved_in_order(id, message, ActivityLevel::None);
+            if !queue.fill_reserved_with(first_id, rows) {
+                for message in chunks {
+                    queue.insert_resolved_in_order(first_id, message, ActivityLevel::None);
+                }
             }
             return;
         }
-        self.add_message_unshrunk(buffer_id, message);
+        for message in chunks {
+            self.add_message_unshrunk(buffer_id, message);
+        }
     }
 
     /// Decide what happens to a message on a translation-enabled buffer.

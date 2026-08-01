@@ -116,8 +116,12 @@ incoming direction, and a message of yours already being translated is still
 sent when it comes back.
 
 If the person you are talking to changes nick, the settings and any lines in
-flight follow the conversation. The saved setting still names the nick you
-typed, so it is that name a restart looks for.
+flight follow the conversation — including a message of yours that was still
+being translated, which goes to them under their new nick and never to
+whoever may have picked up the old one. If their window has closed by then,
+the message is refused and handed back rather than sent to a name that is no
+longer theirs. The saved setting still names the nick you typed, so it is
+that name a restart looks for.
 
 ## When translation does not happen
 
@@ -125,6 +129,11 @@ A line that was not translated is shown as its original, marked with the
 reason:
 
     11:32:33 alice> hola que tal [untranslated: timeout]
+
+A translation that comes back as more than one line is refused outright. The
+translator is an outside service and its answer is about to be sent under
+your nick, so anything that could be read as a second IRC command never
+reaches the network.
 
 Never a guess, never a partial translation. A fluent sentence that means
 something else is the one failure a reader cannot detect, so a visible gap is

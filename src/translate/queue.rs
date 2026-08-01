@@ -179,22 +179,60 @@ impl TranslateQueue {
         });
     }
 
-    /// Fill a reserved place with the row it was held for.
+    /// Fill a reserved place with the rows it was held for, keeping them
+    /// together.
+    ///
+    /// One submitted message can become several rows: a translated echo long
+    /// enough to split, which `show_original_out` makes common because the
+    /// appended original pushes it past the budget. They occupy the ONE
+    /// reserved position, in order, rather than taking ids allocated now —
+    /// a line that arrived during the translation holds an id between the
+    /// reservation and any fresh one, so ordering the continuations by id
+    /// would render the first chunk, then the reply, then the rest of the
+    /// user's own sentence.
     ///
     /// Returns `false` when the id is unknown — the reservation was already
     /// released by a timeout, a flush, or a buffer close.
-    pub fn fill_reserved(&mut self, id: u64, message: Message, activity: ActivityLevel) -> bool {
-        let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) else {
+    pub fn fill_reserved_with(
+        &mut self,
+        id: u64,
+        rows: Vec<(Message, ActivityLevel)>,
+    ) -> bool {
+        let Some(pos) = self
+            .entries
+            .iter()
+            .position(|e| e.id == id && matches!(e.slot, Some(Slot::Reserved { .. })))
+        else {
             return false;
         };
-        if !matches!(entry.slot, Some(Slot::Reserved { .. })) {
-            return false;
-        }
-        entry.slot = Some(Slot::Ready {
-            message,
+        let mut rows = rows.into_iter();
+        let Some((first, activity)) = rows.next() else {
+            // Nothing to put there after all; give the place back rather
+            // than leave a barrier nothing will ever fill.
+            self.entries.remove(pos);
+            return true;
+        };
+        self.entries[pos].slot = Some(Slot::Ready {
+            message: first,
             activity,
             reason: None,
         });
+        for (offset, (message, activity)) in rows.enumerate() {
+            self.entries.insert(
+                pos + 1 + offset,
+                Entry {
+                    // The SAME id as the row it continues: these are one
+                    // message, and a later `insert_resolved_in_order` must
+                    // place a newer line after all of them, not between.
+                    id,
+                    slot: Some(Slot::Ready {
+                        message,
+                        activity,
+                        reason: None,
+                    }),
+                },
+            );
+        }
         true
     }
 
@@ -578,7 +616,10 @@ mod tests {
         );
         assert!(!q.is_empty(), "the queue survives, so nothing prunes it");
 
-        assert!(q.fill_reserved(10, message(10, "my own line"), ActivityLevel::None));
+        assert!(q.fill_reserved_with(
+            10,
+            vec![(message(10, "my own line"), ActivityLevel::None)]
+        ));
         assert_eq!(ids(&q.drain_ready()), vec![10, 11]);
     }
 
@@ -609,7 +650,7 @@ mod tests {
     #[test]
     fn filling_an_unknown_reservation_reports_it_rather_than_panicking() {
         let mut q = TranslateQueue::new();
-        assert!(!q.fill_reserved(10, message(10, "x"), ActivityLevel::None));
+        assert!(!q.fill_reserved_with(10, vec![(message(10, "x"), ActivityLevel::None)]));
     }
 
     #[test]
