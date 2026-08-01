@@ -205,6 +205,25 @@ Pending entries must be released — untranslated, in order — rather than lost
 the buffer is closed (`/close`, `/part`), the connection drops, the app quits or
 detaches, or `/translate delin|delout` disables the buffer.
 
+### 3.6 Lifting a barrier is a release event
+
+An outgoing message holds a `Reserved` slot in its buffer's queue (§5.1). While it
+sits at the head it is a barrier: every line that finishes translating behind it is
+`Resolved` but undeliverable.
+
+That reservation goes away in exactly two ways — it is **filled** by the local echo,
+or **released** because no echo will come. Both make the head deliverable, so both
+must be followed by a drain. They are the only release events that do not arrive
+through `resolve_incoming_translation`, and the outgoing delivery arm never revisits
+the queue afterwards, so a bare `release_echo_slot` leaves the echo *and* the replies
+queued behind it invisible until the next one-second maintenance tick.
+
+`App::release_echo_slot_and_drain` pairs the two so the delivery path cannot do one
+without the other; the fill case drains explicitly at the end of
+`send_outgoing_translated`. Reservations released *at the tail* — a dispatch that
+fails its `try_send` the moment after reserving — need no drain, because a tail entry
+was never blocking anything.
+
 ---
 
 ## 4. Incoming path
@@ -278,6 +297,38 @@ A `/me` is translated as its inner text: handing the `\x01ACTION …\x01` framin
 to a translator returns anything but a valid CTCP, so the request carries the
 prose and the deliver path re-wraps it. Every other CTCP is protocol and passes
 through untouched.
+
+### 5.3 A send that fails after the wait
+
+The composer is cleared at submission, so from the moment a message is dispatched
+the only copy of the user's text is inside the pending request. Between dispatch and
+delivery the connection can go away — the handle precheck can pass and the send fail
+anyway, because the writer task dies independently of the map entry.
+
+Three things have to happen on that path, and which of them depends on how far the
+send got:
+
+- **The reservation always goes back** (§3.6), whether or not anything was sent.
+- **Nothing was sent** → the retry text is restored to whoever submitted it, exactly
+  as an up-front refusal does. Anything else means the user watches a message they
+  typed disappear with no trace.
+- **A split message got partway** → the first chunks are already on the channel. The
+  text is put in the error row and deliberately **not** restored to the composer:
+  handing back the whole line invites the user to press Enter and publish those
+  chunks a second time. The row says so, rather than leaving the truncation to be
+  discovered from the channel.
+
+"Whoever submitted it" is the origin captured at dispatch, never the current one —
+see §5.4.
+
+### 5.4 A refusal goes back to the client that typed it
+
+Every submitting path scopes `App::submit_origin` for the duration of the submit, so
+a refusal restores the text where its author is looking. That includes both web
+arms: the browser composer sends plain lines as `SendMessage` and every `/`-prefixed
+line as `RunCommand`, and both end in the same `handle_submit`. Scoping only the
+first would return a refused `/msg` to the *terminal's* input line — lost for its
+author, and dropped into a window nobody is watching.
 
 ---
 

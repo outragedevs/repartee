@@ -993,19 +993,8 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
             // nothing.
             if path.starts_with("translate.") {
                 app.sync_translate_from_config();
-                if path == "translate.enabled"
-                    && app.config.translate.enabled
-                    && !app.state.translate_active
-                {
-                    crate::commands::helpers::add_local_event(
-                        app,
-                        &format!(
-                            "{warn}translate: enabled but no backend was built \
-                             at startup — restart to activate{rst}",
-                            warn = crate::commands::types::C_ERR,
-                            rst = crate::commands::types::C_RST,
-                        ),
-                    );
+                if path == "translate.enabled" {
+                    crate::commands::helpers::warn_if_translate_needs_restart(app);
                 }
             }
 

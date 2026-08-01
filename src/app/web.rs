@@ -526,7 +526,16 @@ impl App {
                 self.web_fetch_mentions(session_id);
             }
             WebCommand::RunCommand { buffer_id, text } => {
+                // The same origin scope as `SendMessage`, for the same
+                // reason. The web composer dispatches every `/`-prefixed line
+                // as `RunCommand`, and `/msg`, `/query <peer> <text>` and
+                // `/me` all reach the outgoing translation gate — so a
+                // refusal must return the text to THIS browser, not to the
+                // terminal's input line where its author cannot see it.
+                self.submit_origin =
+                    crate::app::translate::SubmitOrigin::Web(session_id.to_string());
                 let sent_message = self.web_run_command(&buffer_id, &text);
+                self.submit_origin = crate::app::translate::SubmitOrigin::Tui;
                 self.on_typing_submit(
                     &crate::app::typing::TypingSource::Web(session_id.to_string()),
                     &buffer_id,

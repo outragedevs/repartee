@@ -655,7 +655,7 @@ impl crate::app::App {
                 // No echo will be written, so the place held for it must be
                 // given back — leaving it would block the buffer until the
                 // queue timeout.
-                self.state.release_echo_slot(&out.buffer_id, out.echo_id);
+                self.release_echo_slot_and_drain(&out.buffer_id, out.echo_id);
                 self.restore_outgoing_input(out, &reason_label);
                 return;
             }
@@ -670,7 +670,7 @@ impl crate::app::App {
                 &out.buffer_id,
                 "Failed to send message — connection unavailable",
             );
-            self.state.release_echo_slot(&out.buffer_id, out.echo_id);
+            self.release_echo_slot_and_drain(&out.buffer_id, out.echo_id);
             let retry = out.retry_text.clone();
             let origin = out.origin.clone();
             self.restore_input_text_to(&retry, &origin);
@@ -724,6 +724,37 @@ impl crate::app::App {
             self.drain_pending_e2e_sends();
         }
         if !send_ok {
+            // The handle was there at the precheck and the send failed
+            // anyway — the writer task went away in between. No echo will be
+            // written, so the reservation has to go back or this buffer stays
+            // barricaded behind it until the queue timeout.
+            self.release_echo_slot_and_drain(&out.buffer_id, out.echo_id);
+            if sent_any {
+                // A split message that died halfway already put its first
+                // chunks on the channel. Restoring the whole line into the
+                // composer would invite the user to send those chunks a
+                // second time, so it goes to the error row and nowhere else.
+                let retry = out.retry_text.clone();
+                self.deliver_translate_error(
+                    &out.buffer_id,
+                    &format!(
+                        "{err}Part of the message was sent — the rest was not.{rst} \
+                         {dim}Not restored to the input line, to avoid sending the \
+                         first part twice.{rst}\n{dim}Your text:{rst} {retry}",
+                        err = crate::commands::types::C_ERR,
+                        dim = crate::commands::types::C_DIM,
+                        rst = crate::commands::types::C_RST,
+                    ),
+                );
+                return;
+            }
+            // Nothing reached the wire, and the composer was cleared at
+            // submission. Same as the connection-unavailable branch above:
+            // hand the text back rather than let the user watch a message
+            // they typed disappear without a trace.
+            let retry = out.retry_text.clone();
+            let origin = out.origin.clone();
+            self.restore_input_text_to(&retry, &origin);
             return;
         }
         // Honour the submitting call site's intent. `BufferInput` keeps the
@@ -746,6 +777,11 @@ impl crate::app::App {
             // written and the reservation has no filler.
             self.state.release_echo_slot(&out.buffer_id, out.echo_id);
         }
+        // Both branches just lifted the barrier this send was holding —
+        // by filling it or by giving it up. Whichever it was, the echo and
+        // any lines that finished translating behind it are deliverable NOW,
+        // and this arm is the one that never comes back to the queue.
+        self.drain_translate_queue(&out.buffer_id);
     }
 
     /// Assemble the outgoing translation request, capturing every
@@ -1148,7 +1184,7 @@ impl crate::app::App {
                     // E2E state can change during the wait, nothing reached
                     // the wire, and the composer was cleared at submission.
                     self.deliver_translate_error(&out.buffer_id, &reason.user_message());
-                    self.state.release_echo_slot(&out.buffer_id, out.echo_id);
+                    self.release_echo_slot_and_drain(&out.buffer_id, out.echo_id);
                     let retry = out.retry_text.clone();
                     let origin = out.origin.clone();
                     self.restore_input_text_to(&retry, &origin);
@@ -1376,6 +1412,34 @@ impl crate::app::App {
             remaining = self.translate_in_flight_debt,
             "translate: settled part of a concurrency reduction"
         );
+    }
+
+    /// Release whatever one buffer's queue has ready, and drop it if that
+    /// emptied it.
+    ///
+    /// The outgoing delivery arm needs this because it is the only path that
+    /// lifts a barrier without going through
+    /// [`Self::resolve_incoming_translation`]. Filling or releasing a
+    /// reservation that sits at the HEAD makes it — and every resolved line
+    /// queued behind it — deliverable at once, and nothing would revisit the
+    /// queue until the one-second maintenance tick.
+    fn drain_translate_queue(&mut self, buffer_id: &str) {
+        let Some(queue) = self.state.translate_queues.get_mut(buffer_id) else {
+            return;
+        };
+        let ready = queue.drain_ready();
+        self.release_translated(buffer_id, ready);
+        self.prune_empty_translate_queues();
+    }
+
+    /// Give a reservation back and release whatever that unblocks.
+    ///
+    /// Always this pair, never a bare `release_echo_slot`, on the delivery
+    /// side: a reservation is a barrier, so dropping one at the head is just
+    /// as much a release event as filling it.
+    fn release_echo_slot_and_drain(&mut self, buffer_id: &str, id: u64) {
+        self.state.release_echo_slot(buffer_id, id);
+        self.drain_translate_queue(buffer_id);
     }
 
     /// Drop queues that have fully drained, so the tick has nothing to walk
@@ -1810,6 +1874,161 @@ mod app_tests {
         );
     }
 
+    /// `app_with_buffer` plus an IRC handle whose sender accepts
+    /// `ok_before_failure` frames and then fails — a writer task that goes
+    /// away AFTER the precheck found the handle present.
+    fn app_with_dying_handle(ok_before_failure: usize) -> crate::app::App {
+        let mut app = app_with_buffer();
+        app.irc_handles.insert(
+            "test".to_string(),
+            crate::irc::handle::IrcHandle::new(
+                "test".to_string(),
+                crate::irc::handle::IrcSender::capturing_then_failing(ok_before_failure),
+                None,
+                None,
+            ),
+        );
+        app
+    }
+
+    /// How many entries — reservations included — are still parked in this
+    /// buffer's queue.
+    fn queued(app: &crate::app::App) -> usize {
+        app.state
+            .translate_queues
+            .get(BUF)
+            .map_or(0, crate::translate::queue::TranslateQueue::len)
+    }
+
+    #[test]
+    fn a_send_that_fails_outright_returns_the_text_and_frees_the_queue() {
+        // The handle was present at the precheck and the send failed anyway.
+        // Nothing reached the wire and the composer was cleared at submit, so
+        // the message exists nowhere unless it comes back.
+        let mut app = app_with_dying_handle(0);
+        app.state.reserve_echo_slot(BUF, 1);
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(outgoing(
+            "moje zdanie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "mein satz".to_string(),
+            },
+            false,
+        ))));
+        assert_eq!(
+            app.input.value, "moje zdanie",
+            "nothing was sent, so the text must come back"
+        );
+        assert_eq!(
+            queued(&app),
+            0,
+            "the reservation is given back — leaving it barricades the buffer \
+             until the queue timeout"
+        );
+    }
+
+    #[test]
+    fn a_send_that_fails_halfway_keeps_the_text_out_of_the_composer() {
+        // A split message whose first chunk is already on the channel. Handing
+        // the whole line back invites the user to press Enter and publish that
+        // first chunk a second time.
+        let mut app = app_with_dying_handle(1);
+        app.state.reserve_echo_slot(BUF, 1);
+        let long = "wieloslowne zdanie ".repeat(40);
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(outgoing(
+            "krotkie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: long.trim().to_string(),
+            },
+            false,
+        ))));
+        assert!(
+            app.input.value.is_empty(),
+            "part of it is already published — do not offer to send that twice: {:?}",
+            app.input.value
+        );
+        let rows: Vec<String> = app.state.buffers[BUF]
+            .messages
+            .iter()
+            .map(|m| m.text.clone())
+            .collect();
+        assert!(
+            rows.iter().any(|t| t.contains("Part of the message was sent")),
+            "the partial send is named rather than silently dropped: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|t| t.contains("krotkie")),
+            "and the text is still visible somewhere: {rows:?}"
+        );
+        assert_eq!(
+            queued(&app),
+            0,
+            "the reservation is given back on this path too"
+        );
+    }
+
+    #[test]
+    fn an_echo_releases_the_lines_queued_behind_it_at_once() {
+        // The reservation is a barrier. Filling it makes the echo AND every
+        // line that finished translating behind it deliverable — and the
+        // outgoing arm is the one that never revisits the queue, so waiting
+        // for the maintenance tick would blank the channel for a full second.
+        let mut app = app_with_dying_handle(usize::MAX);
+        let mut queue = TranslateQueue::new();
+        queue.reserve(1);
+        queue.push_pending(2, "line two".to_string(), payload(2, "line two"));
+        queue.resolve(2, Ok("linia dwa".to_string()));
+        app.state.translate_queues.insert(BUF.to_string(), queue);
+
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(outgoing(
+            "moje zdanie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "mein satz".to_string(),
+            },
+            false,
+        ))));
+
+        assert_eq!(
+            shown(&app),
+            vec!["mein satz".to_string(), "linia dwa".to_string()],
+            "our own line, then the reply that was waiting behind it — with no \
+             tick in between"
+        );
+        assert!(
+            !app.state.translate_queues.contains_key(BUF),
+            "and the drained queue is pruned"
+        );
+    }
+
+    #[test]
+    fn a_released_reservation_also_releases_what_was_behind_it() {
+        // Same barrier, lifted the other way: the send is refused, so no echo
+        // fills the slot. The line queued behind it must still come out now.
+        let mut app = app_with_buffer();
+        let mut queue = TranslateQueue::new();
+        queue.reserve(1);
+        queue.push_pending(2, "line two".to_string(), payload(2, "line two"));
+        queue.resolve(2, Ok("linia dwa".to_string()));
+        app.state.translate_queues.insert(BUF.to_string(), queue);
+
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(outgoing(
+            "moje zdanie",
+            TranslateOutcome::Untranslated {
+                id: 1,
+                reason: crate::translate::UntranslatedReason::NoProvider,
+            },
+            false,
+        ))));
+
+        assert!(
+            shown(&app).contains(&"linia dwa".to_string()),
+            "the waiting line is released as soon as the barrier goes: {:?}",
+            shown(&app)
+        );
+    }
+
     fn set_buffer_langs(app: &mut crate::app::App, lang: Option<&str>, my_lang: Option<&str>) {
         app.config.translate.buffers.insert(
             BUF.to_string(),
@@ -2125,6 +2344,64 @@ mod app_tests {
         };
         assert_eq!(text, "moje zdanie");
         assert_eq!(session.as_deref(), Some("alice-session"));
+    }
+
+    #[test]
+    fn a_refused_slash_command_from_the_web_goes_back_to_that_browser() {
+        // The web composer dispatches `/msg` as `RunCommand`, not
+        // `SendMessage` — but both end in the same `handle_submit` and the
+        // same outgoing translation gate. Without the origin scope on this
+        // arm too, the refusal restores the text into the TERMINAL's input
+        // line: lost for its author, dropped where nobody is looking.
+        let mut app = app_with_outgoing(None); // no target language → refuse
+        app.irc_handles.insert(
+            "test".to_string(),
+            crate::irc::handle::IrcHandle::new(
+                "test".to_string(),
+                crate::irc::handle::IrcSender::capturing(0),
+                None,
+                None,
+            ),
+        );
+        let mut rx = app.web_broadcaster.subscribe();
+
+        app.handle_web_command(
+            crate::web::protocol::WebCommand::RunCommand {
+                buffer_id: BUF.to_string(),
+                text: "/msg #dupa moje zdanie".to_string(),
+            },
+            "alice-session",
+        );
+
+        assert!(
+            app.input.value.is_empty(),
+            "the terminal input belongs to whoever is sitting at it: {:?}",
+            app.input.value
+        );
+        let restored: Vec<(String, Option<String>)> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|ev| match ev {
+                crate::web::protocol::WebEvent::RestoreInput { text, session_id } => {
+                    Some((text, session_id))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            restored,
+            // The bare body, because `/msg`ing the buffer you are already in
+            // retries correctly as plain text — see `retry_form_for`.
+            vec![(
+                "moje zdanie".to_string(),
+                Some("alice-session".to_string())
+            )],
+            "the retry form goes back to the browser that submitted it"
+        );
+        assert_eq!(
+            app.submit_origin,
+            SubmitOrigin::Tui,
+            "and the scope is closed again afterwards, so a later terminal \
+             send is not attributed to this browser"
+        );
     }
 
     #[test]

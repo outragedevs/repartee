@@ -185,6 +185,18 @@ enum Wire {
     /// is no way to build an `irc::client::Sender` without a live connection.
     #[cfg(test)]
     Capture(Arc<Mutex<Vec<Message>>>),
+    /// Test double: records frames until `ok_before_failure` have gone
+    /// through, then fails every send.
+    ///
+    /// A connection whose writer task is gone still leaves its handle in
+    /// `App::irc_handles`, so this is the only way to reach the branches that
+    /// run when the handle exists and the send itself fails — including a
+    /// multi-chunk send that puts some chunks on the channel and then dies.
+    #[cfg(test)]
+    CaptureThenFail {
+        frames: Arc<Mutex<Vec<Message>>>,
+        ok_before_failure: usize,
+    },
 }
 
 /// The send half of one IRC connection, with its flood budget attached.
@@ -240,6 +252,25 @@ impl IrcSender {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .push(message);
+                Ok(())
+            }
+            #[cfg(test)]
+            Wire::CaptureThenFail {
+                frames,
+                ok_before_failure,
+            } => {
+                let full = {
+                    let mut frames = frames.lock().unwrap_or_else(PoisonError::into_inner);
+                    let full = frames.len() >= *ok_before_failure;
+                    if !full {
+                        frames.push(message);
+                    }
+                    full
+                };
+                if full {
+                    // What a dropped writer task actually produces.
+                    return Err(irc::error::Error::AsyncChannelClosed);
+                }
                 Ok(())
             }
         }
@@ -637,6 +668,22 @@ impl IrcSender {
         }
     }
 
+    /// A sender that accepts `ok_before_failure` frames and then fails every
+    /// send, as a connection whose writer task has gone does.
+    ///
+    /// `0` fails from the very first frame — nothing reaches the wire while
+    /// the handle is still in the map.
+    pub(crate) fn capturing_then_failing(ok_before_failure: usize) -> Self {
+        Self {
+            wire: Wire::CaptureThenFail {
+                frames: Arc::new(Mutex::new(Vec::new())),
+                ok_before_failure,
+            },
+            budget: Arc::new(Mutex::new(FloodEstimate::new())),
+            threshold_ms: 0,
+        }
+    }
+
     /// This connection's mirrored penalty, as of its last charge or drain.
     pub(crate) fn penalty_ms(&self) -> u64 {
         self.budget_mut().penalty_ms
@@ -649,7 +696,7 @@ impl IrcSender {
             // frames of an accidentally-live sender would otherwise pass while
             // observing nothing at all.
             Wire::Live(_) => unreachable!("captured() on a live sender — build it with capturing()"),
-            Wire::Capture(frames) => frames
+            Wire::Capture(frames) | Wire::CaptureThenFail { frames, .. } => frames
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone(),

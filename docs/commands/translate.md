@@ -135,6 +135,12 @@ typed in the buffer, so whether a line is translated depends on the buffer,
 never on which command you used. A `/me` is translated as its text; other
 CTCPs (`VERSION`, DCC negotiation) are protocol and pass through untouched.
 
+There is one case where your text is **not** put back in the composer: a long
+message is split into several lines before it goes out, and if the connection
+dies partway through, the first parts are already on the channel. Restoring
+the whole thing would invite you to press Enter and send those parts twice, so
+it stays in the error row only — which says as much.
+
 A line the translator deliberately skipped — already in the target language,
 or too short to be worth translating — is a correct outcome, not a failure.
 It is sent and shown with no marker; marking it would cry wolf on a large
@@ -218,4 +224,7 @@ managed with the `add*` / `del*` subcommands rather than `/set`.
 
 Enabling `translate.enabled` at runtime when it was off at startup reports
 that a restart is required: the translation workers are built once, when the
-client starts.
+client starts. `/reload` says the same thing — editing `enabled = true` in
+`config.toml` and reloading cannot build a backend either, so the reload
+warns instead of reporting a plain success you would have no reason to
+distrust.

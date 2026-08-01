@@ -130,6 +130,12 @@ pub(crate) fn apply_reloaded_config(app: &mut App, new_config: crate::config::Ap
     // user believes they turned it off. The per-buffer flags and languages
     // would go stale the same way.
     app.sync_translate_from_config();
+    // …and when the file now asks for translation this process cannot give,
+    // say so. `sync_translate_from_config` leaves `translate_active` false
+    // because the backend is bound at startup, so without this the reload
+    // reports only "Config reloaded" while translation stays off — exactly
+    // the silent no-op `/set translate.enabled` already warns about.
+    super::helpers::warn_if_translate_needs_restart(app);
     // A hand-edited `[statusbar]` section must reach open tabs too.
     super::handlers_ui::push_statusbar_web_event(app);
 }
@@ -1866,5 +1872,72 @@ mod translate_reload_tests {
         assert_eq!(app.state.translate_my_lang, "pl");
         assert!(!app.state.translate_show_original_in);
         assert!(app.state.translate_buffers.contains_key("net/#german"));
+    }
+
+    /// Every row the reload wrote into the active buffer.
+    fn rows(app: &crate::app::App) -> Vec<String> {
+        let id = app.state.active_buffer_id.clone().expect("an active buffer");
+        app.state.buffers[&id]
+            .messages
+            .iter()
+            .map(|m| m.text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn reload_says_so_when_it_cannot_actually_turn_translation_on() {
+        // The process started with translation off, so no backend was built
+        // and none can be built now. Reporting only "Config reloaded" leaves
+        // the user believing their hand-edited `enabled = true` took effect
+        // and their channel is being translated when it is not.
+        let mut app = test_app();
+        app.state
+            .add_buffer(crate::state::buffer::Buffer::for_test(
+                "net",
+                crate::state::buffer::BufferType::Channel,
+                "#german",
+            ));
+        app.state.set_active_buffer("net/#german");
+        assert!(app.translate_backend.is_none(), "precondition: no backend");
+
+        let mut reloaded = crate::config::AppConfig::default();
+        reloaded.translate.enabled = true;
+        super::apply_reloaded_config(&mut app, reloaded);
+
+        assert!(!app.state.translate_active, "and it stayed off");
+        assert!(
+            rows(&app).iter().any(|t| t.contains("restart to activate")),
+            "the reload must not report success on a no-op: {:?}",
+            rows(&app)
+        );
+    }
+
+    #[test]
+    fn reload_stays_quiet_when_translation_is_off_or_actually_running() {
+        // The warning is about a contradiction between config and reality.
+        // Firing it on an ordinary reload would train the user to ignore it.
+        for (enabled, backend) in [(false, false), (true, true)] {
+            let mut app = test_app();
+            app.state
+                .add_buffer(crate::state::buffer::Buffer::for_test(
+                    "net",
+                    crate::state::buffer::BufferType::Channel,
+                    "#german",
+                ));
+            app.state.set_active_buffer("net/#german");
+            if backend {
+                app.translate_backend = Some(std::sync::Arc::new(
+                    crate::translate::backend::StubBackend::new(0, 0),
+                ));
+            }
+            let mut reloaded = crate::config::AppConfig::default();
+            reloaded.translate.enabled = enabled;
+            super::apply_reloaded_config(&mut app, reloaded);
+            assert!(
+                !rows(&app).iter().any(|t| t.contains("restart to activate")),
+                "enabled={enabled} backend={backend} must not warn: {:?}",
+                rows(&app)
+            );
+        }
     }
 }
