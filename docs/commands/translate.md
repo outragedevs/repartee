@@ -83,6 +83,25 @@ The exception is a line the translator deliberately skipped — already in the
 target language, or too short to be worth translating. That is a correct
 outcome, not a failure, so the original is sent and shown with no marker.
 
+## What leaves your client
+
+Translating means sending text to an outside service. For each line that is
+translated, the request carries:
+
+- the line itself, in full
+- the nick who said it, and the channel or query name
+- the network name, and the source and target languages
+- **the channel's nick list**
+
+The nick list travels because only your client knows it, and the translator
+needs it to recognise nicks as names rather than words to translate. If that
+is more than you want to share with a provider, do not enable translation on
+that channel.
+
+Nothing is sent for a channel you have not explicitly enabled, and nothing is
+sent for history — only lines arriving live, and only while the master switch
+is on.
+
 ## End-to-end encrypted conversations
 
 **Translation is refused on any conversation E2E might be protecting, and
