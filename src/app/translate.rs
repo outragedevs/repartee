@@ -1719,16 +1719,15 @@ impl crate::app::App {
             _ if out.is_action => crate::state::buffer::MessageType::Action,
             _ => crate::state::buffer::MessageType::Message,
         };
-        // EVERY chunk carries the id reserved at submission. They are one
-        // message and go into that one reserved place together — see
-        // `fill_reserved_with`. Allocating fresh ids for the continuations
-        // lets a line that arrived during the translation sort between them,
-        // so the buffer would show the first chunk, somebody else's reply,
-        // and then the rest of the user's own sentence.
+        // Every chunk gets its OWN id — two live rows sharing one are the
+        // same message to the web client, which would drop all but the
+        // first. What keeps them together is the ORDER KEY passed below: the
+        // id reserved at submission, under which they all take the one place
+        // held for them. See `add_own_message_chunks`.
         let chunks: Vec<crate::state::buffer::Message> = local_chunks
             .into_iter()
             .map(|chunk| crate::state::buffer::Message {
-                id: out.echo_id,
+                id: self.state.next_message_id(),
                 timestamp: chrono::Utc::now(),
                 message_type: message_type.clone(),
                 nick: Some(out.nick.clone()),
@@ -1747,7 +1746,8 @@ impl crate::app::App {
         // nick captured at dispatch, so a `/nick` during the wait would make
         // the dispatch gate mistake it for someone else's line and translate
         // our own message a second time.
-        self.state.add_own_message_chunks(&echo_buffer, chunks);
+        self.state
+            .add_own_message_chunks(&echo_buffer, out.echo_id, chunks);
     }
 
     /// Route a translation-pipeline error to the right buffer, falling back
@@ -1811,6 +1811,13 @@ impl crate::app::App {
         let want = self.config.translate.max_in_flight.max(1) as usize;
         let have = self.translate_in_flight_applied;
         if want == have {
+            // A reduction that never took effect is obsolete the moment the
+            // target comes back up to what is actually applied. Leaving the
+            // debt makes the tick keep forgetting permits as in-flight work
+            // returns them, so the limiter settles at the ABANDONED lower
+            // value and stays there — permanently enforcing a number the
+            // config no longer asks for, with nothing to say why.
+            self.translate_in_flight_debt = 0;
             return;
         }
         if want > have {
@@ -1983,20 +1990,40 @@ impl crate::app::App {
     /// full timeout for a server that is gone blanks the channel for no
     /// possible benefit.
     pub(crate) fn flush_translate_queues_for_connection(&mut self, conn_id: &str) {
+        let belongs = |id: &String, state: &crate::state::AppState| {
+            state
+                .buffers
+                .get(id)
+                .is_some_and(|b| b.connection_id == conn_id)
+        };
         let buffer_ids: Vec<String> = self
             .state
             .translate_queues
             .keys()
-            .filter(|id| {
-                self.state
-                    .buffers
-                    .get(*id)
-                    .is_some_and(|b| b.connection_id == conn_id)
-            })
+            .filter(|id| belongs(id, &self.state))
             .cloned()
             .collect();
         for buffer_id in buffer_ids {
             self.flush_translate_queue(&buffer_id);
+        }
+        // Reflection records die with the session that would have sent them.
+        // Left behind, a reconnect inside the TTL that resends the same text
+        // consumes the STALE record: the new reflection takes the old
+        // reserved id and the old suffix, and the new reservation is left
+        // blocking the buffer until it times out.
+        //
+        // Walked separately from the queues, because a record outlives the
+        // queue whenever the reservation was the only thing in it — which is
+        // the ordinary case for an outgoing send with nothing incoming.
+        let stale: Vec<String> = self
+            .state
+            .own_echo_decorations
+            .keys()
+            .filter(|id| belongs(id, &self.state))
+            .cloned()
+            .collect();
+        for buffer_id in stale {
+            self.state.own_echo_decorations.remove(&buffer_id);
         }
     }
 
@@ -2492,6 +2519,102 @@ mod app_tests {
                 "odpowiedz".to_string(),
             ],
             "our own message first — it was sent first"
+        );
+    }
+
+    #[test]
+    fn a_split_echo_gives_every_chunk_its_own_transport_id() {
+        // The web client takes two live rows sharing an id for the same
+        // message and drops the second, so conflating the queue's ordering
+        // key with the transport id swallowed every chunk after the first —
+        // usually including the one carrying ` [original]`.
+        let mut app = app_with_dying_handle(usize::MAX);
+        app.conn_generations.insert("test".to_string(), 1);
+        let long = "wieloslowne zdanie ".repeat(30);
+        let mut out = outgoing(
+            "krotkie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: long.trim().to_string(),
+            },
+            true, // show_original — this is what pushes it over the budget
+        );
+        out.conn_generation = Some(1);
+        app.state.reserve_echo_slot(BUF, 1);
+
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+
+        let ids: Vec<u64> = app.state.buffers[BUF].messages.iter().map(|m| m.id).collect();
+        assert!(ids.len() > 1, "this echo must actually split: {ids:?}");
+        let unique: std::collections::HashSet<u64> = ids.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            ids.len(),
+            "every chunk needs its own transport id or the browser drops it: {ids:?}"
+        );
+        assert!(
+            shown(&app).last().is_some_and(|t| t.contains("[krotkie]")),
+            "and the last chunk — the one with the original — survives: {:?}",
+            shown(&app)
+        );
+    }
+
+    #[test]
+    fn a_dropped_connection_forgets_what_it_was_waiting_to_reflect() {
+        // A reconnect inside the record's TTL that resends the same text
+        // would otherwise consume the STALE record: the new reflection takes
+        // the old reserved id and suffix, and the new reservation is left
+        // blocking the buffer until it times out.
+        let mut app = app_with_echo_message();
+        send_translated(&mut app, 1, "moje zdanie", "mein satz");
+        assert!(
+            app.state.own_echo_decorations.contains_key(BUF),
+            "precondition: a reflection is expected"
+        );
+
+        app.flush_translate_queues_for_connection("test");
+
+        assert!(
+            !app.state.own_echo_decorations.contains_key(BUF),
+            "the record dies with the session that would have sent it"
+        );
+    }
+
+    #[test]
+    fn restoring_a_reduced_limit_before_it_lands_cancels_the_reduction() {
+        // 4 -> 2 with every permit checked out records a debt of 2 and
+        // applies nothing. Putting the target back to 4 must drop that debt:
+        // otherwise the tick keeps forgetting permits as work returns them,
+        // the limiter settles at the ABANDONED 2, and stays there while the
+        // config says 4.
+        let mut app = test_app();
+        let limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+        let held: Vec<_> = (0..4)
+            .map(|_| std::sync::Arc::clone(&limiter).try_acquire_owned().expect("permit"))
+            .collect();
+        app.translate_in_flight = Some(std::sync::Arc::clone(&limiter));
+        app.translate_in_flight_applied = 4;
+
+        app.config.translate.max_in_flight = 2;
+        app.sync_translate_from_config();
+        assert_eq!(
+            app.translate_in_flight_debt, 2,
+            "nothing could be forgotten while every permit is out"
+        );
+
+        app.config.translate.max_in_flight = 4;
+        app.sync_translate_from_config();
+        assert_eq!(
+            app.translate_in_flight_debt, 0,
+            "the reduction was abandoned before it ever took effect"
+        );
+
+        drop(held);
+        app.settle_translate_concurrency_debt();
+        assert_eq!(
+            limiter.available_permits(),
+            4,
+            "so all four permits stay available, as the config asks"
         );
     }
 

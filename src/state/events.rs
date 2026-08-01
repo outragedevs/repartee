@@ -626,20 +626,29 @@ impl AppState {
     /// a `/nick` during the wait leaves the echo's nick different from the
     /// connection's, and the "is this ours" test would wrongly say no and
     /// translate our own message a second time.
-    pub fn add_own_message(&mut self, buffer_id: &str, message: Message) {
-        self.add_own_message_chunks(buffer_id, vec![message]);
+    pub fn add_own_message(&mut self, buffer_id: &str, order_key: u64, message: Message) {
+        self.add_own_message_chunks(buffer_id, order_key, vec![message]);
     }
 
     /// [`Self::add_own_message`] for a message that became several rows.
     ///
-    /// They take the ONE place reserved at submission, in order. Allocating
-    /// fresh ids for the continuations would let a line that arrived during
-    /// the translation sort between them, splitting the user's own sentence
-    /// around somebody else's reply.
-    pub fn add_own_message_chunks(&mut self, buffer_id: &str, chunks: Vec<Message>) {
-        let Some(first_id) = chunks.first().map(|m| m.id) else {
+    /// `order_key` is the id reserved at submission and is what places these
+    /// rows in the queue — all of them, together, in the ONE place held for
+    /// them. It is deliberately NOT each row's `Message::id`: those are
+    /// transport identities and must stay distinct, because the web client
+    /// treats two live rows sharing an id as the same message and drops the
+    /// second. Conflating the two silently swallowed every chunk after the
+    /// first — usually including the one carrying ` [original]`.
+    pub fn add_own_message_chunks(
+        &mut self,
+        buffer_id: &str,
+        order_key: u64,
+        chunks: Vec<Message>,
+    ) {
+        if chunks.is_empty() {
             return;
-        };
+        }
+        let first_id = order_key;
         if let Some(queue) = self.translate_queues.get_mut(buffer_id) {
             let rows: Vec<(Message, ActivityLevel)> = chunks
                 .iter()
@@ -3062,7 +3071,7 @@ mod translate_gate_tests {
         let (mut state, mut rx) = state_with_translation();
         let mut echo = make_test_message(&mut state, "moje zdanie");
         echo.nick = Some("old_nick".to_string());
-        state.add_own_message(BUF, echo);
+        state.add_own_message(BUF, echo.id, echo);
 
         assert!(
             rx.try_recv().is_err(),
@@ -3080,7 +3089,7 @@ mod translate_gate_tests {
 
         let mut echo = make_test_message(&mut state, "moje zdanie");
         echo.nick = Some("old_nick".to_string());
-        state.add_own_message(BUF, echo);
+        state.add_own_message(BUF, echo.id, echo);
 
         assert_eq!(
             shown(&state, BUF),

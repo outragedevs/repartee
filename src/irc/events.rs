@@ -1561,13 +1561,10 @@ fn handle_privmsg(
             // A reflection of our own send takes the id held for it at
             // submission, so it fills that place in the reorder queue rather
             // than landing after the replies that arrived meanwhile.
-            let id = decoration
-                .as_ref()
-                .map_or_else(|| state.next_message_id(), |d| d.echo_id);
+            let id = state.next_message_id();
             let ts = message_timestamp(tags.as_ref());
             // Save nick before moving into Message — needed for mentions buffer below.
             let nick_saved = if is_mention { Some(nick.clone()) } else { None };
-            let is_reflection = decoration.is_some();
             let action_row = Message {
                     id,
                     timestamp: ts,
@@ -1586,11 +1583,14 @@ fn handle_privmsg(
                     // carried the translation alone.
                     wire_origin: own_origin,
             };
-            if is_reflection {
+            if let Some(echo_id) = decoration.as_ref().map(|d| d.echo_id) {
                 // Fills the place reserved when the user pressed Enter, so
                 // our own message keeps its position among the lines that
-                // arrived while it was being translated.
-                state.add_own_message(&buffer_id, action_row);
+                // arrived while it was being translated. The reserved id is
+                // the ORDER key only — the row keeps its own transport id,
+                // or the web client would take a second chunk of the same
+                // message for a duplicate and drop it.
+                state.add_own_message(&buffer_id, echo_id, action_row);
             } else {
                 state.add_message_with_activity(&buffer_id, action_row, activity);
             }
@@ -1739,10 +1739,7 @@ fn handle_privmsg(
     };
 
     let mode_prefix = nick_prefix(state, &buffer_id, &nick);
-    // See the ACTION branch: a reflection reuses its reserved id.
-    let id = decoration
-        .as_ref()
-        .map_or_else(|| state.next_message_id(), |d| d.echo_id);
+    let id = state.next_message_id();
     let ts = message_timestamp(tags.as_ref());
     // Save nick before moving into Message — needed for mentions buffer below.
     let nick_saved = if is_mention { Some(nick.clone()) } else { None };
@@ -1775,11 +1772,12 @@ fn handle_privmsg(
     // persist; the decrypted replay is logged + surfaced under the real @msgid.
     if e2e_transient_line {
         state.add_transient_message_with_activity(&buffer_id, msg, activity);
-    } else if decoration.is_some() {
+    } else if let Some(echo_id) = decoration.as_ref().map(|d| d.echo_id) {
         // A reflection of our own send: fills the place reserved when the
         // user pressed Enter, so it keeps its position among the lines that
-        // arrived while it was being translated.
-        state.add_own_message(&buffer_id, msg);
+        // arrived while it was being translated. See the ACTION branch on
+        // why the reserved id is the order key and not the row's own.
+        state.add_own_message(&buffer_id, echo_id, msg);
     } else {
         state.add_message_with_activity(&buffer_id, msg, activity);
     }

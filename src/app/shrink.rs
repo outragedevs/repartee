@@ -627,6 +627,8 @@ impl App {
             // treat our own echo as an incoming line worth translating.
             self.state.add_own_message(
                 &out.buffer_id,
+                // Shrink holds no reservation, so each row orders by itself.
+                id,
                 Message {
                     id,
                     timestamp: chrono::Utc::now(),

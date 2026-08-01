@@ -163,7 +163,13 @@ Requests are dispatched **the instant a line arrives**. Translation runs concurr
 up to `max_in_flight` — one limiter shared by the incoming worker and every
 per-connection outgoing lane, because the setting is documented as the *provider's*
 concurrency cap. A lane that skipped it would make the real ceiling `max_in_flight +
-one per connected network`. The queue governs only *when a resolved line is allowed
+one per connected network`.
+
+Lowering the limit can only take permits that are AVAILABLE, so the remainder is
+carried as a debt and retried from the tick. That debt is **abandoned** if the target
+returns to what is currently applied before it lands — otherwise the tick keeps
+forgetting permits as work returns them and the limiter settles at a number the config
+no longer asks for. The queue governs only *when a resolved line is allowed
 onto the screen*.
 
 This distinction is the crux. A serial queue — where line N waits for line N-1 to come
@@ -382,12 +388,19 @@ Ordering is therefore split:
   global queue would let one hung request on network A block translated sends on
   network B.
 - **Echo order** — the local echo enters the buffer's display queue like any other
-  row (§3.2), taking the `id` it was allocated at submission. When it splits into
+  row (§3.2), under the `id` it was allocated at submission. When it splits into
   several rows — which `show_original_out` makes routine, because the appended
   original pushes it past the byte budget — *all* of them occupy that one reserved
-  place. Fresh ids for the continuations would let a line that arrived during the
-  translation sort between them, so the buffer would show the first chunk, somebody
-  else's reply, then the rest of the user's own sentence.
+  place. Ordering them by ids allocated at delivery instead would let a line that
+  arrived during the translation sort between them, so the buffer would show the first
+  chunk, somebody else's reply, then the rest of the user's own sentence.
+
+  That reserved id is the **ordering key only**. Each delivered row keeps its own
+  `Message::id`, because that is a transport identity: the web client treats two live
+  rows sharing an id as the same message and drops the second, so conflating the two
+  silently swallowed every chunk after the first — usually including the one carrying
+  ` [original]`. `add_own_message_chunks` takes them as separate arguments for exactly
+  this reason.
 
 A consequence worth stating: with incoming lines pending, the user's own message can
 appear on the wire before its echo appears on their screen. This is accepted. The
@@ -494,12 +507,17 @@ Details that follow from the shape:
   it before the text it is the original of. The earlier records exist for POSITION
   alone.
 - **The reservation is not released — the reflection fills it.** Each record carries
-  the id reserved when the user pressed Enter, and the reflection takes it instead of
-  a fresh one. Releasing the barrier at send time lets everything queued behind it
-  drain first, and the user's own message then lands below the replies that arrived
-  while it was translating: the exact reordering the reservation exists to prevent. If
-  no reflection ever comes, the queue's expiry clears the barrier like any other
-  stall.
+  the id reserved when the user pressed Enter, and the reflection uses it as its
+  ORDER key. Releasing the barrier at send time lets everything queued behind it drain
+  first, and the user's own message then lands below the replies that arrived while it
+  was translating: the exact reordering the reservation exists to prevent. If no
+  reflection ever comes, the queue's expiry clears the barrier like any other stall.
+- **Records die with the connection.** A drop clears them alongside the queues —
+  walked separately, because a record outlives the queue whenever the reservation was
+  the only thing in it, which is the ordinary case. Left behind, a reconnect inside
+  the TTL that resends the same text consumes the stale record: the new reflection
+  takes the old reserved id and suffix, and the new reservation blocks the buffer
+  until it times out.
 - **An action is decorated inside its frame** (`\x01ACTION … [original]\x01`), because
   matching happens before the CTCP is unwrapped and the result still has to parse as
   one. The recorded `WireOrigin.text` is the frame's BODY, since that is what the row
