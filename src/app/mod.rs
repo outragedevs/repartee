@@ -502,6 +502,13 @@ pub struct App {
     /// `translate.enabled` at runtime cannot materialise one. Mirrors the
     /// role `shrink_client` plays for shrink.
     pub(crate) translate_backend: Option<crate::translate::backend::SharedBackend>,
+    /// Shared concurrency limiter for the incoming worker, so
+    /// `/set translate.max_in_flight` takes effect without a restart.
+    pub(crate) translate_in_flight: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+    /// The limit currently applied to `translate_in_flight`. `Semaphore`
+    /// exposes only available permits, not its total, so the last applied
+    /// value has to be tracked to compute the delta.
+    pub(crate) translate_in_flight_applied: usize,
     /// Both translation workers post their outcomes here; the main loop
     /// drains and routes them through `apply_translate_deliver`.
     pub(crate) translate_deliver_rx: mpsc::Receiver<translate::TranslateDeliver>,
@@ -697,11 +704,13 @@ impl App {
         // reaching into `App`.
         let translate::TranslateRuntime {
             backend: translate_backend,
+            in_flight: translate_in_flight,
             incoming_tx: translate_incoming_tx,
             outgoing_tx: translate_outgoing_tx,
             deliver_tx: _translate_deliver_tx,
             deliver_rx: translate_deliver_rx,
         } = translate::TranslateRuntime::build(&config.translate);
+        let translate_max_in_flight = config.translate.max_in_flight.max(1) as usize;
         state.translate_active = config.translate.enabled && translate_backend.is_some();
         state.translate_buffers.clone_from(&config.translate.buffers);
         state
@@ -848,6 +857,8 @@ impl App {
             translate_outgoing_tx,
             translate_deliver_rx,
             translate_backend,
+            translate_in_flight: Some(translate_in_flight),
+            translate_in_flight_applied: translate_max_in_flight,
             cli_bind_override: None,
             typing: crate::app::typing::TypingSender::default(),
         };

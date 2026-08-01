@@ -110,6 +110,10 @@ pub struct TranslateRuntime {
     /// `None` when translation is disabled — the gates check this to decide
     /// between dispatching and delivering straight through.
     pub backend: Option<SharedBackend>,
+    /// The incoming worker's concurrency limiter, shared so
+    /// `/set translate.max_in_flight` can retune it without a restart.
+    /// Exposed as a plain `/set` option, so it has to actually do something.
+    pub in_flight: Arc<Semaphore>,
     pub incoming_tx: mpsc::Sender<PendingTranslate>,
     pub outgoing_tx: mpsc::Sender<PendingOutgoingTranslate>,
     pub deliver_tx: mpsc::Sender<TranslateDeliver>,
@@ -137,13 +141,14 @@ impl TranslateRuntime {
         let (incoming_tx, incoming_rx) = mpsc::channel::<PendingTranslate>(1024);
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<PendingOutgoingTranslate>(256);
         let (deliver_tx, deliver_rx) = mpsc::channel::<TranslateDeliver>(1024);
+        let in_flight = Arc::new(Semaphore::new(cfg.max_in_flight.max(1) as usize));
 
         if let Some(ref b) = backend {
             spawn_incoming_worker(
                 incoming_rx,
                 Arc::clone(b),
                 deliver_tx.clone(),
-                cfg.max_in_flight.max(1) as usize,
+                Arc::clone(&in_flight),
             );
             spawn_outgoing_worker(outgoing_rx, Arc::clone(b), deliver_tx.clone());
         } else {
@@ -155,6 +160,7 @@ impl TranslateRuntime {
 
         Self {
             backend,
+            in_flight,
             incoming_tx,
             outgoing_tx,
             deliver_tx,
@@ -192,10 +198,9 @@ fn spawn_incoming_worker(
     mut rx: mpsc::Receiver<PendingTranslate>,
     backend: SharedBackend,
     deliver: mpsc::Sender<TranslateDeliver>,
-    max_in_flight: usize,
+    permits: Arc<Semaphore>,
 ) {
     tokio::spawn(async move {
-        let permits = Arc::new(Semaphore::new(max_in_flight));
         while let Some(pending) = rx.recv().await {
             let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
                 break;
@@ -216,10 +221,63 @@ fn spawn_incoming_worker(
     });
 }
 
-/// Serial, so two outgoing messages reach IRC in submission order. Nothing
-/// incoming participates: an incoming line stuck behind a slow provider
-/// must not delay the user's own message.
+/// Fan out to one serial worker PER CONNECTION.
+///
+/// Serial within a connection is what keeps two outgoing messages in
+/// submission order on the wire. Serial ACROSS connections would be
+/// head-of-line blocking: one hung request on network A would hold up
+/// translated sends on network B, which have nothing to do with it. The
+/// design calls for a per-connection FIFO for exactly that reason.
+///
+/// The dispatcher never awaits a per-connection send. A connection whose
+/// queue is full resolves as untranslated, so the deliver path refuses that
+/// one message (fail-closed) instead of stalling every other connection
+/// behind it.
 fn spawn_outgoing_worker(
+    mut rx: mpsc::Receiver<PendingOutgoingTranslate>,
+    backend: SharedBackend,
+    deliver: mpsc::Sender<TranslateDeliver>,
+) {
+    /// Per-connection queue depth. Deep enough that normal typing never
+    /// trips it; shallow enough that a wedged provider surfaces quickly.
+    const PER_CONNECTION_QUEUE: usize = 64;
+
+    tokio::spawn(async move {
+        let mut lanes: std::collections::HashMap<
+            String,
+            mpsc::Sender<PendingOutgoingTranslate>,
+        > = std::collections::HashMap::new();
+
+        while let Some(pending) = rx.recv().await {
+            let conn_id = pending.conn_id.clone();
+            let lane = lanes.entry(conn_id.clone()).or_insert_with(|| {
+                let (tx, lane_rx) = mpsc::channel(PER_CONNECTION_QUEUE);
+                spawn_connection_lane(lane_rx, Arc::clone(&backend), deliver.clone());
+                tx
+            });
+            match lane.try_send(pending) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(p)) => {
+                    tracing::warn!(
+                        conn_id = %conn_id,
+                        "translate: outgoing lane full, refusing this message"
+                    );
+                    refuse_outgoing(&deliver, p, "the translation queue for this connection is full")
+                        .await;
+                }
+                Err(mpsc::error::TrySendError::Closed(p)) => {
+                    // The lane died; drop it so the next message respawns one.
+                    lanes.remove(&conn_id);
+                    tracing::error!(conn_id = %conn_id, "translate: outgoing lane died");
+                    refuse_outgoing(&deliver, p, "the translation worker died").await;
+                }
+            }
+        }
+    });
+}
+
+/// One connection's serial worker: submission order in, submission order out.
+fn spawn_connection_lane(
     mut rx: mpsc::Receiver<PendingOutgoingTranslate>,
     backend: SharedBackend,
     deliver: mpsc::Sender<TranslateDeliver>,
@@ -245,6 +303,35 @@ fn spawn_outgoing_worker(
                 .await;
         }
     });
+}
+
+/// Report a dispatch-side failure as a normal untranslated outcome, so the
+/// deliver path refuses the send and hands the text back rather than the
+/// message vanishing between the queues.
+async fn refuse_outgoing(
+    deliver: &mpsc::Sender<TranslateDeliver>,
+    pending: PendingOutgoingTranslate,
+    reason: &str,
+) {
+    let _ = deliver
+        .send(TranslateDeliver::Outgoing(Box::new(
+            OutgoingTranslateDeliver {
+                conn_id: pending.conn_id,
+                buffer_id: pending.buffer_id,
+                buffer_name: pending.buffer_name,
+                buffer_type: pending.buffer_type,
+                original_text: pending.original_text,
+                outcome: TranslateOutcome::Untranslated {
+                    id: pending.req.id,
+                    reason: UntranslatedReason::Error(reason.to_string()),
+                },
+                nick: pending.nick,
+                own_mode: pending.own_mode,
+                peer_handle: pending.peer_handle,
+                show_original: pending.show_original,
+            },
+        )))
+        .await;
 }
 
 impl crate::app::App {
@@ -744,6 +831,33 @@ impl crate::app::App {
             .translate_my_lang
             .clone_from(&self.config.translate.my_lang);
         self.state.translate_show_original_in = self.config.translate.show_original_in;
+        self.retune_translate_concurrency();
+    }
+
+    /// Apply `translate.max_in_flight` to the running incoming worker.
+    ///
+    /// The limiter is built once at startup, so without this the setting is
+    /// accepted, persisted, and silently ignored — worse than not offering
+    /// it. `Semaphore` can only be nudged by a delta, so the last applied
+    /// value is tracked alongside it.
+    fn retune_translate_concurrency(&mut self) {
+        let Some(limiter) = self.translate_in_flight.as_ref() else {
+            return;
+        };
+        let want = self.config.translate.max_in_flight.max(1) as usize;
+        let have = self.translate_in_flight_applied;
+        if want == have {
+            return;
+        }
+        if want > have {
+            limiter.add_permits(want - have);
+        } else {
+            // Shrinking only takes effect as in-flight work finishes: the
+            // permits already handed out are not recalled mid-request.
+            limiter.forget_permits(have - want);
+        }
+        self.translate_in_flight_applied = want;
+        tracing::info!(from = have, to = want, "translate: concurrency retuned");
     }
 
     /// Drop queues that have fully drained, so the tick has nothing to walk
@@ -1252,6 +1366,48 @@ mod app_tests {
     }
 
     #[test]
+    fn raising_max_in_flight_takes_effect_without_a_restart() {
+        // It is offered as an ordinary /set option, so accepting it and
+        // silently ignoring it is worse than not offering it at all.
+        let mut app = app_with_buffer();
+        app.translate_in_flight = Some(Arc::new(Semaphore::new(4)));
+        app.translate_in_flight_applied = 4;
+        app.config.translate.max_in_flight = 9;
+        app.sync_translate_from_config();
+        assert_eq!(
+            app.translate_in_flight.as_ref().unwrap().available_permits(),
+            9
+        );
+        assert_eq!(app.translate_in_flight_applied, 9);
+    }
+
+    #[test]
+    fn lowering_max_in_flight_takes_effect_without_a_restart() {
+        let mut app = app_with_buffer();
+        app.translate_in_flight = Some(Arc::new(Semaphore::new(8)));
+        app.translate_in_flight_applied = 8;
+        app.config.translate.max_in_flight = 2;
+        app.sync_translate_from_config();
+        assert_eq!(
+            app.translate_in_flight.as_ref().unwrap().available_permits(),
+            2
+        );
+    }
+
+    #[test]
+    fn retuning_to_the_same_value_is_a_no_op() {
+        let mut app = app_with_buffer();
+        app.translate_in_flight = Some(Arc::new(Semaphore::new(4)));
+        app.translate_in_flight_applied = 4;
+        app.config.translate.max_in_flight = 4;
+        app.sync_translate_from_config();
+        assert_eq!(
+            app.translate_in_flight.as_ref().unwrap().available_permits(),
+            4
+        );
+    }
+
+    #[test]
     fn build_outgoing_translate_refuses_a_possibly_e2e_target() {
         // The caller already gates, but this is where cleartext becomes a
         // payload bound for a third party, so the refusal must be a property
@@ -1419,6 +1575,55 @@ mod tests {
             elapsed < std::time::Duration::from_millis(200),
             "four concurrent 60 ms lines took {elapsed:?} — worker looks serial"
         );
+    }
+
+    fn outgoing_for(conn: &str, id: u64, text: &str) -> PendingOutgoingTranslate {
+        PendingOutgoingTranslate {
+            conn_id: conn.to_string(),
+            buffer_id: format!("{conn}/#chan"),
+            buffer_name: "#chan".to_string(),
+            buffer_type: BufferType::Channel,
+            original_text: text.to_string(),
+            req: req(id, text),
+            nick: "me".to_string(),
+            own_mode: None,
+            peer_handle: None,
+            show_original: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_slow_connection_does_not_block_another_connections_send() {
+        // The point of a per-connection FIFO: one hung request on network A
+        // must not hold up translated sends on network B, which have
+        // nothing to do with it.
+        let mut rt = TranslateRuntime::with_backend(
+            Some(Arc::new(StubBackend::with_jitter(&[400, 0]))),
+            &cfg(4),
+        );
+        // First into lane "slow" takes the 400 ms slot; second into lane
+        // "fast" takes the 0 ms one.
+        rt.outgoing_tx
+            .send(outgoing_for("slow", 1, "hello world"))
+            .await
+            .expect("worker alive");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        rt.outgoing_tx
+            .send(outgoing_for("fast", 2, "hello world"))
+            .await
+            .expect("worker alive");
+
+        let first = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            rt.deliver_rx.recv(),
+        )
+        .await
+        .expect("the fast connection must not wait on the slow one")
+        .expect("an outcome");
+        let TranslateDeliver::Outgoing(d) = first else {
+            panic!("expected an outgoing deliver");
+        };
+        assert_eq!(d.conn_id, "fast", "the unrelated connection finished first");
     }
 
     #[tokio::test]

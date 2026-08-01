@@ -808,6 +808,16 @@ const BASE_PATHS: &[&str] = &[
     "typing.show",
     "typing.send_channels",
     "typing.send_queries",
+    // Per-buffer translation settings are deliberately absent: they live in
+    // a map keyed by buffer id and are managed by `/translate add*|del*`,
+    // which a dotted `/set` path has no sane spelling for.
+    "translate.enabled",
+    "translate.my_lang",
+    "translate.show_original_in",
+    "translate.show_original_out",
+    "translate.timeout_ms",
+    "translate.max_in_flight",
+    "translate.max_queue",
 ];
 
 const SERVER_FIELDS: &[&str] = &[
@@ -1237,6 +1247,18 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
         ),
         ("emotes", &["enabled", "render", "lang"]),
         ("typing", &["show", "send_channels", "send_queries"]),
+        (
+            "translate",
+            &[
+                "enabled",
+                "my_lang",
+                "show_original_in",
+                "show_original_out",
+                "timeout_ms",
+                "max_in_flight",
+                "max_queue",
+            ],
+        ),
     ];
 
     for &(section, fields) in sections {
@@ -1647,6 +1669,8 @@ mod tests {
         // Invalid render value is rejected.
         assert!(set_config_value(&mut config, "emotes.render", "bogus").is_err());
         // emotes.* paths are advertised as settable.
+        assert!(BASE_PATHS.contains(&"translate.enabled"));
+        assert!(BASE_PATHS.contains(&"translate.my_lang"));
         assert!(BASE_PATHS.contains(&"emotes.enabled"));
         assert!(BASE_PATHS.contains(&"emotes.render"));
     }
