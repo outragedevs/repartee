@@ -139,6 +139,19 @@ impl TranslateTally {
         }
     }
 
+    /// Fold in an outcome that never reaches the reorder queue.
+    ///
+    /// The outgoing direction resolves its own sends, so its results are
+    /// consumed where they arrive rather than at a queue delivery.
+    pub fn record_outcome(&mut self, outcome: &crate::translate::TranslateOutcome) {
+        use crate::translate::TranslateOutcome as O;
+        use crate::translate::queue::ReadyOrigin;
+        self.record(&match outcome {
+            O::Translated { .. } => ReadyOrigin::Translated,
+            O::Untranslated { reason, .. } => ReadyOrigin::Untranslated(reason.clone()),
+        });
+    }
+
     /// `true` when nothing has been through the mechanism yet.
     pub const fn is_empty(&self) -> bool {
         self.translated == 0

@@ -193,16 +193,28 @@ what stops an abandoned reduction from settling the limiter at a number the conf
 longer asks for.
 
 The permit count, the running total and the debt live in **one** object,
-`TranslateLimiter`, and that is a correctness requirement rather than tidiness. The
-ceiling in force is `total - debt`, so every retirement has to drop the real permit
-count AND `total` together. An earlier version kept `total` on `App` while the workers
-retired permits for themselves: `total` went stale high, the effective ceiling read
-back as the ORIGINAL value once the debt was clear, and the next
-`sync_translate_from_config` — which is every `/set`, `/reload` and `/translate add*`
-— applied the same reduction a second time. Two rounds of that forget every permit and
-translation stops for good, silently. A reduction also never records a debt that would
-take the ceiling below one, which is what stops `acquire` retiring its way into a
-permanent block.
+`TranslateLimiter`, **behind a lock**, and that is a correctness requirement rather
+than tidiness. The ceiling in force is `total - debt`, so those two and the semaphore
+are one piece of state under one invariant, not three counters: every change moves at
+least two of them together, so none can be read or written on its own. Two attempts to
+express that with individually-atomic counters both wedged the client:
+
+- `total` on `App` while the workers retired permits for themselves. It went stale
+  high, the effective ceiling read back as the value from before the reduction, and the
+  next `sync_translate_from_config` — every `/set`, `/reload` and `/translate add*` —
+  applied the same reduction again until no permits were left.
+- `total` and `debt` as separate atomics. `retune` read `debt`, worked out how much of
+  it to cancel, and subtracted; a worker paying a unit in between made the subtraction
+  underflow to `usize::MAX`. The effective ceiling then reads zero and every worker
+  retires the permit it just took, forever.
+
+Neither is visible to a single-threaded test, and the second is not visible to any test
+that lets its workers release permits promptly — a reduction taken while the limiter is
+idle settles immediately and leaves no debt to race on. So the invariant `total > debt`
+is asserted after every mutation inside the limiter, and the stress test holds permits
+across an await while `retune` runs on another thread. A reduction also never records a
+debt that would take the ceiling below one, which is what stops `acquire` retiring its
+way into a permanent block.
 
 The queue governs only *when a resolved line is allowed onto the screen*.
 

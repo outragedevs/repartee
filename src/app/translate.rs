@@ -418,6 +418,21 @@ async fn translate_isolated(
     }
 }
 
+/// The most a translation may come back as, in bytes.
+///
+/// One line goes out, so one line has to come back — but the send path
+/// SPLITS anything over the wire budget and ships every chunk. Without a
+/// ceiling, a backend answering a three-word line with a megabyte turns one
+/// keystroke into thousands of PRIVMSGs: a flood the user's own client
+/// commits, under their nick, ending in a server-side kill or a ban. The
+/// backend is untrusted (§2.0), and "one line" alone does not bound it.
+///
+/// Eight wire lines is far past any real translation of a single IRC message
+/// — a source line is itself bounded by the same budget, and even the worst
+/// expansion between languages, plus the appended original, stays well
+/// inside it — and far short of a flood.
+const MAX_TRANSLATION_BYTES: usize = 8 * crate::irc::MESSAGE_MAX_BYTES;
+
 /// Reject a translation that is not one line.
 ///
 /// **The backend is untrusted.** Its output goes onto the IRC socket, and
@@ -464,6 +479,18 @@ fn single_line_or_refuse(expected: u64, outcome: TranslateOutcome) -> TranslateO
             reason: UntranslatedReason::Error("backend returned multiple lines".to_string()),
         };
     }
+    if trimmed.len() > MAX_TRANSLATION_BYTES {
+        tracing::error!(
+            id,
+            bytes = trimmed.len(),
+            limit = MAX_TRANSLATION_BYTES,
+            "translate: backend returned an oversized answer; refusing it"
+        );
+        return TranslateOutcome::Untranslated {
+            id,
+            reason: UntranslatedReason::Error("backend answer too long".to_string()),
+        };
+    }
     TranslateOutcome::Translated {
         id,
         text: if trimmed.len() == text.len() {
@@ -474,26 +501,69 @@ fn single_line_or_refuse(expected: u64, outcome: TranslateOutcome) -> TranslateO
     }
 }
 
-/// The translation concurrency limiter, with the two numbers that describe
-/// it — and they must live together.
+/// The translation concurrency limiter and the two numbers that describe it.
 ///
-/// The ceiling in force is `total - debt`. Every retirement of a permit has
-/// to drop the real permit count AND `total` in the same breath, or the pair
-/// stops describing the semaphore. An earlier version kept `total` on `App`
-/// while the workers retired permits for themselves: `total` went stale
-/// high, the effective ceiling read back as the ORIGINAL value once the debt
-/// was paid, and the next `sync_translate_from_config` — which is every
-/// `/set`, `/reload` and `/translate add*` — applied the same reduction a
-/// second time. Two rounds of that forget every permit and translation stops
-/// for good, with nothing to say why. One owner, one place to update.
+/// The ceiling in force is `total - debt`, so those two and the semaphore
+/// itself are **one piece of state with one invariant**, not three counters.
+/// Every change moves at least two of them: minting a permit raises `total`
+/// and the semaphore, retiring one lowers both, cancelling a reduction moves
+/// `debt` against `total`. They are therefore behind a lock rather than
+/// individually atomic.
+///
+/// That is the correction to two previous attempts, both of which failed the
+/// same way for the same reason:
+///
+/// - `total` on `App` while the workers retired permits for themselves. It
+///   went stale high, the effective ceiling read back as the value from
+///   before the reduction, and the next `sync_translate_from_config` — every
+///   `/set`, `/reload` and `/translate add*` — applied the same reduction
+///   again until no permits were left.
+/// - `total` and `debt` as separate atomics. `retune` read `debt`, computed
+///   how much to cancel, and subtracted; a worker paying a unit in between
+///   made the subtraction underflow to `usize::MAX`. The effective ceiling
+///   then reads zero and every worker retires its permit forever.
+///
+/// The lock is held only across counter arithmetic and non-blocking
+/// semaphore calls, never across an await, and a worker takes it once per
+/// translation — against a request that takes the better part of a second.
 pub struct TranslateLimiter {
     permits: Arc<Semaphore>,
-    /// Permits minted into `permits`, less those retired again. NOT the
+    counts: std::sync::Mutex<Counts>,
+}
+
+/// The pair that only means anything together. See [`TranslateLimiter`].
+#[derive(Debug, Clone, Copy)]
+struct Counts {
+    /// Permits minted into the semaphore, less those retired again. NOT the
     /// available count: checked-out permits still belong to the total.
-    total: std::sync::atomic::AtomicUsize,
+    total: usize,
     /// A reduction recorded but not yet applied, because the permits it
     /// wants were checked out at the time.
-    debt: std::sync::atomic::AtomicUsize,
+    debt: usize,
+}
+
+impl Counts {
+    /// The ceiling in force. Never zero — see [`TranslateLimiter::retune`].
+    const fn effective(self) -> usize {
+        self.total.saturating_sub(self.debt)
+    }
+
+    /// The invariant every mutation has to leave standing: a reduction can
+    /// never promise away more permits than exist, and never the last one.
+    ///
+    /// Checked after each change rather than reasoned about once. Breaking
+    /// it is not a wrong number but a wedged client — `total < debt` makes
+    /// the effective ceiling zero and has every worker retire its permit
+    /// forever — and both previous attempts at this broke it in a way no
+    /// single-threaded test could show.
+    fn check(self) {
+        debug_assert!(
+            self.total > self.debt,
+            "translate: concurrency invariant broken (total {}, debt {})",
+            self.total,
+            self.debt
+        );
+    }
 }
 
 impl TranslateLimiter {
@@ -501,27 +571,32 @@ impl TranslateLimiter {
         let permits = permits.max(1);
         Self {
             permits: Arc::new(Semaphore::new(permits)),
-            total: std::sync::atomic::AtomicUsize::new(permits),
-            debt: std::sync::atomic::AtomicUsize::new(0),
+            counts: std::sync::Mutex::new(Counts {
+                total: permits,
+                debt: 0,
+            }),
         }
+    }
+
+    /// The counters, recovering from a poisoned lock rather than propagating
+    /// the panic.
+    ///
+    /// A panic elsewhere must not wedge translation for the rest of the
+    /// session: the guarded state is two integers, and the worst a torn
+    /// update leaves behind is a ceiling off by one, which the next retune
+    /// corrects.
+    fn counts(&self) -> std::sync::MutexGuard<'_, Counts> {
+        self.counts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The ceiling actually in force. Never zero: a reduction never records
     /// a debt that would take it below one, which is also what stops
     /// [`Self::acquire`] retiring its way into a permanent block.
+    #[cfg(test)]
     pub fn effective(&self) -> usize {
-        use std::sync::atomic::Ordering;
-        self.total
-            .load(Ordering::Acquire)
-            .saturating_sub(self.debt.load(Ordering::Acquire))
-    }
-
-    /// Take a permit out of circulation for good, and keep `total` with it.
-    fn retire(&self, count: usize) {
-        if count > 0 {
-            self.total
-                .fetch_sub(count, std::sync::atomic::Ordering::AcqRel);
-        }
+        self.counts().effective()
     }
 
     /// Take one permit, first paying off any reduction that could not be
@@ -537,21 +612,24 @@ impl TranslateLimiter {
     ///
     /// Returns `None` only when the semaphore is closed, which is shutdown.
     pub async fn acquire(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
-        use std::sync::atomic::Ordering;
         loop {
             let permit = Arc::clone(&self.permits).acquire_owned().await.ok()?;
-            // Claim the unit BEFORE retiring the permit, so a concurrent
-            // `settle` cannot pay for the same one and take the ceiling
-            // below what was asked for.
-            if self
-                .debt
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |owed| {
-                    owed.checked_sub(1)
-                })
-                .is_ok()
-            {
+            // Claim the unit and drop the total together, under the lock,
+            // BEFORE the permit is retired. Nothing else can then pay for
+            // the same unit or read a total that no longer matches the
+            // semaphore.
+            let claimed = {
+                let mut counts = self.counts();
+                let owed = counts.debt > 0;
+                if owed {
+                    counts.debt -= 1;
+                    counts.total -= 1;
+                    counts.check();
+                }
+                owed
+            };
+            if claimed {
                 permit.forget();
-                self.retire(1);
                 continue;
             }
             return Some(permit);
@@ -560,9 +638,11 @@ impl TranslateLimiter {
 
     /// Move the ceiling to `want`, applying as much of it as possible now.
     pub fn retune(&self, want: usize) {
-        use std::sync::atomic::Ordering;
+        // Clamped to one. A debt that covered every permit would have
+        // `acquire` retire them all and block every worker for good.
         let want = want.max(1);
-        let have = self.effective();
+        let mut counts = self.counts();
+        let have = counts.effective();
         if want == have {
             return;
         }
@@ -573,23 +653,24 @@ impl TranslateLimiter {
             // must not leave a debt behind that the workers would go on
             // paying — which would settle the limiter at a value the config
             // no longer asks for.
-            let cancel = (want - have).min(self.debt.load(Ordering::Acquire));
-            if cancel > 0 {
-                self.debt.fetch_sub(cancel, Ordering::AcqRel);
-            }
+            let cancel = (want - have).min(counts.debt);
+            counts.debt -= cancel;
             let mint = (want - have) - cancel;
             if mint > 0 {
                 self.permits.add_permits(mint);
-                self.total.fetch_add(mint, Ordering::AcqRel);
+                counts.total += mint;
             }
         } else {
-            self.debt.fetch_add(have - want, Ordering::AcqRel);
-            self.settle();
+            counts.debt += have - want;
+            Self::settle_locked(&self.permits, &mut counts);
         }
+        counts.check();
+        let effective = counts.effective();
+        drop(counts);
         tracing::info!(
             from = have,
             to = want,
-            effective = self.effective(),
+            effective,
             "translate: concurrency retuned"
         );
     }
@@ -600,26 +681,27 @@ impl TranslateLimiter {
     /// reduction made while requests were in flight, after which the traffic
     /// stops. Nothing acquires a permit again, so nothing would pay it off.
     pub fn settle(&self) {
-        use std::sync::atomic::Ordering;
-        // Claim the debt in full before touching the semaphore. A worker
-        // that retires a permit claims its unit first, so taking the counter
-        // to zero here is what stops the two paying for the same unit twice.
-        // The unpaid remainder goes straight back.
-        let claim = self.debt.swap(0, Ordering::AcqRel);
-        if claim == 0 {
+        let mut counts = self.counts();
+        Self::settle_locked(&self.permits, &mut counts);
+    }
+
+    /// [`Self::settle`] with the lock already held, so `retune` can finish a
+    /// reduction without releasing it — and without deadlocking on a
+    /// non-reentrant mutex.
+    fn settle_locked(permits: &Semaphore, counts: &mut Counts) {
+        if counts.debt == 0 {
             return;
         }
-        let forgotten = self.permits.forget_permits(claim);
-        if forgotten < claim {
-            self.debt.fetch_add(claim - forgotten, Ordering::AcqRel);
-        }
+        let forgotten = permits.forget_permits(counts.debt);
         if forgotten == 0 {
             return;
         }
-        self.retire(forgotten);
+        counts.debt -= forgotten;
+        counts.total -= forgotten;
+        counts.check();
         tracing::debug!(
             forgotten,
-            remaining = self.debt.load(Ordering::Acquire),
+            remaining = counts.debt,
             "translate: settled part of a concurrency reduction"
         );
     }
@@ -631,7 +713,7 @@ impl TranslateLimiter {
 
     #[cfg(test)]
     pub fn debt(&self) -> usize {
-        self.debt.load(std::sync::atomic::Ordering::Acquire)
+        self.counts().debt
     }
 }
 
@@ -833,6 +915,14 @@ impl crate::app::App {
                 self.resolve_incoming_translation(&buffer_id, outcome, submitted_at);
             }
             TranslateDeliver::Outgoing(mut out) => {
+                // Counted here, once, and before anything can return early.
+                // The outgoing path never goes through the reorder queue's
+                // delivery, so this is the only place its outcome is ever
+                // seen: without it a user running `addout` alone gets a
+                // status page saying nothing has been through the translator
+                // at all — including while every one of their sends is
+                // failing, which is exactly when they would look.
+                self.state.translate_tally.record_outcome(&out.outcome);
                 if self.redirect_outgoing_deliver(&mut out) == RedirectVerdict::Refuse {
                     // The conversation this was addressed to has moved and
                     // its new window is gone. Sending under the old NAME is
@@ -4446,6 +4536,144 @@ mod app_tests {
         assert_eq!(limiter.debt(), 0);
         assert_eq!(limiter.available(), 2);
         assert_eq!(limiter.effective(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn retuning_while_workers_pay_the_debt_cannot_corrupt_the_ceiling() {
+        // The interleaving that wedged this twice, and the reason the
+        // counters are behind a lock rather than individually atomic.
+        //
+        // `retune` upward reads the debt, works out how much of it to
+        // cancel, and subtracts. A worker paying a unit in between made that
+        // subtraction underflow: the effective ceiling reads zero, every
+        // worker then retires the permit it just took, and translation stops
+        // for the rest of the session. Nothing single-threaded can show it,
+        // so this hammers the two paths against each other — with the
+        // invariant asserted after every mutation inside the limiter, so a
+        // torn update trips there too.
+        let limiter = Arc::new(TranslateLimiter::new(4));
+
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let limiter = Arc::clone(&limiter);
+                tokio::spawn(async move {
+                    for _ in 0..300 {
+                        let permit = limiter.acquire().await.expect("open");
+                        // HOLD it. A reduction taken while permits are out
+                        // cannot be settled from idle ones, so it survives as
+                        // debt — and the workers paying that debt down is the
+                        // half of the race that matters.
+                        tokio::time::sleep(std::time::Duration::from_micros(100)).await;
+                        drop(permit);
+                    }
+                })
+            })
+            .collect();
+        let tuner = {
+            let limiter = Arc::clone(&limiter);
+            tokio::spawn(async move {
+                for i in 0..600 {
+                    // Down and back up: raising while the workers are paying
+                    // is the case that underflowed.
+                    limiter.retune(if i % 2 == 0 { 2 } else { 4 });
+                    tokio::time::sleep(std::time::Duration::from_micros(50)).await;
+                }
+            })
+        };
+
+        let storm = async {
+            for worker in workers {
+                worker.await.expect("no worker panicked");
+            }
+            tuner.await.expect("the tuner ran");
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(30), storm)
+            .await
+            .expect("nothing wedged waiting for a permit");
+
+        limiter.retune(4);
+        assert_eq!(
+            limiter.effective(),
+            4,
+            "the ceiling still reads what the config asks for"
+        );
+        // And it can really hand that many out — an underflowed debt leaves
+        // `effective` at zero with every acquisition retiring its permit.
+        let taking = async {
+            let mut held = Vec::new();
+            for _ in 0..4 {
+                held.push(limiter.acquire().await.expect("open"));
+            }
+            held.len()
+        };
+        let taken = tokio::time::timeout(std::time::Duration::from_secs(5), taking)
+            .await
+            .expect("four permits are still obtainable");
+        assert_eq!(taken, 4);
+    }
+
+    #[test]
+    fn an_oversized_backend_answer_is_refused() {
+        // One line in, one line back — but the send path SPLITS anything
+        // over the wire budget and ships every chunk. Without a ceiling a
+        // backend answering a three-word line with a megabyte turns one
+        // keystroke into thousands of PRIVMSGs, under the user's own nick.
+        //
+        // Grown in a loop rather than with `repeat`/`vec!` on the constant:
+        // a const-sized allocation here is folded into an array big enough
+        // to trip `large_stack_arrays` in the test binary.
+        let mut huge = String::new();
+        while huge.len() <= MAX_TRANSLATION_BYTES {
+            huge.push_str("wieloslowne zdanie ");
+        }
+        let refused = super::single_line_or_refuse(
+            1,
+            TranslateOutcome::Translated { id: 1, text: huge },
+        );
+        assert!(
+            matches!(refused, TranslateOutcome::Untranslated { .. }),
+            "an oversized answer is a gap, not something to publish"
+        );
+
+        // A translation that is merely LONGER than its source still passes:
+        // expansion between languages is ordinary, flooding is not.
+        let mut long = String::new();
+        while long.len() < MAX_TRANSLATION_BYTES {
+            long.push('a');
+        }
+        let accepted = super::single_line_or_refuse(
+            2,
+            TranslateOutcome::Translated { id: 2, text: long },
+        );
+        assert!(matches!(accepted, TranslateOutcome::Translated { .. }));
+    }
+
+    #[test]
+    fn an_outgoing_outcome_reaches_the_status_tally() {
+        // The outgoing path resolves its own sends and never goes through
+        // the reorder queue, so nothing else would ever see this outcome.
+        // A user running `addout` alone otherwise gets a status page saying
+        // nothing has been through the translator — including while every
+        // send is failing, which is when they would look.
+        let mut app = app_with_buffer();
+        app.state.reserve_echo_slot(BUF, 1);
+        let mut out = outgoing(
+            "moje zdanie",
+            TranslateOutcome::Untranslated {
+                id: 1,
+                reason: UntranslatedReason::NoProvider,
+            },
+            false,
+        );
+        out.conn_generation = app.connection_generation("test");
+
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+
+        assert_eq!(
+            app.state.translate_tally.provider, 1,
+            "the failure is visible to /translate status"
+        );
+        assert_eq!(app.state.translate_tally.translated, 0);
     }
 
     #[test]

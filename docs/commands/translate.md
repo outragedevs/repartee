@@ -152,7 +152,9 @@ translator is an outside service and its answer is about to be sent under
 your nick, so anything that could be read as a second IRC command never
 reaches the network.
 
-Never a guess, never a partial translation. A fluent sentence that means
+A translation that comes back implausibly long is refused rather than sent:
+it would be split across the wire budget and published as a long run of
+messages under your nick. Never a guess, never a partial translation. A fluent sentence that means
 something else is the one failure a reader cannot detect, so a visible gap is
 always preferred — and the gap has to be visible, or it is just the original
 text with nothing to say it is not a translation.
@@ -275,7 +277,7 @@ precedence on buffers where both are enabled.
     /set translate.max_queue         200
 
 `/translate status` shows what is in flight, and — whether or not anything
-is — how lines have come back this session: how many were translated, how
+is, and for both directions — how lines have come back this session: how many were translated, how
 many the translator decided needed no translation, and any failures split
 into timeouts, provider refusals, and answers this client would not use.
 That split is the point: a channel sitting in its original language looks

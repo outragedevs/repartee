@@ -1,3 +1,13 @@
+// Test builds only, and only because the diagnostic has no span to attach an
+// `#[allow]` to: clippy reports it against `main.rs:1` with no source text, so
+// it cannot be silenced where it is raised or even attributed to a function.
+// It appears once for the whole test binary and moves between unrelated tests
+// as the crate grows — it followed the translate concurrency stress test, the
+// oversized-answer test, and a test that allocates nothing at all in turn.
+// Nothing in this crate declares a large stack array; suppressing it here
+// beats deleting tests that cover real races to appease it.
+#![cfg_attr(test, allow(clippy::large_stack_arrays))]
+
 mod app;
 mod commands;
 mod config;
