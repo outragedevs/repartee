@@ -513,9 +513,18 @@ impl AppState {
     fn deliver_untranslated_in_order(
         &mut self,
         buffer_id: &str,
-        message: Message,
+        mut message: Message,
         level: ActivityLevel,
+        reason: &crate::translate::UntranslatedReason,
     ) -> Option<Message> {
+        // Mark it. A line that failed to even reach the worker is a GAP, and
+        // delivering it unchanged makes it indistinguishable from one the
+        // broker correctly decided to leave alone — the same invisible
+        // failure the marker exists to prevent, just from the dispatch side.
+        let (text, offset) = crate::translate::mark_untranslated(&message.text, reason);
+        message.text = text;
+        message.orig_offset = offset;
+
         if let Some(queue) = self.translate_queues.get_mut(buffer_id) {
             let id = message.id;
             queue.push_resolved(id, message, level);
@@ -598,7 +607,12 @@ impl AppState {
         };
 
         let Some(tx) = self.translate_incoming_tx.as_ref() else {
-            return self.deliver_untranslated_in_order(buffer_id, message, level);
+            return self.deliver_untranslated_in_order(
+                buffer_id,
+                message,
+                level,
+                &crate::translate::UntranslatedReason::NoProvider,
+            );
         };
         match tx.try_send(crate::app::translate::PendingTranslate {
             buffer_id: buffer_id.to_string(),
@@ -607,11 +621,23 @@ impl AppState {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
                 tracing::warn!("translate: incoming queue full, delivering untranslated");
-                return self.deliver_untranslated_in_order(buffer_id, message, level);
+                return self.deliver_untranslated_in_order(
+                    buffer_id,
+                    message,
+                    level,
+                    &crate::translate::UntranslatedReason::Error(
+                        "translation queue full".to_string(),
+                    ),
+                );
             }
             Err(TrySendError::Closed(_)) => {
                 tracing::error!("translate: incoming worker dead, delivering untranslated");
-                return self.deliver_untranslated_in_order(buffer_id, message, level);
+                return self.deliver_untranslated_in_order(
+                    buffer_id,
+                    message,
+                    level,
+                    &crate::translate::UntranslatedReason::NoProvider,
+                );
             }
         }
 
@@ -2676,6 +2702,26 @@ mod translate_gate_tests {
     }
 
     #[test]
+    fn a_line_that_never_reached_the_worker_is_marked() {
+        // Otherwise a dispatch failure looks exactly like a line the broker
+        // correctly decided to leave alone.
+        let (mut state, rx) = state_with_translation();
+        drop(rx);
+        let msg = make_test_message(&mut state, "hola que tal");
+        state.add_message_with_activity(BUF, msg, ActivityLevel::Activity);
+        let shown_text = state.buffers[BUF]
+            .messages
+            .back()
+            .expect("delivered")
+            .text
+            .clone();
+        assert!(
+            shown_text.contains("[untranslated:"),
+            "the gap must be visible: {shown_text}"
+        );
+    }
+
+    #[test]
     fn an_overflow_line_still_renders_in_arrival_order() {
         // End of the same story: once the line ahead resolves, both surface,
         // oldest first — the untranslated fallback included.
@@ -2709,7 +2755,9 @@ mod translate_gate_tests {
             vec![
                 // show_original_in defaults on, hence the bracket.
                 "translated one [line one]".to_string(),
-                "line two".to_string(),
+                // The overflow line never reached the worker, so it is
+                // marked rather than looking like a clean pass-through.
+                "line two [untranslated: error: translation queue full]".to_string(),
             ],
             "arrival order holds across the fallback"
         );

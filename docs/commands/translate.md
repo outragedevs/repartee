@@ -111,7 +111,11 @@ The one exception carries no marker, because it is not a gap: see below.
 For **outgoing** messages the rule is stricter: if translation fails, the
 message is **not sent at all**. Your text goes back into the input line you
 sent it from — the terminal or the browser tab that submitted it — and an
-error explains why. Sending the untranslated original would put something
+error explains why.
+
+If you have already started typing the next message, the composer is left
+alone rather than overwritten; the error row carries the refused text as
+well, so it is recoverable either way. Sending the untranslated original would put something
 other than what you intended in front of the channel.
 
 That applies to every way of not translating, not just a provider error: a

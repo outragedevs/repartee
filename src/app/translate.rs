@@ -672,35 +672,9 @@ impl crate::app::App {
             return;
         }
 
-        // Each already-fits wire text is planned separately, so the split
-        // above is preserved instead of being re-split across the framing.
-        let mut wire_lines = Vec::new();
-        let mut plain_echo = String::new();
-        for wire_text in &wire_texts {
-            match self.state.e2e_encrypt_or_passthrough(
-                &out.buffer_id,
-                &out.buffer_name,
-                &out.buffer_type,
-                wire_text,
-                out.peer_handle.as_deref(),
-            ) {
-                Ok((lines, echo)) => {
-                    wire_lines.extend(lines);
-                    // Every chunk, not just the first: a long translated
-                    // action is split across several wire payloads, and
-                    // echoing only the first would show and LOG a fraction
-                    // of what the peers received.
-                    if !plain_echo.is_empty() {
-                        plain_echo.push(' ');
-                    }
-                    plain_echo.push_str(&echo);
-                }
-                Err(reason) => {
-                    self.deliver_translate_error(&out.buffer_id, &reason.user_message());
-                    return;
-                }
-            }
-        }
+        let Some((wire_lines, plain_echo)) = self.plan_translated_wires(out, &wire_texts) else {
+            return;
+        };
 
         let echo_message_enabled = self
             .state
@@ -1066,11 +1040,15 @@ impl crate::app::App {
         reason: &str,
         origin: &SubmitOrigin,
     ) -> bool {
+        // The text is in the error row as well as restored. Restoring alone
+        // is not enough: a composer that is no longer empty keeps what the
+        // user is typing now (clobbering it would be a worse surprise), and
+        // then the refused message would exist nowhere at all.
         crate::commands::helpers::add_local_event(
             self,
             &format!(
-                "{err}Not sent — {reason}.{rst} {dim}Your text is back in the \
-                 input line; /translate delout this buffer to send it as-is.{rst}",
+                "{err}Not sent — {reason}.{rst} {dim}/translate delout this buffer \
+                 to send it as-is.{rst}\n{dim}Your text:{rst} {text}",
                 err = crate::commands::types::C_ERR,
                 dim = crate::commands::types::C_DIM,
                 rst = crate::commands::types::C_RST,
@@ -1108,6 +1086,63 @@ impl crate::app::App {
                 }
             }
         }
+    }
+
+
+    /// Plan every wire line for a translated outgoing message, and the
+    /// plaintext to echo.
+    ///
+    /// Each payload is planned separately so an action already split to fit
+    /// is not re-split across its CTCP framing. Returns `None` when the send
+    /// was refused — the refusal, and restoring the user's text, are handled
+    /// here.
+    fn plan_translated_wires(
+        &mut self,
+        out: &OutgoingTranslateDeliver,
+        wire_texts: &[String],
+    ) -> Option<(Vec<String>, String)> {
+        let mut wire_lines = Vec::new();
+        let mut plain_echo = String::new();
+        for wire_text in wire_texts {
+            match self.state.e2e_encrypt_or_passthrough(
+                &out.buffer_id,
+                &out.buffer_name,
+                &out.buffer_type,
+                wire_text,
+                out.peer_handle.as_deref(),
+            ) {
+                Ok((lines, echo)) => {
+                    wire_lines.extend(lines);
+                    // Every chunk, not just the first: a long translated
+                    // action is split across several wire payloads, and
+                    // echoing only the first would show and LOG a fraction
+                    // of what the peers received.
+                    //
+                    // Joined by BODY, not by frame. Concatenating the whole
+                    // `\x01ACTION …\x01` payloads would leave delimiters and
+                    // ACTION tokens embedded in the middle of the displayed
+                    // line, since only the outermost frame is stripped later.
+                    let piece = crate::app::e2e_gate::translatable_outgoing_body(&echo)
+                        .unwrap_or(&echo);
+                    if !plain_echo.is_empty() {
+                        plain_echo.push(' ');
+                    }
+                    plain_echo.push_str(piece);
+                }
+                Err(reason) => {
+                    // Same reasoning as the connection-unavailable branch:
+                    // E2E state can change during the wait, nothing reached
+                    // the wire, and the composer was cleared at submission.
+                    self.deliver_translate_error(&out.buffer_id, &reason.user_message());
+                    let retry = out.retry_text.clone();
+                    let origin = out.origin.clone();
+                    self.restore_input_text_to(&retry, &origin);
+                    return None;
+                }
+            }
+        }
+
+        Some((wire_lines, plain_echo))
     }
 
     /// Hand a refused message back to the user instead of losing it.
@@ -1951,6 +1986,43 @@ mod app_tests {
             .text
             .clone();
         assert!(last.contains("queue is full"), "got: {last}");
+    }
+
+    #[test]
+    fn the_deliver_channel_stays_open_when_translation_is_disabled() {
+        // The DEFAULT configuration. With no worker holding a sender, the
+        // receiver would see a closed channel and `recv()` would return
+        // immediately forever, spinning the main select! at 100% CPU.
+        let mut app = test_app();
+        assert!(
+            app.translate_backend.is_none(),
+            "precondition: the feature is off"
+        );
+        assert!(
+            app.translate_deliver_rx.try_recv().is_err_and(|e| matches!(
+                e,
+                tokio::sync::mpsc::error::TryRecvError::Empty
+            )),
+            "the channel must be EMPTY, never Disconnected — a disconnected \
+             receiver makes the event loop spin"
+        );
+    }
+
+    #[test]
+    fn a_refusal_puts_the_text_in_the_error_row_too() {
+        // Restoring alone is not enough: a composer the user has started
+        // typing into keeps what is there, and then the refused message
+        // would exist nowhere at all.
+        let mut app = app_with_outgoing(Some("de"));
+        app.input.value = "something else".to_string();
+        app.refuse_untranslatable_send("moje zdanie", "the translation queue is full");
+        let last = app.state.buffers[BUF].messages.back().unwrap();
+        assert!(
+            last.text.contains("moje zdanie"),
+            "the text is recoverable from the error row: {}",
+            last.text
+        );
+        assert_eq!(app.input.value, "something else", "and typing is untouched");
     }
 
     #[test]

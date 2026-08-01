@@ -530,6 +530,18 @@ pub struct App {
     /// Both translation workers post their outcomes here; the main loop
     /// drains and routes them through `apply_translate_deliver`.
     pub(crate) translate_deliver_rx: mpsc::Receiver<translate::TranslateDeliver>,
+    /// Kept alive for the App's lifetime even when translation is disabled.
+    ///
+    /// With the feature off no worker holds a clone, so dropping this leaves
+    /// the receiver with zero senders — and `recv()` on a closed channel
+    /// returns `None` immediately, forever, spinning the main `select!` at
+    /// 100% CPU. That is the DEFAULT configuration, so it would hit everyone.
+    /// `shrink_deliver_tx` is retained for the same reason.
+    #[expect(
+        dead_code,
+        reason = "held solely to keep the receiver's channel open; see the doc above"
+    )]
+    pub(crate) translate_deliver_tx: mpsc::Sender<translate::TranslateDeliver>,
     /// `/shrink` command + the workers all post their final actions
     /// here; the main loop drains and routes them to
     /// `apply_shrink_deliver`.
@@ -726,7 +738,7 @@ impl App {
             timeout_ms: translate_timeout_ms,
             incoming_tx: translate_incoming_tx,
             outgoing_tx: translate_outgoing_tx,
-            deliver_tx: _translate_deliver_tx,
+            deliver_tx: translate_deliver_tx,
             deliver_rx: translate_deliver_rx,
         } = translate::TranslateRuntime::build(&config.translate);
         let translate_max_in_flight = config.translate.max_in_flight.max(1) as usize;
@@ -875,6 +887,7 @@ impl App {
             shrink_deliver_rx,
             translate_outgoing_tx,
             translate_deliver_rx,
+            translate_deliver_tx,
             translate_backend,
             translate_in_flight: Some(translate_in_flight),
             translate_in_flight_applied: translate_max_in_flight,

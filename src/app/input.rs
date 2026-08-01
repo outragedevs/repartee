@@ -2892,7 +2892,7 @@ pub mod submit_typing_tests {
         // needed. `state.translate_active` stays false, so the submit path
         // never dispatches and these are never read.
         let (translate_outgoing_tx, _translate_outgoing_rx) = mpsc::channel(16);
-        let (_translate_deliver_tx, translate_deliver_rx) = mpsc::channel(16);
+        let (translate_deliver_tx, translate_deliver_rx) = mpsc::channel(16);
 
         App {
             state,
@@ -2994,6 +2994,7 @@ pub mod submit_typing_tests {
             shrink_deliver_rx,
             translate_outgoing_tx,
             translate_deliver_rx,
+            translate_deliver_tx,
             translate_backend: None,
             translate_in_flight: None,
             translate_in_flight_applied: 0,

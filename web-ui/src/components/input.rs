@@ -182,6 +182,10 @@ pub fn InputLine() -> impl IntoView {
             return;
         };
         state.restore_input.set(None);
+        // Only into an empty composer: they may have started the next
+        // message, and clobbering that would be a worse surprise. The text
+        // is not lost either way — the core puts it in the error row too,
+        // precisely because this branch can decline to restore it.
         if value.get_untracked().is_empty() {
             set_value.set(text);
         }
