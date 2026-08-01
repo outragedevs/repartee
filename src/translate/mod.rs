@@ -10,6 +10,8 @@
 //! detection, masking of nicks and URLs, model routing, provider policy,
 //! retries, and quality gating.
 
+pub mod queue;
+
 /// Which way a line is travelling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
