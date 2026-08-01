@@ -120,6 +120,13 @@ deliberate duplication — the last point before bytes reach the socket, making 
 refusal a property of the send rather than of one upstream check, exactly as
 `build_outgoing_translate` re-runs the E2E gate.
 
+The **correlation id** is checked, not believed. An outcome carrying a different id
+than the request it answers is refused and re-labelled to the id we asked about.
+Trusting it resolves the queue slot the backend named: one line's translation applied
+to another — published under the user's nick, in the wrong conversation — while the
+line it belonged to sits pending until the timeout. Both halves of that are silent,
+which is what makes it worse than a visible failure.
+
 ### 2.1 `Filtered` is not a failure
 
 `Untranslated { Filtered }` means the broker correctly decided this line needs no
@@ -180,13 +187,22 @@ would acquire again.
 Both paths claim their units from the counter *before* touching the semaphore — the
 worker one at a time, the tick by taking the whole balance and handing back what it
 could not use — so the two cannot pay for the same unit twice and drop the ceiling
-below what was asked for. Every decision is made against the **effective** ceiling
-(`applied - debt`) rather than the last value written down: a worker that retires a
-permit lowers both numbers without telling the App side, so their difference stays
-exact while either alone drifts. Raising the target cancels outstanding debt before
-minting anything — those permits still exist, they were merely promised away — which
-is also what stops an abandoned reduction from settling the limiter at a number the
-config no longer asks for.
+below what was asked for. Raising the target cancels outstanding debt before minting
+anything: those permits still exist, they were merely promised away, which is also
+what stops an abandoned reduction from settling the limiter at a number the config no
+longer asks for.
+
+The permit count, the running total and the debt live in **one** object,
+`TranslateLimiter`, and that is a correctness requirement rather than tidiness. The
+ceiling in force is `total - debt`, so every retirement has to drop the real permit
+count AND `total` together. An earlier version kept `total` on `App` while the workers
+retired permits for themselves: `total` went stale high, the effective ceiling read
+back as the ORIGINAL value once the debt was clear, and the next
+`sync_translate_from_config` — which is every `/set`, `/reload` and `/translate add*`
+— applied the same reduction a second time. Two rounds of that forget every permit and
+translation stops for good, silently. A reduction also never records a debt that would
+take the ceiling below one, which is what stops `acquire` retiring its way into a
+permanent block.
 
 The queue governs only *when a resolved line is allowed onto the screen*.
 
@@ -343,6 +359,15 @@ renames — during which somebody may have claimed the abandoned nick — and a 
 message meant for them would follow the original peer instead. Only eras still pointing
 AT the renaming id are repointed, and those are by construction the conversation that
 is renaming now: any earlier occupant's era was repointed away when IT renamed.
+
+Anything the rename invalidates has to move with it, and that includes text already
+rendered for the user. The **retry string** is built at dispatch and spells the target
+as it was then, so a redirect rewrites it too: it is handed back into the composer as
+ready-to-send text, and `deferred_retry_text` returns it verbatim whenever the author
+is looking at the conversation — which after a rename means the NEW id. Left stale it
+is the same leak as addressing the old name, one keystroke away. Only the re-addressed
+`/msg <nick> <body>` form carries a nick; buffer input retries as itself and an action
+retries as `/me <body>`, which names nobody.
 
 The migrated key is not written to disk. `/translate add*|del*` writes the file and
 will carry it along next time; rewriting `config.toml` in response to somebody else's
@@ -741,6 +766,21 @@ Command names deliberately mirror the user's existing WeeChat and irssi scripts.
 `/translate status` reports in-flight counts, queue depths, and failures grouped by
 reason — the operational view needed to tell "the provider is down" from "the filter
 is doing its job".
+
+The counters are a session tally on `AppState`, because an outcome is otherwise
+consumed the moment it is rendered and nothing would be left to ask. They are reported
+whether or not anything is in flight: the question is asked precisely when the queues
+have drained and the channel looks untranslated, so returning early on an empty queue
+left it unanswerable at the one moment it mattered.
+
+`ReadyEntry` therefore carries a three-state `ReadyOrigin` and not
+`Option<UntranslatedReason>`. "Translated" and "never a candidate" are both absences of
+a reason, and a channel's JOINs, notices and our own echoes pass through this queue in
+bulk — folding them into the translated total would report a healthy provider that has
+not answered once. A line that never reached the worker carries its reason through the
+queue for the same purpose: those arrive exactly when the provider is in trouble.
+Counting happens at the single point a row leaves the queue for a buffer
+(`AppState::deliver_ready`), so a fourth release path cannot quietly skip it.
 
 ```toml
 [translate]

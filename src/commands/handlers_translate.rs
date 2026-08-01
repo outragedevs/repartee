@@ -321,20 +321,48 @@ fn status(app: &mut App) {
     add_local_event(app, &format!("translate: {active}"));
     if app.state.translate_queues.is_empty() {
         add_local_event(app, "  no lines in flight");
+    } else {
+        let mut rows: Vec<(String, usize, usize)> = app
+            .state
+            .translate_queues
+            .iter()
+            .map(|(id, q)| (id.clone(), q.pending_len(), q.len()))
+            .collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        for (buffer_id, pending, total) in rows {
+            add_local_event(
+                app,
+                &format!("  {buffer_id}  {pending} in flight, {total} queued"),
+            );
+        }
+    }
+    // Reported whether or not anything is in flight. The question this
+    // command answers — is the provider down, or is the filter simply doing
+    // its job — is asked precisely when the queues have drained and the
+    // channel looks untranslated, so an early return here left it
+    // unanswerable at the one moment it mattered.
+    let tally = app.state.translate_tally;
+    if tally.is_empty() {
+        add_local_event(app, "  nothing has been through the translator yet");
         return;
     }
-    let mut rows: Vec<(String, usize, usize)> = app
-        .state
-        .translate_queues
-        .iter()
-        .map(|(id, q)| (id.clone(), q.pending_len(), q.len()))
-        .collect();
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
-    for (buffer_id, pending, total) in rows {
+    add_local_event(
+        app,
+        &format!(
+            "  {} translated, {} filtered",
+            tally.translated, tally.filtered
+        ),
+    );
+    if tally.timeout > 0 || tally.provider > 0 || tally.refused > 0 {
         add_local_event(
             app,
-            &format!("  {buffer_id}  {pending} in flight, {total} queued"),
+            &format!(
+                "  failures: {} timeout, {} provider, {} refused output",
+                tally.timeout, tally.provider, tally.refused
+            ),
         );
+    } else {
+        add_local_event(app, "  failures: none");
     }
 }
 
@@ -361,6 +389,67 @@ mod tests {
             .add_buffer(Buffer::for_test("test", BufferType::Channel, "#dupa"));
         app.state.set_active_buffer("test/#dupa");
         app
+    }
+
+    /// Everything the command printed, in order.
+    fn all_events(app: &App) -> Vec<String> {
+        app.state
+            .buffers
+            .values()
+            .flat_map(|b| b.messages.iter())
+            .map(|m| m.text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn status_reports_failures_by_reason_once_the_queues_have_drained() {
+        // The question this command answers — is the provider down, or is
+        // the filter doing its job — is asked precisely when the queues are
+        // empty and the channel looks untranslated. Returning early there
+        // left it unanswerable at the one moment it mattered.
+        let mut app = app_with_channel();
+        app.state.translate_tally.translated = 12;
+        app.state.translate_tally.filtered = 3;
+        app.state.translate_tally.timeout = 5;
+        app.state.translate_tally.provider = 1;
+        assert!(
+            app.state.translate_queues.is_empty(),
+            "precondition: nothing in flight"
+        );
+
+        status(&mut app);
+
+        let printed = all_events(&app).join("\n");
+        assert!(
+            printed.contains("12 translated, 3 filtered"),
+            "the successful outcomes are reported: {printed}"
+        );
+        assert!(
+            printed.contains("5 timeout, 1 provider"),
+            "and so are the failures, split by reason: {printed}"
+        );
+    }
+
+    #[test]
+    fn status_distinguishes_a_quiet_translator_from_a_broken_one() {
+        // Nothing attempted and everything failing both leave the channel
+        // untranslated. They must not print the same thing.
+        let mut app = app_with_channel();
+        status(&mut app);
+        assert!(
+            all_events(&app).join("\n").contains("nothing has been through"),
+            "an idle translator says so"
+        );
+
+        let mut broken = app_with_channel();
+        broken.state.translate_tally.provider = 9;
+        status(&mut broken);
+        let printed = all_events(&broken).join("\n");
+        assert!(
+            printed.contains("9 provider"),
+            "a failing one names the reason: {printed}"
+        );
+        assert!(!printed.contains("nothing has been through"));
     }
 
     fn last_event(app: &App) -> String {

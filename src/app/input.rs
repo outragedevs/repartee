@@ -3003,8 +3003,6 @@ pub mod submit_typing_tests {
             translate_deliver_tx,
             translate_backend: None,
             translate_in_flight: None,
-            translate_in_flight_applied: 0,
-            translate_in_flight_debt: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             submit_origin: crate::app::translate::SubmitOrigin::Tui,
             conn_generations: std::collections::HashMap::new(),
             translate_timeout_ms: None,

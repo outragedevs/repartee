@@ -30,6 +30,7 @@ impl AppState {
             translate_my_lang: "en".to_string(),
             translate_show_original_in: true,
             translate_max_queue: 200,
+            translate_tally: crate::state::TranslateTally::default(),
             own_echo_decorations: std::collections::HashMap::new(),
             buffer_redirects: std::collections::HashMap::new(),
             pending_buffer_rekeys: Vec::new(),
@@ -844,13 +845,20 @@ impl AppState {
 
         if let Some(queue) = self.translate_queues.get_mut(buffer_id) {
             let id = message.id;
-            queue.push_resolved(id, message, level);
+            queue.push_untranslated(id, message, level, reason.clone());
             // A fallback row lands in the same queue and counts against the
             // same ceiling — and these arrive exactly when the provider is
             // already in trouble, which is when the bound matters.
             self.enforce_translate_ceiling(buffer_id);
             return None;
         }
+        // No queue to carry the reason, so it is counted here instead. This
+        // is the same line either way and must appear in the tally exactly
+        // once, whichever branch it took.
+        self.translate_tally
+            .record(&crate::translate::queue::ReadyOrigin::Untranslated(
+                reason.clone(),
+            ));
         // Deliver it here rather than handing it back. Returning `Some` puts
         // it back into `add_message_with_activity`, which then offers it to
         // incoming SHRINK — so a line already marked `[untranslated: …]`
@@ -989,6 +997,28 @@ impl AppState {
         None
     }
 
+    /// The one way a line leaves the reorder queue for a buffer.
+    ///
+    /// Every release path funnels through here — the ordinary drain, the
+    /// flush on close or disconnect, and the ceiling — so the running tally
+    /// cannot fall behind by someone adding a fourth. Counting at each call
+    /// site instead is how a mirror goes stale, which this file has already
+    /// paid for once.
+    pub(crate) fn deliver_ready(&mut self, buffer_id: &str, ready: Vec<crate::translate::queue::ReadyEntry>) {
+        for entry in ready {
+            self.translate_tally.record(&entry.origin);
+            if let Some(reason) = entry.origin.gap() {
+                tracing::debug!(
+                    buffer_id,
+                    id = entry.id,
+                    reason = %reason.label(),
+                    "translate: line delivered untranslated"
+                );
+            }
+            self.add_message_with_activity_unshrunk(buffer_id, entry.message, entry.activity);
+        }
+    }
+
     /// Release everything this buffer's queue has ready, and drop the queue
     /// if that emptied it.
     ///
@@ -1003,17 +1033,7 @@ impl AppState {
             };
             queue.drain_ready()
         };
-        for entry in ready {
-            if let Some(reason) = entry.reason.as_ref().filter(|r| r.is_gap()) {
-                tracing::debug!(
-                    buffer_id,
-                    id = entry.id,
-                    reason = %reason.label(),
-                    "translate: line delivered untranslated"
-                );
-            }
-            self.add_message_with_activity_unshrunk(buffer_id, entry.message, entry.activity);
-        }
+        self.deliver_ready(buffer_id, ready);
         if self
             .translate_queues
             .get(buffer_id)
@@ -1046,17 +1066,7 @@ impl AppState {
                 "translate: flushed queued lines"
             );
         }
-        for entry in ready {
-            if let Some(reason) = entry.reason.as_ref().filter(|r| r.is_gap()) {
-                tracing::debug!(
-                    buffer_id,
-                    id = entry.id,
-                    reason = %reason.label(),
-                    "translate: line delivered untranslated"
-                );
-            }
-            self.add_message_with_activity_unshrunk(buffer_id, entry.message, entry.activity);
-        }
+        self.deliver_ready(buffer_id, ready);
     }
 
     /// Hold one buffer's queue to `max_queue`, releasing whatever that forces
@@ -1099,9 +1109,7 @@ impl AppState {
             }
             queue.drain_ready()
         };
-        for entry in ready {
-            self.add_message_with_activity_unshrunk(buffer_id, entry.message, entry.activity);
-        }
+        self.deliver_ready(buffer_id, ready);
     }
 
     /// Same as `add_message_with_activity`, but bypasses the shrink
@@ -3220,6 +3228,82 @@ mod translate_gate_tests {
             "the echo must not render ahead of the line queued before it"
         );
         assert_eq!(state.translate_queues[BUF].len(), 2);
+    }
+
+    #[test]
+    fn a_line_that_never_reached_the_worker_is_tallied_as_a_failure() {
+        // These arrive exactly when the provider is in trouble, which is
+        // when `/translate status` is asked whether the provider is in
+        // trouble. Counting them as successful translations would have the
+        // command report health precisely when there is none.
+        let (mut state, _rx) = state_with_translation_capacity(1);
+        let first = make_test_message(&mut state, "hola");
+        let first_id = first.id;
+        state.add_message_with_activity(BUF, first, ActivityLevel::Activity);
+        // The worker channel now holds its one slot, so this one cannot be
+        // dispatched at all and falls back to an untranslated row.
+        let second = make_test_message(&mut state, "que tal");
+        state.add_message_with_activity(BUF, second, ActivityLevel::Activity);
+
+        // Counting happens where a line is DELIVERED, so release them both.
+        state
+            .translate_queues
+            .get_mut(BUF)
+            .expect("queued")
+            .resolve(first_id, Ok("czesc".to_string()));
+        state.drain_translate_ready(BUF);
+        assert_eq!(shown(&state, BUF), 2, "precondition: both were delivered");
+
+        assert_eq!(
+            state.translate_tally.translated, 1,
+            "only the one that actually came back from a broker"
+        );
+        let failures = state.translate_tally.timeout
+            + state.translate_tally.provider
+            + state.translate_tally.refused;
+        assert_eq!(failures, 1, "the undispatched line is counted, once");
+    }
+
+    #[test]
+    fn the_tally_separates_filtered_from_failed() {
+        // Both leave the line in its original language on screen. Telling
+        // them apart is the whole reason the counters are split by reason.
+        let (mut state, _rx) = state_with_translation();
+        let msg = make_test_message(&mut state, "hola que tal");
+        let id = msg.id;
+        state.add_message_with_activity(BUF, msg, ActivityLevel::Activity);
+        state
+            .translate_queues
+            .get_mut(BUF)
+            .expect("queued")
+            .resolve(id, Err(crate::translate::UntranslatedReason::Filtered));
+        state.drain_translate_ready(BUF);
+
+        assert_eq!(state.translate_tally.filtered, 1);
+        assert_eq!(state.translate_tally.translated, 0);
+        assert_eq!(
+            state.translate_tally.timeout + state.translate_tally.provider,
+            0,
+            "a filtered line is the broker working, not a failure"
+        );
+    }
+
+    #[test]
+    fn rows_that_were_never_candidates_stay_out_of_the_tally() {
+        // JOINs, notices and our own echoes pass through the same queue in
+        // bulk. Folding them into the translated total would report a
+        // healthy provider that has not answered once.
+        let (mut state, _rx) = state_with_translation();
+        state.reserve_echo_slot(BUF, 100);
+        let mut echo = make_test_message(&mut state, "moje zdanie");
+        echo.nick = Some("me".to_string());
+        state.add_own_message(BUF, 100, echo);
+
+        assert_eq!(
+            state.translate_tally,
+            crate::state::TranslateTally::default(),
+            "our own echo says nothing about the translator"
+        );
     }
 
     #[test]

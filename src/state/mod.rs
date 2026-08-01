@@ -100,6 +100,55 @@ pub struct OwnEchoDecoration {
     filed_at: std::time::Instant,
 }
 
+/// How translation attempts have turned out this session.
+///
+/// Counted by REASON rather than as one failure total, because the reasons
+/// call for different responses and look identical in aggregate: `filtered`
+/// rising is the broker deciding lines need no translation, `timeout` and
+/// `provider` rising is a broker that is not answering, and `refused` is the
+/// mechanism rejecting the broker's own output.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TranslateTally {
+    /// Lines that came back translated.
+    pub translated: u64,
+    /// Lines the broker correctly decided to leave alone. Not a failure.
+    pub filtered: u64,
+    /// Lines that ran out of time — the per-request budget, the queue's
+    /// expiry, or the queue ceiling.
+    pub timeout: u64,
+    /// Broker-side refusals: quality gate, daily limit, no provider.
+    pub provider: u64,
+    /// Everything else, including output this client refused to use —
+    /// a multi-line answer, an answer to another request, a panic.
+    pub refused: u64,
+}
+
+impl TranslateTally {
+    /// Fold one delivered line in.
+    pub const fn record(&mut self, origin: &crate::translate::queue::ReadyOrigin) {
+        use crate::translate::UntranslatedReason as R;
+        use crate::translate::queue::ReadyOrigin as O;
+        match origin {
+            // Never a candidate, so it says nothing about the provider.
+            O::NotTranslated => {}
+            O::Translated => self.translated += 1,
+            O::Untranslated(R::Filtered) => self.filtered += 1,
+            O::Untranslated(R::Timeout) => self.timeout += 1,
+            O::Untranslated(R::QualityGate | R::DailyLimit | R::NoProvider) => self.provider += 1,
+            O::Untranslated(R::Error(_)) => self.refused += 1,
+        }
+    }
+
+    /// `true` when nothing has been through the mechanism yet.
+    pub const fn is_empty(&self) -> bool {
+        self.translated == 0
+            && self.filtered == 0
+            && self.timeout == 0
+            && self.provider == 0
+            && self.refused == 0
+    }
+}
+
 /// One conversation's occupancy of a buffer id, and where it went.
 ///
 /// See [`AppState::buffer_redirects`] for why a single mapping is not enough.
@@ -185,6 +234,13 @@ pub struct AppState {
     /// between two ticks, and the setting is documented as a bound on memory
     /// and on how far behind the display can fall.
     pub translate_max_queue: usize,
+    /// Running tally of how lines have come back, for `/translate status`.
+    ///
+    /// Kept because the outcome is otherwise consumed the moment it is
+    /// rendered, so nothing could tell a provider that is down from a filter
+    /// doing its job — which is the one question the status command exists to
+    /// answer.
+    pub translate_tally: TranslateTally,
     /// How to render `echo-message`'s reflection of a translated line we
     /// sent, keyed by buffer, oldest first.
     ///

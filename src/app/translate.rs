@@ -275,16 +275,7 @@ pub struct TranslateRuntime {
     /// The incoming worker's concurrency limiter, shared so
     /// `/set translate.max_in_flight` can retune it without a restart.
     /// Exposed as a plain `/set` option, so it has to actually do something.
-    pub in_flight: Arc<Semaphore>,
-    /// Permits a concurrency REDUCTION still owes, shared with the workers.
-    ///
-    /// A lowered `max_in_flight` can only be applied by taking permits away,
-    /// and `Semaphore::forget_permits` can only take ones that are available.
-    /// Under sustained traffic none ever is — tokio hands each returned
-    /// permit straight to the next waiter — so the reduction has to be
-    /// applied where permits are handed out. See
-    /// [`acquire_translate_permit`].
-    pub in_flight_debt: Arc<std::sync::atomic::AtomicUsize>,
+    pub in_flight: Arc<TranslateLimiter>,
     /// Per-request budget in milliseconds, shared with the workers so
     /// `/set translate.timeout_ms` retunes them too rather than only the
     /// queue's display-side expiry.
@@ -316,8 +307,7 @@ impl TranslateRuntime {
         let (incoming_tx, incoming_rx) = mpsc::channel::<PendingTranslate>(1024);
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<PendingOutgoingTranslate>(256);
         let (deliver_tx, deliver_rx) = mpsc::channel::<TranslateDeliver>(1024);
-        let in_flight = Arc::new(Semaphore::new(cfg.max_in_flight.max(1) as usize));
-        let in_flight_debt = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let in_flight = Arc::new(TranslateLimiter::new(cfg.max_in_flight.max(1) as usize));
         let timeout_ms = Arc::new(std::sync::atomic::AtomicU64::new(cfg.timeout_ms.max(1)));
 
         if let Some(ref b) = backend {
@@ -326,7 +316,6 @@ impl TranslateRuntime {
                 Arc::clone(b),
                 deliver_tx.clone(),
                 Arc::clone(&in_flight),
-                Arc::clone(&in_flight_debt),
                 Arc::clone(&timeout_ms),
             );
             spawn_outgoing_worker(
@@ -334,7 +323,6 @@ impl TranslateRuntime {
                 Arc::clone(b),
                 deliver_tx.clone(),
                 Arc::clone(&in_flight),
-                Arc::clone(&in_flight_debt),
                 Arc::clone(&timeout_ms),
             );
         } else {
@@ -347,7 +335,6 @@ impl TranslateRuntime {
         Self {
             backend,
             in_flight,
-            in_flight_debt,
             timeout_ms,
             incoming_tx,
             outgoing_tx,
@@ -413,7 +400,7 @@ async fn translate_isolated(
         tokio::time::timeout(budget, backend.translate(req)).await
     });
     match fut.catch_unwind().await {
-        Ok(Ok(outcome)) => single_line_or_refuse(outcome),
+        Ok(Ok(outcome)) => single_line_or_refuse(id, outcome),
         Ok(Err(_elapsed)) => {
             tracing::warn!(id, ?budget, "translate: backend timed out; abandoning it");
             TranslateOutcome::Untranslated {
@@ -445,7 +432,24 @@ async fn translate_isolated(
 /// contract is one line per request (§2), so a multi-line answer is a broken
 /// response whatever it says, and guessing which line the user meant is not
 /// something to do with text about to be published under their nick.
-fn single_line_or_refuse(outcome: TranslateOutcome) -> TranslateOutcome {
+fn single_line_or_refuse(expected: u64, outcome: TranslateOutcome) -> TranslateOutcome {
+    // The id correlates an answer with the line that asked for it, and the
+    // backend is untrusted, so it is checked rather than believed. An outcome
+    // carrying somebody else's id resolves THAT queue slot: one line's
+    // translation is applied to another — published under the user's nick, in
+    // the wrong conversation — while the line it belonged to sits pending
+    // until the timeout. Both halves of that are silent.
+    if outcome.id() != expected {
+        tracing::error!(
+            expected,
+            answered = outcome.id(),
+            "translate: backend answered with another request's id; refusing it"
+        );
+        return TranslateOutcome::Untranslated {
+            id: expected,
+            reason: UntranslatedReason::Error("backend answered the wrong request".to_string()),
+        };
+    }
     let TranslateOutcome::Translated { id, text } = outcome else {
         return outcome;
     };
@@ -470,41 +474,164 @@ fn single_line_or_refuse(outcome: TranslateOutcome) -> TranslateOutcome {
     }
 }
 
-/// Take one permit, first paying off any concurrency reduction that could
-/// not be applied when it was configured.
+/// The translation concurrency limiter, with the two numbers that describe
+/// it — and they must live together.
 ///
-/// `Semaphore::forget_permits` only takes permits that are AVAILABLE, and
-/// tokio hands a returned permit directly to the next waiter — so while
-/// anyone is waiting, no permit ever becomes available and a lowered
-/// `translate.max_in_flight` would go on being ignored for as long as the
-/// traffic lasts, which is exactly when it matters.
-///
-/// Retiring permits HERE, at the one place they are handed out, makes that
-/// traffic pay the debt instead. The loop terminates: a retune never records
-/// a debt larger than `applied - 1`, so at least one permit always survives
-/// to be returned.
-///
-/// Returns `None` only when the semaphore is closed, which is shutdown.
-async fn acquire_translate_permit(
-    permits: &Arc<Semaphore>,
-    debt: &Arc<std::sync::atomic::AtomicUsize>,
-) -> Option<tokio::sync::OwnedSemaphorePermit> {
-    use std::sync::atomic::Ordering;
-    loop {
-        let permit = Arc::clone(permits).acquire_owned().await.ok()?;
-        // Claim the unit BEFORE retiring the permit, so a concurrent
-        // `settle_translate_concurrency_debt` cannot retire it too and take
-        // the ceiling below what was asked for.
-        if debt
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |owed| {
-                owed.checked_sub(1)
-            })
-            .is_ok()
-        {
-            permit.forget();
-            continue;
+/// The ceiling in force is `total - debt`. Every retirement of a permit has
+/// to drop the real permit count AND `total` in the same breath, or the pair
+/// stops describing the semaphore. An earlier version kept `total` on `App`
+/// while the workers retired permits for themselves: `total` went stale
+/// high, the effective ceiling read back as the ORIGINAL value once the debt
+/// was paid, and the next `sync_translate_from_config` — which is every
+/// `/set`, `/reload` and `/translate add*` — applied the same reduction a
+/// second time. Two rounds of that forget every permit and translation stops
+/// for good, with nothing to say why. One owner, one place to update.
+pub struct TranslateLimiter {
+    permits: Arc<Semaphore>,
+    /// Permits minted into `permits`, less those retired again. NOT the
+    /// available count: checked-out permits still belong to the total.
+    total: std::sync::atomic::AtomicUsize,
+    /// A reduction recorded but not yet applied, because the permits it
+    /// wants were checked out at the time.
+    debt: std::sync::atomic::AtomicUsize,
+}
+
+impl TranslateLimiter {
+    pub fn new(permits: usize) -> Self {
+        let permits = permits.max(1);
+        Self {
+            permits: Arc::new(Semaphore::new(permits)),
+            total: std::sync::atomic::AtomicUsize::new(permits),
+            debt: std::sync::atomic::AtomicUsize::new(0),
         }
-        return Some(permit);
+    }
+
+    /// The ceiling actually in force. Never zero: a reduction never records
+    /// a debt that would take it below one, which is also what stops
+    /// [`Self::acquire`] retiring its way into a permanent block.
+    pub fn effective(&self) -> usize {
+        use std::sync::atomic::Ordering;
+        self.total
+            .load(Ordering::Acquire)
+            .saturating_sub(self.debt.load(Ordering::Acquire))
+    }
+
+    /// Take a permit out of circulation for good, and keep `total` with it.
+    fn retire(&self, count: usize) {
+        if count > 0 {
+            self.total
+                .fetch_sub(count, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
+
+    /// Take one permit, first paying off any reduction that could not be
+    /// applied when it was configured.
+    ///
+    /// `Semaphore::forget_permits` only takes permits that are AVAILABLE,
+    /// and tokio hands a returned permit directly to the next waiter — so
+    /// while anyone is waiting none ever becomes available, and a lowered
+    /// `translate.max_in_flight` would go on being ignored for as long as
+    /// the traffic lasts, which is exactly when it matters. Retiring permits
+    /// HERE, at the one place they are handed out, makes that traffic pay
+    /// the debt instead.
+    ///
+    /// Returns `None` only when the semaphore is closed, which is shutdown.
+    pub async fn acquire(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        use std::sync::atomic::Ordering;
+        loop {
+            let permit = Arc::clone(&self.permits).acquire_owned().await.ok()?;
+            // Claim the unit BEFORE retiring the permit, so a concurrent
+            // `settle` cannot pay for the same one and take the ceiling
+            // below what was asked for.
+            if self
+                .debt
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |owed| {
+                    owed.checked_sub(1)
+                })
+                .is_ok()
+            {
+                permit.forget();
+                self.retire(1);
+                continue;
+            }
+            return Some(permit);
+        }
+    }
+
+    /// Move the ceiling to `want`, applying as much of it as possible now.
+    pub fn retune(&self, want: usize) {
+        use std::sync::atomic::Ordering;
+        let want = want.max(1);
+        let have = self.effective();
+        if want == have {
+            return;
+        }
+        if want > have {
+            // Cancel an outstanding reduction before minting anything: those
+            // permits still exist, they were merely promised away. Raising
+            // the target back to where it started is therefore free, and
+            // must not leave a debt behind that the workers would go on
+            // paying — which would settle the limiter at a value the config
+            // no longer asks for.
+            let cancel = (want - have).min(self.debt.load(Ordering::Acquire));
+            if cancel > 0 {
+                self.debt.fetch_sub(cancel, Ordering::AcqRel);
+            }
+            let mint = (want - have) - cancel;
+            if mint > 0 {
+                self.permits.add_permits(mint);
+                self.total.fetch_add(mint, Ordering::AcqRel);
+            }
+        } else {
+            self.debt.fetch_add(have - want, Ordering::AcqRel);
+            self.settle();
+        }
+        tracing::info!(
+            from = have,
+            to = want,
+            effective = self.effective(),
+            "translate: concurrency retuned"
+        );
+    }
+
+    /// Retire as much of an owed reduction as is idle right now.
+    ///
+    /// Run from the tick as well, for the case the workers cannot cover: a
+    /// reduction made while requests were in flight, after which the traffic
+    /// stops. Nothing acquires a permit again, so nothing would pay it off.
+    pub fn settle(&self) {
+        use std::sync::atomic::Ordering;
+        // Claim the debt in full before touching the semaphore. A worker
+        // that retires a permit claims its unit first, so taking the counter
+        // to zero here is what stops the two paying for the same unit twice.
+        // The unpaid remainder goes straight back.
+        let claim = self.debt.swap(0, Ordering::AcqRel);
+        if claim == 0 {
+            return;
+        }
+        let forgotten = self.permits.forget_permits(claim);
+        if forgotten < claim {
+            self.debt.fetch_add(claim - forgotten, Ordering::AcqRel);
+        }
+        if forgotten == 0 {
+            return;
+        }
+        self.retire(forgotten);
+        tracing::debug!(
+            forgotten,
+            remaining = self.debt.load(Ordering::Acquire),
+            "translate: settled part of a concurrency reduction"
+        );
+    }
+
+    #[cfg(test)]
+    pub fn available(&self) -> usize {
+        self.permits.available_permits()
+    }
+
+    #[cfg(test)]
+    pub fn debt(&self) -> usize {
+        self.debt.load(std::sync::atomic::Ordering::Acquire)
     }
 }
 
@@ -514,13 +641,12 @@ fn spawn_incoming_worker(
     mut rx: mpsc::Receiver<PendingTranslate>,
     backend: SharedBackend,
     deliver: mpsc::Sender<TranslateDeliver>,
-    permits: Arc<Semaphore>,
-    debt: Arc<std::sync::atomic::AtomicUsize>,
+    permits: Arc<TranslateLimiter>,
     timeout_ms: Arc<std::sync::atomic::AtomicU64>,
 ) {
     tokio::spawn(async move {
         while let Some(pending) = rx.recv().await {
-            let Some(permit) = acquire_translate_permit(&permits, &debt).await else {
+            let Some(permit) = permits.acquire().await else {
                 break;
             };
             let backend = Arc::clone(&backend);
@@ -559,8 +685,7 @@ fn spawn_outgoing_worker(
     mut rx: mpsc::Receiver<PendingOutgoingTranslate>,
     backend: SharedBackend,
     deliver: mpsc::Sender<TranslateDeliver>,
-    permits: Arc<Semaphore>,
-    debt: Arc<std::sync::atomic::AtomicUsize>,
+    permits: Arc<TranslateLimiter>,
     timeout_ms: Arc<std::sync::atomic::AtomicU64>,
 ) {
     /// Per-connection queue depth. Deep enough that normal typing never
@@ -582,7 +707,6 @@ fn spawn_outgoing_worker(
                     Arc::clone(&backend),
                     deliver.clone(),
                     Arc::clone(&permits),
-                    Arc::clone(&debt),
                     Arc::clone(&timeout_ms),
                 );
                 tx
@@ -613,8 +737,7 @@ fn spawn_connection_lane(
     mut rx: mpsc::Receiver<PendingOutgoingTranslate>,
     backend: SharedBackend,
     deliver: mpsc::Sender<TranslateDeliver>,
-    permits: Arc<Semaphore>,
-    debt: Arc<std::sync::atomic::AtomicUsize>,
+    permits: Arc<TranslateLimiter>,
     timeout_ms: Arc<std::sync::atomic::AtomicU64>,
 ) {
     tokio::spawn(async move {
@@ -628,7 +751,7 @@ fn spawn_connection_lane(
             //
             // A lane is serial, so this only ever makes it wait; it holds no
             // other permit while acquiring, so nothing can deadlock behind it.
-            let Some(_permit) = acquire_translate_permit(&permits, &debt).await else {
+            let Some(_permit) = permits.acquire().await else {
                 break;
             };
             let outcome =
@@ -760,6 +883,19 @@ impl crate::app::App {
         {
             buffer_id.clone_from(&new_id);
         }
+        // The retry string was rendered at DISPATCH and spells the old nick.
+        // It is handed back to the user as ready-to-send text, so leaving it
+        // stale is the same leak as addressing the old name: whenever the
+        // author is looking at this conversation `deferred_retry_text`
+        // returns it verbatim, and if the abandoned nick has been claimed,
+        // pressing Enter delivers the private text to a stranger.
+        //
+        // Only the re-addressed form carries a nick. Buffer input retries as
+        // itself (`retry_text == retry_body`) and an action retries as
+        // `/me <body>`, which names nobody — see `retry_form_for`.
+        if !out.is_action && out.retry_text != out.retry_body {
+            out.retry_text = format!("/msg {new_name} {}", out.retry_body);
+        }
         out.buffer_id = new_id;
         out.buffer_name = new_name;
         RedirectVerdict::Proceed
@@ -854,21 +990,7 @@ impl crate::app::App {
         buffer_id: &str,
         ready: Vec<crate::translate::queue::ReadyEntry>,
     ) {
-        for entry in ready {
-            if let Some(reason) = entry.reason.as_ref().filter(|r| r.is_gap()) {
-                tracing::debug!(
-                    buffer_id,
-                    id = entry.id,
-                    reason = %reason.label(),
-                    "translate: line delivered untranslated"
-                );
-            }
-            self.state.add_message_with_activity_unshrunk(
-                buffer_id,
-                entry.message,
-                entry.activity,
-            );
-        }
+        self.state.deliver_ready(buffer_id, ready);
     }
 
     /// Final stage of the outgoing pipeline once translation has returned.
@@ -1860,113 +1982,23 @@ impl crate::app::App {
         self.retune_translate_concurrency();
     }
 
-    /// The ceiling actually in force: permits handed out, less the reduction
-    /// still owed.
-    ///
-    /// Every decision here is made against THIS and not against
-    /// `translate_in_flight_applied`, because a worker that pays off a unit
-    /// of debt retires a permit without telling this side. Both numbers fall
-    /// by one when that happens, so their difference — the effective ceiling
-    /// — stays exact while either on its own drifts.
-    fn translate_concurrency_effective(&self) -> usize {
-        self.translate_in_flight_applied.saturating_sub(
-            self.translate_in_flight_debt
-                .load(std::sync::atomic::Ordering::Acquire),
-        )
-    }
-
-    /// The reduction still owed. Test-facing read of the shared counter.
-    #[cfg(test)]
-    pub(crate) fn translate_debt(&self) -> usize {
-        self.translate_in_flight_debt
-            .load(std::sync::atomic::Ordering::Acquire)
-    }
-
     /// Apply `translate.max_in_flight` to the running workers.
     ///
     /// The limiter is built once at startup, so without this the setting is
     /// accepted, persisted, and silently ignored — worse than not offering
-    /// it. `Semaphore` can only be nudged by a delta, so the running total is
-    /// tracked alongside it.
-    fn retune_translate_concurrency(&mut self) {
-        use std::sync::atomic::Ordering;
-        let Some(limiter) = self.translate_in_flight.as_ref() else {
-            return;
-        };
-        let want = self.config.translate.max_in_flight.max(1) as usize;
-        let have = self.translate_concurrency_effective();
-        if want == have {
-            return;
+    /// it.
+    fn retune_translate_concurrency(&self) {
+        if let Some(limiter) = self.translate_in_flight.as_ref() {
+            limiter.retune(self.config.translate.max_in_flight.max(1) as usize);
         }
-        if want > have {
-            // Cancel an outstanding reduction before minting anything: those
-            // permits still exist, they were merely promised away. Raising
-            // the target back to where it started is therefore free, and —
-            // more to the point — must not leave a debt behind that the
-            // workers would go on paying, settling the limiter at a value the
-            // config no longer asks for with nothing to say why.
-            let cancel = (want - have).min(self.translate_in_flight_debt.load(Ordering::Acquire));
-            if cancel > 0 {
-                self.translate_in_flight_debt
-                    .fetch_sub(cancel, Ordering::AcqRel);
-            }
-            let mint = (want - have) - cancel;
-            if mint > 0 {
-                limiter.add_permits(mint);
-                self.translate_in_flight_applied += mint;
-            }
-        } else {
-            // Record the whole reduction as owed, then take back whatever is
-            // idle this instant. Anything still checked out is paid off by
-            // the workers as they next acquire — `forget_permits` alone can
-            // never do it, because a busy limiter has nothing available.
-            self.translate_in_flight_debt
-                .fetch_add(have - want, Ordering::AcqRel);
-            self.settle_translate_concurrency_debt();
-        }
-        tracing::info!(
-            from = have,
-            to = want,
-            effective = self.translate_concurrency_effective(),
-            "translate: concurrency retuned"
-        );
     }
 
-    /// Retire as much of an owed reduction as is idle right now.
-    ///
-    /// Run from the tick as well, for the case the workers cannot cover: a
-    /// reduction made while requests were in flight, after which the traffic
-    /// stops. Nothing acquires a permit again, so nothing would pay the debt,
-    /// and the limiter would sit above the configured ceiling until the next
-    /// message.
-    pub(crate) fn settle_translate_concurrency_debt(&mut self) {
-        use std::sync::atomic::Ordering;
-        let Some(limiter) = self.translate_in_flight.as_ref() else {
-            return;
-        };
-        // Claim the debt in full before touching the semaphore. A worker that
-        // retires a permit claims its unit first, so taking the counter to
-        // zero here is what stops the two paying for the same unit twice and
-        // dropping the ceiling below what was asked for. The unpaid remainder
-        // goes straight back.
-        let claim = self.translate_in_flight_debt.swap(0, Ordering::AcqRel);
-        if claim == 0 {
-            return;
+    /// Retire whatever an owed reduction can claim right now. Called from the
+    /// maintenance tick — see [`TranslateLimiter::settle`].
+    pub(crate) fn settle_translate_concurrency_debt(&self) {
+        if let Some(limiter) = self.translate_in_flight.as_ref() {
+            limiter.settle();
         }
-        let forgotten = limiter.forget_permits(claim);
-        if forgotten < claim {
-            self.translate_in_flight_debt
-                .fetch_add(claim - forgotten, Ordering::AcqRel);
-        }
-        if forgotten == 0 {
-            return;
-        }
-        self.translate_in_flight_applied -= forgotten;
-        tracing::debug!(
-            forgotten,
-            remaining = self.translate_in_flight_debt.load(Ordering::Acquire),
-            "translate: settled part of a concurrency reduction"
-        );
     }
 
     /// Release whatever one buffer's queue has ready, and drop it if that
@@ -2672,37 +2704,32 @@ mod app_tests {
     fn restoring_a_reduced_limit_before_it_lands_cancels_the_reduction() {
         // 4 -> 2 with every permit checked out records a debt of 2 and
         // applies nothing. Putting the target back to 4 must drop that debt:
-        // otherwise the tick keeps forgetting permits as work returns them,
-        // the limiter settles at the ABANDONED 2, and stays there while the
+        // otherwise the workers keep retiring permits as they take them, the
+        // limiter settles at the ABANDONED 2, and stays there while the
         // config says 4.
-        let mut app = test_app();
-        let limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+        let limiter = TranslateLimiter::new(4);
         let held: Vec<_> = (0..4)
-            .map(|_| std::sync::Arc::clone(&limiter).try_acquire_owned().expect("permit"))
+            .map(|_| limiter.permits.clone().try_acquire_owned().expect("permit"))
             .collect();
-        app.translate_in_flight = Some(std::sync::Arc::clone(&limiter));
-        app.translate_in_flight_applied = 4;
 
-        app.config.translate.max_in_flight = 2;
-        app.sync_translate_from_config();
+        limiter.retune(2);
         assert_eq!(
-            app.translate_debt(),
+            limiter.debt(),
             2,
             "nothing could be forgotten while every permit is out"
         );
 
-        app.config.translate.max_in_flight = 4;
-        app.sync_translate_from_config();
+        limiter.retune(4);
         assert_eq!(
-            app.translate_debt(),
+            limiter.debt(),
             0,
             "the reduction was abandoned before it ever took effect"
         );
 
         drop(held);
-        app.settle_translate_concurrency_debt();
+        limiter.settle();
         assert_eq!(
-            limiter.available_permits(),
+            limiter.available(),
             4,
             "so all four permits stay available, as the config asks"
         );
@@ -2744,6 +2771,117 @@ mod app_tests {
                 line.len()
             );
         }
+    }
+
+    #[test]
+    fn an_outcome_answering_another_request_is_refused() {
+        // The id is what correlates an answer with the line that asked for
+        // it, and the backend is untrusted, so it is checked rather than
+        // believed. An outcome carrying somebody else's id would resolve THAT
+        // queue slot: one line's translation applied to another — published
+        // under the user's nick, in the wrong conversation — while the line
+        // it belonged to sits pending until the timeout. Both halves silent.
+        let answered = super::single_line_or_refuse(
+            7,
+            TranslateOutcome::Translated {
+                id: 99,
+                text: "mein satz".to_string(),
+            },
+        );
+        assert_eq!(answered.id(), 7, "the outcome is re-labelled to the line we asked about");
+        assert!(
+            matches!(answered, TranslateOutcome::Untranslated { .. }),
+            "and it is not used as a translation: {answered:?}"
+        );
+
+        // An UNTRANSLATED outcome with a foreign id is just as wrong — it
+        // would mark the wrong line as a gap.
+        let mislabelled = super::single_line_or_refuse(
+            7,
+            TranslateOutcome::Untranslated {
+                id: 99,
+                reason: UntranslatedReason::Filtered,
+            },
+        );
+        assert_eq!(mislabelled.id(), 7);
+    }
+
+    #[test]
+    fn a_retry_is_re_addressed_when_its_query_was_renamed() {
+        // `/msg frank secret` typed elsewhere renders a retry of
+        // `/msg frank secret` at dispatch. If frank renames while the
+        // translation runs and it then fails, `deferred_retry_text` hands
+        // that string straight back whenever the author is looking at the
+        // conversation — now keyed under the NEW id. Pressing Enter would
+        // send the private text to whoever holds `frank` by then.
+        let mut app = app_with_buffer();
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Query, "frank"));
+        let mut out = outgoing(
+            "secret",
+            TranslateOutcome::Untranslated {
+                id: 1,
+                reason: UntranslatedReason::Timeout,
+            },
+            false,
+        );
+        out.buffer_id = "test/frank".to_string();
+        out.buffer_name = "frank".to_string();
+        out.retry_text = "/msg frank secret".to_string();
+        out.retry_body = "secret".to_string();
+        out.submitted_at = dispatched_long_ago();
+
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Query, "frankie"));
+        app.state.rekey_buffer_state("test/frank", "test/frankie");
+
+        assert_eq!(
+            app.redirect_outgoing_deliver(&mut out),
+            RedirectVerdict::Proceed
+        );
+        assert_eq!(
+            out.retry_text, "/msg frankie secret",
+            "the retry follows the conversation, and stops naming a nick its \
+             owner no longer answers to"
+        );
+
+        // And the composer really is handed the re-addressed form.
+        app.state.set_active_buffer("test/frankie");
+        assert_eq!(
+            app.deferred_retry_text(&out).as_deref(),
+            Some("/msg frankie secret")
+        );
+    }
+
+    #[test]
+    fn an_action_retry_is_left_alone_by_a_rename() {
+        // `/me` acts on the active buffer and names nobody, so there is no
+        // stale nick in it to rewrite — and rewriting it would turn an
+        // action into a plain message.
+        let mut app = app_with_buffer();
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Query, "frank"));
+        let mut out = outgoing(
+            "wzdycha",
+            TranslateOutcome::Untranslated {
+                id: 1,
+                reason: UntranslatedReason::Timeout,
+            },
+            false,
+        );
+        out.is_action = true;
+        out.buffer_id = "test/frank".to_string();
+        out.buffer_name = "frank".to_string();
+        out.retry_text = "/me wzdycha".to_string();
+        out.retry_body = "wzdycha".to_string();
+        out.submitted_at = dispatched_long_ago();
+
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Query, "frankie"));
+        app.state.rekey_buffer_state("test/frank", "test/frankie");
+        app.redirect_outgoing_deliver(&mut out);
+
+        assert_eq!(out.retry_text, "/me wzdycha");
     }
 
     #[test]
@@ -4171,28 +4309,62 @@ mod app_tests {
         // It is offered as an ordinary /set option, so accepting it and
         // silently ignoring it is worse than not offering it at all.
         let mut app = app_with_buffer();
-        app.translate_in_flight = Some(Arc::new(Semaphore::new(4)));
-        app.translate_in_flight_applied = 4;
+        app.translate_in_flight = Some(Arc::new(TranslateLimiter::new(4)));
         app.config.translate.max_in_flight = 9;
         app.sync_translate_from_config();
-        assert_eq!(
-            app.translate_in_flight.as_ref().unwrap().available_permits(),
-            9
-        );
-        assert_eq!(app.translate_in_flight_applied, 9);
+        let limiter = app.translate_in_flight.as_ref().unwrap();
+        assert_eq!(limiter.available(), 9);
+        assert_eq!(limiter.effective(), 9);
     }
 
     #[test]
     fn lowering_max_in_flight_takes_effect_without_a_restart() {
         let mut app = app_with_buffer();
-        app.translate_in_flight = Some(Arc::new(Semaphore::new(8)));
-        app.translate_in_flight_applied = 8;
+        app.translate_in_flight = Some(Arc::new(TranslateLimiter::new(8)));
         app.config.translate.max_in_flight = 2;
         app.sync_translate_from_config();
+        assert_eq!(app.translate_in_flight.as_ref().unwrap().available(), 2);
+    }
+
+    #[test]
+    fn a_reduction_paid_by_the_workers_is_not_applied_a_second_time() {
+        // The regression this whole type exists to prevent.
+        //
+        // A worker paying off a unit of debt retires a real permit. If the
+        // running total is not retired with it, the effective ceiling reads
+        // back as the ORIGINAL value once the debt is clear — and the next
+        // `sync_translate_from_config`, which is every /set, /reload and
+        // /translate add*, applies the same reduction again. Two rounds of
+        // that forget every permit and translation stops for good.
+        let limiter = TranslateLimiter::new(4);
+        let held: Vec<_> = (0..4)
+            .map(|_| limiter.permits.clone().try_acquire_owned().expect("permit"))
+            .collect();
+
+        limiter.retune(2);
+        assert_eq!(limiter.debt(), 2, "nothing available, so it is all owed");
+
+        // The workers pay it off as they take permits.
+        drop(held);
+        limiter.settle();
+        assert_eq!(limiter.debt(), 0, "settled from the idle limiter");
+        assert_eq!(limiter.available(), 2);
         assert_eq!(
-            app.translate_in_flight.as_ref().unwrap().available_permits(),
-            2
+            limiter.effective(),
+            2,
+            "the ceiling must read back as what was asked for, not as what \
+             it was before the reduction"
         );
+
+        // The next config sync asks for the same 2 again.
+        limiter.retune(2);
+        assert_eq!(
+            limiter.available(),
+            2,
+            "asking for the value already in force must change nothing"
+        );
+        limiter.retune(2);
+        assert_eq!(limiter.available(), 2, "and must stay changing nothing");
     }
 
     #[tokio::test]
@@ -4206,38 +4378,22 @@ mod app_tests {
         // Here every permit is out and two more acquirers are already
         // waiting, so the semaphore never once goes idle. The reduction has
         // to be applied by the workers as they take permits.
-        use std::sync::atomic::Ordering;
-        let mut app = app_with_buffer();
-        let sem = Arc::new(Semaphore::new(4));
-        let debt = Arc::clone(&app.translate_in_flight_debt);
-        app.translate_in_flight = Some(Arc::clone(&sem));
-        app.translate_in_flight_applied = 4;
-
+        let limiter = Arc::new(TranslateLimiter::new(4));
         let held: Vec<_> = (0..4)
-            .map(|_| Arc::clone(&sem).try_acquire_owned().expect("permit"))
+            .map(|_| limiter.permits.clone().try_acquire_owned().expect("permit"))
             .collect();
-        assert_eq!(
-            sem.available_permits(),
-            0,
-            "precondition: the limiter is fully checked out"
-        );
+        assert_eq!(limiter.available(), 0, "precondition: fully checked out");
 
-        app.config.translate.max_in_flight = 2;
-        app.sync_translate_from_config();
-        assert_eq!(
-            debt.load(Ordering::Acquire),
-            2,
-            "nothing was available, so the whole reduction is owed"
-        );
+        limiter.retune(2);
+        assert_eq!(limiter.debt(), 2, "the whole reduction is owed");
 
         // Two workers are already queued behind the limiter, so each permit
         // released below is handed to one of them rather than becoming
         // available — which is what defeats `forget_permits`.
         let waiters: Vec<_> = (0..2)
             .map(|_| {
-                let permits = Arc::clone(&sem);
-                let debt = Arc::clone(&debt);
-                tokio::spawn(async move { acquire_translate_permit(&permits, &debt).await })
+                let limiter = Arc::clone(&limiter);
+                tokio::spawn(async move { limiter.acquire().await })
             })
             .collect();
         tokio::task::yield_now().await;
@@ -4245,19 +4401,24 @@ mod app_tests {
         drop(held);
         for waiter in waiters {
             // Dropped here on purpose: the permit goes back to the limiter,
-            // which is where `available_permits` below reads it.
+            // which is where `available` below reads it.
             drop(waiter.await.expect("the task ran").expect("not closed"));
         }
 
         assert_eq!(
-            debt.load(Ordering::Acquire),
+            limiter.debt(),
             0,
             "the traffic that blocked the reduction is what applied it"
         );
         assert_eq!(
-            sem.available_permits(),
+            limiter.available(),
             2,
             "and the limiter really is down to the configured two"
+        );
+        assert_eq!(
+            limiter.effective(),
+            2,
+            "with the accounting agreeing, so a later sync is a no-op"
         );
     }
 
@@ -4266,48 +4427,57 @@ mod app_tests {
         // `forget_permits` can only take what is available. Recording the
         // requested value anyway would let the old concurrency creep back as
         // in-flight work returns its permits.
-        let mut app = app_with_buffer();
-        let sem = Arc::new(Semaphore::new(8));
+        let limiter = TranslateLimiter::new(8);
         // Six permits are checked out, so only two can be forgotten now.
-        let held = sem.clone().try_acquire_many_owned(6).expect("6 available");
-        app.translate_in_flight = Some(Arc::clone(&sem));
-        app.translate_in_flight_applied = 8;
-        app.config.translate.max_in_flight = 2;
-        app.sync_translate_from_config();
+        let held = limiter
+            .permits
+            .clone()
+            .try_acquire_many_owned(6)
+            .expect("6 available");
+        limiter.retune(2);
 
-        assert_eq!(sem.available_permits(), 0, "both spare permits were taken");
-        assert_eq!(app.translate_in_flight_applied, 6, "only what really happened");
-        assert_eq!(app.translate_debt(), 4, "the rest is owed");
+        assert_eq!(limiter.available(), 0, "both spare permits were taken");
+        assert_eq!(limiter.debt(), 4, "the rest is owed");
+        assert_eq!(limiter.effective(), 2, "but the target is already binding");
 
         // The in-flight work finishes and its permits come back.
         drop(held);
-        app.settle_translate_concurrency_debt();
-        assert_eq!(app.translate_in_flight_applied, 2, "the target is reached");
-        assert_eq!(app.translate_debt(), 0);
-        assert_eq!(sem.available_permits(), 2);
+        limiter.settle();
+        assert_eq!(limiter.debt(), 0);
+        assert_eq!(limiter.available(), 2);
+        assert_eq!(limiter.effective(), 2);
+    }
+
+    #[test]
+    fn a_reduction_never_takes_the_ceiling_below_one() {
+        // `acquire` retires permits until the debt is clear, so a debt that
+        // covered every permit would block every worker for good.
+        let limiter = TranslateLimiter::new(4);
+        let held: Vec<_> = (0..4)
+            .map(|_| limiter.permits.clone().try_acquire_owned().expect("permit"))
+            .collect();
+        limiter.retune(0);
+        assert_eq!(limiter.effective(), 1, "clamped to one, not to zero");
+        assert!(limiter.debt() < 4, "at least one permit survives the debt");
+        drop(held);
+        limiter.settle();
+        assert_eq!(limiter.available(), 1);
     }
 
     #[test]
     fn settling_is_a_no_op_with_no_debt() {
-        let mut app = app_with_buffer();
-        let sem = Arc::new(Semaphore::new(4));
-        app.translate_in_flight = Some(Arc::clone(&sem));
-        app.translate_in_flight_applied = 4;
-        app.settle_translate_concurrency_debt();
-        assert_eq!(sem.available_permits(), 4);
+        let limiter = TranslateLimiter::new(4);
+        limiter.settle();
+        assert_eq!(limiter.available(), 4);
     }
 
     #[test]
     fn retuning_to_the_same_value_is_a_no_op() {
         let mut app = app_with_buffer();
-        app.translate_in_flight = Some(Arc::new(Semaphore::new(4)));
-        app.translate_in_flight_applied = 4;
+        app.translate_in_flight = Some(Arc::new(TranslateLimiter::new(4)));
         app.config.translate.max_in_flight = 4;
         app.sync_translate_from_config();
-        assert_eq!(
-            app.translate_in_flight.as_ref().unwrap().available_permits(),
-            4
-        );
+        assert_eq!(app.translate_in_flight.as_ref().unwrap().available(), 4);
     }
 
     #[test]
@@ -4848,7 +5018,7 @@ mod tests {
         // meant is not a thing to do with text about to be published under
         // their nick. A TRAILING newline is a correct answer with a stray
         // byte on it.
-        let refused = super::single_line_or_refuse(TranslateOutcome::Translated {
+        let refused = super::single_line_or_refuse(1, TranslateOutcome::Translated {
             id: 1,
             text: "hello\nJOIN #evil".to_string(),
         });
@@ -4863,7 +5033,7 @@ mod tests {
             "got {refused:?}"
         );
 
-        let trimmed = super::single_line_or_refuse(TranslateOutcome::Translated {
+        let trimmed = super::single_line_or_refuse(2, TranslateOutcome::Translated {
             id: 2,
             text: "mein satz\r\n".to_string(),
         });
@@ -4872,7 +5042,7 @@ mod tests {
             "got {trimmed:?}"
         );
 
-        let clean = super::single_line_or_refuse(TranslateOutcome::Translated {
+        let clean = super::single_line_or_refuse(3, TranslateOutcome::Translated {
             id: 3,
             text: "mein satz".to_string(),
         });

@@ -274,6 +274,14 @@ precedence on buffers where both are enabled.
     /set translate.max_in_flight     4
     /set translate.max_queue         200
 
+`/translate status` shows what is in flight, and — whether or not anything
+is — how lines have come back this session: how many were translated, how
+many the translator decided needed no translation, and any failures split
+into timeouts, provider refusals, and answers this client would not use.
+That split is the point: a channel sitting in its original language looks
+identical whether the translator is filtering correctly or not answering at
+all.
+
 `translate.max_in_flight` caps concurrent translations. Raising it past what
 your provider actually allows makes throughput worse, not better. It takes
 effect immediately. Lowering it applies as work already in flight finishes —

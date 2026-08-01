@@ -502,28 +502,17 @@ pub struct App {
     /// `translate.enabled` at runtime cannot materialise one. Mirrors the
     /// role `shrink_client` plays for shrink.
     pub(crate) translate_backend: Option<crate::translate::backend::SharedBackend>,
-    /// Shared concurrency limiter for the incoming worker, so
+    /// Shared concurrency limiter for the translation workers, so
     /// `/set translate.max_in_flight` takes effect without a restart.
-    pub(crate) translate_in_flight: Option<std::sync::Arc<tokio::sync::Semaphore>>,
-    /// Permits handed to `translate_in_flight`, less those this side has
-    /// already retired. `Semaphore` exposes only available permits, not its
-    /// total, so the running total has to be tracked to compute a delta.
     ///
-    /// NOT the live permit count: the workers retire permits too (see
-    /// `acquire_translate_permit`) and each such retirement cancels one unit
-    /// of debt, so the effective ceiling is `applied - debt` either way.
-    pub(crate) translate_in_flight_applied: usize,
-    /// Permits a reduction still owes but could not take, because they were
-    /// checked out at the time.
-    ///
-    /// Shared with the workers, and that is the point: `forget_permits` can
-    /// only take permits that are AVAILABLE, and tokio hands a returned
-    /// permit straight to the next waiter — so under sustained traffic a
-    /// permit never becomes available and a reduction would never take
-    /// effect. The workers pay the debt down at the one place permits are
-    /// handed out, so the traffic that prevents the reduction is what applies
-    /// it.
-    pub(crate) translate_in_flight_debt: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// It owns its own bookkeeping — see
+    /// [`crate::app::translate::TranslateLimiter`]. `App` deliberately keeps
+    /// no mirror of the applied total or the outstanding reduction: holding
+    /// half that pair here while the workers moved the other half is what let
+    /// the two drift apart, and a stale total reapplies a reduction that has
+    /// already landed.
+    pub(crate) translate_in_flight:
+        Option<std::sync::Arc<crate::app::translate::TranslateLimiter>>,
     /// Which client is currently submitting. Set for the duration of a web
     /// command so a refusal returns the text to that browser instead of the
     /// terminal's input line.
@@ -756,14 +745,12 @@ impl App {
         let translate::TranslateRuntime {
             backend: translate_backend,
             in_flight: translate_in_flight,
-            in_flight_debt: translate_in_flight_debt,
             timeout_ms: translate_timeout_ms,
             incoming_tx: translate_incoming_tx,
             outgoing_tx: translate_outgoing_tx,
             deliver_tx: translate_deliver_tx,
             deliver_rx: translate_deliver_rx,
         } = translate::TranslateRuntime::build(&config.translate);
-        let translate_max_in_flight = config.translate.max_in_flight.max(1) as usize;
         state.translate_incoming_tx = Some(translate_incoming_tx);
 
         let (mut dcc, dcc_rx) = crate::dcc::DccManager::new();
@@ -906,8 +893,6 @@ impl App {
             translate_deliver_tx,
             translate_backend,
             translate_in_flight: Some(translate_in_flight),
-            translate_in_flight_applied: translate_max_in_flight,
-            translate_in_flight_debt,
             submit_origin: crate::app::translate::SubmitOrigin::Tui,
             conn_generations: std::collections::HashMap::new(),
             translate_timeout_ms: Some(translate_timeout_ms),

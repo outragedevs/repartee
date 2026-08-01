@@ -70,7 +70,7 @@ enum Slot {
     Ready {
         message: Message,
         activity: ActivityLevel,
-        reason: Option<UntranslatedReason>,
+        origin: ReadyOrigin,
     },
 }
 
@@ -97,14 +97,42 @@ pub struct CeilingForced {
     pub barriers_lifted: usize,
 }
 
+/// Where a row cleared for delivery came from.
+///
+/// Three states and not `Option<UntranslatedReason>`, because "translated"
+/// and "never a candidate" are both absences of a reason and must not be
+/// counted as the same thing: a channel's JOINs and our own echoes pass
+/// through this queue in bulk, and folding them into the translated total
+/// would make `/translate status` report a healthy provider that has not
+/// answered once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadyOrigin {
+    /// Never a translation candidate — a JOIN, a notice, our own echo.
+    NotTranslated,
+    /// Came back from the broker translated.
+    Translated,
+    /// A candidate that did not get a translation, and why.
+    Untranslated(UntranslatedReason),
+}
+
+impl ReadyOrigin {
+    /// The reason the user should see a marker for, if any.
+    #[must_use]
+    pub const fn gap(&self) -> Option<&UntranslatedReason> {
+        match self {
+            Self::Untranslated(reason) if reason.is_gap() => Some(reason),
+            _ => None,
+        }
+    }
+}
+
 /// A line cleared for delivery.
 #[derive(Debug, Clone)]
 pub struct ReadyEntry {
     pub id: u64,
     pub message: Message,
     pub activity: ActivityLevel,
-    /// `None` when the line was translated; otherwise why it was not.
-    pub reason: Option<UntranslatedReason>,
+    pub origin: ReadyOrigin,
 }
 
 #[derive(Debug, Default)]
@@ -152,13 +180,37 @@ impl TranslateQueue {
     /// directly would let a JOIN render before the lines queued ahead of it,
     /// silently reordering the buffer's timeline: the same failure the queue
     /// exists to prevent, arriving from a different direction.
+    /// Take a place for a candidate that will NOT be translated after all —
+    /// the dispatch itself failed, or the line is ineligible.
+    ///
+    /// Distinct from [`Self::push_resolved`] because the reason has to reach
+    /// the tally: these arrive exactly when the provider is in trouble, and
+    /// counting them as successful translations would have `/translate
+    /// status` report health precisely when there is none.
+    pub fn push_untranslated(
+        &mut self,
+        id: u64,
+        message: Message,
+        activity: ActivityLevel,
+        reason: UntranslatedReason,
+    ) {
+        self.entries.push_back(Entry {
+            id,
+            slot: Some(Slot::Ready {
+                message,
+                activity,
+                origin: ReadyOrigin::Untranslated(reason),
+            }),
+        });
+    }
+
     pub fn push_resolved(&mut self, id: u64, message: Message, activity: ActivityLevel) {
         self.entries.push_back(Entry {
             id,
             slot: Some(Slot::Ready {
                 message,
                 activity,
-                reason: None,
+                origin: ReadyOrigin::NotTranslated,
             }),
         });
     }
@@ -188,7 +240,7 @@ impl TranslateQueue {
                 slot: Some(Slot::Ready {
                     message,
                     activity,
-                    reason: None,
+                    origin: ReadyOrigin::NotTranslated,
                 }),
             },
         );
@@ -276,7 +328,7 @@ impl TranslateQueue {
         self.entries[pos].slot = Some(Slot::Ready {
             message: first,
             activity,
-            reason: None,
+            origin: ReadyOrigin::NotTranslated,
         });
         for (offset, (message, activity)) in rows.enumerate() {
             self.entries.insert(
@@ -289,7 +341,7 @@ impl TranslateQueue {
                     slot: Some(Slot::Ready {
                         message,
                         activity,
-                        reason: None,
+                        origin: ReadyOrigin::NotTranslated,
                     }),
                 },
             );
@@ -325,7 +377,7 @@ impl TranslateQueue {
         self.entries[pos].slot = Some(Slot::Ready {
             message: first,
             activity,
-            reason: None,
+            origin: ReadyOrigin::NotTranslated,
         });
         for (offset, (message, activity)) in held.enumerate() {
             self.entries.insert(
@@ -335,7 +387,7 @@ impl TranslateQueue {
                     slot: Some(Slot::Ready {
                         message,
                         activity,
-                        reason: None,
+                        origin: ReadyOrigin::NotTranslated,
                     }),
                 },
             );
@@ -365,7 +417,7 @@ impl TranslateQueue {
             activity,
             show_original,
         } = payload;
-        let reason = match outcome {
+        let origin = match outcome {
             Ok(translated) => {
                 let (text, offset) = super::compose_display(&translated, &original, show_original);
                 message.text = text;
@@ -373,7 +425,7 @@ impl TranslateQueue {
                     text: original,
                     suffix_at: offset,
                 });
-                None
+                ReadyOrigin::Translated
             }
             Err(reason) => {
                 // The original is what the user sees when translation did
@@ -386,13 +438,13 @@ impl TranslateQueue {
                     text: original,
                     suffix_at: offset,
                 });
-                Some(reason)
+                ReadyOrigin::Untranslated(reason)
             }
         };
         entry.slot = Some(Slot::Ready {
             message,
             activity,
-            reason,
+            origin,
         });
         true
     }
@@ -408,7 +460,7 @@ impl TranslateQueue {
             let Some(Slot::Ready {
                 message,
                 activity,
-                reason,
+                origin,
             }) = entry.slot
             else {
                 unreachable!("front matched above")
@@ -417,7 +469,7 @@ impl TranslateQueue {
                 id: entry.id,
                 message,
                 activity,
-                reason,
+                origin,
             });
         }
         out
@@ -748,12 +800,12 @@ mod tests {
         assert_eq!(expired, 1, "only the still-pending entry expires");
         let ready = q.drain_ready();
         assert_eq!(ids(&ready), vec![4, 5]);
-        assert_eq!(ready[0].reason, Some(UntranslatedReason::Timeout));
+        assert_eq!(ready[0].origin, ReadyOrigin::Untranslated(UntranslatedReason::Timeout));
         assert_eq!(
             ready[0].message.text, "vier [untranslated: timeout]",
             "a timed-out line shows its original, marked so the gap is visible"
         );
-        assert_eq!(ready[1].reason, None);
+        assert_eq!(ready[1].origin, ReadyOrigin::Translated);
     }
 
     #[test]
@@ -779,7 +831,7 @@ mod tests {
         assert!(
             ready
                 .iter()
-                .all(|e| e.reason == Some(UntranslatedReason::Timeout))
+                .all(|e| e.origin == ReadyOrigin::Untranslated(UntranslatedReason::Timeout))
         );
         assert_eq!(q.len(), 4, "the queue is bounded afterwards");
     }
@@ -809,7 +861,7 @@ mod tests {
         assert!(!q.resolve(1, Ok("late".into())), "the second is ignored");
         let ready = q.drain_ready();
         assert_eq!(ready[0].message.text, "a b [untranslated: timeout]");
-        assert_eq!(ready[0].reason, Some(UntranslatedReason::Timeout));
+        assert_eq!(ready[0].origin, ReadyOrigin::Untranslated(UntranslatedReason::Timeout));
     }
 
     #[test]
@@ -940,9 +992,9 @@ mod tests {
         let ready = q.drain_ready();
         assert_eq!(ready[0].message.text, "moin");
         assert_eq!(orig(&ready[0].message).suffix_at, None);
-        assert_eq!(ready[0].reason, Some(UntranslatedReason::Filtered));
+        assert_eq!(ready[0].origin, ReadyOrigin::Untranslated(UntranslatedReason::Filtered));
         assert!(
-            !ready[0].reason.as_ref().unwrap().is_gap(),
+            ready[0].origin.gap().is_none(),
             "Filtered renders clean, with no marker"
         );
     }
