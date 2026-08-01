@@ -509,6 +509,10 @@ pub struct App {
     /// exposes only available permits, not its total, so the last applied
     /// value has to be tracked to compute the delta.
     pub(crate) translate_in_flight_applied: usize,
+    /// Permits a reduction still owes but could not take because they were
+    /// checked out. Retried from the tick — see
+    /// `settle_translate_concurrency_debt`.
+    pub(crate) translate_in_flight_debt: usize,
     /// Both translation workers post their outcomes here; the main loop
     /// drains and routes them through `apply_translate_deliver`.
     pub(crate) translate_deliver_rx: mpsc::Receiver<translate::TranslateDeliver>,
@@ -859,6 +863,7 @@ impl App {
             translate_backend,
             translate_in_flight: Some(translate_in_flight),
             translate_in_flight_applied: translate_max_in_flight,
+            translate_in_flight_debt: 0,
             cli_bind_override: None,
             typing: crate::app::typing::TypingSender::default(),
         };
@@ -1529,6 +1534,7 @@ impl App {
                     // stuck head would hold its channel indefinitely once the
                     // traffic that would otherwise poke the queue stops.
                     self.tick_translate_queues();
+                    self.settle_translate_concurrency_debt();
                     self.purge_expired_batches();
                     self.purge_stale_chathistory_requests();
                     self.check_reconnects();

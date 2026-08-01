@@ -159,9 +159,12 @@ impl TranslateQueue {
             }
             Err(reason) => {
                 // The original is what the user sees when translation did
-                // not happen. Never a guess, never a partial translation.
-                message.text = original;
-                message.orig_offset = None;
+                // not happen — never a guess, never a partial translation —
+                // but a GAP is also marked, so it cannot be mistaken for a
+                // line the broker correctly decided to leave alone.
+                let (text, offset) = super::mark_untranslated(&original, &reason);
+                message.text = text;
+                message.orig_offset = offset;
                 Some(reason)
             }
         };
@@ -375,8 +378,8 @@ mod tests {
         assert_eq!(ids(&ready), vec![4, 5]);
         assert_eq!(ready[0].reason, Some(UntranslatedReason::Timeout));
         assert_eq!(
-            ready[0].message.text, "vier",
-            "a timed-out line shows its original, never a guess"
+            ready[0].message.text, "vier [untranslated: timeout]",
+            "a timed-out line shows its original, marked so the gap is visible"
         );
         assert_eq!(ready[1].reason, None);
     }
@@ -433,7 +436,7 @@ mod tests {
         assert!(q.resolve(1, Err(UntranslatedReason::Timeout)));
         assert!(!q.resolve(1, Ok("late".into())), "the second is ignored");
         let ready = q.drain_ready();
-        assert_eq!(ready[0].message.text, "a b");
+        assert_eq!(ready[0].message.text, "a b [untranslated: timeout]");
         assert_eq!(ready[0].reason, Some(UntranslatedReason::Timeout));
     }
 
@@ -458,6 +461,20 @@ mod tests {
         let ready = q.drain_ready();
         assert_eq!(ready[0].message.text, "albalb [blabla]");
         assert_eq!(ready[0].message.orig_offset, Some(6));
+    }
+
+    #[test]
+    fn a_gap_is_marked_and_the_marker_is_dimmable() {
+        let mut q = TranslateQueue::new();
+        q.push_pending(1, "hola que tal".into(), payload(1, "hola que tal"));
+        q.resolve(1, Err(UntranslatedReason::NoProvider));
+        let ready = q.drain_ready();
+        assert_eq!(ready[0].message.text, "hola que tal [untranslated: no provider]");
+        assert_eq!(
+            ready[0].message.orig_offset,
+            Some("hola que tal".len()),
+            "the marker carries an offset so the renderer dims it"
+        );
     }
 
     #[test]

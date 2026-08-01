@@ -172,6 +172,28 @@ pub fn resolve_langs(
     }
 }
 
+/// Mark a line that was NOT translated, and the byte offset where the
+/// marker starts so the renderer can dim it.
+///
+/// Without this a failed translation renders identically to a `Filtered`
+/// one — the same original text, no sign anything went wrong. That breaks
+/// the rule the whole design rests on: a visible hole beats an invisible
+/// lie. The hole has to actually be visible.
+///
+/// [`UntranslatedReason::Filtered`] is not a gap and gets no marker; it is
+/// the broker working correctly.
+#[must_use]
+pub fn mark_untranslated(original: &str, reason: &UntranslatedReason) -> (String, Option<usize>) {
+    if !reason.is_gap() {
+        return (original.to_string(), None);
+    }
+    let offset = original.len();
+    (
+        format!("{original} [untranslated: {}]", reason.label()),
+        Some(offset),
+    )
+}
+
 /// Build the displayed line and, when the original is appended, the byte
 /// offset where its ` [original]` suffix starts.
 ///
@@ -267,6 +289,40 @@ mod tests {
         let pair = resolve_langs(Some(&buf_cfg(None, None)), "pl");
         assert_eq!(pair.incoming(), (None, "pl".to_string()), "incoming still works");
         assert_eq!(pair.outgoing(), None);
+    }
+
+    #[test]
+    fn a_gap_is_marked_so_the_hole_is_visible() {
+        for reason in [
+            UntranslatedReason::Timeout,
+            UntranslatedReason::NoProvider,
+            UntranslatedReason::QualityGate,
+            UntranslatedReason::DailyLimit,
+            UntranslatedReason::Error("boom".to_string()),
+        ] {
+            let (text, offset) = mark_untranslated("hola que tal", &reason);
+            assert!(
+                text.starts_with("hola que tal ["),
+                "{reason:?} must be marked: {text}"
+            );
+            assert!(
+                text.contains(&reason.label()),
+                "the marker names the reason: {text}"
+            );
+            let off = offset.expect("the marker is dimmable");
+            assert!(text.is_char_boundary(off));
+            assert_eq!(&text[..off], "hola que tal");
+        }
+    }
+
+    #[test]
+    fn a_filtered_line_carries_no_marker() {
+        // The broker deciding a line needs no translation is a correct
+        // outcome, not a gap — marking it would cry wolf on a third of all
+        // traffic.
+        let (text, offset) = mark_untranslated("moin", &UntranslatedReason::Filtered);
+        assert_eq!(text, "moin");
+        assert_eq!(offset, None);
     }
 
     #[test]

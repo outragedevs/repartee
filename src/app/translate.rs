@@ -207,7 +207,13 @@ fn spawn_drain<T: Send + 'static>(mut rx: mpsc::Receiver<T>) {
 /// budget.
 async fn translate_isolated(backend: &SharedBackend, req: TranslateRequest) -> TranslateOutcome {
     let id = req.id;
-    let fut = std::panic::AssertUnwindSafe(backend.translate(req));
+    // The boundary has to cover BUILDING the future, not just polling it. A
+    // backend that panics synchronously inside `translate()` — before it ever
+    // returns its `BoxFuture` — would otherwise unwind past this: the
+    // incoming task would produce no outcome at all (its queue entry sitting
+    // pending until the timeout), and an outgoing lane would lose the
+    // message outright.
+    let fut = std::panic::AssertUnwindSafe(async { backend.translate(req).await });
     fut.catch_unwind().await.unwrap_or_else(|_| {
         tracing::error!(id, "translate: backend panicked on one line");
         TranslateOutcome::Untranslated {
@@ -996,13 +1002,51 @@ impl crate::app::App {
         }
         if want > have {
             limiter.add_permits(want - have);
+            self.translate_in_flight_applied = want;
+            self.translate_in_flight_debt = 0;
         } else {
-            // Shrinking only takes effect as in-flight work finishes: the
-            // permits already handed out are not recalled mid-request.
-            limiter.forget_permits(have - want);
+            // `forget_permits` can only take permits that are AVAILABLE, and
+            // returns how many it actually took — possibly zero when every
+            // permit is checked out. Recording the requested value regardless
+            // would be wrong twice over: the old concurrency would come back
+            // as in-flight work returns its permits, and the next retune
+            // would compute its delta from a baseline that never existed.
+            let forgotten = limiter.forget_permits(have - want);
+            self.translate_in_flight_applied = have - forgotten;
+            self.translate_in_flight_debt = (have - want) - forgotten;
         }
-        self.translate_in_flight_applied = want;
-        tracing::info!(from = have, to = want, "translate: concurrency retuned");
+        tracing::info!(
+            from = have,
+            to = want,
+            applied = self.translate_in_flight_applied,
+            "translate: concurrency retuned"
+        );
+    }
+
+    /// Collect a concurrency reduction that could not be applied at once.
+    ///
+    /// Permits held by in-flight requests cannot be forgotten until they come
+    /// back, so the outstanding remainder is retried from the tick. Without
+    /// this a lowered `max_in_flight` silently reverts as soon as the current
+    /// batch finishes.
+    pub(crate) fn settle_translate_concurrency_debt(&mut self) {
+        if self.translate_in_flight_debt == 0 {
+            return;
+        }
+        let Some(limiter) = self.translate_in_flight.as_ref() else {
+            return;
+        };
+        let forgotten = limiter.forget_permits(self.translate_in_flight_debt);
+        if forgotten == 0 {
+            return;
+        }
+        self.translate_in_flight_debt -= forgotten;
+        self.translate_in_flight_applied -= forgotten;
+        tracing::debug!(
+            forgotten,
+            remaining = self.translate_in_flight_debt,
+            "translate: settled part of a concurrency reduction"
+        );
     }
 
     /// Drop queues that have fully drained, so the tick has nothing to walk
@@ -1166,8 +1210,11 @@ mod app_tests {
         app.tick_translate_queues();
         assert_eq!(
             shown(&app),
-            vec!["line 1".to_string(), "line 2".to_string()],
-            "a timed-out line shows its original, in order"
+            vec![
+                "line 1 [untranslated: timeout]".to_string(),
+                "line 2 [untranslated: timeout]".to_string(),
+            ],
+            "a timed-out line shows its original, marked, in order"
         );
         assert!(!app.state.translate_queues.contains_key(BUF));
     }
@@ -1543,6 +1590,42 @@ mod app_tests {
     }
 
     #[test]
+    fn a_reduction_blocked_by_in_flight_work_is_carried_and_settled_later() {
+        // `forget_permits` can only take what is available. Recording the
+        // requested value anyway would let the old concurrency creep back as
+        // in-flight work returns its permits.
+        let mut app = app_with_buffer();
+        let sem = Arc::new(Semaphore::new(8));
+        // Six permits are checked out, so only two can be forgotten now.
+        let held = sem.clone().try_acquire_many_owned(6).expect("6 available");
+        app.translate_in_flight = Some(Arc::clone(&sem));
+        app.translate_in_flight_applied = 8;
+        app.config.translate.max_in_flight = 2;
+        app.sync_translate_from_config();
+
+        assert_eq!(sem.available_permits(), 0, "both spare permits were taken");
+        assert_eq!(app.translate_in_flight_applied, 6, "only what really happened");
+        assert_eq!(app.translate_in_flight_debt, 4, "the rest is owed");
+
+        // The in-flight work finishes and its permits come back.
+        drop(held);
+        app.settle_translate_concurrency_debt();
+        assert_eq!(app.translate_in_flight_applied, 2, "the target is reached");
+        assert_eq!(app.translate_in_flight_debt, 0);
+        assert_eq!(sem.available_permits(), 2);
+    }
+
+    #[test]
+    fn settling_is_a_no_op_with_no_debt() {
+        let mut app = app_with_buffer();
+        let sem = Arc::new(Semaphore::new(4));
+        app.translate_in_flight = Some(Arc::clone(&sem));
+        app.translate_in_flight_applied = 4;
+        app.settle_translate_concurrency_debt();
+        assert_eq!(sem.available_permits(), 4);
+    }
+
+    #[test]
     fn retuning_to_the_same_value_is_a_no_op() {
         let mut app = app_with_buffer();
         app.translate_in_flight = Some(Arc::new(Semaphore::new(4)));
@@ -1682,9 +1765,9 @@ mod app_tests {
         assert_eq!(
             shown(&app),
             vec![
-                "line 1".to_string(),
-                "line 2".to_string(),
-                "line 3".to_string()
+                "line 1 [untranslated: timeout]".to_string(),
+                "line 2 [untranslated: timeout]".to_string(),
+                "line 3 [untranslated: timeout]".to_string(),
             ],
             "pending lines are released, never dropped"
         );
