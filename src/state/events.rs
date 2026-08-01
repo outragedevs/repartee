@@ -30,6 +30,7 @@ impl AppState {
             translate_my_lang: "en".to_string(),
             translate_show_original_in: true,
             own_echo_suppressions: std::collections::HashMap::new(),
+            pending_buffer_rekeys: Vec::new(),
             log_exclude_types: Vec::new(),
             scrollback_limit: 2000,
             pending_web_events: Vec::new(),
@@ -501,6 +502,34 @@ impl AppState {
             self.own_echo_suppressions.remove(buffer_id);
         }
         true
+    }
+
+    /// Move every buffer-id-keyed map from `old_id` to `new_id`.
+    ///
+    /// Called when a query buffer is re-keyed because the peer changed nick.
+    /// The buffer itself moves in `rename_query_buffers`; these are the side
+    /// tables that would otherwise be orphaned under a key nothing looks up
+    /// again.
+    ///
+    /// `translate_buffers` is a mirror of `config.translate.buffers`, so the
+    /// config key is migrated too (by the App, which owns it) — otherwise the
+    /// next `sync_translate_from_config` would re-derive this map from the
+    /// stale config and undo the move.
+    pub fn rekey_buffer_state(&mut self, old_id: &str, new_id: &str) {
+        if old_id == new_id {
+            return;
+        }
+        if let Some(queue) = self.translate_queues.remove(old_id) {
+            self.translate_queues.insert(new_id.to_string(), queue);
+        }
+        if let Some(cfg) = self.translate_buffers.remove(old_id) {
+            self.translate_buffers.insert(new_id.to_string(), cfg);
+        }
+        if let Some(echoes) = self.own_echo_suppressions.remove(old_id) {
+            self.own_echo_suppressions.insert(new_id.to_string(), echoes);
+        }
+        self.pending_buffer_rekeys
+            .push((old_id.to_string(), new_id.to_string()));
     }
 
     /// Give up a reservation whose message will never arrive.

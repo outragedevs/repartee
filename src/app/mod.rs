@@ -517,6 +517,16 @@ pub struct App {
     /// command so a refusal returns the text to that browser instead of the
     /// terminal's input line.
     pub(crate) submit_origin: crate::app::translate::SubmitOrigin,
+    /// How many IRC sessions each `conn_id` has had, bumped every time a
+    /// handle is installed.
+    ///
+    /// A reconnect reuses the `conn_id` and replaces the handle, so "is there
+    /// a handle for this connection" cannot tell a live session from its
+    /// successor. Anything that captures a connection and acts on it later —
+    /// today, a deferred translated send — captures this too and refuses when
+    /// it has moved, rather than putting a pre-disconnect message on a
+    /// post-reconnect session.
+    pub(crate) conn_generations: std::collections::HashMap<String, u64>,
     /// Per-request backend budget shared with the workers, so
     /// `/set translate.timeout_ms` retunes them and not just the queue.
     pub(crate) translate_timeout_ms: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
@@ -893,6 +903,7 @@ impl App {
             translate_in_flight_applied: translate_max_in_flight,
             translate_in_flight_debt: 0,
             submit_origin: crate::app::translate::SubmitOrigin::Tui,
+            conn_generations: std::collections::HashMap::new(),
             translate_timeout_ms: Some(translate_timeout_ms),
             config_path: constants::config_path(),
             cli_bind_override: None,

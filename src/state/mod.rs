@@ -141,6 +141,15 @@ pub struct AppState {
     /// shows the server's echo, which is the old behaviour — never a lost
     /// message.
     pub own_echo_suppressions: HashMap<String, VecDeque<(String, std::time::Instant)>>,
+    /// Query buffers re-keyed by a peer's nick change, as `(old_id, new_id)`.
+    ///
+    /// Drained by the App after each IRC message, the same way
+    /// `pending_web_events` is. The state-side maps are moved immediately in
+    /// `rekey_buffer_state`; this exists for the half the App owns —
+    /// `config.translate.buffers`, whose key must move too or the next
+    /// `sync_translate_from_config` re-derives the mirror from the stale
+    /// config and silently ends translation for that conversation.
+    pub pending_buffer_rekeys: Vec<(String, String)>,
     /// Message types excluded from logging (e.g. "event" to skip quit/join/nick fan-out).
     pub log_exclude_types: Vec<String>,
     /// Maximum messages per buffer (FIFO eviction). 0 = unlimited.

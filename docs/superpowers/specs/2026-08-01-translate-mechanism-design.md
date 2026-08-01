@@ -202,10 +202,42 @@ Late outcomes for an already-released id are dropped, with a `tracing::debug!`.
 ### 3.5 Flush points
 
 Pending entries must be released — untranslated, in order — rather than lost, when:
-the buffer is closed (`/close`, `/part`), the connection drops, the app quits or
-detaches, or `/translate delin|delout` disables the buffer.
+the buffer is closed (`/close`, `/part`), the connection drops, or the app quits or
+detaches. `/translate delin` releases only its own direction — see §3.7.
 
-### 3.6 Lifting a barrier is a release event
+### 3.6 A buffer id is not a stable key
+
+Everything per-buffer is keyed by buffer id, and a query's id contains the peer's
+nick — so the peer typing `/nick` re-keys the buffer out from under all of it. Left
+behind, the queue keeps releasing lines toward a buffer that no longer exists (they
+are dropped) and the per-buffer settings stop matching, so translation silently stops
+mid-conversation for a reason the user has no way to see.
+
+`rekey_buffer_state` moves the state-side maps as part of the rename. The config map
+belongs to `App`, so the rename is also queued in `pending_buffer_rekeys` and drained
+after the IRC message, alongside `pending_web_events` — and it must be, because
+`sync_translate_from_config` re-derives the mirror from the config and would otherwise
+undo the move on the next `/set`.
+
+The migrated key is not written to disk. `/translate add*|del*` writes the file and
+will carry it along next time; rewriting `config.toml` in response to somebody else's
+`/nick` is I/O the user did not ask for. So the setting follows the peer for this
+session, and a restart keys it by the nick they actually typed.
+
+### 3.7 Disabling one direction must not flush the other
+
+`delin` and `delout` share a queue, but not its contents. The only outgoing thing in
+it is a *reservation* — a place held for an echo whose translation is already running
+and will still come back.
+
+So `delout` flushes **nothing**: there is no outgoing work to release, and the full
+flush it used to do forced the buffer's incoming lines out as timeouts, punishing a
+direction that is still switched on. `delin` releases the pending incoming lines
+(they must not be lost — the user saw them arrive) via `flush_pending`, which leaves
+reservations intact; dropping one lets the rows queued behind it render first, and
+the user's own message then appears below the replies to it.
+
+### 3.8 Lifting a barrier is a release event
 
 An outgoing message holds a `Reserved` slot in its buffer's queue (§5.1). While it
 sits at the head it is a barrier: every line that finishes translating behind it is
@@ -308,20 +340,51 @@ anyway, because the writer task dies independently of the map entry.
 Three things have to happen on that path, and which of them depends on how far the
 send got:
 
-- **The reservation always goes back** (§3.6), whether or not anything was sent.
-- **Nothing was sent** → the retry text is restored to whoever submitted it, exactly
-  as an up-front refusal does. Anything else means the user watches a message they
-  typed disappear with no trace.
-- **A split message got partway** → the first chunks are already on the channel. The
-  text is put in the error row and deliberately **not** restored to the composer:
+- **The reservation always goes back** (§3.8), whether or not anything was sent.
+- **The error row always carries the text.** This is not belt-and-braces: the
+  composer restore is a no-op whenever the user has started typing again, because
+  overwriting the next message would be a worse surprise than a lost one — and a
+  deferred failure arrives *seconds after* the user pressed Enter, so a busy composer
+  is the normal case, not the edge. A row naming only the reason therefore loses the
+  message outright while telling the user it was handed back.
+- **Nothing was sent** → the retry text is also restored to whoever submitted it,
+  exactly as an up-front refusal does.
+- **A split message got partway** → the first chunks are already on the channel, so
+  the text stays in the row and is deliberately **not** restored to the composer:
   handing back the whole line invites the user to press Enter and publish those
   chunks a second time. The row says so, rather than leaving the truncation to be
   discovered from the channel.
 
 "Whoever submitted it" is the origin captured at dispatch, never the current one —
-see §5.5.
+see §5.6.
 
-### 5.4 `echo-message` cannot show the original
+Every deferred failure runs through `abandon_with_text`, so the rule cannot be
+forgotten at one of the four sites that need it.
+
+### 5.4 The connection must be the same session
+
+`irc_handles` is keyed by `conn_id`, and a reconnect reuses that id with a
+replacement handle — so "is there a handle" cannot distinguish a live connection
+from its successor. A message dispatched before a drop would otherwise be sent on the
+session that replaced it: on a channel the user may have left, minutes after they
+typed it, quite possibly after they gave up and retyped it by hand. Disconnect
+handling flushes display queues but does not cancel the outgoing lane, so nothing
+else catches this.
+
+`App::conn_generations` counts sessions per `conn_id`, bumped when a handle is
+installed. It is captured with everything else that can move during the wait (§5) and
+compared at delivery; a mismatch refuses like any other deferred failure. Bumping on
+install rather than on disconnect is what makes a captured value mean "the session I
+was written for" — a connection that never comes back is already caught by the handle
+being absent.
+
+Both checks run **before** `plan_translated_wires`, because planning calls
+`e2e_encrypt_or_passthrough`, which creates or rotates the outgoing session and queues
+REKEY NOTICEs. Planning and then failing to send advances our key past a pending
+rotate while the peers never receive the new one — the same ordering, for the same
+reason, as `send_gated_message`'s own precheck.
+
+### 5.5 `echo-message` cannot show the original
 
 A server advertising `echo-message` reflects our own PRIVMSGs back, which is
 normally exactly why the outgoing paths skip the local echo — the reflection *is*
@@ -348,7 +411,7 @@ one original across them.
 `OutgoingEchoPlan::None` is untouched — a script that asked for no echo still gets
 none, and sees the undecorated reflection.
 
-### 5.5 A refusal goes back to the client that typed it
+### 5.6 A refusal goes back to the client that typed it
 
 Every submitting path scopes `App::submit_origin` for the duration of the submit, so
 a refusal restores the text where its author is looking. That includes both web

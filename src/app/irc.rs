@@ -334,6 +334,15 @@ impl App {
                 if let Some(conn) = self.state.connections.get_mut(&handle.conn_id) {
                     conn.local_ip = handle.local_ip;
                 }
+                // A new session for this `conn_id`. Bumping here — rather
+                // than on disconnect — is what makes a captured generation
+                // mean "the session I was written for": a reconnect moves it,
+                // and a connection that never comes back is caught by the
+                // handle being absent.
+                *self
+                    .conn_generations
+                    .entry(handle.conn_id.clone())
+                    .or_default() += 1;
                 self.irc_handles.insert(handle.conn_id.clone(), *handle);
             }
             IrcEvent::NegotiationInfo(conn_id, diag) => {
@@ -928,6 +937,14 @@ impl App {
                         self.state.suppress_event_display = false;
                     }
 
+                    // Migrate config keyed by a buffer id that just moved —
+                    // a query re-keyed because the peer changed nick. The
+                    // state-side maps moved with it already; this is the half
+                    // the App owns, and without it the next
+                    // `sync_translate_from_config` re-derives the mirror from
+                    // the stale key and translation stops for that
+                    // conversation.
+                    self.drain_pending_buffer_rekeys();
                     // Drain pending web events and broadcast + auto-record mentions.
                     self.drain_pending_web_events();
                     // Drain queued RPE2E NOTICE sends (handshake replies,

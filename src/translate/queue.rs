@@ -359,6 +359,28 @@ impl TranslateQueue {
         self.drain_ready()
     }
 
+    /// Release every line still waiting on an INCOMING translation, leaving
+    /// outgoing reservations — and the order they enforce — untouched.
+    ///
+    /// For `/translate delin`, which stops incoming translation on a buffer
+    /// whose outgoing sends may still be in flight. Those sends were already
+    /// dispatched and their outcomes are still coming, so their reservations
+    /// must survive: dropping one lets the rows queued behind it render
+    /// first, and the user's own message then appears below the replies to
+    /// it.
+    pub fn flush_pending(&mut self) -> Vec<ReadyEntry> {
+        let pending: Vec<u64> = self
+            .entries
+            .iter()
+            .filter(|e| matches!(e.slot, Some(Slot::Pending { .. })))
+            .map(|e| e.id)
+            .collect();
+        for id in pending {
+            self.resolve(id, Err(UntranslatedReason::Timeout));
+        }
+        self.drain_ready()
+    }
+
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()

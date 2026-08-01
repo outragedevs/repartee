@@ -149,7 +149,18 @@ fn render_chat_message(
         .unwrap_or_else(|| "$0 $1".to_string());
     let resolved = resolve_abstractions(&msg_format, abstracts, 0);
     // params: $0=displayNick, $1=text, $2=paddedNickMode
-    let body = emotify_message_text(&msg.text, emote_sizing);
+    //
+    // A translated line's body is emotified in TWO HALVES and rejoined, so
+    // the rendered tail is exactly `dim_suffix` and the dimming below can
+    // match it. Emotifying the whole string and then slicing `msg.text` at
+    // the offset compares a raw `:name:` against the placeholder glyphs it
+    // rendered as: the tail never matches and the original stays undimmed
+    // whenever it happens to contain an emote token.
+    //
+    // Splitting is safe because the boundary is the space before ` [`, and
+    // an emote token cannot contain one — so no token straddles the seam and
+    // both halves tokenize exactly as the whole would.
+    let (body, dim_suffix) = split_body_for_dimming(msg, emote_sizing);
     let mut spans = parse_format_string(&resolved, &[&display_nick, &body, &padded_nick_mode]);
 
     // Apply nick color override: recolor spans containing the nick text.
@@ -166,14 +177,35 @@ fn render_chat_message(
     }
 
     // Dim the ` [original]` suffix of a translated line, if there is one.
-    if let Some(offset) = msg.wire_origin.as_ref().and_then(|o| o.suffix_at)
-        && offset <= msg.text.len()
-        && msg.text.is_char_boundary(offset)
-    {
-        dim_trailing_suffix(&mut spans, &msg.text[offset..]);
+    if let Some(suffix) = dim_suffix {
+        dim_trailing_suffix(&mut spans, &suffix);
     }
 
     spans
+}
+
+/// Emotify a message body, returning it alongside the trailing ` [original]`
+/// run to dim — in the SAME rendered form, so the two can be matched.
+///
+/// Returns `(body, None)` for every ordinary message, which is nearly all of
+/// them. An offset that is out of range or mid-character is treated as
+/// absent: the line renders whole and undimmed, which beats slicing a
+/// message apart on a bad index.
+fn split_body_for_dimming(
+    msg: &Message,
+    emote_sizing: Option<crate::ui::emote_layout::EmoteSizing>,
+) -> (String, Option<String>) {
+    let at = msg
+        .wire_origin
+        .as_ref()
+        .and_then(|o| o.suffix_at)
+        .filter(|at| *at < msg.text.len() && msg.text.is_char_boundary(*at));
+    let Some(at) = at else {
+        return (emotify_message_text(&msg.text, emote_sizing), None);
+    };
+    let head = emotify_message_text(&msg.text[..at], emote_sizing);
+    let tail = emotify_message_text(&msg.text[at..], emote_sizing);
+    (format!("{head}{tail}"), Some(tail))
 }
 
 /// Dim the trailing run of spans whose combined text is exactly `suffix`.
@@ -421,6 +453,58 @@ mod tests {
             dim_text(&spans),
             " [blabla]",
             "only the appended original is dimmed"
+        );
+    }
+
+    #[test]
+    fn an_original_containing_an_emote_is_still_dimmed() {
+        // The body is emotified before it is parsed into spans, so a raw
+        // `:name:` sliced out of `Message::text` no longer matches the
+        // placeholder glyphs the tail actually rendered as — and the whole
+        // original silently stays undimmed.
+        let tag = crate::emotes::tag_names()
+            .first()
+            .expect("the emote set is compiled in");
+        let sizing = crate::ui::emote_layout::EmoteSizing {
+            font_w: 8,
+            font_h: 16,
+            max_cols: 2,
+            max_rows: 1,
+        };
+        let translation = "wave";
+        let text = format!("{translation} [:{tag}:]");
+        let mut msg = test_message("alice", &text, MessageType::Message);
+        msg.wire_origin = Some(crate::state::buffer::WireOrigin {
+            text: format!(":{tag}:"),
+            suffix_at: Some(translation.len()),
+        });
+
+        let spans = render_chat_message(
+            &msg,
+            false,
+            &default_theme(),
+            &default_config(),
+            None,
+            Some(sizing),
+        );
+        let dimmed = dim_text(&spans);
+        assert!(
+            !dimmed.is_empty(),
+            "the appended original must still be dimmed once the emote is \
+             rendered: {dimmed:?}"
+        );
+        assert!(
+            dimmed.starts_with(" ["),
+            "and it must be the original, not some other run: {dimmed:?}"
+        );
+        assert!(
+            dimmed.ends_with(']'),
+            "the whole original, up to its closing bracket: {dimmed:?}"
+        );
+        assert!(
+            !dimmed.contains(tag),
+            "the emote really was replaced by placeholders — otherwise this \
+             test would pass without exercising anything: {dimmed:?}"
         );
     }
 

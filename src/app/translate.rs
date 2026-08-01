@@ -175,6 +175,10 @@ pub struct PendingOutgoingTranslate {
     /// The text to hand back if this send is refused — a form that does the
     /// SAME thing when the user presses Enter on it, not the bare body.
     pub retry_text: String,
+    /// Which session of `conn_id` this was written for. Compared at delivery
+    /// so a drop-and-reconnect under the same id cannot put this message on
+    /// the replacement session. `None` when there was no handle at all.
+    pub conn_generation: Option<u64>,
 }
 
 /// Posted by either worker, consumed by the main event loop.
@@ -220,6 +224,10 @@ pub struct OutgoingTranslateDeliver {
     /// The text to hand back if this send is refused — a form that does the
     /// SAME thing when the user presses Enter on it, not the bare body.
     pub retry_text: String,
+    /// Which session of `conn_id` this was written for. Compared at delivery
+    /// so a drop-and-reconnect under the same id cannot put this message on
+    /// the replacement session. `None` when there was no handle at all.
+    pub conn_generation: Option<u64>,
 }
 
 /// Channels and shared state the translation workers need. Built once in
@@ -471,6 +479,7 @@ fn spawn_connection_lane(
                         echo_id: pending.echo_id,
                         origin: pending.origin,
                         retry_text: pending.retry_text,
+                        conn_generation: pending.conn_generation,
                     },
                 )))
                 .await;
@@ -507,6 +516,7 @@ async fn refuse_outgoing(
                 echo_id: pending.echo_id,
                 origin: pending.origin,
                 retry_text: pending.retry_text,
+                conn_generation: pending.conn_generation,
             },
         )))
         .await;
@@ -656,24 +666,39 @@ impl crate::app::App {
                 // given back — leaving it would block the buffer until the
                 // queue timeout.
                 self.release_echo_slot_and_drain(&out.buffer_id, out.echo_id);
-                self.restore_outgoing_input(out, &reason_label);
+                self.abandon_with_text(out, &format!("translation failed ({reason_label})"));
                 return;
             }
         };
 
+        // Two separate questions, both asked BEFORE `plan_translated_wires`.
+        // Planning runs `e2e_encrypt_or_passthrough`, which creates or
+        // rotates the outgoing session and queues REKEY NOTICEs — planning
+        // and then failing to send advances our key past a pending rotate
+        // while the peers never receive the new one. This is the same
+        // ordering, for the same reason, as `send_gated_message`'s precheck.
+
+        // 1. Is there a connection at all? The handle existed at submission
+        //    and is gone now; nothing reached the wire and no echo holds the
+        //    text, so discarding it loses a message the user already watched
+        //    disappear from their composer.
         if !self.irc_handles.contains_key(&out.conn_id) {
-            // The handle existed at submission and is gone now. Nothing
-            // reached the wire and no echo holds the text, so discarding it
-            // here loses a message the user already watched disappear from
-            // their composer.
-            self.deliver_translate_error(
-                &out.buffer_id,
-                "Failed to send message — connection unavailable",
-            );
             self.release_echo_slot_and_drain(&out.buffer_id, out.echo_id);
-            let retry = out.retry_text.clone();
-            let origin = out.origin.clone();
-            self.restore_input_text_to(&retry, &origin);
+            self.abandon_with_text(out, "the connection is unavailable");
+            return;
+        }
+        // 2. Is it the SAME SESSION this message was written for? A drop and
+        //    reconnect under the same `conn_id` installs a replacement
+        //    handle, and question 1 cannot tell them apart. Sending a
+        //    pre-disconnect line on the new session puts text on a channel
+        //    the user may have long since left, minutes after they typed it
+        //    and quite possibly after they retyped it by hand.
+        if self.connection_generation(&out.conn_id) != out.conn_generation {
+            self.release_echo_slot_and_drain(&out.buffer_id, out.echo_id);
+            self.abandon_with_text(
+                out,
+                "the connection was re-established while this was being translated",
+            );
             return;
         }
 
@@ -690,15 +715,14 @@ impl crate::app::App {
             .first()
             .is_some_and(|w| w.starts_with("+RPE2E01"));
 
-        let mut send_ok = true;
+        // Recorded rather than reported inline: the message the user gets
+        // depends on how far the send got, which is only known after the
+        // loop, and it has to carry their text with it.
+        let mut failure: Option<&'static str> = None;
         let mut sent_any = false;
         for wire in &wire_lines {
             let Some(handle) = self.irc_handles.get(&out.conn_id) else {
-                self.deliver_translate_error(
-                    &out.buffer_id,
-                    "Failed to send message — connection dropped",
-                );
-                send_ok = false;
+                failure = Some("the connection dropped");
                 break;
             };
             if handle.sender().send_privmsg(&out.buffer_name, wire).is_err() {
@@ -707,8 +731,7 @@ impl crate::app::App {
                     target = %out.buffer_name,
                     "translate: deferred outgoing send failed"
                 );
-                self.deliver_translate_error(&out.buffer_id, "Failed to send message");
-                send_ok = false;
+                failure = Some("the send failed");
                 break;
             }
             sent_any = true;
@@ -720,11 +743,11 @@ impl crate::app::App {
         // leaves REKEY NOTICEs queued for the next successful send rather
         // than flushing them to peers whose session assumes the triggering
         // ciphertext arrived.
-        if send_ok && !self.state.pending_e2e_sends.is_empty() {
+        if failure.is_none() && !self.state.pending_e2e_sends.is_empty() {
             self.drain_pending_e2e_sends();
         }
-        if !send_ok {
-            self.abandon_translated_send(out, sent_any);
+        if let Some(reason) = failure {
+            self.abandon_translated_send(out, sent_any, reason);
             return;
         }
         // The server's echo carries the TRANSLATION and nothing else, so on a
@@ -779,42 +802,72 @@ impl crate::app::App {
         self.drain_translate_queue(&out.buffer_id);
     }
 
-    /// Clean up after a send that failed AFTER the handle precheck passed —
-    /// the writer task went away between the two, which it can, because it
-    /// dies independently of the map entry.
+    /// Report a deferred send that will not happen, and give the user their
+    /// text back.
+    ///
+    /// The text goes in the ERROR ROW **as well as** the composer, and that is
+    /// the whole point of this function existing. `restore_input_text_to`
+    /// deliberately refuses to overwrite a composer the user has since typed
+    /// into — clobbering the next message would be a worse surprise — so on a
+    /// deferred failure, which by definition happens seconds after the user
+    /// hit Enter, the composer is often busy and the restore is a no-op. A row
+    /// that names only the reason then loses the message outright while
+    /// telling the user it was handed back.
+    ///
+    /// `refuse_untranslatable_send_to` has printed both since it was written,
+    /// for exactly this reason. The deferred paths did not, and they are the
+    /// ones where it matters most.
+    fn abandon_with_text(&mut self, out: &OutgoingTranslateDeliver, reason: &str) {
+        let retry = out.retry_text.clone();
+        self.deliver_translate_error(
+            &out.buffer_id,
+            &format!(
+                "{err}Not sent — {reason}.{rst}\n{dim}Your text:{rst} {retry}",
+                err = crate::commands::types::C_ERR,
+                dim = crate::commands::types::C_DIM,
+                rst = crate::commands::types::C_RST,
+            ),
+        );
+        let origin = out.origin.clone();
+        self.restore_input_text_to(&retry, &origin);
+    }
+
+    /// Clean up after a send that failed AFTER the session check passed — the
+    /// writer task went away between the two, which it can, because it dies
+    /// independently of the map entry.
     ///
     /// `sent_any` is what makes the two cases different, and it is the whole
     /// point of this function.
-    fn abandon_translated_send(&mut self, out: &OutgoingTranslateDeliver, sent_any: bool) {
+    fn abandon_translated_send(
+        &mut self,
+        out: &OutgoingTranslateDeliver,
+        sent_any: bool,
+        reason: &str,
+    ) {
         // No echo will be written either way, so the reservation has to go
         // back or this buffer stays barricaded behind it until the queue
         // timeout.
         self.release_echo_slot_and_drain(&out.buffer_id, out.echo_id);
-        let retry = out.retry_text.clone();
-        if sent_any {
-            // A split message that died halfway already put its first chunks
-            // on the channel. Restoring the whole line into the composer
-            // would invite the user to send those chunks a second time, so it
-            // goes to the error row and nowhere else.
-            self.deliver_translate_error(
-                &out.buffer_id,
-                &format!(
-                    "{err}Part of the message was sent — the rest was not.{rst} \
-                     {dim}Not restored to the input line, to avoid sending the \
-                     first part twice.{rst}\n{dim}Your text:{rst} {retry}",
-                    err = crate::commands::types::C_ERR,
-                    dim = crate::commands::types::C_DIM,
-                    rst = crate::commands::types::C_RST,
-                ),
-            );
+        if !sent_any {
+            self.abandon_with_text(out, reason);
             return;
         }
-        // Nothing reached the wire, and the composer was cleared at
-        // submission. Same as the connection-unavailable branch: hand the
-        // text back rather than let the user watch a message they typed
-        // disappear without a trace.
-        let origin = out.origin.clone();
-        self.restore_input_text_to(&retry, &origin);
+        // A split message that died halfway already put its first chunks
+        // on the channel. Restoring the whole line into the composer
+        // would invite the user to send those chunks a second time, so it
+        // goes to the error row and nowhere else.
+        let retry = out.retry_text.clone();
+        self.deliver_translate_error(
+            &out.buffer_id,
+            &format!(
+                "{err}Part of the message was sent — the rest was not ({reason}).{rst} \
+                 {dim}Not restored to the input line, to avoid sending the \
+                 first part twice.{rst}\n{dim}Your text:{rst} {retry}",
+                err = crate::commands::types::C_ERR,
+                dim = crate::commands::types::C_DIM,
+                rst = crate::commands::types::C_RST,
+            ),
+        );
     }
 
     /// Assemble the outgoing translation request, capturing every
@@ -929,7 +982,24 @@ impl crate::app::App {
             // Buffer input retries as itself; by-target sends overwrite this
             // with a re-addressed form in `dispatch_by_target_translation`.
             retry_text: text.to_string(),
+            // Captured with everything else that could change during the
+            // wait. A reconnect under this same id is a different session,
+            // and this message was written for the one in front of the user.
+            conn_generation: self.connection_generation(conn_id),
         })
+    }
+
+    /// Which session of `conn_id` is live right now, or `None` when there is
+    /// no handle at all.
+    ///
+    /// Both halves matter: `None` at capture and `Some` at delivery means a
+    /// connection came up during the wait, which is just as much a different
+    /// session as a reconnect is.
+    fn connection_generation(&self, conn_id: &str) -> Option<u64> {
+        if !self.irc_handles.contains_key(conn_id) {
+            return None;
+        }
+        self.conn_generations.get(conn_id).copied()
     }
 
     /// What the outgoing gate has decided about one submitted line.
@@ -1216,30 +1286,14 @@ impl crate::app::App {
                     // Same reasoning as the connection-unavailable branch:
                     // E2E state can change during the wait, nothing reached
                     // the wire, and the composer was cleared at submission.
-                    self.deliver_translate_error(&out.buffer_id, &reason.user_message());
                     self.release_echo_slot_and_drain(&out.buffer_id, out.echo_id);
-                    let retry = out.retry_text.clone();
-                    let origin = out.origin.clone();
-                    self.restore_input_text_to(&retry, &origin);
+                    self.abandon_with_text(out, &reason.user_message());
                     return None;
                 }
             }
         }
 
         Some((wire_lines, plain_echo))
-    }
-
-    /// Hand a refused message back to the user instead of losing it.
-    fn restore_outgoing_input(&mut self, out: &OutgoingTranslateDeliver, reason: &str) {
-        self.deliver_translate_error(
-            &out.buffer_id,
-            &format!(
-                "Not sent — translation failed ({reason}). Your text is back in the input line."
-            ),
-        );
-        let retry = out.retry_text.clone();
-        let origin = out.origin.clone();
-        self.restore_input_text_to(&retry, &origin);
     }
 
     /// Emit the local echo for a successfully sent translated message.
@@ -1516,6 +1570,62 @@ impl crate::app::App {
         self.release_translated(buffer_id, ready);
     }
 
+    /// Follow a re-keyed query buffer in the config that `AppState` cannot
+    /// reach.
+    ///
+    /// Not persisted here. `/translate add*|del*` writes the file, and one of
+    /// those will carry the migrated key along the next time the user runs
+    /// it; writing `config.toml` in response to somebody else's `/nick` is
+    /// disk I/O the user did not ask for, and would race an editor they may
+    /// have open. The consequence is that the setting follows the peer for
+    /// this session, and a restart keys it by the nick they actually typed —
+    /// which is what they wrote down.
+    pub(crate) fn drain_pending_buffer_rekeys(&mut self) {
+        if self.state.pending_buffer_rekeys.is_empty() {
+            return;
+        }
+        let rekeys = std::mem::take(&mut self.state.pending_buffer_rekeys);
+        let mut moved = false;
+        for (old_id, new_id) in rekeys {
+            if let Some(cfg) = self.config.translate.buffers.remove(&old_id) {
+                tracing::debug!(%old_id, %new_id, "translate: following a re-keyed query buffer");
+                self.config.translate.buffers.insert(new_id, cfg);
+                moved = true;
+            }
+        }
+        if moved {
+            // Re-derive the mirrors so `translate_buffers` and the config
+            // agree again — `rekey_buffer_state` moved the mirror, and this
+            // is what stops the two drifting from here on.
+            self.sync_translate_from_config();
+        }
+    }
+
+    /// Release this buffer's lines that are waiting on an INCOMING
+    /// translation, and nothing else.
+    ///
+    /// For `/translate delin`. The full [`Self::flush_translate_queue`] would
+    /// also drop the reservations held by outgoing sends that are still in
+    /// flight — a different direction, still enabled, whose echoes would then
+    /// render after the replies to them.
+    pub(crate) fn flush_pending_translations(&mut self, buffer_id: &str) {
+        let ready = {
+            let Some(queue) = self.state.translate_queues.get_mut(buffer_id) else {
+                return;
+            };
+            queue.flush_pending()
+        };
+        if !ready.is_empty() {
+            tracing::debug!(
+                buffer_id,
+                count = ready.len(),
+                "translate: released incoming lines on delin"
+            );
+        }
+        self.release_translated(buffer_id, ready);
+        self.prune_empty_translate_queues();
+    }
+
     /// Flush the queues of every buffer belonging to one connection.
     ///
     /// Used on disconnect: those lines already arrived, and waiting out the
@@ -1717,6 +1827,7 @@ mod app_tests {
             echo_id: 1,
             origin: SubmitOrigin::Tui,
             retry_text: text.to_string(),
+            conn_generation: None,
         }
     }
 
@@ -1753,6 +1864,199 @@ mod app_tests {
             last.text.contains("no provider"),
             "the reason is named: {}",
             last.text
+        );
+    }
+
+    /// Every way a deferred send can be abandoned, as
+    /// `(setup, expected reason fragment)`. Each must put the user's text in
+    /// the error row, because the composer restore is a no-op whenever the
+    /// user has started typing again — which, seconds after they hit Enter,
+    /// is the normal case.
+    #[test]
+    fn every_deferred_failure_names_the_text_it_could_not_send() {
+        type Setup = fn() -> (crate::app::App, OutgoingTranslateDeliver);
+        let cases: [(&str, Setup); 4] = [
+            ("translation failed", || {
+                (
+                    app_with_buffer(),
+                    outgoing(
+                        "moje zdanie",
+                        TranslateOutcome::Untranslated {
+                            id: 1,
+                            reason: crate::translate::UntranslatedReason::NoProvider,
+                        },
+                        false,
+                    ),
+                )
+            }),
+            ("the connection is unavailable", || {
+                (
+                    app_with_buffer(),
+                    outgoing(
+                        "moje zdanie",
+                        TranslateOutcome::Translated {
+                            id: 1,
+                            text: "mein satz".to_string(),
+                        },
+                        false,
+                    ),
+                )
+            }),
+            ("re-established", || {
+                let mut app = app_with_dying_handle(usize::MAX);
+                app.conn_generations.insert("test".to_string(), 7);
+                let mut out = outgoing(
+                    "moje zdanie",
+                    TranslateOutcome::Translated {
+                        id: 1,
+                        text: "mein satz".to_string(),
+                    },
+                    false,
+                );
+                out.conn_generation = Some(6); // the session before this one
+                (app, out)
+            }),
+            ("the send failed", || {
+                let mut app = app_with_dying_handle(0);
+                app.conn_generations.insert("test".to_string(), 1);
+                let mut out = outgoing(
+                    "moje zdanie",
+                    TranslateOutcome::Translated {
+                        id: 1,
+                        text: "mein satz".to_string(),
+                    },
+                    false,
+                );
+                out.conn_generation = Some(1);
+                (app, out)
+            }),
+        ];
+
+        for (fragment, setup) in cases {
+            let (mut app, out) = setup();
+            // The user started the next message during the wait, so the
+            // composer will not be overwritten. This is the case that loses
+            // the message when the row carries only a reason.
+            app.input.value = "something else".to_string();
+            app.state.reserve_echo_slot(BUF, out.echo_id);
+            app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+
+            let rows: Vec<String> = app.state.buffers[BUF]
+                .messages
+                .iter()
+                .map(|m| m.text.clone())
+                .collect();
+            assert!(
+                rows.iter().any(|t| t.contains(fragment)),
+                "{fragment:?} must be named: {rows:?}"
+            );
+            assert!(
+                rows.iter().any(|t| t.contains("moje zdanie")),
+                "{fragment:?}: the text is unrecoverable unless the row \
+                 carries it — the composer is busy: {rows:?}"
+            );
+            assert_eq!(
+                app.input.value, "something else",
+                "{fragment:?}: and what the user is typing now is left alone"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rekeyed_query_keeps_translating_after_a_sync() {
+        // `sync_translate_from_config` re-derives the state mirror from the
+        // config, so moving only the mirror is undone by the next `/set` or
+        // `/reload`. The config key the App owns has to move too.
+        let mut app = app_with_buffer();
+        app.config.translate.enabled = true;
+        app.translate_backend = Some(std::sync::Arc::new(
+            crate::translate::backend::StubBackend::new(0, 0),
+        ));
+        app.config.translate.buffers.insert(
+            "test/frank".to_string(),
+            crate::config::TranslateBufferConfig {
+                incoming: true,
+                outgoing: false,
+                lang: Some("de".to_string()),
+                my_lang: None,
+            },
+        );
+        app.sync_translate_from_config();
+        app.state
+            .pending_buffer_rekeys
+            .push(("test/frank".to_string(), "test/frankie".to_string()));
+
+        app.drain_pending_buffer_rekeys();
+
+        assert!(
+            app.config.translate.buffers.contains_key("test/frankie"),
+            "the config key follows the conversation"
+        );
+        assert!(!app.config.translate.buffers.contains_key("test/frank"));
+        // The mirror must survive a re-derive, which is the whole point.
+        app.sync_translate_from_config();
+        assert!(
+            app.state.translate_buffers.contains_key("test/frankie"),
+            "and a later sync does not undo it"
+        );
+    }
+
+    #[test]
+    fn a_reconnect_during_translation_does_not_send_on_the_new_session() {
+        // The pre-disconnect message must not appear on the session that
+        // replaced it: the user may have left that channel, and minutes may
+        // have passed.
+        let mut app = app_with_dying_handle(usize::MAX);
+        app.conn_generations.insert("test".to_string(), 2);
+        let mut out = outgoing(
+            "moje zdanie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "mein satz".to_string(),
+            },
+            false,
+        );
+        out.conn_generation = Some(1);
+        let sender = app.irc_handles["test"].sender().clone();
+        app.state.reserve_echo_slot(BUF, 1);
+
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+
+        assert!(
+            sender.captured().is_empty(),
+            "nothing may reach the replacement session: {:?}",
+            sender.captured()
+        );
+        assert_eq!(
+            queued(&app),
+            0,
+            "and the reservation is given back rather than stalling the buffer"
+        );
+    }
+
+    #[test]
+    fn a_send_on_the_same_session_still_goes_out() {
+        // The guard above must not refuse the ordinary case, or it would
+        // pass by refusing everything.
+        let mut app = app_with_dying_handle(usize::MAX);
+        app.conn_generations.insert("test".to_string(), 2);
+        let mut out = outgoing(
+            "moje zdanie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "mein satz".to_string(),
+            },
+            false,
+        );
+        out.conn_generation = Some(2);
+        let sender = app.irc_handles["test"].sender().clone();
+
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+
+        let wire: Vec<String> = sender.captured().iter().map(ToString::to_string).collect();
+        assert!(
+            wire.iter().any(|w| w.contains("mein satz")),
+            "the translation reaches the wire: {wire:?}"
         );
     }
 
@@ -1906,7 +2210,7 @@ mod app_tests {
         ))));
         let last = app.state.buffers[BUF].messages.back().unwrap();
         assert!(
-            last.text.contains("connection unavailable"),
+            last.text.contains("the connection is unavailable"),
             "a filtered line reaches the send attempt rather than being refused: {}",
             last.text
         );
@@ -3010,6 +3314,7 @@ mod tests {
             echo_id: 1,
             origin: SubmitOrigin::Tui,
             retry_text: text.to_string(),
+            conn_generation: None,
         }
     }
 
@@ -3073,6 +3378,7 @@ mod tests {
                     echo_id: 1,
                     origin: SubmitOrigin::Tui,
                     retry_text: "hello world".to_string(),
+                    conn_generation: None,
                 })
                 .await
                 .expect("worker alive");

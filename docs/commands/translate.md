@@ -105,6 +105,15 @@ untranslated rather than holding up the channel, and the queue is capped at
 without bound. Losing the connection releases that server's queued lines at
 once rather than waiting the timeout out for a server that is gone.
 
+`/translate delin` releases the lines it was still waiting on, shown
+untranslated. `/translate delout` releases nothing: it does not touch the
+incoming direction, and a message of yours already being translated is still
+sent when it comes back.
+
+If the person you are talking to changes nick, the settings and any lines in
+flight follow the conversation. The saved setting still names the nick you
+typed, so it is that name a restart looks for.
+
 ## When translation does not happen
 
 A line that was not translated is shown as its original, marked with the
@@ -125,9 +134,15 @@ sent it from — the terminal or the browser tab that submitted it — and an
 error explains why.
 
 If you have already started typing the next message, the composer is left
-alone rather than overwritten; the error row carries the refused text as
-well, so it is recoverable either way. Sending the untranslated original would put something
-other than what you intended in front of the channel.
+alone rather than overwritten — and since a translation takes a moment, that
+is the usual case rather than the exception. The error row always carries the
+refused text for exactly that reason, so it is recoverable either way.
+Sending the untranslated original would put something other than what you
+intended in front of the channel.
+
+A connection that drops and comes back while your message is being translated
+also refuses it, rather than sending a message you typed on the old session
+into the new one.
 
 That applies to every way of not translating, not just a provider error: a
 full or dead translation queue, a message too long to translate in one piece,

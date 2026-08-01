@@ -3006,6 +3006,7 @@ pub mod submit_typing_tests {
             translate_in_flight_applied: 0,
             translate_in_flight_debt: 0,
             submit_origin: crate::app::translate::SubmitOrigin::Tui,
+            conn_generations: std::collections::HashMap::new(),
             translate_timeout_ms: None,
             // NEVER the real config path: a handler that saves would clobber
             // the developer's own configuration during `cargo test`.

@@ -210,10 +210,22 @@ fn del(app: &mut App, args: &[String], dir: Dir) {
     }
     app.sync_translate_from_config();
     persist(app);
-    // Lines already in flight must be released, not dropped: the user has
-    // seen them arrive on the network, and losing them silently would be
-    // worse than showing them untranslated.
-    app.flush_translate_queue(&buffer_id);
+    match dir {
+        // Lines already in flight must be released, not dropped: the user has
+        // seen them arrive on the network, and losing them silently would be
+        // worse than showing them untranslated. Only the incoming ones,
+        // though — a full flush would also drop the reservations held by
+        // outgoing sends that are still in flight, and those are a direction
+        // this command did not touch.
+        Dir::In => app.flush_pending_translations(&buffer_id),
+        // Nothing to flush. The queue holds no outgoing WORK, only the
+        // reservations of sends already dispatched, whose outcomes are still
+        // coming and will fill them. Releasing those would misplace the very
+        // echoes the reservations exist to position — and forcing the
+        // buffer's incoming lines out as timeouts, which is what the full
+        // flush did here, punishes a direction that is still enabled.
+        Dir::Out => {}
+    }
 
     let what = if dir == Dir::In { "incoming" } else { "outgoing" };
     add_local_event(app, &format!("translate: {what} disabled for {target}"));
@@ -590,6 +602,105 @@ mod tests {
             last_event(&app).contains("translate.enabled is off"),
             "the user must not think it is live: {}",
             last_event(&app)
+        );
+    }
+
+    const BUF: &str = "test/#dupa";
+
+    /// A queue holding one incoming line still being translated and, behind
+    /// it, an outgoing echo's reservation — the mixed state both `del`
+    /// directions have to reason about.
+    fn app_with_mixed_queue() -> App {
+        let mut app = app_with_channel();
+        app.config.translate.buffers.insert(
+            BUF.to_string(),
+            crate::config::TranslateBufferConfig {
+                incoming: true,
+                outgoing: true,
+                lang: Some("de".to_string()),
+                my_lang: None,
+            },
+        );
+        let mut queue = crate::translate::queue::TranslateQueue::new();
+        let msg = crate::state::buffer::Message {
+            id: 1,
+            timestamp: chrono::Utc::now(),
+            message_type: crate::state::buffer::MessageType::Message,
+            nick: Some("alice".to_string()),
+            nick_mode: None,
+            text: "guten tag".to_string(),
+            highlight: false,
+            event_key: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: None,
+            wire_origin: None,
+        };
+        queue.push_pending(
+            1,
+            "guten tag".to_string(),
+            crate::translate::queue::PendingPayload {
+                message: msg,
+                activity: crate::state::buffer::ActivityLevel::Activity,
+                show_original: false,
+            },
+        );
+        queue.reserve(2); // an outgoing send still being translated
+        app.state.translate_queues.insert(BUF.to_string(), queue);
+        app
+    }
+
+    fn shown(app: &App) -> Vec<String> {
+        app.state.buffers[BUF]
+            .messages
+            .iter()
+            .map(|m| m.text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn delout_leaves_the_incoming_lines_alone() {
+        // Outgoing is a different direction. Flushing the shared queue forced
+        // lines that were translating perfectly well to render as timeouts,
+        // on a buffer where incoming translation is still switched on.
+        let mut app = app_with_mixed_queue();
+        cmd_translate(&mut app, &args(&["delout", "#dupa"]));
+        assert!(
+            !shown(&app).iter().any(|t| t.contains("untranslated")),
+            "no incoming line may be forced out by disabling the other \
+             direction: {:?}",
+            shown(&app)
+        );
+        assert_eq!(
+            app.state.translate_queues[BUF].len(),
+            2,
+            "both the in-flight line and the reservation are untouched"
+        );
+    }
+
+    #[test]
+    fn delin_releases_incoming_lines_but_keeps_outgoing_reservations() {
+        // The pending line must not be lost — the user saw it arrive — but
+        // the reservation belongs to a send already dispatched, whose
+        // outcome is still coming. Dropping it lets newer rows overtake the
+        // user's own message.
+        let mut app = app_with_mixed_queue();
+        cmd_translate(&mut app, &args(&["delin", "#dupa"]));
+        assert!(
+            shown(&app).iter().any(|t| t.contains("guten tag")),
+            "the in-flight line is released, not dropped: {:?}",
+            shown(&app)
+        );
+        let queue = app
+            .state
+            .translate_queues
+            .get(BUF)
+            .expect("the reservation keeps the queue alive");
+        assert_eq!(
+            queue.len(),
+            1,
+            "and the reservation is what remains — the echo it holds a place              for is still coming"
         );
     }
 }

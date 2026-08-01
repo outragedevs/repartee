@@ -2828,8 +2828,16 @@ fn rename_query_buffers(state: &mut AppState, conn_id: &str, new_nick: &str, aff
             buf.id.clone_from(&new_buf_id);
             state.buffers.insert(new_buf_id.clone(), buf);
             if state.active_buffer_id.as_deref() == Some(buf_id.as_str()) {
-                state.active_buffer_id = Some(new_buf_id);
+                state.active_buffer_id.clone_from(&Some(new_buf_id.clone()));
             }
+            // Everything else keyed by buffer id has to move with it.
+            // Anything left under the old key is not merely stale: the queue
+            // would keep releasing lines toward a buffer that no longer
+            // exists (so they are dropped), and the per-buffer translate
+            // settings would stop matching, silently ending translation
+            // mid-conversation because the person on the other end typed
+            // `/nick`.
+            state.rekey_buffer_state(buf_id, &new_buf_id);
         }
     }
 }
@@ -6121,6 +6129,55 @@ mod tests {
                 .unwrap()
                 .text
                 .contains("frank is now known as frankie")
+        );
+    }
+
+    #[test]
+    fn a_query_rename_carries_the_translation_state_with_it() {
+        // The peer typing `/nick` re-keys their query buffer. Anything left
+        // under the old id is not merely stale: the reorder queue keeps
+        // releasing lines toward a buffer that no longer exists, so they are
+        // dropped, and the per-buffer settings stop matching, so translation
+        // silently stops mid-conversation.
+        let mut state = make_test_state();
+        state.add_buffer(Buffer::for_test("test", BufferType::Query, "frank"));
+        state.translate_buffers.insert(
+            "test/frank".to_string(),
+            crate::config::TranslateBufferConfig {
+                incoming: true,
+                outgoing: true,
+                lang: Some("de".to_string()),
+                my_lang: None,
+            },
+        );
+        let mut queue = crate::translate::queue::TranslateQueue::new();
+        queue.reserve(1);
+        state
+            .translate_queues
+            .insert("test/frank".to_string(), queue);
+        state.suppress_own_echo("test/frank", "mein satz");
+
+        let msg = make_irc_msg(Some("frank!user@host"), Command::NICK("frankie".into()));
+        handle_irc_message(&mut state, "test", &msg);
+
+        assert!(
+            state.translate_buffers.contains_key("test/frankie"),
+            "the settings follow the conversation, not the old nick"
+        );
+        assert!(!state.translate_buffers.contains_key("test/frank"));
+        assert!(
+            state.translate_queues.contains_key("test/frankie"),
+            "in-flight lines still have a buffer to be released into"
+        );
+        assert!(!state.translate_queues.contains_key("test/frank"));
+        assert!(
+            state.take_own_echo_suppression("test/frankie", "mein satz"),
+            "and a reflection still in transit is still recognised"
+        );
+        assert_eq!(
+            state.pending_buffer_rekeys,
+            vec![("test/frank".to_string(), "test/frankie".to_string())],
+            "the App is told, so the config key it owns moves too"
         );
     }
 
