@@ -377,6 +377,19 @@ impl App {
     /// Process a single `ScriptAction` from the scripting channel.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn handle_script_action(&mut self, action: crate::scripting::ScriptAction) {
+        // Nobody typed this. Marking the origin keeps a refused script send
+        // from injecting its payload into the user's composer, where they
+        // could send it by accident.
+        let prior_origin = std::mem::replace(
+            &mut self.submit_origin,
+            crate::app::translate::SubmitOrigin::Script,
+        );
+        self.handle_script_action_inner(action);
+        self.submit_origin = prior_origin;
+    }
+
+    #[allow(clippy::too_many_lines, reason = "one arm per ScriptAction variant")]
+    fn handle_script_action_inner(&mut self, action: crate::scripting::ScriptAction) {
         use crate::scripting::ScriptAction;
         match action {
             ScriptAction::Say {

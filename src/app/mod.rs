@@ -517,6 +517,16 @@ pub struct App {
     /// command so a refusal returns the text to that browser instead of the
     /// terminal's input line.
     pub(crate) submit_origin: crate::app::translate::SubmitOrigin,
+    /// Per-request backend budget shared with the workers, so
+    /// `/set translate.timeout_ms` retunes them and not just the queue.
+    pub(crate) translate_timeout_ms: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    /// Where `/translate add*|del*` writes the config.
+    ///
+    /// A field rather than a call to `constants::config_path()` so tests
+    /// point it at a temp file. A command handler that saves unconditionally
+    /// will otherwise overwrite the developer's REAL `~/.repartee/config.toml`
+    /// the moment a unit test exercises it — which is exactly what happened.
+    pub(crate) config_path: std::path::PathBuf,
     /// Both translation workers post their outcomes here; the main loop
     /// drains and routes them through `apply_translate_deliver`.
     pub(crate) translate_deliver_rx: mpsc::Receiver<translate::TranslateDeliver>,
@@ -713,6 +723,7 @@ impl App {
         let translate::TranslateRuntime {
             backend: translate_backend,
             in_flight: translate_in_flight,
+            timeout_ms: translate_timeout_ms,
             incoming_tx: translate_incoming_tx,
             outgoing_tx: translate_outgoing_tx,
             deliver_tx: _translate_deliver_tx,
@@ -869,6 +880,8 @@ impl App {
             translate_in_flight_applied: translate_max_in_flight,
             translate_in_flight_debt: 0,
             submit_origin: crate::app::translate::SubmitOrigin::Tui,
+            translate_timeout_ms: Some(translate_timeout_ms),
+            config_path: constants::config_path(),
             cli_bind_override: None,
             typing: crate::app::typing::TypingSender::default(),
         };

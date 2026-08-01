@@ -92,6 +92,10 @@ pub enum SubmitOrigin {
     #[default]
     Tui,
     Web(String),
+    /// A Lua script. Nobody typed this, so there is no composer to restore
+    /// it to — putting a script's payload into the user's input line would
+    /// hand them text to accidentally send.
+    Script,
 }
 
 /// How a translated outgoing message should echo locally.
@@ -168,6 +172,9 @@ pub struct PendingOutgoingTranslate {
     pub echo_id: u64,
     /// Which client submitted this, so a refusal returns the text there.
     pub origin: SubmitOrigin,
+    /// The text to hand back if this send is refused — a form that does the
+    /// SAME thing when the user presses Enter on it, not the bare body.
+    pub retry_text: String,
 }
 
 /// Posted by either worker, consumed by the main event loop.
@@ -210,6 +217,9 @@ pub struct OutgoingTranslateDeliver {
     pub echo_id: u64,
     /// Which client submitted this, so a refusal returns the text there.
     pub origin: SubmitOrigin,
+    /// The text to hand back if this send is refused — a form that does the
+    /// SAME thing when the user presses Enter on it, not the bare body.
+    pub retry_text: String,
 }
 
 /// Channels and shared state the translation workers need. Built once in
@@ -222,6 +232,10 @@ pub struct TranslateRuntime {
     /// `/set translate.max_in_flight` can retune it without a restart.
     /// Exposed as a plain `/set` option, so it has to actually do something.
     pub in_flight: Arc<Semaphore>,
+    /// Per-request budget in milliseconds, shared with the workers so
+    /// `/set translate.timeout_ms` retunes them too rather than only the
+    /// queue's display-side expiry.
+    pub timeout_ms: Arc<std::sync::atomic::AtomicU64>,
     pub incoming_tx: mpsc::Sender<PendingTranslate>,
     pub outgoing_tx: mpsc::Sender<PendingOutgoingTranslate>,
     pub deliver_tx: mpsc::Sender<TranslateDeliver>,
@@ -250,6 +264,7 @@ impl TranslateRuntime {
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<PendingOutgoingTranslate>(256);
         let (deliver_tx, deliver_rx) = mpsc::channel::<TranslateDeliver>(1024);
         let in_flight = Arc::new(Semaphore::new(cfg.max_in_flight.max(1) as usize));
+        let timeout_ms = Arc::new(std::sync::atomic::AtomicU64::new(cfg.timeout_ms.max(1)));
 
         if let Some(ref b) = backend {
             spawn_incoming_worker(
@@ -257,8 +272,14 @@ impl TranslateRuntime {
                 Arc::clone(b),
                 deliver_tx.clone(),
                 Arc::clone(&in_flight),
+                Arc::clone(&timeout_ms),
             );
-            spawn_outgoing_worker(outgoing_rx, Arc::clone(b), deliver_tx.clone());
+            spawn_outgoing_worker(
+                outgoing_rx,
+                Arc::clone(b),
+                deliver_tx.clone(),
+                Arc::clone(&timeout_ms),
+            );
         } else {
             // Disabled: drain to nowhere so a `try_send` from the IRC or
             // input paths never backpressures.
@@ -269,6 +290,7 @@ impl TranslateRuntime {
         Self {
             backend,
             in_flight,
+            timeout_ms,
             incoming_tx,
             outgoing_tx,
             deliver_tx,
@@ -288,22 +310,45 @@ fn spawn_drain<T: Send + 'static>(mut rx: mpsc::Receiver<T>) {
 /// which is what shrink does on panic — would leave the queue entry pending
 /// until the timeout fires, stalling every line behind it for the full
 /// budget.
-async fn translate_isolated(backend: &SharedBackend, req: TranslateRequest) -> TranslateOutcome {
+async fn translate_isolated(
+    backend: &SharedBackend,
+    req: TranslateRequest,
+    timeout: &Arc<std::sync::atomic::AtomicU64>,
+) -> TranslateOutcome {
     let id = req.id;
+    let budget =
+        std::time::Duration::from_millis(timeout.load(std::sync::atomic::Ordering::Relaxed).max(1));
     // The boundary has to cover BUILDING the future, not just polling it. A
     // backend that panics synchronously inside `translate()` — before it ever
     // returns its `BoxFuture` — would otherwise unwind past this: the
     // incoming task would produce no outcome at all (its queue entry sitting
     // pending until the timeout), and an outgoing lane would lose the
     // message outright.
-    let fut = std::panic::AssertUnwindSafe(async { backend.translate(req).await });
-    fut.catch_unwind().await.unwrap_or_else(|_| {
-        tracing::error!(id, "translate: backend panicked on one line");
-        TranslateOutcome::Untranslated {
-            id,
-            reason: UntranslatedReason::Error("backend panic".to_string()),
+    // The await is bounded. A backend future that never resolves would
+    // otherwise hang forever: the queue's expiry releases the DISPLAYED row
+    // but cannot cancel the task, so each hung incoming request would hold
+    // its semaphore permit for the life of the process, and a hung outgoing
+    // request would wedge that connection's serial lane permanently.
+    let fut = std::panic::AssertUnwindSafe(async {
+        tokio::time::timeout(budget, backend.translate(req)).await
+    });
+    match fut.catch_unwind().await {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(_elapsed)) => {
+            tracing::warn!(id, ?budget, "translate: backend timed out; abandoning it");
+            TranslateOutcome::Untranslated {
+                id,
+                reason: UntranslatedReason::Timeout,
+            }
         }
-    })
+        Err(_) => {
+            tracing::error!(id, "translate: backend panicked on one line");
+            TranslateOutcome::Untranslated {
+                id,
+                reason: UntranslatedReason::Error("backend panic".to_string()),
+            }
+        }
+    }
 }
 
 /// Concurrent up to `max_in_flight`. See the module docs for why this one
@@ -313,6 +358,7 @@ fn spawn_incoming_worker(
     backend: SharedBackend,
     deliver: mpsc::Sender<TranslateDeliver>,
     permits: Arc<Semaphore>,
+    timeout_ms: Arc<std::sync::atomic::AtomicU64>,
 ) {
     tokio::spawn(async move {
         while let Some(pending) = rx.recv().await {
@@ -321,9 +367,10 @@ fn spawn_incoming_worker(
             };
             let backend = Arc::clone(&backend);
             let deliver = deliver.clone();
+            let timeout_ms = Arc::clone(&timeout_ms);
             tokio::spawn(async move {
                 let _permit = permit;
-                let outcome = translate_isolated(&backend, pending.req).await;
+                let outcome = translate_isolated(&backend, pending.req, &timeout_ms).await;
                 let _ = deliver
                     .send(TranslateDeliver::Incoming {
                         buffer_id: pending.buffer_id,
@@ -351,6 +398,7 @@ fn spawn_outgoing_worker(
     mut rx: mpsc::Receiver<PendingOutgoingTranslate>,
     backend: SharedBackend,
     deliver: mpsc::Sender<TranslateDeliver>,
+    timeout_ms: Arc<std::sync::atomic::AtomicU64>,
 ) {
     /// Per-connection queue depth. Deep enough that normal typing never
     /// trips it; shallow enough that a wedged provider surfaces quickly.
@@ -366,7 +414,12 @@ fn spawn_outgoing_worker(
             let conn_id = pending.conn_id.clone();
             let lane = lanes.entry(conn_id.clone()).or_insert_with(|| {
                 let (tx, lane_rx) = mpsc::channel(PER_CONNECTION_QUEUE);
-                spawn_connection_lane(lane_rx, Arc::clone(&backend), deliver.clone());
+                spawn_connection_lane(
+                    lane_rx,
+                    Arc::clone(&backend),
+                    deliver.clone(),
+                    Arc::clone(&timeout_ms),
+                );
                 tx
             });
             match lane.try_send(pending) {
@@ -395,10 +448,11 @@ fn spawn_connection_lane(
     mut rx: mpsc::Receiver<PendingOutgoingTranslate>,
     backend: SharedBackend,
     deliver: mpsc::Sender<TranslateDeliver>,
+    timeout_ms: Arc<std::sync::atomic::AtomicU64>,
 ) {
     tokio::spawn(async move {
         while let Some(pending) = rx.recv().await {
-            let outcome = translate_isolated(&backend, pending.req).await;
+            let outcome = translate_isolated(&backend, pending.req, &timeout_ms).await;
             let _ = deliver
                 .send(TranslateDeliver::Outgoing(Box::new(
                     OutgoingTranslateDeliver {
@@ -416,6 +470,7 @@ fn spawn_connection_lane(
                         echo: pending.echo,
                         echo_id: pending.echo_id,
                         origin: pending.origin,
+                        retry_text: pending.retry_text,
                     },
                 )))
                 .await;
@@ -451,6 +506,7 @@ async fn refuse_outgoing(
                 echo: pending.echo,
                 echo_id: pending.echo_id,
                 origin: pending.origin,
+                retry_text: pending.retry_text,
             },
         )))
         .await;
@@ -602,10 +658,17 @@ impl crate::app::App {
         };
 
         if !self.irc_handles.contains_key(&out.conn_id) {
+            // The handle existed at submission and is gone now. Nothing
+            // reached the wire and no echo holds the text, so discarding it
+            // here loses a message the user already watched disappear from
+            // their composer.
             self.deliver_translate_error(
                 &out.buffer_id,
                 "Failed to send message — connection unavailable",
             );
+            let retry = out.retry_text.clone();
+            let origin = out.origin.clone();
+            self.restore_input_text_to(&retry, &origin);
             return;
         }
 
@@ -613,7 +676,7 @@ impl crate::app::App {
         // above is preserved instead of being re-split across the framing.
         let mut wire_lines = Vec::new();
         let mut plain_echo = String::new();
-        for (i, wire_text) in wire_texts.iter().enumerate() {
+        for wire_text in &wire_texts {
             match self.state.e2e_encrypt_or_passthrough(
                 &out.buffer_id,
                 &out.buffer_name,
@@ -623,9 +686,14 @@ impl crate::app::App {
             ) {
                 Ok((lines, echo)) => {
                     wire_lines.extend(lines);
-                    if i == 0 {
-                        plain_echo = echo;
+                    // Every chunk, not just the first: a long translated
+                    // action is split across several wire payloads, and
+                    // echoing only the first would show and LOG a fraction
+                    // of what the peers received.
+                    if !plain_echo.is_empty() {
+                        plain_echo.push(' ');
                     }
+                    plain_echo.push_str(&echo);
                 }
                 Err(reason) => {
                     self.deliver_translate_error(&out.buffer_id, &reason.user_message());
@@ -806,6 +874,9 @@ impl crate::app::App {
             echo,
             echo_id: id,
             origin: self.submit_origin.clone(),
+            // Buffer input retries as itself; by-target sends overwrite this
+            // with a re-addressed form in `dispatch_by_target_translation`.
+            retry_text: text.to_string(),
         })
     }
 
@@ -879,19 +950,68 @@ impl crate::app::App {
         let body = crate::app::e2e_gate::translatable_outgoing_body(wire_text)?;
         let buffer_id = crate::state::buffer::make_buffer_id(conn_id, target);
         let e2e_possible = self.state.e2e_possible_for_target(conn_id, target);
+        let is_action = body.len() != wire_text.len();
+        let retry = self.retry_form_for(target, body, is_action);
         match self.outgoing_translate_policy(&buffer_id, body, e2e_possible) {
             OutgoingTranslatePolicy::NotApplicable => None,
             OutgoingTranslatePolicy::Refuse(reason) => {
-                Some(self.refuse_untranslatable_send(body, reason))
+                Some(self.refuse_untranslatable_send(&retry, reason))
             }
             OutgoingTranslatePolicy::Translate => {
-                // A shorter body than the wire means the framing was
-                // stripped, i.e. this is an ACTION.
-                let is_action = body.len() != wire_text.len();
+                let buffer_type = if crate::e2e::is_channel_target(target) {
+                    BufferType::Channel
+                } else {
+                    BufferType::Query
+                };
+                let nick = self
+                    .state
+                    .connections
+                    .get(conn_id)
+                    .map(|c| c.nick.clone())
+                    .unwrap_or_default();
                 Some(self.dispatch_by_target_translation(
-                    conn_id, &buffer_id, target, body, is_action, echo,
+                    &OutgoingRequest {
+                        conn_id,
+                        buffer_id: &buffer_id,
+                        buffer_name: target,
+                        buffer_type: &buffer_type,
+                        nick: &nick,
+                        text: body,
+                        is_action,
+                        echo,
+                    },
+                    &retry,
                 ))
             }
+        }
+    }
+
+    /// The text to hand back if this send is refused: a form that does the
+    /// SAME thing when the user presses Enter on it.
+    ///
+    /// Restoring the bare body is unsafe. `/msg bob secret` deliberately
+    /// leaves the current channel active, so returning just `secret` and
+    /// letting the user hit Enter publishes private content to the channel.
+    /// `/me waves` would likewise come back as plain text and lose its
+    /// action semantics.
+    fn retry_form_for(&self, target: &str, body: &str, is_action: bool) -> String {
+        if is_action {
+            // `/me` acts on the active buffer, which is where it came from.
+            return format!("/me {body}");
+        }
+        let active_is_target = self
+            .state
+            .active_buffer_id
+            .as_ref()
+            .and_then(|id| self.state.buffers.get(id))
+            .is_some_and(|b| b.name.eq_ignore_ascii_case(target));
+        if active_is_target {
+            body.to_string()
+        } else {
+            // Re-addressed explicitly. `/msg` reaches the same destination
+            // as `/query <nick> <text>` did, so the retry is equivalent even
+            // when the original spelling is not recoverable here.
+            format!("/msg {target} {body}")
         }
     }
 
@@ -903,47 +1023,25 @@ impl crate::app::App {
     /// the same wrong-language text on the same channel.
     pub(crate) fn dispatch_by_target_translation(
         &mut self,
-        conn_id: &str,
-        buffer_id: &str,
-        target: &str,
-        body: &str,
-        is_action: bool,
-        echo: OutgoingEchoPlan,
+        req: &OutgoingRequest<'_>,
+        retry: &str,
     ) -> bool {
-        let buffer_type = if crate::e2e::is_channel_target(target) {
-            BufferType::Channel
-        } else {
-            BufferType::Query
-        };
-        let nick = self
-            .state
-            .connections
-            .get(conn_id)
-            .map(|c| c.nick.clone())
-            .unwrap_or_default();
-        let Some(pending) = self.build_outgoing_translate(&OutgoingRequest {
-            conn_id,
-            buffer_id,
-            buffer_name: target,
-            buffer_type: &buffer_type,
-            nick: &nick,
-            text: body,
-            is_action,
-            echo,
-        }) else {
+        let Some(pending) = self.build_outgoing_translate(req) else {
             return self.refuse_untranslatable_send(
-                body,
+                retry,
                 "this conversation can no longer be translated",
             );
         };
+        let mut pending = pending;
+        pending.retry_text = retry.to_string();
         match self.translate_outgoing_tx.try_send(pending) {
             Ok(()) => false,
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                self.refuse_untranslatable_send(body, "the translation queue is full")
+                self.refuse_untranslatable_send(retry, "the translation queue is full")
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => self
                 .refuse_untranslatable_send(
-                    body,
+                    retry,
                     "the translation worker has died — restart to restore it",
                 ),
         }
@@ -990,6 +1088,10 @@ impl crate::app::App {
     /// above either way, so it is never truly lost.
     pub(crate) fn restore_input_text_to(&mut self, text: &str, origin: &SubmitOrigin) {
         match origin {
+            // Nobody typed it, so there is nowhere to put it back. The error
+            // row already names the reason; injecting a script's payload into
+            // the user's composer would hand them text to send by accident.
+            SubmitOrigin::Script => {}
             SubmitOrigin::Web(session_id) => {
                 // Back to the browser that sent it. Putting it in the TUI
                 // input instead loses it for its author and makes it appear
@@ -1016,9 +1118,9 @@ impl crate::app::App {
                 "Not sent — translation failed ({reason}). Your text is back in the input line."
             ),
         );
-        let original = out.original_text.clone();
+        let retry = out.retry_text.clone();
         let origin = out.origin.clone();
-        self.restore_input_text_to(&original, &origin);
+        self.restore_input_text_to(&retry, &origin);
     }
 
     /// Emit the local echo for a successfully sent translated message.
@@ -1153,6 +1255,12 @@ impl crate::app::App {
             .translate_my_lang
             .clone_from(&self.config.translate.my_lang);
         self.state.translate_show_original_in = self.config.translate.show_original_in;
+        if let Some(budget) = self.translate_timeout_ms.as_ref() {
+            budget.store(
+                self.config.translate.timeout_ms.max(1),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
         self.retune_translate_concurrency();
     }
 
@@ -1428,6 +1536,7 @@ mod app_tests {
             echo: OutgoingEchoPlan::BufferInput,
             echo_id: 1,
             origin: SubmitOrigin::Tui,
+            retry_text: text.to_string(),
         }
     }
 
@@ -1615,15 +1724,16 @@ mod app_tests {
             },
             false,
         ))));
-        assert!(
-            app.input.value.is_empty(),
-            "a filtered line is not handed back to the user"
-        );
         let last = app.state.buffers[BUF].messages.back().unwrap();
         assert!(
             last.text.contains("connection unavailable"),
-            "it reached the send attempt: {}",
+            "a filtered line reaches the send attempt rather than being refused: {}",
             last.text
+        );
+        assert_eq!(
+            app.input.value, "moin",
+            "and since the connection vanished mid-flight, the text comes back \
+             instead of being lost"
         );
     }
 
@@ -1844,6 +1954,47 @@ mod app_tests {
     }
 
     #[test]
+    fn a_refused_msg_comes_back_re_addressed_not_as_bare_text() {
+        // `/msg bob secret` deliberately leaves the CURRENT channel active.
+        // Returning just `secret` and letting the user press Enter would
+        // publish private content to that channel.
+        let app = app_with_outgoing(Some("de"));
+        assert_eq!(
+            app.retry_form_for("bob", "secret", false),
+            "/msg bob secret",
+            "the retry keeps its destination"
+        );
+    }
+
+    #[test]
+    fn a_refused_action_comes_back_as_an_action() {
+        let app = app_with_outgoing(Some("de"));
+        assert_eq!(
+            app.retry_form_for("#dupa", "waves hello", true),
+            "/me waves hello",
+            "otherwise it loses its action semantics"
+        );
+    }
+
+    #[test]
+    fn text_for_the_active_buffer_comes_back_unadorned() {
+        let mut app = app_with_outgoing(Some("de"));
+        app.state.set_active_buffer(BUF);
+        assert_eq!(app.retry_form_for("#dupa", "moje zdanie", false), "moje zdanie");
+    }
+
+    #[test]
+    fn a_script_refusal_never_touches_the_users_composer() {
+        // Nobody typed it, so there is nowhere to put it back — and putting
+        // a script's payload in the composer hands the user text to send by
+        // accident.
+        let mut app = app_with_outgoing(Some("de"));
+        app.submit_origin = SubmitOrigin::Script;
+        app.refuse_untranslatable_send("payload from a script", "the translation queue is full");
+        assert!(app.input.value.is_empty());
+    }
+
+    #[test]
     fn a_web_submission_is_returned_to_that_browser_not_the_terminal() {
         // The browser cleared its composer on submit, so restoring into the
         // TUI input loses the text for its author AND drops it somewhere
@@ -2023,12 +2174,17 @@ mod app_tests {
         app.translate_outgoing_tx = tx;
 
         let sent = app.dispatch_by_target_translation(
-            "test",
-            BUF,
-            "#dupa",
-            "waves hello",
-            true,
-            OutgoingEchoPlan::BufferInput,
+            &OutgoingRequest {
+                conn_id: "test",
+                buffer_id: BUF,
+                buffer_name: "#dupa",
+                buffer_type: &BufferType::Channel,
+                nick: "me",
+                text: "waves hello",
+                is_action: true,
+                echo: OutgoingEchoPlan::BufferInput,
+            },
+            "/me waves hello",
         );
         assert!(!sent, "nothing is on the wire yet");
         let pending = rx.try_recv().expect("dispatched");
@@ -2048,12 +2204,17 @@ mod app_tests {
 
         let sent =
             app.dispatch_by_target_translation(
-                "test",
-                BUF,
-                "#dupa",
+                &OutgoingRequest {
+                    conn_id: "test",
+                    buffer_id: BUF,
+                    buffer_name: "#dupa",
+                    buffer_type: &BufferType::Channel,
+                    nick: "me",
+                    text: "moje zdanie",
+                    is_action: false,
+                    echo: OutgoingEchoPlan::BufferInput,
+                },
                 "moje zdanie",
-                false,
-                OutgoingEchoPlan::BufferInput,
             );
         assert!(!sent);
         assert_eq!(app.input.value, "moje zdanie", "the text comes back");
@@ -2247,6 +2408,7 @@ mod tests {
             echo: OutgoingEchoPlan::BufferInput,
             echo_id: 1,
             origin: SubmitOrigin::Tui,
+            retry_text: text.to_string(),
         }
     }
 
@@ -2309,6 +2471,7 @@ mod tests {
                     echo: OutgoingEchoPlan::BufferInput,
                     echo_id: 1,
                     origin: SubmitOrigin::Tui,
+                    retry_text: "hello world".to_string(),
                 })
                 .await
                 .expect("worker alive");

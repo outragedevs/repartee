@@ -153,6 +153,7 @@ fn add(app: &mut App, args: &[String], dir: Dir) {
         entry.my_lang = Some(mine);
     }
     app.sync_translate_from_config();
+    persist(app);
 
     let what = if dir == Dir::In { "incoming" } else { "outgoing" };
     add_local_event(app, &format!("translate: {what} enabled for {target}"));
@@ -193,6 +194,7 @@ fn del(app: &mut App, args: &[String], dir: Dir) {
         app.config.translate.buffers.remove(&buffer_id);
     }
     app.sync_translate_from_config();
+    persist(app);
     // Lines already in flight must be released, not dropped: the user has
     // seen them arrive on the network, and losing them silently would be
     // worse than showing them untranslated.
@@ -200,6 +202,24 @@ fn del(app: &mut App, args: &[String], dir: Dir) {
 
     let what = if dir == Dir::In { "incoming" } else { "outgoing" };
     add_local_event(app, &format!("translate: {what} disabled for {target}"));
+}
+
+/// Write the updated per-buffer map to disk.
+///
+/// These commands ARE the documented way to manage a persisted map, so
+/// without this every `addin`/`addout`/`delin`/`delout` silently evaporated
+/// on the next restart or `/reload`. A write failure is surfaced rather than
+/// swallowed: the user needs to know the setting only holds for this session.
+fn persist(app: &mut App) {
+    let path = app.config_path.clone();
+    if let Err(e) = crate::config::save_config(&path, &app.config) {
+        add_local_event(
+            app,
+            &format!(
+                "{C_ERR}translate: setting applied but NOT saved: {e}{C_RST}"
+            ),
+        );
+    }
 }
 
 fn list(app: &mut App) {
@@ -335,6 +355,38 @@ mod tests {
         assert!(cfg.outgoing);
         assert!(!cfg.incoming);
         assert_eq!(cfg.lang.as_deref(), Some("de"));
+    }
+
+    #[test]
+    fn a_change_is_written_to_the_configured_path() {
+        // These commands ARE the documented way to manage a persisted map,
+        // so a change that only lives in memory evaporates on restart.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("config.toml");
+        let mut app = app_with_channel();
+        app.config_path.clone_from(&path);
+
+        cmd_translate(&mut app, &args(&["addin", "#dupa", "de"]));
+
+        let written = std::fs::read_to_string(&path).expect("the config was saved");
+        assert!(
+            written.contains("[translate.buffers"),
+            "the per-buffer map is in the file: {written}"
+        );
+        assert!(written.contains("test/#dupa"), "including this buffer");
+    }
+
+    #[test]
+    fn tests_never_write_the_real_config_path() {
+        // Guard against the hazard directly: a handler that saves
+        // unconditionally would otherwise clobber the developer's own
+        // ~/.repartee/config.toml during `cargo test`.
+        let app = app_with_channel();
+        assert_ne!(
+            app.config_path,
+            crate::constants::config_path(),
+            "the test App must never point at the real config"
+        );
     }
 
     #[test]
