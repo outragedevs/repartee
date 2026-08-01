@@ -457,6 +457,20 @@ impl crate::app::App {
         nick: &str,
         text: &str,
     ) -> Option<PendingOutgoingTranslate> {
+        // Belt and braces. `handle_plain_message` already refuses to reach
+        // this function when E2E cannot be ruled out, but this is the point
+        // where cleartext becomes a payload bound for a third party, and
+        // this function is reachable from anywhere in the crate. A caller
+        // that forgets the gate must not be able to leak; re-checking here
+        // makes the refusal a property of the function rather than of its
+        // call sites. Fail-closed predicate, never the advisory one.
+        if self.state.e2e_possible_for_target(conn_id, buffer_name) {
+            tracing::warn!(
+                target = %buffer_name,
+                "translate: refused an outgoing request for a possibly-E2E target"
+            );
+            return None;
+        }
         let buffer = self.state.buffers.get(buffer_id)?;
         let known_nicks: Vec<String> = buffer.users.keys().cloned().collect();
         let network = self
@@ -914,6 +928,46 @@ mod app_tests {
             last.text.contains("connection unavailable"),
             "it reached the send attempt: {}",
             last.text
+        );
+    }
+
+    #[test]
+    fn build_outgoing_translate_refuses_a_possibly_e2e_target() {
+        // The caller already gates, but this is where cleartext becomes a
+        // payload bound for a third party, so the refusal must be a property
+        // of the function rather than of its call sites.
+        let mut app = app_with_buffer();
+        let db = crate::storage::db::open_database(false).unwrap();
+        let keyring =
+            crate::e2e::keyring::Keyring::new(std::sync::Arc::new(std::sync::Mutex::new(db)));
+        let mgr = crate::e2e::manager::E2eManager::load_or_init(keyring).unwrap();
+        // Derive the network exactly as the production path does, so the
+        // config we install is the one the gate will look up.
+        let network = app
+            .state
+            .connections
+            .get("test")
+            .map_or_else(String::new, |c| c.label.clone());
+        mgr.keyring()
+            .set_channel_config(&crate::e2e::keyring::ChannelConfig {
+                channel: crate::e2e::scoped_context(&network, "#dupa"),
+                enabled: true,
+                mode: crate::e2e::keyring::ChannelMode::Normal,
+            })
+            .unwrap();
+        app.state.e2e_manager = Some(std::sync::Arc::new(mgr));
+
+        let pending = app.build_outgoing_translate(
+            "test",
+            BUF,
+            "#dupa",
+            &BufferType::Channel,
+            "me",
+            "moje zdanie",
+        );
+        assert!(
+            pending.is_none(),
+            "no payload may be built for a possibly-E2E target"
         );
     }
 
