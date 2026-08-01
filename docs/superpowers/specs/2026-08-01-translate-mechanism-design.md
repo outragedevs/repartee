@@ -227,13 +227,20 @@ memory leak with a frozen channel behind it.
   `translate_isolated` bounds the call to the REMAINING budget and skips it entirely
   when none is left, and the outgoing deliver refuses anything that arrives past the
   deadline anyway.
-- **Queue ceiling**, default 200 entries per buffer, enforced **on every insertion**
-  rather than on the maintenance tick. On overflow the oldest pending entries resolve
-  as `Untranslated { Timeout }` immediately and release, so the channel keeps flowing
-  untranslated instead of stalling. Checking once a second is not a bound: a stalled
-  provider and a busy channel can put hundreds of lines in a queue between two ticks,
-  and this number is documented as a limit on memory *and* on how far behind the
-  display may fall.
+- **Queue ceiling**, default 200 entries per buffer, enforced on **every** insertion —
+  translated lines, the untranslated fallbacks, non-translatable rows like JOINs and
+  notices, echo reservations, and split echoes alike. They all occupy the same queue,
+  so they all count; a bound that some insertions skip is not a bound. On overflow the
+  oldest pending entries resolve as `Untranslated { Timeout }` immediately and release,
+  so the channel keeps flowing untranslated instead of stalling.
+
+  Checking on the maintenance tick instead is not a bound either: a stalled provider
+  and a busy channel can put hundreds of lines in a queue between two ticks, and this
+  number is documented as a limit on memory *and* on how far behind the display may
+  fall. For the same reason `AppState`'s mirror of it has to be right from the first
+  line, so every `[translate]` mirror is derived through `sync_translate_from_config`
+  — including at startup, where hand-copying the fields had left this one at its
+  default until the user next ran `/set`, `/reload` or `/translate`.
 
 Late outcomes for an already-released id are dropped, with a `tracing::debug!`.
 
@@ -276,6 +283,13 @@ second case right and the first case badly wrong: it leaves the deliver addressi
 stale NAME, so a pending private message is handed to the stranger who claimed the
 nick. When a redirect applies but its target window is gone, the send is therefore
 **refused** rather than falling through to the old name.
+
+A peer who renames twice repoints the first redirect to the new destination but keeps
+its ORIGINAL timestamp. The timestamp answers "which work does this apply to", and
+that was settled by the rename that created it; a second rename changes only where the
+conversation went. Restamping widens the redirect over the gap between the two
+renames — during which somebody may have claimed the abandoned nick — and a private
+message meant for them would follow the original peer instead.
 
 The migrated key is not written to disk. `/translate add*|del*` writes the file and
 will carry it along next time; rewriting `config.toml` in response to somebody else's
@@ -474,10 +488,18 @@ message comes back a second time — trading one display bug for a duplication b
 
 Details that follow from the shape:
 
-- **Only the last wire line is decorated.** A translation long enough to split is
-  several reflections and one original; repeating it on each would say the same thing
-  N times, and putting it on the first would place it before the text it is the
-  original of.
+- **Every wire line files a record; only the last carries a decoration.** A
+  translation long enough to split is several reflections and one original; repeating
+  it on each would say the same thing N times, and putting it on the first would place
+  it before the text it is the original of. The earlier records exist for POSITION
+  alone.
+- **The reservation is not released — the reflection fills it.** Each record carries
+  the id reserved when the user pressed Enter, and the reflection takes it instead of
+  a fresh one. Releasing the barrier at send time lets everything queued behind it
+  drain first, and the user's own message then lands below the replies that arrived
+  while it was translating: the exact reordering the reservation exists to prevent. If
+  no reflection ever comes, the queue's expiry clears the barrier like any other
+  stall.
 - **An action is decorated inside its frame** (`\x01ACTION … [original]\x01`), because
   matching happens before the CTCP is unwrapped and the result still has to parse as
   one. The recorded `WireOrigin.text` is the frame's BODY, since that is what the row

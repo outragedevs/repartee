@@ -994,21 +994,26 @@ impl crate::app::App {
         };
         if should_echo {
             self.write_translated_local_echo(out, &plain_echo);
-        } else {
-            // The server owns this row. It cannot show the original — the
-            // wire never carried it — so tell the incoming path how to render
-            // the reflection when it arrives, BEFORE releasing the slot, so a
-            // server that answers faster than we finish here finds the record.
+        } else if echo_message_enabled && !is_e2e_encrypted {
+            // The server owns this row: it will come back as a reflection.
+            // Record what to do with it BEFORE anything else, so a server
+            // that answers faster than we finish here still finds it.
+            //
+            // The reservation is deliberately NOT released. The reflection
+            // takes the id held for it and fills that place, so the user's
+            // own message stays where they typed it instead of landing after
+            // the replies that arrived while it was translating. If no
+            // reflection ever comes, the queue's expiry clears the barrier
+            // like any other stall.
             //
             // Decorating the reflection rather than writing our own row is
             // what keeps the server's `@time` and `@msgid` on the message a
             // CHATHISTORY replay has to dedup against. E2E is excluded
             // because its reflection is ciphertext and already swallowed.
-            if echo_message_enabled && !is_e2e_encrypted {
-                self.decorate_own_reflection(out, &wire_lines);
-            }
-            // The server will echo it back for us, so no local row is
-            // written and the reservation has no filler.
+            self.expect_own_reflection(out, &wire_lines);
+        } else {
+            // Nothing will come back — no echo-message, or a script that
+            // wanted no echo — so the place held for it must be given up.
             self.state.release_echo_slot(&out.buffer_id, out.echo_id);
         }
         // Both branches just lifted the barrier this send was holding —
@@ -1025,42 +1030,54 @@ impl crate::app::App {
     /// split is several reflections and one original; repeating it on each
     /// would say the same thing N times, and putting it on the first would
     /// place it before text it is the original of.
-    fn decorate_own_reflection(
-        &mut self,
+    fn expect_own_reflection(&mut self, out: &OutgoingTranslateDeliver, wire_lines: &[String]) {
+        for (i, wire) in wire_lines.iter().enumerate() {
+            // Only the LAST line carries the original. A translation long
+            // enough to split is several reflections and one original;
+            // repeating it on each would say the same thing N times, and
+            // putting it on the first would place it before the text it is
+            // the original of.
+            let display = if i + 1 == wire_lines.len() {
+                Self::reflection_display(out, wire)
+            } else {
+                None
+            };
+            self.state.decorate_own_echo(
+                &out.buffer_id,
+                crate::state::AppState::own_echo_decoration(wire.clone(), out.echo_id, display),
+            );
+        }
+    }
+
+    /// What a reflected wire line should show instead of itself, when the
+    /// buffer is configured to display the original.
+    ///
+    /// `None` when the reflection already reads correctly —
+    /// `show_original_out` is off, or the translation came back identical to
+    /// what was typed.
+    fn reflection_display(
         out: &OutgoingTranslateDeliver,
-        wire_lines: &[String],
-    ) {
-        let Some(last) = wire_lines.last() else {
-            return;
-        };
+        wire: &str,
+    ) -> Option<(String, crate::state::buffer::WireOrigin)> {
         // The BODY, not the frame: an action reflects as `\x01ACTION …\x01`
         // and the row it becomes holds only the inner text, so both the
         // composed display and the recorded wire text are computed on that.
-        let body = crate::app::e2e_gate::translatable_outgoing_body(last).unwrap_or(last);
+        let body = crate::app::e2e_gate::translatable_outgoing_body(wire).unwrap_or(wire);
         let (display_body, suffix_at) =
             crate::translate::compose_display(body, &out.original_text, out.show_original);
-        let Some(suffix_at) = suffix_at else {
-            // Nothing to add — `show_original_out` is off, or the translation
-            // came back identical to what was typed. The reflection is
-            // already exactly right.
-            return;
-        };
+        let suffix_at = suffix_at?;
         let display = if out.is_action {
             format!("\x01ACTION {display_body}\x01")
         } else {
             display_body
         };
-        self.state.decorate_own_echo(
-            &out.buffer_id,
-            crate::state::AppState::own_echo_decoration(
-                last.clone(),
-                display,
-                crate::state::buffer::WireOrigin {
-                    text: body.to_string(),
-                    suffix_at: Some(suffix_at),
-                },
-            ),
-        );
+        Some((
+            display,
+            crate::state::buffer::WireOrigin {
+                text: body.to_string(),
+                suffix_at: Some(suffix_at),
+            },
+        ))
     }
 
     /// Report a deferred send that will not happen, and give the user their
@@ -2424,6 +2441,99 @@ mod app_tests {
     }
 
     #[test]
+    fn a_reflected_echo_keeps_its_place_among_the_lines_it_was_sent_before() {
+        // On an echo-message server the server owns the row, so it arrives
+        // seconds later. Releasing the reservation when the send goes out
+        // lets everything queued behind it drain first, and the user's own
+        // message then appears BELOW the replies to it.
+        let mut app = app_with_echo_message();
+        let mut queue = TranslateQueue::new();
+        queue.reserve(1); // our message, submitted first
+        app.state.translate_queues.insert(BUF.to_string(), queue);
+
+        send_translated(&mut app, 1, "moje zdanie", "mein satz");
+
+        // A reply that arrived — and finished translating — during the wait.
+        // A LATER id than the echo's, which is what makes it queue behind.
+        let reply_id = 5;
+        {
+            let queue = app
+                .state
+                .translate_queues
+                .get_mut(BUF)
+                .expect("the reservation keeps the queue alive");
+            queue.push_pending(
+                reply_id,
+                "antwort".to_string(),
+                payload(reply_id, "antwort"),
+            );
+            queue.resolve(reply_id, Ok("odpowiedz".to_string()));
+        }
+        app.apply_translate_deliver(TranslateDeliver::Incoming {
+            buffer_id: BUF.to_string(),
+            outcome: TranslateOutcome::Translated {
+                id: reply_id,
+                text: "odpowiedz".to_string(),
+            },
+            submitted_at: std::time::Instant::now(),
+        });
+        assert!(
+            shown(&app).is_empty(),
+            "the reply waits behind our reservation: {:?}",
+            shown(&app)
+        );
+
+        reflect(&mut app, "mein satz", "server-M1");
+
+        assert_eq!(
+            shown(&app),
+            vec![
+                "mein satz [moje zdanie]".to_string(),
+                "odpowiedz".to_string(),
+            ],
+            "our own message first — it was sent first"
+        );
+    }
+
+    #[test]
+    fn a_translation_longer_than_the_source_is_split_before_it_is_sent() {
+        // The policy refuses a SOURCE line over the budget, but a
+        // translation can be longer than what it translates. Every wire
+        // payload still has to fit — `send_privmsg` breaks on CRLF only,
+        // never by length.
+        let mut app = app_with_dying_handle(usize::MAX);
+        app.conn_generations.insert("test".to_string(), 1);
+        let sender = app.irc_handles["test"].sender().clone();
+        let long = "wieloslowne zdanie ".repeat(40);
+        assert!(
+            long.len() > crate::irc::MESSAGE_MAX_BYTES,
+            "precondition: this translation does not fit one line"
+        );
+        let mut out = outgoing(
+            "krotkie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: long.trim().to_string(),
+            },
+            false,
+        );
+        out.conn_generation = Some(1);
+
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+
+        let wire: Vec<String> = sender.captured().iter().map(ToString::to_string).collect();
+        assert!(wire.len() > 1, "it must go out in pieces: {}", wire.len());
+        for line in &wire {
+            assert!(
+                line.len() <= crate::irc::MESSAGE_MAX_BYTES + "PRIVMSG #dupa :\r\n".len(),
+                "a payload over the budget would be truncated by the server: \
+                 {} bytes",
+                line.len()
+            );
+        }
+    }
+
+    #[test]
     fn a_backend_cannot_inject_an_irc_command_through_a_line_break() {
         // The backend is untrusted and its output goes on the socket.
         // `send_privmsg` only breaks on \r\n, so a bare \n rides into the
@@ -2718,6 +2828,57 @@ mod app_tests {
                 .redirected_buffer_id("test/frank", std::time::Instant::now()),
             None,
             "work dispatched since belongs to whoever holds the nick now"
+        );
+    }
+
+    #[test]
+    fn every_translate_mirror_is_derived_from_the_config_in_one_place() {
+        // `App::new` used to hand-copy these, and the copy fell behind:
+        // `translate_max_queue` sat at its hardcoded default until the user
+        // happened to run `/set`, `/reload` or `/translate`. With the ceiling
+        // enforced on every insertion that is simply the wrong bound from
+        // startup. Deriving them all through one function is what stops the
+        // next mirror doing the same.
+        let mut app = test_app();
+        app.state.translate_max_queue = 999; // a stale value from anywhere
+        app.config.translate.max_queue = 7;
+        app.config.translate.show_original_in = false;
+        app.config.translate.my_lang = "cs".to_string();
+
+        app.sync_translate_from_config();
+
+        assert_eq!(app.state.translate_max_queue, 7);
+        assert!(!app.state.translate_show_original_in);
+        assert_eq!(app.state.translate_my_lang, "cs");
+    }
+
+    #[test]
+    fn a_second_rename_does_not_widen_the_first_redirect() {
+        // frank -> frankie -> frankie2. Somebody claims `frank` in between,
+        // and the user sends them a translated private message. That message
+        // was dispatched AFTER the first rename, so no redirect covers it —
+        // unless repointing the old redirect restamped it, which would make
+        // it look like it was created by the SECOND rename and hand the
+        // stranger's message to the original peer.
+        let mut app = app_with_buffer();
+        app.state.rekey_buffer_state("test/frank", "test/frankie");
+        let submitted_between = std::time::Instant::now();
+        app.state.rekey_buffer_state("test/frankie", "test/frankie2");
+
+        assert_eq!(
+            app.state
+                .redirected_buffer_id("test/frank", submitted_between),
+            None,
+            "a message to whoever holds `frank` NOW must not follow the peer \
+             who left before it was sent"
+        );
+        // The redirect still works for what it was made for.
+        assert_eq!(
+            app.state
+                .redirected_buffer_id("test/frank", dispatched_long_ago()),
+            Some("test/frankie2"),
+            "and work from before the first rename still follows the peer, \
+             all the way to where they are now"
         );
     }
 

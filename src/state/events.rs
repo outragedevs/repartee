@@ -448,6 +448,7 @@ impl AppState {
             .entry(buffer_id.to_string())
             .or_default()
             .reserve(id);
+        self.enforce_translate_ceiling(buffer_id);
     }
 
     /// How long a filed decoration stays matchable. Generous — the round
@@ -478,16 +479,16 @@ impl AppState {
         entries.push_back(decoration);
     }
 
-    /// Build a decoration record, stamped now.
+    /// Build a reflection record, stamped now.
     pub fn own_echo_decoration(
         wire_text: String,
-        display: String,
-        origin: crate::state::buffer::WireOrigin,
+        echo_id: u64,
+        display: Option<(String, crate::state::buffer::WireOrigin)>,
     ) -> OwnEchoDecoration {
         OwnEchoDecoration {
             wire_text,
+            echo_id,
             display,
-            origin,
             filed_at: std::time::Instant::now(),
         }
     }
@@ -583,10 +584,18 @@ impl AppState {
         // repointed rather than chained, so a peer who renames twice while
         // one line is in flight still resolves in a single hop.
         let now = std::time::Instant::now();
-        for (target, at) in self.buffer_redirects.values_mut() {
+        for (target, _at) in self.buffer_redirects.values_mut() {
             if target == old_id {
+                // Repoint WITHOUT restamping. The timestamp answers "which
+                // work does this redirect apply to", and that answer was
+                // fixed by the rename that created it — a second rename
+                // changes only where the conversation went.
+                //
+                // Restamping widens it to cover work dispatched between the
+                // two renames, which may belong to somebody who claimed the
+                // abandoned nick in the meantime. Their private message
+                // would then be redirected to the original peer.
                 *target = new_id.to_string();
-                *at = now;
             }
         }
         self.buffer_redirects
@@ -646,6 +655,13 @@ impl AppState {
                     queue.insert_resolved_in_order(first_id, message, ActivityLevel::None);
                 }
             }
+            // A split echo adds rows beyond the one reserved place.
+            self.enforce_translate_ceiling(buffer_id);
+            // Filling a reservation lifts a barrier, so this row and
+            // everything resolved behind it are deliverable now. The
+            // outgoing arm drains for itself, but a reflection arriving on
+            // the IRC path has nothing else that would.
+            self.drain_translate_ready(buffer_id);
             return;
         }
         for message in chunks {
@@ -690,6 +706,10 @@ impl AppState {
                 let id = message.id;
                 let queue = self.translate_queues.get_mut(buffer_id)?;
                 queue.push_resolved(id, message, level);
+                // JOINs, notices and events land in the same queue and take
+                // up the same room. A busy channel is exactly where the
+                // ceiling is supposed to bite.
+                self.enforce_translate_ceiling(buffer_id);
                 return None;
             }
             return Some(message);
@@ -884,6 +904,40 @@ impl AppState {
             );
         self.enforce_translate_ceiling(buffer_id);
         None
+    }
+
+    /// Release everything this buffer's queue has ready, and drop the queue
+    /// if that emptied it.
+    ///
+    /// Lives here rather than only on `App` because filling a reservation
+    /// happens from the IRC path — an `echo-message` reflection taking the
+    /// place held for it — and that path has no way back up to the App to
+    /// ask for a drain.
+    pub fn drain_translate_ready(&mut self, buffer_id: &str) {
+        let ready = {
+            let Some(queue) = self.translate_queues.get_mut(buffer_id) else {
+                return;
+            };
+            queue.drain_ready()
+        };
+        for entry in ready {
+            if let Some(reason) = entry.reason.as_ref().filter(|r| r.is_gap()) {
+                tracing::debug!(
+                    buffer_id,
+                    id = entry.id,
+                    reason = %reason.label(),
+                    "translate: line delivered untranslated"
+                );
+            }
+            self.add_message_with_activity_unshrunk(buffer_id, entry.message, entry.activity);
+        }
+        if self
+            .translate_queues
+            .get(buffer_id)
+            .is_some_and(crate::translate::queue::TranslateQueue::is_empty)
+        {
+            self.translate_queues.remove(buffer_id);
+        }
     }
 
     /// Hold one buffer's queue to `max_queue`, releasing whatever that forces
@@ -3156,6 +3210,33 @@ mod translate_gate_tests {
             dispatched += 1;
         }
         assert_eq!(dispatched, 20);
+    }
+
+    #[test]
+    fn the_ceiling_counts_rows_that_are_not_translations() {
+        // JOINs, notices and events go into the same queue to keep the
+        // timeline honest, so they take up the same room. A busy channel
+        // behind a stalled provider is exactly the case the bound is for.
+        let (mut state, _rx) = state_with_translation_capacity(64);
+        state.translate_max_queue = 4;
+
+        // One line in flight, so everything after it has to queue.
+        let msg = make_test_message(&mut state, "guten tag");
+        state.add_message_with_activity(BUF, msg, ActivityLevel::Activity);
+
+        for i in 0..30 {
+            let id = state.next_message_id();
+            let mut ev = make_test_message(&mut state, &format!("* someone joined {i}"));
+            ev.id = id;
+            ev.message_type = MessageType::Event;
+            state.add_message_with_activity(BUF, ev, ActivityLevel::None);
+        }
+
+        assert!(
+            state.translate_queues[BUF].len() <= 4,
+            "non-translatable rows count against the ceiling too: {}",
+            state.translate_queues[BUF].len()
+        );
     }
 
     #[test]

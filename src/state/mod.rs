@@ -73,13 +73,21 @@ pub struct OwnEchoDecoration {
     /// carries. For an action this is the framed `\x01ACTION …\x01`, because
     /// matching happens before the frame is stripped.
     pub wire_text: String,
+    /// The message id reserved for this row when the user pressed Enter.
+    ///
+    /// The reflection takes it instead of a fresh one, so it fills the place
+    /// held for it in the reorder queue. Without that the barrier is
+    /// released empty, everything queued behind it drains first, and the
+    /// user's own message lands after the replies to it — the exact
+    /// reordering the reservation exists to prevent.
+    pub echo_id: u64,
     /// What to display instead — framed the same way, so a decorated action
-    /// still parses as one.
-    pub display: String,
-    /// Recorded on the row. `text` is the wire's BODY (frame stripped), since
-    /// that is what a replay of this message will carry, and `suffix_at` is
-    /// an offset into the displayed body for the same reason.
-    pub origin: buffer::WireOrigin,
+    /// still parses as one — together with what to record as the row's wire
+    /// origin.
+    ///
+    /// `None` when the reflection already reads correctly and only its
+    /// POSITION needed arranging.
+    pub display: Option<(String, buffer::WireOrigin)>,
     filed_at: std::time::Instant,
 }
 

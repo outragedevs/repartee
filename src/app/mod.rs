@@ -752,12 +752,6 @@ impl App {
             deliver_rx: translate_deliver_rx,
         } = translate::TranslateRuntime::build(&config.translate);
         let translate_max_in_flight = config.translate.max_in_flight.max(1) as usize;
-        state.translate_active = config.translate.enabled && translate_backend.is_some();
-        state.translate_buffers.clone_from(&config.translate.buffers);
-        state
-            .translate_my_lang
-            .clone_from(&config.translate.my_lang);
-        state.translate_show_original_in = config.translate.show_original_in;
         state.translate_incoming_tx = Some(translate_incoming_tx);
 
         let (mut dcc, dcc_rx) = crate::dcc::DccManager::new();
@@ -910,6 +904,14 @@ impl App {
             typing: crate::app::typing::TypingSender::default(),
         };
         app.recompute_wrap_indent();
+        // Derive every `[translate]` mirror from ONE place, rather than
+        // hand-copying the fields here as well. Hand-copying is how
+        // `translate_max_queue` came to sit at its hardcoded default until
+        // the user happened to run `/set`, `/reload` or `/translate` — with
+        // the ceiling enforced on every insertion, that is a bound that was
+        // simply the wrong number from startup. Any mirror added later is
+        // now covered by construction.
+        app.sync_translate_from_config();
 
         if app.config.spellcheck.enabled {
             app.init_spellchecker();
