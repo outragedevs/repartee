@@ -39,7 +39,7 @@ use crate::translate::{TranslateOutcome, TranslateRequest, UntranslatedReason};
 /// A struct rather than seven positional parameters: the four `&str`s next
 /// to each other were an easy place to transpose a buffer id and a buffer
 /// name, and the compiler would not have noticed.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct OutgoingRequest<'a> {
     pub conn_id: &'a str,
     pub buffer_id: &'a str,
@@ -49,6 +49,60 @@ pub struct OutgoingRequest<'a> {
     pub text: &'a str,
     /// `true` for `/me`; `text` is then the ACTION's inner prose.
     pub is_action: bool,
+    /// The submitting call site's echo intent, carried rather than guessed.
+    pub echo: OutgoingEchoPlan,
+}
+
+/// The wire payload(s) for one translated outgoing body.
+///
+/// A plain message is one payload. An ACTION is wrapped in CTCP framing —
+/// and wrapping produces ONE string, which a translation longer than its
+/// source can push past the byte budget. The send path would then split the
+/// whole framed string, so peers would receive a first chunk with an opening
+/// delimiter, middle chunks with none, and a last chunk with only the
+/// closing one: malformed actions rather than one long one.
+///
+/// Splitting the BODY and wrapping each chunk keeps every wire line a valid
+/// CTCP.
+fn wrap_outgoing_body(body: &str, is_action: bool) -> Vec<String> {
+    if !is_action {
+        return vec![body.to_string()];
+    }
+    let budget = crate::irc::MESSAGE_MAX_BYTES.saturating_sub(ACTION_WRAPPER_BYTES);
+    if body.len() <= budget {
+        return vec![format!("\x01ACTION {body}\x01")];
+    }
+    crate::irc::split_irc_message(body, budget)
+        .into_iter()
+        .map(|chunk| format!("\x01ACTION {chunk}\x01"))
+        .collect()
+}
+
+/// Bytes `\x01ACTION ` + `\x01` adds around an action's text.
+const ACTION_WRAPPER_BYTES: usize = "\x01ACTION \x01".len();
+
+/// How a translated outgoing message should echo locally.
+///
+/// Carried from the submitting call site rather than re-derived at delivery.
+/// The two paths have genuinely different rules, and guessing from server
+/// capabilities alone got both wrong: script sends (which deliberately never
+/// echo plaintext) gained an echo, and by-target sends lost the caller's
+/// `even_without_encryption` intent.
+#[derive(Debug, Clone)]
+pub enum OutgoingEchoPlan {
+    /// Text typed into the buffer. Echo unless the server echoes it back for
+    /// us, and always when the wire was ciphertext (the server echo of
+    /// ciphertext is swallowed).
+    BufferInput,
+    /// A by-target send that supplied a `GatedEcho`. Mirrors
+    /// `send_gated_message`'s own rule exactly.
+    Gated {
+        buffer_id: String,
+        message_type: crate::state::buffer::MessageType,
+        even_without_encryption: bool,
+    },
+    /// The caller asked for no local echo at all.
+    None,
 }
 
 /// Outcome of the outgoing translation gate for one submitted line.
@@ -93,6 +147,8 @@ pub struct PendingOutgoingTranslate {
     /// translating the `\\x01ACTION …\\x01` framing would corrupt the CTCP —
     /// and the deliver path re-wraps it.
     pub is_action: bool,
+    /// The submitting call site's echo intent, carried rather than guessed.
+    pub echo: OutgoingEchoPlan,
 }
 
 /// Posted by either worker, consumed by the main event loop.
@@ -127,6 +183,8 @@ pub struct OutgoingTranslateDeliver {
     /// translating the `\\x01ACTION …\\x01` framing would corrupt the CTCP —
     /// and the deliver path re-wraps it.
     pub is_action: bool,
+    /// The submitting call site's echo intent, carried rather than guessed.
+    pub echo: OutgoingEchoPlan,
 }
 
 /// Channels and shared state the translation workers need. Built once in
@@ -330,6 +388,7 @@ fn spawn_connection_lane(
                         peer_handle: pending.peer_handle,
                         show_original: pending.show_original,
                         is_action: pending.is_action,
+                        echo: pending.echo,
                     },
                 )))
                 .await;
@@ -362,6 +421,7 @@ async fn refuse_outgoing(
                 peer_handle: pending.peer_handle,
                 show_original: pending.show_original,
                 is_action: pending.is_action,
+                echo: pending.echo,
             },
         )))
         .await;
@@ -484,14 +544,16 @@ impl crate::app::App {
         // Re-wrap here rather than translating the framing: the request
         // carried the ACTION's inner text, because `\x01ACTION …\x01` handed
         // to a translator comes back as anything but a valid CTCP.
-        let wrap = |body: &str| {
-            if out.is_action {
-                format!("\x01ACTION {body}\x01")
-            } else {
-                body.to_string()
-            }
-        };
-        let wire_text = match &out.outcome {
+        //
+        // Wrapping produces ONE string, and a translation can be longer than
+        // its source — enough to push the framed form past the byte budget.
+        // The send path would then split the whole framed string, so peers
+        // would receive a first chunk with an opening delimiter, middle
+        // chunks with none, and a last chunk with only the closing one:
+        // malformed actions rather than one long one. Splitting the BODY and
+        // wrapping each chunk keeps every wire line a valid CTCP.
+        let wrap = |body: &str| wrap_outgoing_body(body, out.is_action);
+        let wire_texts = match &out.outcome {
             TranslateOutcome::Translated { text, .. } => wrap(text),
             // The broker decided this line needed no translation, so the
             // original IS the correct thing to send.
@@ -518,19 +580,30 @@ impl crate::app::App {
             return;
         }
 
-        let (wire_lines, plain_echo) = match self.state.e2e_encrypt_or_passthrough(
-            &out.buffer_id,
-            &out.buffer_name,
-            &out.buffer_type,
-            &wire_text,
-            out.peer_handle.as_deref(),
-        ) {
-            Ok(v) => v,
-            Err(reason) => {
-                self.deliver_translate_error(&out.buffer_id, &reason.user_message());
-                return;
+        // Each already-fits wire text is planned separately, so the split
+        // above is preserved instead of being re-split across the framing.
+        let mut wire_lines = Vec::new();
+        let mut plain_echo = String::new();
+        for (i, wire_text) in wire_texts.iter().enumerate() {
+            match self.state.e2e_encrypt_or_passthrough(
+                &out.buffer_id,
+                &out.buffer_name,
+                &out.buffer_type,
+                wire_text,
+                out.peer_handle.as_deref(),
+            ) {
+                Ok((lines, echo)) => {
+                    wire_lines.extend(lines);
+                    if i == 0 {
+                        plain_echo = echo;
+                    }
+                }
+                Err(reason) => {
+                    self.deliver_translate_error(&out.buffer_id, &reason.user_message());
+                    return;
+                }
             }
-        };
+        }
 
         let echo_message_enabled = self
             .state
@@ -577,7 +650,20 @@ impl crate::app::App {
         if !send_ok {
             return;
         }
-        if !echo_message_enabled || is_e2e_encrypted {
+        // Honour the submitting call site's intent. `BufferInput` keeps the
+        // rule typed text has always had; `Gated` mirrors
+        // `send_gated_message`'s own condition exactly; `None` means the
+        // caller (a script) never wanted a plaintext echo and inventing one
+        // would double-render for scripts that print their own output.
+        let should_echo = match &out.echo {
+            OutgoingEchoPlan::None => false,
+            OutgoingEchoPlan::BufferInput => !echo_message_enabled || is_e2e_encrypted,
+            OutgoingEchoPlan::Gated {
+                even_without_encryption,
+                ..
+            } => is_e2e_encrypted || (*even_without_encryption && !echo_message_enabled),
+        };
+        if should_echo {
             self.write_translated_local_echo(out, &plain_echo);
         }
     }
@@ -602,7 +688,8 @@ impl crate::app::App {
             nick,
             text,
             is_action,
-        } = *req;
+            echo,
+        } = req.clone();
         // Belt and braces. `handle_plain_message` already refuses to reach
         // this function when E2E cannot be ruled out, but this is the point
         // where cleartext becomes a payload bound for a third party, and
@@ -687,6 +774,7 @@ impl crate::app::App {
             peer_handle: captured_peer_handle,
             show_original: self.config.translate.show_original_out,
             is_action,
+            echo,
         })
     }
 
@@ -755,6 +843,7 @@ impl crate::app::App {
         conn_id: &str,
         target: &str,
         wire_text: &str,
+        echo: OutgoingEchoPlan,
     ) -> Option<bool> {
         let body = crate::app::e2e_gate::translatable_outgoing_body(wire_text)?;
         let buffer_id = crate::state::buffer::make_buffer_id(conn_id, target);
@@ -769,7 +858,7 @@ impl crate::app::App {
                 // stripped, i.e. this is an ACTION.
                 let is_action = body.len() != wire_text.len();
                 Some(self.dispatch_by_target_translation(
-                    conn_id, &buffer_id, target, body, is_action,
+                    conn_id, &buffer_id, target, body, is_action, echo,
                 ))
             }
         }
@@ -788,6 +877,7 @@ impl crate::app::App {
         target: &str,
         body: &str,
         is_action: bool,
+        echo: OutgoingEchoPlan,
     ) -> bool {
         let buffer_type = if crate::e2e::is_channel_target(target) {
             BufferType::Channel
@@ -808,6 +898,7 @@ impl crate::app::App {
             nick: &nick,
             text: body,
             is_action,
+            echo,
         }) else {
             return self.refuse_untranslatable_send(
                 body,
@@ -873,8 +964,23 @@ impl crate::app::App {
     }
 
     /// Emit the local echo for a successfully sent translated message.
+    #[cfg(test)]
+    pub(crate) fn write_translated_local_echo_for_test(
+        &mut self,
+        out: &OutgoingTranslateDeliver,
+        plain_echo: &str,
+    ) {
+        self.write_translated_local_echo(out, plain_echo);
+    }
+
     fn write_translated_local_echo(&mut self, out: &OutgoingTranslateDeliver, plain_echo: &str) {
-        if !self.state.buffers.contains_key(&out.buffer_id) {
+        // A gated echo names its own buffer — a script may target a
+        // conversation that is not the one the send was addressed through.
+        let echo_buffer = match &out.echo {
+            OutgoingEchoPlan::Gated { buffer_id, .. } => buffer_id.clone(),
+            _ => out.buffer_id.clone(),
+        };
+        if !self.state.buffers.contains_key(&echo_buffer) {
             crate::commands::helpers::add_local_event(
                 self,
                 &format!(
@@ -920,14 +1026,14 @@ impl crate::app::App {
             // make the dispatch gate mistake it for someone else's line and
             // translate our own message a second time.
             self.state.add_own_message(
-                &out.buffer_id,
+                &echo_buffer,
                 crate::state::buffer::Message {
                     id,
                     timestamp: chrono::Utc::now(),
-                    message_type: if out.is_action {
-                        crate::state::buffer::MessageType::Action
-                    } else {
-                        crate::state::buffer::MessageType::Message
+                    message_type: match &out.echo {
+                        OutgoingEchoPlan::Gated { message_type, .. } => message_type.clone(),
+                        _ if out.is_action => crate::state::buffer::MessageType::Action,
+                        _ => crate::state::buffer::MessageType::Message,
                     },
                     nick: Some(out.nick.clone()),
                     nick_mode: nick_mode_str.clone(),
@@ -1254,6 +1360,7 @@ mod app_tests {
             peer_handle: None,
             show_original,
             is_action: false,
+            echo: OutgoingEchoPlan::BufferInput,
         }
     }
 
@@ -1311,6 +1418,121 @@ mod app_tests {
         assert_eq!(app.input.value, "something else");
     }
 
+    fn outgoing_with_echo(
+        text: &str,
+        outcome: TranslateOutcome,
+        echo: OutgoingEchoPlan,
+    ) -> OutgoingTranslateDeliver {
+        let mut d = outgoing(text, outcome, false);
+        d.echo = echo;
+        d
+    }
+
+    #[test]
+    fn a_short_action_is_one_well_formed_ctcp() {
+        let wires = super::wrap_outgoing_body("waves hello", true);
+        assert_eq!(wires, vec!["\x01ACTION waves hello\x01".to_string()]);
+    }
+
+    #[test]
+    fn a_plain_message_is_never_wrapped() {
+        let wires = super::wrap_outgoing_body("hello there", false);
+        assert_eq!(wires, vec!["hello there".to_string()]);
+    }
+
+    #[test]
+    fn an_overlong_action_splits_into_several_valid_ctcps() {
+        // A translation can be longer than its source. Splitting the framed
+        // string instead of the body would hand peers a first chunk with an
+        // opening delimiter and a last with only the closing one.
+        let body = "abcdefghij ".repeat(80);
+        let wires = super::wrap_outgoing_body(body.trim(), true);
+        assert!(wires.len() > 1, "this body must actually split");
+        for wire in &wires {
+            assert!(wire.starts_with("\x01ACTION "), "each chunk opens: {wire:?}");
+            assert!(wire.ends_with('\x01'), "each chunk closes: {wire:?}");
+            assert!(
+                wire.len() <= crate::irc::MESSAGE_MAX_BYTES,
+                "each chunk fits the budget: {} bytes",
+                wire.len()
+            );
+        }
+        // No words are lost or reordered. Compared word-wise, not
+        // byte-wise: `split_irc_message` consumes the whitespace it breaks
+        // on, which is its existing intended behaviour.
+        let words: Vec<&str> = wires
+            .iter()
+            .flat_map(|w| {
+                w.strip_prefix("\x01ACTION ")
+                    .and_then(|t| t.strip_suffix('\x01'))
+                    .expect("well formed")
+                    .split_whitespace()
+            })
+            .collect();
+        assert_eq!(
+            words,
+            body.split_whitespace().collect::<Vec<_>>(),
+            "every word survives the split, in order"
+        );
+    }
+
+    #[test]
+    fn a_script_send_that_wants_no_echo_does_not_get_one() {
+        // Script plaintext sends historically never echoed; inventing one
+        // double-renders for scripts that print their own output.
+        let mut app = app_with_buffer();
+        let before = app.state.buffers[BUF].messages.len();
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(outgoing_with_echo(
+            "moje zdanie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "mein satz".to_string(),
+            },
+            OutgoingEchoPlan::None,
+        ))));
+        // The send itself fails (no IRC handle) and reports that, but no
+        // echo row may be added on top.
+        let texts: Vec<String> = app.state.buffers[BUF]
+            .messages
+            .iter()
+            .skip(before)
+            .map(|m| m.text.clone())
+            .collect();
+        assert!(
+            texts.iter().all(|t| !t.contains("mein satz")),
+            "no echo was requested: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_gated_echo_uses_the_callers_buffer_and_message_type() {
+        let mut app = app_with_buffer();
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Query, "bob"));
+        let plan = OutgoingEchoPlan::Gated {
+            buffer_id: "test/bob".to_string(),
+            message_type: MessageType::Action,
+            even_without_encryption: true,
+        };
+        app.write_translated_local_echo_for_test(
+            &outgoing_with_echo(
+                "macha",
+                TranslateOutcome::Translated {
+                    id: 1,
+                    text: "winkt".to_string(),
+                },
+                plan,
+            ),
+            "winkt",
+        );
+        let msg = app.state.buffers["test/bob"]
+            .messages
+            .back()
+            .expect("echoed into the caller's buffer, not the send target");
+        assert_eq!(msg.text, "winkt");
+        assert_eq!(msg.message_type, MessageType::Action);
+    }
+
     #[test]
     fn a_filtered_outgoing_line_is_sent_as_the_original() {
         // Filtered means the broker correctly decided no translation was
@@ -1359,6 +1581,7 @@ mod app_tests {
             nick: "me",
             text: "moje zdanie",
             is_action: false,
+            echo: OutgoingEchoPlan::BufferInput,
         })
     }
 
@@ -1414,6 +1637,7 @@ mod app_tests {
                 nick: "me",
                 text: "moje zdanie",
                 is_action: false,
+                echo: OutgoingEchoPlan::BufferInput,
             })
             .expect("spanish buffer");
         assert_eq!(de.req.target_lang, "de");
@@ -1643,7 +1867,12 @@ mod app_tests {
         let mut app = app_with_outgoing(Some("de"));
         let (tx, mut rx) = mpsc::channel(4);
         app.translate_outgoing_tx = tx;
-        let handled = app.gate_by_target_translation("test", "#dupa", "moje zdanie");
+        let handled = app.gate_by_target_translation(
+            "test",
+            "#dupa",
+            "moje zdanie",
+            OutgoingEchoPlan::BufferInput,
+        );
         assert_eq!(handled, Some(false), "taken over, nothing on the wire yet");
         assert_eq!(rx.try_recv().expect("dispatched").req.text, "moje zdanie");
     }
@@ -1654,7 +1883,12 @@ mod app_tests {
         let (tx, mut rx) = mpsc::channel(4);
         app.translate_outgoing_tx = tx;
         let handled =
-            app.gate_by_target_translation("test", "#dupa", "\x01ACTION waves hello\x01");
+            app.gate_by_target_translation(
+                "test",
+                "#dupa",
+                "\x01ACTION waves hello\x01",
+                OutgoingEchoPlan::BufferInput,
+            );
         assert_eq!(handled, Some(false));
         let pending = rx.try_recv().expect("dispatched");
         assert_eq!(pending.req.text, "waves hello");
@@ -1665,7 +1899,12 @@ mod app_tests {
     fn the_by_target_gate_steps_aside_for_an_untranslated_buffer() {
         let mut app = app_with_buffer();
         assert_eq!(
-            app.gate_by_target_translation("test", "#dupa", "hello there"),
+            app.gate_by_target_translation(
+                "test",
+                "#dupa",
+                "hello there",
+                OutgoingEchoPlan::BufferInput
+            ),
             None,
             "the ordinary send must proceed"
         );
@@ -1676,7 +1915,12 @@ mod app_tests {
         // Protocol, not prose — a translated VERSION reply is nonsense.
         let mut app = app_with_outgoing(Some("de"));
         assert_eq!(
-            app.gate_by_target_translation("test", "#dupa", "\x01VERSION\x01"),
+            app.gate_by_target_translation(
+                "test",
+                "#dupa",
+                "\x01VERSION\x01",
+                OutgoingEchoPlan::BufferInput
+            ),
             None
         );
     }
@@ -1694,6 +1938,7 @@ mod app_tests {
             "#dupa",
             "waves hello",
             true,
+            OutgoingEchoPlan::BufferInput,
         );
         assert!(!sent, "nothing is on the wire yet");
         let pending = rx.try_recv().expect("dispatched");
@@ -1712,7 +1957,14 @@ mod app_tests {
         drop(rx);
 
         let sent =
-            app.dispatch_by_target_translation("test", BUF, "#dupa", "moje zdanie", false);
+            app.dispatch_by_target_translation(
+                "test",
+                BUF,
+                "#dupa",
+                "moje zdanie",
+                false,
+                OutgoingEchoPlan::BufferInput,
+            );
         assert!(!sent);
         assert_eq!(app.input.value, "moje zdanie", "the text comes back");
     }
@@ -1751,6 +2003,7 @@ mod app_tests {
             nick: "me",
             text: "moje zdanie",
             is_action: false,
+            echo: OutgoingEchoPlan::BufferInput,
         });
         assert!(
             pending.is_none(),
@@ -1901,6 +2154,7 @@ mod tests {
             peer_handle: None,
             show_original: false,
             is_action: false,
+            echo: OutgoingEchoPlan::BufferInput,
         }
     }
 
@@ -1960,6 +2214,7 @@ mod tests {
                     peer_handle: None,
                     show_original: false,
                     is_action: false,
+                    echo: OutgoingEchoPlan::BufferInput,
                 })
                 .await
                 .expect("worker alive");

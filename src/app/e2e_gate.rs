@@ -743,7 +743,20 @@ impl super::App {
 
         // Outgoing translation, for every sender that addresses a target by
         // NAME. See `gate_by_target_translation`.
-        if let Some(handled) = self.gate_by_target_translation(conn_id, target, wire_text) {
+        // The caller's echo intent travels with the request. Deriving it at
+        // delivery from server capabilities alone lost `even_without_encryption`
+        // and gave script sends an echo they explicitly do not want.
+        let echo_plan = echo.as_ref().map_or(
+            crate::app::translate::OutgoingEchoPlan::None,
+            |e| crate::app::translate::OutgoingEchoPlan::Gated {
+                buffer_id: e.buffer_id.to_string(),
+                message_type: e.message_type.clone(),
+                even_without_encryption: e.even_without_encryption,
+            },
+        );
+        if let Some(handled) =
+            self.gate_by_target_translation(conn_id, target, wire_text, echo_plan)
+        {
             return handled;
         }
 

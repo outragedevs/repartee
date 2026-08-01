@@ -1464,6 +1464,8 @@ impl App {
                         nick: &nick,
                         text,
                         is_action: false,
+                        // Typed into the buffer: the existing echo rule.
+                        echo: crate::app::translate::OutgoingEchoPlan::BufferInput,
                     },
                 ) else {
                     // The policy said translate, so this is a race (the
