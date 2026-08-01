@@ -1419,7 +1419,17 @@ impl crate::app::App {
             SubmitOrigin::Script => return None,
             SubmitOrigin::Tui => self.state.active_buffer_id.as_deref(),
             SubmitOrigin::Web(session) => {
-                self.web_active_buffers.get(session).map(String::as_str)
+                if self.web_buffer_unconfirmed.contains(session) {
+                    // We do not know where this tab is. Treat that as "not
+                    // here": the re-addressed form below is correct from any
+                    // buffer, and an action declines rather than guessing.
+                    // Trusting a stale record hands back a bare body that
+                    // goes to whatever conversation the browser is actually
+                    // showing.
+                    None
+                } else {
+                    self.web_active_buffers.get(session).map(String::as_str)
+                }
             }
         };
         if looking_at == Some(out.buffer_id.as_str()) {
@@ -1931,11 +1941,19 @@ impl crate::app::App {
                     // `\x01ACTION …\x01` payloads would leave delimiters and
                     // ACTION tokens embedded in the middle of the displayed
                     // line, since only the outermost frame is stripped later.
+                    //
+                    // Concatenated with NOTHING between them. The echo has to
+                    // be what the peers received, and the pieces already carry
+                    // their own separators: `split_irc_message` breaks after a
+                    // word's trailing whitespace, leaving it on the preceding
+                    // chunk, and breaks a word too long for one line at a
+                    // character boundary with no whitespace at all. Inserting a
+                    // space therefore doubled the separator in the first case
+                    // and put one INSIDE a word in the second — so the row the
+                    // author sees, and the line written to their log, differed
+                    // from what went out.
                     let piece = crate::app::e2e_gate::translatable_outgoing_body(&echo)
                         .unwrap_or(&echo);
-                    if !plain_echo.is_empty() {
-                        plain_echo.push(' ');
-                    }
                     plain_echo.push_str(piece);
                 }
                 Err(reason) => {
@@ -4691,6 +4709,137 @@ mod app_tests {
             app.outgoing_translate_policy(BUF, "moje zdanie", true),
             OutgoingTranslatePolicy::NotApplicable
         ));
+    }
+
+    #[test]
+    fn a_split_action_echo_is_exactly_what_went_on_the_wire() {
+        // The echo is the row the author sees and the line written to their
+        // log, so it has to be the message the peers received — nothing
+        // added. `split_irc_message` leaves a word's trailing whitespace on
+        // the chunk before the break, and breaks a word too long for one line
+        // at a character boundary with no whitespace at all. Inserting a
+        // separator between the pieces therefore doubled a space in the first
+        // case and put one INSIDE a word in the second.
+        for body in [
+            // Ordinary word-boundary splits.
+            "wieloslowne zdanie ".repeat(40),
+            // A single word far too long for one line — hard character
+            // splits, no whitespace anywhere to rejoin on.
+            "z".repeat(crate::irc::MESSAGE_MAX_BYTES * 3),
+        ] {
+            let mut app = app_with_dying_handle(usize::MAX);
+            app.conn_generations.insert("test".to_string(), 1);
+            let sender = app.irc_handles["test"].sender().clone();
+            let mut out = outgoing(
+                "krotkie",
+                TranslateOutcome::Translated {
+                    id: 1,
+                    text: body.trim_end().to_string(),
+                },
+                false,
+            );
+            out.is_action = true;
+            out.conn_generation = Some(1);
+            app.state.reserve_echo_slot(BUF, 1);
+
+            app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+
+            // Rebuild what the peers actually saw, from the frames sent.
+            let wire: Vec<String> = sender.captured().iter().map(ToString::to_string).collect();
+            assert!(wire.len() > 1, "precondition: this had to be split");
+            let on_the_wire: String = wire
+                .iter()
+                .filter_map(|frame| frame.split_once(" :").map(|(_, rest)| rest))
+                .map(|payload| {
+                    let payload = payload.trim_end_matches(['\r', '\n']);
+                    crate::app::e2e_gate::translatable_outgoing_body(payload)
+                        .unwrap_or(payload)
+                        .to_string()
+                })
+                .collect();
+
+            // The echo is itself broken into display ROWS by the same
+            // splitter, so the comparison is row-set against wire-set — both
+            // reassembled the way a reader does.
+            let echoed: String = app.state.buffers[BUF]
+                .messages
+                .iter()
+                .filter(|m| m.nick.as_deref() == Some("me"))
+                .map(|m| m.text.as_str())
+                .collect();
+            assert!(!echoed.is_empty(), "the send is echoed locally");
+
+            assert_eq!(
+                echoed, on_the_wire,
+                "what the author sees must be the message the peers got"
+            );
+        }
+    }
+
+    #[test]
+    fn a_web_retry_is_re_addressed_when_the_tab_may_have_moved() {
+        // A tab that follows a TUI-driven `ActiveBufferChanged` changes
+        // buffer without telling us, and the opt-out is a localStorage flag
+        // only the browser can see — so after such a broadcast the recorded
+        // buffer is a guess. Handing back a BARE body on a guess puts it in
+        // whatever composer the browser is really showing, and Enter sends it
+        // there.
+        let session = "sess-1".to_string();
+        let mut app = app_with_buffer();
+        app.web_active_buffers.insert(session.clone(), BUF.to_string());
+        let mut out = outgoing(
+            "moje zdanie",
+            TranslateOutcome::Untranslated {
+                id: 1,
+                reason: UntranslatedReason::Timeout,
+            },
+            false,
+        );
+        out.origin = SubmitOrigin::Web(session.clone());
+
+        // Confirmed: the tab told us where it is, so the dispatch form stands.
+        assert_eq!(
+            app.deferred_retry_text(&out).as_deref(),
+            Some("moje zdanie"),
+            "a session we have heard from keeps the plain form"
+        );
+
+        // The TUI moves; this tab may or may not have followed.
+        app.web_buffer_unconfirmed.insert(session);
+        assert_eq!(
+            app.deferred_retry_text(&out).as_deref(),
+            Some("/msg #dupa moje zdanie"),
+            "unsure where the composer is, so the form has to name its target"
+        );
+    }
+
+    #[test]
+    fn a_web_session_at_the_new_buffer_is_not_marked_unsure() {
+        // Its own `SwitchBuffer` is what raised the broadcast, and a tab
+        // already recorded at the new buffer ends up there whether it follows
+        // or not. Without this exemption every web switch would immediately
+        // mark itself a guess.
+        let mut app = app_with_buffer();
+        app.web_active_buffers
+            .insert("sess-1".to_string(), BUF.to_string());
+        app.web_active_buffers
+            .insert("sess-2".to_string(), "test/#other".to_string());
+        app.state
+            .pending_web_events
+            .push(crate::web::protocol::WebEvent::ActiveBufferChanged {
+                buffer_id: BUF.to_string(),
+            });
+
+        app.drain_pending_web_events();
+
+        assert!(
+            !app.web_buffer_unconfirmed.contains("sess-1"),
+            "the session already at that buffer stays trusted"
+        );
+        assert!(
+            app.web_buffer_unconfirmed.contains("sess-2"),
+            "the one that may have followed does not"
+        );
     }
 
     #[test]

@@ -657,6 +657,14 @@ Details that follow from the shape:
   the TTL that resends the same text consumes the stale record: the new reflection
   takes the old reserved id and suffix, and the new reservation blocks the buffer
   until it times out.
+- **The echo is concatenated, never joined.** A split translation echoes as the pieces
+  run together with nothing between them, because the echo is the row the author sees
+  and the line written to their log, and both have to be the message the peers
+  received. The pieces already carry their own separators: `split_irc_message` breaks
+  after a word's trailing whitespace, leaving it on the chunk before the break, and
+  breaks a word too long for one line at a character boundary with no whitespace at
+  all. Inserting a space doubled the separator in the first case and put one INSIDE a
+  word in the second.
 - **An action is decorated inside its frame** (`\x01ACTION … [original]\x01`), because
   matching happens before the CTCP is unwrapped and the result still has to parse as
   one. The recorded `WireOrigin.text` is the frame's BODY, since that is what the row
@@ -698,6 +706,23 @@ arms: the browser composer sends plain lines as `SendMessage` and every `/`-pref
 line as `RunCommand`, and both end in the same `handle_submit`. Scoping only the
 first would return a refused `/msg` to the *terminal's* input line — lost for its
 author, and dropped into a window nobody is watching.
+
+Where they are looking is answered differently per client, and only one of the answers
+is reliable. The TUI's active buffer is authoritative. A web session's is not: a tab
+changes buffer without telling us whenever it follows a TUI-driven
+`ActiveBufferChanged`, and whether it follows is a `localStorage` flag
+(`web_follow_tui_buffer`) only the browser can see — so the server cannot deduce it.
+After such a broadcast the recorded buffer is a **guess**, and a guess is not enough to
+hand back a bare body: restoring one into a composer that has since moved publishes it
+to the wrong conversation the moment the user presses Enter, which is the leak this
+whole function exists to prevent.
+
+Sessions are therefore marked unconfirmed when the broadcast goes out and trusted again
+when they next speak for themselves. A session already recorded AT the new buffer is
+exempt — it ends up there whether it followed or not — which is also what stops a tab's
+own `SwitchBuffer` from marking itself, since that switch is what raised the event.
+While unconfirmed, a web retry takes the re-addressed form, which is correct from any
+buffer.
 
 ---
 

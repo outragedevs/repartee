@@ -474,6 +474,19 @@ pub struct App {
     pub(crate) web_state_snapshot:
         Option<std::sync::Arc<parking_lot::RwLock<crate::web::server::WebStateSnapshot>>>,
     pub(crate) web_active_buffers: HashMap<String, String>,
+    /// Sessions whose entry in `web_active_buffers` is a GUESS.
+    ///
+    /// A tab changes buffer without telling us whenever it follows the TUI's
+    /// `ActiveBufferChanged`, and whether a given tab follows is a
+    /// localStorage flag (`web_follow_tui_buffer`) only the browser knows —
+    /// so the server cannot deduce it. After such a broadcast the record
+    /// stands as a best guess, which is fine for routing shell I/O but not
+    /// for deciding whether text may be handed back BARE: restoring a bare
+    /// body into a composer that has since moved publishes it to the wrong
+    /// conversation the moment the user presses Enter.
+    ///
+    /// Cleared when the session speaks for itself again.
+    pub(crate) web_buffer_unconfirmed: std::collections::HashSet<String>,
     pub web_restart_pending: bool,
     /// Tracks the current local date for emitting "day changed" markers.
     pub(crate) last_day: chrono::NaiveDate,
@@ -881,6 +894,7 @@ impl App {
             web_rate_limiter: None,
             web_state_snapshot: None,
             web_active_buffers: HashMap::new(),
+            web_buffer_unconfirmed: std::collections::HashSet::new(),
             web_restart_pending: false,
             last_day: chrono::Local::now().date_naive(),
             shrink_client,

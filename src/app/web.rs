@@ -70,6 +70,7 @@ impl App {
         self.web_rate_limiter = None;
         self.web_state_snapshot = None;
         self.web_active_buffers.clear();
+        self.web_buffer_unconfirmed.clear();
         // Detach the preview extractor from AppState too — otherwise
         // message_to_wire keeps populating `previews` for messages that
         // no client can render.
@@ -223,6 +224,22 @@ impl App {
                     structural_change = true;
                 }
                 crate::web::protocol::WebEvent::ActiveBufferChanged { buffer_id } => {
+                    // A tab that follows this changes buffer without telling
+                    // us, and the opt-out lives in the browser, so afterwards
+                    // the recorded buffer is a guess — except for a session
+                    // already recorded AT the new buffer, which ends up there
+                    // whether it followed or not. That exemption is what keeps
+                    // a session's own `SwitchBuffer` from immediately marking
+                    // itself unconfirmed: the switch that raised this event is
+                    // the same one that recorded it. See
+                    // `App::web_buffer_unconfirmed`.
+                    for (session, recorded) in &self.web_active_buffers {
+                        if recorded == buffer_id {
+                            self.web_buffer_unconfirmed.remove(session);
+                        } else {
+                            self.web_buffer_unconfirmed.insert(session.clone());
+                        }
+                    }
                     // Broadcast so the TUI and every web session stay 1:1 in
                     // sync — switching the active buffer anywhere (TUI, any tab,
                     // phone) propagates everywhere. Also structural so a
@@ -440,6 +457,7 @@ impl App {
                 if let Some(buffer_id) = initial_buffer_id {
                     self.web_active_buffers
                         .insert(session_id.to_string(), buffer_id);
+                    self.web_buffer_unconfirmed.remove(session_id);
                 }
             }
             WebCommand::Typing { buffer_id, typing } => {
@@ -486,6 +504,8 @@ impl App {
                 // routing (a web shell is keyed by the session's active buffer).
                 self.web_active_buffers
                     .insert(session_id.to_string(), buffer_id.clone());
+                // The session just told us where it is.
+                self.web_buffer_unconfirmed.remove(session_id);
                 let web_id = format!("web-{session_id}");
                 if self.shell_mgr.has_web_session(&web_id) {
                     self.force_broadcast_web_shell_screen(&web_id);
@@ -565,6 +585,7 @@ impl App {
             }
             WebCommand::WebDisconnect => {
                 self.web_active_buffers.remove(session_id);
+                self.web_buffer_unconfirmed.remove(session_id);
                 self.on_web_session_gone(session_id);
                 self.shell_mgr.close_web_by_session(session_id);
             }

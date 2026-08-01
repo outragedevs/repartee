@@ -2991,6 +2991,7 @@ pub mod submit_typing_tests {
             web_rate_limiter: None,
             web_state_snapshot: None,
             web_active_buffers: HashMap::new(),
+            web_buffer_unconfirmed: std::collections::HashSet::new(),
             web_restart_pending: false,
             last_day: chrono::Local::now().date_naive(),
             shrink_client: None,
