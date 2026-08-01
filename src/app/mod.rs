@@ -20,6 +20,11 @@ pub mod scripting;
 mod session;
 mod shell;
 pub mod shrink;
+// The runtime lands before the App fields and gates that drive it, so it is
+// briefly dead. Removed once the incoming and outgoing paths are wired;
+// `make clippy` must be clean without it by then.
+#[allow(dead_code, reason = "consumed once the dispatch gates land")]
+pub mod translate;
 pub mod typing;
 mod web;
 mod who;
