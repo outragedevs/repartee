@@ -127,6 +127,37 @@ impl TranslateQueue {
         });
     }
 
+    /// Place a ready row at the position its id earns, rather than at the
+    /// back.
+    ///
+    /// Used for a deferred outgoing echo: its id was allocated when the user
+    /// pressed Enter, but it only becomes a row once translation returns —
+    /// by which time lines that arrived DURING the wait are already queued.
+    /// Appending would render the user's own message after replies to it.
+    pub fn insert_resolved_in_order(
+        &mut self,
+        id: u64,
+        message: Message,
+        activity: ActivityLevel,
+    ) {
+        let pos = self
+            .entries
+            .iter()
+            .position(|e| e.id > id)
+            .unwrap_or(self.entries.len());
+        self.entries.insert(
+            pos,
+            Entry {
+                id,
+                slot: Some(Slot::Ready {
+                    message,
+                    activity,
+                    reason: None,
+                }),
+            },
+        );
+    }
+
     /// Fold an outcome into the matching entry.
     ///
     /// Returns `false` when the id is unknown or already resolved — a late
@@ -438,6 +469,33 @@ mod tests {
         let ready = q.drain_ready();
         assert_eq!(ready[0].message.text, "a b [untranslated: timeout]");
         assert_eq!(ready[0].reason, Some(UntranslatedReason::Timeout));
+    }
+
+    #[test]
+    fn a_reserved_id_lands_ahead_of_lines_that_arrived_later() {
+        // The outgoing echo's id was allocated at submission; lines 5 and 6
+        // arrived while it was translating. It belongs before them.
+        let mut q = TranslateQueue::new();
+        q.push_pending(5, "later one".into(), payload(5, "later one"));
+        q.push_pending(6, "later two".into(), payload(6, "later two"));
+        q.insert_resolved_in_order(4, message(4, "my own line"), ActivityLevel::None);
+
+        q.resolve(5, Ok("t5".into()));
+        q.resolve(6, Ok("t6".into()));
+        assert_eq!(
+            ids(&q.drain_ready()),
+            vec![4, 5, 6],
+            "the echo renders before the replies to it"
+        );
+    }
+
+    #[test]
+    fn a_reserved_id_after_everything_lands_at_the_back() {
+        let mut q = TranslateQueue::new();
+        q.push_pending(1, "a".into(), payload(1, "a"));
+        q.insert_resolved_in_order(9, message(9, "mine"), ActivityLevel::None);
+        q.resolve(1, Ok("t".into()));
+        assert_eq!(ids(&q.drain_ready()), vec![1, 9]);
     }
 
     #[test]

@@ -149,6 +149,10 @@ pub struct PendingOutgoingTranslate {
     pub is_action: bool,
     /// The submitting call site's echo intent, carried rather than guessed.
     pub echo: OutgoingEchoPlan,
+    /// The message id reserved when the user pressed Enter. The local echo
+    /// takes it so it renders at the position it was submitted from, not
+    /// after the lines that arrived while it was translating.
+    pub echo_id: u64,
 }
 
 /// Posted by either worker, consumed by the main event loop.
@@ -185,6 +189,10 @@ pub struct OutgoingTranslateDeliver {
     pub is_action: bool,
     /// The submitting call site's echo intent, carried rather than guessed.
     pub echo: OutgoingEchoPlan,
+    /// The message id reserved when the user pressed Enter. The local echo
+    /// takes it so it renders at the position it was submitted from, not
+    /// after the lines that arrived while it was translating.
+    pub echo_id: u64,
 }
 
 /// Channels and shared state the translation workers need. Built once in
@@ -389,6 +397,7 @@ fn spawn_connection_lane(
                         show_original: pending.show_original,
                         is_action: pending.is_action,
                         echo: pending.echo,
+                        echo_id: pending.echo_id,
                     },
                 )))
                 .await;
@@ -422,6 +431,7 @@ async fn refuse_outgoing(
                 show_original: pending.show_original,
                 is_action: pending.is_action,
                 echo: pending.echo,
+                echo_id: pending.echo_id,
             },
         )))
         .await;
@@ -775,6 +785,7 @@ impl crate::app::App {
             show_original: self.config.translate.show_original_out,
             is_action,
             echo,
+            echo_id: id,
         })
     }
 
@@ -1019,8 +1030,15 @@ impl crate::app::App {
         // Only a single-chunk echo can carry the offset: splitting moves the
         // suffix into the last chunk and the byte offset no longer maps.
         let single_chunk = local_chunks.len() == 1;
-        for chunk in local_chunks {
-            let id = self.state.next_message_id();
+        for (i, chunk) in local_chunks.into_iter().enumerate() {
+            // The first chunk takes the id reserved at submission so it
+            // lands in the right place; continuation chunks follow it and
+            // get fresh ids.
+            let id = if i == 0 {
+                out.echo_id
+            } else {
+                self.state.next_message_id()
+            };
             // `add_own_message`, not `add_message`: this echo carries the
             // nick captured at dispatch, so a `/nick` during the wait would
             // make the dispatch gate mistake it for someone else's line and
@@ -1361,6 +1379,7 @@ mod app_tests {
             show_original,
             is_action: false,
             echo: OutgoingEchoPlan::BufferInput,
+            echo_id: 1,
         }
     }
 
@@ -2155,6 +2174,7 @@ mod tests {
             show_original: false,
             is_action: false,
             echo: OutgoingEchoPlan::BufferInput,
+            echo_id: 1,
         }
     }
 
@@ -2215,6 +2235,7 @@ mod tests {
                     show_original: false,
                     is_action: false,
                     echo: OutgoingEchoPlan::BufferInput,
+                    echo_id: 1,
                 })
                 .await
                 .expect("worker alive");

@@ -448,7 +448,11 @@ impl AppState {
     pub fn add_own_message(&mut self, buffer_id: &str, message: Message) {
         if let Some(queue) = self.translate_queues.get_mut(buffer_id) {
             let id = message.id;
-            queue.push_resolved(id, message, ActivityLevel::None);
+            // By ID, not appended: a deferred echo's id was allocated when
+            // the user pressed Enter, and lines that arrived during the
+            // translation wait are already queued ahead of it. Appending
+            // would render their own message after the replies to it.
+            queue.insert_resolved_in_order(id, message, ActivityLevel::None);
             return;
         }
         self.add_message_unshrunk(buffer_id, message);
