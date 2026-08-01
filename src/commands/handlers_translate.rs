@@ -65,6 +65,21 @@ fn resolve_target(app: &mut App, target: &str) -> Option<(String, String)> {
         add_local_event(app, &format!("{C_ERR}translate: no active connection{C_RST}"));
         return None;
     };
+    // The startup Status buffer reports the placeholder connection rather
+    // than none at all, so without this `/translate addin #chan de` typed
+    // there reports success and persists `_default/#chan` — a mapping no
+    // real connection can ever match, and one the user has no reason to
+    // suspect is inert.
+    if conn_id == App::DEFAULT_CONN_ID || !app.state.connections.contains_key(&conn_id) {
+        add_local_event(
+            app,
+            &format!(
+                "{C_ERR}translate: not on a server — switch to a connected \
+                 buffer first{C_RST}"
+            ),
+        );
+        return None;
+    }
     let buffer_id = make_buffer_id(&conn_id, target);
     Some((conn_id, buffer_id))
 }
@@ -317,6 +332,13 @@ mod tests {
 
     fn app_with_channel() -> App {
         let mut app = test_app();
+        // A real connection, not just a buffer: `resolve_target` requires
+        // one, because the startup Status buffer otherwise persists a
+        // `_default/...` mapping that can never match a live connection.
+        let mut conn = crate::state::events::tests::make_test_connection();
+        conn.id = "test".to_string();
+        conn.label = "TestServer".to_string();
+        app.state.add_connection(conn);
         app.state
             .add_buffer(Buffer::for_test("test", BufferType::Channel, "#dupa"));
         app.state.set_active_buffer("test/#dupa");
@@ -386,6 +408,19 @@ mod tests {
             app.config_path,
             crate::constants::config_path(),
             "the test App must never point at the real config"
+        );
+    }
+
+    #[test]
+    fn the_default_status_buffer_cannot_be_configured() {
+        // `active_conn_id()` reports the placeholder connection there rather
+        // than none, so without an explicit check this reported success and
+        // persisted a `_default/...` mapping no connection can ever match.
+        let mut app = test_app();
+        cmd_translate(&mut app, &args(&["addin", "#chan", "de"]));
+        assert!(
+            app.config.translate.buffers.is_empty(),
+            "nothing may be persisted from the Status buffer"
         );
     }
 

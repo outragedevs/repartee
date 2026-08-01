@@ -652,6 +652,10 @@ impl crate::app::App {
             // hand the text back, and let them decide.
             TranslateOutcome::Untranslated { reason, .. } => {
                 let reason_label = reason.label();
+                // No echo will be written, so the place held for it must be
+                // given back — leaving it would block the buffer until the
+                // queue timeout.
+                self.state.release_echo_slot(&out.buffer_id, out.echo_id);
                 self.restore_outgoing_input(out, &reason_label);
                 return;
             }
@@ -666,6 +670,7 @@ impl crate::app::App {
                 &out.buffer_id,
                 "Failed to send message — connection unavailable",
             );
+            self.state.release_echo_slot(&out.buffer_id, out.echo_id);
             let retry = out.retry_text.clone();
             let origin = out.origin.clone();
             self.restore_input_text_to(&retry, &origin);
@@ -736,6 +741,10 @@ impl crate::app::App {
         };
         if should_echo {
             self.write_translated_local_echo(out, &plain_echo);
+        } else {
+            // The server will echo it back for us, so no local row is
+            // written and the reservation has no filler.
+            self.state.release_echo_slot(&out.buffer_id, out.echo_id);
         }
     }
 
@@ -1008,16 +1017,21 @@ impl crate::app::App {
         };
         let mut pending = pending;
         pending.retry_text = retry.to_string();
+        // Hold the display position now, while the order is still known.
+        self.state.reserve_echo_slot(req.buffer_id, pending.echo_id);
         match self.translate_outgoing_tx.try_send(pending) {
             Ok(()) => false,
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            Err(tokio::sync::mpsc::error::TrySendError::Full(p)) => {
+                self.state.release_echo_slot(req.buffer_id, p.echo_id);
                 self.refuse_untranslatable_send(retry, "the translation queue is full")
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => self
-                .refuse_untranslatable_send(
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(p)) => {
+                self.state.release_echo_slot(req.buffer_id, p.echo_id);
+                self.refuse_untranslatable_send(
                     retry,
                     "the translation worker has died — restart to restore it",
-                ),
+                )
+            }
         }
     }
 
@@ -1134,6 +1148,7 @@ impl crate::app::App {
                     // E2E state can change during the wait, nothing reached
                     // the wire, and the composer was cleared at submission.
                     self.deliver_translate_error(&out.buffer_id, &reason.user_message());
+                    self.state.release_echo_slot(&out.buffer_id, out.echo_id);
                     let retry = out.retry_text.clone();
                     let origin = out.origin.clone();
                     self.restore_input_text_to(&retry, &origin);
@@ -1392,6 +1407,29 @@ impl crate::app::App {
             );
         }
         self.release_translated(buffer_id, ready);
+    }
+
+    /// Flush the queues of every buffer belonging to one connection.
+    ///
+    /// Used on disconnect: those lines already arrived, and waiting out the
+    /// full timeout for a server that is gone blanks the channel for no
+    /// possible benefit.
+    pub(crate) fn flush_translate_queues_for_connection(&mut self, conn_id: &str) {
+        let buffer_ids: Vec<String> = self
+            .state
+            .translate_queues
+            .keys()
+            .filter(|id| {
+                self.state
+                    .buffers
+                    .get(*id)
+                    .is_some_and(|b| b.connection_id == conn_id)
+            })
+            .cloned()
+            .collect();
+        for buffer_id in buffer_ids {
+            self.flush_translate_queue(&buffer_id);
+        }
     }
 
     /// Flush every buffer's queue. Used on quit and detach.

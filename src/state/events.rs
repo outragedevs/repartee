@@ -432,6 +432,27 @@ impl AppState {
         self.add_message_with_activity_unshrunk(buffer_id, message, level);
     }
 
+    /// Hold this buffer's queue position for an outgoing echo that is still
+    /// being translated.
+    ///
+    /// Creates the queue if there is none: the barrier has to exist for the
+    /// whole wait. Reserving only an id is not enough — a later incoming line
+    /// can create a queue, resolve, drain and have it pruned before the echo
+    /// arrives, and the echo would then be appended after it.
+    pub fn reserve_echo_slot(&mut self, buffer_id: &str, id: u64) {
+        self.translate_queues
+            .entry(buffer_id.to_string())
+            .or_default()
+            .reserve(id);
+    }
+
+    /// Give up a reservation whose message will never arrive.
+    pub fn release_echo_slot(&mut self, buffer_id: &str, id: u64) {
+        if let Some(queue) = self.translate_queues.get_mut(buffer_id) {
+            queue.release_reserved(id);
+        }
+    }
+
     /// Deliver a line we authored ourselves — a deferred local echo.
     ///
     /// It must never be sent for translation: we wrote it, and an outgoing
@@ -448,11 +469,13 @@ impl AppState {
     pub fn add_own_message(&mut self, buffer_id: &str, message: Message) {
         if let Some(queue) = self.translate_queues.get_mut(buffer_id) {
             let id = message.id;
-            // By ID, not appended: a deferred echo's id was allocated when
-            // the user pressed Enter, and lines that arrived during the
-            // translation wait are already queued ahead of it. Appending
-            // would render their own message after the replies to it.
-            queue.insert_resolved_in_order(id, message, ActivityLevel::None);
+            // Fill the place held at submission when there is one. Failing
+            // that, insert by id — a deferred echo's id was allocated when
+            // the user pressed Enter, so appending would render their own
+            // message after the replies to it.
+            if !queue.fill_reserved(id, message.clone(), ActivityLevel::None) {
+                queue.insert_resolved_in_order(id, message, ActivityLevel::None);
+            }
             return;
         }
         self.add_message_unshrunk(buffer_id, message);
@@ -498,6 +521,22 @@ impl AppState {
                 return None;
             }
             return Some(message);
+        }
+        // A reassembled `draft/multiline` message carries newlines. The
+        // contract is one line per request, and handing the whole thing over
+        // makes a backend collapse and reorder words ACROSS line boundaries —
+        // the shipped stub does exactly that. It is eligible but not
+        // translatable, so it is a GAP: delivered marked, the same as the
+        // outgoing side refusing multiline rather than mangling it.
+        if message.text.contains('\n') {
+            return self.deliver_untranslated_in_order(
+                buffer_id,
+                message,
+                level,
+                &crate::translate::UntranslatedReason::Error(
+                    "multi-line message".to_string(),
+                ),
+            );
         }
         self.dispatch_for_translation(buffer_id, message, level)
     }
@@ -1217,7 +1256,7 @@ pub mod tests {
     use chrono::Utc;
     use std::collections::{HashMap, VecDeque};
 
-    fn make_test_connection() -> Connection {
+    pub fn make_test_connection() -> Connection {
         Connection {
             id: "libera".to_string(),
             label: "Libera".to_string(),
@@ -2698,6 +2737,27 @@ mod translate_gate_tests {
             state.translate_queues[BUF].len(),
             2,
             "it takes its place in the queue instead"
+        );
+    }
+
+    #[test]
+    fn a_multiline_message_is_delivered_marked_not_mangled() {
+        // The contract is one line per request; handing the whole thing over
+        // makes a backend collapse and reorder words ACROSS line boundaries.
+        let (mut state, mut rx) = state_with_translation();
+        let mut msg = make_test_message(&mut state, "pierwsza linia");
+        msg.text = "pierwsza linia\ndruga linia".to_string();
+        state.add_message_with_activity(BUF, msg, ActivityLevel::Activity);
+
+        assert!(
+            rx.try_recv().is_err(),
+            "a multi-line body must never become one request"
+        );
+        let shown = state.buffers[BUF].messages.back().expect("delivered").text.clone();
+        assert!(shown.starts_with("pierwsza linia\ndruga linia"), "intact: {shown:?}");
+        assert!(
+            shown.contains("[untranslated: error: multi-line message]"),
+            "and marked, so it is not mistaken for a clean pass: {shown:?}"
         );
     }
 

@@ -1476,6 +1476,8 @@ impl App {
                         "this conversation can no longer be translated",
                     );
                 };
+                self.state.reserve_echo_slot(&active_id, pending.echo_id);
+                let reserved_id = pending.echo_id;
                 match self.translate_outgoing_tx.try_send(pending) {
                     // Nothing is on the wire yet, so we must not claim a
                     // send. The deferred path reports the outcome via
@@ -1483,11 +1485,13 @@ impl App {
                     Ok(()) => return false,
                     Err(TrySendError::Full(_)) => {
                         tracing::warn!("translate: outgoing queue full, refusing to send");
+                        self.state.release_echo_slot(&active_id, reserved_id);
                         return self
                             .refuse_untranslatable_send(text, "the translation queue is full");
                     }
                     Err(TrySendError::Closed(_)) => {
                         tracing::error!("translate: outgoing worker dead, refusing to send");
+                        self.state.release_echo_slot(&active_id, reserved_id);
                         return self.refuse_untranslatable_send(
                             text,
                             "the translation worker has died — restart to restore it",
@@ -3003,8 +3007,10 @@ pub mod submit_typing_tests {
             translate_timeout_ms: None,
             // NEVER the real config path: a handler that saves would clobber
             // the developer's own configuration during `cargo test`.
-            config_path: std::env::temp_dir()
-                .join("repartee-test-config-do-not-use.toml"),
+            config_path: std::env::temp_dir().join(format!(
+                "{}-test-config-do-not-use.toml",
+                crate::constants::APP_NAME
+            )),
             cli_bind_override: None,
             typing: crate::app::typing::TypingSender::default(),
         }

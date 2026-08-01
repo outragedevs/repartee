@@ -500,6 +500,12 @@ impl App {
                 // limits/ref types and could be rejected for non-membership.
             }
             IrcEvent::Disconnected(conn_id, error) => {
+                // Release anything still waiting on a translation for this
+                // connection FIRST. The lines already arrived; holding them
+                // for the full timeout after the server is gone means a
+                // stuck provider blanks the channel for seconds with no
+                // prospect of the answer ever being useful.
+                self.flush_translate_queues_for_connection(&conn_id);
                 // DCC connections are peer-to-peer and independent of the IRC
                 // server.  Do NOT close DCC records on IRC disconnect.
                 crate::irc::events::handle_disconnected(

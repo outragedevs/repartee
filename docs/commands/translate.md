@@ -92,7 +92,8 @@ an answer can never appear above its question.
 A line that has waited longer than `translate.timeout_ms` is shown
 untranslated rather than holding up the channel, and the queue is capped at
 `translate.max_queue` so a dead provider cannot stall a busy channel or grow
-without bound.
+without bound. Losing the connection releases that server's queued lines at
+once rather than waiting the timeout out for a server that is gone.
 
 ## When translation does not happen
 
@@ -121,7 +122,11 @@ other than what you intended in front of the channel.
 That applies to every way of not translating, not just a provider error: a
 full or dead translation queue, a message too long to translate in one piece,
 a multi-line paste, and a buffer with `outgoing` enabled but no language all
-refuse rather than sending as-is. `/translate delout <target>` is how you
+refuse rather than sending as-is.
+
+Incoming multi-line messages are the mirror of this: they are shown intact
+and marked untranslated rather than being flattened into one request, which
+would let a translator reorder words across the line breaks. `/translate delout <target>` is how you
 send something untranslated on purpose.
 
 It also applies however the message was submitted. `/msg`, `/query <nick>

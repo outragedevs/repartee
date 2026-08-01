@@ -41,6 +41,14 @@ pub struct PendingPayload {
 
 #[derive(Debug)]
 enum Slot {
+    /// A place held for a row that does not exist yet — an outgoing echo
+    /// whose translation is still running.
+    ///
+    /// An id alone does not preserve order: a later incoming line can create
+    /// a queue, resolve, drain, and have the queue pruned before the echo
+    /// arrives, leaving nothing to insert into. The barrier has to physically
+    /// exist for the whole wait.
+    Reserved { queued_at: Instant },
     Pending {
         original: String,
         payload: PendingPayload,
@@ -158,6 +166,45 @@ impl TranslateQueue {
         );
     }
 
+    /// Hold a place for a row that will be built later.
+    pub fn reserve(&mut self, id: u64) {
+        self.reserve_at(id, Instant::now());
+    }
+
+    /// Injectable-clock variant.
+    pub fn reserve_at(&mut self, id: u64, now: Instant) {
+        self.entries.push_back(Entry {
+            id,
+            slot: Some(Slot::Reserved { queued_at: now }),
+        });
+    }
+
+    /// Fill a reserved place with the row it was held for.
+    ///
+    /// Returns `false` when the id is unknown — the reservation was already
+    /// released by a timeout, a flush, or a buffer close.
+    pub fn fill_reserved(&mut self, id: u64, message: Message, activity: ActivityLevel) -> bool {
+        let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) else {
+            return false;
+        };
+        if !matches!(entry.slot, Some(Slot::Reserved { .. })) {
+            return false;
+        }
+        entry.slot = Some(Slot::Ready {
+            message,
+            activity,
+            reason: None,
+        });
+        true
+    }
+
+    /// Drop a reservation whose row will never arrive — a refused send.
+    /// Leaving it would block everything queued behind it until the timeout.
+    pub fn release_reserved(&mut self, id: u64) {
+        self.entries
+            .retain(|e| !(e.id == id && matches!(e.slot, Some(Slot::Reserved { .. }))));
+    }
+
     /// Fold an outcome into the matching entry.
     ///
     /// Returns `false` when the id is unknown or already resolved — a late
@@ -244,7 +291,7 @@ impl TranslateQueue {
             .entries
             .iter()
             .filter_map(|e| match e.slot.as_ref() {
-                Some(Slot::Pending { queued_at, .. })
+                Some(Slot::Pending { queued_at, .. } | Slot::Reserved { queued_at })
                     if now.duration_since(*queued_at) >= timeout =>
                 {
                     Some(e.id)
@@ -253,6 +300,10 @@ impl TranslateQueue {
             })
             .collect();
         for id in &expired {
+            // A reservation has no row to resolve INTO, so it is dropped.
+            // Its message either arrives later and is delivered directly, or
+            // was refused; either way it must stop blocking the queue.
+            self.release_reserved(*id);
             self.resolve(*id, Err(UntranslatedReason::Timeout));
         }
         expired.len()
@@ -272,11 +323,12 @@ impl TranslateQueue {
         let ids: Vec<u64> = self
             .entries
             .iter()
-            .filter(|e| matches!(e.slot, Some(Slot::Pending { .. })))
+            .filter(|e| matches!(e.slot, Some(Slot::Pending { .. } | Slot::Reserved { .. })))
             .take(excess)
             .map(|e| e.id)
             .collect();
         for id in &ids {
+            self.release_reserved(*id);
             self.resolve(*id, Err(UntranslatedReason::Timeout));
         }
         ids.len()
@@ -291,10 +343,11 @@ impl TranslateQueue {
         let pending: Vec<u64> = self
             .entries
             .iter()
-            .filter(|e| matches!(e.slot, Some(Slot::Pending { .. })))
+            .filter(|e| matches!(e.slot, Some(Slot::Pending { .. } | Slot::Reserved { .. })))
             .map(|e| e.id)
             .collect();
         for id in pending {
+            self.release_reserved(id);
             self.resolve(id, Err(UntranslatedReason::Timeout));
         }
         self.drain_ready()
@@ -317,7 +370,7 @@ impl TranslateQueue {
     pub fn pending_len(&self) -> usize {
         self.entries
             .iter()
-            .filter(|e| matches!(e.slot, Some(Slot::Pending { .. })))
+            .filter(|e| matches!(e.slot, Some(Slot::Pending { .. } | Slot::Reserved { .. })))
             .count()
     }
 }
@@ -469,6 +522,57 @@ mod tests {
         let ready = q.drain_ready();
         assert_eq!(ready[0].message.text, "a b [untranslated: timeout]");
         assert_eq!(ready[0].reason, Some(UntranslatedReason::Timeout));
+    }
+
+    #[test]
+    fn a_reservation_survives_a_queue_that_would_otherwise_be_pruned() {
+        // The exact scenario: outgoing 10 is still translating; incoming 11
+        // arrives, resolves and drains. Without a physical barrier the queue
+        // would be empty (and pruned), and 10 would later be appended AFTER
+        // 11 — the user's message below the reply to it.
+        let mut q = TranslateQueue::new();
+        q.reserve(10);
+        q.push_pending(11, "later".into(), payload(11, "later"));
+        q.resolve(11, Ok("translated later".into()));
+
+        assert!(
+            q.drain_ready().is_empty(),
+            "11 must not drain past the place held for 10"
+        );
+        assert!(!q.is_empty(), "the queue survives, so nothing prunes it");
+
+        assert!(q.fill_reserved(10, message(10, "my own line"), ActivityLevel::None));
+        assert_eq!(ids(&q.drain_ready()), vec![10, 11]);
+    }
+
+    #[test]
+    fn releasing_a_reservation_unblocks_what_is_behind_it() {
+        // A refused send writes no echo, so the barrier must be given back
+        // or everything behind it waits out the timeout.
+        let mut q = TranslateQueue::new();
+        q.reserve(10);
+        q.push_pending(11, "later".into(), payload(11, "later"));
+        q.resolve(11, Ok("translated later".into()));
+        q.release_reserved(10);
+        assert_eq!(ids(&q.drain_ready()), vec![11]);
+    }
+
+    #[test]
+    fn a_stale_reservation_expires_rather_than_wedging_the_buffer() {
+        let mut q = TranslateQueue::new();
+        let t0 = Instant::now();
+        q.reserve_at(10, t0);
+        q.push_pending_at(11, "later".into(), payload(11, "later"), t0);
+        q.resolve(11, Ok("translated later".into()));
+        q.expire(t0 + Duration::from_millis(5001), Duration::from_millis(5000));
+        assert_eq!(ids(&q.drain_ready()), vec![11]);
+        assert!(q.is_empty());
+    }
+
+    #[test]
+    fn filling_an_unknown_reservation_reports_it_rather_than_panicking() {
+        let mut q = TranslateQueue::new();
+        assert!(!q.fill_reserved(10, message(10, "x"), ActivityLevel::None));
     }
 
     #[test]
