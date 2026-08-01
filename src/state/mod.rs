@@ -102,6 +102,29 @@ pub struct AppState {
     pub shrink_incoming_active: bool,
     /// URL length threshold mirrored from `config.shrink.min_url_length`.
     pub shrink_min_url_length: u32,
+    /// Worker-queue sender for incoming translation dispatch. `None` when
+    /// the feature is disabled. Same shape as `shrink_incoming_tx`: the
+    /// synchronous `add_message` path decides between an immediate add and
+    /// a deferred translate without reaching into `App`.
+    pub translate_incoming_tx: Option<mpsc::Sender<crate::app::translate::PendingTranslate>>,
+    /// Per-buffer reorder queues. A buffer appears here only while it has
+    /// lines in flight; absent means "deliver straight through".
+    ///
+    /// Note this is keyed by buffer id and NOT cleared when translation is
+    /// turned off — a queue with entries still has to drain in order.
+    pub translate_queues: HashMap<String, crate::translate::queue::TranslateQueue>,
+    /// Mirror of `config.translate.enabled && a backend exists`. Synced from
+    /// `/set` so a runtime flip needs no restart, exactly as
+    /// `shrink_incoming_active` is.
+    pub translate_active: bool,
+    /// Mirror of `config.translate.buffers`, keyed by buffer id.
+    pub translate_buffers: HashMap<String, crate::config::TranslateBufferConfig>,
+    /// Mirror of `config.translate.target_lang`.
+    pub translate_target_lang: String,
+    /// Mirror of `config.translate.show_original_in`. Captured per line at
+    /// dispatch, so a mid-flight `/set` cannot make a queued line render
+    /// differently from how it was queued.
+    pub translate_show_original_in: bool,
     /// Message types excluded from logging (e.g. "event" to skip quit/join/nick fan-out).
     pub log_exclude_types: Vec<String>,
     /// Maximum messages per buffer (FIFO eviction). 0 = unlimited.

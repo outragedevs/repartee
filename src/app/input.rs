@@ -2275,7 +2275,7 @@ mod tests {
 /// the fixture builds the struct directly — the same reason `send_typing_frame`
 /// exists as a free function over borrowed state.
 #[cfg(test)]
-mod submit_typing_tests {
+pub mod submit_typing_tests {
     #![allow(clippy::unwrap_used, reason = "test code")]
 
     use super::{App, BufferType};
@@ -2800,7 +2800,7 @@ mod submit_typing_tests {
         clippy::too_many_lines,
         reason = "one line per App field — a struct literal cannot be shortened"
     )]
-    fn test_app() -> App {
+    pub fn test_app() -> App {
         let mut state = crate::state::AppState::new();
         let db = crate::storage::db::open_database(false).unwrap();
         let keyring = crate::e2e::keyring::Keyring::new(Arc::new(Mutex::new(db)));
@@ -2823,6 +2823,11 @@ mod submit_typing_tests {
         // entirely, so nothing here is ever read.
         let (shrink_outgoing_tx, _shrink_outgoing_rx) = mpsc::channel(16);
         let (shrink_deliver_tx, shrink_deliver_rx) = mpsc::channel(16);
+        // Same reasoning as shrink above: hand-rolled so no tokio reactor is
+        // needed. `state.translate_active` stays false, so the submit path
+        // never dispatches and these are never read.
+        let (translate_outgoing_tx, _translate_outgoing_rx) = mpsc::channel(16);
+        let (_translate_deliver_tx, translate_deliver_rx) = mpsc::channel(16);
 
         App {
             state,
@@ -2922,6 +2927,8 @@ mod submit_typing_tests {
             shrink_outgoing_tx,
             shrink_deliver_tx,
             shrink_deliver_rx,
+            translate_outgoing_tx,
+            translate_deliver_rx,
             cli_bind_override: None,
             typing: crate::app::typing::TypingSender::default(),
         }

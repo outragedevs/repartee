@@ -11,7 +11,7 @@ pub mod e2e_gate;
 )]
 pub(crate) mod emote_anim;
 mod image;
-mod input;
+pub mod input;
 mod irc;
 mod log_browser;
 mod maintenance;
@@ -496,6 +496,15 @@ pub struct App {
     /// drains, awaits shrink, and posts an `OutgoingDeliver` back
     /// via `shrink_deliver_rx`.
     pub(crate) shrink_outgoing_tx: mpsc::Sender<shrink::PendingOutgoing>,
+    /// Pre-send queue for outgoing messages that need translation.
+    /// `handle_plain_message` enqueues here; the serial outgoing worker
+    /// drains it and posts an `OutgoingTranslateDeliver` back via
+    /// `translate_deliver_rx`.
+    #[allow(dead_code, reason = "read once the outgoing dispatch gate lands")]
+    pub(crate) translate_outgoing_tx: mpsc::Sender<translate::PendingOutgoingTranslate>,
+    /// Both translation workers post their outcomes here; the main loop
+    /// drains and routes them through `apply_translate_deliver`.
+    pub(crate) translate_deliver_rx: mpsc::Receiver<translate::TranslateDeliver>,
     /// `/shrink` command + the workers all post their final actions
     /// here; the main loop drains and routes them to
     /// `apply_shrink_deliver`.
@@ -682,6 +691,25 @@ impl App {
         state.shrink_min_url_length = config.shrink.min_url_length;
         state.shrink_incoming_tx = Some(shrink_incoming_tx);
 
+        // Same wiring shape as shrink: the synchronous `add_message` path
+        // needs the sender and the config mirrors on `state`, so it can
+        // decide between an immediate add and a deferred translate without
+        // reaching into `App`.
+        let translate::TranslateRuntime {
+            backend: translate_backend,
+            incoming_tx: translate_incoming_tx,
+            outgoing_tx: translate_outgoing_tx,
+            deliver_tx: _translate_deliver_tx,
+            deliver_rx: translate_deliver_rx,
+        } = translate::TranslateRuntime::build(&config.translate);
+        state.translate_active = config.translate.enabled && translate_backend.is_some();
+        state.translate_buffers.clone_from(&config.translate.buffers);
+        state
+            .translate_target_lang
+            .clone_from(&config.translate.target_lang);
+        state.translate_show_original_in = config.translate.show_original_in;
+        state.translate_incoming_tx = Some(translate_incoming_tx);
+
         let (mut dcc, dcc_rx) = crate::dcc::DccManager::new();
         dcc.timeout_secs = config.dcc.timeout;
         if !config.dcc.own_ip.is_empty() {
@@ -817,6 +845,8 @@ impl App {
             shrink_outgoing_tx,
             shrink_deliver_tx,
             shrink_deliver_rx,
+            translate_outgoing_tx,
+            translate_deliver_rx,
             cli_bind_override: None,
             typing: crate::app::typing::TypingSender::default(),
         };
@@ -1483,6 +1513,10 @@ impl App {
                     self.handle_netsplit_tick();
                     self.typing_tick();
                     self.expire_typing();
+                    // Drives the queue timeout and ceiling. Without a tick a
+                    // stuck head would hold its channel indefinitely once the
+                    // traffic that would otherwise poke the queue stops.
+                    self.tick_translate_queues();
                     self.purge_expired_batches();
                     self.purge_stale_chathistory_requests();
                     self.check_reconnects();
@@ -1548,6 +1582,18 @@ impl App {
                         // to absorb.
                         while let Ok(extra) = self.shrink_deliver_rx.try_recv() {
                             self.apply_shrink_deliver(extra);
+                        }
+                        self.drain_pending_web_events();
+                    }
+                },
+                translate_res = self.translate_deliver_rx.recv() => {
+                    if let Some(deliver) = translate_res {
+                        self.apply_translate_deliver(deliver);
+                        // Drain siblings in the same tick: a burst on a busy
+                        // channel arrives as many outcomes at once, and each
+                        // one can unblock the queue head.
+                        while let Ok(extra) = self.translate_deliver_rx.try_recv() {
+                            self.apply_translate_deliver(extra);
                         }
                         self.drain_pending_web_events();
                     }

@@ -207,6 +207,39 @@ pub struct Buffer {
 }
 
 impl Buffer {
+    /// A bare buffer of `buffer_type`, for tests.
+    ///
+    /// Every test module that needs one was hand-rolling the same 20-field
+    /// literal; sharing it here keeps a new field from having to be added
+    /// in a dozen places.
+    #[cfg(test)]
+    pub(crate) fn for_test(conn_id: &str, buffer_type: BufferType, name: &str) -> Self {
+        Self {
+            id: make_buffer_id(conn_id, name),
+            connection_id: conn_id.to_string(),
+            buffer_type,
+            name: name.to_string(),
+            messages: VecDeque::new(),
+            activity: ActivityLevel::None,
+            unread_count: 0,
+            last_read: Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
+            peer_handle: None,
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
+            log_initial_loaded: false,
+            pin_backlog: false,
+        }
+    }
+
     /// Record a nick as having spoken in this buffer.
     /// Moves them to the front of `last_speakers` (most recent first).
     pub fn touch_speaker(&mut self, nick: &str) {
