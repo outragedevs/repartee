@@ -498,6 +498,28 @@ impl AppState {
         self.dispatch_for_translation(buffer_id, message, level)
     }
 
+    /// Deliver a line that will not be translated after all, without letting
+    /// it overtake lines already queued for this buffer.
+    ///
+    /// Returning it to the caller for immediate display would put it on
+    /// screen ahead of older lines still waiting on their translations —
+    /// breaking the one guarantee the reorder queue exists to provide, and
+    /// doing so exactly when the channel is busiest, which is when a full
+    /// worker queue happens.
+    fn deliver_untranslated_in_order(
+        &mut self,
+        buffer_id: &str,
+        message: Message,
+        level: ActivityLevel,
+    ) -> Option<Message> {
+        if let Some(queue) = self.translate_queues.get_mut(buffer_id) {
+            let id = message.id;
+            queue.push_resolved(id, message, level);
+            return None;
+        }
+        Some(message)
+    }
+
     /// Whether this message on this buffer should be sent for translation.
     fn translate_should_dispatch(&self, buffer_id: &str, message: &Message) -> bool {
         if !self.translate_active || self.translate_incoming_tx.is_none() {
@@ -572,7 +594,7 @@ impl AppState {
         };
 
         let Some(tx) = self.translate_incoming_tx.as_ref() else {
-            return Some(message);
+            return self.deliver_untranslated_in_order(buffer_id, message, level);
         };
         match tx.try_send(crate::app::translate::PendingTranslate {
             buffer_id: buffer_id.to_string(),
@@ -581,11 +603,11 @@ impl AppState {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
                 tracing::warn!("translate: incoming queue full, delivering untranslated");
-                return Some(message);
+                return self.deliver_untranslated_in_order(buffer_id, message, level);
             }
             Err(TrySendError::Closed(_)) => {
                 tracing::error!("translate: incoming worker dead, delivering untranslated");
-                return Some(message);
+                return self.deliver_untranslated_in_order(buffer_id, message, level);
             }
         }
 
@@ -2639,8 +2661,65 @@ mod translate_gate_tests {
         );
         assert_eq!(
             shown(&state, BUF),
-            1,
-            "the overflow line is delivered untranslated, not dropped"
+            0,
+            "the overflow line must NOT jump ahead of the line still translating"
         );
+        assert_eq!(
+            state.translate_queues[BUF].len(),
+            2,
+            "it takes its place in the queue instead"
+        );
+    }
+
+    #[test]
+    fn an_overflow_line_still_renders_in_arrival_order() {
+        // End of the same story: once the line ahead resolves, both surface,
+        // oldest first — the untranslated fallback included.
+        let mut state = make_test_state();
+        let (tx, _rx) = mpsc::channel(1);
+        state.translate_incoming_tx = Some(tx);
+        state.translate_active = true;
+        state.translate_buffers.insert(
+            BUF.to_string(),
+            TranslateBufferConfig {
+                incoming: true,
+                outgoing: false,
+                lang: None,
+                my_lang: None,
+            },
+        );
+        let first = make_test_message(&mut state, "line one");
+        let first_id = first.id;
+        state.add_message_with_activity(BUF, first, ActivityLevel::Activity);
+        let second = make_test_message(&mut state, "line two");
+        state.add_message_with_activity(BUF, second, ActivityLevel::Activity);
+
+        let ready = {
+            let queue = state.translate_queues.get_mut(BUF).expect("queue exists");
+            queue.resolve(first_id, Ok("translated one".to_string()));
+            queue.drain_ready()
+        };
+        let texts: Vec<String> = ready.iter().map(|e| e.message.text.clone()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                // show_original_in defaults on, hence the bracket.
+                "translated one [line one]".to_string(),
+                "line two".to_string(),
+            ],
+            "arrival order holds across the fallback"
+        );
+    }
+
+    #[test]
+    fn a_dead_worker_with_no_queue_still_delivers_immediately() {
+        // With nothing pending there is no order to protect, so the line
+        // must not be parked in a queue nobody will ever drain.
+        let (mut state, rx) = state_with_translation();
+        drop(rx);
+        let msg = make_test_message(&mut state, "hola que tal");
+        state.add_message_with_activity(BUF, msg, ActivityLevel::Activity);
+        assert_eq!(shown(&state, BUF), 1);
+        assert!(!state.translate_queues.contains_key(BUF));
     }
 }
