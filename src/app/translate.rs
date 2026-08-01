@@ -1642,15 +1642,45 @@ impl crate::app::App {
     ) -> OutgoingTranslatePolicy {
         // E2E wins: the conversation is simply not translated, and the
         // ordinary (encrypted) send is exactly right.
-        if e2e_possible || !self.state.translate_active {
+        let bypass = e2e_possible
+            || !self.state.translate_active
+            || self
+                .config
+                .translate
+                .buffers
+                .get(buffer_id)
+                .is_none_or(|cfg| !cfg.outgoing);
+        if bypass {
+            // An ordinary send goes straight to the socket, while a
+            // translation still in flight for this same conversation is
+            // waiting on the provider. The plain one would arrive FIRST and
+            // peers would read the two in the opposite order to the one they
+            // were typed in — invisibly to the author, whose own buffer shows
+            // them correctly, because the reservation still orders the
+            // display.
+            //
+            // Only reachable while outgoing translation is being switched OFF
+            // under a send already dispatched — `/translate delout`, `/e2e
+            // on`, `translate.enabled false`, a `/reload` — because with it
+            // still on the next send takes the Translate path and the
+            // connection's serial lane keeps the order. Refusing rather than
+            // reordering is the same choice this gate makes everywhere else:
+            // a visible refusal beats an invisible wrong, and the wait is
+            // bounded by the in-flight send's own timeout.
+            if self.state.has_pending_outgoing_echo(buffer_id) {
+                return OutgoingTranslatePolicy::Refuse(
+                    "an earlier message to this conversation is still being \
+                     translated — send it again in a moment",
+                );
+            }
             return OutgoingTranslatePolicy::NotApplicable;
         }
-        let Some(cfg) = self.config.translate.buffers.get(buffer_id) else {
-            return OutgoingTranslatePolicy::NotApplicable;
-        };
-        if !cfg.outgoing {
-            return OutgoingTranslatePolicy::NotApplicable;
-        }
+        let cfg = self
+            .config
+            .translate
+            .buffers
+            .get(buffer_id)
+            .expect("the bypass check above proved this is present");
         // From here translation is REQUIRED, so everything below refuses
         // rather than falling through to a plaintext send. Putting text on a
         // channel in a language the user did not choose is the failure the
@@ -4610,6 +4640,57 @@ mod app_tests {
             .await
             .expect("four permits are still obtainable");
         assert_eq!(taken, 4);
+    }
+
+    #[test]
+    fn a_bypass_send_cannot_overtake_a_translation_already_in_flight() {
+        // Outgoing translation switched off under a send already dispatched
+        // — `/translate delout`, `/e2e on`, `translate.enabled false`, a
+        // `/reload`. The earlier message stays in the translation lane by
+        // design; the next one would take the ordinary path straight to the
+        // socket and arrive FIRST, so peers read the two in the opposite
+        // order to the one they were typed in. Invisibly to the author,
+        // whose own buffer shows them correctly because the reservation
+        // still orders the display.
+        let mut app = app_with_outgoing(Some("de"));
+        app.state.reserve_echo_slot(BUF, 1);
+
+        // Now outgoing translation goes away under it.
+        app.config.translate.buffers.remove(BUF);
+        app.sync_translate_from_config();
+
+        assert!(
+            matches!(
+                app.outgoing_translate_policy(BUF, "moje zdanie", false),
+                OutgoingTranslatePolicy::Refuse(_)
+            ),
+            "the send waits rather than jumping the queue"
+        );
+
+        // Once the earlier send lands the reservation goes, and ordinary
+        // sends resume immediately.
+        app.state.release_echo_slot(BUF, 1);
+        assert!(matches!(
+            app.outgoing_translate_policy(BUF, "moje zdanie", false),
+            OutgoingTranslatePolicy::NotApplicable
+        ));
+    }
+
+    #[test]
+    fn a_buffer_that_never_translated_is_never_held_up() {
+        // The guard must not touch the ordinary path. A buffer with no
+        // outgoing work in flight has no reservation, so nothing changes for
+        // the overwhelming majority of sends.
+        let app = app_with_buffer();
+        assert!(matches!(
+            app.outgoing_translate_policy(BUF, "moje zdanie", false),
+            OutgoingTranslatePolicy::NotApplicable
+        ));
+        // Even with an E2E conversation, which takes the same bypass.
+        assert!(matches!(
+            app.outgoing_translate_policy(BUF, "moje zdanie", true),
+            OutgoingTranslatePolicy::NotApplicable
+        ));
     }
 
     #[test]

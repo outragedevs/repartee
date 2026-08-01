@@ -117,6 +117,16 @@ const SETTING_PATHS: &[&str] = &[
     "statusbar.prompt_color",
     "statusbar.separator",
     "statusbar.text_color",
+    // Per-buffer translation settings are deliberately absent here too: they
+    // live in a map keyed by buffer id and are managed by
+    // `/translate add*|del*`, which a dotted `/set` path cannot spell.
+    "translate.enabled",
+    "translate.max_in_flight",
+    "translate.max_queue",
+    "translate.my_lang",
+    "translate.show_original_in",
+    "translate.show_original_out",
+    "translate.timeout_ms",
     "typing.send_channels",
     "typing.send_queries",
     "typing.show",

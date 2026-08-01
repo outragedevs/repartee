@@ -466,7 +466,7 @@ impl AppState {
     /// Cap per buffer. A user cannot outrun their own echoes by this much;
     /// the bound exists so a server that stops echoing entirely cannot grow
     /// this without limit.
-    const OWN_ECHO_MAX: usize = 32;
+    pub(crate) const OWN_ECHO_MAX: usize = 32;
 
     /// Record how `echo-message`'s reflection of one wire line should be
     /// rendered when it comes back.
@@ -475,15 +475,65 @@ impl AppState {
     /// decorated rather than replaced by a locally-written row.
     pub fn decorate_own_echo(&mut self, buffer_id: &str, decoration: OwnEchoDecoration) {
         let now = std::time::Instant::now();
-        let entries = self
-            .own_echo_decorations
-            .entry(buffer_id.to_string())
-            .or_default();
-        entries.retain(|d| now.duration_since(d.filed_at) < Self::OWN_ECHO_TTL);
-        while entries.len() >= Self::OWN_ECHO_MAX {
-            entries.pop_front();
+        let mut dropped: Vec<u64> = Vec::new();
+        {
+            let entries = self
+                .own_echo_decorations
+                .entry(buffer_id.to_string())
+                .or_default();
+            entries.retain(|d| {
+                let fresh = now.duration_since(d.filed_at) < Self::OWN_ECHO_TTL;
+                if !fresh {
+                    dropped.push(d.echo_id);
+                }
+                fresh
+            });
+            while entries.len() >= Self::OWN_ECHO_MAX {
+                if let Some(evicted) = entries.pop_front() {
+                    dropped.push(evicted.echo_id);
+                }
+            }
+            entries.push_back(decoration);
+            Self::still_expected(entries, &mut dropped);
         }
-        entries.push_back(decoration);
+        self.abandon_reflections(buffer_id, dropped);
+    }
+
+    /// Strike from `dropped` every id some surviving record can still fill.
+    ///
+    /// One message files a record per wire line, all sharing the reserved id,
+    /// so losing one chunk's record does not mean the reservation is orphaned
+    /// — another chunk may still be coming for it.
+    fn still_expected(entries: &std::collections::VecDeque<OwnEchoDecoration>, dropped: &mut Vec<u64>) {
+        dropped.retain(|id| !entries.iter().any(|d| d.echo_id == *id));
+    }
+
+    /// Give back the places held for reflections that can no longer arrive.
+    ///
+    /// A record is what lets a reflection find the slot reserved when the
+    /// user pressed Enter. Dropping the record without the reservation leaves
+    /// a barrier nothing will ever fill: the buffer stalls behind it until
+    /// the queue's expiry, and every line that finished translating meanwhile
+    /// is held back and then released ahead of the echo they were replies to.
+    ///
+    /// Reachable well short of the 32-record cap, because one translation
+    /// long enough to split files a record per wire line and several sends
+    /// can resolve in a burst before any of their reflections arrive.
+    fn abandon_reflections(&mut self, buffer_id: &str, dropped: Vec<u64>) {
+        if dropped.is_empty() {
+            return;
+        }
+        for echo_id in dropped {
+            tracing::debug!(
+                buffer_id,
+                echo_id,
+                "translate: reflection record gone; releasing the place held for it"
+            );
+            self.release_echo_slot(buffer_id, echo_id);
+        }
+        // Releasing at the head makes it and everything resolved behind it
+        // deliverable, and nothing else on this path would revisit the queue.
+        self.drain_translate_ready(buffer_id);
     }
 
     /// Build a reflection record, stamped now.
@@ -514,15 +564,31 @@ impl AppState {
         wire_text: &str,
     ) -> Option<OwnEchoDecoration> {
         let now = std::time::Instant::now();
+        let mut dropped: Vec<u64> = Vec::new();
         let entries = self.own_echo_decorations.get_mut(buffer_id)?;
-        entries.retain(|d| now.duration_since(d.filed_at) < Self::OWN_ECHO_TTL);
+        entries.retain(|d| {
+            let fresh = now.duration_since(d.filed_at) < Self::OWN_ECHO_TTL;
+            if !fresh {
+                dropped.push(d.echo_id);
+            }
+            fresh
+        });
         let found = entries
             .iter()
             .position(|d| d.wire_text == wire_text)
             .map(|pos| entries.remove(pos).expect("position just found it"));
+        Self::still_expected(entries, &mut dropped);
+        // The record we just took is about to fill its reservation, so an
+        // expired SIBLING of the same message must not release it first.
+        if let Some(taken) = found.as_ref() {
+            dropped.retain(|id| *id != taken.echo_id);
+        }
         if entries.is_empty() {
             self.own_echo_decorations.remove(buffer_id);
         }
+        // A record that timed out leaves the same orphaned barrier as one
+        // evicted at the cap.
+        self.abandon_reflections(buffer_id, dropped);
         found
     }
 
@@ -654,6 +720,17 @@ impl AppState {
         self.buffer_redirects.retain(|_, eras| !eras.is_empty());
         self.pending_buffer_rekeys
             .push((old_id.to_string(), new_id.to_string()));
+    }
+
+    /// Whether one of this buffer's own messages is still in the translator.
+    ///
+    /// The reservation it holds is the only record of a send that has left
+    /// the submit path but not yet reached the wire.
+    #[must_use]
+    pub fn has_pending_outgoing_echo(&self, buffer_id: &str) -> bool {
+        self.translate_queues
+            .get(buffer_id)
+            .is_some_and(crate::translate::queue::TranslateQueue::has_reservation)
     }
 
     /// Give up a reservation whose message will never arrive.
@@ -3303,6 +3380,78 @@ mod translate_gate_tests {
             state.translate_tally,
             crate::state::TranslateTally::default(),
             "our own echo says nothing about the translator"
+        );
+    }
+
+    #[test]
+    fn evicting_a_reflection_record_gives_back_the_place_it_held() {
+        // The record is what lets a reflection find the slot reserved when
+        // the user pressed Enter. Dropping it at the cap without the
+        // reservation leaves a barrier nothing can ever fill: the buffer
+        // stalls behind it until the queue expiry, and the replies that
+        // finished translating meanwhile are then released AHEAD of the
+        // message they were replies to.
+        let (mut state, _rx) = state_with_translation();
+        state.reserve_echo_slot(BUF, 1);
+        let reply = make_test_message(&mut state, "reply");
+        let reply_id = reply.id;
+        state
+            .translate_queues
+            .get_mut(BUF)
+            .expect("reserved above")
+            .push_resolved(reply_id, reply, ActivityLevel::Activity);
+        state.decorate_own_echo(
+            BUF,
+            AppState::own_echo_decoration("moje zdanie".to_string(), 1, None, true),
+        );
+        assert_eq!(shown(&state, BUF), 0, "precondition: the barrier holds");
+
+        // Enough later sends to push that record off the front.
+        for i in 0..AppState::OWN_ECHO_MAX {
+            let echo_id = 100 + i as u64;
+            state.reserve_echo_slot(BUF, echo_id);
+            state.decorate_own_echo(
+                BUF,
+                AppState::own_echo_decoration(format!("linia {i}"), echo_id, None, true),
+            );
+        }
+
+        assert_eq!(
+            shown(&state, BUF),
+            1,
+            "the orphaned barrier is lifted, so the reply is not held behind \
+             a reflection that can no longer be placed"
+        );
+        assert!(
+            state.translate_queues[BUF].has_reservation(),
+            "and only the orphaned one goes — the later sends still hold theirs"
+        );
+    }
+
+    #[test]
+    fn a_record_still_expected_by_a_sibling_chunk_keeps_its_reservation() {
+        // One message files a record per wire line, all sharing the reserved
+        // id. Losing one chunk's record must not release a reservation
+        // another chunk is still coming for.
+        let (mut state, _rx) = state_with_translation();
+        state.reserve_echo_slot(BUF, 7);
+        state.decorate_own_echo(
+            BUF,
+            AppState::own_echo_decoration("pierwsza".to_string(), 7, None, false),
+        );
+        state.decorate_own_echo(
+            BUF,
+            AppState::own_echo_decoration("druga".to_string(), 7, None, true),
+        );
+
+        // Take the first chunk's record, as its reflection would.
+        let taken = state
+            .take_own_echo_decoration(BUF, "pierwsza")
+            .expect("the record is there");
+        assert!(!taken.is_last);
+        assert!(
+            state.translate_queues[BUF].has_reservation(),
+            "the place stays held for the chunk still to come"
         );
     }
 

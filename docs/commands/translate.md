@@ -121,7 +121,12 @@ so.
 `/translate delin` releases the lines it was still waiting on, shown
 untranslated. `/translate delout` releases nothing: it does not touch the
 incoming direction, and a message of yours already being translated is still
-sent when it comes back.
+sent when it comes back. Until it does, the next message to that same
+conversation is refused with a note rather than sent — it would otherwise
+reach the channel ahead of the one still being translated, and you would have
+no way to see that it had. Press Enter again once the earlier one lands.
+Turning off `translate.enabled`, running `/reload`, or enabling E2E on the
+conversation all behave the same way for the same reason.
 
 Closing a window — `/close`, leaving the channel, or being kicked from it —
 also shows whatever it was still waiting on, untranslated, before the window

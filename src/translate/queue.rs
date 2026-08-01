@@ -349,6 +349,17 @@ impl TranslateQueue {
         true
     }
 
+    /// Whether an outgoing send is still holding a place here.
+    ///
+    /// Only the outgoing dispatch reserves, so this answers "is one of this
+    /// buffer's own messages still in the translator".
+    #[must_use]
+    pub fn has_reservation(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|e| matches!(e.slot, Some(Slot::Reserved { .. })))
+    }
+
     /// End a reservation whose remaining rows will never arrive — a refused
     /// send, a timeout, a flush. Leaving it would block everything queued
     /// behind it.

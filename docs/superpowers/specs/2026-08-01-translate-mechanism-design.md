@@ -399,6 +399,23 @@ direction that is still switched on. `delin` releases the pending incoming lines
 reservations intact; dropping one lets the rows queued behind it render first, and
 the user's own message then appears below the replies to it.
 
+Leaving the outgoing send in flight has a consequence on the OTHER side, though. Once
+outgoing translation is off, the next message takes the ordinary path straight to the
+socket while the earlier one is still waiting on the provider — so peers read the two
+in the opposite order to the one they were typed in, and the author cannot see it,
+because their own buffer is still ordered by the reservation. The same window opens for
+`/e2e on`, `translate.enabled false` and `/reload`; it does NOT open while translation
+is on, because the next send then takes the Translate path and the connection's serial
+lane keeps the order.
+
+A bypass send is therefore **refused** while a reservation for that buffer stands
+(`has_pending_outgoing_echo`), rather than reordered. That is the same choice this gate
+makes everywhere else — a visible refusal beats an invisible wrong — and the wait is
+bounded by the in-flight send's own timeout. Routing plain sends through the
+translation lane instead would preserve the order too, but at the cost of putting every
+ordinary send behind a provider that may be wedged; refusing keeps the failure where
+the user can see and answer it.
+
 ### 3.8 Lifting a barrier is a release event
 
 An outgoing message holds a `Reserved` slot in its buffer's queue (§5.1). While it
@@ -625,6 +642,15 @@ Details that follow from the shape:
   first, and the user's own message then lands below the replies that arrived while it
   was translating: the exact reordering the reservation exists to prevent. If no
   reflection ever comes, the queue's expiry clears the barrier like any other stall.
+- **A record and its reservation die together.** The record is what lets a reflection
+  find the slot reserved when the user pressed Enter, so dropping one — at the 32-record
+  cap, or on its TTL — without releasing the reservation leaves a barrier nothing can
+  ever fill. The buffer then stalls until the queue's expiry and the replies that
+  finished translating meanwhile are released AHEAD of the message they were replies to.
+  Well short of 32 messages, too: one translation long enough to split files a record
+  per wire line, and several sends can resolve in a burst before any reflection returns.
+  A dropped id is released only when no surviving record still shares it, since the
+  other chunks of the same message may yet arrive.
 - **Records die with the connection.** A drop clears them alongside the queues —
   walked separately, because a record outlives the queue whenever the reservation was
   the only thing in it, which is the ordinary case. Left behind, a reconnect inside
