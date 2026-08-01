@@ -160,7 +160,7 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
             // setter has no sane spelling for it.
             let val = match parts[1] {
                 "enabled" => config.translate.enabled.to_string(),
-                "target_lang" => config.translate.target_lang.clone(),
+                "my_lang" => config.translate.my_lang.clone(),
                 "show_original_in" => config.translate.show_original_in.to_string(),
                 "show_original_out" => config.translate.show_original_out.to_string(),
                 "timeout_ms" => config.translate.timeout_ms.to_string(),
@@ -455,11 +455,11 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
         },
         "translate" => match parts[1] {
             "enabled" => config.translate.enabled = parse_bool(raw)?,
-            "target_lang" => {
+            "my_lang" => {
                 if raw.trim().is_empty() {
-                    return Err("translate.target_lang must not be empty".to_string());
+                    return Err("translate.my_lang must not be empty".to_string());
                 }
-                config.translate.target_lang = raw.trim().to_string();
+                config.translate.my_lang = raw.trim().to_lowercase();
             }
             "show_original_in" => config.translate.show_original_in = parse_bool(raw)?,
             "show_original_out" => config.translate.show_original_out = parse_bool(raw)?,

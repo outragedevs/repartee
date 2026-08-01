@@ -40,13 +40,20 @@ fn usage(app: &mut App) {
     for line in [
         "Usage: /translate list",
         "       /translate status",
-        "       /translate addin  <#channel|nick> [source-lang]",
+        "       /translate addin  <#channel|nick> [lang] [my-lang]",
         "       /translate delin  <#channel|nick>",
-        "       /translate addout <#channel|nick> [source-lang]",
+        "       /translate addout <#channel|nick> <lang> [my-lang]",
         "       /translate delout <#channel|nick>",
     ] {
         add_local_event(app, line);
     }
+    add_local_event(
+        app,
+        &format!(
+            "{C_DIM}<lang> is the language the CHANNEL speaks; [my-lang] overrides \
+             translate.my_lang for this buffer only.{C_RST}"
+        ),
+    );
 }
 
 /// Resolve a user-typed target to a buffer id on the active connection.
@@ -70,7 +77,8 @@ fn add(app: &mut App, args: &[String], dir: Dir) {
         );
         return;
     };
-    let source_lang = args.get(1).map(|s| s.trim().to_lowercase());
+    let given_lang = args.get(1).map(|s| s.trim().to_lowercase());
+    let given_my_lang = args.get(2).map(|s| s.trim().to_lowercase());
     let Some((conn_id, buffer_id)) = resolve_target(app, target) else {
         return;
     };
@@ -100,6 +108,34 @@ fn add(app: &mut App, args: &[String], dir: Dir) {
         return;
     }
 
+    let given_lang = given_lang.filter(|l| !l.is_empty());
+    let given_my_lang = given_my_lang.filter(|l| !l.is_empty());
+
+    // Outgoing needs to know which language to WRITE in, and that cannot be
+    // detected — there is nothing to detect it from. Refuse rather than
+    // enable a direction that could only ever fall through untranslated.
+    // Incoming is different: with no language the broker detects the
+    // source, which is the common case.
+    if dir == Dir::Out
+        && given_lang.is_none()
+        && app
+            .config
+            .translate
+            .buffers
+            .get(&buffer_id)
+            .and_then(|c| c.lang.as_ref())
+            .is_none()
+    {
+        add_local_event(
+            app,
+            &format!(
+                "{C_ERR}translate: addout needs the language {target} is written \
+                 in — e.g. /translate addout {target} de{C_RST}"
+            ),
+        );
+        return;
+    }
+
     let entry = app
         .config
         .translate
@@ -110,8 +146,11 @@ fn add(app: &mut App, args: &[String], dir: Dir) {
         Dir::In => entry.incoming = true,
         Dir::Out => entry.outgoing = true,
     }
-    if let Some(lang) = source_lang.filter(|l| !l.is_empty()) {
-        entry.source_lang = Some(lang);
+    if let Some(lang) = given_lang {
+        entry.lang = Some(lang);
+    }
+    if let Some(mine) = given_my_lang {
+        entry.my_lang = Some(mine);
     }
     app.sync_translate_from_config();
 
@@ -171,8 +210,8 @@ fn list(app: &mut App) {
     add_local_event(
         app,
         &format!(
-            "translate: target={} master={}",
-            app.config.translate.target_lang,
+            "translate: my_lang={} master={}",
+            app.config.translate.my_lang,
             if app.config.translate.enabled {
                 "on"
             } else {
@@ -180,6 +219,7 @@ fn list(app: &mut App) {
             }
         ),
     );
+    let my_lang = app.config.translate.my_lang.clone();
     let mut rows: Vec<(String, TranslateBufferConfig)> = app
         .config
         .translate
@@ -189,21 +229,31 @@ fn list(app: &mut App) {
         .collect();
     rows.sort_by(|a, b| a.0.cmp(&b.0));
     for (buffer_id, cfg) in rows {
+        // Print the actual arrows per direction rather than a bare language
+        // list. Which language is the source and which the target is exactly
+        // what is easy to get backwards, so it should be readable at a
+        // glance instead of inferred.
+        let pair = crate::translate::resolve_langs(Some(&cfg), &my_lang);
         let mut dirs = Vec::new();
         if cfg.incoming {
-            dirs.push("in");
+            let (src, dst) = pair.incoming();
+            dirs.push(format!(
+                "in: {}→{dst}",
+                src.as_deref().unwrap_or("auto")
+            ));
         }
         if cfg.outgoing {
-            dirs.push("out");
+            match pair.outgoing() {
+                Some((src, dst)) => {
+                    dirs.push(format!("out: {}→{dst}", src.as_deref().unwrap_or("auto")));
+                }
+                // Reachable if the language was removed from config.toml by
+                // hand after `addout` set it. Say so rather than printing a
+                // direction that cannot run.
+                None => dirs.push("out: NO LANGUAGE SET".to_string()),
+            }
         }
-        let from = cfg
-            .source_lang
-            .as_deref()
-            .map_or_else(|| "auto".to_string(), std::string::ToString::to_string);
-        add_local_event(
-            app,
-            &format!("  {buffer_id}  [{}]  from={from}", dirs.join(",")),
-        );
+        add_local_event(app, &format!("  {buffer_id}  {}", dirs.join("   ")));
     }
 }
 
@@ -270,7 +320,7 @@ mod tests {
         let cfg = &app.config.translate.buffers["test/#dupa"];
         assert!(cfg.incoming);
         assert!(!cfg.outgoing, "addin must not enable the outgoing side");
-        assert_eq!(cfg.source_lang.as_deref(), Some("de"));
+        assert_eq!(cfg.lang.as_deref(), Some("de"));
         assert!(
             app.state.translate_buffers.contains_key("test/#dupa"),
             "the state mirror is synced immediately"
@@ -280,18 +330,45 @@ mod tests {
     #[test]
     fn addout_enables_outgoing_only() {
         let mut app = app_with_channel();
-        cmd_translate(&mut app, &args(&["addout", "#dupa"]));
+        cmd_translate(&mut app, &args(&["addout", "#dupa", "de"]));
         let cfg = &app.config.translate.buffers["test/#dupa"];
         assert!(cfg.outgoing);
         assert!(!cfg.incoming);
-        assert_eq!(cfg.source_lang, None, "no language means autodetect");
+        assert_eq!(cfg.lang.as_deref(), Some("de"));
+    }
+
+    #[test]
+    fn addout_without_a_language_is_refused() {
+        let mut app = app_with_channel();
+        cmd_translate(&mut app, &args(&["addout", "#dupa"]));
+        assert!(
+            last_event(&app).contains("needs the language"),
+            "got: {}",
+            last_event(&app)
+        );
+        assert!(
+            !app.config.translate.buffers.contains_key("test/#dupa"),
+            "a direction that could never work must not be enabled"
+        );
+    }
+
+    #[test]
+    fn addout_reuses_the_language_addin_already_set() {
+        // The language belongs to the buffer, not to a direction, so naming
+        // it once is enough.
+        let mut app = app_with_channel();
+        cmd_translate(&mut app, &args(&["addin", "#dupa", "de"]));
+        cmd_translate(&mut app, &args(&["addout", "#dupa"]));
+        let cfg = &app.config.translate.buffers["test/#dupa"];
+        assert!(cfg.incoming && cfg.outgoing);
+        assert_eq!(cfg.lang.as_deref(), Some("de"));
     }
 
     #[test]
     fn delin_leaves_the_outgoing_side_alone() {
         let mut app = app_with_channel();
         cmd_translate(&mut app, &args(&["addin", "#dupa"]));
-        cmd_translate(&mut app, &args(&["addout", "#dupa"]));
+        cmd_translate(&mut app, &args(&["addout", "#dupa", "de"]));
         cmd_translate(&mut app, &args(&["delin", "#dupa"]));
         let cfg = &app.config.translate.buffers["test/#dupa"];
         assert!(!cfg.incoming);
@@ -343,8 +420,12 @@ mod tests {
     }
 
     #[test]
-    fn list_shows_the_configured_directions_and_language() {
+    fn list_spells_out_the_direction_of_each_translation() {
+        // Which language is source and which is target is exactly what is
+        // easy to get backwards, so `list` prints arrows rather than a bare
+        // language and leaves the reader to infer.
         let mut app = app_with_channel();
+        app.config.translate.my_lang = "pl".to_string();
         cmd_translate(&mut app, &args(&["addin", "#dupa", "de"]));
         cmd_translate(&mut app, &args(&["addout", "#dupa"]));
         cmd_translate(&mut app, &args(&["list"]));
@@ -356,8 +437,48 @@ mod tests {
         assert!(
             texts
                 .iter()
-                .any(|t| t.contains("[in,out]") && t.contains("from=de")),
+                .any(|t| t.contains("in: de→pl") && t.contains("out: pl→de")),
             "list output: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn list_reports_an_outgoing_direction_that_cannot_run() {
+        // Reachable by editing config.toml by hand. Printing a direction
+        // that will never translate anything, with no hint, would be worse.
+        let mut app = app_with_channel();
+        app.config.translate.buffers.insert(
+            "test/#dupa".to_string(),
+            crate::config::TranslateBufferConfig {
+                incoming: false,
+                outgoing: true,
+                lang: None,
+                my_lang: None,
+            },
+        );
+        cmd_translate(&mut app, &args(&["list"]));
+        assert!(
+            last_event(&app).contains("NO LANGUAGE SET"),
+            "got: {}",
+            last_event(&app)
+        );
+    }
+
+    #[test]
+    fn a_third_argument_overrides_our_language_for_that_buffer() {
+        let mut app = app_with_channel();
+        app.config.translate.my_lang = "pl".to_string();
+        cmd_translate(&mut app, &args(&["addin", "#dupa", "zh", "en"]));
+        let cfg = &app.config.translate.buffers["test/#dupa"];
+        assert_eq!(cfg.lang.as_deref(), Some("zh"));
+        assert_eq!(
+            cfg.my_lang.as_deref(),
+            Some("en"),
+            "this buffer is read in English while the rest stay Polish"
+        );
+        assert_eq!(
+            app.config.translate.my_lang, "pl",
+            "the global default is untouched"
         );
     }
 

@@ -119,8 +119,8 @@ pub struct AppState {
     pub translate_active: bool,
     /// Mirror of `config.translate.buffers`, keyed by buffer id.
     pub translate_buffers: HashMap<String, crate::config::TranslateBufferConfig>,
-    /// Mirror of `config.translate.target_lang`.
-    pub translate_target_lang: String,
+    /// Mirror of `config.translate.my_lang`.
+    pub translate_my_lang: String,
     /// Mirror of `config.translate.show_original_in`. Captured per line at
     /// dispatch, so a mid-flight `/set` cannot make a queued line render
     /// differently from how it was queued.

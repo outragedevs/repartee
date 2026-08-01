@@ -705,8 +705,8 @@ impl App {
         state.translate_active = config.translate.enabled && translate_backend.is_some();
         state.translate_buffers.clone_from(&config.translate.buffers);
         state
-            .translate_target_lang
-            .clone_from(&config.translate.target_lang);
+            .translate_my_lang
+            .clone_from(&config.translate.my_lang);
         state.translate_show_original_in = config.translate.show_original_in;
         state.translate_incoming_tx = Some(translate_incoming_tx);
 

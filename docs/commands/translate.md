@@ -9,9 +9,9 @@ description: Translate a channel or query in near-real time
 
     /translate list
     /translate status
-    /translate addin  <#channel|nick> [source-lang]
+    /translate addin  <#channel|nick> [lang] [my-lang]
     /translate delin  <#channel|nick>
-    /translate addout <#channel|nick> [source-lang]
+    /translate addout <#channel|nick> <lang> [my-lang]
     /translate delout <#channel|nick>
 
 Alias: `/tr`
@@ -27,13 +27,39 @@ say to you; `addout` translates what you send. They are independent, so
 reading a German channel in Polish while still writing German yourself is
 just `addin` without `addout`.
 
-`source-lang` is a hint. Leave it off and the language is detected
-automatically; give it when a channel is reliably one language and you would
-rather not pay for detection.
-
 Nothing happens until the master switch is on:
 
     /set translate.enabled true
+
+## Languages
+
+A buffer has a **language pair**, not a per-direction setting:
+
+- `<lang>` — the language the channel or query is written in
+- `translate.my_lang` — the language *you* read and write
+
+The two directions swap them:
+
+| direction | from | into |
+|---|---|---|
+| incoming | the channel's `lang` | your `my_lang` |
+| outgoing | your `my_lang` | the channel's `lang` |
+
+So the language you write *into* is per channel, which is what makes a German
+and a Spanish channel work at the same time. `/translate list` prints the
+arrows for each direction so you can check at a glance:
+
+    test/#german  in: de→pl   out: pl→de
+    test/#somos   in: es→pl   out: pl→es
+
+`[my-lang]` overrides `translate.my_lang` for one buffer only — useful when
+machine translation into your own language is poor for a particular source
+and English reads better.
+
+For **incoming**, `<lang>` may be left off and the language is detected
+automatically. For **outgoing** it is required and `addout` refuses without
+it: there is nothing to detect which language to *write* in from, so guessing
+is the one thing that must not happen.
 
 ## What you see
 
@@ -90,7 +116,7 @@ translated, the request carries:
 
 - the line itself, in full
 - the nick who said it, and the channel or query name
-- the network name, and the source and target languages
+- the network name, and the two languages for that direction
 - **the channel's nick list**
 
 The nick list travels because only your client knows it, and the translator
@@ -127,10 +153,13 @@ precedence on buffers where both are enabled.
 ## Examples
 
     /set translate.enabled true
-    /set translate.target_lang pl
+    /set translate.my_lang pl
 
-    /translate addin #german de
-    /translate addout #german de
+    /translate addin  #german de     # read it in Polish
+    /translate addout #german        # write it in German (lang already known)
+    /translate addin  #somos  es     # a second channel, a different language
+    /translate addout #somos  es
+    /translate addin  #cn zh en      # read this one in English, not Polish
     /translate list
     /translate status
     /translate delout #german
@@ -138,7 +167,7 @@ precedence on buffers where both are enabled.
 ## Configuration
 
     /set translate.enabled           false
-    /set translate.target_lang       en
+    /set translate.my_lang           en
     /set translate.show_original_in  true
     /set translate.show_original_out true
     /set translate.timeout_ms        5000

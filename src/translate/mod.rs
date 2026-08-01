@@ -120,6 +120,58 @@ impl TranslateOutcome {
     }
 }
 
+/// The two languages in play for one buffer.
+///
+/// A buffer has a language PAIR, and the two directions swap it. Modelling
+/// it as a pair — resolved once, in one place — is deliberate: treating
+/// `source` and `target` as per-direction settings read straight off the
+/// config is exactly how the outgoing direction ended up inverted during
+/// development, translating our own text as though it were the channel's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LangPair {
+    /// What this channel or query speaks. `None` means "let the broker
+    /// detect it", which is only meaningful for incoming.
+    pub buffer: Option<String>,
+    /// What we read and write here.
+    pub mine: String,
+}
+
+impl LangPair {
+    /// Languages for an incoming line: out of the buffer's, into ours.
+    #[must_use]
+    pub fn incoming(&self) -> (Option<String>, String) {
+        (self.buffer.clone(), self.mine.clone())
+    }
+
+    /// Languages for an outgoing line: out of ours, into the buffer's.
+    ///
+    /// `None` when the buffer has no language set. A target cannot be
+    /// autodetected — there is nothing to detect which language to WRITE in
+    /// from — so the caller must refuse rather than guess.
+    #[must_use]
+    pub fn outgoing(&self) -> Option<(Option<String>, String)> {
+        let target = self.buffer.clone()?;
+        Some((Some(self.mine.clone()), target))
+    }
+}
+
+/// Resolve the language pair for a buffer.
+///
+/// The single place the per-buffer and global settings are combined. Both
+/// dispatch paths go through it, so they cannot drift apart.
+#[must_use]
+pub fn resolve_langs(
+    buffer_cfg: Option<&crate::config::TranslateBufferConfig>,
+    global_my_lang: &str,
+) -> LangPair {
+    LangPair {
+        buffer: buffer_cfg.and_then(|c| c.lang.clone()),
+        mine: buffer_cfg
+            .and_then(|c| c.my_lang.clone())
+            .unwrap_or_else(|| global_my_lang.to_string()),
+    }
+}
+
 /// Build the displayed line and, when the original is appended, the byte
 /// offset where its ` [original]` suffix starts.
 ///
@@ -147,6 +199,75 @@ pub fn compose_display(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn buf_cfg(
+        lang: Option<&str>,
+        my_lang: Option<&str>,
+    ) -> crate::config::TranslateBufferConfig {
+        crate::config::TranslateBufferConfig {
+            incoming: true,
+            outgoing: true,
+            lang: lang.map(str::to_string),
+            my_lang: my_lang.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn resolve_falls_back_to_the_global_language() {
+        let pair = resolve_langs(Some(&buf_cfg(Some("de"), None)), "pl");
+        assert_eq!(pair.buffer.as_deref(), Some("de"));
+        assert_eq!(pair.mine, "pl");
+    }
+
+    #[test]
+    fn resolve_honours_a_per_buffer_override() {
+        // Reading one channel in a different language than the rest.
+        let pair = resolve_langs(Some(&buf_cfg(Some("zh"), Some("en"))), "pl");
+        assert_eq!(pair.buffer.as_deref(), Some("zh"));
+        assert_eq!(pair.mine, "en", "the buffer override wins over the global");
+    }
+
+    #[test]
+    fn resolve_with_no_buffer_config_is_all_defaults() {
+        let pair = resolve_langs(None, "pl");
+        assert_eq!(pair.buffer, None, "unknown buffer language means autodetect");
+        assert_eq!(pair.mine, "pl");
+    }
+
+    #[test]
+    fn incoming_goes_from_the_buffers_language_into_ours() {
+        let pair = resolve_langs(Some(&buf_cfg(Some("de"), None)), "pl");
+        assert_eq!(pair.incoming(), (Some("de".to_string()), "pl".to_string()));
+    }
+
+    #[test]
+    fn outgoing_goes_from_ours_into_the_buffers_language() {
+        // The exact inversion this pair type exists to prevent: outgoing is
+        // the MIRROR of incoming, not a copy of it.
+        let pair = resolve_langs(Some(&buf_cfg(Some("de"), None)), "pl");
+        assert_eq!(
+            pair.outgoing(),
+            Some((Some("pl".to_string()), "de".to_string()))
+        );
+    }
+
+    #[test]
+    fn the_two_directions_are_exact_mirrors() {
+        let pair = resolve_langs(Some(&buf_cfg(Some("de"), Some("en"))), "pl");
+        let (in_src, in_dst) = pair.incoming();
+        let (out_src, out_dst) = pair.outgoing().expect("buffer language is set");
+        assert_eq!(in_src, Some(out_dst), "incoming source == outgoing target");
+        assert_eq!(Some(in_dst), out_src, "incoming target == outgoing source");
+    }
+
+    #[test]
+    fn outgoing_is_impossible_without_the_buffers_language() {
+        // A target cannot be autodetected — there is nothing to detect
+        // which language to WRITE in from.
+        let pair = resolve_langs(Some(&buf_cfg(None, None)), "pl");
+        assert_eq!(pair.incoming(), (None, "pl".to_string()), "incoming still works");
+        assert_eq!(pair.outgoing(), None);
+    }
 
     #[test]
     fn compose_appends_original_in_brackets_when_enabled() {

@@ -570,8 +570,13 @@ pub struct TranslateConfig {
     /// Master switch — when false nothing is translated in either
     /// direction, even for buffers with per-buffer flags set.
     pub enabled: bool,
-    /// Language every line is translated INTO.
-    pub target_lang: String,
+    /// The language YOU read and write, unless a buffer overrides it.
+    ///
+    /// Named `my_lang` rather than `target_lang` deliberately: "target" is
+    /// ambiguous about WHOSE language it means, and reading it as "the
+    /// language to translate into" is what produced an inverted outgoing
+    /// direction during development.
+    pub my_lang: String,
     /// Append ` [original]` to incoming translated lines.
     pub show_original_in: bool,
     /// Append ` [original]` to the local echo of outgoing translated lines.
@@ -597,16 +602,40 @@ pub struct TranslateConfig {
 pub struct TranslateBufferConfig {
     pub incoming: bool,
     pub outgoing: bool,
-    /// Source language hint. `None` lets the broker autodetect.
+    /// The language spoken in THIS channel or query.
+    ///
+    /// A buffer has a language PAIR, not a per-direction setting: this one
+    /// and ours. The directions swap them —
+    ///
+    /// | direction | source | target |
+    /// |---|---|---|
+    /// | incoming | `lang` | `my_lang` |
+    /// | outgoing | `my_lang` | `lang` |
+    ///
+    /// — which is why both call sites resolve the pair through the single
+    /// [`crate::translate::resolve_langs`] rather than reading these fields
+    /// directly. Reading them per direction is exactly how the outgoing
+    /// direction ended up inverted during development.
+    ///
+    /// `None` is allowed for incoming, where it means "let the broker detect
+    /// it". Outgoing cannot autodetect a TARGET — there is nothing to detect
+    /// which language to write in from — so it requires this to be set.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_lang: Option<String>,
+    pub lang: Option<String>,
+    /// Per-buffer override of [`TranslateConfig::my_lang`].
+    ///
+    /// For reading one channel in a different language than the rest — say
+    /// the machine translation into your own language is poor for that
+    /// source, and English reads better.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub my_lang: Option<String>,
 }
 
 impl Default for TranslateConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            target_lang: "en".to_string(),
+            my_lang: "en".to_string(),
             show_original_in: true,
             show_original_out: true,
             timeout_ms: 5000,

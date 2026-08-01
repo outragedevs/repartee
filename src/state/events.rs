@@ -27,7 +27,7 @@ impl AppState {
             translate_queues: std::collections::HashMap::new(),
             translate_active: false,
             translate_buffers: std::collections::HashMap::new(),
-            translate_target_lang: "en".to_string(),
+            translate_my_lang: "en".to_string(),
             translate_show_original_in: true,
             log_exclude_types: Vec::new(),
             scrollback_limit: 2000,
@@ -550,10 +550,12 @@ impl AppState {
             .unwrap_or_default();
         let target = buffer.name.clone();
         let known_nicks: Vec<String> = buffer.users.keys().cloned().collect();
-        let source_lang = self
-            .translate_buffers
-            .get(buffer_id)
-            .and_then(|c| c.source_lang.clone());
+        // One resolver for both directions — see `resolve_langs`.
+        let (source_lang, target_lang) = crate::translate::resolve_langs(
+            self.translate_buffers.get(buffer_id),
+            &self.translate_my_lang,
+        )
+        .incoming();
 
         let id = message.id;
         let original = message.text.clone();
@@ -565,7 +567,7 @@ impl AppState {
             nick: message.nick.clone().unwrap_or_default(),
             text: original.clone(),
             source_lang,
-            target_lang: self.translate_target_lang.clone(),
+            target_lang,
             known_nicks,
         };
 
@@ -2346,13 +2348,14 @@ mod translate_gate_tests {
         let (tx, rx) = mpsc::channel(16);
         state.translate_incoming_tx = Some(tx);
         state.translate_active = true;
-        state.translate_target_lang = "pl".to_string();
+        state.translate_my_lang = "pl".to_string();
         state.translate_buffers.insert(
             BUF.to_string(),
             TranslateBufferConfig {
                 incoming: true,
                 outgoing: false,
-                source_lang: Some("de".to_string()),
+                lang: Some("de".to_string()),
+                my_lang: None,
             },
         );
         (state, rx)
@@ -2375,6 +2378,53 @@ mod translate_gate_tests {
         assert_eq!(dispatched.req.target_lang, "pl");
         assert_eq!(dispatched.req.source_lang.as_deref(), Some("de"));
         assert_eq!(state.translate_queues[BUF].pending_len(), 1);
+    }
+
+    #[test]
+    fn an_incoming_request_carries_the_channels_language_as_its_source() {
+        let (mut state, mut rx) = state_with_translation();
+        let msg = make_test_message(&mut state, "hola que tal");
+        state.add_message_with_activity(BUF, msg, ActivityLevel::Activity);
+        let req = rx.try_recv().expect("dispatched").req;
+        assert_eq!(
+            req.source_lang.as_deref(),
+            Some("de"),
+            "incoming starts in the CHANNEL's language"
+        );
+        assert_eq!(req.target_lang, "pl", "and lands in ours");
+    }
+
+    #[test]
+    fn a_per_buffer_override_wins_for_incoming() {
+        let (mut state, mut rx) = state_with_translation();
+        state
+            .translate_buffers
+            .get_mut(BUF)
+            .expect("configured above")
+            .my_lang = Some("en".to_string());
+        let msg = make_test_message(&mut state, "hola que tal");
+        state.add_message_with_activity(BUF, msg, ActivityLevel::Activity);
+        let req = rx.try_recv().expect("dispatched").req;
+        assert_eq!(req.source_lang.as_deref(), Some("de"));
+        assert_eq!(
+            req.target_lang, "en",
+            "this buffer is read in English while the global stays Polish"
+        );
+    }
+
+    #[test]
+    fn incoming_without_a_channel_language_lets_the_broker_detect_it() {
+        let (mut state, mut rx) = state_with_translation();
+        state
+            .translate_buffers
+            .get_mut(BUF)
+            .expect("configured above")
+            .lang = None;
+        let msg = make_test_message(&mut state, "hola que tal");
+        state.add_message_with_activity(BUF, msg, ActivityLevel::Activity);
+        let req = rx.try_recv().expect("dispatched").req;
+        assert_eq!(req.source_lang, None, "autodetect is valid for incoming");
+        assert_eq!(req.target_lang, "pl");
     }
 
     #[test]
@@ -2572,7 +2622,8 @@ mod translate_gate_tests {
             TranslateBufferConfig {
                 incoming: true,
                 outgoing: false,
-                source_lang: None,
+                lang: None,
+                my_lang: None,
             },
         );
         // Fill the single slot, then send one more.

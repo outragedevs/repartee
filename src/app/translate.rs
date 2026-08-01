@@ -499,12 +499,24 @@ impl crate::app::App {
         } else {
             None
         };
-        let source_lang = self
-            .config
-            .translate
-            .buffers
-            .get(buffer_id)
-            .and_then(|c| c.source_lang.clone());
+        // Same resolver as the incoming path, asked for the other
+        // direction — the pair is never read per-direction off the config.
+        // `outgoing()` returns None when the buffer has no language, because
+        // a TARGET cannot be autodetected: there is nothing to detect which
+        // language to write in from. Refusing lets the caller fall through
+        // to sending untranslated rather than guessing.
+        let Some((source_lang, target_lang)) = crate::translate::resolve_langs(
+            self.config.translate.buffers.get(buffer_id),
+            &self.config.translate.my_lang,
+        )
+        .outgoing() else {
+            tracing::warn!(
+                buffer_id,
+                "translate: outgoing needs the buffer's language; \
+                 set it with /translate addout <target> <lang>"
+            );
+            return None;
+        };
 
         let id = self.state.next_message_id();
         Some(PendingOutgoingTranslate {
@@ -521,7 +533,7 @@ impl crate::app::App {
                 nick: captured_nick.clone(),
                 text: text.to_string(),
                 source_lang,
-                target_lang: self.config.translate.target_lang.clone(),
+                target_lang,
                 known_nicks,
             },
             nick: captured_nick,
@@ -641,8 +653,8 @@ impl crate::app::App {
             .translate_buffers
             .clone_from(&self.config.translate.buffers);
         self.state
-            .translate_target_lang
-            .clone_from(&self.config.translate.target_lang);
+            .translate_my_lang
+            .clone_from(&self.config.translate.my_lang);
         self.state.translate_show_original_in = self.config.translate.show_original_in;
     }
 
@@ -931,6 +943,111 @@ mod app_tests {
         );
     }
 
+    fn set_buffer_langs(app: &mut crate::app::App, lang: Option<&str>, my_lang: Option<&str>) {
+        app.config.translate.buffers.insert(
+            BUF.to_string(),
+            crate::config::TranslateBufferConfig {
+                incoming: true,
+                outgoing: true,
+                lang: lang.map(str::to_string),
+                my_lang: my_lang.map(str::to_string),
+            },
+        );
+    }
+
+    fn build(app: &mut crate::app::App) -> Option<PendingOutgoingTranslate> {
+        app.build_outgoing_translate(
+            "test",
+            BUF,
+            "#dupa",
+            &BufferType::Channel,
+            "me",
+            "moje zdanie",
+        )
+    }
+
+    #[test]
+    fn outgoing_translates_out_of_our_language_into_the_buffers() {
+        // THE regression. These were inverted: a message typed in our own
+        // language went to the broker labelled as the CHANNEL's language and
+        // asked to become ours — a no-op at best, garbage at worst. It also
+        // made writing to two channels in two languages impossible, since
+        // the target came from a single global setting.
+        let mut app = app_with_buffer();
+        app.config.translate.my_lang = "pl".to_string();
+        set_buffer_langs(&mut app, Some("de"), None);
+
+        let pending = build(&mut app).expect("a request is built");
+        assert_eq!(
+            pending.req.source_lang.as_deref(),
+            Some("pl"),
+            "outgoing starts in OUR language"
+        );
+        assert_eq!(
+            pending.req.target_lang, "de",
+            "and lands in the language this buffer speaks"
+        );
+    }
+
+    #[test]
+    fn two_buffers_can_have_two_different_outgoing_targets() {
+        // The user's actual objection: one global target_lang made this
+        // impossible.
+        let mut app = app_with_buffer();
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Channel, "#otro"));
+        app.config.translate.my_lang = "pl".to_string();
+        set_buffer_langs(&mut app, Some("de"), None);
+        app.config.translate.buffers.insert(
+            "test/#otro".to_string(),
+            crate::config::TranslateBufferConfig {
+                incoming: true,
+                outgoing: true,
+                lang: Some("es".to_string()),
+                my_lang: None,
+            },
+        );
+
+        let de = build(&mut app).expect("german buffer");
+        let es = app
+            .build_outgoing_translate(
+                "test",
+                "test/#otro",
+                "#otro",
+                &BufferType::Channel,
+                "me",
+                "moje zdanie",
+            )
+            .expect("spanish buffer");
+        assert_eq!(de.req.target_lang, "de");
+        assert_eq!(es.req.target_lang, "es");
+        assert_eq!(de.req.source_lang.as_deref(), Some("pl"));
+        assert_eq!(es.req.source_lang.as_deref(), Some("pl"));
+    }
+
+    #[test]
+    fn a_per_buffer_override_wins_for_outgoing_too() {
+        let mut app = app_with_buffer();
+        app.config.translate.my_lang = "pl".to_string();
+        set_buffer_langs(&mut app, Some("zh"), Some("en"));
+        let pending = build(&mut app).expect("a request is built");
+        assert_eq!(
+            pending.req.source_lang.as_deref(),
+            Some("en"),
+            "we write this buffer in English, not the global Polish"
+        );
+        assert_eq!(pending.req.target_lang, "zh");
+    }
+
+    #[test]
+    fn outgoing_is_refused_when_the_buffer_has_no_language() {
+        // There is nothing to detect a WRITE language from, so building a
+        // request could only ever produce a wrong target.
+        let mut app = app_with_buffer();
+        set_buffer_langs(&mut app, None, None);
+        assert!(build(&mut app).is_none());
+    }
+
     #[test]
     fn build_outgoing_translate_refuses_a_possibly_e2e_target() {
         // The caller already gates, but this is where cleartext becomes a
@@ -1214,7 +1331,8 @@ mod ordering_integration {
             TranslateBufferConfig {
                 incoming: true,
                 outgoing: false,
-                source_lang: None,
+                lang: None,
+                my_lang: None,
             },
         );
 

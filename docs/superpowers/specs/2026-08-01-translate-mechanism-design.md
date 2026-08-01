@@ -74,7 +74,7 @@ pub struct TranslateRequest {
     pub nick: String,                // speaker; ourselves when Outgoing
     pub text: String,                // exactly one line, raw, unmasked
     pub source_lang: Option<String>, // None = broker autodetects
-    pub target_lang: String,
+    pub target_lang: String,         // resolved per direction — see §2.2
     pub known_nicks: Vec<String>,    // channel nicklist, for masking behind the seam
 }
 
@@ -110,6 +110,30 @@ original with **no marker**.
 Every other reason is a genuine gap and renders with a dim marker. The rule from the
 research architecture — *a visible hole always beats an invisible lie* — must hold
 when the mechanism fails, not only when a model does.
+
+### 2.2 Languages are a per-buffer PAIR, not per-direction settings
+
+Each buffer has a language pair: the one the channel speaks (`lang`) and the
+one we read and write (`my_lang`, global with a per-buffer override). The two
+directions **swap** it:
+
+| direction | source | target |
+|---|---|---|
+| incoming | `lang` | `my_lang` |
+| outgoing | `my_lang` | `lang` |
+
+This is stated explicitly because the first implementation got it wrong.
+Modelling `source_lang`/`target_lang` as settings read straight off the config
+produced an outgoing direction that told the broker our own text was already
+in the channel's language and asked it to produce ours — a no-op at best. It
+also made a single global "target language" the write target for every
+channel, so a German and a Spanish channel could not both work.
+
+Both dispatch paths therefore resolve the pair through one function,
+`translate::resolve_langs`, and ask it for a direction rather than reading the
+fields. `LangPair::outgoing()` returns `None` when the buffer has no language:
+a target cannot be autodetected, so `addout` requires one and refuses without
+it.
 
 ---
 
@@ -295,8 +319,8 @@ Command names deliberately mirror the user's existing WeeChat and irssi scripts.
 
 ```
 /translate list
-/translate addin  <#channel|nick> [lang]     /translate delin  <#channel|nick>
-/translate addout <#channel|nick> [lang]     /translate delout <#channel|nick>
+/translate addin  <#channel|nick> [lang] [my-lang]   /translate delin  <target>
+/translate addout <#channel|nick> <lang> [my-lang]   /translate delout <target>
 /translate status
 ```
 
@@ -307,7 +331,7 @@ is doing its job".
 ```toml
 [translate]
 enabled           = false
-target_lang       = "pl"
+my_lang           = "pl"
 show_original_in  = true
 show_original_out = true
 timeout_ms        = 5000
@@ -316,7 +340,7 @@ max_in_flight     = 4      # research finding: raising concurrency past measured
 max_queue         = 200
 
 [translate.buffers]
-"libera/#dupa" = { incoming = true, outgoing = false, source_lang = "de" }
+"libera/#dupa" = { incoming = true, outgoing = true, lang = "de" }
 ```
 
 ---
