@@ -1378,16 +1378,23 @@ fn handle_privmsg(
     }
     let text: &str = decrypted_owned.as_deref().unwrap_or(text);
 
-    // The plaintext twin of the branch above: our own reflection of a line we
-    // have already rendered locally. Only a translated send with the original
-    // on screen files one of these — the local row carries the ` [original]`
-    // suffix and the wire cannot, so showing the reflection too would put the
-    // same message on screen twice and log the undecorated copy. Matching is
-    // consuming and exact, and a miss simply shows the reflection, which is
-    // what every other send does.
-    if is_own && state.take_own_echo_suppression(&buffer_id, text) {
-        return;
-    }
+    // Our own reflection of a translated send, on a buffer configured to show
+    // the original. The wire carried only the translation, so this is where
+    // the ` [original]` suffix is put back on — the reflection is kept, not
+    // replaced by a locally-written row, because it is the copy carrying the
+    // server's `@time` and `@msgid`, and those are what a later CHATHISTORY
+    // replay dedups against. Matching is consuming and exact; a miss renders
+    // the reflection plain, exactly as every non-translated send does.
+    let decoration = if is_own {
+        state.take_own_echo_decoration(&buffer_id, text)
+    } else {
+        None
+    };
+    let (text, own_origin): (&str, Option<crate::state::buffer::WireOrigin>) = decoration
+        .as_ref()
+        .map_or((text, None), |d| {
+            (d.display.as_str(), Some(d.origin.clone()))
+        });
 
     // Check if this is a CTCP (ACTION or other)
     let is_ctcp = text.starts_with('\x01') && text.ends_with('\x01');
@@ -1569,7 +1576,10 @@ fn handle_privmsg(
                     log_msg_id: None,
                     log_ref_id: None,
                     tags,
-                    wire_origin: None,
+                    // Set only for a decorated reflection of our own send —
+                    // the row shows `translation [original]` while the wire
+                    // carried the translation alone.
+                    wire_origin: own_origin,
                 },
                 activity,
             );
@@ -1742,7 +1752,10 @@ fn handle_privmsg(
         // real message and leave the placeholder showing until restart. Real
         // messages keep their tags.
         tags: if e2e_transient_line { None } else { tags },
-        wire_origin: None,
+        // Set only for a decorated reflection of our own send — the row shows
+        // `translation [original]` while the wire carried the translation
+        // alone, so identity has to come from the wire text.
+        wire_origin: own_origin,
     };
     // Placeholders are delivered transiently (never logged) so they don't
     // persist; the decrypted replay is logged + surfaced under the real @msgid.
@@ -6155,7 +6168,17 @@ mod tests {
         state
             .translate_queues
             .insert("test/frank".to_string(), queue);
-        state.suppress_own_echo("test/frank", "mein satz");
+        state.decorate_own_echo(
+            "test/frank",
+            crate::state::AppState::own_echo_decoration(
+                "mein satz".to_string(),
+                "mein satz [moje zdanie]".to_string(),
+                crate::state::buffer::WireOrigin {
+                    text: "mein satz".to_string(),
+                    suffix_at: Some(9),
+                },
+            ),
+        );
 
         let msg = make_irc_msg(Some("frank!user@host"), Command::NICK("frankie".into()));
         handle_irc_message(&mut state, "test", &msg);
@@ -6171,7 +6194,9 @@ mod tests {
         );
         assert!(!state.translate_queues.contains_key("test/frank"));
         assert!(
-            state.take_own_echo_suppression("test/frankie", "mein satz"),
+            state
+                .take_own_echo_decoration("test/frankie", "mein satz")
+                .is_some(),
             "and a reflection still in transit is still recognised"
         );
         assert_eq!(

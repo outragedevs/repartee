@@ -87,10 +87,11 @@ line reloaded from history renders it undimmed in both: the stored text is
 flat, and the client will not guess which trailing brackets are an original —
 an ordinary message may simply end that way.
 
-Your own translated messages are shown by Repartee itself when the original
-is configured to be visible, even on servers that echo your messages back to
-you. The echo carries only the translation, so it cannot show the original;
-the copy the server sends back is dropped in favour of the one that can.
+On servers that echo your own messages back to you, that echo is still the
+copy you see — Repartee adds the original to it as it arrives, rather than
+printing a second line of its own. The server's copy is the one carrying the
+message's identity, and keeping it is what stops your own messages coming
+back a second time after a reconnect.
 
 ## Ordering
 

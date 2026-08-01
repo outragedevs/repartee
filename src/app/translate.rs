@@ -286,6 +286,7 @@ impl TranslateRuntime {
                 outgoing_rx,
                 Arc::clone(b),
                 deliver_tx.clone(),
+                Arc::clone(&in_flight),
                 Arc::clone(&timeout_ms),
             );
         } else {
@@ -406,6 +407,7 @@ fn spawn_outgoing_worker(
     mut rx: mpsc::Receiver<PendingOutgoingTranslate>,
     backend: SharedBackend,
     deliver: mpsc::Sender<TranslateDeliver>,
+    permits: Arc<Semaphore>,
     timeout_ms: Arc<std::sync::atomic::AtomicU64>,
 ) {
     /// Per-connection queue depth. Deep enough that normal typing never
@@ -426,6 +428,7 @@ fn spawn_outgoing_worker(
                     lane_rx,
                     Arc::clone(&backend),
                     deliver.clone(),
+                    Arc::clone(&permits),
                     Arc::clone(&timeout_ms),
                 );
                 tx
@@ -456,10 +459,23 @@ fn spawn_connection_lane(
     mut rx: mpsc::Receiver<PendingOutgoingTranslate>,
     backend: SharedBackend,
     deliver: mpsc::Sender<TranslateDeliver>,
+    permits: Arc<Semaphore>,
     timeout_ms: Arc<std::sync::atomic::AtomicU64>,
 ) {
     tokio::spawn(async move {
         while let Some(pending) = rx.recv().await {
+            // The SAME limiter the incoming worker uses.
+            // `translate.max_in_flight` is documented as the provider's
+            // concurrency cap, and a per-connection lane that skipped it made
+            // the real ceiling `max_in_flight + one per connected network` —
+            // silently over the limit on exactly the setups that have several
+            // networks open.
+            //
+            // A lane is serial, so this only ever makes it wait; it holds no
+            // other permit while acquiring, so nothing can deadlock behind it.
+            let Ok(_permit) = Arc::clone(&permits).acquire_owned().await else {
+                break;
+            };
             let outcome = translate_isolated(&backend, pending.req, &timeout_ms).await;
             let _ = deliver
                 .send(TranslateDeliver::Outgoing(Box::new(
@@ -529,15 +545,58 @@ impl crate::app::App {
             TranslateDeliver::Incoming { buffer_id, outcome } => {
                 self.resolve_incoming_translation(&buffer_id, outcome);
             }
-            TranslateDeliver::Outgoing(out) => {
+            TranslateDeliver::Outgoing(mut out) => {
+                self.redirect_outgoing_deliver(&mut out);
                 self.send_outgoing_translated(&out);
             }
         }
     }
 
+    /// Point a finished outgoing translation at the query buffer as it is
+    /// NOW, if its peer renamed while the translation was running.
+    ///
+    /// The target name matters more than the id: `buffer_name` is what
+    /// `send_privmsg` addresses, so leaving it stale sends the message to a
+    /// nick its owner no longer answers to — and if somebody else has claimed
+    /// it in the meantime, to a stranger.
+    fn redirect_outgoing_deliver(&self, out: &mut OutgoingTranslateDeliver) {
+        let Some(new_id) = self.state.redirected_buffer_id(&out.buffer_id) else {
+            return;
+        };
+        let new_id = new_id.to_string();
+        let Some(new_name) = self.state.buffers.get(&new_id).map(|b| b.name.clone()) else {
+            // Renamed and then closed. Leave it alone: the existing
+            // buffer-is-gone handling reports it and hands the text back,
+            // which is better than sending to a conversation with no window.
+            return;
+        };
+        tracing::debug!(
+            from = %out.buffer_id,
+            to = %new_id,
+            "translate: following a renamed query for a finished send"
+        );
+        // The echo plan names its own buffer, which is this same query for
+        // every caller that supplies one.
+        if let OutgoingEchoPlan::Gated { buffer_id, .. } = &mut out.echo
+            && *buffer_id == out.buffer_id
+        {
+            buffer_id.clone_from(&new_id);
+        }
+        out.buffer_id = new_id;
+        out.buffer_name = new_name;
+    }
+
     /// Fold an incoming outcome into its buffer's queue and release whatever
     /// that unblocks.
     fn resolve_incoming_translation(&mut self, buffer_id: &str, outcome: TranslateOutcome) {
+        // This line was dispatched under the id the buffer had at the time.
+        // If the peer has since renamed, the queue holding its place moved
+        // with the buffer, and without following it the outcome lands
+        // nowhere and the line it belongs to sits until the timeout.
+        let buffer_id = &self
+            .state
+            .redirected_buffer_id(buffer_id)
+            .map_or_else(|| buffer_id.to_string(), ToString::to_string);
         let ready = {
             let Some(queue) = self.state.translate_queues.get_mut(buffer_id) else {
                 // The queue is gone — the buffer was closed, or a flush
@@ -750,47 +809,34 @@ impl crate::app::App {
             self.abandon_translated_send(out, sent_any, reason);
             return;
         }
-        // The server's echo carries the TRANSLATION and nothing else, so on a
-        // buffer configured to show the original it can never render the
-        // ` [original]` suffix the user asked for — and it is the echo, not
-        // any local row, that would reach SQLite. Only the local echo knows
-        // the original, so when it is wanted the local echo has to be the one
-        // that renders, and the reflection is dropped on arrival.
-        let wants_original =
-            out.show_original && matches!(out.outcome, TranslateOutcome::Translated { .. });
         // Honour the submitting call site's intent. `BufferInput` keeps the
         // rule typed text has always had; `Gated` mirrors
         // `send_gated_message`'s own condition exactly; `None` means the
         // caller (a script) never wanted a plaintext echo and inventing one
-        // would double-render for scripts that print their own output — and
-        // that stays true here: a caller that wants no echo gets none, and
-        // sees the server's undecorated reflection like it always has.
+        // would double-render for scripts that print their own output.
         let should_echo = match &out.echo {
             OutgoingEchoPlan::None => false,
-            OutgoingEchoPlan::BufferInput => {
-                !echo_message_enabled || is_e2e_encrypted || wants_original
-            }
+            OutgoingEchoPlan::BufferInput => !echo_message_enabled || is_e2e_encrypted,
             OutgoingEchoPlan::Gated {
                 even_without_encryption,
                 ..
-            } => {
-                is_e2e_encrypted
-                    || (*even_without_encryption && (!echo_message_enabled || wants_original))
-            }
+            } => is_e2e_encrypted || (*even_without_encryption && !echo_message_enabled),
         };
         if should_echo {
-            // File the reflection BEFORE writing the row, so a server that
-            // answers faster than we finish here still finds the record.
-            // Only when the server will actually send one: an E2E reflection
-            // is ciphertext and already swallowed, and with echo-message off
-            // there is nothing to swallow.
-            if echo_message_enabled && !is_e2e_encrypted {
-                for wire in &wire_lines {
-                    self.state.suppress_own_echo(&out.buffer_id, wire);
-                }
-            }
             self.write_translated_local_echo(out, &plain_echo);
         } else {
+            // The server owns this row. It cannot show the original — the
+            // wire never carried it — so tell the incoming path how to render
+            // the reflection when it arrives, BEFORE releasing the slot, so a
+            // server that answers faster than we finish here finds the record.
+            //
+            // Decorating the reflection rather than writing our own row is
+            // what keeps the server's `@time` and `@msgid` on the message a
+            // CHATHISTORY replay has to dedup against. E2E is excluded
+            // because its reflection is ciphertext and already swallowed.
+            if echo_message_enabled && !is_e2e_encrypted {
+                self.decorate_own_reflection(out, &wire_lines);
+            }
             // The server will echo it back for us, so no local row is
             // written and the reservation has no filler.
             self.state.release_echo_slot(&out.buffer_id, out.echo_id);
@@ -800,6 +846,51 @@ impl crate::app::App {
         // any lines that finished translating behind it are deliverable NOW,
         // and this arm is the one that never comes back to the queue.
         self.drain_translate_queue(&out.buffer_id);
+    }
+
+    /// Tell the incoming path how to render `echo-message`'s reflection of
+    /// this send, so it shows the original the wire could not carry.
+    ///
+    /// Only the LAST wire line is decorated. A translation long enough to
+    /// split is several reflections and one original; repeating it on each
+    /// would say the same thing N times, and putting it on the first would
+    /// place it before text it is the original of.
+    fn decorate_own_reflection(
+        &mut self,
+        out: &OutgoingTranslateDeliver,
+        wire_lines: &[String],
+    ) {
+        let Some(last) = wire_lines.last() else {
+            return;
+        };
+        // The BODY, not the frame: an action reflects as `\x01ACTION …\x01`
+        // and the row it becomes holds only the inner text, so both the
+        // composed display and the recorded wire text are computed on that.
+        let body = crate::app::e2e_gate::translatable_outgoing_body(last).unwrap_or(last);
+        let (display_body, suffix_at) =
+            crate::translate::compose_display(body, &out.original_text, out.show_original);
+        let Some(suffix_at) = suffix_at else {
+            // Nothing to add — `show_original_out` is off, or the translation
+            // came back identical to what was typed. The reflection is
+            // already exactly right.
+            return;
+        };
+        let display = if out.is_action {
+            format!("\x01ACTION {display_body}\x01")
+        } else {
+            display_body
+        };
+        self.state.decorate_own_echo(
+            &out.buffer_id,
+            crate::state::AppState::own_echo_decoration(
+                last.clone(),
+                display,
+                crate::state::buffer::WireOrigin {
+                    text: body.to_string(),
+                    suffix_at: Some(suffix_at),
+                },
+            ),
+        );
     }
 
     /// Report a deferred send that will not happen, and give the user their
@@ -906,8 +997,19 @@ impl crate::app::App {
             );
             return None;
         }
-        let buffer = self.state.buffers.get(buffer_id)?;
-        let known_nicks: Vec<String> = buffer.users.keys().cloned().collect();
+        // An OPEN buffer is not required. A script's `say()` addresses a
+        // target by name and has always been able to reach one the user has
+        // no window on; refusing here because there is no buffer would drop
+        // messages that used to go out, and translation is a setting on the
+        // conversation, not on whether it happens to be on screen. All the
+        // buffer contributes is the nick list — masking behind the seam
+        // simply gets an empty one.
+        let known_nicks: Vec<String> = self
+            .state
+            .buffers
+            .get(buffer_id)
+            .map(|b| b.users.keys().cloned().collect())
+            .unwrap_or_default();
         let network = self
             .state
             .connections
@@ -1962,6 +2064,148 @@ mod app_tests {
         }
     }
 
+    /// An app with a query on `frank` that has since renamed to `frankie`,
+    /// exactly as `rekey_buffer_state` leaves things.
+    fn app_after_a_query_rename() -> crate::app::App {
+        let mut app = app_with_dying_handle(usize::MAX);
+        app.conn_generations.insert("test".to_string(), 1);
+        // `test/frank` is deliberately absent: a rename removes it.
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Query, "frankie"));
+        app.state.rekey_buffer_state("test/frank", "test/frankie");
+        app
+    }
+
+    fn query_rows(app: &crate::app::App) -> Vec<String> {
+        app.state.buffers["test/frankie"]
+            .messages
+            .iter()
+            .map(|m| m.text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_configured_target_translates_without_an_open_buffer() {
+        // A script's `say()` addresses a target by name and has always been
+        // able to reach one the user has no window on. Requiring an open
+        // buffer here dropped those sends outright — and translation is a
+        // property of the conversation, not of whether it is on screen.
+        let mut app = app_with_outgoing(Some("de"));
+        assert!(
+            !app.state.buffers.contains_key("test/#nowhere"),
+            "precondition: no buffer for this target"
+        );
+        set_langs_for(&mut app, "test/#nowhere", Some("de"));
+
+        let pending = app.build_outgoing_translate(&OutgoingRequest {
+            conn_id: "test",
+            buffer_id: "test/#nowhere",
+            buffer_name: "#nowhere",
+            buffer_type: &BufferType::Channel,
+            nick: "me",
+            text: "moje zdanie",
+            is_action: false,
+            echo: OutgoingEchoPlan::None,
+        });
+
+        let pending = pending.expect("a configured target must still be translated");
+        assert_eq!(pending.req.text, "moje zdanie");
+        assert_eq!(pending.req.target_lang, "de");
+        assert!(
+            pending.req.known_nicks.is_empty(),
+            "no buffer means no nick list — which is all the buffer supplied"
+        );
+    }
+
+    #[test]
+    fn an_outgoing_send_follows_a_query_that_renamed_mid_translation() {
+        // The message was addressed to `frank`; by the time the translation
+        // came back they are `frankie`. Sending to the old nick reaches
+        // nobody — or, if somebody else has claimed it, a stranger.
+        let mut app = app_after_a_query_rename();
+        let sender = app.irc_handles["test"].sender().clone();
+        let mut out = outgoing(
+            "moje zdanie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "mein satz".to_string(),
+            },
+            false,
+        );
+        out.buffer_id = "test/frank".to_string();
+        out.buffer_name = "frank".to_string();
+        out.buffer_type = BufferType::Query;
+        out.conn_generation = Some(1);
+
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+
+        let wire: Vec<String> = sender.captured().iter().map(ToString::to_string).collect();
+        assert!(
+            wire.iter().any(|w| w.contains("frankie")),
+            "addressed to who they are now: {wire:?}"
+        );
+        assert!(
+            !wire.iter().any(|w| w.contains("PRIVMSG frank ")),
+            "and never to the nick they left behind: {wire:?}"
+        );
+        assert!(
+            query_rows(&app).iter().any(|t| t == "mein satz"),
+            "the echo lands in the renamed buffer: {:?}",
+            query_rows(&app)
+        );
+    }
+
+    #[test]
+    fn an_incoming_outcome_follows_a_query_that_renamed_mid_translation() {
+        // The queue moved with the buffer, so an outcome addressed to the old
+        // id finds nothing and its line sits until the timeout — rendering a
+        // perfectly good translation as `[untranslated: timeout]`.
+        let mut app = app_with_buffer();
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Query, "frank"));
+        let mut queue = TranslateQueue::new();
+        queue.push_pending(1, "guten tag".to_string(), payload(1, "guten tag"));
+        app.state
+            .translate_queues
+            .insert("test/frank".to_string(), queue);
+
+        // The rename itself: the old buffer goes, the new one arrives.
+        app.state.buffers.shift_remove("test/frank");
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Query, "frankie"));
+        app.state.rekey_buffer_state("test/frank", "test/frankie");
+
+        app.apply_translate_deliver(TranslateDeliver::Incoming {
+            buffer_id: "test/frank".to_string(), // dispatched under the old id
+            outcome: TranslateOutcome::Translated {
+                id: 1,
+                text: "dzien dobry".to_string(),
+            },
+        });
+
+        assert_eq!(
+            query_rows(&app),
+            vec!["dzien dobry".to_string()],
+            "the outcome finds its moved queue: {:?}",
+            query_rows(&app)
+        );
+    }
+
+    #[test]
+    fn a_redirect_never_hijacks_a_fresh_conversation_under_the_old_nick() {
+        // Somebody else takes the abandoned nick and the user opens a query
+        // with THEM. That buffer is live, so it wins: the redirect is about
+        // a different conversation entirely.
+        let mut app = app_after_a_query_rename();
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Query, "frank"));
+        assert_eq!(
+            app.state.redirected_buffer_id("test/frank"),
+            None,
+            "a live buffer under the old id is not a stale reference"
+        );
+    }
+
     #[test]
     fn a_rekeyed_query_keeps_translating_after_a_sync() {
         // `sync_translate_from_config` re-derives the state mirror from the
@@ -2377,13 +2621,23 @@ mod app_tests {
     }
 
     fn set_buffer_langs(app: &mut crate::app::App, lang: Option<&str>, my_lang: Option<&str>) {
+        set_langs_for(app, BUF, lang);
+        if let Some(mine) = my_lang
+            && let Some(cfg) = app.config.translate.buffers.get_mut(BUF)
+        {
+            cfg.my_lang = Some(mine.to_string());
+        }
+    }
+
+    /// Configure one buffer id for translation in both directions.
+    fn set_langs_for(app: &mut crate::app::App, buffer_id: &str, lang: Option<&str>) {
         app.config.translate.buffers.insert(
-            BUF.to_string(),
+            buffer_id.to_string(),
             crate::config::TranslateBufferConfig {
                 incoming: true,
                 outgoing: true,
                 lang: lang.map(str::to_string),
-                my_lang: my_lang.map(str::to_string),
+                my_lang: None,
             },
         );
     }
@@ -2706,8 +2960,9 @@ mod app_tests {
         app
     }
 
-    /// The server reflecting one of our own PRIVMSGs back at us.
-    fn reflect(app: &mut crate::app::App, text: &str) {
+    /// The server reflecting one of our own PRIVMSGs back at us, carrying
+    /// the `@msgid` a real one would.
+    fn reflect(app: &mut crate::app::App, text: &str, msgid: &str) {
         let prefix = irc::proto::Prefix::Nickname(
             "me".to_string(),
             "me".to_string(),
@@ -2717,129 +2972,151 @@ mod app_tests {
             &mut app.state,
             "test",
             &irc::proto::Message {
-                tags: None,
+                tags: Some(vec![irc::proto::message::Tag(
+                    "msgid".to_string(),
+                    Some(msgid.to_string()),
+                )]),
                 prefix: Some(prefix),
                 command: irc::proto::Command::PRIVMSG("#dupa".to_string(), text.to_string()),
             },
         );
     }
 
+    /// The rows in `#dupa`, as `(text, msgid)`.
+    fn rows_with_ids(app: &crate::app::App) -> Vec<(String, Option<String>)> {
+        app.state.buffers[BUF]
+            .messages
+            .iter()
+            .map(|m| {
+                (
+                    m.text.clone(),
+                    m.tags.as_ref().and_then(|t| t.get("msgid")).cloned(),
+                )
+            })
+            .collect()
+    }
+
+    /// Send one translated line on an echo-message server.
+    fn send_translated(app: &mut crate::app::App, id: u64, original: &str, translated: &str) {
+        let mut out = outgoing(
+            original,
+            TranslateOutcome::Translated {
+                id,
+                text: translated.to_string(),
+            },
+            true, // show_original
+        );
+        out.echo_id = id;
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+    }
+
     #[test]
     fn showing_the_original_outgoing_survives_echo_message() {
         // The wire carries only the translation, so the server's reflection
-        // can never render the ` [original]` suffix the user configured —
-        // and the reflection is what would reach SQLite. The local echo has
-        // to be the row that renders, and the reflection has to go.
+        // cannot render the ` [original]` suffix the user configured. It is
+        // DECORATED rather than replaced by a local row: the reflection is
+        // the copy that carries the server's msgid and timestamp, and a
+        // locally-authored row would match nothing on a later replay.
         let mut app = app_with_echo_message();
-        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(outgoing(
-            "moje zdanie",
-            TranslateOutcome::Translated {
-                id: 1,
-                text: "mein satz".to_string(),
-            },
-            true, // show_original
-        ))));
-        assert_eq!(
-            shown(&app),
-            vec!["mein satz [moje zdanie]".to_string()],
-            "the local row renders, carrying the original"
+        send_translated(&mut app, 1, "moje zdanie", "mein satz");
+        assert!(
+            shown(&app).is_empty(),
+            "no local row — the server owns this one: {:?}",
+            shown(&app)
         );
 
-        reflect(&mut app, "mein satz");
+        reflect(&mut app, "mein satz", "server-M1");
 
         assert_eq!(
-            shown(&app),
-            vec!["mein satz [moje zdanie]".to_string()],
-            "and the server's undecorated copy of the same line is dropped"
+            rows_with_ids(&app),
+            vec![(
+                "mein satz [moje zdanie]".to_string(),
+                Some("server-M1".to_string())
+            )],
+            "one row, decorated, still carrying the server's msgid"
         );
+        let row = app.state.buffers[BUF].messages.back().expect("the row");
+        let origin = row
+            .wire_origin
+            .as_ref()
+            .expect("a decorated row records what the wire carried");
+        assert_eq!(
+            origin.text, "mein satz",
+            "identity is the wire text, so a replay of this line dedups"
+        );
+        assert_eq!(origin.suffix_at, Some("mein satz".len()));
     }
 
     #[test]
     fn echo_message_still_owns_the_echo_when_the_original_is_not_shown() {
-        // Nothing is lost by letting the server echo when there is no suffix
-        // to add, and writing our own row as well would double every line.
+        // Nothing to add, so nothing is filed and the reflection is shown
+        // exactly as it always was.
         let mut app = app_with_echo_message();
         app.config.translate.show_original_out = false;
-        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(outgoing(
+        let mut out = outgoing(
             "moje zdanie",
             TranslateOutcome::Translated {
                 id: 1,
                 text: "mein satz".to_string(),
             },
             false, // show_original
-        ))));
-        assert!(
-            shown(&app).is_empty(),
-            "no local row: the server will send one: {:?}",
-            shown(&app)
         );
+        out.echo_id = 1;
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+        assert!(shown(&app).is_empty(), "no local row: {:?}", shown(&app));
 
-        reflect(&mut app, "mein satz");
+        reflect(&mut app, "mein satz", "server-M1");
 
-        assert_eq!(
-            shown(&app),
-            vec!["mein satz".to_string()],
-            "and it is shown, exactly as before"
+        assert_eq!(shown(&app), vec!["mein satz".to_string()]);
+        assert!(
+            app.state.buffers[BUF]
+                .messages
+                .back()
+                .is_some_and(|m| m.wire_origin.is_none()),
+            "an undecorated reflection IS its own wire text"
         );
     }
 
     #[test]
     fn a_reflection_that_was_never_filed_is_still_shown() {
         // Fail-open. A miss — a netsplit between send and echo, a server
-        // that rewrites what it reflects, a line we never sent — must show
-        // the message, never swallow it.
+        // that rewrites what it reflects, someone else's line — renders
+        // plain. The mechanism can lose a suffix, never a message.
         let mut app = app_with_echo_message();
-        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(outgoing(
-            "moje zdanie",
-            TranslateOutcome::Translated {
-                id: 1,
-                text: "mein satz".to_string(),
-            },
-            true,
-        ))));
+        send_translated(&mut app, 1, "moje zdanie", "mein satz");
 
-        reflect(&mut app, "etwas ganz anderes");
+        reflect(&mut app, "etwas ganz anderes", "server-M9");
 
         assert_eq!(
             shown(&app),
-            vec![
-                "mein satz [moje zdanie]".to_string(),
-                "etwas ganz anderes".to_string(),
-            ],
-            "an unmatched line is displayed, not dropped"
+            vec!["etwas ganz anderes".to_string()],
+            "an unmatched line is displayed, undecorated"
         );
     }
 
     #[test]
     fn each_reflection_consumes_one_record_so_the_second_send_still_shows() {
-        // Sending the same text twice files two records. If a reflection
-        // peeked instead of consuming, the second one would also be
-        // swallowed — and the user would see one of their two messages.
+        // Sending the same text twice files two decorations. If a reflection
+        // peeked instead of consuming, the second would be decorated from
+        // the first record and the third — a stranger's identical line —
+        // would be decorated too.
         let mut app = app_with_echo_message();
-        for id in 1..=2u64 {
-            let mut out = outgoing(
-                "moje zdanie",
-                TranslateOutcome::Translated {
-                    id,
-                    text: "mein satz".to_string(),
-                },
-                true,
-            );
-            out.echo_id = id;
-            app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
-        }
-        assert_eq!(shown(&app).len(), 2, "both local rows are written");
+        send_translated(&mut app, 1, "moje zdanie", "mein satz");
+        send_translated(&mut app, 2, "moje zdanie", "mein satz");
 
-        reflect(&mut app, "mein satz");
-        reflect(&mut app, "mein satz");
-        assert_eq!(shown(&app).len(), 2, "both reflections are dropped");
+        reflect(&mut app, "mein satz", "server-M1");
+        reflect(&mut app, "mein satz", "server-M2");
+        reflect(&mut app, "mein satz", "server-M3");
 
-        // A third, with nothing left filed, is a stranger's line.
-        reflect(&mut app, "mein satz");
         assert_eq!(
-            shown(&app).len(),
-            3,
-            "once the records run out, a matching line is shown"
+            shown(&app),
+            vec![
+                "mein satz [moje zdanie]".to_string(),
+                "mein satz [moje zdanie]".to_string(),
+                // Records exhausted: this one is not ours to decorate.
+                "mein satz".to_string(),
+            ],
+            "each record is spent exactly once"
         );
     }
 
@@ -3391,6 +3668,64 @@ mod tests {
             }
         }
         assert_eq!(order, vec![1, 2], "submission order is preserved");
+    }
+
+    #[tokio::test]
+    async fn outgoing_lanes_obey_the_shared_concurrency_cap() {
+        // `translate.max_in_flight` is documented as the PROVIDER's
+        // concurrency cap. A per-connection lane that skipped the limiter
+        // made the real ceiling `max_in_flight + one per network`, which is
+        // over the limit exactly on the setups that have several open.
+        //
+        // One permit, two connections, 60 ms each: sharing the limiter means
+        // they run one after the other, so the pair cannot finish in one
+        // request's time.
+        let mut rt = TranslateRuntime::with_backend(
+            Some(Arc::new(StubBackend::with_jitter(&[60]))),
+            &cfg(1),
+        );
+        let started = tokio::time::Instant::now();
+        for (i, conn) in ["a", "b"].iter().enumerate() {
+            rt.outgoing_tx
+                .send(outgoing_for(conn, i as u64 + 1, "hello world"))
+                .await
+                .expect("worker alive");
+        }
+        for _ in 0..2 {
+            rt.deliver_rx.recv().await.expect("outcome");
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= std::time::Duration::from_millis(100),
+            "two lanes finished in {elapsed:?} with one permit — they are \
+             not sharing the limiter"
+        );
+    }
+
+    #[tokio::test]
+    async fn separate_connections_still_run_concurrently_when_permits_allow() {
+        // The cap must not turn the per-connection lanes back into one
+        // serial queue: with permits to spare, two networks translate at the
+        // same time, which is the whole reason the lanes are per connection.
+        let mut rt = TranslateRuntime::with_backend(
+            Some(Arc::new(StubBackend::with_jitter(&[60]))),
+            &cfg(4),
+        );
+        let started = tokio::time::Instant::now();
+        for (i, conn) in ["a", "b"].iter().enumerate() {
+            rt.outgoing_tx
+                .send(outgoing_for(conn, i as u64 + 1, "hello world"))
+                .await
+                .expect("worker alive");
+        }
+        for _ in 0..2 {
+            rt.deliver_rx.recv().await.expect("outcome");
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(110),
+            "two networks took {elapsed:?} — one is blocking the other"
+        );
     }
 
     #[tokio::test]

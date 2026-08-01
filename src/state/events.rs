@@ -1,6 +1,6 @@
 use tokio::sync::mpsc::error::TrySendError;
 
-use crate::state::AppState;
+use crate::state::{AppState, OwnEchoDecoration};
 use crate::state::buffer::{ActivityLevel, Buffer, Message, MessageType, NickEntry};
 use crate::state::connection::{Connection, ConnectionStatus};
 use crate::state::sorting::sort_buffers;
@@ -29,7 +29,8 @@ impl AppState {
             translate_buffers: std::collections::HashMap::new(),
             translate_my_lang: "en".to_string(),
             translate_show_original_in: true,
-            own_echo_suppressions: std::collections::HashMap::new(),
+            own_echo_decorations: std::collections::HashMap::new(),
+            buffer_redirects: std::collections::HashMap::new(),
             pending_buffer_rekeys: Vec::new(),
             log_exclude_types: Vec::new(),
             scrollback_limit: 2000,
@@ -448,9 +449,9 @@ impl AppState {
             .reserve(id);
     }
 
-    /// How long a filed reflection stays matchable. Generous — the round
+    /// How long a filed decoration stays matchable. Generous — the round
     /// trip is one server hop — but finite, so a reflection lost to a
-    /// netsplit does not sit there waiting to swallow an unrelated line the
+    /// netsplit does not sit there waiting to decorate an unrelated line the
     /// user retypes verbatim much later.
     const OWN_ECHO_TTL: std::time::Duration = std::time::Duration::from_secs(30);
     /// Cap per buffer. A user cannot outrun their own echoes by this much;
@@ -458,50 +459,86 @@ impl AppState {
     /// this without limit.
     const OWN_ECHO_MAX: usize = 32;
 
-    /// Record a wire line we rendered locally, so `echo-message`'s
-    /// reflection of it is dropped instead of shown twice.
+    /// Record how `echo-message`'s reflection of one wire line should be
+    /// rendered when it comes back.
     ///
-    /// See [`AppState::own_echo_suppressions`] for why a translated send has
-    /// to do this at all.
-    pub fn suppress_own_echo(&mut self, buffer_id: &str, wire_text: &str) {
+    /// See [`AppState::own_echo_decorations`] for why the reflection is
+    /// decorated rather than replaced by a locally-written row.
+    pub fn decorate_own_echo(&mut self, buffer_id: &str, decoration: OwnEchoDecoration) {
         let now = std::time::Instant::now();
         let entries = self
-            .own_echo_suppressions
+            .own_echo_decorations
             .entry(buffer_id.to_string())
             .or_default();
-        entries.retain(|(_, at)| now.duration_since(*at) < Self::OWN_ECHO_TTL);
+        entries.retain(|d| now.duration_since(d.filed_at) < Self::OWN_ECHO_TTL);
         while entries.len() >= Self::OWN_ECHO_MAX {
             entries.pop_front();
         }
-        entries.push_back((wire_text.to_string(), now));
+        entries.push_back(decoration);
     }
 
-    /// Consume a filed reflection matching this line, if there is one.
+    /// Build a decoration record, stamped now.
+    pub fn own_echo_decoration(
+        wire_text: String,
+        display: String,
+        origin: crate::state::buffer::WireOrigin,
+    ) -> OwnEchoDecoration {
+        OwnEchoDecoration {
+            wire_text,
+            display,
+            origin,
+            filed_at: std::time::Instant::now(),
+        }
+    }
+
+    /// Consume the decoration matching this reflected line, if there is one.
     ///
     /// Consuming rather than peeking is what makes sending the same text
     /// twice work: the first reflection takes the first record, the second
     /// takes the second. Matching the OLDEST record first keeps that in send
     /// order.
-    pub fn take_own_echo_suppression(&mut self, buffer_id: &str, wire_text: &str) -> bool {
+    pub fn take_own_echo_decoration(
+        &mut self,
+        buffer_id: &str,
+        wire_text: &str,
+    ) -> Option<OwnEchoDecoration> {
         let now = std::time::Instant::now();
-        let Some(entries) = self.own_echo_suppressions.get_mut(buffer_id) else {
-            return false;
-        };
-        entries.retain(|(_, at)| now.duration_since(*at) < Self::OWN_ECHO_TTL);
-        let Some(pos) = entries.iter().position(|(text, _)| text == wire_text) else {
-            // Nothing filed: this is an ordinary echo (or one we already
-            // consumed). Showing it is the behaviour every non-translated
-            // send has always had.
-            if entries.is_empty() {
-                self.own_echo_suppressions.remove(buffer_id);
-            }
-            return false;
-        };
-        entries.remove(pos);
+        let entries = self.own_echo_decorations.get_mut(buffer_id)?;
+        entries.retain(|d| now.duration_since(d.filed_at) < Self::OWN_ECHO_TTL);
+        let found = entries
+            .iter()
+            .position(|d| d.wire_text == wire_text)
+            .map(|pos| entries.remove(pos).expect("position just found it"));
         if entries.is_empty() {
-            self.own_echo_suppressions.remove(buffer_id);
+            self.own_echo_decorations.remove(buffer_id);
         }
-        true
+        found
+    }
+
+    /// How long a re-keyed buffer keeps answering to its old id.
+    ///
+    /// Only in-flight translation work needs this, so the window is the one
+    /// that matters: comfortably longer than any request, short enough that a
+    /// stranger who later claims the abandoned nick does not inherit a
+    /// redirect meant for its previous owner.
+    const REDIRECT_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+    /// Where work dispatched against `buffer_id` should go now, if that
+    /// buffer has since been re-keyed.
+    ///
+    /// A live buffer under the old id always wins: somebody has taken the
+    /// abandoned nick and opened a fresh conversation with them, and that
+    /// conversation is not the one the redirect is about.
+    #[must_use]
+    pub fn redirected_buffer_id(&self, buffer_id: &str) -> Option<&str> {
+        if self.buffers.contains_key(buffer_id) {
+            return None;
+        }
+        let (new_id, at) = self.buffer_redirects.get(buffer_id)?;
+        if at.elapsed() >= Self::REDIRECT_TTL {
+            return None;
+        }
+        Some(new_id.as_str())
     }
 
     /// Move every buffer-id-keyed map from `old_id` to `new_id`.
@@ -525,9 +562,24 @@ impl AppState {
         if let Some(cfg) = self.translate_buffers.remove(old_id) {
             self.translate_buffers.insert(new_id.to_string(), cfg);
         }
-        if let Some(echoes) = self.own_echo_suppressions.remove(old_id) {
-            self.own_echo_suppressions.insert(new_id.to_string(), echoes);
+        if let Some(echoes) = self.own_echo_decorations.remove(old_id) {
+            self.own_echo_decorations.insert(new_id.to_string(), echoes);
         }
+        // Work already dispatched still carries the old id, so it needs a way
+        // to find its way here. Existing redirects INTO the old id are
+        // repointed rather than chained, so a peer who renames twice while
+        // one line is in flight still resolves in a single hop.
+        let now = std::time::Instant::now();
+        for (target, at) in self.buffer_redirects.values_mut() {
+            if target == old_id {
+                *target = new_id.to_string();
+                *at = now;
+            }
+        }
+        self.buffer_redirects
+            .insert(old_id.to_string(), (new_id.to_string(), now));
+        self.buffer_redirects
+            .retain(|_, (_, at)| at.elapsed() < Self::REDIRECT_TTL);
         self.pending_buffer_rekeys
             .push((old_id.to_string(), new_id.to_string()));
     }

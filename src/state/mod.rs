@@ -65,6 +65,24 @@ pub struct PendingUserhostRequest {
     pub action: PendingUserhostAction,
 }
 
+/// How to render one reflected wire line — see
+/// [`AppState::own_echo_decorations`].
+#[derive(Debug, Clone)]
+pub struct OwnEchoDecoration {
+    /// The wire line exactly as we sent it, which is what the reflection
+    /// carries. For an action this is the framed `\x01ACTION …\x01`, because
+    /// matching happens before the frame is stripped.
+    pub wire_text: String,
+    /// What to display instead — framed the same way, so a decorated action
+    /// still parses as one.
+    pub display: String,
+    /// Recorded on the row. `text` is the wire's BODY (frame stripped), since
+    /// that is what a replay of this message will carry, and `suffix_at` is
+    /// an offset into the displayed body for the same reason.
+    pub origin: buffer::WireOrigin,
+    filed_at: std::time::Instant,
+}
+
 #[expect(
     clippy::struct_excessive_bools,
     reason = "top-level app state aggregates independent feature flags"
@@ -125,22 +143,31 @@ pub struct AppState {
     /// dispatch, so a mid-flight `/set` cannot make a queued line render
     /// differently from how it was queued.
     pub translate_show_original_in: bool,
-    /// Wire lines we have already rendered locally and expect `echo-message`
-    /// to reflect back, keyed by buffer, oldest first.
+    /// How to render `echo-message`'s reflection of a translated line we
+    /// sent, keyed by buffer, oldest first.
     ///
-    /// Normally a server that echoes our messages is exactly why we skip the
-    /// local echo. A translated send with `show_original_out` on cannot: the
-    /// wire carries only the translation, so the server's echo can never
-    /// produce the ` [original]` suffix the user asked to see, and it is the
-    /// echo — not the local row — that would reach `SQLite`. So that case
-    /// writes the local row and files the wire line here; the incoming
-    /// handler drops the reflection when it arrives.
+    /// The wire carries only the translation, so the reflection cannot show
+    /// the ` [original]` suffix `show_original_out` asks for. The fix is to
+    /// **decorate the reflection**, not to replace it with a local row: the
+    /// reflection is the copy that carries the server's `@time` and `@msgid`,
+    /// and those are what a later CHATHISTORY replay of the same message
+    /// dedups against. A locally-authored row has a local clock and no msgid,
+    /// so it matches nothing and the message comes back a second time.
     ///
-    /// Bounded and time-limited, because a reflection that never comes (a
-    /// netsplit between send and echo) must not accumulate. Failing to match
-    /// shows the server's echo, which is the old behaviour — never a lost
-    /// message.
-    pub own_echo_suppressions: HashMap<String, VecDeque<(String, std::time::Instant)>>,
+    /// Bounded and time-limited, because a reflection that never arrives (a
+    /// netsplit between send and echo) must not accumulate. A miss renders
+    /// the reflection undecorated, which is exactly what every non-translated
+    /// send does — the mechanism can lose a suffix, never a message.
+    pub own_echo_decorations: HashMap<String, VecDeque<OwnEchoDecoration>>,
+    /// Query buffers that were re-keyed, `old_id -> (new_id, when)`.
+    ///
+    /// Work already handed to the translation workers carries the buffer id
+    /// and target name it was dispatched with. A peer's `/nick` moves the
+    /// buffer out from under it, so without a redirect an incoming outcome
+    /// finds no queue and times out, and an outgoing send addresses a nick
+    /// its owner no longer answers to — which, if somebody else has taken it
+    /// in the meantime, means sending it to a stranger.
+    pub buffer_redirects: HashMap<String, (String, std::time::Instant)>,
     /// Query buffers re-keyed by a peer's nick change, as `(old_id, new_id)`.
     ///
     /// Drained by the App after each IRC message, the same way

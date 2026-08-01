@@ -140,8 +140,11 @@ it.
 ## 3. Ordering: immediate dispatch, ordered release
 
 Requests are dispatched **the instant a line arrives**. Translation runs concurrently,
-up to `max_in_flight`. The queue governs only *when a resolved line is allowed onto
-the screen*.
+up to `max_in_flight` — one limiter shared by the incoming worker and every
+per-connection outgoing lane, because the setting is documented as the *provider's*
+concurrency cap. A lane that skipped it would make the real ceiling `max_in_flight +
+one per connected network`. The queue governs only *when a resolved line is allowed
+onto the screen*.
 
 This distinction is the crux. A serial queue — where line N waits for line N-1 to come
 back before being sent for translation — would make latency cumulative: ten queued
@@ -218,6 +221,19 @@ belongs to `App`, so the rename is also queued in `pending_buffer_rekeys` and dr
 after the IRC message, alongside `pending_web_events` — and it must be, because
 `sync_translate_from_config` re-derives the mirror from the config and would otherwise
 undo the move on the next `/set`.
+
+Moving the maps is not enough on its own: **work already handed to the workers carries
+the buffer id and target name it was dispatched with**, and no amount of re-keying
+reaches into an in-flight request. So the rename also records a redirect, `old_id ->
+new_id`, consulted when a result comes back. Without it an incoming outcome finds no
+queue and its line sits until the timeout, and — worse — an outgoing send addresses a
+nick its owner no longer answers to, which if somebody else has claimed it in the
+meantime means sending it to a stranger.
+
+A live buffer under the old id always beats the redirect: that is somebody who took
+the abandoned nick, and the conversation with them is not the one the redirect is
+about. Redirects also expire, so a stranger who claims the nick later inherits
+nothing.
 
 The migrated key is not written to disk. `/translate add*|del*` writes the file and
 will carry it along next time; rewriting `config.toml` in response to somebody else's
@@ -330,6 +346,12 @@ to a translator returns anything but a valid CTCP, so the request carries the
 prose and the deliver path re-wraps it. Every other CTCP is protocol and passes
 through untouched.
 
+None of these require an OPEN buffer. A script's `say()` addresses a target by name
+and has always been able to reach a conversation the user has no window on; refusing
+because there is no buffer would drop sends that used to go out. Translation is a
+property of the conversation, not of whether it is on screen — all the buffer
+contributes is the nick list, and its absence just means an empty one.
+
 ### 5.3 A send that fails after the wait
 
 The composer is cleared at submission, so from the moment a message is dispatched
@@ -384,32 +406,39 @@ REKEY NOTICEs. Planning and then failing to send advances our key past a pending
 rotate while the peers never receive the new one — the same ordering, for the same
 reason, as `send_gated_message`'s own precheck.
 
-### 5.5 `echo-message` cannot show the original
+### 5.5 `echo-message` reflections are decorated, not replaced
 
-A server advertising `echo-message` reflects our own PRIVMSGs back, which is
-normally exactly why the outgoing paths skip the local echo — the reflection *is*
-the row, and it reaches the buffer, the web clients and `SQLite` through the
-ordinary incoming path.
+A server advertising `echo-message` reflects our own PRIVMSGs back, which is why the
+outgoing paths skip the local echo — the reflection *is* the row, and it reaches the
+buffer, the web clients and `SQLite` through the ordinary incoming path.
 
-A translated send with `show_original_out` on breaks that. The wire carries the
-translation and nothing else, so the reflection can never render the ` [original]`
-suffix the user configured, and the reflection is the copy that gets logged. Only
-the local echo knows the original.
+A translated send with `show_original_out` on cannot be shown by that reflection
+alone: the wire carried the translation and nothing else. So the send files a
+**decoration** in `own_echo_decorations` — the wire line, what to display instead,
+and the `WireOrigin` to record — and `handle_privmsg` applies it when the reflection
+arrives.
 
-So that case — and only that case — writes the local row anyway and files each wire
-line it sent in `own_echo_suppressions`; `handle_privmsg` drops the reflection when
-it arrives. Matching is exact and **consuming**, so sending the same text twice
-files two records and each reflection takes one. A miss shows the reflection, which
-is the behaviour every other send has: the mechanism can duplicate nothing, only
-fail to suppress.
+Decorating rather than writing our own row and dropping the reflection is the point.
+The reflection is the copy carrying the server's `@time` and `@msgid`, and those are
+exactly what a later CHATHISTORY replay of the same message dedups against (§7.1). A
+locally-authored row has a local clock and no msgid, so it matches nothing and the
+message comes back a second time — trading one display bug for a duplication bug.
 
-Suppression, rather than decorating the reflection on arrival, because a long
-message is several wire lines and one display row: the local echo already joins
-them and places the suffix once, while decorating N reflections would have to split
-one original across them.
+Details that follow from the shape:
 
-`OutgoingEchoPlan::None` is untouched — a script that asked for no echo still gets
-none, and sees the undecorated reflection.
+- **Only the last wire line is decorated.** A translation long enough to split is
+  several reflections and one original; repeating it on each would say the same thing
+  N times, and putting it on the first would place it before the text it is the
+  original of.
+- **An action is decorated inside its frame** (`\x01ACTION … [original]\x01`), because
+  matching happens before the CTCP is unwrapped and the result still has to parse as
+  one. The recorded `WireOrigin.text` is the frame's BODY, since that is what the row
+  holds and what a replay carries.
+- **Matching is consuming**, so the same text sent twice files two records and each
+  reflection takes one, oldest first.
+- **A miss renders the reflection plain** — a netsplit between send and echo, a server
+  that rewrites what it reflects, a stranger's identical line. The mechanism can lose
+  a suffix; it can never lose or duplicate a message.
 
 ### 5.6 A refusal goes back to the client that typed it
 
