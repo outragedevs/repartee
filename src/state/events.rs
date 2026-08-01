@@ -1057,6 +1057,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            orig_offset: None,
         }
     }
 
@@ -1114,6 +1115,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            orig_offset: None,
         };
         state.add_message("libera/#rust", event_msg);
         assert!(
@@ -1148,6 +1150,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            orig_offset: None,
         };
         state.add_message("libera/#rust", event_msg2);
         assert_eq!(
@@ -1354,6 +1357,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: Some(tags),
+            orig_offset: None,
         };
         state.add_message("libera/#rust", msg);
 
@@ -1383,6 +1387,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            orig_offset: None,
         };
 
         // Normal config: the row is queued, so ingest reports success.
@@ -1418,6 +1423,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            orig_offset: None,
         };
         // First fills the single slot (kept unread via _rx), second overflows.
         assert!(state.ingest_history_message("libera/#rust", &msg));
@@ -1453,6 +1459,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            orig_offset: None,
         };
 
         state.add_message("libera/#rust", build());
@@ -1511,6 +1518,7 @@ mod tests {
             log_msg_id: Some("primary-gen-id".to_string()),
             log_ref_id: None,
             tags: Some(tags.clone()),
+            orig_offset: None,
         };
         state.add_message("libera/#rust", primary);
 
@@ -1527,6 +1535,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: Some("primary-gen-id".to_string()),
             tags: Some(tags),
+            orig_offset: None,
         };
         state.add_message("libera/#linux", reference);
 
@@ -1566,6 +1575,7 @@ mod tests {
             log_msg_id: Some(primary_id.clone()),
             log_ref_id: None,
             tags: None,
+            orig_offset: None,
         };
         state.add_message("libera/#rust", msg1);
 
@@ -1583,6 +1593,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: Some(primary_id.clone()),
             tags: None,
+            orig_offset: None,
         };
         state.add_message("libera/#linux", msg2);
 

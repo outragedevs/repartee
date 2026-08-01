@@ -101,6 +101,19 @@ pub struct Message {
     /// `IRCv3` message tags extracted from the incoming IRC message.
     /// `None` when no tags are present (the common case), avoiding a `HashMap` allocation per message.
     pub tags: Option<HashMap<String, String>>,
+    /// Byte offset where the appended ` [original]` suffix begins, when a
+    /// translated line is displayed alongside its original. The renderer
+    /// dims from here to the end.
+    ///
+    /// Live-render only — deliberately NOT persisted. The stored text is
+    /// flat (the log records exactly what was on screen), so a row reloaded
+    /// from `SQLite` has no way to recover this and renders the same
+    /// characters undimmed.
+    ///
+    /// Never derive this by scanning for a trailing `[...]`: an ordinary
+    /// message may legitimately end that way, and the renderer would dim
+    /// someone else's brackets.
+    pub orig_offset: Option<usize>,
 }
 
 // === NickEntry ===

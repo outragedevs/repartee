@@ -844,6 +844,7 @@ fn make_separator(
         log_msg_id: None,
         log_ref_id: None,
         tags: None,
+        orig_offset: None,
     }
 }
 
@@ -881,6 +882,7 @@ mod tests {
             log_msg_id: log_id.map(str::to_owned),
             log_ref_id: None,
             tags: None,
+            orig_offset: None,
         }
     }
 

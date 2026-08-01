@@ -165,7 +165,69 @@ fn render_chat_message(
         }
     }
 
+    // Dim the ` [original]` suffix of a translated line, if there is one.
+    if let Some(offset) = msg.orig_offset
+        && offset <= msg.text.len()
+        && msg.text.is_char_boundary(offset)
+    {
+        dim_trailing_suffix(&mut spans, &msg.text[offset..]);
+    }
+
     spans
+}
+
+/// Dim the trailing run of spans whose combined text is exactly `suffix`.
+///
+/// Used for the ` [original]` appended to a translated line. It works from
+/// the END of the span list rather than from a byte offset, because the
+/// message body is substituted into a theme format string and then parsed
+/// as a whole — the body's own format codes can split it across any number
+/// of spans, so span boundaries carry no fixed relationship to offsets in
+/// `Message::text`.
+///
+/// If the accumulated tail does not match `suffix` exactly, nothing is
+/// dimmed. That case is reachable — a theme whose `pubmsg` format appends
+/// decoration after `$1`, or a body transformed by emote substitution — and
+/// leaving the line undimmed is strictly better than dimming the wrong run.
+fn dim_trailing_suffix(spans: &mut Vec<StyledSpan>, suffix: &str) {
+    if suffix.is_empty() {
+        return;
+    }
+    let mut acc = 0usize;
+    let mut first = None;
+    for (i, span) in spans.iter().enumerate().rev() {
+        acc += span.text.len();
+        if acc >= suffix.len() {
+            first = Some(i);
+            break;
+        }
+    }
+    let Some(first) = first else { return };
+
+    // The suffix may start mid-span; split that span so only its tail dims.
+    let overshoot = acc - suffix.len();
+    if overshoot > 0 {
+        let span = &spans[first];
+        if !span.text.is_char_boundary(overshoot) {
+            return;
+        }
+        let (head, tail) = span.text.split_at(overshoot);
+        let mut head_span = span.clone();
+        let mut tail_span = span.clone();
+        head_span.text = head.to_string();
+        tail_span.text = tail.to_string();
+        spans[first] = head_span;
+        spans.insert(first + 1, tail_span);
+    }
+    let start = if overshoot > 0 { first + 1 } else { first };
+
+    let combined: String = spans[start..].iter().map(|s| s.text.as_str()).collect();
+    if combined != suffix {
+        return;
+    }
+    for span in &mut spans[start..] {
+        span.dim = true;
+    }
 }
 
 /// Replace known `:name:` tokens with PUA placeholders so the wrapper reserves
@@ -321,11 +383,110 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            orig_offset: None,
         }
     }
 
     fn shipped_theme(src: &str) -> crate::theme::ThemeFile {
         toml::from_str(src).expect("shipped theme must parse")
+    }
+
+    /// Render a chat message through the default theme and return its spans.
+    fn chat_spans(msg: &Message) -> Vec<StyledSpan> {
+        render_chat_message(msg, false, &default_theme(), &default_config(), None, None)
+    }
+
+    fn dim_text(spans: &[StyledSpan]) -> String {
+        spans
+            .iter()
+            .filter(|s| s.dim)
+            .map(|s| s.text.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn translated_original_suffix_renders_dimmed() {
+        let mut msg = test_message("alice", "albalb [blabla]", MessageType::Message);
+        msg.orig_offset = Some(6);
+        let spans = chat_spans(&msg);
+        let all: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert!(
+            all.contains("albalb [blabla]"),
+            "the whole line still renders: {all:?}"
+        );
+        assert_eq!(
+            dim_text(&spans),
+            " [blabla]",
+            "only the appended original is dimmed"
+        );
+    }
+
+    #[test]
+    fn message_without_offset_has_no_dim_spans() {
+        // An ordinary message that merely ENDS in brackets must not be
+        // mistaken for a translated one.
+        let msg = test_message("alice", "ordinary [not an original]", MessageType::Message);
+        let spans = chat_spans(&msg);
+        assert!(
+            spans.iter().all(|s| !s.dim),
+            "no offset means no dimming at all"
+        );
+    }
+
+    #[test]
+    fn dim_suffix_spanning_a_multibyte_boundary() {
+        let mut msg = test_message("alice", "zażółć gęślą [jaźń]", MessageType::Message);
+        let offset = "zażółć gęślą".len();
+        msg.orig_offset = Some(offset);
+        let spans = chat_spans(&msg);
+        assert_eq!(dim_text(&spans), " [jaźń]");
+    }
+
+    #[test]
+    fn dim_trailing_suffix_leaves_spans_alone_on_mismatch() {
+        // Fail-safe: when the tail does not match the expected suffix
+        // exactly, nothing is dimmed rather than the wrong run.
+        let mut spans = vec![
+            StyledSpan {
+                text: "hello".to_string(),
+                fg: None,
+                bg: None,
+                bold: false,
+                italic: false,
+                underline: false,
+                dim: false,
+            },
+            StyledSpan {
+                text: " world".to_string(),
+                fg: None,
+                bg: None,
+                bold: false,
+                italic: false,
+                underline: false,
+                dim: false,
+            },
+        ];
+        dim_trailing_suffix(&mut spans, " [other]");
+        assert!(spans.iter().all(|s| !s.dim));
+    }
+
+    #[test]
+    fn dim_trailing_suffix_splits_a_boundary_span() {
+        let mut spans = vec![StyledSpan {
+            text: "albalb [blabla]".to_string(),
+            fg: None,
+            bg: None,
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+        }];
+        dim_trailing_suffix(&mut spans, " [blabla]");
+        assert_eq!(spans.len(), 2, "the boundary span is split in two");
+        assert_eq!(spans[0].text, "albalb");
+        assert!(!spans[0].dim);
+        assert_eq!(spans[1].text, " [blabla]");
+        assert!(spans[1].dim);
     }
 
     fn render_event_text(theme_src: &str, event_key: &str, params: &[&str]) -> String {
@@ -343,6 +504,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            orig_offset: None,
         };
         render_event(&msg, &theme)
             .into_iter()
@@ -553,6 +715,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            orig_offset: None,
         };
         let theme = default_theme();
         let config = default_config();

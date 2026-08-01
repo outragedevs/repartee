@@ -423,6 +423,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            orig_offset: None,
         };
         let wire = message_to_wire(&msg, None);
         assert_eq!(wire.id, 42);
@@ -448,6 +449,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            orig_offset: None,
         };
         let wire = message_to_wire(&msg, None);
         assert_eq!(wire.event_key.as_deref(), Some("join"));
@@ -469,6 +471,7 @@ mod tests {
             log_msg_id: None,
             log_ref_id: None,
             tags: None,
+            orig_offset: None,
         };
         let wire = message_to_wire(&msg, Some(&extractor));
         assert_eq!(wire.previews.len(), 1);
