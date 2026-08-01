@@ -2539,6 +2539,29 @@ mod translate_gate_tests {
     }
 
     #[test]
+    fn surfaced_history_is_never_sent_for_translation() {
+        // Scroll-back and CHATHISTORY splice straight into `buf.messages`,
+        // bypassing `add_message` and therefore the dispatch gate. That is
+        // load-bearing: routing history through `add_message` would fire a
+        // translation request per historical line every time the user
+        // scrolls up, and re-translate text that was already translated
+        // when it was live. This pins the property.
+        let (mut state, mut rx) = state_with_translation();
+        let rows = vec![
+            make_test_message(&mut state, "erste zeile"),
+            make_test_message(&mut state, "zweite zeile"),
+        ];
+        state.surface_history_rows(BUF, rows);
+
+        assert!(
+            rx.try_recv().is_err(),
+            "history must never reach the translation worker"
+        );
+        assert_eq!(shown(&state, BUF), 2, "and it is spliced in as stored");
+        assert!(!state.translate_queues.contains_key(BUF));
+    }
+
+    #[test]
     fn a_full_worker_queue_delivers_untranslated() {
         let mut state = make_test_state();
         let (tx, _rx) = mpsc::channel(1);
