@@ -101,6 +101,8 @@ pub struct AppConfig {
     pub emotes: EmotesConfig,
     #[serde(default)]
     pub typing: TypingConfig,
+    #[serde(default)]
+    pub translate: TranslateConfig,
 }
 
 /// Hand-written (not derived) for one reason: `config_version` must be
@@ -129,6 +131,7 @@ impl Default for AppConfig {
             shrink: ShrinkConfig::default(),
             emotes: EmotesConfig::default(),
             typing: TypingConfig::default(),
+            translate: TranslateConfig::default(),
         }
     }
 }
@@ -551,6 +554,65 @@ impl Default for ShrinkConfig {
             outgoing_timeout_ms: 2000,
             incoming_timeout_ms: 2000,
             cache_max_entries: 500,
+        }
+    }
+}
+
+/// Near-real-time channel translation.
+///
+/// This configures the *mechanism* — what is eligible, how long a line may
+/// wait, how it is displayed. Everything about how translation is actually
+/// performed lives behind the seam in `src/translate/backend.rs` and is
+/// configured separately.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TranslateConfig {
+    /// Master switch — when false nothing is translated in either
+    /// direction, even for buffers with per-buffer flags set.
+    pub enabled: bool,
+    /// Language every line is translated INTO.
+    pub target_lang: String,
+    /// Append ` [original]` to incoming translated lines.
+    pub show_original_in: bool,
+    /// Append ` [original]` to the local echo of outgoing translated lines.
+    pub show_original_out: bool,
+    /// How long a line may sit in the reorder queue before it is released
+    /// untranslated. The default sits above the worst case measured during
+    /// research (~4.2 s), so a healthy provider never trips it.
+    pub timeout_ms: u64,
+    /// Concurrent in-flight translations. Raising this past a provider's
+    /// measured concurrency limit makes throughput worse, not better.
+    pub max_in_flight: u32,
+    /// Per-buffer queue ceiling. On overflow the oldest pending entries are
+    /// released untranslated, so a dead provider cannot turn the queue into
+    /// an unbounded memory leak with a frozen channel behind it.
+    pub max_queue: u32,
+    /// Per-buffer settings, keyed by buffer id (`<connection_id>/<target>`).
+    pub buffers: HashMap<String, TranslateBufferConfig>,
+}
+
+/// Which directions are translated for one channel or query.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TranslateBufferConfig {
+    pub incoming: bool,
+    pub outgoing: bool,
+    /// Source language hint. `None` lets the broker autodetect.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_lang: Option<String>,
+}
+
+impl Default for TranslateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            target_lang: "en".to_string(),
+            show_original_in: true,
+            show_original_out: true,
+            timeout_ms: 5000,
+            max_in_flight: 4,
+            max_queue: 200,
+            buffers: HashMap::new(),
         }
     }
 }

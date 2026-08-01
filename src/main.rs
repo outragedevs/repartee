@@ -17,6 +17,12 @@ mod spellcheck;
 mod state;
 mod storage;
 mod theme;
+// The contract types land before the App wiring that consumes them, so the
+// module is briefly dead. This allow is removed once the outgoing path and
+// the `/translate` command are in place; `make clippy` must be clean without
+// it by then.
+#[allow(dead_code, reason = "consumed once the App wiring lands")]
+mod translate;
 mod ui;
 mod web;
 
