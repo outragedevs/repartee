@@ -323,6 +323,34 @@ impl AppState {
     /// Used for local UI events (command output, status messages) that
     /// should appear on screen but not be persisted — but still broadcast
     /// to web clients so command output is visible on the web UI.
+    /// [`Self::add_local_message`] for a row that belongs in the TIMELINE — a
+    /// day separator — rather than being a response to something the user
+    /// just did.
+    ///
+    /// Command output keeps using `add_local_message` and appears at once:
+    /// holding `/help` behind a pending translation would read as a hung
+    /// client. A separator is different — it dates the lines around it, so
+    /// rendering it above one that arrived before midnight is simply wrong.
+    pub fn add_local_message_in_order(&mut self, buffer_id: &str, message: Message) {
+        if let Some(queue) = self.translate_queues.get_mut(buffer_id) {
+            let id = message.id;
+            queue.push_resolved_as(
+                id,
+                message,
+                ActivityLevel::None,
+                crate::translate::queue::ReadyDelivery::Local,
+            );
+            self.enforce_translate_ceiling(buffer_id);
+            return;
+        }
+        self.add_local_message(buffer_id, message);
+    }
+
+    /// [`Self::add_local_message`] with the queue already consulted.
+    fn deliver_local_now(&mut self, buffer_id: &str, message: Message) {
+        self.add_local_message(buffer_id, message);
+    }
+
     pub fn add_local_message(&mut self, buffer_id: &str, message: Message) {
         self.pending_web_events
             .push(crate::web::protocol::WebEvent::NewMessage {
@@ -882,6 +910,29 @@ impl AppState {
         }
     }
 
+    /// Outgoing sends still at the provider, per buffer, for `/translate
+    /// status`. Counted from the markers rather than from reservations: the
+    /// queue ceiling can take a reservation back while its send runs on.
+    #[must_use]
+    pub fn outgoing_in_flight_counts(
+        &self,
+        max_age: std::time::Duration,
+    ) -> Vec<(String, usize)> {
+        let mut rows: Vec<(String, usize)> = self
+            .outgoing_in_flight
+            .iter()
+            .map(|(id, times)| {
+                (
+                    id.clone(),
+                    times.iter().filter(|at| at.elapsed() < max_age).count(),
+                )
+            })
+            .filter(|(_, live)| *live > 0)
+            .collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        rows
+    }
+
     /// Whether one of this buffer's own messages is still in the translator.
     ///
     /// `max_age` bounds how long a marker is believed. Every delivery clears
@@ -1261,10 +1312,28 @@ impl AppState {
                     "translate: line delivered untranslated"
                 );
             }
-            // Now, not when it was queued: the aggregate has to carry the
-            // text the channel ends up showing, marker and all.
-            self.fan_out_mention_for_row(buffer_id, &entry.message);
-            self.add_message_with_activity_unshrunk(buffer_id, entry.message, entry.activity);
+            // Each row leaves the way it would have arrived. A day separator
+            // or an E2E placeholder took its place in the queue so it could
+            // not render ahead of the lines queued before it, but it must not
+            // pick up logging on the way out.
+            match entry.delivery {
+                crate::translate::queue::ReadyDelivery::Logged => {
+                    // Now, not when it was queued: the aggregate has to carry
+                    // the text the channel ends up showing, marker and all.
+                    self.fan_out_mention_for_row(buffer_id, &entry.message);
+                    self.add_message_with_activity_unshrunk(
+                        buffer_id,
+                        entry.message,
+                        entry.activity,
+                    );
+                }
+                crate::translate::queue::ReadyDelivery::Transient => {
+                    self.deliver_transient_now(buffer_id, entry.message, entry.activity);
+                }
+                crate::translate::queue::ReadyDelivery::Local => {
+                    self.deliver_local_now(buffer_id, entry.message);
+                }
+            }
         }
     }
 
@@ -1400,6 +1469,27 @@ impl AppState {
         message: Message,
         level: ActivityLevel,
     ) {
+        // Through the queue when there is one. A placeholder is a
+        // chronological row like any other: appended directly it renders
+        // above the lines queued before it, which is the reordering the queue
+        // exists to prevent, arriving from yet another direction.
+        if let Some(queue) = self.translate_queues.get_mut(buffer_id) {
+            let id = message.id;
+            queue.push_resolved_as(
+                id,
+                message,
+                level,
+                crate::translate::queue::ReadyDelivery::Transient,
+            );
+            self.enforce_translate_ceiling(buffer_id);
+            return;
+        }
+        self.deliver_transient_now(buffer_id, message, level);
+    }
+
+    /// [`Self::add_transient_message_with_activity`] with the queue already
+    /// consulted. Never persisted, by contract.
+    fn deliver_transient_now(&mut self, buffer_id: &str, message: Message, level: ActivityLevel) {
         if !self.buffers.contains_key(buffer_id) {
             return;
         }
@@ -3270,6 +3360,21 @@ mod translate_gate_tests {
     /// [`state_with_translation`] with a chosen worker-queue depth, so a test
     /// about the DISPLAY ceiling is not confounded by the dispatch channel
     /// filling up and turning later lines into ready rows.
+    /// [`state_with_translation`] with the storage writer wired up, so a test
+    /// can assert what does and does not reach the log.
+    fn state_with_translation_and_log() -> (
+        AppState,
+        mpsc::Receiver<crate::storage::LogRow>,
+    ) {
+        let (mut state, rx) = state_with_translation();
+        // The dispatch receiver has to stay alive or the gate falls back to
+        // delivering untranslated.
+        std::mem::forget(rx);
+        let (log_tx, log_rx) = mpsc::channel(32);
+        state.log_tx = Some(log_tx);
+        (state, log_rx)
+    }
+
     fn state_with_translation_capacity(
         capacity: usize,
     ) -> (
@@ -3774,6 +3879,83 @@ mod translate_gate_tests {
             state.buffers[BUF].messages.len(),
             before,
             "the replay is recognised as the row already on screen"
+        );
+    }
+
+    #[test]
+    fn a_day_separator_waits_its_turn_and_is_still_not_logged() {
+        // Appended directly it renders ABOVE a line that arrived before
+        // midnight and is still being translated — dating the lines around it
+        // wrongly, which is the one thing a separator exists to do. It has to
+        // take its place in the queue, and come out of it without picking up
+        // logging on the way.
+        let (mut state, mut log_rx) = state_with_translation_and_log();
+        let msg = make_test_message(&mut state, "hola");
+        let id = msg.id;
+        state.add_message_with_activity(BUF, msg, ActivityLevel::Activity);
+
+        let mut separator = make_test_message(&mut state, "--- day changed ---");
+        separator.message_type = MessageType::Event;
+        state.add_local_message_in_order(BUF, separator);
+        assert_eq!(
+            shown(&state, BUF),
+            0,
+            "the separator does not jump ahead of the line queued before it"
+        );
+
+        state
+            .translate_queues
+            .get_mut(BUF)
+            .expect("queued")
+            .resolve(id, Ok("czesc".to_string()));
+        state.drain_translate_ready(BUF);
+
+        let rows: Vec<&str> = state.buffers[BUF]
+            .messages
+            .iter()
+            .map(|m| m.text.as_str())
+            .collect();
+        assert_eq!(
+            rows,
+            vec!["czesc [hola]", "--- day changed ---"],
+            "and lands after it, where it belongs"
+        );
+        assert!(
+            log_rx.try_recv().is_ok(),
+            "the chat line is logged, as always"
+        );
+        assert!(
+            log_rx.try_recv().is_err(),
+            "the separator is not — going through the queue must not make a \
+             local row start being persisted"
+        );
+    }
+
+    #[test]
+    fn a_transient_placeholder_waits_its_turn_and_is_never_logged() {
+        // Same for an E2E placeholder, whose whole contract is that it is
+        // shown and never persisted.
+        let (mut state, mut log_rx) = state_with_translation_and_log();
+        let msg = make_test_message(&mut state, "hola");
+        let id = msg.id;
+        state.add_message_with_activity(BUF, msg, ActivityLevel::Activity);
+
+        let placeholder = make_test_message(&mut state, "[E2E: awaiting our own identity]");
+        state.add_transient_message_with_activity(BUF, placeholder, ActivityLevel::Activity);
+        assert_eq!(shown(&state, BUF), 0, "queued, not appended");
+
+        state
+            .translate_queues
+            .get_mut(BUF)
+            .expect("queued")
+            .resolve(id, Ok("czesc".to_string()));
+        state.drain_translate_ready(BUF);
+
+        assert_eq!(shown(&state, BUF), 2);
+        assert!(log_rx.try_recv().is_ok(), "the chat line is logged");
+        assert!(
+            log_rx.try_recv().is_err(),
+            "the placeholder is not, queue or no queue"
         );
     }
 

@@ -253,6 +253,24 @@ Without this, a JOIN arriving while lines 4 and 5 are still translating would re
 before them, silently reordering the buffer's timeline — the exact failure the queue
 exists to prevent, just from a different direction.
 
+"Everything" has to mean everything, and two paths were not covered: the day separator
+(`add_local_message`) and E2E placeholders (`add_transient_message_with_activity`) both
+appended straight to the buffer. A pre-midnight line still being translated then
+rendered BELOW the separator that is supposed to date it, and a placeholder rendered
+above the lines queued before it.
+
+They now take a resolved place in the queue like any other row — but they keep their own
+delivery rules coming out of it, which is why a released entry carries a
+`ReadyDelivery`: `Logged` for ordinary chat, `Transient` for a placeholder that must
+never be persisted, `Local` for a client-generated line that neither logs nor escalates
+activity. A placeholder that started being logged because it went through a queue would
+be a worse bug than the reordering.
+
+Command output is deliberately NOT routed this way. `add_local_message` still appends at
+once, because holding `/help` behind a pending translation reads as a hung client; the
+distinction is chronological rows, which belong in the timeline, versus responses to
+something the user just did.
+
 ### 3.3 Release rule
 
 A queue is a per-buffer `VecDeque` of entries that are either `Pending { id }` or
@@ -723,7 +741,10 @@ Details that follow from the shape:
   after group eviction is always.
 - **Records die with the connection.** A drop clears them alongside the queues —
   walked separately, because a record outlives the queue whenever the reservation was
-  the only thing in it, which is the ordinary case. Left behind, a reconnect inside
+  the only thing in it, which is the ordinary case. Ownership is decided by the
+  buffer id's connection PREFIX, never by looking up a live buffer: a queue or a record
+  routinely outlives its window (a send to a conversation never opened, or one whose
+  query was closed mid-translation), and consulting `buffers` skipped exactly those. Left behind, a reconnect inside
   the TTL that resends the same text consumes the stale record: the new reflection
   takes the old reserved id and suffix, and the new reservation blocks the buffer
   until it times out.
@@ -912,6 +933,14 @@ Command names deliberately mirror the user's existing WeeChat and irssi scripts.
 `/translate status` reports in-flight counts, queue depths, and failures grouped by
 reason — the operational view needed to tell "the provider is down" from "the filter
 is doing its job".
+
+In-flight counts are reported as three separate numbers because they answer three
+questions: lines actually AT the provider (`translating_len`), display positions held
+for an echo not yet reflected (`reserved_len`), and total queue depth. Folding
+reservations into "in flight" made a healthy client look busy — a reservation's
+translation has usually already come back. Outgoing work is not in these queues at all,
+since the ceiling can take a reservation back while the send runs on, so it is read from
+`outgoing_in_flight` and reported on its own line.
 
 The counters are a session tally on `AppState`, because an outcome is otherwise
 consumed the moment it is rendered and nothing would be left to ask. They are reported

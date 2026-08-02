@@ -237,7 +237,7 @@ impl App {
         for buf_id in buffer_ids {
             let id = self.state.next_message_id();
             let event_param = separator_text.clone();
-            self.state.add_local_message(
+            self.state.add_local_message_in_order(
                 &buf_id,
                 Message {
                     log_key: None,

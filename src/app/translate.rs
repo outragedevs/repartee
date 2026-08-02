@@ -2312,17 +2312,23 @@ impl crate::app::App {
     /// full timeout for a server that is gone blanks the channel for no
     /// possible benefit.
     pub(crate) fn flush_translate_queues_for_connection(&mut self, conn_id: &str) {
-        let belongs = |id: &String, state: &crate::state::AppState| {
-            state
-                .buffers
-                .get(id)
-                .is_some_and(|b| b.connection_id == conn_id)
+        // Ownership comes from the KEY, not from a live buffer. A queue or a
+        // reflection record routinely outlives its window — a send to a
+        // conversation that was never opened, or one whose query was closed
+        // while the translation ran — and consulting `buffers` skipped
+        // exactly those on disconnect. A reconnect inside the record's TTL
+        // that resends the same text then consumed the stale record, taking
+        // the old reserved id with it and leaving the new reservation
+        // blocking the buffer until it timed out.
+        let belongs = |id: &String| {
+            id.split_once('/')
+                .is_some_and(|(owner, _)| owner == conn_id)
         };
         let buffer_ids: Vec<String> = self
             .state
             .translate_queues
             .keys()
-            .filter(|id| belongs(id, &self.state))
+            .filter(|id| belongs(id))
             .cloned()
             .collect();
         for buffer_id in buffer_ids {
@@ -2341,7 +2347,7 @@ impl crate::app::App {
             .state
             .own_echo_decorations
             .keys()
-            .filter(|id| belongs(id, &self.state))
+            .filter(|id| belongs(id))
             .cloned()
             .collect();
         for buffer_id in stale {
@@ -3528,6 +3534,83 @@ mod app_tests {
             app.redirect_outgoing_deliver(&mut out),
             RedirectVerdict::Refuse,
             "an unanswerable redirect must not fall through to the old name"
+        );
+    }
+
+    #[test]
+    fn the_day_separator_goes_through_the_queue_when_there_is_one() {
+        // Asserted through `check_day_changed` and not through the helper it
+        // calls: the helper working proves nothing if the separator path does
+        // not use it.
+        let mut app = app_with_buffer();
+        app.state.reserve_echo_slot(BUF, 1);
+        app.last_day = chrono::Local::now()
+            .date_naive()
+            .pred_opt()
+            .expect("yesterday");
+
+        app.check_day_changed();
+
+        assert_eq!(
+            app.state.buffers[BUF].messages.len(),
+            0,
+            "the separator must not render above the line queued before it"
+        );
+        assert_eq!(
+            app.state.translate_queues[BUF].len(),
+            2,
+            "it took its place behind the reservation instead"
+        );
+    }
+
+    #[test]
+    fn a_disconnect_clears_state_for_conversations_with_no_window() {
+        // A queue or a reflection record routinely outlives its window: a
+        // send to a conversation that was never opened, or one whose query
+        // was closed while the translation ran. Deciding ownership by looking
+        // up a live buffer skipped exactly those, so a reconnect inside the
+        // record's TTL that resent the same text consumed the STALE record —
+        // taking the old reserved id with it and leaving the new reservation
+        // blocking the buffer until it timed out.
+        let mut app = app_with_buffer();
+        app.state.reserve_echo_slot("test/ghost", 1);
+        app.state.decorate_own_echo(
+            "test/ghost",
+            crate::state::AppState::own_echo_decoration(
+                "mein satz".to_string(),
+                1,
+                None,
+                true,
+            ),
+        );
+        assert!(
+            !app.state.buffers.contains_key("test/ghost"),
+            "precondition: no window for this conversation"
+        );
+
+        app.flush_translate_queues_for_connection("test");
+
+        assert!(
+            !app.state.translate_queues.contains_key("test/ghost"),
+            "the queue dies with the session"
+        );
+        assert!(
+            !app.state.own_echo_decorations.contains_key("test/ghost"),
+            "and so does the record that would have matched a resend"
+        );
+    }
+
+    #[test]
+    fn a_disconnect_leaves_another_connection_alone() {
+        // Ownership by key prefix must not become "everything".
+        let mut app = app_with_buffer();
+        app.state.reserve_echo_slot("other/#chan", 1);
+
+        app.flush_translate_queues_for_connection("test");
+
+        assert!(
+            app.state.translate_queues.contains_key("other/#chan"),
+            "a different connection's work is untouched"
         );
     }
 

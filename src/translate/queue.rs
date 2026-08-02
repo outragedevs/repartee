@@ -71,6 +71,7 @@ enum Slot {
         message: Message,
         activity: ActivityLevel,
         origin: ReadyOrigin,
+        delivery: ReadyDelivery,
     },
 }
 
@@ -95,6 +96,24 @@ pub struct CeilingForced {
     /// being translated. Silently folding the two into one number leaves an
     /// operator no way to tell that ordering was sacrificed.
     pub barriers_lifted: usize,
+}
+
+/// How a released row must be handed to the buffer.
+///
+/// The queue takes rows that are NOT ordinary chat — a day separator, an E2E
+/// placeholder — because otherwise they render ahead of the lines queued
+/// before them and the timeline reorders silently (§3.2). But they keep their
+/// own delivery rules on the way out: a placeholder that started being logged
+/// because it went through a queue would be worse than the reordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadyDelivery {
+    /// Logged and delivered — an ordinary chat row.
+    Logged,
+    /// Delivered, never persisted — an E2E placeholder.
+    Transient,
+    /// Appended without logging and without escalating activity — a
+    /// client-generated line such as the day separator.
+    Local,
 }
 
 /// Where a row cleared for delivery came from.
@@ -133,6 +152,7 @@ pub struct ReadyEntry {
     pub message: Message,
     pub activity: ActivityLevel,
     pub origin: ReadyOrigin,
+    pub delivery: ReadyDelivery,
 }
 
 #[derive(Debug, Default)]
@@ -200,6 +220,27 @@ impl TranslateQueue {
                 message,
                 activity,
                 origin: ReadyOrigin::Untranslated(reason),
+                delivery: ReadyDelivery::Logged,
+            }),
+        });
+    }
+
+    /// [`Self::push_resolved`] for a row that must not be logged, or must not
+    /// escalate activity, when it is released.
+    pub fn push_resolved_as(
+        &mut self,
+        id: u64,
+        message: Message,
+        activity: ActivityLevel,
+        delivery: ReadyDelivery,
+    ) {
+        self.entries.push_back(Entry {
+            id,
+            slot: Some(Slot::Ready {
+                message,
+                activity,
+                origin: ReadyOrigin::NotTranslated,
+                delivery,
             }),
         });
     }
@@ -211,6 +252,7 @@ impl TranslateQueue {
                 message,
                 activity,
                 origin: ReadyOrigin::NotTranslated,
+            delivery: ReadyDelivery::Logged,
             }),
         });
     }
@@ -241,6 +283,7 @@ impl TranslateQueue {
                     message,
                     activity,
                     origin: ReadyOrigin::NotTranslated,
+            delivery: ReadyDelivery::Logged,
                 }),
             },
         );
@@ -329,6 +372,7 @@ impl TranslateQueue {
             message: first,
             activity,
             origin: ReadyOrigin::NotTranslated,
+            delivery: ReadyDelivery::Logged,
         });
         for (offset, (message, activity)) in rows.enumerate() {
             self.entries.insert(
@@ -342,6 +386,7 @@ impl TranslateQueue {
                         message,
                         activity,
                         origin: ReadyOrigin::NotTranslated,
+                        delivery: ReadyDelivery::Logged,
                     }),
                 },
             );
@@ -392,6 +437,7 @@ impl TranslateQueue {
             message: first,
             activity,
             origin: ReadyOrigin::NotTranslated,
+            delivery: ReadyDelivery::Logged,
         });
         for (offset, (message, activity)) in held.enumerate() {
             self.entries.insert(
@@ -402,6 +448,7 @@ impl TranslateQueue {
                         message,
                         activity,
                         origin: ReadyOrigin::NotTranslated,
+                        delivery: ReadyDelivery::Logged,
                     }),
                 },
             );
@@ -459,6 +506,7 @@ impl TranslateQueue {
             message,
             activity,
             origin,
+            delivery: ReadyDelivery::Logged,
         });
         true
     }
@@ -475,6 +523,7 @@ impl TranslateQueue {
                 message,
                 activity,
                 origin,
+                delivery,
             }) = entry.slot
             else {
                 unreachable!("front matched above")
@@ -484,6 +533,7 @@ impl TranslateQueue {
                 message,
                 activity,
                 origin,
+                delivery,
             });
         }
         out
@@ -615,10 +665,34 @@ impl TranslateQueue {
     /// How many entries are still awaiting an outcome. Drives
     /// `/translate status`.
     #[must_use]
+    #[cfg(test)]
     pub fn pending_len(&self) -> usize {
         self.entries
             .iter()
             .filter(|e| matches!(e.slot, Some(Slot::Pending { .. } | Slot::Reserved { .. })))
+            .count()
+    }
+
+    /// Lines actually AT the provider, waiting on a translation.
+    ///
+    /// Distinct from [`Self::pending_len`], which also counts reservations —
+    /// a reservation is a held display position whose translation has
+    /// typically already come back, so reporting it as provider work makes a
+    /// healthy client look busy.
+    #[must_use]
+    pub fn translating_len(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| matches!(e.slot, Some(Slot::Pending { .. })))
+            .count()
+    }
+
+    /// Display positions held for an echo that has not been reflected yet.
+    #[must_use]
+    pub fn reserved_len(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| matches!(e.slot, Some(Slot::Reserved { .. })))
             .count()
     }
 }

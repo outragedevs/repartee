@@ -319,21 +319,37 @@ fn status(app: &mut App) {
         "off"
     };
     add_local_event(app, &format!("translate: {active}"));
-    if app.state.translate_queues.is_empty() {
+    // Incoming work and display depth are different numbers and are reported
+    // as such: a reservation is a held POSITION whose translation has usually
+    // already come back, so counting it as provider work made a healthy
+    // client look busy. Outgoing work is not in these queues at all — the
+    // ceiling can take a reservation back while the send runs on — so it is
+    // read from its own markers below.
+    let mut rows: Vec<(String, usize, usize, usize)> = app
+        .state
+        .translate_queues
+        .iter()
+        .map(|(id, q)| (id.clone(), q.translating_len(), q.reserved_len(), q.len()))
+        .filter(|(_, translating, reserved, total)| {
+            *translating > 0 || *reserved > 0 || *total > 0
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    let outgoing = app.state.outgoing_in_flight_counts(std::time::Duration::from_millis(
+        app.config.translate.timeout_ms.saturating_mul(2),
+    ));
+    if rows.is_empty() && outgoing.is_empty() {
         add_local_event(app, "  no lines in flight");
     } else {
-        let mut rows: Vec<(String, usize, usize)> = app
-            .state
-            .translate_queues
-            .iter()
-            .map(|(id, q)| (id.clone(), q.pending_len(), q.len()))
-            .collect();
-        rows.sort_by(|a, b| a.0.cmp(&b.0));
-        for (buffer_id, pending, total) in rows {
-            add_local_event(
-                app,
-                &format!("  {buffer_id}  {pending} in flight, {total} queued"),
-            );
+        for (buffer_id, translating, reserved, total) in rows {
+            let mut parts = vec![format!("{translating} translating"), format!("{total} queued")];
+            if reserved > 0 {
+                parts.push(format!("{reserved} awaiting echo"));
+            }
+            add_local_event(app, &format!("  {buffer_id}  {}", parts.join(", ")));
+        }
+        for (buffer_id, count) in outgoing {
+            add_local_event(app, &format!("  {buffer_id}  {count} outgoing in flight"));
         }
     }
     // Reported whether or not anything is in flight. The question this
