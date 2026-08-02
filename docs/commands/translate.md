@@ -198,9 +198,15 @@ intended in front of the channel.
 If you have moved to a different conversation while it was translating, what
 comes back is re-addressed — a private message returns as
 `/msg <nick> <text>`, so pressing Enter cannot publish it to the channel you
-are now in. Where no such form exists (a `/me`, or a conversation that has
-since closed) nothing is put in the composer at all and the text stays in the
-error row, which names where it was going.
+are now in. Where no such form exists nothing is put in the composer at all
+and the text stays in the error row, which names where it was going. That
+covers a `/me`, a conversation that has since closed, and — because `/msg`
+names a person, not a server — **any** move to a different network: the same
+nick there is somebody else.
+
+The local echo names whoever the message actually went out as. If you `/nick`
+while a translation is running, the message reaches the channel under your new
+name, and that is the name your own copy carries too.
 
 A connection that drops and comes back while your message is being translated
 also refuses it, rather than sending a message you typed on the old session

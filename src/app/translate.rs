@@ -172,7 +172,6 @@ pub struct PendingOutgoingTranslate {
     pub original_text: String,
     pub req: TranslateRequest,
     pub nick: String,
-    pub own_mode: Option<char>,
     pub peer_handle: Option<String>,
     pub show_original: bool,
     /// `true` for `/me`. The request carries the ACTION's inner text —
@@ -233,7 +232,6 @@ pub struct OutgoingTranslateDeliver {
     pub original_text: String,
     pub outcome: TranslateOutcome,
     pub nick: String,
-    pub own_mode: Option<char>,
     pub peer_handle: Option<String>,
     pub show_original: bool,
     /// `true` for `/me`. The request carries the ACTION's inner text —
@@ -890,7 +888,6 @@ fn spawn_connection_lane(
                         original_text: pending.original_text,
                         outcome,
                         nick: pending.nick,
-                        own_mode: pending.own_mode,
                         peer_handle: pending.peer_handle,
                         show_original: pending.show_original,
                         is_action: pending.is_action,
@@ -929,7 +926,6 @@ async fn refuse_outgoing(
                     reason: UntranslatedReason::Error(reason.to_string()),
                 },
                 nick: pending.nick,
-                own_mode: pending.own_mode,
                 peer_handle: pending.peer_handle,
                 show_original: pending.show_original,
                 is_action: pending.is_action,
@@ -1516,12 +1512,10 @@ impl crate::app::App {
             SubmitOrigin::Tui => self.state.active_buffer_id.as_deref(),
             SubmitOrigin::Web(session) => {
                 if self.web_buffer_unconfirmed.contains(session) {
-                    // We do not know where this tab is. Treat that as "not
-                    // here": the re-addressed form below is correct from any
-                    // buffer, and an action declines rather than guessing.
-                    // Trusting a stale record hands back a bare body that
-                    // goes to whatever conversation the browser is actually
-                    // showing.
+                    // We do not know where this tab is, and every form below
+                    // depends on knowing. Trusting a stale record hands back
+                    // a bare body that goes to whatever conversation the
+                    // browser is actually showing.
                     None
                 } else {
                     self.web_active_buffers.get(session).map(String::as_str)
@@ -1544,8 +1538,30 @@ impl crate::app::App {
             // the leak this whole function exists to prevent.
             return None;
         }
-        // Explicitly re-addressed, so it goes where it was always going no
-        // matter which buffer they are in when they press Enter.
+        // `/msg` names a TARGET, not a network: `cmd_msg` resolves it against
+        // `active_conn_id`, whatever that is when Enter is pressed. So the
+        // re-addressed form is correct from any buffer ON THIS CONNECTION and
+        // from no other — hand it to a composer belonging to a second network
+        // and the private text goes to whoever holds that nick THERE.
+        //
+        // Which is the same leak as the branch above, reached through the
+        // other door: that one asks whether the name still means the right
+        // person, this one whether it is even being asked on the right
+        // network. A user waiting on a translation switching to another
+        // server is not exotic — it is what the wait is for.
+        //
+        // No spelling of `/msg` carries a network, so there is nothing to
+        // re-address TO. Decline, exactly as an action does, and leave the
+        // text in the error row where it can be copied deliberately.
+        let looking_at = looking_at?;
+        if self
+            .state
+            .buffers
+            .get(looking_at)
+            .is_none_or(|b| b.connection_id != out.conn_id)
+        {
+            return None;
+        }
         Some(format!("/msg {} {}", out.buffer_name, out.retry_body))
     }
 
@@ -1652,7 +1668,6 @@ impl crate::app::App {
             .connections
             .get(conn_id)
             .map_or_else(|| nick.to_string(), |c| c.nick.clone());
-        let captured_own_mode = self.state.nick_prefix(buffer_id, &captured_nick);
         // Resolve the FULL peer handle now, while the buffer still exists —
         // a `/close` during the wait would otherwise leave
         // `e2e_encrypt_or_passthrough` unable to recover the network and
@@ -1705,7 +1720,6 @@ impl crate::app::App {
                 known_nicks,
             },
             nick: captured_nick,
-            own_mode: captured_own_mode,
             peer_handle: captured_peer_handle,
             show_original: self.config.translate.show_original_out,
             is_action,
@@ -2137,7 +2151,34 @@ impl crate::app::App {
         } else {
             crate::irc::split_irc_message(&echo_text, crate::irc::MESSAGE_MAX_BYTES)
         };
-        let nick_mode_str = out.own_mode.map(|c| c.to_string());
+        // Whose line this IS, resolved now rather than at dispatch.
+        //
+        // The wire message carries no sender: the SERVER stamps the prefix as
+        // it relays it, using whatever nick the connection holds at that
+        // moment. The send happens here, so that is the nick this row was
+        // published under and the one every peer saw. A `/nick` during the
+        // wait — and the wait is exactly when a user has time to do one —
+        // left the echo attributed to a name nobody received the message
+        // from, in the buffer and in the log.
+        //
+        // `conn.nick` is written from the server's own NICK confirmation, not
+        // optimistically on `/nick`, so reading it cannot pick up a change the
+        // server refused. The channel prefix is re-derived for the same reason
+        // and from the same instant.
+        //
+        // The peer handle stays CAPTURED — see `build_outgoing_translate`. It
+        // is not identity for display, it is what keeps an E2E DM encrypted
+        // when its Query buffer was closed during the wait, and re-reading it
+        // would find nothing and fall through to plaintext.
+        let echo_nick = self
+            .state
+            .connections
+            .get(&out.conn_id)
+            .map_or_else(|| out.nick.clone(), |c| c.nick.clone());
+        let nick_mode_str = self
+            .state
+            .nick_prefix(&echo_buffer, &echo_nick)
+            .map(|c| c.to_string());
         // Only a single-chunk echo can carry this: splitting moves the suffix
         // into the last chunk (so the offset no longer maps) and leaves each
         // chunk holding a fraction of a wire line that was itself split
@@ -2168,7 +2209,7 @@ impl crate::app::App {
                 id: self.state.next_message_id(),
                 timestamp: chrono::Utc::now(),
                 message_type: message_type.clone(),
-                nick: Some(out.nick.clone()),
+                nick: Some(echo_nick.clone()),
                 nick_mode: nick_mode_str.clone(),
                 text: chunk,
                 highlight: false,
@@ -2180,10 +2221,11 @@ impl crate::app::App {
                 wire_origin: wire_origin.clone(),
             })
             .collect();
-        // `add_own_message_chunks`, not `add_message`: this echo carries the
-        // nick captured at dispatch, so a `/nick` during the wait would make
-        // the dispatch gate mistake it for someone else's line and translate
-        // our own message a second time.
+        // `add_own_message_chunks`, not `add_message`: these rows have to take
+        // the ONE place reserved when the user pressed Enter, together, so
+        // they keep their position among the lines that arrived while the
+        // translation ran. `add_message` would append them at the end and
+        // hand them to the translation gate on the way.
         self.state
             .add_own_message_chunks(&echo_buffer, out.echo_id, chunks);
     }
@@ -2590,7 +2632,6 @@ mod app_tests {
             original_text: text.to_string(),
             outcome,
             nick: "me".to_string(),
-            own_mode: None,
             peer_handle: None,
             show_original,
             is_action: false,
@@ -4822,6 +4863,53 @@ mod app_tests {
     }
 
     #[test]
+    fn a_deferred_echo_is_attributed_to_the_nick_the_message_went_out_under() {
+        // The wire message carries no sender: the SERVER stamps the prefix as
+        // it relays the line, using whatever nick the connection holds then.
+        // The send happens AFTER the translation, so a `/nick` during the wait
+        // — and the wait is exactly when a user has time for one — means the
+        // message went out under the new name and every peer saw that. An echo
+        // carrying the nick captured at dispatch attributes the line, in the
+        // buffer and in the log, to a name nobody received it from.
+        //
+        // No echo-message here, so this local row is the only copy the author
+        // ever sees.
+        let mut app = app_with_dying_handle(usize::MAX);
+        let mut conn = crate::app::input::submit_typing_tests::make_connection();
+        conn.id = "test".to_string();
+        conn.nick = "alice".to_string();
+        app.state.add_connection(conn);
+        app.state.reserve_echo_slot(BUF, 1);
+
+        let mut out = outgoing("moje zdanie", TranslateOutcome::Translated {
+            id: 1,
+            text: "mein satz".to_string(),
+        }, false);
+        out.nick = "alice".to_string(); // captured when Enter was pressed
+        out.echo_id = 1;
+
+        // `/nick bob` lands, confirmed by the server, while the translation
+        // is still out.
+        app.state
+            .connections
+            .get_mut("test")
+            .expect("the connection")
+            .nick = "bob".to_string();
+
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+
+        let row = app.state.buffers[BUF]
+            .messages
+            .back()
+            .expect("the local echo");
+        assert_eq!(
+            row.nick.as_deref(),
+            Some("bob"),
+            "the row names who the message was actually published as"
+        );
+    }
+
+    #[test]
     fn retyping_a_message_whose_echo_was_lost_does_not_wedge_the_buffer() {
         // The natural reaction to a message that never appeared is to send it
         // again — so a lost reflection and a repeat of the same text are not
@@ -5533,13 +5621,20 @@ mod app_tests {
     }
 
     #[test]
-    fn a_web_retry_is_re_addressed_when_the_tab_may_have_moved() {
+    fn a_web_retry_is_withheld_when_the_tab_may_have_moved() {
         // A tab that follows a TUI-driven `ActiveBufferChanged` changes
         // buffer without telling us, and the opt-out is a localStorage flag
         // only the browser can see — so after such a broadcast the recorded
         // buffer is a guess. Handing back a BARE body on a guess puts it in
         // whatever composer the browser is really showing, and Enter sends it
         // there.
+        //
+        // The re-addressed `/msg` form is not the answer either, and this
+        // test used to say it was. `web_run_command` runs the retry with the
+        // TAB's buffer active, so `/msg` resolves its target on that buffer's
+        // CONNECTION — and not knowing which buffer the tab is showing is
+        // exactly not knowing which network it would go out on. Nothing is
+        // restored; the text is in the error row.
         let session = "sess-1".to_string();
         let mut app = app_with_buffer();
         app.web_active_buffers.insert(session.clone(), BUF.to_string());
@@ -5563,9 +5658,56 @@ mod app_tests {
         // The TUI moves; this tab may or may not have followed.
         app.web_buffer_unconfirmed.insert(session);
         assert_eq!(
+            app.deferred_retry_text(&out),
+            None,
+            "unsure where the composer is, so nothing is put in it"
+        );
+    }
+
+    #[test]
+    fn a_retry_is_never_handed_to_a_composer_on_another_network() {
+        // `/msg` names a TARGET, not a network — `cmd_msg` resolves it
+        // against whatever connection the active buffer belongs to when
+        // Enter is pressed. The user switching servers while a translation
+        // runs is not exotic; the wait is what gives them time to.
+        //
+        // So the re-addressed form, which exists to make a refusal safe from
+        // any OTHER buffer, is safe only on the same connection. Offered on a
+        // second network it hands the user a ready-to-send private message
+        // aimed at whoever holds that nick THERE — the same leak the
+        // buffer-is-gone branch guards, arriving through the other door.
+        let mut app = app_with_buffer();
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Query, "bob"));
+        let mut out = outgoing(
+            "sekret",
+            TranslateOutcome::Untranslated {
+                id: 1,
+                reason: UntranslatedReason::Timeout,
+            },
+            false,
+        );
+        out.buffer_id = "test/bob".to_string();
+        out.buffer_name = "bob".to_string();
+        out.buffer_type = BufferType::Query;
+        out.retry_body = "sekret".to_string();
+
+        // Same connection, different buffer: re-addressing is what it is for.
+        assert_eq!(
             app.deferred_retry_text(&out).as_deref(),
-            Some("/msg #dupa moje zdanie"),
-            "unsure where the composer is, so the form has to name its target"
+            Some("/msg bob sekret"),
+            "still on this network, so naming the target is enough"
+        );
+
+        // A second network, and the user is looking at it.
+        app.state
+            .add_buffer(Buffer::for_test("other", BufferType::Channel, "#inne"));
+        app.state.set_active_buffer("other/#inne");
+        assert_eq!(
+            app.deferred_retry_text(&out),
+            None,
+            "there is no spelling of /msg that carries a network, so nothing \
+             is offered — the text stays in the error row"
         );
     }
 
@@ -6047,7 +6189,6 @@ mod tests {
             original_text: text.to_string(),
             req: req(id, text),
             nick: "me".to_string(),
-            own_mode: None,
             peer_handle: None,
             show_original: false,
             is_action: false,
@@ -6113,7 +6254,6 @@ mod tests {
                     original_text: "hello world".to_string(),
                     req: req(id, "hello world"),
                     nick: "me".to_string(),
-                    own_mode: None,
                     peer_handle: None,
                     show_original: false,
                     is_action: false,

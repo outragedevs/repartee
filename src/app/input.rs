@@ -1521,7 +1521,6 @@ impl App {
                 .connections
                 .get(&conn_id)
                 .map_or_else(|| nick.clone(), |c| c.nick.clone());
-            let captured_own_mode = self.state.nick_prefix(&active_id, &captured_nick);
             // Resolve the FULL E2E peer handle now, while the buffer still
             // exists: its live peer_handle OR the network-scoped cached handle
             // `/e2e on` keyed its config under. Capturing only `b.peer_handle`
@@ -1551,7 +1550,6 @@ impl App {
                 original_text: text.to_string(),
                 urls: pre_extracted_urls,
                 nick: captured_nick,
-                own_mode: captured_own_mode,
                 peer_handle: captured_peer_handle,
             };
             // `try_send` rather than blocking — the queue is sized

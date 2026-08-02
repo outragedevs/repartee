@@ -850,14 +850,24 @@ a public channel. So the form is chosen again at restore time, from where that c
 is looking now — the TUI's active buffer, or the submitting session's active buffer
 for a web client.
 
-Two cases have no safe form and are therefore **not restored at all**, with the text
-left in the error row:
+Three cases have no safe form and are therefore **not restored at all**, with the
+text left in the error row:
 
 - **An action.** `/me` acts on the active buffer and has no re-addressed spelling.
 - **A target whose buffer is gone.** Its name is no longer proof of anything: on a
   query, somebody else may have claimed the nick since (§3.6). Re-addressing would
   hand the user a ready-to-send private message aimed at a stranger — the same leak,
   one keystroke away.
+- **A composer on another connection.** `/msg` names a TARGET, not a network:
+  `cmd_msg` resolves it against whatever connection the active buffer belongs to when
+  Enter is pressed (for a web tab too — `web_run_command` runs the retry with that
+  tab's buffer active). So the re-addressed form is correct from any buffer ON THIS
+  CONNECTION and from no other. Offered on a second network it hands the user a
+  ready-to-send private message aimed at whoever holds that nick *there*: the same
+  leak as the case above, reached through the other door. That branch asks whether
+  the name still means the right person; this one whether it is even being asked on
+  the right network. No spelling of `/msg` carries a network, so there is nothing to
+  re-address to, and the form is withheld.
 
 ### 5.7 A refusal goes back to the client that typed it
 
@@ -882,8 +892,9 @@ Sessions are therefore marked unconfirmed when the broadcast goes out and truste
 when they next speak for themselves. A session already recorded AT the new buffer is
 exempt — it ends up there whether it followed or not — which is also what stops a tab's
 own `SwitchBuffer` from marking itself, since that switch is what raised the event.
-While unconfirmed, a web retry takes the re-addressed form, which is correct from any
-buffer.
+While unconfirmed, a web retry is **withheld entirely**. The re-addressed form is not
+a way out here: not knowing which buffer the tab is showing is exactly not knowing
+which connection its retry would resolve against, and that is the third case above.
 
 ---
 
