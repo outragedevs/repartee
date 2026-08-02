@@ -1722,7 +1722,19 @@ fn handle_privmsg(
     }
 
     // --- Flood checks for regular messages ---
-    if state.flood_protection && nick != our_nick && !flood_exempt {
+    //
+    // `!is_own`, not `nick != our_nick`. IRC nicks are case-insensitive and an
+    // `echo-message` reflection may carry ours in a different case — the very
+    // reason `is_own` is computed that way thirty lines up, and the spelling
+    // `flood_exempt` already uses. Compared exactly, our own reflection reads
+    // as a stranger's and goes through checks meant for other people:
+    // duplicate-text suppression then eats the SECOND time the user sends the
+    // same line, so their own message disappears from their own buffer. With
+    // a translated send that is worse than cosmetic — the decoration was
+    // consumed above, so the place held for the reflection is left with
+    // nothing that can ever fill it, and the conversation stalls behind the
+    // barrier until the queue's expiry.
+    if state.flood_protection && !is_own && !flood_exempt {
         let now = Instant::now();
 
         if ident.starts_with('~') {
@@ -6358,6 +6370,53 @@ mod tests {
         assert!(
             !state.translate_queues.contains_key("test/#rust"),
             "and nothing is left holding the queue open"
+        );
+    }
+
+    #[test]
+    fn our_own_reflection_never_goes_through_the_flood_gate() {
+        // Flood protection exists to shield the user from OTHER people. The
+        // gate spelled that `nick != our_nick`, compared exactly — but IRC
+        // nicks are case-insensitive and an `echo-message` server may reflect
+        // ours in a different case, which is precisely why `is_own` is
+        // computed with `eq_ignore_ascii_case` and why `flood_exempt` right
+        // above already uses it.
+        //
+        // Compared exactly, our own reflection reads as a stranger's: send
+        // the same line three times and duplicate-text suppression eats the
+        // third, so the user's own message never appears in their own buffer.
+        // On a translated buffer it also strands the place held for it, since
+        // the decoration was consumed before this check runs.
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#rust"));
+        state.flood_protection = true;
+
+        // Fill the duplicate window with somebody else's traffic, so the
+        // next repeated line is inside the window the check looks at.
+        for i in 0..4 {
+            let filler: IrcMessage = format!(":alice!u@h PRIVMSG #rust :filler {i}\r\n")
+                .parse()
+                .expect("valid");
+            handle_irc_message(&mut state, "test", &filler);
+        }
+
+        // Our nick is "me"; the server reflects it as "Me".
+        for _ in 0..3 {
+            let reflection: IrcMessage = ":Me!u@h PRIVMSG #rust :mein satz\r\n"
+                .parse()
+                .expect("valid");
+            handle_irc_message(&mut state, "test", &reflection);
+        }
+
+        let mine = rows(&state, "test/#rust")
+            .iter()
+            .filter(|t| t.contains("mein satz"))
+            .count();
+        assert_eq!(
+            mine, 3,
+            "every one of our own lines is shown; none is mistaken for a stranger \
+             flooding us: {:?}",
+            rows(&state, "test/#rust")
         );
     }
 

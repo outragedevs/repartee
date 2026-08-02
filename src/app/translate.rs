@@ -1456,14 +1456,23 @@ impl crate::app::App {
         // The row shows whatever would be restored; when nothing can be, it
         // shows the bare body and says where it was headed, so the user can
         // still see and re-send it deliberately.
-        let shown = restore.clone().unwrap_or_else(|| {
-            format!("{body} {dim}(to {target}){rst}",
-                body = out.retry_body,
-                target = out.buffer_name,
-                dim = crate::commands::types::C_DIM,
-                rst = crate::commands::types::C_RST,
-            )
-        });
+        //
+        // Escaped before composing, never after: the styling around it is
+        // theme codes we mean, and escaping the finished string would show
+        // those literally instead. `restore` keeps its raw form for the
+        // composer, which is not parsed.
+        let escape = crate::commands::helpers::escape_format;
+        let shown = restore.as_deref().map_or_else(
+            || {
+                format!("{body} {dim}(to {target}){rst}",
+                    body = escape(&out.retry_body),
+                    target = escape(&out.buffer_name),
+                    dim = crate::commands::types::C_DIM,
+                    rst = crate::commands::types::C_RST,
+                )
+            },
+            escape,
+        );
         self.deliver_translate_error(
             &out.buffer_id,
             &format!(
@@ -1958,10 +1967,14 @@ impl crate::app::App {
             self,
             &format!(
                 "{err}Not sent — {reason}.{rst} {dim}/translate delout this buffer \
-                 to send it as-is.{rst}\n{dim}Your text:{rst} {text}",
+                 to send it as-is.{rst}\n{dim}Your text:{rst} {shown}",
                 err = crate::commands::types::C_ERR,
                 dim = crate::commands::types::C_DIM,
                 rst = crate::commands::types::C_RST,
+                // Escaped: the row is styled by the theme parser, so a `%` the
+                // user typed would be read as a theme code and eaten. The
+                // COMPOSER gets the raw text below — it is not parsed.
+                shown = crate::commands::helpers::escape_format(text),
             ),
         );
         self.restore_input_text_to(text, origin);
@@ -2084,7 +2097,8 @@ impl crate::app::App {
                 &format!(
                     "{dim}translate: message to {target} sent (buffer was \
                      closed during the translation wait){rst}",
-                    target = out.buffer_name,
+                    // A channel name may legally contain `%`.
+                    target = crate::commands::helpers::escape_format(&out.buffer_name),
                     dim = crate::commands::types::C_DIM,
                     rst = crate::commands::types::C_RST,
                 ),
@@ -2618,6 +2632,72 @@ mod app_tests {
             last.text.contains("no provider"),
             "the reason is named: {}",
             last.text
+        );
+    }
+
+    /// What the user would actually read in the row: the theme parser's
+    /// output, joined back into plain text.
+    fn as_rendered(row_text: &str) -> String {
+        crate::theme::parser::parse_format_string(row_text, &[])
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect()
+    }
+
+    /// Every character class the two rendering passes can eat, in text a
+    /// person might really type: a printf format, a price, a shell variable.
+    const TREACHEROUS: &str = "printf(\"%i\") costs $5 or 50% — $*, $[3]0, %Z112233, %N";
+
+    #[test]
+    fn a_refused_message_is_readable_in_the_row_exactly_as_it_was_typed() {
+        // This row is frequently the ONLY surviving copy: the composer
+        // restore declines to clobber text the user has started typing since,
+        // which seconds after they pressed Enter is the normal case. A row
+        // that silently drops `%i` and the `5` from `$5` is not something
+        // they can retype from — and they have no way to know it happened.
+        let mut app = app_with_buffer();
+        app.refuse_untranslatable_send(TREACHEROUS, "no provider");
+
+        let row = app.state.buffers[BUF]
+            .messages
+            .back()
+            .expect("the refusal row");
+        assert!(
+            as_rendered(&row.text).contains(TREACHEROUS),
+            "the row renders as something other than what was typed:\n  {}",
+            as_rendered(&row.text)
+        );
+    }
+
+    #[test]
+    fn a_deferred_refusal_is_readable_in_the_row_exactly_as_it_was_typed() {
+        // The deferred path builds its own row, and it is the one that
+        // matters most — a deferred failure by definition arrives seconds
+        // later, which is exactly when the composer is busy.
+        let mut app = app_with_buffer();
+        let out = outgoing(
+            TREACHEROUS,
+            TranslateOutcome::Untranslated {
+                id: 1,
+                reason: crate::translate::UntranslatedReason::NoProvider,
+            },
+            false,
+        );
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+
+        let row = app.state.buffers[BUF]
+            .messages
+            .back()
+            .expect("the refusal row");
+        assert!(
+            as_rendered(&row.text).contains(TREACHEROUS),
+            "the row renders as something other than what was typed:\n  {}",
+            as_rendered(&row.text)
+        );
+        assert_eq!(
+            app.input.value, TREACHEROUS,
+            "and the composer gets it RAW — it is not parsed, so escaping it \
+             there would hand back text with doubled signs in it"
         );
     }
 

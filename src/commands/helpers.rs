@@ -2,6 +2,33 @@ use crate::app::App;
 use crate::state::buffer::{Message, MessageType};
 use chrono::Utc;
 
+/// Make text safe to interpolate into an event row's format string.
+///
+/// An `Event` row with no `event_key` is handed to `parse_format_string`
+/// whole, which reads it in two passes and each has a way to eat characters:
+///
+/// - `substitute_vars` consumes `$0`–`$9`, `$*` and `$[N]D`. With no params
+///   they expand to nothing, so "costs $5" renders as "costs ".
+/// - the format walk consumes `%N` (reset), `%_` (bold), `%Zaabbcc` (colour —
+///   six further characters with it), and the rest. `printf("%i", n)` renders
+///   as `printf("", n)`.
+///
+/// That is correct for the codes WE put in a row and wrong for everything
+/// that came from a user, a peer, or a server. It matters most where the row
+/// is the last copy of something: a refused outgoing message is restored to
+/// the composer only while the composer is still empty (see
+/// `restore_input_text_to`), so seconds after the user pressed Enter the row
+/// is routinely the ONLY place their text survives, and a copy that quietly
+/// drops characters is not one they can retype from.
+///
+/// Doubling is the escape both passes define — `$$` for a literal `$` (irssi
+/// `special_vars`), `%%` for a literal `%` — and the web UI's renderer reads
+/// `%%` the same way, so escaped text is correct in either front end.
+#[must_use]
+pub fn escape_format(text: &str) -> String {
+    text.replace('%', "%%").replace('$', "$$")
+}
+
 pub fn add_local_event(app: &mut App, text: &str) {
     let Some(active_id) = app.state.active_buffer_id.as_deref() else {
         return;
@@ -52,4 +79,63 @@ pub fn warn_if_translate_needs_restart(app: &mut App) {
             rst = crate::commands::types::C_RST,
         ),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    /// Both renderers must agree on what escaped text means: the same row is
+    /// shown in the terminal and in the browser, and a copy the user is
+    /// expected to retype from cannot be correct in one and wrong in the
+    /// other. The web UI's parser lives in a separate crate, so the shape of
+    /// its `$$`/`%%` handling is mirrored here rather than called.
+    fn as_web_renders(text: &str) -> String {
+        let chars: Vec<char> = text.chars().collect();
+        let mut out = String::new();
+        let mut i = 0;
+        while i < chars.len() {
+            match chars[i] {
+                '$' if i + 1 < chars.len() && chars[i + 1] == '$' => {
+                    out.push('$');
+                    i += 2;
+                }
+                '%' if i + 1 < chars.len() && chars[i + 1] == '%' => {
+                    out.push('%');
+                    i += 2;
+                }
+                c => {
+                    out.push(c);
+                    i += 1;
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn escaped_text_renders_back_to_itself_in_both_front_ends() {
+        // One case per thing a rendering pass can eat, plus the escapes
+        // themselves — text that is ALREADY doubled must survive a round trip
+        // too, or a user quoting a theme string loses it.
+        for original in [
+            "printf(\"%i\", n)",
+            "costs $5",
+            "$* and $[3]0",
+            "%Z112233 red %N reset %_bold",
+            "100% sure",
+            "literal %% and $$ signs",
+            "nothing special here",
+        ] {
+            let escaped = super::escape_format(original);
+            let tui: String = crate::theme::parser::parse_format_string(&escaped, &[])
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect();
+            assert_eq!(tui, original, "TUI mangled {original:?} (escaped: {escaped:?})");
+            assert_eq!(
+                as_web_renders(&escaped),
+                original,
+                "web mangled {original:?} (escaped: {escaped:?})"
+            );
+        }
+    }
 }

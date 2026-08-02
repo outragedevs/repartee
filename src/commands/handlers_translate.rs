@@ -6,6 +6,7 @@
 
 use crate::app::App;
 use crate::commands::helpers::add_local_event;
+use crate::commands::helpers::escape_format as esc;
 use crate::commands::types::{C_DIM, C_ERR, C_RST};
 use crate::config::TranslateBufferConfig;
 use crate::state::buffer::make_buffer_id;
@@ -30,7 +31,8 @@ pub fn cmd_translate(app: &mut App, args: &[String]) {
         "delin" => del(app, args.get(1..).unwrap_or_default(), Dir::In),
         "delout" => del(app, args.get(1..).unwrap_or_default(), Dir::Out),
         other => {
-            add_local_event(app, &format!("{C_ERR}translate: unknown subcommand '{other}'{C_RST}"));
+            let shown = esc(other);
+            add_local_event(app, &format!("{C_ERR}translate: unknown subcommand '{shown}'{C_RST}"));
             usage(app);
         }
     }
@@ -110,7 +112,8 @@ fn add(app: &mut App, args: &[String], dir: Dir) {
         add_local_event(
             app,
             &format!(
-                "{C_ERR}translate: refused — {target} is end-to-end encrypted.{C_RST}"
+                "{C_ERR}translate: refused — {shown} is end-to-end encrypted.{C_RST}",
+                shown = esc(target),
             ),
         );
         add_local_event(
@@ -144,8 +147,9 @@ fn add(app: &mut App, args: &[String], dir: Dir) {
         add_local_event(
             app,
             &format!(
-                "{C_ERR}translate: addout needs the language {target} is written \
-                 in — e.g. /translate addout {target} de{C_RST}"
+                "{C_ERR}translate: addout needs the language {shown} is written \
+                 in — e.g. /translate addout {shown} de{C_RST}",
+                shown = esc(target),
             ),
         );
         return;
@@ -171,7 +175,7 @@ fn add(app: &mut App, args: &[String], dir: Dir) {
     persist(app);
 
     let what = if dir == Dir::In { "incoming" } else { "outgoing" };
-    add_local_event(app, &format!("translate: {what} enabled for {target}"));
+    add_local_event(app, &format!("translate: {what} enabled for {}", esc(target)));
     if !app.config.translate.enabled {
         add_local_event(
             app,
@@ -197,7 +201,7 @@ fn del(app: &mut App, args: &[String], dir: Dir) {
     let Some(entry) = app.config.translate.buffers.get_mut(&buffer_id) else {
         add_local_event(
             app,
-            &format!("translate: {target} was not enabled for translation"),
+            &format!("translate: {} was not enabled for translation", esc(target)),
         );
         return;
     };
@@ -228,7 +232,7 @@ fn del(app: &mut App, args: &[String], dir: Dir) {
     }
 
     let what = if dir == Dir::In { "incoming" } else { "outgoing" };
-    add_local_event(app, &format!("translate: {what} disabled for {target}"));
+    add_local_event(app, &format!("translate: {what} disabled for {}", esc(target)));
 }
 
 /// Write the updated per-buffer map to disk.
@@ -291,14 +295,19 @@ fn list(app: &mut App) {
         if cfg.incoming {
             let (src, dst) = pair.incoming();
             dirs.push(format!(
-                "in: {}→{dst}",
-                src.as_deref().unwrap_or("auto")
+                "in: {}→{}",
+                esc(src.as_deref().unwrap_or("auto")),
+                esc(&dst)
             ));
         }
         if cfg.outgoing {
             match pair.outgoing() {
                 Some((src, dst)) => {
-                    dirs.push(format!("out: {}→{dst}", src.as_deref().unwrap_or("auto")));
+                    dirs.push(format!(
+                        "out: {}→{}",
+                        esc(src.as_deref().unwrap_or("auto")),
+                        esc(&dst)
+                    ));
                 }
                 // Reachable if the language was removed from config.toml by
                 // hand after `addout` set it. Say so rather than printing a
@@ -306,7 +315,7 @@ fn list(app: &mut App) {
                 None => dirs.push("out: NO LANGUAGE SET".to_string()),
             }
         }
-        add_local_event(app, &format!("  {buffer_id}  {}", dirs.join("   ")));
+        add_local_event(app, &format!("  {}  {}", esc(&buffer_id), dirs.join("   ")));
     }
 }
 
@@ -346,10 +355,10 @@ fn status(app: &mut App) {
             if reserved > 0 {
                 parts.push(format!("{reserved} awaiting echo"));
             }
-            add_local_event(app, &format!("  {buffer_id}  {}", parts.join(", ")));
+            add_local_event(app, &format!("  {}  {}", esc(&buffer_id), parts.join(", ")));
         }
         for (buffer_id, count) in outgoing {
-            add_local_event(app, &format!("  {buffer_id}  {count} outgoing in flight"));
+            add_local_event(app, &format!("  {}  {count} outgoing in flight", esc(&buffer_id)));
         }
     }
     // Reported whether or not anything is in flight. The question this

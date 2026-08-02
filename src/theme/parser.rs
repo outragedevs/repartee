@@ -117,6 +117,18 @@ pub fn substitute_vars(input: &str, params: &[&str]) -> String {
                 break;
             }
 
+            // $$ -- a literal '$', exactly as irssi's special_vars defines it
+            // (`docs/special_vars.txt`: "$$  a literal '$'"). Without it there
+            // is no way to put a `$` followed by a digit into a rendered line:
+            // "costs $5" loses the 5, and any row carrying user text — a
+            // refused message handed back to its author, most of all — is
+            // silently not what was typed.
+            if chars[i] == '$' {
+                result.push('$');
+                i += 1;
+                continue;
+            }
+
             // $* -- all params joined with space
             if chars[i] == '*' {
                 result.push_str(&params.join(" "));
@@ -603,6 +615,19 @@ mod tests {
     fn substitute_trailing_dollar() {
         let result = substitute_vars("price: 5$", &[]);
         assert_eq!(result, "price: 5$");
+    }
+
+    #[test]
+    fn a_doubled_dollar_is_a_literal_one_as_in_irssi() {
+        // `docs/special_vars.txt`: "$$  a literal '$'". Without it there is no
+        // spelling for a `$` in front of a digit, so any line carrying text
+        // somebody typed loses it — "costs $5" becomes "costs ".
+        assert_eq!(substitute_vars("costs $$5", &[]), "costs $5");
+        assert_eq!(substitute_vars("$$0 is not $0", &["sub"]), "$0 is not sub");
+        assert_eq!(substitute_vars("$$$$", &[]), "$$");
+        // A lone `$` in front of something that is not a variable is still
+        // passed through — this changes only the doubled form.
+        assert_eq!(substitute_vars("a $ b $x", &[]), "a $ b $x");
     }
 
     // -----------------------------------------------------------------------

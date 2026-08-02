@@ -188,7 +188,10 @@ error explains why.
 If you have already started typing the next message, the composer is left
 alone rather than overwritten — and since a translation takes a moment, that
 is the usual case rather than the exception. The error row always carries the
-refused text for exactly that reason, so it is recoverable either way.
+refused text for exactly that reason, so it is recoverable either way — and it
+carries it **character for character**, including `%` and `$`, which the theme
+engine would otherwise read as formatting codes and swallow. A row you are
+meant to retype from has to be exactly what you typed.
 Sending the untranslated original would put something other than what you
 intended in front of the channel.
 

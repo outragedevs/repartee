@@ -666,6 +666,20 @@ send got:
   deferred failure arrives *seconds after* the user pressed Enter, so a busy composer
   is the normal case, not the edge. A row naming only the reason therefore loses the
   message outright while telling the user it was handed back.
+- **And it carries the text verbatim.** An `Event` row with no `event_key` is handed
+  to `parse_format_string` whole, which reads it in two passes and each eats
+  characters: `substitute_vars` consumes `$0`–`$9`, `$*` and `$[N]D` (with no params
+  they expand to nothing, so "costs $5" renders as "costs "), and the format walk
+  consumes `%N`, `%_`, `%Zaabbcc` and the rest. That is right for the codes the row
+  itself carries and wrong for anything a person typed. `commands::helpers::
+  escape_format` doubles both signs — `$$` and `%%`, the escapes both passes define —
+  and is applied at composition, never to the finished string, so the styling around
+  the text still renders. The composer and the web `RestoreInput` get the text RAW:
+  neither is parsed, and escaping there would hand back doubled signs.
+  `$$` did not previously exist in the theme parser; it was added, because irssi
+  defines it (`docs/special_vars.txt`) and without it no `$` before a digit can be
+  rendered at all. The web UI's renderer consumes it too, so a row reads the same in
+  both front ends.
 - **Nothing was sent** → the retry text is also restored to whoever submitted it,
   exactly as an up-front refusal does.
 - **A split message got partway** → the first chunks are already on the channel, so
@@ -768,6 +782,13 @@ Details that follow from the shape:
   what was asked for and what a suppressed reflection has always done on a
   non-translated buffer; only the barrier is wrong. `abandon_own_reflection` is the
   one place that gives a place back, shared by all of these.
+- **Our own reflection never enters the flood gate.** Flood protection guards the user
+  against other people, and its condition is `!is_own` — not `nick != our_nick`, which
+  compares exactly while IRC nicks are case-insensitive and an `echo-message` server
+  may reflect ours in a different case. Compared exactly, our own reflection reads as a
+  stranger's: duplicate-text suppression eats the *second* time the user sends the same
+  line, so their own message never appears in their own buffer, and with the decoration
+  already consumed the place held for it is stranded as well.
 - **Records die with the connection.** A drop clears them alongside the queues —
   walked separately, because a record outlives the queue whenever the reservation was
   the only thing in it, which is the ordinary case. Ownership is decided by the
