@@ -924,12 +924,25 @@ impl crate::app::App {
                 // failing, which is exactly when they would look.
                 self.state.translate_tally.record_outcome(&out.outcome);
                 // This send is back, whatever the outcome, so it no longer
-                // holds ordinary sends to its buffer behind it. Cleared under
-                // the id it may have moved to as well as the one it was
-                // dispatched with, because a rename moves the marker with the
-                // rest of the buffer's state.
-                let dispatched_under = out.buffer_id.clone();
-                self.state.clear_outgoing_dispatch(&dispatched_under);
+                // holds ordinary sends to its conversation behind it.
+                //
+                // Cleared under the id the marker LIVES under, which is not
+                // always the one this send was dispatched with: a rename moves
+                // `outgoing_in_flight` along with the rest of the buffer's
+                // state, so after one the entry sits under the new id. Reading
+                // the redirect here rather than relying on
+                // `redirect_outgoing_deliver` covers the refusal paths too —
+                // those return before `out.buffer_id` is updated.
+                let marker_id = match self
+                    .state
+                    .redirected_buffer_id(&out.buffer_id, out.submitted_at)
+                {
+                    crate::state::BufferRedirect::MovedTo(id) => id.to_string(),
+                    crate::state::BufferRedirect::Stays | crate::state::BufferRedirect::Unknown => {
+                        out.buffer_id.clone()
+                    }
+                };
+                self.state.clear_outgoing_dispatch(&marker_id);
                 if self.redirect_outgoing_deliver(&mut out) == RedirectVerdict::Refuse {
                     // The conversation this was addressed to has moved and
                     // its new window is gone. Sending under the old NAME is
@@ -4790,6 +4803,85 @@ mod app_tests {
             app.outgoing_translate_policy(BUF, "moje zdanie", false),
             OutgoingTranslatePolicy::NotApplicable
         ));
+    }
+
+    #[test]
+    fn a_renamed_query_clears_its_in_flight_marker_where_it_moved_to() {
+        // `rekey_buffer_state` moves `outgoing_in_flight` with the rest of the
+        // buffer's state, so after a rename the marker sits under the NEW id
+        // while the send in the worker still carries the old one. Clearing
+        // only the id it was dispatched with leaves the renamed conversation
+        // refusing its own ordinary sends until the marker ages out.
+        let mut app = app_with_buffer();
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Query, "frank"));
+        app.state.note_outgoing_dispatch("test/frank");
+        let submitted = std::time::Instant::now();
+
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Query, "frankie"));
+        app.state.rekey_buffer_state("test/frank", "test/frankie");
+        assert!(
+            app.state.has_outgoing_in_flight(
+                "test/frankie",
+                std::time::Duration::from_secs(60)
+            ),
+            "precondition: the marker moved with the buffer"
+        );
+
+        let mut out = outgoing(
+            "sekret",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "geheim".to_string(),
+            },
+            false,
+        );
+        out.buffer_id = "test/frank".to_string();
+        out.buffer_name = "frank".to_string();
+        out.submitted_at = submitted;
+        out.conn_generation = app.connection_generation("test");
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+
+        assert!(
+            !app.state.has_outgoing_in_flight(
+                "test/frankie",
+                std::time::Duration::from_secs(60)
+            ),
+            "the send came back, so the conversation it moved to is free again"
+        );
+    }
+
+    #[test]
+    fn a_pending_send_holds_up_only_its_own_conversation() {
+        // Deliberate scope, pinned so it is not widened by accident.
+        //
+        // The guard exists to stop a bypass send overtaking an earlier one to
+        // the SAME conversation, where the reorder is plainly visible: a reply
+        // above the message it answers, to everyone reading. Extending it to
+        // the whole connection would refuse ordinary sends to every other
+        // buffer whenever one translated send is in flight — which is not a
+        // transient window but the steady state of the feature's ordinary
+        // configuration, one channel translated and the rest not.
+        let mut app = app_with_outgoing(Some("de"));
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Channel, "#other"));
+        app.state.note_outgoing_dispatch(BUF);
+
+        assert!(
+            matches!(
+                app.outgoing_translate_policy(BUF, "moje zdanie", true),
+                OutgoingTranslatePolicy::Refuse(_)
+            ),
+            "its own conversation waits"
+        );
+        assert!(
+            matches!(
+                app.outgoing_translate_policy("test/#other", "moje zdanie", false),
+                OutgoingTranslatePolicy::NotApplicable
+            ),
+            "an unrelated conversation on the same connection does not"
+        );
     }
 
     #[test]

@@ -527,11 +527,29 @@ worse failure than a cosmetic reordering.
 
 Ordering is therefore split:
 
-- **Wire order** — a per-connection FIFO ensures two outgoing messages reach IRC
-  in submission order, so a fast second message cannot overtake a slow first one.
-  Nothing incoming participates, and neither does any other connection: a single
-  global queue would let one hung request on network A block translated sends on
-  network B.
+- **Wire order** — a per-connection FIFO ensures two TRANSLATED outgoing messages
+  reach IRC in submission order, so a fast second message cannot overtake a slow
+  first one. Nothing incoming participates, and neither does any other connection:
+  a single global queue would let one hung request on network A block translated
+  sends on network B.
+
+  A send that bypasses translation is held back only from overtaking pending work
+  in the **same conversation** (§3.7), not everywhere on the connection, and that
+  narrower scope is deliberate. Same-conversation is where a reorder is plainly
+  visible and misleading — a reply sitting above the message it answers, to
+  everyone reading it. Across buffers there is no such reader: the two messages
+  land in different channels, and nobody follows them as a sequence.
+
+  The wider guard also cannot be paid for. Refusing every ordinary send on a
+  connection whenever one translated send is in flight is not a transient window;
+  it is the steady state of the feature's ordinary configuration — one channel
+  translated, the rest not — where a message to any other buffer within a second
+  of a translated one would be bounced. Routing bypass sends through the lane
+  instead would preserve the order without refusing anything, but puts every
+  ordinary send on the connection behind a provider that may be wedged, which
+  trades a nearly unobservable reorder for a visible stall on traffic that has
+  nothing to do with translation. `a_pending_send_holds_up_only_its_own_conversation`
+  pins the scope so it is not widened by accident.
 - **Echo order** — the local echo enters the buffer's display queue like any other
   row (§3.2), under the `id` it was allocated at submission. When it splits into
   several rows — which `show_original_out` makes routine, because the appended
