@@ -479,6 +479,23 @@ fn single_line_or_refuse(expected: u64, outcome: TranslateOutcome) -> TranslateO
             reason: UntranslatedReason::Error("backend returned multiple lines".to_string()),
         };
     }
+    // Whitespace-only counts as empty: a line of spaces renders exactly as
+    // blank as nothing at all, and is just as useless on the wire. The test
+    // is on the whole answer, but only the trailing newlines are actually
+    // stripped from what gets sent — leading space in a real translation is
+    // the backend's business, not ours to rewrite.
+    if trimmed.trim().is_empty() {
+        // Nothing usable came back. Accepting it renders an incoming line
+        // blank when the original is hidden, and on the outgoing side puts an
+        // empty PRIVMSG on the channel, reports the send as done, and throws
+        // away the text the user typed. An empty answer is a gap like any
+        // other: mark it and hand the original back.
+        tracing::error!(id, "translate: backend returned an empty answer; refusing it");
+        return TranslateOutcome::Untranslated {
+            id,
+            reason: UntranslatedReason::Error("backend returned nothing".to_string()),
+        };
+    }
     if trimmed.len() > MAX_TRANSLATION_BYTES {
         tracing::error!(
             id,
@@ -3515,6 +3532,61 @@ mod app_tests {
     }
 
     #[test]
+    fn closing_a_query_does_not_lose_track_of_a_send_still_in_flight() {
+        // A translated private message is in the worker; the user closes the
+        // query; the peer then changes nick in a shared channel. With the
+        // window gone there is no query buffer for the NICK handler to
+        // re-key, so nothing recorded that the conversation moved — and the
+        // send went out addressed to the abandoned nick, which somebody else
+        // may already hold.
+        let mut app = app_with_buffer();
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Query, "frank"));
+        app.state.note_outgoing_dispatch("test/frank");
+        let submitted = std::time::Instant::now();
+
+        app.state.remove_buffer("test/frank");
+        assert!(
+            app.state
+                .has_outgoing_in_flight("test/frank", std::time::Duration::from_secs(60)),
+            "closing the window does not recall the message"
+        );
+
+        // The peer renames somewhere we can still see them.
+        crate::irc::events::rename_query_buffers_for_test(
+            &mut app.state,
+            "test",
+            "frank",
+            "frankie",
+            &[],
+        );
+
+        assert_eq!(
+            app.state.redirected_buffer_id("test/frank", submitted),
+            crate::state::BufferRedirect::MovedTo("test/frankie"),
+            "the rename is recorded even with no window to move"
+        );
+
+        // And the delivery path refuses rather than addressing `frank`: the
+        // conversation moved somewhere that has no window either.
+        let mut out = outgoing(
+            "sekret",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "geheim".to_string(),
+            },
+            false,
+        );
+        out.buffer_id = "test/frank".to_string();
+        out.buffer_name = "frank".to_string();
+        out.submitted_at = submitted;
+        assert_eq!(
+            app.redirect_outgoing_deliver(&mut out),
+            RedirectVerdict::Refuse
+        );
+    }
+
+    #[test]
     fn a_reused_nick_that_renames_twice_still_separates_the_eras() {
         // As above, but bob renames again: alice's era must follow ALICE
         // through her own chain while bob's follows his, with neither
@@ -5057,6 +5129,54 @@ mod app_tests {
         assert!(
             app.web_buffer_unconfirmed.contains("sess-2"),
             "the one that may have followed does not"
+        );
+    }
+
+    #[test]
+    fn an_empty_backend_answer_is_refused() {
+        // Accepting it renders an incoming line blank when the original is
+        // hidden, and on the outgoing side puts an EMPTY PRIVMSG on the
+        // channel, reports the send as done, and throws away what the user
+        // typed.
+        for answer in ["", "\n", "\r\n", "   \r\n"] {
+            let refused = super::single_line_or_refuse(
+                1,
+                TranslateOutcome::Translated {
+                    id: 1,
+                    text: answer.to_string(),
+                },
+            );
+            assert!(
+                matches!(refused, TranslateOutcome::Untranslated { .. }),
+                "an empty answer is a gap, not a translation: {answer:?} -> {refused:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_translation_never_reaches_the_wire() {
+        // The consequence the guard buys: the original comes back to the
+        // user instead of an empty line going out under their nick.
+        let mut app = app_with_dying_handle(64);
+        app.conn_generations.insert("test".to_string(), 1);
+        let sender = app.irc_handles["test"].sender().clone();
+        let mut out = outgoing(
+            "moje zdanie",
+            TranslateOutcome::Untranslated {
+                id: 1,
+                reason: UntranslatedReason::Error("backend returned nothing".to_string()),
+            },
+            false,
+        );
+        out.conn_generation = Some(1);
+        app.state.reserve_echo_slot(BUF, 1);
+
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+
+        assert!(
+            sender.captured().is_empty(),
+            "nothing goes out: {:?}",
+            sender.captured()
         );
     }
 

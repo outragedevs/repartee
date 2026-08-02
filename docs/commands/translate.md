@@ -160,7 +160,9 @@ translator is an outside service and its answer is about to be sent under
 your nick, so anything that could be read as a second IRC command never
 reaches the network.
 
-A translation that comes back implausibly long is refused rather than sent:
+A translation that comes back empty is refused too — the original comes
+back to you rather than an empty line going out under your nick. One that
+comes back implausibly long is refused rather than sent:
 it would be split across the wire budget and published as a long run of
 messages under your nick. Never a guess, never a partial translation. A fluent sentence that means
 something else is the one failure a reader cannot detect, so a visible gap is

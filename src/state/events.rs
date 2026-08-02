@@ -119,7 +119,12 @@ impl AppState {
         // anyway" used to describe. The refusal was the bug.
         self.flush_translate_queue(id);
         self.own_echo_decorations.remove(id);
-        self.outgoing_in_flight.remove(id);
+        // `outgoing_in_flight` is deliberately NOT dropped here. It is the
+        // only remaining record that a send is still out for this
+        // conversation, and closing the window does not recall it: the peer
+        // may yet change nick, and without this the rename goes unrecorded
+        // and the message is addressed to a nick somebody else may hold. The
+        // entry ages out on its own.
         self.pending_web_events
             .push(crate::web::protocol::WebEvent::BufferClosed {
                 buffer_id: id.to_string(),
@@ -704,6 +709,14 @@ impl AppState {
     /// redirect meant for its previous owner.
     const REDIRECT_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
+    /// [`Self::REDIRECT_TTL`], for callers outside this module that need the
+    /// same window — a nick change has to be recorded for as long as a
+    /// redirect could still be consulted.
+    #[must_use]
+    pub const fn redirect_ttl() -> std::time::Duration {
+        Self::REDIRECT_TTL
+    }
+
     /// How many occupancies of one buffer id are remembered at a time.
     ///
     /// A nick passed around inside the TTL would otherwise grow this list
@@ -1093,6 +1106,13 @@ impl AppState {
         // pointing at the marker and the wire text stops being the wire text.
         // Translation and shrink are mutually exclusive per line by design,
         // and that has to hold on the failure path too.
+        //
+        // The fan-out happens HERE because this branch is the delivery: the
+        // caller is told the row was taken over, so it skips its inline
+        // mention push, and nothing releases from a queue that was never
+        // created — the mention would simply be lost. `deliver_ready` does
+        // the same job for every row that really does go through a queue.
+        self.fan_out_mention_for_row(buffer_id, &message);
         self.add_message_with_activity_unshrunk(buffer_id, message, level);
         None
     }
@@ -3754,6 +3774,39 @@ mod translate_gate_tests {
             state.buffers[BUF].messages.len(),
             before,
             "the replay is recognised as the row already on screen"
+        );
+    }
+
+    #[test]
+    fn a_mention_survives_a_line_that_never_reached_the_translator() {
+        // A multi-line message, or a dead worker, is delivered straight away
+        // with no queue behind it — but the caller was still told the row was
+        // taken over, so it skipped its own mention push. Nothing releases
+        // from a queue that was never created, so without a fan-out here the
+        // mention is simply gone.
+        let (mut state, _rx) = state_with_translation();
+        let mut mentions = crate::state::events::tests::make_test_buffer(
+            "libera",
+            crate::state::buffer::BufferType::Mentions,
+            "Mentions",
+        );
+        mentions.id = "_mentions".to_string();
+        state.buffers.insert("_mentions".to_string(), mentions);
+
+        // Multi-line: eligible for translation, but not translatable.
+        let mut msg = make_test_message(&mut state, "hola kofany\nsegunda linea");
+        msg.highlight = true;
+        let taken = state.add_message_with_activity(BUF, msg, ActivityLevel::Mention);
+
+        assert!(taken, "precondition: the caller is told not to push inline");
+        assert!(
+            !state.translate_queues.contains_key(BUF),
+            "precondition: no queue was created, so nothing will release it"
+        );
+        assert_eq!(
+            state.buffers["_mentions"].messages.len(),
+            1,
+            "the mention is aggregated by the branch that delivered it"
         );
     }
 

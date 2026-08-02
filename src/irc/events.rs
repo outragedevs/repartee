@@ -2820,7 +2820,39 @@ fn handle_quit(
 
 /// Rename query buffers in `affected` to `new_nick`.
 /// Re-keys the buffer in the `IndexMap` and updates `active_buffer_id`.
-fn rename_query_buffers(state: &mut AppState, conn_id: &str, new_nick: &str, affected: &[String]) {
+/// Test hook for [`rename_query_buffers`], which is where a peer's nick
+/// change is turned into a redirect.
+#[cfg(test)]
+pub fn rename_query_buffers_for_test(
+    state: &mut AppState,
+    conn_id: &str,
+    old_nick: &str,
+    new_nick: &str,
+    affected: &[String],
+) {
+    rename_query_buffers(state, conn_id, old_nick, new_nick, affected);
+}
+
+fn rename_query_buffers(
+    state: &mut AppState,
+    conn_id: &str,
+    old_nick: &str,
+    new_nick: &str,
+    affected: &[String],
+) {
+    // A query whose window was CLOSED is not in `affected`, so nothing below
+    // would record that this conversation moved — and a translated private
+    // message still in the worker would then be addressed to the abandoned
+    // nick, which somebody else may already hold. The in-flight marker
+    // outlives the window precisely so this case is still answerable.
+    let old_id = make_buffer_id(conn_id, old_nick);
+    let new_id = make_buffer_id(conn_id, new_nick);
+    if old_id != new_id
+        && !state.buffers.contains_key(&old_id)
+        && state.has_outgoing_in_flight(&old_id, AppState::redirect_ttl())
+    {
+        state.rekey_buffer_state(&old_id, &new_id);
+    }
     for buf_id in affected {
         let is_query = state
             .buffers
@@ -2936,7 +2968,7 @@ fn handle_nick_change(
             for buf_id in &affected {
                 state.update_nick(buf_id, &old_nick, new_nick);
             }
-            rename_query_buffers(state, conn_id, new_nick, &affected);
+            rename_query_buffers(state, conn_id, &old_nick, new_nick, &affected);
             return;
         }
     }
@@ -3027,7 +3059,7 @@ fn handle_nick_change(
         );
     }
 
-    rename_query_buffers(state, conn_id, new_nick, &affected);
+    rename_query_buffers(state, conn_id, &old_nick, new_nick, &affected);
 }
 
 #[expect(clippy::too_many_arguments, reason = "IRC KICK has many parameters")]

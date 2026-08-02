@@ -120,6 +120,11 @@ deliberate duplication — the last point before bytes reach the socket, making 
 refusal a property of the send rather than of one upstream check, exactly as
 `build_outgoing_translate` re-runs the E2E gate.
 
+An **empty answer** is refused as well, whitespace-only included. Accepted, it renders an
+incoming line blank whenever the original is hidden, and on the outgoing side puts an
+empty PRIVMSG on the channel, reports the send as done, and discards the text the user
+typed — a silent loss of their message in exchange for nothing.
+
 The **correlation id** is checked, not believed. An outcome carrying a different id
 than the request it answers is refused and re-labelled to the id we asked about.
 Trusting it resolves the queue slot the backend named: one line's translation applied
@@ -394,6 +399,14 @@ is the same leak as addressing the old name, one keystroke away. Only the re-add
 `/msg <nick> <body>` form carries a nick; buffer input retries as itself and an action
 retries as `/me <body>`, which names nobody.
 
+A closed window does not end the question. `/close` on a query whose translated
+message is still in the worker leaves no buffer for the NICK handler to re-key, so
+nothing would record that the conversation moved and the send would go out addressed to
+the abandoned nick. The in-flight marker (§3.7) therefore OUTLIVES the window — it is
+the only remaining record that a message is still out for that conversation — and a
+rename is turned into an era whenever one is live, buffer or no buffer. The delivery
+path then follows it, or refuses when the destination has no window either.
+
 The migrated key is not written to disk. `/translate add*|del*` writes the file and
 will carry it along next time; rewriting `config.toml` in response to somebody else's
 `/nick` is I/O the user did not ask for. So the setting follows the peer for this
@@ -498,12 +511,15 @@ A new `translate_rx` arm in the `select!` loop, alongside `preview_rx`
 the head.
 
 A highlighted channel line is copied into the `_mentions` aggregate **when it is
-released**, not when it arrives. Built at arrival it would carry the original while the
+delivered**, not when it arrives. Built at arrival it would carry the original while the
 channel goes on to show the translation, and the two would disagree permanently — in the
 one place someone looks precisely because they were away and cannot re-read the channel.
 `add_message_with_activity` reports whether translation took the row over, so the inline
-fan-out is skipped exactly then and `deliver_ready` does it instead, with the final text,
-marker and all. Shrink is deliberately unchanged: it defers the chat row but its mention
+fan-out is skipped exactly then and the delivery does it instead, with the final text,
+marker and all. "Delivery" is two places, and both must do it: `deliver_ready` for a row
+released from a queue, and `deliver_untranslated_in_order`'s immediate branch — a
+multi-line message, or a dead worker, is handed straight to the buffer with no queue
+behind it, so nothing would ever release it and the mention would simply be lost. Shrink is deliberately unchanged: it defers the chat row but its mention
 is still pushed inline from the original text.
 
 ---
