@@ -169,6 +169,14 @@ reaches the network from a translated message is framing this client built.
 Incoming is checked too: a reply carrying it would render as a `/me` from the
 other person, putting words in their mouth.
 
+A translation *beginning* with one of the E2E wire prefixes is refused too.
+Those are recognised as protocol on every conversation, encrypted or not —
+that is how the first handshake from a peer can arrive at all — so an answer
+shaped like one would be swallowed as a handshake or fed to the decryption
+path by every Repartee that received it, your own included, instead of being
+read. Only the prefix is reserved: mentioning the protocol mid-sentence is
+ordinary conversation and passes.
+
 A translation that comes back empty is refused too — the original comes
 back to you rather than an empty line going out under your nick. One that
 comes back implausibly long is refused rather than sent:
@@ -277,9 +285,11 @@ encryption exists to exclude.
 The refusal is enforced where each request is built, not just in
 `/translate addin`, so the order you enable things in does not matter:
 turning E2E on for a channel that already had translation enabled stops it
-from the next line. When E2E status cannot be determined at all — an
-unreadable keyring, a DM whose peer handle has not resolved yet — the
-conversation is treated as encrypted and left untranslated.
+from the next line — and `/e2e on` says so, rather than leaving a channel
+that silently stopped translating to read as a broken translator. When E2E
+status cannot be determined at all — an unreadable keyring, a DM whose peer
+handle has not resolved yet — the conversation is treated as encrypted and
+left untranslated.
 
 ## Interaction with URL shortening
 

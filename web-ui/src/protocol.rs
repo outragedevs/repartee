@@ -141,6 +141,12 @@ pub enum WebEvent {
         text: String,
         #[serde(default)]
         session_id: Option<String>,
+        /// The buffer the text belongs to. Restored only while that buffer
+        /// is still the active one — the tab may have switched during the
+        /// round trip, and a retry in another conversation's composer would
+        /// publish it there on Enter.
+        #[serde(default)]
+        buffer_id: Option<String>,
     },
     Error {
         message: String,

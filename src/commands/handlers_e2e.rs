@@ -470,6 +470,26 @@ fn e2e_on(app: &mut App) {
         return;
     }
     ok(app, &format!("enabled on {} (mode=normal)", crate::e2e::display_context(&chan)));
+    // The user just made this a conversation translation must never touch.
+    // The exclusion itself is enforced at the gate, from the next line, with
+    // no state to keep in sync — but silently: without this row both
+    // features read as "on" and the channel simply stops being translated,
+    // which looks like a broken translator rather than a decision.
+    if let Some(buffer_id) = app.state.active_buffer_id.as_deref()
+        && app.state.translate_buffers.contains_key(buffer_id)
+    {
+        warn(
+            app,
+            "this conversation was set up for translation — encryption wins, \
+             so it will no longer be translated (translating would send its \
+             plaintext to a third-party provider)",
+        );
+    }
+    // The user just made this a conversation translation must never touch.
+    // The exclusion itself is enforced at the gate, from the next line, with
+    // no state to keep in sync — but silently: without this row both
+    // features read as "on" and the channel simply stops being translated,
+    // which looks like a broken translator rather than a decision.
 }
 
 fn e2e_off(app: &mut App) {
@@ -1640,6 +1660,79 @@ mod tests {
 
     fn s(x: &str) -> String {
         x.to_string()
+    }
+
+    /// App looking at channel `test/#dupa`, with a live E2E manager.
+    fn app_on_a_channel() -> crate::app::App {
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        app.state
+            .add_buffer(crate::state::buffer::Buffer::for_test(
+                "test",
+                crate::state::buffer::BufferType::Channel,
+                "#dupa",
+            ));
+        app.state.set_active_buffer("test/#dupa");
+        let db = crate::storage::db::open_database(false).unwrap();
+        let keyring =
+            crate::e2e::keyring::Keyring::new(std::sync::Arc::new(std::sync::Mutex::new(db)));
+        app.state.e2e_manager = Some(std::sync::Arc::new(
+            crate::e2e::E2eManager::load_or_init(keyring).unwrap(),
+        ));
+        app
+    }
+
+    fn rows(app: &crate::app::App) -> Vec<String> {
+        app.state.buffers["test/#dupa"]
+            .messages
+            .iter()
+            .map(|m| m.text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn e2e_on_says_so_when_it_ends_translation_for_the_conversation() {
+        // The exclusion itself runs at the gate, silently and from the next
+        // line. Without this row the user sees both features "on" and a
+        // channel that simply stopped being translated — which reads as a
+        // broken translator, not as encryption winning.
+        let mut app = app_on_a_channel();
+        app.state.translate_buffers.insert(
+            "test/#dupa".to_string(),
+            crate::config::TranslateBufferConfig {
+                incoming: true,
+                outgoing: false,
+                lang: Some("de".to_string()),
+                my_lang: None,
+            },
+        );
+
+        e2e_on(&mut app);
+
+        assert!(
+            rows(&app)
+                .iter()
+                .any(|t| t.contains("no longer be translated")),
+            "the user is told which feature won: {:?}",
+            rows(&app)
+        );
+    }
+
+    #[test]
+    fn e2e_on_stays_quiet_about_translation_where_none_was_configured() {
+        // The warning is about a real conflict. On every ordinary /e2e on it
+        // would be noise that trains the user to ignore it.
+        let mut app = app_on_a_channel();
+        e2e_on(&mut app);
+        assert!(
+            rows(&app).iter().any(|t| t.contains("enabled on")),
+            "precondition: the enable itself succeeded: {:?}",
+            rows(&app)
+        );
+        assert!(
+            !rows(&app).iter().any(|t| t.contains("translated")),
+            "no translation was configured, so nothing to say: {:?}",
+            rows(&app)
+        );
     }
 
     // ---------- DM keying context ----------

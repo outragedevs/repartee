@@ -262,6 +262,7 @@ mod tests {
         let ev = WebEvent::RestoreInput {
             text: "moje zdanie".to_string(),
             session_id: Some("alice".to_string()),
+            buffer_id: Some("libera/bob".to_string()),
         };
         assert!(
             is_targeted_to_other(&ev, "bob"),

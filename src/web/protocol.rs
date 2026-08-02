@@ -168,6 +168,15 @@ pub enum WebEvent {
         text: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
+        /// The buffer whose composer this text belongs in. The client
+        /// applies the restore only while that buffer is still its active
+        /// one: the tab may have switched during the round trip — its
+        /// `SwitchBuffer` travels client→server while this travels
+        /// server→client, so the two can cross — and a bare retry restored
+        /// into another conversation's composer publishes it there on the
+        /// next Enter.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        buffer_id: Option<String>,
     },
     /// Server-side error.
     Error {

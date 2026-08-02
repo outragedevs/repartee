@@ -98,6 +98,21 @@ const fn outgoing_body_budget(is_action: bool) -> usize {
 /// Bytes `\x01ACTION ` + `\x01` adds around an action's text.
 const ACTION_WRAPPER_BYTES: usize = "\x01ACTION \x01".len();
 
+/// Whether every Repartee client would read this text as RPE2E PROTOCOL
+/// rather than prose.
+///
+/// Matched exactly as the receive paths match it — bare prefixes, no `\x01`
+/// involved: `+RPE2E01` opens the ciphertext wire format and `RPEE2E` a
+/// handshake, and both are recognised on ANY buffer, E2E-enabled or not,
+/// because that is how a peer's first KEYREQ can arrive at all. The
+/// E2E–translate exclusion keys on the CONVERSATION and cannot help here:
+/// text shaped like this does its damage on conversations where E2E was
+/// never enabled.
+fn reads_as_rpe2e_protocol(text: &str) -> bool {
+    text.starts_with(crate::e2e::handshake::CTCP_TAG)
+        || text.starts_with(crate::e2e::wire::WIRE_PREFIX)
+}
+
 /// Which client submitted a message.
 ///
 /// Carried so a refusal returns the text to the person who typed it. Without
@@ -519,6 +534,32 @@ fn single_line_or_refuse(expected: u64, outcome: TranslateOutcome) -> TranslateO
             reason: UntranslatedReason::Error("backend returned CTCP framing".to_string()),
         };
     }
+    // The RPE2E wire prefixes are protocol without any framing byte, so the
+    // `\x01` check above does not see them. A translation beginning with one
+    // is swallowed as a handshake or fed to the ciphertext path by every
+    // receiving Repartee — our own reflection handling included — instead of
+    // rendering as prose, and on the incoming side it would vanish the same
+    // way. The shipped stub alone can produce this: it reorders words, so
+    // "hello RPEE2E" comes back tag-first. Not a translation anybody can
+    // read, so it is refused like any other unusable answer.
+    if reads_as_rpe2e_protocol(trimmed) {
+        tracing::error!(
+            id,
+            "translate: backend returned E2E protocol text; refusing it"
+        );
+        return TranslateOutcome::Untranslated {
+            id,
+            reason: UntranslatedReason::Error("backend returned E2E protocol text".to_string()),
+        };
+    }
+    // The RPE2E wire prefixes are protocol without any framing byte, so the
+    // `\x01` check above does not see them. A translation beginning with one
+    // is swallowed as a handshake or fed to the ciphertext path by every
+    // receiving Repartee — our own reflection handling included — instead of
+    // rendering as prose, and on the incoming side it would vanish the same
+    // way. The shipped stub alone can produce this: it reorders words, so
+    // "hello RPEE2E" comes back tag-first. Not a translation anybody can
+    // read, so it is refused like any other unusable answer.
     // Whitespace-only counts as empty: a line of spaces renders exactly as
     // blank as nothing at all, and is just as useless on the wire. The test
     // is on the whole answer, but only the trailing newlines are actually
@@ -1188,20 +1229,39 @@ impl crate::app::App {
     /// would produce a local echo inconsistent with what hit the wire — or
     /// leak plaintext for an E2E PM whose Query buffer is gone. Same
     /// reasoning as `send_outgoing_substituted` in `shrink.rs`.
-    fn send_outgoing_translated(&mut self, out: &OutgoingTranslateDeliver) {
-        // Re-wrap here rather than translating the framing: the request
-        // carried the ACTION's inner text, because `\x01ACTION …\x01` handed
-        // to a translator comes back as anything but a valid CTCP.
-        //
-        // Wrapping produces ONE string, and a translation can be longer than
-        // its source — enough to push the framed form past the byte budget.
-        // The send path would then split the whole framed string, so peers
-        // would receive a first chunk with an opening delimiter, middle
-        // chunks with none, and a last chunk with only the closing one:
-        // malformed actions rather than one long one. Splitting the BODY and
-        // wrapping each chunk keeps every wire line a valid CTCP.
+    /// The body one resolved outgoing outcome should put on the wire, or
+    /// `None` after refusing the send and handing the text back.
+    ///
+    /// This is the last point before bytes reach the socket, so the refusals
+    /// live HERE even though `single_line_or_refuse` already ran at the seam
+    /// — making them a property of the send rather than of one upstream
+    /// check is the same reasoning as re-running the E2E gate inside
+    /// `build_outgoing_translate`.
+    ///
+    /// `send_privmsg` only breaks on `\r\n`: a bare `\n` rides into the
+    /// trailing parameter and a server accepting bare-LF endings reads the
+    /// remainder as a fresh command. `\x01` is checked on the BODY rather
+    /// than on the wire lines because the wire lines are where our OWN
+    /// action framing legitimately lives — one arriving inside the body puts
+    /// a REQUEST on the wire under the user's nick rather than a message.
+    /// The RPE2E prefixes are checked on the BACKEND's text only: the
+    /// not-a-gap branch sends the user's own words, which every
+    /// non-translated path ships verbatim, and translated buffers must not
+    /// hold the user's own prose to a stricter rule.
+    fn translated_wire_body<'a>(&mut self, out: &'a OutgoingTranslateDeliver) -> Option<&'a str> {
         let body: &str = match &out.outcome {
-            TranslateOutcome::Translated { text, .. } => text,
+            TranslateOutcome::Translated { text, .. } => {
+                if reads_as_rpe2e_protocol(text) {
+                    tracing::error!(
+                        target = %out.buffer_name,
+                        "translate: refusing a wire payload shaped like E2E protocol"
+                    );
+                    self.release_echo_slot_and_drain(&out.buffer_id, out.echo_id);
+                    self.abandon_with_text(out, "the translation was E2E protocol text");
+                    return None;
+                }
+                text
+            }
             // The broker decided this line needed no translation, so the
             // original IS the correct thing to send.
             TranslateOutcome::Untranslated { reason, .. } if !reason.is_gap() => &out.original_text,
@@ -1217,26 +1277,9 @@ impl crate::app::App {
                 // queue timeout.
                 self.release_echo_slot_and_drain(&out.buffer_id, out.echo_id);
                 self.abandon_with_text(out, &format!("translation failed ({reason_label})"));
-                return;
+                return None;
             }
         };
-
-        // Belt and braces on the injection guard. `single_line_or_refuse`
-        // already rejects a multi-line answer at the seam, but THIS is the
-        // last point before bytes reach the socket, and `send_privmsg` only
-        // breaks on `\r\n` — a bare `\n` rides into the trailing parameter
-        // and a server accepting bare-LF endings reads the remainder as a
-        // fresh command. Making the refusal a property of the send rather
-        // than of one upstream check is the same reasoning as re-running the
-        // E2E gate inside `build_outgoing_translate`.
-        //
-        // The same reasoning covers `\x01`, and it is checked on the BODY
-        // rather than on the wire lines because the wire lines are where our
-        // OWN action framing legitimately lives. Every `\x01` reaching IRC
-        // from here has to be one `wrap_outgoing_body` put there; one arriving
-        // inside the body is either a backend answer that got past the seam or
-        // a caller that supplied a pre-framed original, and either way it puts
-        // a REQUEST on the wire under the user's nick rather than a message.
         if body.contains(['\r', '\n', '\x01']) {
             tracing::error!(
                 target = %out.buffer_name,
@@ -1244,8 +1287,26 @@ impl crate::app::App {
             );
             self.release_echo_slot_and_drain(&out.buffer_id, out.echo_id);
             self.abandon_with_text(out, "the translation contained a control character");
-            return;
+            return None;
         }
+        Some(body)
+    }
+
+    fn send_outgoing_translated(&mut self, out: &OutgoingTranslateDeliver) {
+        let Some(body) = self.translated_wire_body(out) else {
+            return;
+        };
+        // Re-wrap here rather than translating the framing: the request
+        // carried the ACTION's inner text, because `\x01ACTION …\x01` handed
+        // to a translator comes back as anything but a valid CTCP.
+        //
+        // Wrapping produces ONE string, and a translation can be longer than
+        // its source — enough to push the framed form past the byte budget.
+        // The send path would then split the whole framed string, so peers
+        // would receive a first chunk with an opening delimiter, middle
+        // chunks with none, and a last chunk with only the closing one:
+        // malformed actions rather than one long one. Splitting the BODY and
+        // wrapping each chunk keeps every wire line a valid CTCP.
         let wire_texts = wrap_outgoing_body(body, out.is_action);
 
         // Late is the same as not at all. The display reservation this send
@@ -2038,9 +2099,24 @@ impl crate::app::App {
                 // Back to the browser that sent it. Putting it in the TUI
                 // input instead loses it for its author and makes it appear
                 // where nobody is looking.
+                //
+                // Bound to the buffer this session is RECORDED at — the one
+                // every retry form above was computed against. The tab may
+                // switch during the round trip (its SwitchBuffer travels
+                // client→server while this event travels server→client, so
+                // the two can cross), and a bare retry restored into another
+                // conversation's composer publishes it there on the next
+                // Enter. The client applies the restore only while this
+                // buffer is still its active one; the error row carries the
+                // text either way. No record means no destination the form
+                // is known to be safe for, so nothing is restored at all.
+                let Some(buffer_id) = self.web_active_buffers.get(session_id).cloned() else {
+                    return;
+                };
                 self.broadcast_web(crate::web::protocol::WebEvent::RestoreInput {
                     text: text.to_string(),
                     session_id: Some(session_id.clone()),
+                    buffer_id: Some(buffer_id),
                 });
             }
             SubmitOrigin::Tui => {
@@ -2842,6 +2918,38 @@ mod app_tests {
     }
 
     #[test]
+    fn a_translation_shaped_like_e2e_protocol_never_reaches_the_wire() {
+        // Belt and braces at the send, mirroring the CTCP check: this is the
+        // last point before the socket, and the reason in the row is what
+        // proves THIS guard fired — reaching the checks below would have
+        // said "the connection is unavailable" instead, since this app has
+        // no handle.
+        let mut app = app_with_buffer();
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(outgoing(
+            "moje zdanie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "+RPE2E01 dGFqbmU=".to_string(),
+            },
+            false,
+        ))));
+
+        assert_eq!(
+            app.input.value, "moje zdanie",
+            "the user's own text comes back, as with any other refusal"
+        );
+        let last = app.state.buffers[BUF]
+            .messages
+            .back()
+            .expect("an error row explains why");
+        assert!(
+            last.text.contains("E2E protocol"),
+            "refused before anything else could be tried: {}",
+            last.text
+        );
+    }
+
+    #[test]
     fn a_backend_answer_cannot_break_out_of_the_action_framing_we_put_round_it() {
         // The subtler half. `/me` wraps the answer in `\x01ACTION …\x01`
         // ourselves, so a bare `\x01` inside the BODY closes our framing
@@ -3481,6 +3589,49 @@ mod app_tests {
             echoed.iter().map(|(_, w)| w.clone()).collect::<Vec<_>>(),
             wire_bodies,
             "and each row is KEYED by the body its wire line carried"
+        );
+    }
+
+    #[test]
+    fn a_translation_shaped_like_e2e_protocol_is_refused_at_the_seam() {
+        // `+RPE2E01` and `RPEE2E` are matched as BARE prefixes by every
+        // Repartee receive path, on every buffer — that is how a peer's
+        // first KEYREQ arrives at all — so no per-buffer E2E setting can
+        // defuse text shaped like them. The `\x01` check never sees them.
+        // The shipped stub alone can produce one: it reorders words, so
+        // "hello RPEE2E" comes back tag-first.
+        for proto in ["RPEE2E KEYREQ v=1 c=x p=y", "+RPE2E01 dGFqbmU="] {
+            let out = super::single_line_or_refuse(
+                1,
+                TranslateOutcome::Translated {
+                    id: 1,
+                    text: proto.to_string(),
+                },
+            );
+            assert!(
+                matches!(
+                    out,
+                    TranslateOutcome::Untranslated {
+                        reason: crate::translate::UntranslatedReason::Error(_),
+                        ..
+                    }
+                ),
+                "{proto:?} must be refused, not published as prose: {out:?}"
+            );
+        }
+        // Prefix only, exactly as the receive paths match: the tag inside a
+        // sentence is somebody talking ABOUT the protocol, and refusing that
+        // would eat ordinary conversation.
+        let prose = super::single_line_or_refuse(
+            1,
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "wspomnial o RPEE2E w rozmowie".to_string(),
+            },
+        );
+        assert!(
+            matches!(prose, TranslateOutcome::Translated { .. }),
+            "mid-sentence mention is prose: {prose:?}"
         );
     }
 
@@ -4961,6 +5112,10 @@ mod app_tests {
         // nobody is looking.
         let mut app = app_with_outgoing(Some("de"));
         app.submit_origin = SubmitOrigin::Web("alice-session".to_string());
+        // Every real web submission records its buffer before the submit
+        // runs (`confirm_web_buffer`); the restore is bound to that record.
+        app.web_active_buffers
+            .insert("alice-session".to_string(), BUF.to_string());
         let mut rx = app.web_broadcaster.subscribe();
 
         app.refuse_untranslatable_send("moje zdanie", "the translation queue is full");
@@ -4969,12 +5124,43 @@ mod app_tests {
             app.input.value.is_empty(),
             "the terminal input must not be touched"
         );
-        let (text, session) = match rx.try_recv().expect("an event was broadcast") {
-            crate::web::protocol::WebEvent::RestoreInput { text, session_id } => (text, session_id),
+        let (text, session, buffer) = match rx.try_recv().expect("an event was broadcast") {
+            crate::web::protocol::WebEvent::RestoreInput {
+                text,
+                session_id,
+                buffer_id,
+            } => (text, session_id, buffer_id),
             other => panic!("expected RestoreInput, got {other:?}"),
         };
         assert_eq!(text, "moje zdanie");
         assert_eq!(session.as_deref(), Some("alice-session"));
+        assert_eq!(
+            buffer.as_deref(),
+            Some(BUF),
+            "bound to the composer it belongs in, so a tab that moved on \
+             cannot arm another conversation with it"
+        );
+    }
+
+    #[test]
+    fn a_web_restore_with_no_recorded_buffer_is_withheld_entirely() {
+        // No record means no destination the retry form is known to be safe
+        // for. The error row carries the text, so withholding loses nothing;
+        // broadcasting without a binding would have the client restore into
+        // whatever composer happens to be active.
+        let mut app = app_with_outgoing(Some("de"));
+        app.submit_origin = SubmitOrigin::Web("alice-session".to_string());
+        let mut rx = app.web_broadcaster.subscribe();
+
+        app.refuse_untranslatable_send("moje zdanie", "the translation queue is full");
+
+        assert!(
+            !std::iter::from_fn(|| rx.try_recv().ok()).any(|ev| matches!(
+                ev,
+                crate::web::protocol::WebEvent::RestoreInput { .. }
+            )),
+            "nothing is restored when the session's buffer is unknown"
+        );
     }
 
     /// An app on an `echo-message` server, with `#dupa` set to show the
@@ -5383,21 +5569,28 @@ mod app_tests {
             "the terminal input belongs to whoever is sitting at it: {:?}",
             app.input.value
         );
-        let restored: Vec<(String, Option<String>)> = std::iter::from_fn(|| rx.try_recv().ok())
-            .filter_map(|ev| match ev {
-                crate::web::protocol::WebEvent::RestoreInput { text, session_id } => {
-                    Some((text, session_id))
-                }
-                _ => None,
-            })
-            .collect();
+        let restored: Vec<(String, Option<String>, Option<String>)> =
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter_map(|ev| match ev {
+                    crate::web::protocol::WebEvent::RestoreInput {
+                        text,
+                        session_id,
+                        buffer_id,
+                    } => Some((text, session_id, buffer_id)),
+                    _ => None,
+                })
+                .collect();
         assert_eq!(
             restored,
             // The bare body, because `/msg`ing the buffer you are already in
             // retries correctly as plain text — see `retry_form_for`.
             vec![(
                 "moje zdanie".to_string(),
-                Some("alice-session".to_string())
+                Some("alice-session".to_string()),
+                // Bound to the buffer the form was computed for, so a tab
+                // that switches away mid-flight shows it only in the error
+                // row instead of arming another composer with it.
+                Some(BUF.to_string()),
             )],
             "the retry form goes back to the browser that submitted it"
         );

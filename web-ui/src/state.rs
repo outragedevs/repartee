@@ -709,10 +709,21 @@ impl AppState {
             WebEvent::Error { message, .. } => {
                 self.error.set(Some(message));
             }
-            WebEvent::RestoreInput { text, .. } => {
-                // The composer owns its own value signal, so hand the text
-                // over here and let the input component pick it up.
-                self.restore_input.set(Some(text));
+            WebEvent::RestoreInput { text, buffer_id, .. } => {
+                // Only while the composer still belongs to the conversation
+                // the server computed the retry for. This tab may have
+                // switched during the round trip — its `SwitchBuffer`
+                // travels client→server while this event travels the other
+                // way, so the two can cross — and a bare retry restored into
+                // another conversation's composer publishes it there on the
+                // next Enter. The text survives in the error row either way,
+                // so skipping loses nothing. An event with no buffer (an
+                // older server) fails closed for the same reason.
+                if buffer_id.is_some() && buffer_id == self.active_buffer.get_untracked() {
+                    // The composer owns its own value signal, so hand the
+                    // text over and let the input component pick it up.
+                    self.restore_input.set(Some(text));
+                }
             }
             WebEvent::ShellScreen {
                 buffer_id,
@@ -1151,6 +1162,45 @@ mod tests {
             vec!["alice", "Bob"],
             "SyncInit must seed the typing map, not blank it"
         );
+    }
+
+    #[test]
+    fn a_restore_is_applied_only_in_the_buffer_it_was_computed_for() {
+        // The tab may switch during the round trip — its SwitchBuffer
+        // travels client→server while RestoreInput travels the other way —
+        // and a bare retry restored into another conversation's composer
+        // publishes it there on the next Enter. Exactly the JSON the server
+        // emits, so a field-name drift between the two mirrored protocol
+        // files fails here.
+        let state = headless_state();
+        state.active_buffer.set(Some("libera/#rust".to_string()));
+
+        let stale = r#"{"type":"RestoreInput","text":"sekret","session_id":"s1",
+            "buffer_id":"libera/bob"}"#;
+        state.handle_event(serde_json::from_str(stale).expect("mirrors the server"));
+        assert!(
+            state.restore_input.get_untracked().is_none(),
+            "the tab has left libera/bob, so the text stays in the error row"
+        );
+
+        let matching = r#"{"type":"RestoreInput","text":"sekret","session_id":"s1",
+            "buffer_id":"libera/#rust"}"#;
+        state.handle_event(serde_json::from_str(matching).expect("mirrors the server"));
+        assert_eq!(
+            state.restore_input.get_untracked().as_deref(),
+            Some("sekret"),
+            "still in the conversation it was addressed to, so it comes back"
+        );
+
+        // An event with no buffer — an older server — fails closed too:
+        // restoring it anywhere is the leak this binding exists to prevent.
+        state.restore_input.set(None);
+        state.handle_event(WebEvent::RestoreInput {
+            text: "sekret".to_string(),
+            session_id: Some("s1".to_string()),
+            buffer_id: None,
+        });
+        assert!(state.restore_input.get_untracked().is_none());
     }
 
     #[test]
