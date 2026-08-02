@@ -26,6 +26,7 @@ impl App {
                 self.state.add_message(
                     buffer_id,
                     Message {
+                        log_key: None,
                         id,
                         timestamp: Utc::now(),
                         message_type: MessageType::Event,
@@ -239,6 +240,7 @@ impl App {
             self.state.add_local_message(
                 &buf_id,
                 Message {
+                    log_key: None,
                     id,
                     timestamp: Utc::now(),
                     message_type: MessageType::Event,
@@ -286,6 +288,7 @@ impl App {
                     self.state.add_message(
                         &buf_id,
                         crate::state::buffer::Message {
+                            log_key: None,
                             id: msg_id,
                             timestamp: chrono::Utc::now(),
                             message_type: crate::state::buffer::MessageType::Event,

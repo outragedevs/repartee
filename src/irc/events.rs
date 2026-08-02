@@ -205,6 +205,7 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
                     state.add_message(
                         &buffer_id,
                         Message {
+                            log_key: None,
                             id,
                             timestamp: Utc::now(),
                             message_type: MessageType::Event,
@@ -311,6 +312,7 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
             state.add_message(
                 &buffer_id,
                 Message {
+                    log_key: None,
                     id,
                     timestamp: Utc::now(),
                     message_type: MessageType::Event,
@@ -366,6 +368,7 @@ pub fn handle_connected(state: &mut AppState, conn_id: &str) {
     state.add_message(
         &buffer_id,
         Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -490,6 +493,7 @@ pub fn handle_disconnected(state: &mut AppState, conn_id: &str, error: Option<&s
     state.add_message(
         &buffer_id,
         Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -620,6 +624,7 @@ pub fn handle_cap_new(
     state.add_message(
         &buffer_id,
         Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -690,6 +695,7 @@ pub fn handle_cap_del(
     state.add_message(
         &buffer_id,
         Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -744,6 +750,7 @@ pub fn handle_cap_ack(
     state.add_message(
         &buffer_id,
         Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -798,6 +805,7 @@ pub fn handle_cap_nak(
     state.add_message(
         &buffer_id,
         Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -1077,6 +1085,7 @@ pub fn ingest_chathistory_batch(
         let timestamp = message_timestamp(tags.as_ref());
 
         let message = Message {
+            log_key: None,
             id: 0, // store-only: real id assigned if/when spliced into a buffer
             timestamp,
             message_type: msg_type,
@@ -1566,6 +1575,7 @@ fn handle_privmsg(
             // Save nick before moving into Message — needed for mentions buffer below.
             let nick_saved = if is_mention { Some(nick.clone()) } else { None };
             let action_row = Message {
+                log_key: None,
                     id,
                     timestamp: ts,
                     message_type: MessageType::Action,
@@ -1583,6 +1593,9 @@ fn handle_privmsg(
                     // carried the translation alone.
                     wire_origin: own_origin,
             };
+            // `true` when translation took the row over — see the plain
+            // branch below.
+            let deferred;
             if let Some(d) = decoration.as_ref() {
                 // Takes the place reserved when the user pressed Enter, so
                 // our own message keeps its position among the lines that
@@ -1594,52 +1607,23 @@ fn handle_privmsg(
                 // A split send is several reflections: all but the last are
                 // parked at the reservation, because closing it early lets
                 // everything behind the barrier drain between the chunks.
+                deferred = false;
                 if d.is_last {
                     state.add_own_message(&buffer_id, d.echo_id, action_row);
                 } else {
                     state.hold_own_message_chunk(&buffer_id, d.echo_id, action_row);
                 }
             } else {
-                state.add_message_with_activity(&buffer_id, action_row, activity);
+                deferred = state.add_message_with_activity(&buffer_id, action_row, activity);
             }
 
-            // Push to mentions buffer — channel highlights only.
-            if is_mention && target_is_channel && state.buffers.contains_key("_mentions") {
+            // Push to mentions buffer — channel highlights only. Skipped when
+            // translation took the row: the aggregate is built at release
+            // instead, so it carries the same text the channel shows.
+            if is_mention && target_is_channel && !deferred {
                 let nick = nick_saved.unwrap_or_default();
-                let conn_label = state
-                    .connections
-                    .get(conn_id)
-                    .map_or(conn_id, |c| c.label.as_str());
-                let datetime = ts
-                    .with_timezone(&chrono::Local)
-                    .format("%Y/%m/%d %H:%M:%S")
-                    .to_string();
                 let action_body = format!("* {nick} {action_text}");
-                let mention_text = crate::ui::format_mention_line(
-                    &datetime,
-                    conn_label,
-                    target,
-                    &nick,
-                    &action_body,
-                    state.nick_color_sat,
-                    state.nick_color_lit,
-                );
-                let mention_msg = Message {
-                    id: state.next_message_id(),
-                    timestamp: ts,
-                    message_type: MessageType::MentionLog,
-                    nick: None,
-                    nick_mode: None,
-                    text: mention_text,
-                    highlight: true,
-                    event_key: None,
-                    event_params: None,
-                    log_msg_id: None,
-                    log_ref_id: None,
-                    tags: None,
-                    wire_origin: None,
-                };
-                state.add_mention_to_buffer(mention_msg);
+                state.fan_out_mention(conn_id, target, &nick, &action_body, ts);
             }
 
             return;
@@ -1752,6 +1736,7 @@ fn handle_privmsg(
     // Save nick before moving into Message — needed for mentions buffer below.
     let nick_saved = if is_mention { Some(nick.clone()) } else { None };
     let msg = Message {
+        log_key: None,
         id,
         timestamp: ts,
         message_type: MessageType::Message,
@@ -1778,7 +1763,11 @@ fn handle_privmsg(
     };
     // Placeholders are delivered transiently (never logged) so they don't
     // persist; the decrypted replay is logged + surfaced under the real @msgid.
+    // `true` when translation took the row over: its mention is then built
+    // at release, from the text the channel actually ends up showing.
+    let deferred_for_translation;
     if e2e_transient_line {
+        deferred_for_translation = false;
         state.add_transient_message_with_activity(&buffer_id, msg, activity);
     } else if let Some(d) = decoration.as_ref() {
         // A reflection of our own send: takes the place reserved when the
@@ -1786,51 +1775,20 @@ fn handle_privmsg(
         // arrived while it was being translated. See the ACTION branch on
         // why the reserved id is the order key and not the row's own, and on
         // why every chunk but the last is parked rather than delivered.
+        deferred_for_translation = false;
         if d.is_last {
             state.add_own_message(&buffer_id, d.echo_id, msg);
         } else {
             state.hold_own_message_chunk(&buffer_id, d.echo_id, msg);
         }
     } else {
-        state.add_message_with_activity(&buffer_id, msg, activity);
+        deferred_for_translation = state.add_message_with_activity(&buffer_id, msg, activity);
     }
 
     // Push to mentions buffer — channel highlights only (not PMs/queries).
-    if is_mention && target_is_channel && state.buffers.contains_key("_mentions") {
+    if is_mention && target_is_channel && !deferred_for_translation {
         let nick = nick_saved.unwrap_or_default();
-        let conn_label = state
-            .connections
-            .get(conn_id)
-            .map_or(conn_id, |c| c.label.as_str());
-        let datetime = ts
-            .with_timezone(&chrono::Local)
-            .format("%Y/%m/%d %H:%M:%S")
-            .to_string();
-        let mention_text = crate::ui::format_mention_line(
-            &datetime,
-            conn_label,
-            target,
-            &nick,
-            text,
-            state.nick_color_sat,
-            state.nick_color_lit,
-        );
-        let mention_msg = Message {
-            id: state.next_message_id(),
-            timestamp: ts,
-            message_type: MessageType::MentionLog,
-            nick: None,
-            nick_mode: None,
-            text: mention_text,
-            highlight: true,
-            event_key: None,
-            event_params: None,
-            log_msg_id: None,
-            log_ref_id: None,
-            tags: None,
-            wire_origin: None,
-        };
-        state.add_mention_to_buffer(mention_msg);
+        state.fan_out_mention(conn_id, target, &nick, text, ts);
     }
 }
 
@@ -1944,6 +1902,7 @@ fn handle_notice(
     state.add_message(
         &buffer_id,
         Message {
+            log_key: None,
             id,
             timestamp: message_timestamp(tags.as_ref()),
             message_type: MessageType::Notice,
@@ -2135,6 +2094,7 @@ fn handle_join(
     state.add_message(
         &buffer_id,
         Message {
+            log_key: None,
             id,
             timestamp: message_timestamp(tags.as_ref()),
             message_type: MessageType::Event,
@@ -2238,6 +2198,7 @@ fn handle_account(
         state.add_message(
             &buf_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: message_timestamp(tags.as_ref()),
                 message_type: MessageType::Event,
@@ -2641,6 +2602,7 @@ fn handle_chghost(
         state.add_message(
             &buf_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: message_timestamp(tags.as_ref()),
                 message_type: MessageType::Event,
@@ -2720,6 +2682,7 @@ fn handle_part(
         state.add_message(
             &buffer_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: message_timestamp(tags.as_ref()),
                 message_type: MessageType::Event,
@@ -2823,6 +2786,7 @@ fn handle_quit(
         state.add_message(
             buf_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: ts,
                 message_type: MessageType::Event,
@@ -3037,6 +3001,7 @@ fn handle_nick_change(
         state.add_message(
             buf_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: ts,
                 message_type: MessageType::Event,
@@ -3126,6 +3091,7 @@ fn handle_kick(
          -> Message {
             let id = state.next_message_id();
             Message {
+                log_key: None,
                 id,
                 timestamp: ts,
                 message_type: MessageType::Event,
@@ -3175,6 +3141,7 @@ fn handle_kick(
         state.add_message(
             &buffer_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: ts,
                 message_type: MessageType::Event,
@@ -3223,6 +3190,7 @@ fn handle_topic(
         state.add_message(
             &buffer_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: message_timestamp(tags.as_ref()),
                 message_type: MessageType::Event,
@@ -3291,6 +3259,7 @@ fn handle_mode(
         state.add_message(
             &buffer_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: ts,
                 message_type: MessageType::Event,
@@ -3316,6 +3285,7 @@ fn handle_mode(
         state.add_message(
             &server_buf,
             Message {
+                log_key: None,
                 id,
                 timestamp: ts,
                 message_type: MessageType::Event,
@@ -3600,6 +3570,7 @@ fn handle_invite(
         state.add_message(
             &buffer_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: message_timestamp(tags.as_ref()),
                 message_type: MessageType::Event,
@@ -3623,6 +3594,7 @@ fn handle_invite(
             state.add_message(
                 &buffer_id,
                 Message {
+                    log_key: None,
                     id,
                     timestamp: message_timestamp(tags.as_ref()),
                     message_type: MessageType::Event,
@@ -4308,6 +4280,7 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
             state.add_message(
                 &buffer_id,
                 Message {
+                    log_key: None,
                     id,
                     timestamp: Utc::now(),
                     message_type: MessageType::Event,
@@ -4365,6 +4338,7 @@ pub fn emit(state: &mut AppState, buffer_id: &str, text: &str) {
     state.add_message(
         buffer_id,
         Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -4393,6 +4367,7 @@ fn emit_event(
     state.add_message(
         buffer_id,
         Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -5310,6 +5285,7 @@ fn emit_e2e_debug(
     state.add_message(
         &target_buffer,
         Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -5338,6 +5314,7 @@ fn emit_e2e_message(
     state.add_message(
         buffer_id,
         Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -5605,6 +5582,7 @@ pub(crate) fn e2e_event_message(
     highlight: bool,
 ) -> Message {
     Message {
+        log_key: None,
         id,
         timestamp: Utc::now(),
         message_type: MessageType::Event,

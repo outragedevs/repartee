@@ -492,6 +492,7 @@ pub(crate) fn rows_to_buffer_messages(
         if last_date.is_none_or(|d| d != local_date) {
             let sep_text = crate::app::backlog::format_date_separator(local_date);
             out.push(Message {
+                log_key: None,
                 id: state.next_message_id(),
                 timestamp: ts,
                 message_type: MessageType::Event,
@@ -555,8 +556,61 @@ pub(crate) fn stored_to_message(
         event_key: None,
         event_params: None,
         log_msg_id: Some(stored.id.to_string()),
+        // The one identity that survives the round trip. `text` above is the
+        // DISPLAY text — for a translated row, not what crossed the wire — so
+        // without this a CHATHISTORY replay of the same line has nothing to
+        // match against and is spliced in beside it, untranslated.
+        log_key: Some(stored.msg_id.clone()),
         log_ref_id: None,
         tags: None,
         wire_origin: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stored_row() -> crate::storage::StoredMessage {
+        crate::storage::StoredMessage {
+            id: 42,
+            msg_id: "synthetic-key-for-the-wire-text".to_string(),
+            network: "libera".to_string(),
+            buffer: "#rust".to_string(),
+            timestamp: 1_700_000_000,
+            ts_ms: 1_700_000_000_000,
+            msg_type: "message".to_string(),
+            nick: Some("alice".to_string()),
+            // What the log holds for a translated row: the DISPLAY text. The
+            // wire text it was keyed by is not recoverable from here.
+            text: "czesc".to_string(),
+            highlight: false,
+            ref_id: None,
+            tags: None,
+            event_key: None,
+        }
+    }
+
+    #[test]
+    fn a_loaded_row_keeps_the_key_it_was_stored_under() {
+        // The one identity that survives the round trip. Without it a
+        // CHATHISTORY replay of this same line — which carries the WIRE text,
+        // not the display text above — has nothing to match against and is
+        // spliced in beside it, untranslated.
+        let mut state = crate::state::events::tests::make_test_state();
+        let stored = stored_row();
+
+        let msg = stored_to_message(&mut state, &stored);
+
+        assert_eq!(
+            msg.log_key.as_deref(),
+            Some(stored.msg_id.as_str()),
+            "the stored key comes back with the row"
+        );
+        assert_eq!(
+            msg.log_msg_id.as_deref(),
+            Some("42"),
+            "and the SQLite row id still means the row id, which paging needs"
+        );
     }
 }

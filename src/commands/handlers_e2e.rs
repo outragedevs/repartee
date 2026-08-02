@@ -52,6 +52,7 @@ fn e2e_event(app: &mut App, level: E2eEventLevel, text: &str) {
     app.state.add_local_message(
         &active_id,
         Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -2171,6 +2172,7 @@ mod tests {
         let text = "accepted bob on #rust";
         let level = E2eEventLevel::Info;
         let msg = Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,

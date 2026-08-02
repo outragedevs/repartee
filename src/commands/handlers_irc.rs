@@ -1032,6 +1032,7 @@ pub(crate) fn cmd_msg(app: &mut App, args: &[String]) {
             app.state.add_message(
                 &buffer_id,
                 crate::state::buffer::Message {
+                    log_key: None,
                     id: msg_id,
                     timestamp: chrono::Utc::now(),
                     message_type: crate::state::buffer::MessageType::Message,
@@ -1153,6 +1154,7 @@ pub(crate) fn cmd_me(app: &mut App, args: &[String]) {
             app.state.add_message(
                 &buffer_id,
                 crate::state::buffer::Message {
+                    log_key: None,
                     id: msg_id,
                     timestamp: chrono::Utc::now(),
                     message_type: crate::state::buffer::MessageType::Action,

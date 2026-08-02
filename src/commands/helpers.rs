@@ -11,6 +11,7 @@ pub fn add_local_event(app: &mut App, text: &str) {
     app.state.add_local_message(
         &active_id,
         Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Event,

@@ -497,6 +497,15 @@ A new `translate_rx` arm in the `select!` loop, alongside `preview_rx`
 (`src/app/mod.rs:1419`), receives outcomes, resolves the matching entry, and drains
 the head.
 
+A highlighted channel line is copied into the `_mentions` aggregate **when it is
+released**, not when it arrives. Built at arrival it would carry the original while the
+channel goes on to show the translation, and the two would disagree permanently — in the
+one place someone looks precisely because they were away and cannot re-read the channel.
+`add_message_with_activity` reports whether translation took the row over, so the inline
+fan-out is skipped exactly then and `deliver_ready` does it instead, with the final text,
+marker and all. Shrink is deliberately unchanged: it defers the chat row but its mention
+is still pushed inline from the original text.
+
 ---
 
 ## 5. Outgoing path
@@ -857,6 +866,19 @@ our own outgoing echo it carried our translation.
 
 Incoming shrink rewrites text the same way and had the same defect; it now records its
 wire text too.
+
+Identity has to survive a round trip through the log, and `wire_origin` does not — the
+log stores the flat display text, by design (§7). What survives instead is the key the
+row was **stored under**: the server `@msgid`, or on a server without one a hash of its
+WIRE text. `storage_identity` is that rule, used by the writer and by the in-memory
+`CHATHISTORY` dedup alike, because the two answering differently is exactly how a replay
+ends up spliced beside the row it duplicates.
+
+A row read back from `SQLite` therefore carries `Message::log_key`. Without it, a
+translated row reloaded by the log browser holds only its translation, a replay of the
+same line arrives carrying the original, and on a msgid-less server nothing matches — so
+the untranslated copy is spliced in beside the translation. No new column: the log has
+always kept this key, it was simply thrown away on the way back.
 
 ---
 

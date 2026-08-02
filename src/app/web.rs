@@ -34,6 +34,7 @@ impl App {
         self.state.add_message(
             &buffer_id,
             crate::state::buffer::Message {
+                log_key: None,
                 id,
                 timestamp: chrono::Utc::now(),
                 message_type: crate::state::buffer::MessageType::Event,

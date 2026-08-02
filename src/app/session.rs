@@ -180,6 +180,7 @@ impl App {
         self.state.add_message(
             &buf_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: Utc::now(),
                 message_type: MessageType::Event,

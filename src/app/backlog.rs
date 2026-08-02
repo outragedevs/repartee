@@ -832,6 +832,7 @@ fn make_separator(
 ) -> Message {
     let event_param = text.clone();
     Message {
+        log_key: None,
         id,
         timestamp,
         message_type: MessageType::Event,
@@ -870,6 +871,7 @@ mod tests {
 
     fn msg(ts: i64, log_id: Option<&str>, event_key: Option<&str>) -> Message {
         Message {
+            log_key: None,
             id: 1,
             timestamp: chrono::DateTime::from_timestamp(ts, 0).unwrap(),
             message_type: event_key.map_or(MessageType::Message, |_| MessageType::Event),

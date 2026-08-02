@@ -382,17 +382,24 @@ impl AppState {
         }
     }
 
+    /// Returns `true` when the row was taken over by translation and will be
+    /// delivered later, so the caller must not act as though it is on screen.
+    ///
+    /// The mention fan-out is the caller that cares: building it now would
+    /// aggregate the ORIGINAL text while the channel goes on to show the
+    /// translation, and the two would never agree again. It is done at
+    /// release instead, in `deliver_ready`.
     pub fn add_message_with_activity(
         &mut self,
         buffer_id: &str,
         message: Message,
         level: ActivityLevel,
-    ) {
+    ) -> bool {
         // Translation dispatch runs BEFORE shrink: the two are mutually
         // exclusive per line and translation wins. Two external round-trips
         // on one line is worse than losing shrink on a translated buffer.
         let Some(message) = self.route_through_translation(buffer_id, message, level) else {
-            return;
+            return true;
         };
         // Incoming shrink: if the message text has URL(s) above the
         // configured threshold and shrink-incoming is wired up, hand
@@ -419,8 +426,12 @@ impl AppState {
                     // text; chat-buffer text uses the shortened form.
                     push_to_mentions: false,
                 };
+                // `false` on every arm: shrink defers the CHAT row but its
+                // mention is pushed inline by the call site, deliberately
+                // with the original text (see `push_to_mentions` above). Only
+                // translation moves the fan-out to release time.
                 match tx.try_send(pending) {
-                    Ok(()) => return,
+                    Ok(()) => return false,
                     Err(TrySendError::Full(p)) => {
                         tracing::warn!("shrink: incoming queue full, delivering unshrunk");
                         self.add_message_with_activity_unshrunk(
@@ -428,7 +439,7 @@ impl AppState {
                             p.message,
                             p.activity_level,
                         );
-                        return;
+                        return false;
                     }
                     Err(TrySendError::Closed(p)) => {
                         tracing::error!("shrink: incoming worker dead, delivering unshrunk");
@@ -437,12 +448,88 @@ impl AppState {
                             p.message,
                             p.activity_level,
                         );
-                        return;
+                        return false;
                     }
                 }
             }
         }
         self.add_message_with_activity_unshrunk(buffer_id, message, level);
+        false
+    }
+
+    /// Copy a highlighted channel line into the `_mentions` aggregate.
+    ///
+    /// One formatter for all three callers — the two inline pushes in
+    /// `handle_privmsg` and the deferred one in [`Self::deliver_ready`] —
+    /// because a mention that reads differently from the line it aggregates
+    /// is the whole defect this exists to avoid.
+    pub fn fan_out_mention(
+        &mut self,
+        conn_id: &str,
+        target: &str,
+        nick: &str,
+        body: &str,
+        ts: chrono::DateTime<chrono::Utc>,
+    ) {
+        if !self.buffers.contains_key("_mentions") {
+            return;
+        }
+        let conn_label = self
+            .connections
+            .get(conn_id)
+            .map_or(conn_id, |c| c.label.as_str());
+        let datetime = ts
+            .with_timezone(&chrono::Local)
+            .format("%Y/%m/%d %H:%M:%S")
+            .to_string();
+        let mention_text = crate::ui::format_mention_line(
+            &datetime,
+            conn_label,
+            target,
+            nick,
+            body,
+            self.nick_color_sat,
+            self.nick_color_lit,
+        );
+        let mention_msg = Message {
+            id: self.next_message_id(),
+            timestamp: ts,
+            message_type: MessageType::MentionLog,
+            nick: None,
+            nick_mode: None,
+            text: mention_text,
+            highlight: true,
+            event_key: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: None,
+            wire_origin: None,
+            log_key: None,
+        };
+        self.add_mention_to_buffer(mention_msg);
+    }
+
+    /// [`Self::fan_out_mention`] for a row released from the reorder queue,
+    /// so the aggregate carries the text the channel actually shows.
+    fn fan_out_mention_for_row(&mut self, buffer_id: &str, message: &Message) {
+        if !message.highlight {
+            return;
+        }
+        let Some((conn_id, target)) = buffer_id.split_once('/') else {
+            return;
+        };
+        if !crate::e2e::is_channel_target(target) {
+            return;
+        }
+        let nick = message.nick.clone().unwrap_or_default();
+        let body = if message.message_type == MessageType::Action {
+            format!("* {nick} {}", message.text)
+        } else {
+            message.text.clone()
+        };
+        let (conn_id, target) = (conn_id.to_string(), target.to_string());
+        self.fan_out_mention(&conn_id, &target, &nick, &body, message.timestamp);
     }
 
     /// Hold this buffer's queue position for an outgoing echo that is still
@@ -1154,6 +1241,9 @@ impl AppState {
                     "translate: line delivered untranslated"
                 );
             }
+            // Now, not when it was queued: the aggregate has to carry the
+            // text the channel ends up showing, marker and all.
+            self.fan_out_mention_for_row(buffer_id, &entry.message);
             self.add_message_with_activity_unshrunk(buffer_id, entry.message, entry.activity);
         }
     }
@@ -1388,32 +1478,7 @@ impl AppState {
         let msg_id = match (message.log_msg_id.clone(), message.log_ref_id.is_some()) {
             (Some(explicit), _) => explicit,
             (None, true) => uuid::Uuid::new_v4().to_string(),
-            (None, false) => message
-                .tags
-                .as_ref()
-                .and_then(|t| t.get("msgid"))
-                .filter(|m| !m.is_empty())
-                .cloned()
-                // No server @msgid (server doesn't support it): derive a
-                // deterministic key from content+time instead of a random UUID, so
-                // a live message and its later CHATHISTORY replay collapse on the
-                // unique (network, msg_id) index rather than storing twice.
-                .unwrap_or_else(|| {
-                    synthetic_msg_id(
-                        &network,
-                        buf_name,
-                        message.timestamp.timestamp_millis(),
-                        message.nick.as_deref(),
-                        type_str,
-                        // The WIRE text, which for a translated row is not
-                        // what we display or store. CHATHISTORY replay
-                        // bypasses translation, so keying on the display
-                        // text gives the live row and its own replay two
-                        // different ids and the unique index stops
-                        // collapsing them. See `WireOrigin`.
-                        dedup_text(message),
-                    )
-                }),
+            (None, false) => storage_identity(&network, buf_name, message),
         };
         let row = LogRow {
             msg_id,
@@ -1477,9 +1542,23 @@ impl AppState {
         // placeholders — ones whose ciphertext was NOT part of this replay —
         // intact.
         let mut spliced_ts: Vec<chrono::DateTime<chrono::Utc>> = Vec::new();
+        // What this replay would be STORED as, so a row already on screen that
+        // came back from the log — and therefore carries only its stored key,
+        // its wire text long since replaced by the display text — can still be
+        // recognised as the same message.
+        let stored_as = buffer_id.split_once('/').map(|(conn_id, buf_name)| {
+            let network = self
+                .connections
+                .get(conn_id)
+                .map_or_else(|| conn_id.to_string(), |c| c.label.clone());
+            (network, buf_name.to_string())
+        });
         for mut msg in rows {
+            let candidate_key = stored_as
+                .as_ref()
+                .map(|(network, buf_name)| storage_identity(network, buf_name, &msg));
             let already_present = match self.buffers.get(buffer_id) {
-                Some(buf) => buffer_contains_history_row(buf, &msg),
+                Some(buf) => buffer_contains_history_row(buf, &msg, candidate_key.as_deref()),
                 None => return,
             };
             if already_present {
@@ -1744,6 +1823,33 @@ const fn effective_scrollback_limit(pinned: bool, limit: usize) -> usize {
 /// trade-off is that two genuinely distinct messages with the same network,
 /// buffer, millisecond, nick, type and text collapse to one — indistinguishable
 /// anyway without a server `@msgid`, and vanishingly rare.
+/// The key a conversational row is stored under: the server `@msgid` when
+/// there is one, otherwise a deterministic hash of its content and time.
+///
+/// One function for the writer and for the in-memory `CHATHISTORY` dedup,
+/// because the two answering differently is precisely how a replay ends up
+/// spliced beside the row it duplicates. The hash covers the WIRE text — for
+/// a translated line, not what is displayed or stored — since a replay
+/// bypasses translation and would otherwise hash to something else entirely.
+fn storage_identity(network: &str, buf_name: &str, message: &Message) -> String {
+    message
+        .tags
+        .as_ref()
+        .and_then(|t| t.get("msgid"))
+        .filter(|m| !m.is_empty())
+        .cloned()
+        .unwrap_or_else(|| {
+            synthetic_msg_id(
+                network,
+                buf_name,
+                message.timestamp.timestamp_millis(),
+                message.nick.as_deref(),
+                message.message_type.as_str(),
+                dedup_text(message),
+            )
+        })
+}
+
 fn synthetic_msg_id(
     network: &str,
     buffer: &str,
@@ -1788,7 +1894,11 @@ fn dedup_text(message: &Message) -> &str {
         .map_or(message.text.as_str(), |o| o.text.as_str())
 }
 
-fn buffer_contains_history_row(buf: &Buffer, candidate: &Message) -> bool {
+fn buffer_contains_history_row(
+    buf: &Buffer,
+    candidate: &Message,
+    candidate_key: Option<&str>,
+) -> bool {
     let candidate_msgid = candidate.tags.as_ref().and_then(|t| t.get("msgid"));
     let candidate_text = dedup_text(candidate);
     buf.messages.iter().any(|m| {
@@ -1796,6 +1906,14 @@ fn buffer_contains_history_row(buf: &Buffer, candidate: &Message) -> bool {
             && let Some(mid) = m.tags.as_ref().and_then(|t| t.get("msgid"))
         {
             return cid == mid;
+        }
+        // A row read back from the log kept the key it was stored under and
+        // nothing else that identifies the wire: its text is the DISPLAY text,
+        // which for a translated line is not what a replay carries. Comparing
+        // storage keys is the only match left, and it is the same key the
+        // unique (network, msg_id) index already collapses them on.
+        if let (Some(stored), Some(key)) = (m.log_key.as_deref(), candidate_key) {
+            return stored == key;
         }
         m.timestamp == candidate.timestamp
             && m.nick == candidate.nick
@@ -1917,6 +2035,7 @@ pub mod tests {
 
     pub fn make_test_message(state: &mut AppState, text: &str) -> Message {
         Message {
+            log_key: None,
             id: state.next_message_id(),
             timestamp: Utc::now(),
             message_type: MessageType::Message,
@@ -1975,6 +2094,7 @@ pub mod tests {
         state.suppress_event_display = true;
 
         let event_msg = Message {
+            log_key: None,
             id: state.next_message_id(),
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -2010,6 +2130,7 @@ pub mod tests {
 
         state.suppress_event_display = false;
         let event_msg2 = Message {
+            log_key: None,
             id: state.next_message_id(),
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -2217,6 +2338,7 @@ pub mod tests {
         let mut tags = std::collections::HashMap::new();
         tags.insert("msgid".to_string(), "server-msgid-xyz".to_string());
         let msg = Message {
+            log_key: None,
             id: state.next_message_id(),
             timestamp: Utc::now(),
             message_type: MessageType::Message,
@@ -2247,6 +2369,7 @@ pub mod tests {
         state.log_tx = Some(tx);
 
         let msg = Message {
+            log_key: None,
             id: 0,
             timestamp: Utc::now(),
             message_type: MessageType::Message,
@@ -2283,6 +2406,7 @@ pub mod tests {
         let mut state = make_test_state();
         state.log_tx = Some(tx);
         let msg = Message {
+            log_key: None,
             id: 0,
             timestamp: Utc::now(),
             message_type: MessageType::Message,
@@ -2317,8 +2441,9 @@ pub mod tests {
         // from their content+time, so INSERT OR IGNORE on (network, msg_id)
         // collapses them. With a random UUID per call they would get two distinct
         // keys and the same message would be stored — and paginated — twice.
-        let ts = Utc::now();
+        let ts = chrono::Utc::now();
         let build = || Message {
+            log_key: None,
             id: 0,
             timestamp: ts,
             message_type: MessageType::Message,
@@ -2376,6 +2501,7 @@ pub mod tests {
 
         let ts = Utc::now();
         let wire = || Message {
+            log_key: None,
             id: 0,
             timestamp: ts,
             message_type: MessageType::Message,
@@ -2425,6 +2551,7 @@ pub mod tests {
         state.add_buffer(Buffer::for_test("libera", BufferType::Channel, "#rust"));
         let ts = Utc::now();
         let wire = Message {
+            log_key: None,
             id: 1,
             timestamp: ts,
             message_type: MessageType::Message,
@@ -2478,6 +2605,7 @@ pub mod tests {
         // the same @msgid, would all collide on it and be dropped by the unique
         // index, and `ref_id` would point at a primary stored under a different id.
         let primary = Message {
+            log_key: None,
             id: state.next_message_id(),
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -2495,6 +2623,7 @@ pub mod tests {
         state.add_message("libera/#rust", primary);
 
         let reference = Message {
+            log_key: None,
             id: state.next_message_id(),
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -2535,6 +2664,7 @@ pub mod tests {
 
         // Primary row: full text, log_msg_id set, no ref_id
         let msg1 = Message {
+            log_key: None,
             id: state.next_message_id(),
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -2553,6 +2683,7 @@ pub mod tests {
 
         // Reference row: same text in UI, but ref_id set
         let msg2 = Message {
+            log_key: None,
             id: state.next_message_id(),
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -3571,6 +3702,134 @@ mod translate_gate_tests {
         assert!(
             state.translate_queues[BUF].has_reservation(),
             "the place stays held for the chunk still to come"
+        );
+    }
+
+    #[test]
+    fn a_reloaded_translated_row_still_dedups_its_own_replay() {
+        // The log stores the DISPLAY text, so a translated row read back from
+        // SQLite has lost the wire text a CHATHISTORY replay carries. On a
+        // server without @msgid there is then nothing left to match on, and
+        // the replay is spliced in beside the translation, untranslated.
+        //
+        // What survives the round trip is the key the row was STORED under —
+        // for a msgid-less server, a hash of its wire text — and that is the
+        // same key the unique (network, msg_id) index collapses them on.
+        let mut state = make_test_state();
+        let ts = chrono::Utc::now();
+        let network = state.connections["libera"].label.clone();
+
+        // The live row, as it looked before it was logged: display text is
+        // the translation, identity is the wire text.
+        let mut live = make_test_message(&mut state, "czesc");
+        live.timestamp = ts;
+        live.nick = Some("alice".to_string());
+        live.wire_origin = Some(crate::state::buffer::WireOrigin {
+            text: "hola".to_string(),
+            suffix_at: None,
+        });
+        let stored_key = super::storage_identity(&network, "#rust", &live);
+
+        // Read back from the log: display text only, plus the stored key.
+        let mut reloaded = live;
+        reloaded.wire_origin = None;
+        reloaded.log_key = Some(stored_key);
+        state.buffers[BUF].messages.clear();
+        state
+            .buffers
+            .get_mut(BUF)
+            .expect("buffer")
+            .messages
+            .push_back(reloaded);
+
+        // The replay: same line, untranslated, no @msgid.
+        let mut replay = make_test_message(&mut state, "hola");
+        replay.timestamp = ts;
+        replay.nick = Some("alice".to_string());
+        let before = state.buffers[BUF].messages.len();
+
+        state.surface_history_rows(BUF, vec![replay]);
+
+        assert_eq!(
+            state.buffers[BUF].messages.len(),
+            before,
+            "the replay is recognised as the row already on screen"
+        );
+    }
+
+    #[test]
+    fn a_mention_carries_the_text_the_channel_ends_up_showing() {
+        // The channel shows the translation; the `_mentions` aggregate was
+        // built the instant the line arrived, from the ORIGINAL. The two then
+        // disagree permanently — and the aggregate is exactly where someone
+        // looks when they were away and cannot re-read the channel.
+        let (mut state, _rx) = state_with_translation();
+        let mut mentions = crate::state::events::tests::make_test_buffer(
+            "libera",
+            crate::state::buffer::BufferType::Mentions,
+            "Mentions",
+        );
+        mentions.id = "_mentions".to_string();
+        state.buffers.insert("_mentions".to_string(), mentions);
+        let mut msg = make_test_message(&mut state, "hola kofany");
+        msg.highlight = true;
+        let id = msg.id;
+        state.add_message_with_activity(BUF, msg, ActivityLevel::Mention);
+
+        assert_eq!(
+            state.buffers["_mentions"].messages.len(),
+            0,
+            "nothing is aggregated while the line is still being translated"
+        );
+
+        state
+            .translate_queues
+            .get_mut(BUF)
+            .expect("queued")
+            .resolve(id, Ok("czesc kofany".to_string()));
+        state.drain_translate_ready(BUF);
+
+        let aggregated = state.buffers["_mentions"]
+            .messages
+            .iter()
+            .map(|m| m.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            aggregated.contains("czesc kofany"),
+            "the aggregate shows what the channel shows: {aggregated}"
+        );
+    }
+
+    #[test]
+    fn an_untranslated_mention_is_still_aggregated_once() {
+        // The deferral must not become a way to LOSE a mention: a line that
+        // goes through the queue without being translated — the queue was
+        // busy, or the provider failed — is aggregated on release, exactly
+        // once.
+        let (mut state, _rx) = state_with_translation();
+        let mut mentions = crate::state::events::tests::make_test_buffer(
+            "libera",
+            crate::state::buffer::BufferType::Mentions,
+            "Mentions",
+        );
+        mentions.id = "_mentions".to_string();
+        state.buffers.insert("_mentions".to_string(), mentions);
+        let mut msg = make_test_message(&mut state, "hola kofany");
+        msg.highlight = true;
+        let id = msg.id;
+        state.add_message_with_activity(BUF, msg, ActivityLevel::Mention);
+        state
+            .translate_queues
+            .get_mut(BUF)
+            .expect("queued")
+            .resolve(id, Err(crate::translate::UntranslatedReason::Timeout));
+        state.drain_translate_ready(BUF);
+
+        assert_eq!(
+            state.buffers["_mentions"].messages.len(),
+            1,
+            "aggregated once, not zero times and not twice"
         );
     }
 

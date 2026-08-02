@@ -92,6 +92,7 @@ impl App {
             nick_lit,
         );
         Message {
+            log_key: None,
             id,
             timestamp: ts,
             message_type: MessageType::MentionLog,

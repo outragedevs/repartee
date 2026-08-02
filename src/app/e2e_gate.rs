@@ -666,6 +666,7 @@ impl AppState {
         self.add_local_message(
             buffer_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: chrono::Utc::now(),
                 message_type: MessageType::Event,
@@ -723,7 +724,6 @@ impl super::App {
         echo: Option<GatedEcho<'_>>,
     ) -> bool {
         use crate::state::buffer::{Message, MessageType};
-
         // Precheck the connection BEFORE running the gate: planning may call
         // encrypt_outgoing, which creates/rotates the outgoing session and
         // queues REKEY NOTICEs — and drain_pending_e2e_sends DROPS queued
@@ -822,20 +822,17 @@ impl super::App {
                     .map(|c| c.nick.clone())
                     .unwrap_or_default();
                 let own_mode = self.state.nick_prefix(echo.buffer_id, &nick);
-                // Encrypted sends and ACTIONs echo as ONE logical message
-                // (matching what the peer renders); plain multi-chunk text
+                // Matching what the peer renders; plain multi-chunk text
                 // echoes per wire chunk, matching the legacy handlers.
+                let one_row = encrypted || echo.message_type == MessageType::Action;
                 let echo_chunks: Vec<String> =
-                    if encrypted || echo.message_type == MessageType::Action {
-                        vec![echo.text.to_string()]
-                    } else {
-                        wires
-                    };
+                    if one_row { vec![echo.text.to_string()] } else { wires };
                 for chunk in echo_chunks {
                     let id = self.state.next_message_id();
                     self.state.add_message(
                         echo.buffer_id,
                         Message {
+                            log_key: None, // live row, never read back from the log
                             id,
                             timestamp: chrono::Utc::now(),
                             message_type: echo.message_type.clone(),
@@ -878,6 +875,7 @@ impl super::App {
         self.state.add_local_message(
             &active_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: chrono::Utc::now(),
                 message_type: MessageType::Event,

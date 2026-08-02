@@ -155,6 +155,7 @@ impl App {
                 self.state.add_message(
                     &buffer_id,
                     Message {
+                        log_key: None,
                         id: msg_id,
                         timestamp: Utc::now(),
                         message_type: MessageType::Event,
@@ -206,6 +207,7 @@ impl App {
                     self.state.add_message_with_activity(
                         &buffer_id,
                         Message {
+                            log_key: None,
                             id: msg_id,
                             timestamp: Utc::now(),
                             message_type: MessageType::Message,
@@ -241,6 +243,7 @@ impl App {
                 self.state.add_message_with_activity(
                     &buffer_id,
                     Message {
+                        log_key: None,
                         id: msg_id,
                         timestamp: Utc::now(),
                         message_type: MessageType::Action,
@@ -285,6 +288,7 @@ impl App {
                     self.state.add_message(
                         &buffer_id,
                         Message {
+                            log_key: None,
                             id: msg_id,
                             timestamp: Utc::now(),
                             message_type: MessageType::Event,

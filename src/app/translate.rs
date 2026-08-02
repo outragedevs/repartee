@@ -2095,6 +2095,7 @@ impl crate::app::App {
         let chunks: Vec<crate::state::buffer::Message> = local_chunks
             .into_iter()
             .map(|chunk| crate::state::buffer::Message {
+                log_key: None,
                 id: self.state.next_message_id(),
                 timestamp: chrono::Utc::now(),
                 message_type: message_type.clone(),
@@ -2361,6 +2362,7 @@ mod app_tests {
 
     fn message(id: u64, text: &str) -> Message {
         Message {
+            log_key: None,
             id,
             timestamp: chrono::Utc::now(),
             message_type: MessageType::Message,
@@ -5804,6 +5806,7 @@ mod ordering_integration {
 
     fn message(id: u64, text: &str) -> Message {
         Message {
+            log_key: None,
             id,
             timestamp: chrono::Utc::now(),
             message_type: MessageType::Message,

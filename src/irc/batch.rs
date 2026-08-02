@@ -621,6 +621,7 @@ fn process_netsplit_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo
         state.add_message(
             buf_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: ts,
                 message_type: MessageType::Event,
@@ -700,6 +701,7 @@ fn process_netjoin_batch(state: &mut AppState, conn_id: &str, batch: &BatchInfo)
         state.add_message(
             buf_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: ts,
                 message_type: MessageType::Event,
@@ -1614,6 +1616,7 @@ mod tests {
             .unwrap()
             .messages
             .push_back(Message {
+                log_key: None,
                 id: 1,
                 timestamp: live_ts,
                 message_type: MessageType::Message,

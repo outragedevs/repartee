@@ -640,6 +640,7 @@ mod tests {
 
     fn message(id: u64, text: &str) -> Message {
         Message {
+            log_key: None,
             id,
             timestamp: Utc::now(),
             message_type: MessageType::Message,

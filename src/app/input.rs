@@ -1368,6 +1368,7 @@ impl App {
                     self.state.add_message(
                         &active_id,
                         Message {
+                            log_key: None,
                             id: msg_id,
                             timestamp: chrono::Utc::now(),
                             message_type: MessageType::Message,
@@ -1689,6 +1690,7 @@ impl App {
                     self.state.add_message(
                         &active_id,
                         Message {
+                            log_key: None,
                             id,
                             timestamp: chrono::Utc::now(),
                             message_type: MessageType::Message,
@@ -1744,6 +1746,7 @@ impl App {
                         self.state.add_message(
                             &active_id,
                             Message {
+                                log_key: None,
                                 id,
                                 timestamp: chrono::Utc::now(),
                                 message_type: MessageType::Message,
@@ -1798,6 +1801,7 @@ impl App {
                 self.state.add_message(
                     &active_id,
                     Message {
+                        log_key: None,
                         id,
                         timestamp: chrono::Utc::now(),
                         message_type: MessageType::Message,
@@ -1826,6 +1830,7 @@ impl App {
                     self.state.add_message(
                         &active_id,
                         Message {
+                            log_key: None,
                             id,
                             timestamp: chrono::Utc::now(),
                             message_type: MessageType::Message,

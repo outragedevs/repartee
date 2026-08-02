@@ -1145,6 +1145,7 @@ impl App {
         self.state.add_local_message(
             &buffer_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: Utc::now(),
                 message_type: MessageType::Event,
@@ -1244,6 +1245,7 @@ impl App {
         state.add_message(
             &buf_id,
             Message {
+                log_key: None,
                 id,
                 timestamp: Utc::now(),
                 message_type: MessageType::Event,

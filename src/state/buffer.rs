@@ -106,9 +106,23 @@ pub struct Message {
     /// which is the overwhelming majority of rows.
     ///
     /// Live-only, deliberately NOT persisted. The stored text is flat (the
-    /// log records exactly what was on screen), and a row reloaded from
-    /// `SQLite` has already been keyed and rendered once.
+    /// log records exactly what was on screen); what survives the round trip
+    /// instead is [`Self::log_key`].
     pub wire_origin: Option<WireOrigin>,
+    /// The key this row is stored under in the log (`messages.msg_id`), set
+    /// only on rows READ BACK from `SQLite`.
+    ///
+    /// A live row derives that key from its `@msgid`, or — on a server
+    /// without one — from a hash of its WIRE text (`synthetic_msg_id`). A
+    /// reloaded row cannot: the log holds the display text, so for a
+    /// translated line the wire text is gone. Carrying the stored key forward
+    /// is what still lets a `CHATHISTORY` replay of that same line be
+    /// recognised as the line already on screen instead of being spliced in
+    /// beside it, untranslated.
+    ///
+    /// No new column: this is the key the log has always kept, just no longer
+    /// thrown away on the way back.
+    pub log_key: Option<String>,
 }
 
 /// What the network carried for a row whose display differs from it.

@@ -416,6 +416,7 @@ mod tests {
     #[test]
     fn message_to_wire_converts_correctly() {
         let msg = crate::state::buffer::Message {
+            log_key: None,
             id: 42,
             timestamp: Utc::now(),
             message_type: MessageType::Message,
@@ -442,6 +443,7 @@ mod tests {
     #[test]
     fn message_to_wire_preserves_event_key() {
         let msg = crate::state::buffer::Message {
+            log_key: None,
             id: 99,
             timestamp: Utc::now(),
             message_type: MessageType::Event,
@@ -464,6 +466,7 @@ mod tests {
     fn message_to_wire_populates_previews_when_extractor_provided() {
         let extractor = crate::web::preview::WebPreviewExtractor::new(vec![0u8; 32], 4, 200);
         let msg = crate::state::buffer::Message {
+            log_key: None,
             id: 1,
             timestamp: Utc::now(),
             message_type: MessageType::Message,
@@ -524,6 +527,7 @@ mod tests {
         // and renders the appended original in full brightness, while the
         // TUI dims it — the documented display differing per frontend.
         let msg = Message {
+            log_key: None,
             id: 1,
             timestamp: chrono::Utc::now(),
             message_type: crate::state::buffer::MessageType::Message,
@@ -551,6 +555,7 @@ mod tests {
         // `show_original_in = false` still replaces the text, but there is
         // no appended original — so nothing to dim.
         let msg = Message {
+            log_key: None,
             id: 1,
             timestamp: chrono::Utc::now(),
             message_type: crate::state::buffer::MessageType::Message,

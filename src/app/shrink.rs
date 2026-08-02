@@ -630,6 +630,7 @@ impl App {
                 // Shrink holds no reservation, so each row orders by itself.
                 id,
                 Message {
+                    log_key: None,
                     id,
                     timestamp: chrono::Utc::now(),
                     message_type: crate::state::buffer::MessageType::Message,
