@@ -68,7 +68,7 @@ fn wrap_outgoing_body(body: &str, is_action: bool) -> Vec<String> {
     if !is_action {
         return vec![body.to_string()];
     }
-    let budget = crate::irc::MESSAGE_MAX_BYTES.saturating_sub(ACTION_WRAPPER_BYTES);
+    let budget = outgoing_body_budget(is_action);
     if body.len() <= budget {
         return vec![format!("\x01ACTION {body}\x01")];
     }
@@ -76,6 +76,23 @@ fn wrap_outgoing_body(body: &str, is_action: bool) -> Vec<String> {
         .into_iter()
         .map(|chunk| format!("\x01ACTION {chunk}\x01"))
         .collect()
+}
+
+/// The byte budget for the PROSE of one wire line.
+///
+/// An action's CTCP framing rides the same wire line as its body, so its
+/// prose budget is smaller by exactly the wrapper. ONE function for the send
+/// path and the local-echo chunker, because the two disagreeing is a defect
+/// with no visible symptom: the echo's rows have to break where the wire
+/// lines broke, or their `WireOrigin` texts stop naming anything a
+/// CHATHISTORY replay carries and the author's history stops matching what
+/// peers received.
+const fn outgoing_body_budget(is_action: bool) -> usize {
+    if is_action {
+        crate::irc::MESSAGE_MAX_BYTES.saturating_sub(ACTION_WRAPPER_BYTES)
+    } else {
+        crate::irc::MESSAGE_MAX_BYTES
+    }
 }
 
 /// Bytes `\x01ACTION ` + `\x01` adds around an action's text.
@@ -2170,10 +2187,17 @@ impl crate::app::App {
         // it on the first would place it before the text it is the original
         // of. The last row may exceed the wire budget once the suffix is on
         // it, which is correct: nothing sends it.
-        let body_chunks = if echo_body.len() <= crate::irc::MESSAGE_MAX_BYTES {
+        //
+        // The budget is the BODY's, not the line's: an action's framing rides
+        // the same wire line, so its prose broke at a smaller budget. Cutting
+        // the echo at the full line budget instead put boundaries where the
+        // wire never did — a `/me` body between the two budgets showed the
+        // author ONE row where peers received TWO actions.
+        let budget = outgoing_body_budget(out.is_action);
+        let body_chunks = if echo_body.len() <= budget {
             vec![echo_body.to_string()]
         } else {
-            crate::irc::split_irc_message(echo_body, crate::irc::MESSAGE_MAX_BYTES)
+            crate::irc::split_irc_message(echo_body, budget)
         };
         let composes = matches!(out.outcome, TranslateOutcome::Translated { .. });
         let last_chunk = body_chunks.len().saturating_sub(1);
@@ -3384,6 +3408,80 @@ mod app_tests {
                 line.len()
             );
         }
+    }
+
+    #[test]
+    fn a_long_action_echo_breaks_where_the_wire_actions_broke() {
+        // A `/me` pays for its CTCP framing out of the same wire line, so its
+        // BODY breaks at a smaller budget than a plain message's. Cutting the
+        // echo at the full line budget put row boundaries where the wire never
+        // did: for a body between the two budgets the author saw ONE row where
+        // peers received TWO actions, and no row's `WireOrigin` named a body
+        // any CHATHISTORY replay carries.
+        let mut app = app_with_dying_handle(usize::MAX);
+        app.conn_generations.insert("test".to_string(), 1);
+        let sender = app.irc_handles["test"].sender().clone();
+        // Longer than the action body budget, but inside the full line
+        // budget — the exact window the two chunkers disagreed over.
+        let body = "a".repeat(crate::irc::MESSAGE_MAX_BYTES - 5);
+        let mut out = outgoing(
+            "krotkie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: body,
+            },
+            false,
+        );
+        out.is_action = true;
+        out.conn_generation = Some(1);
+        app.state.reserve_echo_slot(BUF, 1);
+
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+
+        let wire_bodies: Vec<String> = sender
+            .captured()
+            .iter()
+            .map(|m| {
+                let line = m.to_string();
+                let start = line.find('\u{1}').expect("an action frame");
+                let end = line.rfind('\u{1}').expect("a closed action frame");
+                line[start..=end]
+                    .trim_matches('\u{1}')
+                    .strip_prefix("ACTION ")
+                    .expect("an ACTION payload")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            wire_bodies.len(),
+            2,
+            "this body must actually split on the wire, or the test proves nothing"
+        );
+
+        let echoed: Vec<(String, String)> = app.state.buffers[BUF]
+            .messages
+            .iter()
+            .map(|m| {
+                (
+                    m.text.clone(),
+                    m.wire_origin
+                        .as_ref()
+                        .expect("an echo row records its wire text")
+                        .text
+                        .clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            echoed.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>(),
+            wire_bodies,
+            "the author's rows are the wire bodies, one for one"
+        );
+        assert_eq!(
+            echoed.iter().map(|(_, w)| w.clone()).collect::<Vec<_>>(),
+            wire_bodies,
+            "and each row is KEYED by the body its wire line carried"
+        );
     }
 
     #[test]
