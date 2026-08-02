@@ -26,7 +26,7 @@ use chrono::Utc;
 /// `%%` the same way, so escaped text is correct in either front end.
 #[must_use]
 pub fn escape_format(text: &str) -> String {
-    text.replace('%', "%%").replace('$', "$$")
+    text.replace('%', "%%")
 }
 
 pub fn add_local_event(app: &mut App, text: &str) {
@@ -83,21 +83,16 @@ pub fn warn_if_translate_needs_restart(app: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    /// Both renderers must agree on what escaped text means: the same row is
-    /// shown in the terminal and in the browser, and a copy the user is
-    /// expected to retype from cannot be correct in one and wrong in the
-    /// other. The web UI's parser lives in a separate crate, so the shape of
-    /// its `$$`/`%%` handling is mirrored here rather than called.
+    /// What the browser's renderer would show. The web UI's parser lives in a
+    /// separate crate, so the shape of its `%%` handling is mirrored here —
+    /// the two front ends display the same rows and a copy the user is meant
+    /// to retype from cannot be correct in one and wrong in the other.
     fn as_web_renders(text: &str) -> String {
         let chars: Vec<char> = text.chars().collect();
         let mut out = String::new();
         let mut i = 0;
         while i < chars.len() {
             match chars[i] {
-                '$' if i + 1 < chars.len() && chars[i + 1] == '$' => {
-                    out.push('$');
-                    i += 2;
-                }
                 '%' if i + 1 < chars.len() && chars[i + 1] == '%' => {
                     out.push('%');
                     i += 2;
@@ -113,12 +108,15 @@ mod tests {
 
     #[test]
     fn escaped_text_renders_back_to_itself_in_both_front_ends() {
-        // One case per thing a rendering pass can eat, plus the escapes
-        // themselves — text that is ALREADY doubled must survive a round trip
-        // too, or a user quoting a theme string loses it.
+        // `%` is the only sign that needs escaping. `$` is NOT: with no params
+        // the variable pass is skipped entirely (see
+        // `theme::parser::substitute_vars`), so a dollar in an event row is a
+        // dollar. Escaping it was a mistake that reached the web renderer and
+        // ate `echo $$` in ordinary chat.
         for original in [
             "printf(\"%i\", n)",
             "costs $5",
+            "echo $$",
             "$* and $[3]0",
             "%Z112233 red %N reset %_bold",
             "100% sure",

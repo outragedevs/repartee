@@ -121,16 +121,6 @@ pub fn parse_format(text: &str) -> Vec<StyledSpan> {
 
     while i < len {
         match chars[i] {
-            // `$$` is irssi's literal '$', and the TUI parser consumes it in
-            // its variable pass. Text escaped for one front end has to render
-            // the same in the other, so it is consumed here too. A lone `$`,
-            // and `$0`-style variables, fall through untouched — this renderer
-            // never substituted variables and still does not.
-            '$' if i + 1 < len && chars[i + 1] == '$' => {
-                current.push('$');
-                i += 2;
-            }
-
             // irssi format codes
             '%' if i + 1 < len => match chars[i + 1] {
                 'Z' if i + 8 <= len => {
@@ -583,19 +573,25 @@ mod tests {
     }
 
     #[test]
-    fn escaped_signs_render_as_one_sign_each() {
-        // The terminal and the browser show the same rows, and a refused
-        // message the user is meant to retype from cannot be correct in one
-        // and doubled in the other. `$$`/`%%` are what the client escapes
-        // with (`commands::helpers::escape_format`).
+    fn dollars_in_a_message_body_are_left_exactly_as_they_arrived() {
+        // This parser sees raw IRC message bodies, not just rows the client
+        // composed, so it must not claim any `$` sequence means something.
+        // A `$$` arm was added here once to mirror an escape the TUI applied
+        // to its event rows; it rendered `echo $$` — an ordinary line in any
+        // channel where people talk about shells — as `echo $`.
+        //
+        // The TUI does not substitute variables in message bodies either
+        // (they are inserted as params, after that pass), so leaving `$`
+        // alone is what keeps the two front ends showing the same text.
         let rendered = |t: &str| -> String {
             parse_format(t).iter().map(|s| s.text.as_str()).collect()
         };
-        assert_eq!(rendered("costs $$5"), "costs $5");
+        assert_eq!(rendered("echo $$"), "echo $$");
+        assert_eq!(rendered("costs $5"), "costs $5");
+        assert_eq!(rendered("a $ b $x $0 $*"), "a $ b $x $0 $*");
+        // `%%` is a different matter: both renderers read it as one literal
+        // `%`, and both interpret `%i` in a body, so they still agree.
         assert_eq!(rendered("printf(\"%%i\")"), "printf(\"%i\")");
-        assert_eq!(rendered("$$*"), "$*");
-        // A lone `$` is untouched — this renderer substitutes no variables.
-        assert_eq!(rendered("a $ b $x $0"), "a $ b $x $0");
     }
 
     #[test]

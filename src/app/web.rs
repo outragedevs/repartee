@@ -440,6 +440,25 @@ impl App {
         );
     }
 
+    /// Take a client's word for where it is.
+    ///
+    /// A tab is marked unconfirmed when a TUI-driven `ActiveBufferChanged`
+    /// goes out, because whether it follows is a `localStorage` flag only the
+    /// browser can see. Every command that names a `buffer_id` settles that
+    /// question outright — the tab is telling us which composer the text came
+    /// from — so the guess is replaced by the fact and the doubt cleared.
+    ///
+    /// Not cosmetic. `deferred_retry_text` withholds a refused message
+    /// entirely from a session whose buffer it does not know, since it cannot
+    /// tell which CONNECTION the retry would resolve against. Leaving a tab
+    /// unconfirmed after it has just spoken means its author does not get
+    /// their own text back, on the one path where getting it back matters.
+    fn confirm_web_buffer(&mut self, session_id: &str, buffer_id: &str) {
+        self.web_active_buffers
+            .insert(session_id.to_string(), buffer_id.to_string());
+        self.web_buffer_unconfirmed.remove(session_id);
+    }
+
     /// Dispatch a command received from a web client.
     #[expect(
         clippy::too_many_lines,
@@ -468,6 +487,10 @@ impl App {
                 self.on_web_typing(session_id, &buffer_id, typing);
             }
             WebCommand::SendMessage { buffer_id, text } => {
+                // The tab just named the buffer its text came from, which is
+                // the answer to the question `web_buffer_unconfirmed` records
+                // not knowing.
+                self.confirm_web_buffer(session_id, &buffer_id);
                 // Mark who is submitting for the duration of the command, so
                 // a refusal (translation, E2E) returns the text to THIS
                 // browser rather than the terminal's input line.
@@ -553,6 +576,7 @@ impl App {
                 // `/me` all reach the outgoing translation gate — so a
                 // refusal must return the text to THIS browser, not to the
                 // terminal's input line where its author cannot see it.
+                self.confirm_web_buffer(session_id, &buffer_id);
                 self.submit_origin =
                     crate::app::translate::SubmitOrigin::Web(session_id.to_string());
                 let sent_message = self.web_run_command(&buffer_id, &text);

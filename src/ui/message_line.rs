@@ -177,8 +177,19 @@ fn render_chat_message(
     }
 
     // Dim the ` [original]` suffix of a translated line, if there is one.
+    //
+    // Matched against the suffix as it RENDERS, not as it is stored. The
+    // original is a person's own message and may carry mIRC or theme codes;
+    // those are consumed on the way into spans, so a raw comparison measures
+    // bytes that are not on screen and silently matches nothing — leaving the
+    // suffix undimmed on exactly the lines whose original had formatting in
+    // it, and disagreeing with the web front end, which dims by offset.
     if let Some(suffix) = dim_suffix {
-        dim_trailing_suffix(&mut spans, &suffix);
+        let rendered: String = parse_format_string(&suffix, &[])
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect();
+        dim_trailing_suffix(&mut spans, &rendered);
     }
 
     spans
@@ -454,6 +465,31 @@ mod tests {
             dim_text(&spans),
             " [blabla]",
             "only the appended original is dimmed"
+        );
+    }
+
+    #[test]
+    fn a_formatted_original_is_still_dimmed() {
+        // The original is a person's own message and may carry mIRC or theme
+        // codes — bold, a colour — which are consumed on the way into spans.
+        // Comparing the STORED suffix against rendered spans then measures
+        // bytes that are not on screen, matches nothing, and leaves the
+        // suffix undimmed on exactly the lines whose original was formatted.
+        let original = "\x02bla\x02 %Z112233bla%N";
+        let text = format!("albalb [{original}]");
+        let suffix_at = "albalb".len();
+        let mut msg = test_message("alice", &text, MessageType::Message);
+        msg.wire_origin = Some(crate::state::buffer::WireOrigin {
+            text: "blabla".to_string(),
+            suffix_at: Some(suffix_at),
+        });
+
+        let spans = chat_spans(&msg);
+        assert_eq!(
+            dim_text(&spans),
+            " [bla bla]",
+            "the codes are gone from the text, but the run they styled is \
+             still the run that dims"
         );
     }
 

@@ -679,6 +679,15 @@ send got:
   **all three** refusal rows, and most of all to the partial-send one: that path
   deliberately declines to restore the composer at all, so unlike the other two it has
   no second copy to fall back on.
+
+  **`%` only.** `$` needs no escape, because `substitute_vars` now returns its input
+  untouched when there are no params — substituting into nothing can only DELETE
+  (`$0` and `$[3]0` expand to nothing, `$*` to the join of nothing), so on every
+  `&[]` call site it was eating text nobody meant as a variable. Escaping `$` as `$$`
+  instead was tried and was a mistake: the web UI's renderer sees raw IRC message
+  bodies through the same entry point as composed rows, so teaching it `$$` made an
+  ordinary line like `echo $$` render as `echo $`. The rule the two front ends now
+  share is that a `$` in a person's text is a dollar sign.
   `$$` did not previously exist in the theme parser; it was added, because irssi
   defines it (`docs/special_vars.txt`) and without it no `$` before a digit can be
   rendered at all. The web UI's renderer consumes it too, so a row reads the same in
@@ -741,6 +750,17 @@ message comes back a second time — trading one display bug for a duplication b
 
 Details that follow from the shape:
 
+- **The local echo is chunked by the WIRE, not by the display.** The byte budget
+  belongs to a PRIVMSG, not to a row on screen. Splitting the composed display —
+  translation plus ` [original]`, which `show_original_out` makes the common case —
+  cut at boundaries the wire never used, so no chunk's text was a wire text and none
+  could carry `wire_origin`. That cost the suffix its dimming and, worse, cost every
+  chunk its identity: `dedup_text` falls back to keying the row by what is DISPLAYED,
+  so a later CHATHISTORY replay matches nothing and splices a second, untranslated
+  copy in beside it. Chunked by wire line the rows correspond one for one, and only
+  the LAST carries the original — the same rule `expect_own_reflection` follows for a
+  split reflection, so the two paths finally agree. The last row may exceed the wire
+  budget once the suffix is on it, which is correct: nothing sends it.
 - **Every wire line files a record; only the last carries a decoration.** A
   translation long enough to split is several reflections and one original; repeating
   it on each would say the same thing N times, and putting it on the first would place
@@ -895,6 +915,12 @@ own `SwitchBuffer` from marking itself, since that switch is what raised the eve
 While unconfirmed, a web retry is **withheld entirely**. The re-addressed form is not
 a way out here: not knowing which buffer the tab is showing is exactly not knowing
 which connection its retry would resolve against, and that is the third case above.
+
+A tab does not stay unconfirmed for long, because any submit answers the question:
+`SendMessage` and `RunCommand` both name the buffer their text came from, so both
+replace the guess with that fact and clear the doubt. Without it a tab that had just
+spoken would still be refused its own text back, on the one path where getting it
+back is the point.
 
 ---
 

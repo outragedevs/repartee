@@ -2140,17 +2140,32 @@ impl crate::app::App {
         } else {
             plain_echo
         };
-        let (echo_text, orig_offset) = if matches!(out.outcome, TranslateOutcome::Translated { .. })
-        {
-            crate::translate::compose_display(echo_body, &out.original_text, out.show_original)
+        // Chunk the BODY at the wire budget, never the composed display.
+        //
+        // The budget is a property of a PRIVMSG, not of a row on screen, and
+        // the body is what the wire carried. Splitting the display instead —
+        // translation plus ` [original]`, which `show_original_out` makes the
+        // common case — cut at boundaries the wire never used, so no chunk's
+        // text was a wire text and none could carry `wire_origin`. That cost
+        // the suffix its dimming, and cost every chunk its identity: `dedup`
+        // then keys the row by what is DISPLAYED, so a later CHATHISTORY
+        // replay of the same message matches nothing and splices a second,
+        // untranslated copy in beside it.
+        //
+        // Chunked this way the rows are the wire lines, one for one. Only the
+        // LAST carries the original — the same rule `expect_own_reflection`
+        // follows for the reflection of a split send, and for the same reason:
+        // repeating it on each would say the same thing N times, and putting
+        // it on the first would place it before the text it is the original
+        // of. The last row may exceed the wire budget once the suffix is on
+        // it, which is correct: nothing sends it.
+        let body_chunks = if echo_body.len() <= crate::irc::MESSAGE_MAX_BYTES {
+            vec![echo_body.to_string()]
         } else {
-            (echo_body.to_string(), None)
+            crate::irc::split_irc_message(echo_body, crate::irc::MESSAGE_MAX_BYTES)
         };
-        let local_chunks = if echo_text.len() <= crate::irc::MESSAGE_MAX_BYTES {
-            vec![echo_text]
-        } else {
-            crate::irc::split_irc_message(&echo_text, crate::irc::MESSAGE_MAX_BYTES)
-        };
+        let composes = matches!(out.outcome, TranslateOutcome::Translated { .. });
+        let last_chunk = body_chunks.len().saturating_sub(1);
         // Whose line this IS, resolved now rather than at dispatch.
         //
         // The wire message carries no sender: the SERVER stamps the prefix as
@@ -2179,19 +2194,6 @@ impl crate::app::App {
             .state
             .nick_prefix(&echo_buffer, &echo_nick)
             .map(|c| c.to_string());
-        // Only a single-chunk echo can carry this: splitting moves the suffix
-        // into the last chunk (so the offset no longer maps) and leaves each
-        // chunk holding a fraction of a wire line that was itself split
-        // differently (so no chunk's text is a wire text).
-        let single_chunk = local_chunks.len() == 1;
-        // What the NETWORK carried for this row — our translation, not the
-        // original we typed. A CHATHISTORY replay of our own message brings
-        // back exactly this, so it is what the row must be keyed by. See
-        // `WireOrigin`.
-        let wire_origin = single_chunk.then(|| crate::state::buffer::WireOrigin {
-            text: echo_body.to_string(),
-            suffix_at: orig_offset,
-        });
         let message_type = match &out.echo {
             OutgoingEchoPlan::Gated { message_type, .. } => message_type.clone(),
             _ if out.is_action => crate::state::buffer::MessageType::Action,
@@ -2202,23 +2204,38 @@ impl crate::app::App {
         // first. What keeps them together is the ORDER KEY passed below: the
         // id reserved at submission, under which they all take the one place
         // held for them. See `add_own_message_chunks`.
-        let chunks: Vec<crate::state::buffer::Message> = local_chunks
+        let chunks: Vec<crate::state::buffer::Message> = body_chunks
             .into_iter()
-            .map(|chunk| crate::state::buffer::Message {
-                log_key: None,
-                id: self.state.next_message_id(),
-                timestamp: chrono::Utc::now(),
-                message_type: message_type.clone(),
-                nick: Some(echo_nick.clone()),
-                nick_mode: nick_mode_str.clone(),
-                text: chunk,
-                highlight: false,
-                event_key: None,
-                event_params: None,
-                log_msg_id: None,
-                log_ref_id: None,
-                tags: None,
-                wire_origin: wire_origin.clone(),
+            .enumerate()
+            .map(|(i, body)| {
+                let (text, suffix_at) = if composes && i == last_chunk {
+                    crate::translate::compose_display(&body, &out.original_text, out.show_original)
+                } else {
+                    (body.clone(), None)
+                };
+                crate::state::buffer::Message {
+                    log_key: None,
+                    id: self.state.next_message_id(),
+                    timestamp: chrono::Utc::now(),
+                    message_type: message_type.clone(),
+                    nick: Some(echo_nick.clone()),
+                    nick_mode: nick_mode_str.clone(),
+                    text,
+                    highlight: false,
+                    event_key: None,
+                    event_params: None,
+                    log_msg_id: None,
+                    log_ref_id: None,
+                    tags: None,
+                    // What the NETWORK carried for this row — our translation,
+                    // not the original we typed. A CHATHISTORY replay of our
+                    // own message brings back exactly this, so it is what the
+                    // row must be keyed by. See `WireOrigin`.
+                    wire_origin: Some(crate::state::buffer::WireOrigin {
+                        text: body,
+                        suffix_at,
+                    }),
+                }
             })
             .collect();
         // `add_own_message_chunks`, not `add_message`: these rows have to take
@@ -4863,6 +4880,77 @@ mod app_tests {
     }
 
     #[test]
+    fn a_split_translated_echo_keeps_one_row_per_wire_line() {
+        // `show_original_out` appends ` [original]` to the echo, so a message
+        // near the wire budget splits on DISPLAY while the wire itself did
+        // not, or split elsewhere. Chunking the composed display meant no
+        // chunk's text was ever a wire text: each row lost `wire_origin`, so
+        // the suffix could not be dimmed and — worse — `dedup_text` fell back
+        // to keying the row by what is shown. A later CHATHISTORY replay
+        // brings back the wire lines, matches none of them, and splices a
+        // second untranslated copy of the message in beside the first.
+        let mut app = app_with_dying_handle(usize::MAX);
+        let mut conn = crate::app::input::submit_typing_tests::make_connection();
+        conn.id = "test".to_string();
+        conn.nick = "me".to_string();
+        app.state.add_connection(conn);
+        app.state.reserve_echo_slot(BUF, 1);
+
+        // Long enough that the translation alone needs two wire lines.
+        let translated = "wieloslowne zdanie ".repeat(40).trim().to_string();
+        let mut out = outgoing(
+            "krotki oryginal",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: translated.clone(),
+            },
+            true, // show_original_out
+        );
+        out.echo_id = 1;
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+
+        let rows: Vec<_> = app.state.buffers[BUF].messages.iter().collect();
+        assert!(rows.len() > 1, "precondition: this split");
+        assert!(
+            rows.iter().all(|m| m.wire_origin.is_some()),
+            "every row is a wire line, so every row can say which one"
+        );
+
+        // The rows ARE the wire lines — the same split the send path used,
+        // not a second one taken over the composed display.
+        let wire_texts: Vec<&str> = rows
+            .iter()
+            .filter_map(|m| m.wire_origin.as_ref())
+            .map(|o| o.text.as_str())
+            .collect();
+        let wire_split =
+            crate::irc::split_irc_message(&translated, crate::irc::MESSAGE_MAX_BYTES);
+        assert_eq!(
+            wire_texts, wire_split,
+            "the rows are the wire lines, one for one"
+        );
+
+        // Only the LAST carries the original — the same rule the reflection
+        // path follows, and for the same reason.
+        let with_suffix: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.wire_origin.as_ref().is_some_and(|o| o.suffix_at.is_some()))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            with_suffix,
+            vec![rows.len() - 1],
+            "the original is appended once, to the last row"
+        );
+        assert!(
+            rows.last().expect("rows").text.contains("[krotki oryginal]"),
+            "and it is there: {:?}",
+            rows.last().expect("rows").text
+        );
+    }
+
+    #[test]
     fn a_deferred_echo_is_attributed_to_the_nick_the_message_went_out_under() {
         // The wire message carries no sender: the SERVER stamps the prefix as
         // it relays the line, using whatever nick the connection holds then.
@@ -5738,6 +5826,57 @@ mod app_tests {
             app.web_buffer_unconfirmed.contains("sess-2"),
             "the one that may have followed does not"
         );
+    }
+
+    #[test]
+    fn a_tab_that_submits_says_where_it_is_and_is_trusted_again() {
+        // `web_buffer_unconfirmed` records not knowing which buffer a tab is
+        // showing. A submit ANSWERS that: the command carries the buffer its
+        // text came from. Leaving the doubt standing after the tab has just
+        // spoken is not cosmetic — `deferred_retry_text` withholds a refused
+        // message entirely from a session whose buffer it does not know,
+        // because it cannot tell which connection the retry would resolve
+        // against. The author would not get their own text back, on the one
+        // path where getting it back is the point.
+        let session = "sess-1";
+        let mut app = app_with_buffer();
+        app.web_active_buffers
+            .insert(session.to_string(), "test/#stale".to_string());
+        app.web_buffer_unconfirmed.insert(session.to_string());
+
+        app.handle_web_command(
+            crate::web::protocol::WebCommand::SendMessage {
+                buffer_id: BUF.to_string(),
+                text: "czesc".to_string(),
+            },
+            session,
+        );
+
+        assert!(
+            !app.web_buffer_unconfirmed.contains(session),
+            "it just told us where it is"
+        );
+        assert_eq!(
+            app.web_active_buffers.get(session).map(String::as_str),
+            Some(BUF),
+            "and the guess is replaced by what it said, not merely trusted"
+        );
+
+        // The same for the `/`-prefixed arm, which is a separate branch.
+        app.web_buffer_unconfirmed.insert(session.to_string());
+        app.handle_web_command(
+            crate::web::protocol::WebCommand::RunCommand {
+                buffer_id: "test/#other".to_string(),
+                text: "/me macha".to_string(),
+            },
+            session,
+        );
+        assert_eq!(
+            app.web_active_buffers.get(session).map(String::as_str),
+            Some("test/#other"),
+            "RunCommand names its buffer too"
+        );
+        assert!(!app.web_buffer_unconfirmed.contains(session));
     }
 
     #[test]

@@ -104,7 +104,23 @@ fn read_hex6_bytes(bytes: &[u8], pos: usize) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 /// Substitute positional variables ($0, $1, $*, $[N]0, $[-N]0) in a string.
+///
+/// **With no params there is nothing to substitute, and the input is returned
+/// untouched.** Running the pass anyway can only ever DELETE: `$0` and
+/// `$[3]0` expand to nothing, `$*` to the join of nothing. So on the call
+/// sites that pass `&[]` — an event row with no themed format, the topic bar,
+/// the body handed to `split_body_for_dimming` — it silently ate text that
+/// nobody had asked to be treated as a variable. "costs $5" rendered as
+/// "costs ", and "echo $0" as "echo ".
+///
+/// Skipping is what makes those call sites need no escape at all: the text
+/// they carry is a person's, not a format string, and `$` in it is a dollar
+/// sign. It is also what keeps the TUI and the web UI agreeing, since the
+/// web's renderer substitutes no variables either.
 pub fn substitute_vars(input: &str, params: &[&str]) -> String {
+    if params.is_empty() {
+        return input.to_string();
+    }
     let chars: Vec<char> = input.chars().collect();
     let mut result = String::new();
     let mut i = 0;
@@ -117,12 +133,10 @@ pub fn substitute_vars(input: &str, params: &[&str]) -> String {
                 break;
             }
 
-            // $$ -- a literal '$', exactly as irssi's special_vars defines it
-            // (`docs/special_vars.txt`: "$$  a literal '$'"). Without it there
-            // is no way to put a `$` followed by a digit into a rendered line:
-            // "costs $5" loses the 5, and any row carrying user text — a
-            // refused message handed back to its author, most of all — is
-            // silently not what was typed.
+            // $$ -- a literal '$', exactly as irssi's special_vars defines
+            // it (`docs/special_vars.txt`). Only reachable with params
+            // present, i.e. inside a themed format string, which is the only
+            // place a `$` is a variable in the first place.
             if chars[i] == '$' {
                 result.push('$');
                 i += 1;
@@ -619,15 +633,27 @@ mod tests {
 
     #[test]
     fn a_doubled_dollar_is_a_literal_one_as_in_irssi() {
-        // `docs/special_vars.txt`: "$$  a literal '$'". Without it there is no
-        // spelling for a `$` in front of a digit, so any line carrying text
-        // somebody typed loses it — "costs $5" becomes "costs ".
-        assert_eq!(substitute_vars("costs $$5", &[]), "costs $5");
+        // `docs/special_vars.txt`: "$$  a literal '$'". Only meaningful where
+        // a `$` could be a variable at all, i.e. with params present.
         assert_eq!(substitute_vars("$$0 is not $0", &["sub"]), "$0 is not sub");
-        assert_eq!(substitute_vars("$$$$", &[]), "$$");
-        // A lone `$` in front of something that is not a variable is still
-        // passed through — this changes only the doubled form.
-        assert_eq!(substitute_vars("a $ b $x", &[]), "a $ b $x");
+        assert_eq!(substitute_vars("$$ $*", &["a", "b"]), "$ a b");
+    }
+
+    #[test]
+    fn with_no_params_the_text_is_returned_untouched() {
+        // Substituting into nothing can only DELETE — `$0` and `$[3]0` expand
+        // to nothing, `$*` to the join of nothing — so on the call sites that
+        // pass no params (an event row with no themed format, the topic bar)
+        // this pass silently ate text nobody meant as a variable. It is also
+        // what let the two front ends disagree: the web renderer substitutes
+        // no variables at all.
+        for input in ["costs $5", "echo $$", "$* and $[3]0", "a $ b $x", "$0"] {
+            assert_eq!(
+                substitute_vars(input, &[]),
+                input,
+                "{input:?} is a person's text, not a format string"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
