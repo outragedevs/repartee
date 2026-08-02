@@ -891,6 +891,15 @@ impl AppState {
             return;
         }
         if let Some(queue) = self.translate_queues.remove(old_id) {
+            // The new id may still hold its PREVIOUS occupant's queue — a
+            // stale query under the very nick this conversation is renaming
+            // onto, with lines the network already delivered still waiting in
+            // it. Installing ours over it would drop them unseen and
+            // unlogged; release them into the buffer first, exactly as a
+            // buffer close would have.
+            if self.translate_queues.contains_key(new_id) {
+                self.flush_translate_queue(new_id);
+            }
             self.translate_queues.insert(new_id.to_string(), queue);
         }
         if let Some(cfg) = self.translate_buffers.remove(old_id) {
@@ -900,7 +909,16 @@ impl AppState {
             self.own_echo_decorations.insert(new_id.to_string(), echoes);
         }
         if let Some(in_flight) = self.outgoing_in_flight.remove(old_id) {
-            self.outgoing_in_flight.insert(new_id.to_string(), in_flight);
+            // MERGED, never inserted over: markers may already sit under the
+            // new id (the previous occupant's send still at the provider),
+            // and replacing them would let this buffer's next ordinary send
+            // skip the in-flight refusal and overtake it on the wire. The
+            // markers are ages, not identities, so combining the two queues
+            // keeps both counts honest and they age out individually.
+            self.outgoing_in_flight
+                .entry(new_id.to_string())
+                .or_default()
+                .extend(in_flight);
         }
         // Work already dispatched still carries the old id, so it needs a way
         // to find its way here. Existing redirects INTO the old id are
@@ -3415,6 +3433,82 @@ mod translate_gate_tests {
         mpsc::Receiver<crate::app::translate::PendingTranslate>,
     ) {
         state_with_translation_capacity(16)
+    }
+
+    #[test]
+    fn a_rename_onto_an_id_with_a_stale_queue_releases_its_lines_first() {
+        // The peer renames onto a nick whose PREVIOUS conversation still has
+        // lines in flight — somebody who held the nick until moments ago.
+        // Installing the moved queue over the stale one dropped those lines
+        // unseen and unlogged, though the network had already delivered them.
+        let mut state = make_test_state();
+        state.add_buffer(crate::state::buffer::Buffer::for_test(
+            "libera",
+            crate::state::buffer::BufferType::Query,
+            "frankie",
+        ));
+
+        let mut leftover = crate::translate::queue::TranslateQueue::new();
+        let line = make_test_message(&mut state, "wiadomosc starego frankie");
+        leftover.push_pending(
+            line.id,
+            line.text.clone(),
+            crate::translate::queue::PendingPayload {
+                message: line,
+                activity: ActivityLevel::Activity,
+                show_original: false,
+            },
+        );
+        state
+            .translate_queues
+            .insert("libera/frankie".to_string(), leftover);
+
+        let mut moved = crate::translate::queue::TranslateQueue::new();
+        moved.reserve(99);
+        state
+            .translate_queues
+            .insert("libera/frank".to_string(), moved);
+
+        state.rekey_buffer_state("libera/frank", "libera/frankie");
+
+        let shown: Vec<String> = state.buffers["libera/frankie"]
+            .messages
+            .iter()
+            .map(|m| m.text.clone())
+            .collect();
+        assert_eq!(
+            shown,
+            vec!["wiadomosc starego frankie [untranslated: timeout]".to_string()],
+            "the stale queue's line is released into the buffer, not dropped"
+        );
+        assert!(
+            state.translate_queues["libera/frankie"].has_reservation(),
+            "and the moved queue is installed with its reservation intact"
+        );
+    }
+
+    #[test]
+    fn a_rename_merges_in_flight_markers_rather_than_replacing_them() {
+        // A marker may already sit under the new id — the previous
+        // occupant's send still at the provider. Replacing the entry would
+        // erase it, and the next ordinary send to that conversation would
+        // skip the in-flight refusal and overtake the translated one on the
+        // wire.
+        let mut state = make_test_state();
+        state.note_outgoing_dispatch("libera/frankie");
+        state.note_outgoing_dispatch("libera/frank");
+
+        state.rekey_buffer_state("libera/frank", "libera/frankie");
+
+        assert!(
+            !state.outgoing_in_flight.contains_key("libera/frank"),
+            "nothing is left under the abandoned id"
+        );
+        assert_eq!(
+            state.outgoing_in_flight["libera/frankie"].len(),
+            2,
+            "both sends stay on record until they come back or age out"
+        );
     }
 
     /// [`state_with_translation`] with a chosen worker-queue depth, so a test

@@ -2109,12 +2109,23 @@ impl crate::app::App {
     }
 
     fn write_translated_local_echo(&mut self, out: &OutgoingTranslateDeliver, plain_echo: &str) {
-        // A gated echo names its own buffer — a script may target a
-        // conversation that is not the one the send was addressed through.
+        // A gated echo names its own buffer. Today every caller that
+        // supplies one names the buffer the send was addressed through —
+        // `redirect_outgoing_deliver` relies on that — but the plan carries
+        // the id precisely so a future caller may diverge, so it is honoured
+        // rather than assumed away.
         let echo_buffer = match &out.echo {
             OutgoingEchoPlan::Gated { buffer_id, .. } => buffer_id.clone(),
             _ => out.buffer_id.clone(),
         };
+        if echo_buffer != out.buffer_id {
+            // An echo written elsewhere can never fill the place the SEND
+            // buffer holds for it, and nothing later on this path would give
+            // it back — the barrier would stand until the queue's expiry
+            // with the whole conversation behind it. The caller drains that
+            // queue right after this returns.
+            self.state.release_echo_slot(&out.buffer_id, out.echo_id);
+        }
         if !self.state.buffers.contains_key(&echo_buffer) {
             crate::commands::helpers::add_local_event(
                 self,
@@ -2466,8 +2477,8 @@ impl crate::app::App {
         }
     }
 
-    /// Flush every buffer's queue. Used on quit and detach.
-    #[allow(dead_code, reason = "called once the flush points are wired")]
+    /// Flush every buffer's queue. Used on quit and detach, at the end of
+    /// [`crate::app::App::run`].
     pub(crate) fn flush_all_translate_queues(&mut self) {
         let buffer_ids: Vec<String> = self.state.translate_queues.keys().cloned().collect();
         for buffer_id in buffer_ids {
@@ -3226,6 +3237,58 @@ mod app_tests {
             shown(&app).last().is_some_and(|t| t.contains("[krotkie]")),
             "and the last chunk — the one with the original — survives: {:?}",
             shown(&app)
+        );
+    }
+
+    #[test]
+    fn an_echo_written_to_another_buffer_still_frees_the_send_buffers_place() {
+        // No caller supplies a divergent `Gated` echo buffer today, but the
+        // plan carries its own id so one may. An echo written elsewhere can
+        // never fill the place the SEND buffer holds, and nothing later on
+        // the success path gives it back — the conversation would sit behind
+        // the barrier until the queue's expiry.
+        let mut app = app_with_dying_handle(usize::MAX);
+        app.conn_generations.insert("test".to_string(), 1);
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Channel, "#other"));
+
+        let mut queue = TranslateQueue::new();
+        queue.reserve(1);
+        queue.push_resolved(2, message(2, "odpowiedz kolegi"), ActivityLevel::Activity);
+        app.state.translate_queues.insert(BUF.to_string(), queue);
+
+        let mut out = outgoing(
+            "moje zdanie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "mein satz".to_string(),
+            },
+            false,
+        );
+        out.conn_generation = Some(1);
+        out.echo = OutgoingEchoPlan::Gated {
+            buffer_id: "test/#other".to_string(),
+            message_type: MessageType::Message,
+            even_without_encryption: true,
+        };
+
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+
+        assert_eq!(
+            shown(&app),
+            vec!["odpowiedz kolegi".to_string()],
+            "the reply behind the barrier is delivered now, not at expiry"
+        );
+        assert_eq!(queued(&app), 0, "and nothing is left holding the queue open");
+        let other: Vec<String> = app.state.buffers["test/#other"]
+            .messages
+            .iter()
+            .map(|m| m.text.clone())
+            .collect();
+        assert_eq!(
+            other,
+            vec!["mein satz".to_string()],
+            "the echo itself landed where the plan asked"
         );
     }
 

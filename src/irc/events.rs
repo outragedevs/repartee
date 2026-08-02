@@ -1718,6 +1718,17 @@ fn handle_privmsg(
         && try_dispatch_rpe2e_ctcp(state, conn_id, prefix, target, text)
             == Some(RpEe2eOutcome::Handled)
     {
+        // The dispatcher just ATE this line, so it exits like every other
+        // dropped reflection: the place reserved at submission goes back.
+        // Reachable, unlike the non-ACTION CTCP case above: the seam refuses
+        // `\x01` but not prose that merely BEGINS with the handshake tag, so
+        // a broken backend answering `RPEE2E …` produces a reflection the
+        // dispatcher swallows as our own handshake echo — and the barrier
+        // would stand until the queue's expiry with the whole conversation
+        // behind it.
+        if let Some(d) = decoration.as_ref() {
+            state.abandon_own_reflection(&buffer_id, d.echo_id);
+        }
         return;
     }
 
@@ -6417,6 +6428,63 @@ mod tests {
             "every one of our own lines is shown; none is mistaken for a stranger \
              flooding us: {:?}",
             rows(&state, "test/#rust")
+        );
+    }
+
+    #[test]
+    fn a_handshake_shaped_reflection_the_dispatcher_eats_still_lifts_the_barrier() {
+        // The seam refuses `\x01` but not prose that merely BEGINS with the
+        // handshake tag, so a broken backend can answer `RPEE2E …` and the
+        // send path ships it as a translation. The reflection then matches
+        // its decoration — and, because our own handshake echoes are
+        // swallowed, the RPE2E dispatcher eats the line before delivery.
+        // That exit has to give the reserved place back like every other
+        // dropped reflection, or the reply behind the barrier waits out the
+        // full queue expiry.
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#rust"));
+        // The dispatcher only answers at all when a manager exists; without
+        // one the line would fall through to ordinary delivery and this test
+        // would prove nothing.
+        let db = crate::storage::db::open_database(false).unwrap();
+        let keyring = crate::e2e::keyring::Keyring::new(std::sync::Arc::new(
+            std::sync::Mutex::new(db),
+        ));
+        state.e2e_manager = Some(std::sync::Arc::new(
+            crate::e2e::manager::E2eManager::load_or_init(keyring).unwrap(),
+        ));
+
+        let handshake_shaped = "RPEE2E KEYREQ backend nonsense";
+        let mut queue = crate::translate::queue::TranslateQueue::new();
+        queue.reserve(1);
+        let reply =
+            crate::state::events::tests::make_test_message(&mut state, "odpowiedz kolegi");
+        queue.push_resolved(reply.id, reply, crate::state::buffer::ActivityLevel::Activity);
+        state.translate_queues.insert("test/#rust".to_string(), queue);
+        state.decorate_own_echo(
+            "test/#rust",
+            crate::state::AppState::own_echo_decoration(
+                handshake_shaped.to_string(),
+                1,
+                None,
+                true,
+            ),
+        );
+
+        let reflection: IrcMessage = format!(":me!u@h PRIVMSG #rust :{handshake_shaped}\r\n")
+            .parse()
+            .expect("valid");
+        handle_irc_message(&mut state, "test", &reflection);
+
+        assert_eq!(
+            rows(&state, "test/#rust"),
+            vec!["odpowiedz kolegi".to_string()],
+            "the dispatcher ate our line, as it does every own handshake echo — \
+             but the reply behind the barrier is delivered now, not at expiry"
+        );
+        assert!(
+            !state.translate_queues.contains_key("test/#rust"),
+            "and nothing is left holding the queue open"
         );
     }
 
