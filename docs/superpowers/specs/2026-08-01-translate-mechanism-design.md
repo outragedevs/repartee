@@ -675,7 +675,10 @@ send got:
   escape_format` doubles both signs — `$$` and `%%`, the escapes both passes define —
   and is applied at composition, never to the finished string, so the styling around
   the text still renders. The composer and the web `RestoreInput` get the text RAW:
-  neither is parsed, and escaping there would hand back doubled signs.
+  neither is parsed, and escaping there would hand back doubled signs. It applies to
+  **all three** refusal rows, and most of all to the partial-send one: that path
+  deliberately declines to restore the composer at all, so unlike the other two it has
+  no second copy to fall back on.
   `$$` did not previously exist in the theme parser; it was added, because irssi
   defines it (`docs/special_vars.txt`) and without it no `$` before a digit can be
   rendered at all. The web UI's renderer consumes it too, so a row reads the same in
@@ -770,6 +773,23 @@ Details that follow from the shape:
   kept its record then FILLS that reservation, and the message renders with its last
   chunk first. A dropped id is released only when no record for it survives, which
   after group eviction is always.
+- **And a reservation and its record die together the other way round, too.** The
+  point above is one direction of a single coupling; this is the other, and it is the
+  sharper of the two. A record left behind is not inert: matching is by wire text,
+  oldest first, so a record that outlives its reservation is consumed by the NEXT
+  reflection carrying the same text. With a 5-second translation budget against the
+  record's 30-second TTL that window is 25 seconds wide, and the thing a user does
+  when a message never appears is retype it — so a lost reflection and a repeat of the
+  same text are cause and effect, not independent events. The second send's reflection
+  then takes the first send's record: it renders with the WRONG original, and the
+  reservation it should have filled is left barricading the buffer for another full
+  timeout. `Expired::abandoned_reservations` names every reservation the sweep gave up
+  on and `forget_own_echo_records` drops what was filed for them, in that order, so a
+  reflection arriving in the same tick cannot take a record whose slot has just gone.
+  Timeouts only — the **ceiling** also ends reservations, but it is not evidence the
+  reflection is lost (it takes the POSITION back while the send is still in flight),
+  so there the record stays and the reflection still renders with its original, merely
+  out of place.
 - **A reflection this client deliberately drops releases its reservation too.** The
   record going missing is one way a reflection never fills its slot; the reflection
   *arriving and being swallowed on purpose* is the other, and the queue cannot tell

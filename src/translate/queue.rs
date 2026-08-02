@@ -98,6 +98,23 @@ pub struct CeilingForced {
     pub barriers_lifted: usize,
 }
 
+/// What [`TranslateQueue::expire`] gave up on.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Expired {
+    /// Entries forced out because their translation never came back.
+    pub timed_out: usize,
+    /// Reservation ids whose reflection never arrived.
+    ///
+    /// Reported by id rather than counted, because the caller has to find the
+    /// filed record that was waiting for each one. A reservation reaching its
+    /// timeout is this client concluding the reflection is not coming; the
+    /// record kept for it is stale from that moment, and a record that
+    /// outlives its reservation will be matched by the NEXT reflection
+    /// carrying the same wire text — the user retyping a message that never
+    /// appeared, which is exactly what they do when one goes missing.
+    pub abandoned_reservations: Vec<u64>,
+}
+
 /// How a released row must be handed to the buffer.
 ///
 /// The queue takes rows that are NOT ordinary chat — a day separator, an E2E
@@ -540,32 +557,46 @@ impl TranslateQueue {
     }
 
     /// Force every entry that has been pending for at least `timeout` to
-    /// resolve as [`UntranslatedReason::Timeout`]. Returns how many were
-    /// forced.
+    /// resolve as [`UntranslatedReason::Timeout`].
     ///
     /// Without this a single stuck line holds its whole channel: everything
     /// behind it is ready but unreleasable.
-    pub fn expire(&mut self, now: Instant, timeout: Duration) -> usize {
-        let expired: Vec<u64> = self
+    ///
+    /// Reservations are reported by id as well as counted — see
+    /// [`Expired::abandoned_reservations`] for what the caller owes them.
+    pub fn expire(&mut self, now: Instant, timeout: Duration) -> Expired {
+        let expired: Vec<(u64, bool)> = self
             .entries
             .iter()
             .filter_map(|e| match e.slot.as_ref() {
-                Some(Slot::Pending { queued_at, .. } | Slot::Reserved { queued_at, .. })
+                Some(Slot::Pending { queued_at, .. })
                     if now.duration_since(*queued_at) >= timeout =>
                 {
-                    Some(e.id)
+                    Some((e.id, false))
+                }
+                Some(Slot::Reserved { queued_at, .. })
+                    if now.duration_since(*queued_at) >= timeout =>
+                {
+                    Some((e.id, true))
                 }
                 _ => None,
             })
             .collect();
-        for id in &expired {
+        let mut out = Expired {
+            timed_out: expired.len(),
+            abandoned_reservations: Vec::new(),
+        };
+        for (id, was_reservation) in expired {
             // A reservation has no row to resolve INTO, so it is dropped.
             // Its message either arrives later and is delivered directly, or
             // was refused; either way it must stop blocking the queue.
-            self.release_reserved(*id);
-            self.resolve(*id, Err(UntranslatedReason::Timeout));
+            self.release_reserved(id);
+            self.resolve(id, Err(UntranslatedReason::Timeout));
+            if was_reservation {
+                out.abandoned_reservations.push(id);
+            }
         }
-        expired.len()
+        out
     }
 
     /// Force the oldest entries out until the queue fits `max`.
@@ -886,7 +917,7 @@ mod tests {
         q.push_pending_at(5, "fuenf".into(), payload(5, "fuenf"), t0);
         q.resolve(5, Ok("piec".into()));
         let expired = q.expire(t0 + Duration::from_millis(5001), Duration::from_millis(5000));
-        assert_eq!(expired, 1, "only the still-pending entry expires");
+        assert_eq!(expired.timed_out, 1, "only the still-pending entry expires");
         let ready = q.drain_ready();
         assert_eq!(ids(&ready), vec![4, 5]);
         assert_eq!(ready[0].origin, ReadyOrigin::Untranslated(UntranslatedReason::Timeout));
@@ -903,7 +934,7 @@ mod tests {
         let t0 = Instant::now();
         q.push_pending_at(1, "a b".into(), payload(1, "a b"), t0);
         let expired = q.expire(t0 + Duration::from_millis(4999), Duration::from_millis(5000));
-        assert_eq!(expired, 0);
+        assert_eq!(expired.timed_out, 0);
         assert_eq!(q.pending_len(), 1);
     }
 
@@ -999,6 +1030,28 @@ mod tests {
         q.expire(t0 + Duration::from_millis(5001), Duration::from_millis(5000));
         assert_eq!(ids(&q.drain_ready()), vec![11]);
         assert!(q.is_empty());
+    }
+
+    #[test]
+    fn expiry_names_the_reservations_it_gave_up_on_and_only_those() {
+        // The caller has to find the reflection record filed for each place
+        // it just stopped holding, so a count is not enough. Pending lines
+        // are counted but not named: they resolve in place as timeouts and
+        // there is nothing filed for them.
+        let mut q = TranslateQueue::new();
+        let t0 = Instant::now();
+        q.reserve_at(10, t0);
+        q.push_pending_at(11, "stuck".into(), payload(11, "stuck"), t0);
+        q.reserve_at(12, t0 + Duration::from_millis(4000));
+
+        let expired = q.expire(t0 + Duration::from_millis(5001), Duration::from_millis(5000));
+
+        assert_eq!(expired.timed_out, 2, "the old reservation and the stuck line");
+        assert_eq!(
+            expired.abandoned_reservations,
+            vec![10],
+            "only reservations are named, and only the one past its budget: {expired:?}"
+        );
     }
 
     #[test]

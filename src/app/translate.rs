@@ -1125,23 +1125,28 @@ impl crate::app::App {
         let now = std::time::Instant::now();
         let buffer_ids: Vec<String> = self.state.translate_queues.keys().cloned().collect();
         for buffer_id in buffer_ids {
-            let ready = {
+            let (ready, abandoned) = {
                 let Some(queue) = self.state.translate_queues.get_mut(&buffer_id) else {
                     continue;
                 };
                 let expired = queue.expire(now, timeout);
                 let forced = queue.enforce_ceiling(max_queue);
-                if expired > 0 || forced.forced > 0 {
+                if expired.timed_out > 0 || forced.forced > 0 {
                     tracing::debug!(
                         buffer_id = %buffer_id,
-                        expired,
+                        expired = expired.timed_out,
+                        abandoned = expired.abandoned_reservations.len(),
                         forced = forced.forced,
                         barriers = forced.barriers_lifted,
                         "translate: released lines untranslated"
                     );
                 }
-                queue.drain_ready()
+                (queue.drain_ready(), expired.abandoned_reservations)
             };
+            // Before the release, so a reflection arriving in the same tick
+            // cannot take a record whose slot has just gone.
+            self.state
+                .forget_own_echo_records(&buffer_id, &abandoned);
             self.release_translated(&buffer_id, ready);
         }
         self.prune_empty_translate_queues();
@@ -1568,7 +1573,12 @@ impl crate::app::App {
         // on the channel. Restoring the whole line into the composer
         // would invite the user to send those chunks a second time, so it
         // goes to the error row and nowhere else.
-        let retry = out.retry_text.clone();
+        //
+        // Which makes escaping it matter MORE here than anywhere else, not
+        // less: the other refusal rows have the composer as a second copy
+        // whenever it happens to be empty, and this one deliberately has
+        // none. The row is the only copy there will ever be.
+        let retry = crate::commands::helpers::escape_format(&out.retry_text);
         self.deliver_translate_error(
             &out.buffer_id,
             &format!(
@@ -4323,6 +4333,44 @@ mod app_tests {
     }
 
     #[test]
+    fn a_partial_send_leaves_the_only_copy_of_the_text_readable() {
+        // This row is the only copy there will ever be — the composer restore
+        // is deliberately skipped here so the user cannot republish the chunks
+        // already on the channel. Every other refusal has the composer as a
+        // second chance whenever it happens to be empty; this one has none, so
+        // a row that silently eats `%i` and the `5` from `$5` is the whole
+        // recovery gone.
+        let mut app = app_with_dying_handle(1);
+        app.state.reserve_echo_slot(BUF, 1);
+        let long = "wieloslowne zdanie ".repeat(40);
+        let mut out = outgoing(
+            TREACHEROUS,
+            TranslateOutcome::Translated {
+                id: 1,
+                text: long.trim().to_string(),
+            },
+            false,
+        );
+        out.retry_text = TREACHEROUS.to_string();
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+
+        assert!(
+            app.input.value.is_empty(),
+            "precondition: nothing is restored on this path"
+        );
+        let row = app.state.buffers[BUF]
+            .messages
+            .iter()
+            .map(|m| as_rendered(&m.text))
+            .find(|t| t.contains("Part of the message was sent"))
+            .expect("the partial-send row");
+        assert!(
+            row.contains(TREACHEROUS),
+            "the row renders as something other than what was typed:\n  {row}"
+        );
+    }
+
+    #[test]
     fn an_echo_releases_the_lines_queued_behind_it_at_once() {
         // The reservation is a barrier. Filling it makes the echo AND every
         // line that finished translating behind it deliverable — and the
@@ -4771,6 +4819,68 @@ mod app_tests {
         );
         out.echo_id = id;
         app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+    }
+
+    #[test]
+    fn retyping_a_message_whose_echo_was_lost_does_not_wedge_the_buffer() {
+        // The natural reaction to a message that never appeared is to send it
+        // again — so a lost reflection and a repeat of the same text are not
+        // independent events, they are cause and effect.
+        //
+        // The reservation for the first send times out after `timeout_ms`
+        // (5s by default) but the record filed for it stayed matchable for
+        // `OWN_ECHO_TTL` (30s). In that gap the SECOND send's reflection
+        // matches the FIRST send's record — matching is by wire text, oldest
+        // first — so it is decorated with the wrong original and, worse, tries
+        // to fill a slot that no longer exists. The second reservation, which
+        // it should have filled, is left barricading the buffer for another
+        // full timeout.
+        let mut app = app_with_echo_message();
+        app.config.translate.timeout_ms = 5_000;
+        let mut queue = TranslateQueue::new();
+        queue.reserve_at(
+            1,
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(6))
+                .expect("six seconds ago"),
+        );
+        app.state.translate_queues.insert(BUF.to_string(), queue);
+        send_translated(&mut app, 1, "moje zdanie", "mein satz");
+
+        // The reflection never comes. The sweep gives the place back — and
+        // must forget the record that was waiting to fill it.
+        app.tick_translate_queues();
+
+        // The user retypes the same thing. Same wire text, a new place held.
+        let mut queue = TranslateQueue::new();
+        queue.reserve(2);
+        app.state.translate_queues.insert(BUF.to_string(), queue);
+        send_translated(&mut app, 2, "inne zdanie", "mein satz");
+
+        // A reply arrives and finishes translating while the second send is
+        // still out — it is what the barrier is holding back.
+        {
+            let queue = app
+                .state
+                .translate_queues
+                .get_mut(BUF)
+                .expect("the second reservation keeps the queue alive");
+            queue.push_pending(9, "antwort".to_string(), payload(9, "antwort"));
+            queue.resolve(9, Ok("odpowiedz".to_string()));
+        }
+
+        reflect(&mut app, "mein satz", "server-M2");
+
+        let rows = shown(&app);
+        assert_eq!(
+            rows,
+            vec![
+                "mein satz [inne zdanie]".to_string(),
+                "odpowiedz".to_string(),
+            ],
+            "the reflection fills the place held by the send it belongs to, \
+             carries THAT send's original, and the reply behind it drains: {rows:?}"
+        );
     }
 
     #[test]

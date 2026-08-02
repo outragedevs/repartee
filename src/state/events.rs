@@ -686,6 +686,50 @@ impl AppState {
         self.drain_translate_ready(buffer_id);
     }
 
+    /// Drop the records kept for reservations that have just timed out.
+    ///
+    /// The mirror of [`Self::abandon_own_reflection`], and the half that was
+    /// missing: that one gives a place back when its record dies, this one
+    /// throws a record away when its place does. The two lifetimes are one
+    /// thing — a record exists only to let a reflection find its slot — and
+    /// letting either outlive the other breaks the pairing in a different
+    /// direction.
+    ///
+    /// This direction is the sharper one, because a record left behind is not
+    /// inert: [`Self::take_own_echo_decoration`] matches by wire text, oldest
+    /// first, so a stale record is consumed by the NEXT reflection carrying
+    /// the same text. With the default 5-second budget against the record's
+    /// 30-second TTL there is a 25-second window in which the natural reaction
+    /// to a message that never appeared — retyping it — reflects into the dead
+    /// record: the row is decorated with the FIRST send's original, and the
+    /// second send's reservation, which the reflection should have filled, is
+    /// left barricading the buffer for another full timeout.
+    ///
+    /// Only timeouts. The ceiling (§3.8) also ends reservations, but it is not
+    /// evidence the reflection is lost — it takes the POSITION back while the
+    /// send is still in flight — so the record stays and the reflection still
+    /// renders with its original, merely out of place.
+    pub fn forget_own_echo_records(&mut self, buffer_id: &str, ids: &[u64]) {
+        if ids.is_empty() {
+            return;
+        }
+        let Some(entries) = self.own_echo_decorations.get_mut(buffer_id) else {
+            return;
+        };
+        let before = entries.len();
+        entries.retain(|d| !ids.contains(&d.echo_id));
+        if entries.len() != before {
+            tracing::debug!(
+                buffer_id,
+                dropped = before - entries.len(),
+                "translate: reservation timed out; forgetting the record kept for it"
+            );
+        }
+        if entries.is_empty() {
+            self.own_echo_decorations.remove(buffer_id);
+        }
+    }
+
     /// Build a reflection record, stamped now.
     pub fn own_echo_decoration(
         wire_text: String,
