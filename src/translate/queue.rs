@@ -349,10 +349,13 @@ impl TranslateQueue {
         true
     }
 
-    /// Whether an outgoing send is still holding a place here.
+    /// Whether a place is still held here for a row that does not exist yet.
     ///
-    /// Only the outgoing dispatch reserves, so this answers "is one of this
-    /// buffer's own messages still in the translator".
+    /// A DISPLAY-position question, and only that. Whether the send itself is
+    /// still out is `AppState::has_outgoing_in_flight`, which is tracked
+    /// apart precisely because the ceiling may take this reservation back
+    /// while the work continues.
+    #[cfg(test)]
     #[must_use]
     pub fn has_reservation(&self) -> bool {
         self.entries

@@ -31,6 +31,7 @@ impl AppState {
             translate_show_original_in: true,
             translate_max_queue: 200,
             translate_tally: crate::state::TranslateTally::default(),
+            outgoing_in_flight: std::collections::HashMap::new(),
             own_echo_decorations: std::collections::HashMap::new(),
             buffer_redirects: std::collections::HashMap::new(),
             pending_buffer_rekeys: Vec::new(),
@@ -118,6 +119,7 @@ impl AppState {
         // anyway" used to describe. The refusal was the bug.
         self.flush_translate_queue(id);
         self.own_echo_decorations.remove(id);
+        self.outgoing_in_flight.remove(id);
         self.pending_web_events
             .push(crate::web::protocol::WebEvent::BufferClosed {
                 buffer_id: id.to_string(),
@@ -481,31 +483,43 @@ impl AppState {
                 .own_echo_decorations
                 .entry(buffer_id.to_string())
                 .or_default();
-            entries.retain(|d| {
-                let fresh = now.duration_since(d.filed_at) < Self::OWN_ECHO_TTL;
-                if !fresh {
-                    dropped.push(d.echo_id);
-                }
-                fresh
-            });
-            while entries.len() >= Self::OWN_ECHO_MAX {
-                if let Some(evicted) = entries.pop_front() {
-                    dropped.push(evicted.echo_id);
+            for expired in entries
+                .iter()
+                .filter(|d| now.duration_since(d.filed_at) >= Self::OWN_ECHO_TTL)
+                .map(|d| d.echo_id)
+            {
+                if !dropped.contains(&expired) {
+                    dropped.push(expired);
                 }
             }
+            // Counted in RECORDS, dropped in MESSAGES: a group is several
+            // records, so counting groups would evict far more than the cap
+            // asks for.
+            let mut surviving = entries
+                .iter()
+                .filter(|d| !dropped.contains(&d.echo_id))
+                .count();
+            while surviving >= Self::OWN_ECHO_MAX {
+                let Some(oldest) = entries
+                    .iter()
+                    .find(|d| !dropped.contains(&d.echo_id))
+                    .map(|d| d.echo_id)
+                else {
+                    break;
+                };
+                surviving -= entries.iter().filter(|d| d.echo_id == oldest).count();
+                dropped.push(oldest);
+            }
+            // BY MESSAGE, never by record. One message files a record per
+            // wire line, all sharing the reserved id, and dropping some while
+            // keeping others is worse than dropping all: the reflections that
+            // lost their record are appended behind the reservation, the one
+            // that kept its record then FILLS that reservation, and the
+            // message renders with its last chunk first.
+            entries.retain(|d| !dropped.contains(&d.echo_id));
             entries.push_back(decoration);
-            Self::still_expected(entries, &mut dropped);
         }
         self.abandon_reflections(buffer_id, dropped);
-    }
-
-    /// Strike from `dropped` every id some surviving record can still fill.
-    ///
-    /// One message files a record per wire line, all sharing the reserved id,
-    /// so losing one chunk's record does not mean the reservation is orphaned
-    /// — another chunk may still be coming for it.
-    fn still_expected(entries: &std::collections::VecDeque<OwnEchoDecoration>, dropped: &mut Vec<u64>) {
-        dropped.retain(|id| !entries.iter().any(|d| d.echo_id == *id));
     }
 
     /// Give back the places held for reflections that can no longer arrive.
@@ -566,18 +580,21 @@ impl AppState {
         let now = std::time::Instant::now();
         let mut dropped: Vec<u64> = Vec::new();
         let entries = self.own_echo_decorations.get_mut(buffer_id)?;
-        entries.retain(|d| {
-            let fresh = now.duration_since(d.filed_at) < Self::OWN_ECHO_TTL;
-            if !fresh {
-                dropped.push(d.echo_id);
+        // Expiry is by MESSAGE too — see `decorate_own_echo`.
+        for expired in entries
+            .iter()
+            .filter(|d| now.duration_since(d.filed_at) >= Self::OWN_ECHO_TTL)
+            .map(|d| d.echo_id)
+        {
+            if !dropped.contains(&expired) {
+                dropped.push(expired);
             }
-            fresh
-        });
+        }
+        entries.retain(|d| !dropped.contains(&d.echo_id));
         let found = entries
             .iter()
             .position(|d| d.wire_text == wire_text)
             .map(|pos| entries.remove(pos).expect("position just found it"));
-        Self::still_expected(entries, &mut dropped);
         // The record we just took is about to fill its reservation, so an
         // expired SIBLING of the same message must not release it first.
         if let Some(taken) = found.as_ref() {
@@ -637,16 +654,37 @@ impl AppState {
         &self,
         buffer_id: &str,
         dispatched_at: std::time::Instant,
-    ) -> Option<&str> {
-        self.buffer_redirects
-            .get(buffer_id)?
-            .iter()
-            .find(|era| {
-                era.ended_at.elapsed() < Self::REDIRECT_TTL
-                    && era.started_at.is_none_or(|from| from <= dispatched_at)
-                    && dispatched_at <= era.ended_at
-            })
-            .map(|era| era.target.as_str())
+    ) -> crate::state::BufferRedirect<'_> {
+        use crate::state::BufferRedirect;
+        let Some(eras) = self.buffer_redirects.get(buffer_id) else {
+            // Nothing on record. Either this id never moved, or every era
+            // aged out — and an era that aged out ended at least
+            // `REDIRECT_TTL` ago, so it cannot have covered work dispatched
+            // inside that window. Older than the window, we cannot say.
+            return if dispatched_at.elapsed() >= Self::REDIRECT_TTL {
+                BufferRedirect::Unknown
+            } else {
+                BufferRedirect::Stays
+            };
+        };
+        if let Some(era) = eras.iter().find(|era| {
+            era.ended_at.elapsed() < Self::REDIRECT_TTL
+                && era.started_at.is_none_or(|from| from <= dispatched_at)
+                && dispatched_at <= era.ended_at
+        }) {
+            return BufferRedirect::MovedTo(era.target.as_str());
+        }
+        // No era covers it. That is an answer only if we can see far enough
+        // back: past the TTL, or before the earliest era we still hold, a
+        // rename we have dropped may have covered this work.
+        let floor = eras.first().and_then(|era| era.started_at);
+        if dispatched_at.elapsed() >= Self::REDIRECT_TTL
+            || floor.is_some_and(|from| dispatched_at < from)
+        {
+            BufferRedirect::Unknown
+        } else {
+            BufferRedirect::Stays
+        }
     }
 
     /// Move every buffer-id-keyed map from `old_id` to `new_id`.
@@ -672,6 +710,9 @@ impl AppState {
         }
         if let Some(echoes) = self.own_echo_decorations.remove(old_id) {
             self.own_echo_decorations.insert(new_id.to_string(), echoes);
+        }
+        if let Some(in_flight) = self.outgoing_in_flight.remove(old_id) {
+            self.outgoing_in_flight.insert(new_id.to_string(), in_flight);
         }
         // Work already dispatched still carries the old id, so it needs a way
         // to find its way here. Existing redirects INTO the old id are
@@ -722,15 +763,36 @@ impl AppState {
             .push((old_id.to_string(), new_id.to_string()));
     }
 
+    /// Note that an outgoing send for this buffer has entered the translator.
+    pub fn note_outgoing_dispatch(&mut self, buffer_id: &str) {
+        self.outgoing_in_flight
+            .entry(buffer_id.to_string())
+            .or_default()
+            .push_back(std::time::Instant::now());
+    }
+
+    /// Clear one of this buffer's in-flight markers — the send came back,
+    /// whatever the outcome.
+    pub fn clear_outgoing_dispatch(&mut self, buffer_id: &str) {
+        if let Some(times) = self.outgoing_in_flight.get_mut(buffer_id) {
+            times.pop_front();
+            if times.is_empty() {
+                self.outgoing_in_flight.remove(buffer_id);
+            }
+        }
+    }
+
     /// Whether one of this buffer's own messages is still in the translator.
     ///
-    /// The reservation it holds is the only record of a send that has left
-    /// the submit path but not yet reached the wire.
+    /// `max_age` bounds how long a marker is believed. Every delivery clears
+    /// one, but a path that somehow does not must not leave this buffer's
+    /// ordinary sends refused forever — the send it stands for cannot outlive
+    /// its own budget either way.
     #[must_use]
-    pub fn has_pending_outgoing_echo(&self, buffer_id: &str) -> bool {
-        self.translate_queues
+    pub fn has_outgoing_in_flight(&self, buffer_id: &str, max_age: std::time::Duration) -> bool {
+        self.outgoing_in_flight
             .get(buffer_id)
-            .is_some_and(crate::translate::queue::TranslateQueue::has_reservation)
+            .is_some_and(|times| times.iter().any(|at| at.elapsed() < max_age))
     }
 
     /// Give up a reservation whose message will never arrive.
@@ -3425,6 +3487,63 @@ mod translate_gate_tests {
         assert!(
             state.translate_queues[BUF].has_reservation(),
             "and only the orphaned one goes — the later sends still hold theirs"
+        );
+    }
+
+    #[test]
+    fn a_split_message_loses_all_its_records_together_or_none() {
+        // Evicting one chunk's record while a sibling survives is worse than
+        // evicting both. The reflection that lost its record is appended
+        // BEHIND the reservation; the one that kept its record then fills
+        // that reservation and renders first, so the message arrives with its
+        // last chunk at the top.
+        let (mut state, _rx) = state_with_translation();
+        state.reserve_echo_slot(BUF, 1);
+        state.decorate_own_echo(
+            BUF,
+            AppState::own_echo_decoration("pierwsza".to_string(), 1, None, false),
+        );
+        state.decorate_own_echo(
+            BUF,
+            AppState::own_echo_decoration("druga".to_string(), 1, None, true),
+        );
+
+        // Fill to exactly the cap, so the NEXT record forces one eviction and
+        // no more. Checking after a long run of sends would prove nothing:
+        // dropping a group one record at a time converges on the same set
+        // eventually, and it is the moment of the eviction that matters.
+        let fill = AppState::OWN_ECHO_MAX - state.own_echo_decorations[BUF].len();
+        for i in 0..fill {
+            let echo_id = 100 + i as u64;
+            state.reserve_echo_slot(BUF, echo_id);
+            state.decorate_own_echo(
+                BUF,
+                AppState::own_echo_decoration(format!("linia {i}"), echo_id, None, true),
+            );
+        }
+        assert_eq!(
+            state.own_echo_decorations[BUF].len(),
+            AppState::OWN_ECHO_MAX,
+            "precondition: exactly at the cap, nothing evicted yet"
+        );
+
+        state.reserve_echo_slot(BUF, 999);
+        state.decorate_own_echo(
+            BUF,
+            AppState::own_echo_decoration("jeszcze".to_string(), 999, None, true),
+        );
+
+        let left: Vec<u64> = state.own_echo_decorations[BUF]
+            .iter()
+            .map(|d| d.echo_id)
+            .collect();
+        assert!(
+            !left.contains(&1),
+            "neither chunk's record may be left behind on its own: {left:?}"
+        );
+        assert!(
+            state.take_own_echo_decoration(BUF, "druga").is_none(),
+            "including the one that would have filled the reservation"
         );
     }
 

@@ -923,6 +923,13 @@ impl crate::app::App {
                 // at all — including while every one of their sends is
                 // failing, which is exactly when they would look.
                 self.state.translate_tally.record_outcome(&out.outcome);
+                // This send is back, whatever the outcome, so it no longer
+                // holds ordinary sends to its buffer behind it. Cleared under
+                // the id it may have moved to as well as the one it was
+                // dispatched with, because a rename moves the marker with the
+                // rest of the buffer's state.
+                let dispatched_under = out.buffer_id.clone();
+                self.state.clear_outgoing_dispatch(&dispatched_under);
                 if self.redirect_outgoing_deliver(&mut out) == RedirectVerdict::Refuse {
                     // The conversation this was addressed to has moved and
                     // its new window is gone. Sending under the old NAME is
@@ -948,13 +955,25 @@ impl crate::app::App {
     /// nick its owner no longer answers to — and if somebody else has claimed
     /// it in the meantime, to a stranger.
     fn redirect_outgoing_deliver(&self, out: &mut OutgoingTranslateDeliver) -> RedirectVerdict {
-        let Some(new_id) = self
+        let new_id = match self
             .state
             .redirected_buffer_id(&out.buffer_id, out.submitted_at)
-        else {
-            return RedirectVerdict::Proceed;
+        {
+            crate::state::BufferRedirect::Stays => return RedirectVerdict::Proceed,
+            crate::state::BufferRedirect::MovedTo(id) => id.to_string(),
+            crate::state::BufferRedirect::Unknown => {
+                // We cannot say whether this conversation moved: the request
+                // outlived the redirect history, which `translate.timeout_ms`
+                // is free to allow. Sending under the recorded NAME is the one
+                // thing that must not happen — somebody may hold that nick
+                // now, and this may be a private message.
+                tracing::warn!(
+                    buffer_id = %out.buffer_id,
+                    "translate: send outlived the redirect history; refusing it"
+                );
+                return RedirectVerdict::Refuse;
+            }
         };
-        let new_id = new_id.to_string();
         let Some(new_name) = self.state.buffers.get(&new_id).map(|b| b.name.clone()) else {
             // Renamed, then closed. The old NAME must not be used either way
             // — somebody may hold that nick now — so this cannot fall through
@@ -1003,10 +1022,15 @@ impl crate::app::App {
         // If the peer has since renamed, the queue holding its place moved
         // with the buffer, and without following it the outcome lands
         // nowhere and the line it belongs to sits until the timeout.
-        let buffer_id = &self
-            .state
-            .redirected_buffer_id(buffer_id, submitted_at)
-            .map_or_else(|| buffer_id.to_string(), ToString::to_string);
+        // Nothing is sent from here, so an unanswerable redirect is not a
+        // safety question: the outcome simply lands nowhere and the line it
+        // belongs to is released by the queue's expiry.
+        let buffer_id = &match self.state.redirected_buffer_id(buffer_id, submitted_at) {
+            crate::state::BufferRedirect::MovedTo(id) => id.to_string(),
+            crate::state::BufferRedirect::Stays | crate::state::BufferRedirect::Unknown => {
+                buffer_id.to_string()
+            }
+        };
         let ready = {
             let Some(queue) = self.state.translate_queues.get_mut(buffer_id) else {
                 // The queue is gone — the buffer was closed, or a flush
@@ -1677,7 +1701,10 @@ impl crate::app::App {
             // reordering is the same choice this gate makes everywhere else:
             // a visible refusal beats an invisible wrong, and the wait is
             // bounded by the in-flight send's own timeout.
-            if self.state.has_pending_outgoing_echo(buffer_id) {
+            if self.state.has_outgoing_in_flight(
+                buffer_id,
+                std::time::Duration::from_millis(self.config.translate.timeout_ms.saturating_mul(2)),
+            ) {
                 return OutgoingTranslatePolicy::Refuse(
                     "an earlier message to this conversation is still being \
                      translated — send it again in a moment",
@@ -1824,14 +1851,20 @@ impl crate::app::App {
         pending.retry_text = retry.to_string();
         // Hold the display position now, while the order is still known.
         self.state.reserve_echo_slot(req.buffer_id, pending.echo_id);
+        // And note the WORK, which is a different question from where its row
+        // goes — the ceiling may take the reservation back while the send is
+        // still out.
+        self.state.note_outgoing_dispatch(req.buffer_id);
         match self.translate_outgoing_tx.try_send(pending) {
             Ok(()) => false,
             Err(tokio::sync::mpsc::error::TrySendError::Full(p)) => {
                 self.state.release_echo_slot(req.buffer_id, p.echo_id);
+                self.state.clear_outgoing_dispatch(req.buffer_id);
                 self.refuse_untranslatable_send(retry, "the translation queue is full")
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(p)) => {
                 self.state.release_echo_slot(req.buffer_id, p.echo_id);
+                self.state.clear_outgoing_dispatch(req.buffer_id);
                 self.refuse_untranslatable_send(
                     retry,
                     "the translation worker has died — restart to restore it",
@@ -3308,14 +3341,14 @@ mod app_tests {
         assert_eq!(
             app.state
                 .redirected_buffer_id("test/frank", before_the_rename),
-            Some("test/frankie"),
+            crate::state::BufferRedirect::MovedTo("test/frankie"),
             "work from before the rename belongs to the peer who moved — \
              even though a live buffer now sits under the old id"
         );
         assert_eq!(
             app.state
                 .redirected_buffer_id("test/frank", std::time::Instant::now()),
-            None,
+            crate::state::BufferRedirect::Stays,
             "work dispatched since belongs to whoever holds the nick now"
         );
     }
@@ -3357,7 +3390,7 @@ mod app_tests {
         assert_eq!(
             app.state
                 .redirected_buffer_id("test/frank", submitted_between),
-            None,
+            crate::state::BufferRedirect::Stays,
             "a message to whoever holds `frank` NOW must not follow the peer \
              who left before it was sent"
         );
@@ -3365,7 +3398,7 @@ mod app_tests {
         assert_eq!(
             app.state
                 .redirected_buffer_id("test/frank", dispatched_long_ago()),
-            Some("test/frankie2"),
+            crate::state::BufferRedirect::MovedTo("test/frankie2"),
             "and work from before the first rename still follows the peer, \
              all the way to where they are now"
         );
@@ -3397,20 +3430,72 @@ mod app_tests {
 
         assert_eq!(
             app.state.redirected_buffer_id("test/alice", sent_to_alice),
-            Some("test/alicia"),
+            crate::state::BufferRedirect::MovedTo("test/alicia"),
             "a message dispatched to alice follows ALICE, not whoever \
              occupied her nick afterwards"
         );
         assert_eq!(
             app.state.redirected_buffer_id("test/alice", sent_to_bob),
-            Some("test/bobby"),
+            crate::state::BufferRedirect::MovedTo("test/bobby"),
             "and one dispatched while bob held the nick follows bob"
         );
         assert_eq!(
             app.state
                 .redirected_buffer_id("test/alice", std::time::Instant::now()),
-            None,
+            crate::state::BufferRedirect::Stays,
             "with nothing holding it now, anything sent since stays put"
+        );
+    }
+
+    #[test]
+    fn a_send_that_outlived_the_redirect_history_is_refused() {
+        // `translate.timeout_ms` has no upper bound, so a request can stay in
+        // flight longer than the five minutes of rename history we keep. Once
+        // it has, "no era covers this" no longer means "the conversation
+        // never moved" — it means we cannot tell. Sending under the recorded
+        // NAME on that answer hands a private message to whoever holds the
+        // abandoned nick.
+        let app = app_with_buffer();
+        let long_ago = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(600))
+            .expect("600s before now");
+
+        assert_eq!(
+            app.state.redirected_buffer_id("test/frank", long_ago),
+            crate::state::BufferRedirect::Unknown,
+            "past the history we keep, the question has no answer"
+        );
+        assert_eq!(
+            app.state
+                .redirected_buffer_id("test/frank", std::time::Instant::now()),
+            crate::state::BufferRedirect::Stays,
+            "inside it, no record really does mean it never moved"
+        );
+    }
+
+    #[test]
+    fn an_unanswerable_redirect_refuses_the_send_rather_than_guessing() {
+        let mut app = app_with_buffer();
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Query, "frank"));
+        let mut out = outgoing(
+            "sekret",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "geheim".to_string(),
+            },
+            false,
+        );
+        out.buffer_id = "test/frank".to_string();
+        out.buffer_name = "frank".to_string();
+        out.submitted_at = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(600))
+            .expect("600s before now");
+
+        assert_eq!(
+            app.redirect_outgoing_deliver(&mut out),
+            RedirectVerdict::Refuse,
+            "an unanswerable redirect must not fall through to the old name"
         );
     }
 
@@ -3431,12 +3516,12 @@ mod app_tests {
 
         assert_eq!(
             app.state.redirected_buffer_id("test/alice", sent_to_alice),
-            Some("test/alicja"),
+            crate::state::BufferRedirect::MovedTo("test/alicja"),
             "alice's era follows alice to her latest nick, in one hop"
         );
         assert_eq!(
             app.state.redirected_buffer_id("test/alice", sent_to_bob),
-            Some("test/robert"),
+            crate::state::BufferRedirect::MovedTo("test/robert"),
             "bob's era follows bob to his, independently"
         );
     }
@@ -4672,6 +4757,7 @@ mod app_tests {
         // still orders the display.
         let mut app = app_with_outgoing(Some("de"));
         app.state.reserve_echo_slot(BUF, 1);
+        app.state.note_outgoing_dispatch(BUF);
 
         // Now outgoing translation goes away under it.
         app.config.translate.buffers.remove(BUF);
@@ -4685,13 +4771,51 @@ mod app_tests {
             "the send waits rather than jumping the queue"
         );
 
-        // Once the earlier send lands the reservation goes, and ordinary
-        // sends resume immediately.
+        // The queue ceiling may take the display reservation back while the
+        // send is still in the translator. That is a position being given up,
+        // not work finishing, and reading the two as one thing let the next
+        // message overtake it.
         app.state.release_echo_slot(BUF, 1);
+        assert!(
+            matches!(
+                app.outgoing_translate_policy(BUF, "moje zdanie", false),
+                OutgoingTranslatePolicy::Refuse(_)
+            ),
+            "losing the reservation does not mean the send came back"
+        );
+
+        // Once the send itself lands, ordinary sends resume immediately.
+        app.state.clear_outgoing_dispatch(BUF);
         assert!(matches!(
             app.outgoing_translate_policy(BUF, "moje zdanie", false),
             OutgoingTranslatePolicy::NotApplicable
         ));
+    }
+
+    #[test]
+    fn a_stale_in_flight_marker_stops_holding_sends_up() {
+        // Every delivery clears a marker, but a path that somehow does not
+        // must not refuse this buffer's ordinary sends for the rest of the
+        // session — the send it stands for cannot outlive its own budget.
+        let mut app = app_with_buffer();
+        app.config.translate.timeout_ms = 500;
+        app.state
+            .outgoing_in_flight
+            .entry(BUF.to_string())
+            .or_default()
+            .push_back(
+                std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(30))
+                    .expect("30s before now"),
+            );
+
+        assert!(
+            matches!(
+                app.outgoing_translate_policy(BUF, "moje zdanie", false),
+                OutgoingTranslatePolicy::NotApplicable
+            ),
+            "a marker older than any send could be is not believed"
+        );
     }
 
     #[test]

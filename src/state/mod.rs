@@ -162,6 +162,26 @@ impl TranslateTally {
     }
 }
 
+/// Where work dispatched under a buffer id belongs now.
+///
+/// Three answers, not two. "No redirect on record" and "we can no longer
+/// tell" look identical from a lookup that returns `Option`, and they call
+/// for opposite actions: the first means the conversation never moved and
+/// the send proceeds, the second means a rename may have happened that we
+/// have forgotten, and sending under the old NAME could hand a private
+/// message to whoever holds that nick now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BufferRedirect<'a> {
+    /// No rename of this id is on record for the time in question.
+    Stays,
+    /// The conversation moved; it lives here now.
+    MovedTo(&'a str),
+    /// A rename may have covered this work and aged out of the history, so
+    /// the question cannot be answered. Callers that would put bytes on the
+    /// wire must refuse.
+    Unknown,
+}
+
 /// One conversation's occupancy of a buffer id, and where it went.
 ///
 /// See [`AppState::buffer_redirects`] for why a single mapping is not enough.
@@ -247,6 +267,20 @@ pub struct AppState {
     /// between two ticks, and the setting is documented as a bound on memory
     /// and on how far behind the display can fall.
     pub translate_max_queue: usize,
+    /// Dispatch times of outgoing sends that have left the submit path and
+    /// not yet reached the wire, per buffer.
+    ///
+    /// Separate from the echo RESERVATION, which is a display-position
+    /// marker and nothing more: the queue ceiling may lift a reservation
+    /// while its translation is still running, and reading that as "no work
+    /// in flight" let the next message bypass translation and reach IRC
+    /// ahead of it. One marker cannot answer both "where does this row go"
+    /// and "is this send still out".
+    ///
+    /// Times rather than a count so a delivery path that fails to clear its
+    /// entry heals itself: a stale marker would otherwise refuse this
+    /// buffer's ordinary sends for the rest of the session.
+    pub outgoing_in_flight: HashMap<String, VecDeque<std::time::Instant>>,
     /// Running tally of how lines have come back, for `/translate status`.
     ///
     /// Kept because the outcome is otherwise consumed the moment it is

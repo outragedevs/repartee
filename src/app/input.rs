@@ -1477,6 +1477,10 @@ impl App {
                     );
                 };
                 self.state.reserve_echo_slot(&active_id, pending.echo_id);
+                // The reservation says where the row goes; this says the send
+                // is still out. The queue ceiling may take the first back
+                // while the second is still true.
+                self.state.note_outgoing_dispatch(&active_id);
                 let reserved_id = pending.echo_id;
                 match self.translate_outgoing_tx.try_send(pending) {
                     // Nothing is on the wire yet, so we must not claim a
@@ -1486,12 +1490,14 @@ impl App {
                     Err(TrySendError::Full(_)) => {
                         tracing::warn!("translate: outgoing queue full, refusing to send");
                         self.state.release_echo_slot(&active_id, reserved_id);
+                        self.state.clear_outgoing_dispatch(&active_id);
                         return self
                             .refuse_untranslatable_send(text, "the translation queue is full");
                     }
                     Err(TrySendError::Closed(_)) => {
                         tracing::error!("translate: outgoing worker dead, refusing to send");
                         self.state.release_echo_slot(&active_id, reserved_id);
+                        self.state.clear_outgoing_dispatch(&active_id);
                         return self.refuse_untranslatable_send(
                             text,
                             "the translation worker has died — restart to restore it",

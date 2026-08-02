@@ -107,7 +107,10 @@ without bound. That deadline counts from the moment the line arrived — or,
 for your own messages, from the moment you pressed Enter — not from when the
 translator was actually reached, so a busy queue cannot quietly stretch it.
 A message of yours whose translation misses the deadline is not sent; the
-text comes back as with any other refusal. Losing the connection releases that server's queued lines at
+text comes back as with any other refusal. The same happens to a private
+message that has been in flight so long the client can no longer be sure
+whether the person you addressed still answers to that nick — better to hand
+it back than to risk delivering it to whoever picked the nick up. Losing the connection releases that server's queued lines at
 once rather than waiting the timeout out for a server that is gone.
 
 The queue is held to `translate.max_queue` as lines arrive, not on a timer,

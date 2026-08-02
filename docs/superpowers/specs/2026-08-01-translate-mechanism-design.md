@@ -359,9 +359,22 @@ resolves to the stranger's new window. `buffer_redirects` therefore holds a **li
 eras** per id, each carrying the window it covers (`started_at`..`ended_at`) and where
 that occupant lives now; a result is matched against the era that was current when it
 was dispatched. The list is bounded and pruned from the front, which is safe precisely
-because every era carries its own start: dropping one cannot widen the one behind it,
-and work that falls off resolves to no redirect at all — which the delivery path treats
-as "the conversation is gone" and refuses.
+because every era carries its own start: dropping one cannot widen the one behind it.
+
+The lookup answers with **three** states, not two, and an earlier version of this
+paragraph claimed a refusal the code did not perform. `Option` conflates "no rename is
+on record" with "we can no longer tell", and those call for opposite actions: the first
+means the conversation never moved and the send proceeds, the second means a rename may
+have aged out of the history, so sending under the recorded NAME could hand a private
+message to whoever holds that nick now. `BufferRedirect::Unknown` is returned when the
+work was dispatched further back than the history reaches — past `REDIRECT_TTL`, or
+before the earliest era still held — and the outgoing delivery path REFUSES it.
+
+That is reachable in configuration, not just in theory: `translate.timeout_ms` has a
+floor of 500 ms and no ceiling, so a request may legitimately stay in flight longer than
+the five minutes of rename history kept for it. The incoming path treats `Unknown` as
+"stays put" instead, because nothing is sent from there — the outcome simply lands
+nowhere and the queue's expiry releases the line.
 
 A peer who renames twice repoints the first era to the new destination but keeps
 its ORIGINAL window. The timestamp answers "which work does this apply to", and
@@ -408,8 +421,18 @@ because their own buffer is still ordered by the reservation. The same window op
 is on, because the next send then takes the Translate path and the connection's serial
 lane keeps the order.
 
-A bypass send is therefore **refused** while a reservation for that buffer stands
-(`has_pending_outgoing_echo`), rather than reordered. That is the same choice this gate
+A bypass send is therefore **refused** while a send for that buffer is still out
+(`has_outgoing_in_flight`), rather than reordered.
+
+The marker for that is tracked apart from the echo RESERVATION, and has to be. A
+reservation answers "where does this row go"; the ceiling (§3.8) may take it back while
+the translation is still running, so reading it as "no work in flight" let the next
+message bypass translation and reach IRC ahead of the earlier one — the very reorder
+this guard exists to stop. It is the same mistake as giving `Message::id` two meanings
+(§5.5) and as splitting the concurrency counters (§3): one marker cannot answer two
+questions. The marker records dispatch TIMES rather than a count, so a delivery path
+that fails to clear its entry heals after the send's own budget instead of refusing that
+buffer's ordinary sends for the rest of the session. That is the same choice this gate
 makes everywhere else — a visible refusal beats an invisible wrong — and the wait is
 bounded by the in-flight send's own timeout. Routing plain sends through the
 translation lane instead would preserve the order too, but at the cost of putting every
@@ -649,8 +672,12 @@ Details that follow from the shape:
   finished translating meanwhile are released AHEAD of the message they were replies to.
   Well short of 32 messages, too: one translation long enough to split files a record
   per wire line, and several sends can resolve in a burst before any reflection returns.
-  A dropped id is released only when no surviving record still shares it, since the
-  other chunks of the same message may yet arrive.
+  Eviction is therefore by MESSAGE, never by record: all the records sharing a reserved
+  id go together. Dropping some while keeping others is worse than dropping all — the
+  reflections that lost their record are appended behind the reservation, the one that
+  kept its record then FILLS that reservation, and the message renders with its last
+  chunk first. A dropped id is released only when no record for it survives, which
+  after group eviction is always.
 - **Records die with the connection.** A drop clears them alongside the queues —
   walked separately, because a record outlives the queue whenever the reservation was
   the only thing in it, which is the ordinary case. Left behind, a reconnect inside
