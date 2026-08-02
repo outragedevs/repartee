@@ -115,10 +115,27 @@ is one line per request: a multi-line answer is a broken response whatever it sa
 and picking one of its lines to publish under the user's nick is not a guess worth
 making.
 
+**CTCP framing is the client's to create, never the backend's.** `\x01` is what
+tells every IRC client that a PRIVMSG is a *request* rather than prose, and a plain
+translation reaches `send_privmsg` verbatim. An answer of
+`\x01DCC SEND secrets.txt …\x01` would therefore put a file-transfer offer on the
+wire under the user's own nick — one line, correctly correlated, non-empty, well
+inside the byte ceiling, so every other check at the seam waves it through. The
+subtler form is an ACTION: `/me` wraps the answer in `\x01ACTION …\x01` *we* build,
+so a bare `\x01` inside the body closes that framing early and opens a second,
+backend-chosen request behind it. Incoming is not exempt — a reply carrying
+`\x01ACTION …\x01` renders as an action from the peer, attributing words to them
+they never said — which is why the check lives at the seam and covers both
+directions.
+
 The deliver path re-checks every wire payload immediately before sending. That is
 deliberate duplication — the last point before bytes reach the socket, making the
 refusal a property of the send rather than of one upstream check, exactly as
-`build_outgoing_translate` re-runs the E2E gate.
+`build_outgoing_translate` re-runs the E2E gate. The line-break check is on the wire
+payloads; the `\x01` check is on the **body**, before wrapping, because the wire
+payloads are where our own action delimiters legitimately live and there is no way
+to tell ours from smuggled ones once they are in the same string. Every `\x01` that
+reaches IRC from this path is one `wrap_outgoing_body` put there.
 
 An **empty answer** is refused as well, whitespace-only included. Accepted, it renders an
 incoming line blank whenever the original is hidden, and on the outgoing side puts an
@@ -739,6 +756,18 @@ Details that follow from the shape:
   kept its record then FILLS that reservation, and the message renders with its last
   chunk first. A dropped id is released only when no record for it survives, which
   after group eviction is always.
+- **A reflection this client deliberately drops releases its reservation too.** The
+  record going missing is one way a reflection never fills its slot; the reflection
+  *arriving and being swallowed on purpose* is the other, and the queue cannot tell
+  them apart. Two paths do it. An **ignore rule** can match us — `*!*@*` on a channel
+  someone is flooding, or any mask that happens to cover our own host — and the
+  decoration is consumed before the ignore check runs, so after that return nothing
+  can ever fill the slot. A **script** suppressing a PRIVMSG returns from
+  `handle_irc_event` before `handle_privmsg` is ever called, so the reflection never
+  reaches the code that would fill it. In both cases the message is gone, which is
+  what was asked for and what a suppressed reflection has always done on a
+  non-translated buffer; only the barrier is wrong. `abandon_own_reflection` is the
+  one place that gives a place back, shared by all of these.
 - **Records die with the connection.** A drop clears them alongside the queues —
   walked separately, because a record outlives the queue whenever the reservation was
   the only thing in it, which is the ordinary case. Ownership is decided by the

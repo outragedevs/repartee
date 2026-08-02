@@ -1279,6 +1279,38 @@ pub fn push_typing_web_event(state: &mut AppState, buffer_id: &str) {
         });
 }
 
+/// Give back the place held for an own reflection a script just ate.
+///
+/// Script suppression of a non-state-mutating command returns before
+/// `handle_privmsg` ever runs, so the reflection of a translated send never
+/// reaches the code that would fill its reservation. The record is still
+/// filed and the barrier is still up, and nothing else on that path revisits
+/// either: the conversation stalls until the queue's expiry, then delivers
+/// everything that arrived meanwhile in a burst.
+///
+/// The message is dropped either way — that is what the script asked for, and
+/// it is what a suppressed reflection has always done on a non-translated
+/// buffer. Only the barrier is wrong.
+pub fn release_suppressed_own_echo(state: &mut AppState, conn_id: &str, msg: &IrcMessage) {
+    let Command::PRIVMSG(target, text) = &msg.command else {
+        return;
+    };
+    let Some(our_nick) = state.connections.get(conn_id).map(|c| c.nick.clone()) else {
+        return;
+    };
+    let (nick, ..) = extract_nick_userhost(msg.prefix.as_ref());
+    // Case-insensitively, for the same reason `handle_privmsg` does it: a
+    // server may echo our nick back in a different case.
+    if our_nick.is_empty() || !nick.eq_ignore_ascii_case(&our_nick) {
+        return;
+    }
+    // `is_own` reflections route to the TARGET's buffer, never the sender's.
+    let buffer_id = make_buffer_id(conn_id, target);
+    if let Some(d) = state.take_own_echo_decoration(&buffer_id, text) {
+        state.abandon_own_reflection(&buffer_id, d.echo_id);
+    }
+}
+
 #[expect(clippy::too_many_lines, reason = "linear message handler")]
 fn handle_privmsg(
     state: &mut AppState,
@@ -1446,6 +1478,14 @@ fn handle_privmsg(
             &ignore_level,
             channel,
         ) {
+            // An ignore mask can match US — `*!*@*` on a noisy channel, or any
+            // pattern that happens to cover our own host. The decoration was
+            // consumed just above, so this reflection is now the ONLY thing
+            // that could ever fill the place reserved when the user pressed
+            // Enter, and we are about to drop it. Hand the place back.
+            if let Some(d) = decoration.as_ref() {
+                state.abandon_own_reflection(&buffer_id, d.echo_id);
+            }
             return;
         }
     }
@@ -1627,6 +1667,20 @@ fn handle_privmsg(
             }
 
             return;
+        }
+
+        // Every remaining exit from this branch DROPS the line — the CTCP
+        // flood cut-off, a consumed RPE2E handshake, or the plain
+        // "not an ACTION, nothing to show" fall-through. If a decoration was
+        // consumed for it, the place reserved at submission has to go back
+        // here, before any of them, rather than at each one.
+        //
+        // Not reachable today: the seam and the send both refuse `\x01` in a
+        // translated body, so an own reflection cannot be a non-ACTION CTCP.
+        // It is written once here so that stays true by construction and not
+        // by that argument holding.
+        if let Some(d) = decoration.as_ref() {
+            state.abandon_own_reflection(&buffer_id, d.echo_id);
         }
 
         // Other CTCP — flood check
@@ -6247,6 +6301,85 @@ mod tests {
             state.pending_buffer_rekeys,
             vec![("test/frank".to_string(), "test/frankie".to_string())],
             "the App is told, so the config key it owns moves too"
+        );
+    }
+
+    /// A channel mid-translation: a place held for our own reflection, and a
+    /// peer's line already resolved and waiting behind that barrier.
+    ///
+    /// Returns the state; the reflection itself is `:me!u@h PRIVMSG #rust
+    /// :mein satz`, whose decoration is filed under `echo_id` 1.
+    fn channel_awaiting_our_own_reflection() -> AppState {
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#rust"));
+        let mut queue = crate::translate::queue::TranslateQueue::new();
+        queue.reserve(1);
+        let reply =
+            crate::state::events::tests::make_test_message(&mut state, "odpowiedz kolegi");
+        queue.push_resolved(reply.id, reply, crate::state::buffer::ActivityLevel::Activity);
+        state.translate_queues.insert("test/#rust".to_string(), queue);
+        state.decorate_own_echo(
+            "test/#rust",
+            crate::state::AppState::own_echo_decoration("mein satz".to_string(), 1, None, true),
+        );
+        state
+    }
+
+    fn rows(state: &AppState, buffer_id: &str) -> Vec<String> {
+        state.buffers[buffer_id]
+            .messages
+            .iter()
+            .map(|m| m.text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn an_ignore_rule_that_eats_our_own_reflection_still_lifts_the_barrier() {
+        // An ignore mask can cover US — `*!*@*` on a channel someone is
+        // flooding, or any pattern that happens to match our own host. The
+        // decoration is consumed before the ignore check runs, so after this
+        // return NOTHING can ever fill the place reserved when the user
+        // pressed Enter, and the reply that arrived while we were translating
+        // sits behind it until the queue's expiry.
+        let mut state = channel_awaiting_our_own_reflection();
+        ignore(&mut state, "*!*@*", vec![IgnoreLevel::Public]);
+
+        let reflection: IrcMessage = ":me!u@h PRIVMSG #rust :mein satz\r\n"
+            .parse()
+            .expect("valid");
+        handle_irc_message(&mut state, "test", &reflection);
+
+        assert_eq!(
+            rows(&state, "test/#rust"),
+            vec!["odpowiedz kolegi".to_string()],
+            "our own line is dropped, as the ignore asked — but the reply \
+             behind it is not held hostage to a reflection that will never come"
+        );
+        assert!(
+            !state.translate_queues.contains_key("test/#rust"),
+            "and nothing is left holding the queue open"
+        );
+    }
+
+    #[test]
+    fn a_suppressed_line_from_somebody_else_leaves_our_reservation_alone() {
+        // The counterpart: the release is keyed on the line being OURS. A
+        // script eating a peer's message must not hand back the place our own
+        // send is still waiting for, or our line lands after the replies it
+        // came before.
+        let mut state = channel_awaiting_our_own_reflection();
+        let theirs: IrcMessage = ":alice!u@h PRIVMSG #rust :mein satz\r\n"
+            .parse()
+            .expect("valid");
+        release_suppressed_own_echo(&mut state, "test", &theirs);
+
+        assert!(
+            rows(&state, "test/#rust").is_empty(),
+            "the barrier stands: our own reflection is still coming"
+        );
+        assert!(
+            state.translate_queues["test/#rust"].has_reservation(),
+            "and the place held for it is untouched"
         );
     }
 

@@ -817,6 +817,18 @@ impl App {
                     let script_suppressed = self.emit_irc_to_scripts(&conn_id, &msg);
                     if script_suppressed && !state_mutating {
                         // Display suppressed — still keep auxiliary tracking in sync.
+                        //
+                        // A translated send holds a place in its buffer's
+                        // reorder queue for the reflection it is expecting.
+                        // Eating the PRIVMSG here means that reflection never
+                        // reaches the handler that would fill it, so the place
+                        // has to be given up — the message is gone, but the
+                        // rest of the conversation must not wait for it.
+                        crate::irc::events::release_suppressed_own_echo(
+                            &mut self.state,
+                            &conn_id,
+                            &msg,
+                        );
                         if let Some(channel) = endofnames_channel {
                             self.queue_channel_query(&conn_id, channel);
                         }

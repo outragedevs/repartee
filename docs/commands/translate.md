@@ -160,6 +160,15 @@ translator is an outside service and its answer is about to be sent under
 your nick, so anything that could be read as a second IRC command never
 reaches the network.
 
+For the same reason, a translation carrying the CTCP byte (`\x01`) is refused.
+That byte is what tells an IRC client a message is a *request* rather than
+text — a DCC file offer, a VERSION query — so an answer containing one would
+send a request under your nick instead of a sentence, and inside a `/me` it
+would break out of the action your client wrapped round it. Any framing that
+reaches the network from a translated message is framing this client built.
+Incoming is checked too: a reply carrying it would render as a `/me` from the
+other person, putting words in their mouth.
+
 A translation that comes back empty is refused too — the original comes
 back to you rather than an empty line going out under your nick. One that
 comes back implausibly long is refused rather than sent:
@@ -215,6 +224,13 @@ message is split into several lines before it goes out, and if the connection
 dies partway through, the first parts are already on the channel. Restoring
 the whole thing would invite you to press Enter and send those parts twice, so
 it stays in the error row only — which says as much.
+
+On a server with `echo-message`, your own translated message is the copy the
+server sends back, and the client holds its place in the buffer until that
+copy arrives. If something in your own setup throws that copy away — an
+`/ignore` mask broad enough to cover you, or a script that swallows the
+message — the line is gone, as you asked, and the conversation carries on
+immediately rather than pausing for a reply that is never coming.
 
 A line the translator deliberately skipped — already in the target language,
 or too short to be worth translating — is a correct outcome, not a failure.

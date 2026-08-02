@@ -479,6 +479,31 @@ fn single_line_or_refuse(expected: u64, outcome: TranslateOutcome) -> TranslateO
             reason: UntranslatedReason::Error("backend returned multiple lines".to_string()),
         };
     }
+    // CTCP framing is the CLIENT's to create, never the backend's.
+    //
+    // `\x01` is what tells every IRC client that a PRIVMSG is a request
+    // rather than prose, and the outgoing path hands a plain translation to
+    // `send_privmsg` verbatim. A backend answering with
+    // `\x01DCC SEND … \x01` therefore puts a file-transfer offer on the wire
+    // under the user's own nick, addressed to whoever they were talking to,
+    // and a `\x01` embedded in an ACTION's body closes our framing early and
+    // opens a second request behind it. Neither is a translation, so neither
+    // is something to sanitise and send: refuse the answer and hand the
+    // original back, like any other unusable response.
+    //
+    // Checked here rather than only at the send because the incoming
+    // direction takes the same text — a reply carrying `\x01` renders as a
+    // fake ACTION from the peer, attributing words to them they never said.
+    if trimmed.contains('\x01') {
+        tracing::error!(
+            id,
+            "translate: backend returned CTCP framing; refusing it"
+        );
+        return TranslateOutcome::Untranslated {
+            id,
+            reason: UntranslatedReason::Error("backend returned CTCP framing".to_string()),
+        };
+    }
     // Whitespace-only counts as empty: a line of spaces renders exactly as
     // blank as nothing at all, and is just as useless on the wire. The test
     // is on the whole answer, but only the trailing newlines are actually
@@ -1157,14 +1182,11 @@ impl crate::app::App {
         // chunks with none, and a last chunk with only the closing one:
         // malformed actions rather than one long one. Splitting the BODY and
         // wrapping each chunk keeps every wire line a valid CTCP.
-        let wrap = |body: &str| wrap_outgoing_body(body, out.is_action);
-        let wire_texts = match &out.outcome {
-            TranslateOutcome::Translated { text, .. } => wrap(text),
+        let body: &str = match &out.outcome {
+            TranslateOutcome::Translated { text, .. } => text,
             // The broker decided this line needed no translation, so the
             // original IS the correct thing to send.
-            TranslateOutcome::Untranslated { reason, .. } if !reason.is_gap() => {
-                wrap(&out.original_text)
-            }
+            TranslateOutcome::Untranslated { reason, .. } if !reason.is_gap() => &out.original_text,
             // Everything else is a genuine gap. Do NOT fall back to sending
             // the original: the user asked for this channel to be written in
             // another language, and shipping their untranslated text is
@@ -1189,18 +1211,24 @@ impl crate::app::App {
         // fresh command. Making the refusal a property of the send rather
         // than of one upstream check is the same reasoning as re-running the
         // E2E gate inside `build_outgoing_translate`.
-        if wire_texts
-            .iter()
-            .any(|w| w.contains(['\r', '\n']))
-        {
+        //
+        // The same reasoning covers `\x01`, and it is checked on the BODY
+        // rather than on the wire lines because the wire lines are where our
+        // OWN action framing legitimately lives. Every `\x01` reaching IRC
+        // from here has to be one `wrap_outgoing_body` put there; one arriving
+        // inside the body is either a backend answer that got past the seam or
+        // a caller that supplied a pre-framed original, and either way it puts
+        // a REQUEST on the wire under the user's nick rather than a message.
+        if body.contains(['\r', '\n', '\x01']) {
             tracing::error!(
                 target = %out.buffer_name,
-                "translate: refusing a wire payload containing a line break"
+                "translate: refusing a wire payload containing a line break or CTCP framing"
             );
             self.release_echo_slot_and_drain(&out.buffer_id, out.echo_id);
-            self.abandon_with_text(out, "the translation contained a line break");
+            self.abandon_with_text(out, "the translation contained a control character");
             return;
         }
+        let wire_texts = wrap_outgoing_body(body, out.is_action);
 
         // Late is the same as not at all. The display reservation this send
         // holds expires `timeout_ms` after submission whether or not the
@@ -2590,6 +2618,171 @@ mod app_tests {
             last.text.contains("no provider"),
             "the reason is named: {}",
             last.text
+        );
+    }
+
+    #[test]
+    fn a_backend_answer_carrying_ctcp_framing_never_reaches_the_wire() {
+        // `\x01` is what tells every IRC client that a PRIVMSG is a REQUEST
+        // rather than prose. A backend answering with `\x01DCC SEND …\x01`
+        // otherwise puts a file-transfer offer on the channel under the
+        // user's own nick — one line, correctly correlated, non-empty, well
+        // inside the byte ceiling, so every other guard at the seam waves it
+        // through.
+        //
+        // The reason in the row is what distinguishes this from the checks
+        // BELOW it: reaching those would have said "the connection is
+        // unavailable" instead, since this app has no handle.
+        let mut app = app_with_buffer();
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(outgoing(
+            "moje zdanie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "\u{1}DCC SEND secrets.txt 2130706433 1024 512\u{1}".to_string(),
+            },
+            false,
+        ))));
+
+        assert_eq!(
+            app.input.value, "moje zdanie",
+            "the user's own text comes back, as with any other refusal"
+        );
+        let last = app.state.buffers[BUF]
+            .messages
+            .back()
+            .expect("an error row explains why");
+        assert!(
+            last.text.contains("control character"),
+            "refused before anything else could be tried: {}",
+            last.text
+        );
+    }
+
+    #[test]
+    fn a_backend_answer_cannot_break_out_of_the_action_framing_we_put_round_it() {
+        // The subtler half. `/me` wraps the answer in `\x01ACTION …\x01`
+        // ourselves, so a bare `\x01` inside the BODY closes our framing
+        // early and opens a second, attacker-chosen request behind it:
+        //
+        //   \x01ACTION wzdycha\x01 \x01DCC SEND …\x01
+        //
+        // The guard is therefore on the body, before wrapping — on the wire
+        // lines it could not tell our own delimiters from smuggled ones.
+        let mut app = app_with_buffer();
+        let mut out = outgoing(
+            "wzdycha",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "seufzt\u{1} \u{1}DCC SEND secrets.txt 2130706433 1024 512".to_string(),
+            },
+            false,
+        );
+        out.is_action = true;
+        out.retry_text = "/me wzdycha".to_string();
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+
+        let rows: Vec<String> = app.state.buffers[BUF]
+            .messages
+            .iter()
+            .map(|m| m.text.clone())
+            .collect();
+        assert!(
+            rows.last().is_some_and(|t| t.contains("control character")),
+            "refused, not sanitised and sent: {rows:?}"
+        );
+    }
+
+    /// A script engine that eats every event it is shown.
+    ///
+    /// Stands in for the one line of Lua a user writes to hide something —
+    /// `hook_signal("privmsg", function() return true end)`. What matters for
+    /// the test is only that `emit` says `Suppress`.
+    #[derive(Debug)]
+    struct SuppressingEngine;
+
+    impl crate::scripting::engine::ScriptEngine for SuppressingEngine {
+        fn extension(&self) -> &'static str {
+            "test"
+        }
+        fn load_script(
+            &mut self,
+            _path: &std::path::Path,
+            _api: &crate::scripting::engine::ScriptAPI,
+        ) -> color_eyre::Result<crate::scripting::engine::ScriptMeta> {
+            unimplemented!("nothing loads this engine from disk")
+        }
+        fn unload_script(&mut self, _name: &str) -> color_eyre::Result<()> {
+            Ok(())
+        }
+        fn emit(&self, _event: &crate::scripting::event_bus::Event) -> crate::scripting::event_bus::EventResult {
+            crate::scripting::event_bus::EventResult::Suppress
+        }
+        fn handle_command(
+            &self,
+            _name: &str,
+            _args: &[String],
+            _connection_id: Option<&str>,
+        ) -> Option<crate::scripting::event_bus::EventResult> {
+            None
+        }
+        fn fire_timer(&self, _timer_id: u64) {}
+        fn loaded_scripts(&self) -> Vec<crate::scripting::engine::ScriptMeta> {
+            vec![crate::scripting::engine::ScriptMeta {
+                name: "suppress-everything".to_string(),
+                version: None,
+                description: None,
+                path: std::path::PathBuf::from("suppress-everything.test"),
+            }]
+        }
+    }
+
+    #[test]
+    fn a_script_eating_our_reflection_does_not_strand_the_conversation() {
+        // The whole path, not the helper: script suppression of a PRIVMSG
+        // returns from `handle_irc_event` BEFORE `handle_privmsg` is ever
+        // called, so the reflection of a translated send never reaches the
+        // code that fills its reservation. Driving `release_suppressed_own_echo`
+        // directly would pass with the call site deleted.
+        let mut app = app_with_buffer();
+        let mut conn = crate::state::events::tests::make_test_connection();
+        conn.id = "test".to_string();
+        conn.nick = "me".to_string();
+        app.state.add_connection(conn);
+
+        let mut manager =
+            crate::scripting::engine::ScriptManager::new(std::path::PathBuf::from("/nonexistent"));
+        manager.register_engine(Box::new(SuppressingEngine));
+        app.script_manager = Some(manager);
+
+        // A place held for our own reflection, with a peer's line already
+        // resolved behind it.
+        let mut queue = TranslateQueue::new();
+        queue.reserve(1);
+        queue.push_resolved(2, message(2, "odpowiedz kolegi"), ActivityLevel::Activity);
+        app.state.translate_queues.insert(BUF.to_string(), queue);
+        app.state.decorate_own_echo(
+            BUF,
+            crate::state::AppState::own_echo_decoration("mein satz".to_string(), 1, None, true),
+        );
+
+        let reflection: ::irc::proto::Message = ":me!u@h PRIVMSG #dupa :mein satz\r\n"
+            .parse()
+            .expect("valid");
+        app.handle_irc_event(crate::irc::IrcEvent::Message(
+            "test".to_string(),
+            Box::new(reflection),
+        ));
+
+        let rows: Vec<String> = app.state.buffers[BUF]
+            .messages
+            .iter()
+            .map(|m| m.text.clone())
+            .collect();
+        assert_eq!(
+            rows,
+            vec!["odpowiedz kolegi".to_string()],
+            "the script ate our own line, as it asked to — but the reply behind \
+             it is not held until the queue's expiry: {rows:?}"
         );
     }
 
@@ -5929,6 +6122,36 @@ mod tests {
             matches!(&clean, TranslateOutcome::Translated { text, .. } if text == "mein satz"),
             "an ordinary answer is untouched: {clean:?}"
         );
+    }
+
+    #[test]
+    fn ctcp_framing_is_refused_at_the_seam_in_both_directions() {
+        use crate::translate::UntranslatedReason;
+        // The outgoing risk is a request sent under the user's nick. The
+        // INCOMING risk is quieter and is why this lives at the seam rather
+        // than only at the send: a reply carrying `\x01ACTION …\x01` renders
+        // as an action from the peer, putting words in their mouth in a
+        // conversation the user is reading as authentic.
+        for text in [
+            "\u{1}DCC SEND secrets.txt 2130706433 1024 512\u{1}",
+            "\u{1}ACTION nigdy tego nie powiedzial\u{1}",
+            "prawdziwe zdanie\u{1}",
+        ] {
+            let refused = super::single_line_or_refuse(1, TranslateOutcome::Translated {
+                id: 1,
+                text: text.to_string(),
+            });
+            assert!(
+                matches!(
+                    refused,
+                    TranslateOutcome::Untranslated {
+                        reason: UntranslatedReason::Error(_),
+                        ..
+                    }
+                ),
+                "{text:?} must not come back as a translation: {refused:?}"
+            );
+        }
     }
 
     /// A backend that answers with whatever it is handed at construction —

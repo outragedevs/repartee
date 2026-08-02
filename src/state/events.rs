@@ -658,13 +658,29 @@ impl AppState {
             return;
         }
         for echo_id in dropped {
-            tracing::debug!(
-                buffer_id,
-                echo_id,
-                "translate: reflection record gone; releasing the place held for it"
-            );
-            self.release_echo_slot(buffer_id, echo_id);
+            self.abandon_own_reflection(buffer_id, echo_id);
         }
+    }
+
+    /// Give back the place held for one reflection that will not be shown.
+    ///
+    /// Two ways that happens, and they look identical to the queue. The
+    /// record can go missing — evicted at the cap or timed out — so an
+    /// arriving reflection has nothing to match. Or the reflection can arrive
+    /// and be DROPPED on purpose: an ignore rule that matches our own
+    /// hostmask, or a script that ate the PRIVMSG before the handler ran.
+    ///
+    /// Either way the reservation is a barrier nothing will ever fill, and
+    /// leaving it up stalls the whole conversation until the queue's expiry —
+    /// lines that finished translating meanwhile are held back and then
+    /// released in a burst, ahead of the echo they were replies to.
+    pub fn abandon_own_reflection(&mut self, buffer_id: &str, echo_id: u64) {
+        tracing::debug!(
+            buffer_id,
+            echo_id,
+            "translate: reflection will not be shown; releasing the place held for it"
+        );
+        self.release_echo_slot(buffer_id, echo_id);
         // Releasing at the head makes it and everything resolved behind it
         // deliverable, and nothing else on this path would revisit the queue.
         self.drain_translate_ready(buffer_id);
