@@ -1091,6 +1091,16 @@ It exists to prove the parts that are easy to get wrong — ordered release unde
 out-of-order returns, timeout releasing a stuck head, queue-ceiling overflow,
 fail-closed E2E, outgoing refusal — before any real provider exists.
 
+It is installed only when `translate.backend = "stub"` names it, never by
+`translate.enabled` alone. The stub does not translate — it reverses word
+order — and on the outgoing side its answer is what reaches the channel under
+the user's own nick, so a user who asked for a translator and got this one
+would have every line they send corrupted. `enabled` on its own resolves to no
+backend: the mechanism stays wired and every line is delivered as it arrived.
+Startup reports which of the three outcomes the config produced (no
+translator, an unknown name, or the stub with its warning), because a config
+that translates nothing looks exactly like one that works.
+
 ---
 
 ## 10. Error handling summary

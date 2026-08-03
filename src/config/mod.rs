@@ -569,7 +569,25 @@ impl Default for ShrinkConfig {
 pub struct TranslateConfig {
     /// Master switch — when false nothing is translated in either
     /// direction, even for buffers with per-buffer flags set.
+    ///
+    /// On its own it translates NOTHING: it says the mechanism may run, not
+    /// that there is anything to run it with. See `backend`.
     pub enabled: bool,
+    /// Which implementation behind the seam to install, by name.
+    ///
+    /// `"none"` (the default) means there is no translator: the mechanism
+    /// stays wired but every line is delivered as it arrived. `"stub"`
+    /// selects the built-in test backend, which does not translate — it
+    /// REVERSES word order — and exists so the mechanism can be exercised
+    /// end to end with no API key.
+    ///
+    /// Deliberately not implied by `enabled`. A user who turns translation
+    /// on expects a translator; installing the stub because it is the only
+    /// implementation that exists would publish reversed sentences on a real
+    /// channel, under their nick, as if they had typed them. Naming the stub
+    /// is the difference between testing the mechanism and being handed it
+    /// by surprise.
+    pub backend: String,
     /// The language YOU read and write, unless a buffer overrides it.
     ///
     /// Named `my_lang` rather than `target_lang` deliberately: "target" is
@@ -635,6 +653,7 @@ impl Default for TranslateConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            backend: "none".to_string(),
             my_lang: "en".to_string(),
             show_original_in: true,
             show_original_out: true,

@@ -923,6 +923,14 @@ impl App {
         // simply the wrong number from startup. Any mirror added later is
         // now covered by construction.
         app.sync_translate_from_config();
+        // Say out loud what `[translate]` actually resolved to. Both quiet
+        // outcomes mislead: a config asking for translation with no backend
+        // behind it looks exactly like one that is working, and the test
+        // backend looks — to the people reading the channel — like the user
+        // typing their sentences backwards.
+        if let Some(notice) = translate::startup_backend_notice(&app.config.translate) {
+            crate::commands::helpers::add_local_event(&mut app, &notice);
+        }
 
         if app.config.spellcheck.enabled {
             app.init_spellchecker();

@@ -160,6 +160,7 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
             // setter has no sane spelling for it.
             let val = match parts[1] {
                 "enabled" => config.translate.enabled.to_string(),
+                "backend" => config.translate.backend.clone(),
                 "my_lang" => config.translate.my_lang.clone(),
                 "show_original_in" => config.translate.show_original_in.to_string(),
                 "show_original_out" => config.translate.show_original_out.to_string(),
@@ -455,6 +456,20 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
         },
         "translate" => match parts[1] {
             "enabled" => config.translate.enabled = parse_bool(raw)?,
+            "backend" => {
+                // Rejected rather than stored-and-ignored: an unknown name
+                // installs nothing, and a config that asks for translation
+                // and silently does none is the failure this whole setting
+                // exists to make visible.
+                let want = raw.trim().to_ascii_lowercase();
+                if !crate::translate::backend::BACKEND_NAMES.contains(&want.as_str()) {
+                    return Err(format!(
+                        "translate.backend must be one of: {}",
+                        crate::translate::backend::BACKEND_NAMES.join(", ")
+                    ));
+                }
+                config.translate.backend = want;
+            }
             "my_lang" => {
                 if raw.trim().is_empty() {
                     return Err("translate.my_lang must not be empty".to_string());
@@ -812,6 +827,7 @@ const BASE_PATHS: &[&str] = &[
     // a map keyed by buffer id and are managed by `/translate add*|del*`,
     // which a dotted `/set` path has no sane spelling for.
     "translate.enabled",
+    "translate.backend",
     "translate.my_lang",
     "translate.show_original_in",
     "translate.show_original_out",
@@ -993,7 +1009,11 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
             // nothing.
             if path.starts_with("translate.") {
                 app.sync_translate_from_config();
-                if path == "translate.enabled" {
+                // `backend` has the same restart caveat as `enabled` and for
+                // the same reason — naming a translator cannot conjure the
+                // workers that were bound at startup. Warning on only one of
+                // the two switches is how the quieter one comes to lie.
+                if path == "translate.enabled" || path == "translate.backend" {
                     crate::commands::helpers::warn_if_translate_needs_restart(app);
                 }
             }
@@ -1240,6 +1260,7 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
             "translate",
             &[
                 "enabled",
+                "backend",
                 "my_lang",
                 "show_original_in",
                 "show_original_out",
@@ -1662,6 +1683,35 @@ mod tests {
         assert!(BASE_PATHS.contains(&"translate.my_lang"));
         assert!(BASE_PATHS.contains(&"emotes.enabled"));
         assert!(BASE_PATHS.contains(&"emotes.render"));
+    }
+
+    #[test]
+    fn get_set_translate_backend() {
+        // The name of the translator is a setting in its own right, not
+        // something `enabled` implies. A value this build has no
+        // implementation for is REJECTED rather than stored: accepted-and-
+        // ignored would leave the user with a config that reads like
+        // translation is on and a client that translates nothing.
+        let mut config = default_config();
+        assert_eq!(
+            get_config_value(&config, "translate.backend").unwrap().value,
+            "none",
+            "no translator is the default — the only implementation that \
+             exists on this branch is a test stub"
+        );
+        set_config_value(&mut config, "translate.backend", "stub").unwrap();
+        assert_eq!(config.translate.backend, "stub");
+        // Hand-typed, so spelling is normalised the way the reader is.
+        set_config_value(&mut config, "translate.backend", "  NONE ").unwrap();
+        assert_eq!(config.translate.backend, "none");
+        let err = set_config_value(&mut config, "translate.backend", "gogle")
+            .expect_err("an unknown translator must not be accepted");
+        assert!(
+            err.contains("none") && err.contains("stub"),
+            "the error has to say what the valid names are: {err}"
+        );
+        assert_eq!(config.translate.backend, "none", "and nothing was stored");
+        assert!(BASE_PATHS.contains(&"translate.backend"));
     }
 
     #[test]

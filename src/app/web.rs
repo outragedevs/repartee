@@ -225,6 +225,34 @@ impl App {
                     structural_change = true;
                 }
                 crate::web::protocol::WebEvent::ActiveBufferChanged { buffer_id } => {
+                    // Broadcast so the TUI and every web session stay 1:1 in
+                    // sync — switching the active buffer anywhere (TUI, any tab,
+                    // phone) propagates everywhere. Also structural so a
+                    // newly-connecting session's SyncInit snapshot reflects the
+                    // new active buffer. (Clients ignore the echo for a buffer
+                    // they already switched to, and may opt out via the
+                    // `web_follow_tui_buffer` localStorage flag.)
+                    structural_change = true;
+                    // …except shell buffers: they're per-session web terminals,
+                    // so a followed session would render an unusable ShellView
+                    // and have its shell I/O rejected. Don't propagate a switch
+                    // into a shell (e.g. the TUI opening its own /shell).
+                    //
+                    // Decided BEFORE the confirmation bookkeeping below: an
+                    // event no browser is ever sent cannot have moved a tab, so
+                    // doubting every session afterwards invents doubt out of
+                    // nothing — and the doubt is not free. A session marked
+                    // unconfirmed has a failed send WITHHELD from its composer
+                    // by `deferred_retry_text`, which is the one path where
+                    // getting the text back is the point.
+                    if self
+                        .state
+                        .buffers
+                        .get(buffer_id)
+                        .is_some_and(|b| b.buffer_type == crate::state::buffer::BufferType::Shell)
+                    {
+                        continue;
+                    }
                     // A tab that follows this changes buffer without telling
                     // us, and the opt-out lives in the browser, so afterwards
                     // the recorded buffer is a guess — except for a session
@@ -240,26 +268,6 @@ impl App {
                         } else {
                             self.web_buffer_unconfirmed.insert(session.clone());
                         }
-                    }
-                    // Broadcast so the TUI and every web session stay 1:1 in
-                    // sync — switching the active buffer anywhere (TUI, any tab,
-                    // phone) propagates everywhere. Also structural so a
-                    // newly-connecting session's SyncInit snapshot reflects the
-                    // new active buffer. (Clients ignore the echo for a buffer
-                    // they already switched to, and may opt out via the
-                    // `web_follow_tui_buffer` localStorage flag.)
-                    structural_change = true;
-                    // …except shell buffers: they're per-session web terminals,
-                    // so a followed session would render an unusable ShellView
-                    // and have its shell I/O rejected. Don't propagate a switch
-                    // into a shell (e.g. the TUI opening its own /shell).
-                    if self
-                        .state
-                        .buffers
-                        .get(buffer_id)
-                        .is_some_and(|b| b.buffer_type == crate::state::buffer::BufferType::Shell)
-                    {
-                        continue;
                     }
                 }
                 crate::web::protocol::WebEvent::ConnectionStatus { .. }

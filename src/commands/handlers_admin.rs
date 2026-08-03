@@ -1833,6 +1833,7 @@ mod translate_reload_tests {
             crate::translate::backend::StubBackend::new(0, 0),
         ));
         app.config.translate.enabled = true;
+        app.config.translate.backend = "stub".to_string();
         app.sync_translate_from_config();
         assert!(app.state.translate_active, "precondition: it is on");
 
@@ -1847,6 +1848,34 @@ mod translate_reload_tests {
     }
 
     #[test]
+    fn reload_taking_the_backend_away_stops_it_immediately_too() {
+        // The same privacy property as `enabled = false`, reached by the
+        // other switch. A user who takes the translator OUT of config.toml
+        // has said just as plainly that their lines should stop leaving for
+        // it, and "restart for that to count" is not an answer mid-
+        // conversation. (Putting one BACK still needs the restart the
+        // workers were bound in — that direction warns.)
+        let mut app = test_app();
+        app.translate_backend = Some(std::sync::Arc::new(
+            crate::translate::backend::StubBackend::new(0, 0),
+        ));
+        app.config.translate.enabled = true;
+        app.config.translate.backend = "stub".to_string();
+        app.sync_translate_from_config();
+        assert!(app.state.translate_active, "precondition: it is on");
+
+        let mut reloaded = crate::config::AppConfig::default();
+        reloaded.translate.enabled = true;
+        reloaded.translate.backend = "none".to_string();
+        super::apply_reloaded_config(&mut app, reloaded);
+
+        assert!(
+            !app.state.translate_active,
+            "naming no translator must stop translation at once"
+        );
+    }
+
+    #[test]
     fn reload_picks_up_hand_edited_buffers_and_languages() {
         let mut app = test_app();
         app.translate_backend = Some(std::sync::Arc::new(
@@ -1855,6 +1884,7 @@ mod translate_reload_tests {
 
         let mut reloaded = crate::config::AppConfig::default();
         reloaded.translate.enabled = true;
+        reloaded.translate.backend = "stub".to_string();
         reloaded.translate.my_lang = "pl".to_string();
         reloaded.translate.show_original_in = false;
         reloaded.translate.buffers.insert(
@@ -1932,6 +1962,9 @@ mod translate_reload_tests {
             }
             let mut reloaded = crate::config::AppConfig::default();
             reloaded.translate.enabled = enabled;
+            if backend {
+                reloaded.translate.backend = "stub".to_string();
+            }
             super::apply_reloaded_config(&mut app, reloaded);
             assert!(
                 !rows(&app).iter().any(|t| t.contains("restart to activate")),

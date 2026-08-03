@@ -27,9 +27,29 @@ say to you; `addout` translates what you send. They are independent, so
 reading a German channel in Polish while still writing German yourself is
 just `addin` without `addout`.
 
-Nothing happens until the master switch is on:
+Nothing happens until the master switch is on **and** a translator is named:
 
     /set translate.enabled true
+    /set translate.backend <name>
+
+The switch and the translator are separate settings on purpose. `enabled`
+says the mechanism may run; `backend` says what it runs on. With
+`translate.backend = "none"` — the default — every line is delivered exactly
+as it arrived, however many buffers are configured, and `/translate status`
+says so.
+
+This build ships one backend, and it is **not** a translator:
+
+| name | what it does |
+|---|---|
+| `none` | nothing is translated (default) |
+| `stub` | test backend — **reverses word order**, no network, no API key |
+
+`stub` exists so the mechanism can be exercised end to end while the real
+translator is written. It is never installed implicitly, because its output
+does not stay on your screen: on the outgoing side it is what goes to the
+channel, under your nick. Repartee says so loudly at startup when it is on.
+Do not leave it on for a real conversation.
 
 ## Languages
 
@@ -314,6 +334,7 @@ precedence on buffers where both are enabled.
 ## Configuration
 
     /set translate.enabled           false
+    /set translate.backend           none
     /set translate.my_lang           en
     /set translate.show_original_in  true
     /set translate.show_original_out true
@@ -342,9 +363,14 @@ holding up another.
 Per-buffer settings live under `[translate.buffers]` in `config.toml` and are
 managed with the `add*` / `del*` subcommands rather than `/set`.
 
-Enabling `translate.enabled` at runtime when it was off at startup reports
-that a restart is required: the translation workers are built once, when the
-client starts. `/reload` says the same thing — editing `enabled = true` in
-`config.toml` and reloading cannot build a backend either, so the reload
-warns instead of reporting a plain success you would have no reason to
-distrust.
+Enabling `translate.enabled`, or naming a `translate.backend`, at runtime when
+translation was not running at startup reports that a restart is required: the
+translation workers and the backend are built once, when the client starts.
+`/reload` says the same thing — editing `enabled = true` in `config.toml` and
+reloading cannot build a backend either, so the reload warns instead of
+reporting a plain success you would have no reason to distrust.
+
+Turning it **off** needs no restart, by either switch. `/set translate.backend
+none`, `/set translate.enabled false`, and the same edits followed by
+`/reload` all stop translation immediately: deciding your lines should stop
+leaving for a translator is not a decision that should wait.

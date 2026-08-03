@@ -319,12 +319,21 @@ pub struct TranslateRuntime {
 impl TranslateRuntime {
     /// Build the runtime and spawn the workers.
     ///
-    /// This branch ships the stub backend: the mechanism is what is being
-    /// built, and the stub proves it end to end with no API key. Swapping
-    /// in a real broker is a one-line change here.
+    /// The backend is chosen by NAME, never implied by `translate.enabled`.
+    /// This branch ships only the stub — the mechanism is what is being
+    /// built, and the stub proves it end to end with no API key — and the
+    /// stub does not translate: it reverses word order. Installing it
+    /// because it is the only implementation that exists would put reversed
+    /// sentences on a real channel under the user's own nick. So `enabled`
+    /// on its own resolves to no backend, and every line is delivered as it
+    /// arrived until a real broker is written and named here.
     pub fn build(cfg: &crate::config::TranslateConfig) -> Self {
+        use crate::translate::backend::BackendKind;
         let backend: Option<SharedBackend> = if cfg.enabled {
-            Some(Arc::new(StubBackend::new(0, 0)))
+            match crate::translate::backend::backend_kind(&cfg.backend) {
+                BackendKind::Stub => Some(Arc::new(StubBackend::new(0, 0))),
+                BackendKind::None | BackendKind::Unknown => None,
+            }
         } else {
             None
         };
@@ -376,6 +385,47 @@ impl TranslateRuntime {
 
 fn spawn_drain<T: Send + 'static>(mut rx: mpsc::Receiver<T>) {
     tokio::spawn(async move { while rx.recv().await.is_some() {} });
+}
+
+/// What to tell the user at startup about the backend their config asked for,
+/// or `None` when the answer is unremarkable.
+///
+/// Every outcome of `enabled = true` on this branch is worth a word, and the
+/// silent ones are the dangerous ones: translation configured per buffer and
+/// simply never happening looks identical to translation happening well, and
+/// a stub that reverses word order looks — to the reader on the other side —
+/// exactly like a person typing nonsense.
+///
+/// Pure so the wording is testable without standing up an `App`.
+#[must_use]
+pub fn startup_backend_notice(cfg: &crate::config::TranslateConfig) -> Option<String> {
+    use crate::commands::types::{C_ERR, C_RST};
+    use crate::translate::backend::{BackendKind, backend_kind};
+    if !cfg.enabled {
+        return None;
+    }
+    Some(match backend_kind(&cfg.backend) {
+        BackendKind::None => format!(
+            "{C_ERR}translate: enabled, but translate.backend is \"none\" — no \
+             translator is installed, so nothing is translated in either \
+             direction{C_RST}"
+        ),
+        // The name is echoed back because the whole failure is a typo, and a
+        // message that will not show it makes the user hunt for one.
+        BackendKind::Unknown => format!(
+            "{C_ERR}translate: unknown translate.backend \"{name}\" — no \
+             translator is installed, so nothing is translated. Known: \
+             {known}{C_RST}",
+            name = crate::commands::helpers::escape_format(cfg.backend.trim()),
+            known = crate::translate::backend::BACKEND_NAMES.join(", "),
+        ),
+        BackendKind::Stub => format!(
+            "{C_ERR}translate: the TEST backend is installed — it does not \
+             translate, it REVERSES word order, and the result is what gets \
+             sent to the network under your nick. Do not leave it on for a \
+             real conversation.{C_RST}"
+        ),
+    })
 }
 
 /// Translate one request, converting a panic into an `Untranslated`
@@ -2529,8 +2579,25 @@ impl crate::app::App {
         self.config.translate.timeout_ms = self.config.translate.timeout_ms.max(500);
         self.config.translate.max_in_flight = self.config.translate.max_in_flight.max(1);
         self.config.translate.max_queue = self.config.translate.max_queue.max(1);
+        // A backend OBJECT exists only if one was built at startup; the
+        // config's answer is re-read every time because turning translation
+        // OFF must take effect at once. `/set translate.backend none` and a
+        // hand-edited `config.toml` plus `/reload` are both ways of saying
+        // "stop sending my lines to a translator", and a switch that only
+        // works after a restart is not one a user reaches for when they
+        // change their mind mid-conversation. Turning it back ON still needs
+        // the restart the workers were bound in — `warn_if_translate_needs_restart`
+        // says so.
         let has_backend = self.translate_backend.is_some();
-        self.state.translate_active = self.config.translate.enabled && has_backend;
+        // Spelled as "not one of the no-op kinds" so that a real broker added
+        // to `BackendKind` later is active by default rather than silently
+        // inert until somebody remembers this line.
+        let wants_backend = !matches!(
+            crate::translate::backend::backend_kind(&self.config.translate.backend),
+            crate::translate::backend::BackendKind::None
+                | crate::translate::backend::BackendKind::Unknown
+        );
+        self.state.translate_active = self.config.translate.enabled && has_backend && wants_backend;
         self.state
             .translate_buffers
             .clone_from(&self.config.translate.buffers);
@@ -6575,6 +6642,85 @@ mod app_tests {
     }
 
     #[test]
+    fn a_shell_switch_no_browser_ever_sees_leaves_every_tab_trusted() {
+        // The TUI opening its own `/shell` raises `ActiveBufferChanged` like
+        // any other switch, but the event is DROPPED rather than broadcast: a
+        // web tab that followed it would render an unusable ShellView and
+        // have its shell I/O rejected.
+        //
+        // An event no browser is ever sent cannot have moved a tab, so
+        // doubting every session afterwards invents doubt out of nothing —
+        // and the doubt is not free. A session marked unconfirmed has a
+        // failed send withheld from its composer by `deferred_retry_text`,
+        // which is the one path where getting the text back is the point.
+        let mut app = app_with_buffer();
+        app.web_active_buffers
+            .insert("sess-1".to_string(), BUF.to_string());
+        app.state.add_buffer(Buffer::for_test(
+            "test",
+            BufferType::Shell,
+            "shell1",
+        ));
+        app.state
+            .pending_web_events
+            .push(crate::web::protocol::WebEvent::ActiveBufferChanged {
+                buffer_id: "test/shell1".to_string(),
+            });
+
+        app.drain_pending_web_events();
+
+        assert!(
+            !app.web_buffer_unconfirmed.contains("sess-1"),
+            "the tab was never told about the shell, so it is still where it \
+             said it was"
+        );
+
+        // The ordinary switch it never sees is the contrast: that one IS
+        // broadcast, so the tab may have followed it.
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Channel, "#inne"));
+        app.state
+            .pending_web_events
+            .push(crate::web::protocol::WebEvent::ActiveBufferChanged {
+                buffer_id: "test/#inne".to_string(),
+            });
+        app.drain_pending_web_events();
+        assert!(
+            app.web_buffer_unconfirmed.contains("sess-1"),
+            "a switch that does reach the browser still makes the record a guess"
+        );
+    }
+
+    #[test]
+    fn taking_the_translator_away_stops_translation_without_a_restart() {
+        // Turning translation ON needs a restart — the workers are bound in
+        // `App::new`. Turning it OFF must not: `/set translate.backend none`
+        // is a user saying "stop sending my lines to a translator", and a
+        // switch that waits for a restart keeps shipping them meanwhile.
+        let mut app = app_with_buffer();
+        app.translate_backend = Some(std::sync::Arc::new(
+            crate::translate::backend::StubBackend::new(0, 0),
+        ));
+        app.config.translate.enabled = true;
+        app.config.translate.backend = "stub".to_string();
+        app.sync_translate_from_config();
+        assert!(app.state.translate_active, "precondition: it is running");
+
+        app.config.translate.backend = "none".to_string();
+        app.sync_translate_from_config();
+        assert!(
+            !app.state.translate_active,
+            "the config names no translator, so nothing goes to one"
+        );
+
+        // A name this build cannot honour is the same answer, not a fallback
+        // to whatever happens to be installed.
+        app.config.translate.backend = "gogle".to_string();
+        app.sync_translate_from_config();
+        assert!(!app.state.translate_active);
+    }
+
+    #[test]
     fn a_tab_that_submits_says_where_it_is_and_is_trusted_again() {
         // `web_buffer_unconfirmed` records not knowing which buffer a tab is
         // showing. A submit ANSWERS that: the command carries the buffer its
@@ -7003,6 +7149,85 @@ mod tests {
             target_lang: "pl".to_string(),
             known_nicks: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn enabling_translation_never_installs_the_test_stub_by_itself() {
+        // The stub does not translate — it reverses word order — and its
+        // output does not stay on screen: on the outgoing side it is what
+        // goes to the channel, under the user's own nick. Whoever turns
+        // `translate.enabled` on is asking for a translator, and handing them
+        // this one because it is the only implementation that exists corrupts
+        // every line they send.
+        //
+        // So the backend is chosen by NAME, and the name has to be said.
+        let plain = crate::config::TranslateConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        assert!(
+            TranslateRuntime::build(&plain).backend.is_none(),
+            "enabled=true alone must install no translator"
+        );
+
+        let named = crate::config::TranslateConfig {
+            enabled: true,
+            backend: "stub".to_string(),
+            ..Default::default()
+        };
+        assert!(
+            TranslateRuntime::build(&named).backend.is_some(),
+            "and naming it must still get it — the mechanism has to be \
+             testable end to end"
+        );
+
+        // A typo installs nothing rather than the nearest thing.
+        let typo = crate::config::TranslateConfig {
+            enabled: true,
+            backend: "stubb".to_string(),
+            ..Default::default()
+        };
+        assert!(TranslateRuntime::build(&typo).backend.is_none());
+
+        // And the master switch still wins over a named backend.
+        let off = crate::config::TranslateConfig {
+            enabled: false,
+            backend: "stub".to_string(),
+            ..Default::default()
+        };
+        assert!(TranslateRuntime::build(&off).backend.is_none());
+    }
+
+    #[test]
+    fn every_way_of_not_translating_says_so_at_startup() {
+        // Both silences mislead. A config asking for translation with nothing
+        // behind it looks exactly like one that works, and the test backend
+        // looks — to the channel — like the user typing sentences backwards.
+        let notice = |backend: &str, enabled: bool| {
+            startup_backend_notice(&crate::config::TranslateConfig {
+                enabled,
+                backend: backend.to_string(),
+                ..Default::default()
+            })
+        };
+
+        assert_eq!(notice("none", false), None, "nothing to say when it is off");
+        assert_eq!(notice("stub", false), None);
+
+        let none = notice("none", true).expect("enabled with no translator must be reported");
+        assert!(none.contains("no translator"), "{none}");
+
+        let unknown = notice("gogle", true).expect("a typo must be reported");
+        assert!(
+            unknown.contains("gogle"),
+            "the name has to be echoed back — the whole failure IS the typo: {unknown}"
+        );
+
+        let stub = notice("stub", true).expect("the test backend must be announced");
+        assert!(
+            stub.contains("REVERSES") && stub.contains("sent to the network"),
+            "the warning has to say what it does to outgoing lines: {stub}"
+        );
     }
 
     #[tokio::test]

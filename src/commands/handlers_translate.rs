@@ -184,6 +184,18 @@ fn add(app: &mut App, args: &[String], dir: Dir) {
                  you /set translate.enabled true{C_RST}"
             ),
         );
+    } else if !app.state.translate_active {
+        // Enabling a buffer while nothing can translate it is the silent
+        // half of the same mistake: the buffer is listed, the switch is on,
+        // and every line still arrives untouched.
+        add_local_event(
+            app,
+            &format!(
+                "{C_DIM}no translator is installed (translate.backend = {}) — \
+                 the buffer is configured but nothing is translated yet{C_RST}",
+                esc(&app.config.translate.backend)
+            ),
+        );
     }
 }
 
@@ -320,14 +332,27 @@ fn list(app: &mut App) {
 }
 
 fn status(app: &mut App) {
+    use crate::translate::backend::{BackendKind, backend_kind};
+    let backend = app.config.translate.backend.clone();
+    // Distinguish the two ways of not running. "Restart required" is true
+    // only when a translator IS named and the process started without one;
+    // saying it when the config names none sends the user to restart into
+    // exactly the same silence.
     let active = if app.state.translate_active {
         "active"
-    } else if app.config.translate.enabled {
-        "enabled but no backend (restart required)"
-    } else {
+    } else if !app.config.translate.enabled {
         "off"
+    } else {
+        match backend_kind(&backend) {
+            BackendKind::None => "enabled, but no translator is configured",
+            BackendKind::Unknown => "enabled, but translate.backend names no translator this build has",
+            BackendKind::Stub => "enabled but not running (restart required)",
+        }
     };
-    add_local_event(app, &format!("translate: {active}"));
+    add_local_event(
+        app,
+        &format!("translate: {active} (backend: {})", esc(&backend)),
+    );
     // Incoming work and display depth are different numbers and are reported
     // as such: a reservation is a held POSITION whose translation has usually
     // already come back, so counting it as provider work made a healthy

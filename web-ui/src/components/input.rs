@@ -120,6 +120,7 @@ const SETTING_PATHS: &[&str] = &[
     // Per-buffer translation settings are deliberately absent here too: they
     // live in a map keyed by buffer id and are managed by
     // `/translate add*|del*`, which a dotted `/set` path cannot spell.
+    "translate.backend",
     "translate.enabled",
     "translate.max_in_flight",
     "translate.max_queue",

@@ -31,6 +31,42 @@ pub trait TranslateBackend: Send + Sync + 'static {
 /// Shared handle to whichever backend is configured.
 pub type SharedBackend = Arc<dyn TranslateBackend>;
 
+/// Which implementation `translate.backend` asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendKind {
+    /// No translator at all. The mechanism stays wired and delivers every
+    /// line as it arrived.
+    ///
+    /// This is what `translate.enabled = true` gets on its own, and it is
+    /// the only safe default while the seam's sole implementation is a test
+    /// stub: a translator nobody asked for is worse than none.
+    None,
+    /// The built-in test stub — never a default, always named explicitly.
+    Stub,
+    /// A name this build has no implementation for. Treated as [`Self::None`]
+    /// and reported, rather than silently read as "no translation": a typo in
+    /// `config.toml` otherwise looks exactly like a working setup that never
+    /// translates anything.
+    Unknown,
+}
+
+/// Resolve a configured backend name.
+///
+/// Case- and whitespace-insensitive because this value is hand-typed into
+/// `config.toml` as often as it is set through `/set`.
+#[must_use]
+pub fn backend_kind(name: &str) -> BackendKind {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "" | "none" => BackendKind::None,
+        "stub" => BackendKind::Stub,
+        _ => BackendKind::Unknown,
+    }
+}
+
+/// The names `/set translate.backend` accepts, for its error message and the
+/// docs to agree on one list.
+pub const BACKEND_NAMES: &[&str] = &["none", "stub"];
+
 /// Exercises the whole mechanism with no API key and no network.
 ///
 /// It exists so the parts that are easy to get wrong — ordered release
