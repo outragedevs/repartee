@@ -1201,8 +1201,18 @@ impl AppState {
                 // park used to swallow the shrink dispatch outright, so the
                 // same NOTICE rendered shortened or raw depending on whether
                 // a translation happened to be in flight.
-                let message =
-                    self.offer_parked_row_to_shrink(buffer_id, message, level, parked_shrink)?;
+                let Some(message) =
+                    self.offer_parked_row_to_shrink(buffer_id, message, level, parked_shrink)
+                else {
+                    // Shrink took it, and it is in the queue as a RESERVATION
+                    // — the same room a parked row takes, on the same ceiling.
+                    // Without this a burst of long-URL lines grows the queue
+                    // to the shrink CHANNEL's capacity instead of
+                    // `translate.max_queue`, and the bound the user configured
+                    // only reasserts itself on the next maintenance tick.
+                    self.enforce_translate_ceiling(buffer_id);
+                    return None;
+                };
                 let id = message.id;
                 let queue = self.translate_queues.get_mut(buffer_id)?;
                 queue.push_resolved(id, message, level);
@@ -1894,6 +1904,14 @@ impl AppState {
                 .map_or_else(|| conn_id.to_string(), |c| c.label.clone());
             (network, buf_name.to_string())
         });
+        // Our nick on this connection, so a replay of something WE sent can be
+        // recognised as the local echo already on screen — the one row in the
+        // buffer whose timestamp is our own clock rather than the server's.
+        // See `own_echo_matches_replay`.
+        let own_nick = buffer_id
+            .split_once('/')
+            .and_then(|(conn_id, _)| self.connections.get(conn_id))
+            .map(|c| c.nick.clone());
         for mut msg in rows {
             let candidate_key = stored_as
                 .as_ref()
@@ -1904,12 +1922,21 @@ impl AppState {
                 // scan of the buffer alone splices the same message in a
                 // second time — raw, ahead of its still-translating twin.
                 Some(buf) => {
-                    buffer_contains_history_row(buf, &msg, candidate_key.as_deref())
-                        || self.translate_queues.get(buffer_id).is_some_and(|q| {
-                            q.any_message(|m| {
-                                history_row_matches(m, &msg, candidate_key.as_deref())
-                            })
+                    buffer_contains_history_row(
+                        buf,
+                        &msg,
+                        candidate_key.as_deref(),
+                        own_nick.as_deref(),
+                    ) || self.translate_queues.get(buffer_id).is_some_and(|q| {
+                        q.any_message(|m| {
+                            history_row_matches(
+                                m,
+                                &msg,
+                                candidate_key.as_deref(),
+                                own_nick.as_deref(),
+                            )
                         })
+                    })
                 }
                 None => return,
             };
@@ -2246,11 +2273,63 @@ fn dedup_text(message: &Message) -> &str {
         .map_or(message.text.as_str(), |o| o.text.as_str())
 }
 
+/// How far a row WE wrote may sit from the server's stamp on the same
+/// message before the two stop being recognisable as one.
+///
+/// The gap is a round trip plus whatever the two clocks disagree by, so it is
+/// generous: the alternative to a wide window is a duplicate on screen, while
+/// the cost of one is confined to our OWN nick repeating itself verbatim
+/// inside a minute — and every line we send while connected is echoed
+/// locally, so both copies are on screen already and it is the redundant
+/// replays that get skipped.
+const OWN_ECHO_REPLAY_SKEW: chrono::TimeDelta = chrono::TimeDelta::seconds(60);
+
+/// Whether `m` is a row we WROTE ourselves and `candidate` is the server's
+/// replay of that same message.
+///
+/// A local echo — the row written when `echo-message` is unavailable — never
+/// carried a wire identity. It has no `@msgid` to compare, and its timestamp
+/// is OUR clock at the moment of the send while the replay carries the
+/// server's `@time`, so neither exact test in [`history_row_matches`] can
+/// ever match the pair and a reconnect gap-fill splices our own line in a
+/// second time. For a translated row the duplicate is not even a lookalike:
+/// one copy shows the translation with ` [original]`, the other the bare wire
+/// text.
+///
+/// Bounded so it cannot swallow anything else: the row has to be ours, has to
+/// be one we WROTE rather than one that arrived (anything off the wire that
+/// carried tags is excluded), and has to agree on type and on wire text.
+fn own_echo_matches_replay(m: &Message, candidate: &Message, own_nick: Option<&str>) -> bool {
+    let Some(own) = own_nick else { return false };
+    if m.tags.is_some() {
+        return false;
+    }
+    if !m
+        .nick
+        .as_deref()
+        .is_some_and(|n| n.eq_ignore_ascii_case(own))
+        || !candidate
+            .nick
+            .as_deref()
+            .is_some_and(|n| n.eq_ignore_ascii_case(own))
+    {
+        return false;
+    }
+    m.message_type == candidate.message_type
+        && dedup_text(m) == dedup_text(candidate)
+        && (m.timestamp - candidate.timestamp).abs() <= OWN_ECHO_REPLAY_SKEW
+}
+
 /// Whether `m` is the same logical message as `candidate` — the one
 /// comparison for the buffer scan AND the reorder-queue scan, because the
 /// two answering differently is precisely how a replay ends up spliced
 /// beside the row it duplicates.
-fn history_row_matches(m: &Message, candidate: &Message, candidate_key: Option<&str>) -> bool {
+fn history_row_matches(
+    m: &Message,
+    candidate: &Message,
+    candidate_key: Option<&str>,
+    own_nick: Option<&str>,
+) -> bool {
     if let Some(cid) = candidate.tags.as_ref().and_then(|t| t.get("msgid"))
         && let Some(mid) = m.tags.as_ref().and_then(|t| t.get("msgid"))
     {
@@ -2264,23 +2343,30 @@ fn history_row_matches(m: &Message, candidate: &Message, candidate_key: Option<&
     if let (Some(stored), Some(key)) = (m.log_key.as_deref(), candidate_key) {
         return stored == key;
     }
-    m.timestamp == candidate.timestamp
+    if m.timestamp == candidate.timestamp
         && m.nick == candidate.nick
         && m.message_type == candidate.message_type
         // Both sides through `dedup_text`: the in-memory row may be a
         // translation of the very line being replayed, and comparing the
         // display texts would never match, splicing a duplicate in.
         && dedup_text(m) == dedup_text(candidate)
+    {
+        return true;
+    }
+    // Exact timestamps are the wrong test for the one row the client wrote
+    // itself, and only for that row.
+    own_echo_matches_replay(m, candidate, own_nick)
 }
 
 fn buffer_contains_history_row(
     buf: &Buffer,
     candidate: &Message,
     candidate_key: Option<&str>,
+    own_nick: Option<&str>,
 ) -> bool {
     buf.messages
         .iter()
-        .any(|m| history_row_matches(m, candidate, candidate_key))
+        .any(|m| history_row_matches(m, candidate, candidate_key, own_nick))
 }
 
 /// Trim oldest messages from the buffer if it exceeds the (pin-aware) scrollback
@@ -2945,6 +3031,86 @@ pub mod tests {
             texts,
             vec!["good morning".to_string()],
             "the gap-fill row is the line already on screen, translated"
+        );
+    }
+
+    #[test]
+    fn our_own_local_echo_is_not_spliced_again_by_its_server_replay() {
+        // Without `echo-message` the client WRITES its own row, and that row
+        // is the only one in the buffer whose timestamp is our clock rather
+        // than the server's. It carries no `@msgid` either — nothing about it
+        // came off the wire. So both exact tests miss, and a reconnect
+        // gap-fill splices the user's own line in a second time: for a
+        // translated send, once as the translation with ` [original]` and once
+        // as the bare text the network carried.
+        let mut state = make_test_state();
+        let sent_at = Utc::now();
+        let mut echo = Message {
+            log_key: None,
+            id: 1,
+            timestamp: sent_at,
+            message_type: MessageType::Message,
+            nick: Some("testuser".to_string()),
+            nick_mode: None,
+            text: "guten morgen [dzien dobry]".to_string(),
+            highlight: false,
+            event_key: None,
+            event_params: None,
+            log_msg_id: None,
+            log_ref_id: None,
+            tags: None,
+            wire_origin: Some(WireOrigin {
+                text: "guten morgen".to_string(),
+                suffix_at: Some("guten morgen".len()),
+            }),
+        };
+        state.add_message_unshrunk("libera/#rust", echo.clone());
+
+        // The server's replay of that same message: its own @time, its own
+        // @msgid, and the text the NETWORK carried — our translation, without
+        // the original we kept for ourselves.
+        let mut tags = std::collections::HashMap::new();
+        tags.insert("msgid".to_string(), "server-1".to_string());
+        let replay = Message {
+            id: 2,
+            timestamp: sent_at + chrono::TimeDelta::milliseconds(420),
+            text: "guten morgen".to_string(),
+            tags: Some(tags),
+            wire_origin: None,
+            ..echo.clone()
+        };
+        state.surface_history_rows("libera/#rust", vec![replay]);
+
+        let texts: Vec<String> = state.buffers["libera/#rust"]
+            .messages
+            .iter()
+            .map(|m| m.text.clone())
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["guten morgen [dzien dobry]".to_string()],
+            "the replay is the line already on screen, not a second copy"
+        );
+
+        // The window is not a licence to collapse anything that looks alike:
+        // a row from somebody ELSE at a different second is a different
+        // message, and on a server with no msgid the exact timestamp is the
+        // only thing telling two identical lines apart.
+        echo.nick = Some("carol".to_string());
+        echo.text = "no to co".to_string();
+        echo.wire_origin = None;
+        state.add_message_unshrunk("libera/#rust", echo.clone());
+        let mut again = echo;
+        again.timestamp = sent_at + chrono::TimeDelta::seconds(2);
+        state.surface_history_rows("libera/#rust", vec![again]);
+        assert_eq!(
+            state.buffers["libera/#rust"]
+                .messages
+                .iter()
+                .filter(|m| m.text == "no to co")
+                .count(),
+            2,
+            "carol said it twice and both rows stand"
         );
     }
 
@@ -3848,6 +4014,44 @@ mod translate_gate_tests {
                 "zobacz [example.com]".to_string(),
             ],
             "the shrunk NOTICE lands in its reserved place, in order"
+        );
+    }
+
+    #[test]
+    fn rows_away_at_the_shrink_worker_still_count_against_the_ceiling() {
+        // A row dispatched to shrink holds a RESERVATION in the queue — the
+        // same room a raw parked row takes. Counting it only once it comes
+        // back lets a burst of long-URL lines grow the queue to the shrink
+        // CHANNEL's capacity instead of `translate.max_queue`, which is the
+        // memory and display-backlog bound the user actually configured.
+        let (mut state, t_rx) = state_with_translation();
+        std::mem::forget(t_rx);
+        let (shrink_tx, shrink_rx) = mpsc::channel(64);
+        std::mem::forget(shrink_rx);
+        state.shrink_incoming_tx = Some(shrink_tx);
+        state.shrink_incoming_active = true;
+        state.shrink_min_url_length = 10;
+        state.translate_max_queue = 4;
+
+        // One translation in flight parks everything behind it.
+        let pending = make_test_message(&mut state, "hola que tal");
+        state.add_message_with_activity(BUF, pending, ActivityLevel::Activity);
+
+        // …then a burst of NOTICEs that are all eligible for shrink and all
+        // ineligible for translation.
+        for i in 0..20 {
+            let mut notice = make_test_message(
+                &mut state,
+                &format!("zobacz http://example.com/bardzo-dlugi-link-{i}"),
+            );
+            notice.message_type = MessageType::Notice;
+            state.add_message(BUF, notice);
+        }
+
+        assert!(
+            state.translate_queues[BUF].len() <= 4,
+            "the ceiling has to hold while the rows are away: {}",
+            state.translate_queues[BUF].len()
         );
     }
 

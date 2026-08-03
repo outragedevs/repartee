@@ -1024,6 +1024,33 @@ same line arrives carrying the original, and on a msgid-less server nothing matc
 the untranslated copy is spliced in beside the translation. No new column: the log has
 always kept this key, it was simply thrown away on the way back.
 
+### 7.2 The one row whose clock is ours
+
+Every rule above compares identities the WIRE supplied. A local echo — the row written
+for our own send when the server does not offer `echo-message` — has none: no `@msgid`,
+and a timestamp taken from OUR clock at the moment of the send, while the server's
+replay of that same message carries its own `@time`. Both exact tests therefore miss,
+and a reconnect gap-fill splices our own line in a second time; with translation on,
+once as the translation with ` [original]` and once as the bare text the network
+carried.
+
+`own_echo_matches_replay` is the exception written for it, and it is scoped as tightly
+as the failure: only for rows whose nick is OURS, only for rows that never carried
+tags, and only when type and wire text agree, with a 60-second tolerance covering the
+round trip and ordinary clock skew. It cannot affect two identical lines from anybody
+else — on a msgid-less server their exact timestamps are all that tells them apart, and
+that test is untouched.
+
+**Known residue, not translation-specific.** The same mismatch also puts two rows in
+`SQLite`: the echo is stored under a hash of our clock, the replay under the server's
+`@msgid` or a hash of its `@time`, and the unique `(network, msg_id)` index has no
+reason to collapse them. So the duplicate returns when the buffer is reloaded from the
+log. Closing that would mean a fuzzy lookup per ingested CHATHISTORY row, on the
+storage path, plus keeping the `oldest_ingested` watermark honest when a row is skipped
+as already-stored — a change to reconnect backlog accounting that has nothing to do
+with translation and should be specified on its own. It predates this branch and
+affects every local echo, translated or not.
+
 ---
 
 ## 8. Configuration and commands

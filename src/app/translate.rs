@@ -2586,7 +2586,7 @@ impl crate::app::App {
         // "stop sending my lines to a translator", and a switch that only
         // works after a restart is not one a user reaches for when they
         // change their mind mid-conversation. Turning it back ON still needs
-        // the restart the workers were bound in — `warn_if_translate_needs_restart`
+        // the restart the workers were bound in — `warn_if_translate_cannot_run`
         // says so.
         let has_backend = self.translate_backend.is_some();
         // Spelled as "not one of the no-op kinds" so that a real broker added

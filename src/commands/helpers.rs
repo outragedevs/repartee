@@ -56,29 +56,53 @@ pub fn add_local_event(app: &mut App, text: &str) {
     );
 }
 
-/// Say so when the config asks for translation that this process cannot
-/// provide.
+/// Say so when the config asks for translation that this process is not
+/// doing — and say WHICH of the reasons it is.
 ///
-/// The backend and the worker queues are built once in `App::new`, so turning
-/// `translate.enabled` on at runtime — by `/set` or by editing the file and
-/// running `/reload` — cannot materialise one. Both routes have to warn, or
-/// the quieter of the two silently contradicts the documented restart
-/// requirement and the user believes translation is running when it is not.
-/// Shared rather than duplicated for the reason `/reload` and `/set` drifted
-/// apart over typing once already.
-pub fn warn_if_translate_needs_restart(app: &mut App) {
+/// The backend and the worker queues are built once in `App::new`, so NAMING
+/// a translator at runtime — by `/set` or by editing the file and running
+/// `/reload` — cannot materialise one. Both routes have to warn, or the
+/// quieter of the two silently contradicts the documented restart requirement
+/// and the user believes translation is running when it is not. Shared rather
+/// than duplicated for the reason `/reload` and `/set` drifted apart over
+/// typing once already.
+///
+/// Restarting is only ever the answer when a translator IS named. Told to
+/// restart after `/set translate.backend none`, the user restarts into
+/// exactly the same silence — and the advice is worse than useless there,
+/// because it contradicts the thing they just asked for.
+pub fn warn_if_translate_cannot_run(app: &mut App) {
+    use crate::translate::backend::{BackendKind, backend_kind};
     if !app.config.translate.enabled || app.state.translate_active {
         return;
     }
-    add_local_event(
-        app,
-        &format!(
-            "{warn}translate: enabled but no backend was built \
-             at startup — restart to activate{rst}",
-            warn = crate::commands::types::C_ERR,
-            rst = crate::commands::types::C_RST,
+    let warn = crate::commands::types::C_ERR;
+    let rst = crate::commands::types::C_RST;
+    let row = match backend_kind(&app.config.translate.backend) {
+        // Not a contradiction — a config that names no translator and
+        // translates nothing is consistent. Still said out loud, because
+        // `translate.enabled = true` with per-buffer flags set otherwise
+        // looks exactly like a working setup.
+        BackendKind::None => format!(
+            "{warn}translate: enabled, but translate.backend is \"none\" — no \
+             translator is installed, so nothing is translated{rst}"
         ),
-    );
+        BackendKind::Unknown => format!(
+            "{warn}translate: unknown translate.backend \"{name}\" — no \
+             translator is installed. Known: {known}{rst}",
+            name = escape_format(app.config.translate.backend.trim()),
+            known = crate::translate::backend::BACKEND_NAMES.join(", "),
+        ),
+        // Named rather than a wildcard so that adding a real broker to
+        // `BackendKind` stops the compiler here and makes somebody decide
+        // what this says about it, instead of inheriting the stub's wording.
+        BackendKind::Stub => format!(
+            "{warn}translate: {name} is configured but no backend was built \
+             at startup — restart to activate{rst}",
+            name = escape_format(app.config.translate.backend.trim()),
+        ),
+    };
+    add_local_event(app, &row);
 }
 
 #[cfg(test)]

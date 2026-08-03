@@ -135,7 +135,7 @@ pub(crate) fn apply_reloaded_config(app: &mut App, new_config: crate::config::Ap
     // because the backend is bound at startup, so without this the reload
     // reports only "Config reloaded" while translation stays off — exactly
     // the silent no-op `/set translate.enabled` already warns about.
-    super::helpers::warn_if_translate_needs_restart(app);
+    super::helpers::warn_if_translate_cannot_run(app);
     // A hand-edited `[statusbar]` section must reach open tabs too.
     super::handlers_ui::push_statusbar_web_event(app);
 }
@@ -1932,6 +1932,7 @@ mod translate_reload_tests {
 
         let mut reloaded = crate::config::AppConfig::default();
         reloaded.translate.enabled = true;
+        reloaded.translate.backend = "stub".to_string();
         super::apply_reloaded_config(&mut app, reloaded);
 
         assert!(!app.state.translate_active, "and it stayed off");
@@ -1940,6 +1941,40 @@ mod translate_reload_tests {
             "the reload must not report success on a no-op: {:?}",
             rows(&app)
         );
+    }
+
+    #[test]
+    fn reload_does_not_send_the_user_to_restart_into_the_same_silence() {
+        // "Restart to activate" is only ever true when a translator is NAMED.
+        // A config that enables translation while naming none translates
+        // nothing no matter how many times it is restarted, and telling the
+        // user otherwise contradicts what they wrote — most sharply right
+        // after they wrote `backend = "none"` themselves.
+        for backend in ["none", "gogle"] {
+            let mut app = test_app();
+            app.state
+                .add_buffer(crate::state::buffer::Buffer::for_test(
+                    "net",
+                    crate::state::buffer::BufferType::Channel,
+                    "#german",
+                ));
+            app.state.set_active_buffer("net/#german");
+
+            let mut reloaded = crate::config::AppConfig::default();
+            reloaded.translate.enabled = true;
+            reloaded.translate.backend = backend.to_string();
+            super::apply_reloaded_config(&mut app, reloaded);
+
+            let said = rows(&app);
+            assert!(
+                !said.iter().any(|t| t.contains("restart")),
+                "backend={backend} must not advise a restart: {said:?}"
+            );
+            assert!(
+                said.iter().any(|t| t.contains("no translator is installed")),
+                "…but must still say translation is not happening: {said:?}"
+            );
+        }
     }
 
     #[test]

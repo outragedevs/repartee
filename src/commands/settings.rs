@@ -1014,7 +1014,7 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                 // workers that were bound at startup. Warning on only one of
                 // the two switches is how the quieter one comes to lie.
                 if path == "translate.enabled" || path == "translate.backend" {
-                    crate::commands::helpers::warn_if_translate_needs_restart(app);
+                    crate::commands::helpers::warn_if_translate_cannot_run(app);
                 }
             }
 
