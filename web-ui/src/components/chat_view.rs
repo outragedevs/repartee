@@ -1111,12 +1111,15 @@ fn render_body(
 /// Split a body into `(translation, " [original]")` at a server-supplied
 /// offset, or `None` when there is nothing to split.
 ///
-/// Rejects an offset that is out of range, mid-character, or at either end:
-/// each would either panic on the slice or produce an empty half, and the
-/// undimmed line is a perfectly good fallback.
+/// Rejects an offset that is out of range or mid-character: each would
+/// either panic on the slice or dim nothing, and the undimmed line is a
+/// perfectly good fallback. Zero is VALID and dims the whole body — an
+/// empty original marked untranslated carries offset 0, and the TUI dims it
+/// from the start; rejecting it here made the same row render differently
+/// in the two frontends, the divergence this offset exists to prevent.
 fn split_original_suffix(text: &str, orig_offset: Option<usize>) -> Option<(&str, &str)> {
     let at = orig_offset?;
-    if at == 0 || at >= text.len() || !text.is_char_boundary(at) {
+    if at >= text.len() || !text.is_char_boundary(at) {
         return None;
     }
     Some((&text[..at], &text[at..]))
@@ -1280,7 +1283,7 @@ mod tests {
 
     #[test]
     fn an_unusable_offset_leaves_the_line_whole() {
-        // Each of these would panic on the slice or leave one half empty.
+        // Each of these would panic on the slice or dim nothing.
         // Rendering the line undimmed is the right failure.
         let text = "zażółć";
         assert_eq!(split_original_suffix(text, Some(3)), None, "mid-character");
@@ -1290,6 +1293,18 @@ mod tests {
             None,
             "at the end: nothing to dim"
         );
-        assert_eq!(split_original_suffix(text, Some(0)), None, "at the start");
+    }
+
+    #[test]
+    fn offset_zero_dims_the_whole_body_as_the_tui_does() {
+        // An empty original marked untranslated carries suffix offset 0 —
+        // `mark_untranslated("")` yields " [untranslated: …]" dimmed from
+        // the very first byte. The TUI dims it whole; rejecting 0 here had
+        // the browser render the same row at full brightness.
+        assert_eq!(
+            split_original_suffix(" [untranslated: timeout]", Some(0)),
+            Some(("", " [untranslated: timeout]")),
+            "zero is a real boundary, not an unusable offset"
+        );
     }
 }

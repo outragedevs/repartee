@@ -425,6 +425,35 @@ impl TranslateQueue {
             .any(|e| matches!(e.slot, Some(Slot::Reserved { .. })))
     }
 
+    /// Whether THIS queue holds the reservation with `id`.
+    ///
+    /// For the caller that only has the id — a release whose buffer id can
+    /// no longer be resolved because the redirect history aged out.
+    #[must_use]
+    pub fn holds_reservation(&self, id: u64) -> bool {
+        self.entries
+            .iter()
+            .any(|e| e.id == id && matches!(e.slot, Some(Slot::Reserved { .. })))
+    }
+
+    /// Whether any row anywhere in this queue satisfies `f` — pending
+    /// payloads, ready rows, and chunks parked at a reservation alike.
+    ///
+    /// For the CHATHISTORY gap-fill dedup: a line's live copy sits HERE for
+    /// the whole translation wait, invisible to a scan of the buffer, and a
+    /// gap-fill that checks only the buffer splices the same message in a
+    /// second time. A pending payload's `text` is still its wire text —
+    /// resolution has not rewritten it yet — so the same comparison the
+    /// buffer scan uses works unchanged.
+    pub fn any_message(&self, mut f: impl FnMut(&Message) -> bool) -> bool {
+        self.entries.iter().any(|e| match e.slot.as_ref() {
+            Some(Slot::Pending { payload, .. }) => f(&payload.message),
+            Some(Slot::Ready { message, .. }) => f(message),
+            Some(Slot::Reserved { held, .. }) => held.iter().any(|(m, _)| f(m)),
+            None => false,
+        })
+    }
+
     /// End a reservation whose remaining rows will never arrive — a refused
     /// send, a timeout, a flush. Leaving it would block everything queued
     /// behind it.

@@ -476,11 +476,14 @@ impl App {
                 self.send_outgoing_substituted(&out);
             }
             ShrinkDeliver::Incoming(inc) => {
-                // Use the `_unshrunk` variant — text is already
-                // substituted, taking the shrink path again would
-                // loop forever (worker would push back to the
-                // worker queue).
-                self.state.add_message_with_activity_unshrunk(
+                // In order, never a plain append: a row that was PARKED for
+                // ordering when it went to shrink holds a reserved place in
+                // its buffer's reorder queue, and the shrunk text has to
+                // come back exactly where the raw row would have been. The
+                // helper takes the `_unshrunk` delivery underneath — text is
+                // already substituted, and taking the shrink path again
+                // would loop forever.
+                self.state.deliver_shrunk_in_order(
                     &inc.buffer_id,
                     inc.message,
                     inc.activity_level,

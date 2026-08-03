@@ -1011,14 +1011,22 @@ impl crate::app::App {
                 self.resolve_incoming_translation(&buffer_id, outcome, submitted_at);
             }
             TranslateDeliver::Outgoing(mut out) => {
-                // Counted here, once, and before anything can return early.
-                // The outgoing path never goes through the reorder queue's
-                // delivery, so this is the only place its outcome is ever
-                // seen: without it a user running `addout` alone gets a
-                // status page saying nothing has been through the translator
-                // at all — including while every one of their sends is
-                // failing, which is exactly when they would look.
-                self.state.translate_tally.record_outcome(&out.outcome);
+                // An UNTRANSLATED outcome is counted here, once, before any
+                // early return — its reason is the broker's or the
+                // mechanism's own and nothing downstream changes it. The
+                // outgoing path never goes through the reorder queue's
+                // delivery, so this is the only place it is ever seen.
+                //
+                // A TRANSLATED outcome is NOT counted yet: this client may
+                // still refuse the answer itself (an RPE2E-shaped body, a
+                // smuggled control character), and counting those as
+                // successes had `/translate status` reporting a healthy
+                // provider while every send was being refused — the exact
+                // question the tally exists to answer, answered wrong. The
+                // send path records it — see `translated_wire_body`.
+                if matches!(out.outcome, TranslateOutcome::Untranslated { .. }) {
+                    self.state.translate_tally.record_outcome(&out.outcome);
+                }
                 // This send is back, whatever the outcome, so it no longer
                 // holds ordinary sends to its conversation behind it.
                 //
@@ -1044,7 +1052,25 @@ impl crate::app::App {
                     // its new window is gone. Sending under the old NAME is
                     // the one thing that must not happen: somebody else may
                     // hold that nick now, and this is a private message.
-                    self.release_echo_slot_and_drain(&out.buffer_id, out.echo_id);
+                    //
+                    // Released BY ID, wherever it lives. On the Unknown
+                    // verdict `out.buffer_id` is still the pre-rename id,
+                    // but if the conversation really did rename inside the
+                    // wait, `rekey_buffer_state` moved the reservation to
+                    // the NEW id — a release under the old one is a no-op
+                    // and the renamed conversation stays barricaded until
+                    // the queue's expiry. Ids are globally unique, so the
+                    // scan is exact.
+                    if let Some(held_in) = self.state.release_echo_slot_anywhere(out.echo_id) {
+                        self.drain_translate_queue(&held_in);
+                    }
+                    // A refusal of the SEND, not of the answer — the
+                    // translation itself came back fine, so it still counts
+                    // as one. This arm returns before `translated_wire_body`
+                    // (the usual recording point) ever runs.
+                    if matches!(out.outcome, TranslateOutcome::Translated { .. }) {
+                        self.state.translate_tally.record_outcome(&out.outcome);
+                    }
                     self.abandon_with_text(
                         &out,
                         "the conversation it was addressed to is no longer open",
@@ -1248,7 +1274,25 @@ impl crate::app::App {
     /// not-a-gap branch sends the user's own words, which every
     /// non-translated path ships verbatim, and translated buffers must not
     /// hold the user's own prose to a stricter rule.
+    /// Count a Translated answer this client refused to use — "refused
+    /// output" by [`crate::state::TranslateTally`]'s own definition.
+    fn record_refused_answer(&mut self, why: &str) {
+        self.state
+            .translate_tally
+            .record(&crate::translate::queue::ReadyOrigin::Untranslated(
+                UntranslatedReason::Error(why.to_string()),
+            ));
+    }
+
     fn translated_wire_body<'a>(&mut self, out: &'a OutgoingTranslateDeliver) -> Option<&'a str> {
+        // What the tally says about a TRANSLATED outcome is decided here,
+        // not at delivery: an answer refused on content grounds is refused
+        // output, and counting it as translated had `/translate status`
+        // reporting a healthy provider while every send was being refused.
+        // Transport failures further down (connection gone, wire write
+        // failed) deliberately leave the count as translated — the answer
+        // itself came back fine, and the tally reports the TRANSLATOR's
+        // health, not the connection's.
         let body: &str = match &out.outcome {
             TranslateOutcome::Translated { text, .. } => {
                 if reads_as_rpe2e_protocol(text) {
@@ -1256,6 +1300,7 @@ impl crate::app::App {
                         target = %out.buffer_name,
                         "translate: refusing a wire payload shaped like E2E protocol"
                     );
+                    self.record_refused_answer("backend returned E2E protocol text");
                     self.release_echo_slot_and_drain(&out.buffer_id, out.echo_id);
                     self.abandon_with_text(out, "the translation was E2E protocol text");
                     return None;
@@ -1285,9 +1330,15 @@ impl crate::app::App {
                 target = %out.buffer_name,
                 "translate: refusing a wire payload containing a line break or CTCP framing"
             );
+            if matches!(out.outcome, TranslateOutcome::Translated { .. }) {
+                self.record_refused_answer("the translation contained a control character");
+            }
             self.release_echo_slot_and_drain(&out.buffer_id, out.echo_id);
             self.abandon_with_text(out, "the translation contained a control character");
             return None;
+        }
+        if matches!(out.outcome, TranslateOutcome::Translated { .. }) {
+            self.state.translate_tally.record_outcome(&out.outcome);
         }
         Some(body)
     }
@@ -1369,9 +1420,13 @@ impl crate::app::App {
             .connections
             .get(&out.conn_id)
             .is_some_and(|c| c.enabled_caps.contains("echo-message"));
+        // The CONSTANT, never a literal: a bumped wire version would leave a
+        // hardcoded prefix silently not matching, this branch would file
+        // decorations for a ciphertext reflection that is swallowed earlier,
+        // and the user's own message would never appear in their buffer.
         let is_e2e_encrypted = wire_lines
             .first()
-            .is_some_and(|w| w.starts_with("+RPE2E01"));
+            .is_some_and(|w| w.starts_with(crate::e2e::wire::WIRE_PREFIX));
 
         // Recorded rather than reported inline: the message the user gets
         // depends on how far the send got, which is only known after the
@@ -1556,6 +1611,12 @@ impl crate::app::App {
             &out.buffer_id,
             &format!(
                 "{err}Not sent — {reason}.{rst}\n{dim}Your text:{rst} {shown}",
+                // The reason can embed a BROKER-authored string — an
+                // `UntranslatedReason::Error` carries the provider's own
+                // message, and provider errors routinely contain `%`
+                // ("quota 100% used"). Unescaped it reaches the theme
+                // parser as format codes and mangles or recolors the row.
+                reason = escape(reason),
                 err = crate::commands::types::C_ERR,
                 dim = crate::commands::types::C_DIM,
                 rst = crate::commands::types::C_RST,
@@ -1679,6 +1740,10 @@ impl crate::app::App {
                 "{err}Part of the message was sent — the rest was not ({reason}).{rst} \
                  {dim}Not restored to the input line, to avoid sending the \
                  first part twice.{rst}\n{dim}Your text:{rst} {retry}",
+                // Uniform with the other refusal rows — today's callers pass
+                // literals, and the escape is what keeps that from being a
+                // requirement.
+                reason = crate::commands::helpers::escape_format(reason),
                 err = crate::commands::types::C_ERR,
                 dim = crate::commands::types::C_DIM,
                 rst = crate::commands::types::C_RST,
@@ -1983,13 +2048,35 @@ impl crate::app::App {
             // `/me` acts on the active buffer, which is where it came from.
             return format!("/me {body}");
         }
-        let active_is_target = self
-            .state
-            .active_buffer_id
-            .as_ref()
+        // Which composer would take this back is a property of the ORIGIN,
+        // not of the TUI's active buffer. `restore_input_text_to` routes a
+        // web refusal to the web session's recorded buffer, and the two can
+        // disagree: `/query bob <text>` switches the TUI's active buffer to
+        // bob's query BEFORE the gate runs, so judging by the TUI here
+        // returned the bare body while the restore delivered it to the
+        // browser's composer — still sitting on whatever channel the command
+        // was typed into, where Enter would publish the private text. The
+        // form and the destination have to be computed against the SAME
+        // buffer, exactly as `deferred_retry_text` does on the deferred
+        // path.
+        let looking_at = match &self.submit_origin {
+            // Nothing is ever restored for a script; the re-addressed form
+            // below is what the error row shows, and naming the target there
+            // is strictly clearer.
+            SubmitOrigin::Script => None,
+            SubmitOrigin::Tui => self.state.active_buffer_id.as_deref(),
+            SubmitOrigin::Web(session) => {
+                if self.web_buffer_unconfirmed.contains(session) {
+                    None
+                } else {
+                    self.web_active_buffers.get(session).map(String::as_str)
+                }
+            }
+        };
+        let composer_is_target = looking_at
             .and_then(|id| self.state.buffers.get(id))
             .is_some_and(|b| b.name.eq_ignore_ascii_case(target));
-        if active_is_target {
+        if composer_is_target {
             body.to_string()
         } else {
             // Re-addressed explicitly. `/msg` reaches the same destination
@@ -2065,20 +2152,30 @@ impl crate::app::App {
         // is not enough: a composer that is no longer empty keeps what the
         // user is typing now (clobbering it would be a worse surprise), and
         // then the refused message would exist nowhere at all.
-        crate::commands::helpers::add_local_event(
-            self,
-            &format!(
-                "{err}Not sent — {reason}.{rst} {dim}/translate delout this buffer \
-                 to send it as-is.{rst}\n{dim}Your text:{rst} {shown}",
-                err = crate::commands::types::C_ERR,
-                dim = crate::commands::types::C_DIM,
-                rst = crate::commands::types::C_RST,
-                // Escaped: the row is styled by the theme parser, so a `%` the
-                // user typed would be read as a theme code and eaten. The
-                // COMPOSER gets the raw text below — it is not parsed.
-                shown = crate::commands::helpers::escape_format(text),
-            ),
+        //
+        // Through `deliver_translate_error`, not `add_local_event`: the row
+        // has to take its place in the reorder queue when one exists, or it
+        // renders above older lines still waiting on their translations.
+        let row = format!(
+            "{err}Not sent — {reason}.{rst} {dim}/translate delout this buffer \
+             to send it as-is.{rst}\n{dim}Your text:{rst} {shown}",
+            // The reason too: it can quote broker-authored text, and a
+            // `%` in it would be eaten as a theme code — see
+            // `abandon_with_text`.
+            reason = crate::commands::helpers::escape_format(reason),
+            err = crate::commands::types::C_ERR,
+            dim = crate::commands::types::C_DIM,
+            rst = crate::commands::types::C_RST,
+            // Escaped: the row is styled by the theme parser, so a `%` the
+            // user typed would be read as a theme code and eaten. The
+            // COMPOSER gets the raw text below — it is not parsed.
+            shown = crate::commands::helpers::escape_format(text),
         );
+        if let Some(active) = self.state.active_buffer_id.clone() {
+            self.deliver_translate_error(&active, &row);
+        } else {
+            tracing::warn!("translate: refusal with no buffer to report into: {row}");
+        }
         self.restore_input_text_to(text, origin);
         false
     }
@@ -2122,7 +2219,11 @@ impl crate::app::App {
             SubmitOrigin::Tui => {
                 if self.input.value.is_empty() {
                     self.input.value = text.to_string();
-                    self.input.cursor_pos = self.input.value.chars().count();
+                    // `cursor_pos` is a BYTE offset — `ui/input.rs` advances
+                    // it by `len_utf8` and slices `value[..cursor_pos]`. A
+                    // char count lands mid-character on non-ASCII text and
+                    // the next render frame panics on the slice.
+                    self.input.cursor_pos = self.input.value.len();
                 }
             }
         }
@@ -2220,6 +2321,13 @@ impl crate::app::App {
             self.state.release_echo_slot(&out.buffer_id, out.echo_id);
         }
         if !self.state.buffers.contains_key(&echo_buffer) {
+            // No echo will be written, so the place held for it must go
+            // back. The buffer being gone does NOT mean the queue is: a
+            // by-target send to a conversation with no window reserves into
+            // a queue `remove_buffer` never saw, and a `/join` inside the
+            // timeout would park the fresh channel's every line behind the
+            // dead reservation. The caller drains right after this returns.
+            self.state.release_echo_slot(&out.buffer_id, out.echo_id);
             crate::commands::helpers::add_local_event(
                 self,
                 &format!(
@@ -2360,6 +2468,13 @@ impl crate::app::App {
 
     /// Route a translation-pipeline error to the right buffer, falling back
     /// to the active one when the destination is gone.
+    ///
+    /// IN ORDER, through the buffer's reorder queue when one exists — the
+    /// same treatment the day separator gets, for the same reason. This row
+    /// dates the refusal; appended directly it renders ABOVE older lines
+    /// still waiting on their translations, silently reordering the timeline
+    /// on the very row that is often the only surviving copy of the user's
+    /// refused text. With no queue it appears at once, exactly as before.
     fn deliver_translate_error(&mut self, buffer_id: &str, message: &str) {
         let target = if self.state.buffers.contains_key(buffer_id) {
             Some(buffer_id.to_string())
@@ -2370,10 +2485,26 @@ impl crate::app::App {
             tracing::warn!("translate: outgoing error with no target buffer: {message}");
             return;
         };
-        let prior = self.state.active_buffer_id.clone();
-        self.state.active_buffer_id = Some(buf_id);
-        crate::commands::helpers::add_local_event(self, message);
-        self.state.active_buffer_id = prior;
+        let id = self.state.next_message_id();
+        self.state.add_local_message_in_order(
+            &buf_id,
+            crate::state::buffer::Message {
+                log_key: None,
+                id,
+                timestamp: chrono::Utc::now(),
+                message_type: crate::state::buffer::MessageType::Event,
+                nick: None,
+                nick_mode: None,
+                text: message.to_string(),
+                highlight: false,
+                event_key: None,
+                event_params: None,
+                log_msg_id: None,
+                log_ref_id: None,
+                tags: None,
+                wire_origin: None,
+            },
+        );
     }
 
     /// Re-derive every translate mirror on `AppState` from the config.
@@ -2387,6 +2518,17 @@ impl crate::app::App {
     /// the worker queues are bound in `App::new`, so flipping the switch at
     /// runtime cannot materialise one.
     pub(crate) fn sync_translate_from_config(&mut self) {
+        // Normalise the floors HERE, where every config route converges —
+        // startup, `/set`, `/reload`, `/translate add*`. `/set` validates
+        // (500 ms floor on the timeout), but a hand-edited `config.toml`
+        // arrives via serde with no validation at all, and an unfloored
+        // `timeout_ms = 0` reaches the queue tick as `Duration::ZERO`:
+        // every pending line times out on the next tick and every send is
+        // refused — the feature bricked with misleading per-line markers
+        // instead of the validation error `/set` would have shown.
+        self.config.translate.timeout_ms = self.config.translate.timeout_ms.max(500);
+        self.config.translate.max_in_flight = self.config.translate.max_in_flight.max(1);
+        self.config.translate.max_queue = self.config.translate.max_queue.max(1);
         let has_backend = self.translate_backend.is_some();
         self.state.translate_active = self.config.translate.enabled && has_backend;
         self.state
@@ -3208,6 +3350,256 @@ mod app_tests {
         out.buffer_name = "bob".to_string();
         out.buffer_type = BufferType::Query;
         Box::new(out)
+    }
+
+    #[test]
+    fn restored_text_leaves_the_cursor_on_a_char_boundary_at_the_end() {
+        // `cursor_pos` is a BYTE offset — the renderer slices
+        // `value[..cursor_pos]` every frame. A char count lands inside a
+        // multi-byte character and the next render panics, taking the whole
+        // TUI down with the refused message it was handing back.
+        let mut app = app_with_buffer();
+        app.refuse_untranslatable_send("zażółć gęślą jaźń", "no provider");
+        assert_eq!(
+            app.input.cursor_pos,
+            app.input.value.len(),
+            "the cursor sits at the END of the restored text, in bytes"
+        );
+        assert!(app.input.value.is_char_boundary(app.input.cursor_pos));
+    }
+
+    #[test]
+    fn a_web_refusal_readdresses_by_the_web_composers_buffer_not_the_tuis() {
+        // `/query bob <text>` switches the TUI's active buffer to bob
+        // BEFORE the gate runs, so judging "is the composer on the target"
+        // by the TUI said yes and returned the BARE body — while the
+        // restore was routed to the web session's composer, still sitting
+        // on the channel the command was typed into, where Enter publishes
+        // the private text. The form and the destination must be computed
+        // against the same buffer.
+        let mut app = app_with_buffer();
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Query, "bob"));
+        // The TUI — a different head entirely — is looking at bob's query…
+        app.state.set_active_buffer("test/bob");
+        // …but the SUBMITTING web session's composer is on the channel.
+        app.submit_origin = SubmitOrigin::Web("s1".to_string());
+        app.web_active_buffers
+            .insert("s1".to_string(), BUF.to_string());
+        let mut rx = app.web_broadcaster.subscribe();
+
+        let retry = app.retry_form_for("bob", "sekret", false);
+        app.refuse_untranslatable_send(&retry, "no target language set for this buffer");
+
+        match rx.try_recv().expect("the refusal reaches the browser") {
+            crate::web::protocol::WebEvent::RestoreInput {
+                text, buffer_id, ..
+            } => {
+                assert_eq!(
+                    text, "/msg bob sekret",
+                    "re-addressed: the composer that takes this back is NOT \
+                     on bob's query, so a bare body would publish to #dupa"
+                );
+                assert_eq!(buffer_id.as_deref(), Some(BUF));
+            }
+            other => panic!("expected RestoreInput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_echo_for_a_buffer_that_never_existed_still_frees_its_reservation() {
+        // `/translate addout` config outlives its window (`/part` keeps the
+        // entry), and a `/msg` to the parted channel reserves into a queue
+        // `remove_buffer` never saw. Returning from the missing-buffer echo
+        // branch without the release left that reservation barricading the
+        // id — and a `/join` inside the timeout parked the fresh channel's
+        // every line behind it.
+        let mut app = app_with_dying_handle(usize::MAX);
+        app.conn_generations.insert("test".to_string(), 1);
+        app.state.reserve_echo_slot("test/#gone", 1);
+        let mut out = outgoing(
+            "moje zdanie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "mein satz".to_string(),
+            },
+            false,
+        );
+        out.buffer_id = "test/#gone".to_string();
+        out.buffer_name = "#gone".to_string();
+        out.conn_generation = Some(1);
+
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+
+        assert!(
+            !app.state.translate_queues.contains_key("test/#gone"),
+            "the place held for an echo no buffer can take goes back at once"
+        );
+    }
+
+    #[test]
+    fn a_refusal_row_waits_its_turn_behind_lines_still_translating() {
+        // The row dates the refusal. Appended directly it renders ABOVE
+        // older lines still waiting on their translations — silent
+        // reordering on the very row that is often the only surviving copy
+        // of the refused text. With no queue it still appears at once.
+        let mut app = app_with_queue(1);
+        app.state.set_active_buffer(BUF);
+
+        app.refuse_untranslatable_send("tekst", "no provider");
+        assert!(
+            shown(&app).is_empty(),
+            "the row waits for the older line: {:?}",
+            shown(&app)
+        );
+
+        app.apply_translate_deliver(TranslateDeliver::Incoming {
+            buffer_id: BUF.to_string(),
+            outcome: TranslateOutcome::Translated {
+                id: 1,
+                text: "pierwsza".to_string(),
+            },
+            submitted_at: dispatched_long_ago(),
+        });
+        let rows = shown(&app);
+        assert_eq!(rows.len(), 2, "both are out once the head resolves: {rows:?}");
+        assert_eq!(rows[0], "pierwsza", "the older line first");
+        assert!(
+            rows[1].contains("Not sent") && rows[1].contains("tekst"),
+            "the refusal row after it, text intact: {}",
+            rows[1]
+        );
+    }
+
+    #[test]
+    fn a_refusal_that_outlived_the_redirect_history_frees_the_moved_reservation() {
+        // On the Unknown verdict `out.buffer_id` is still the pre-rename
+        // id, but the rename moved the reservation to the NEW id. A release
+        // under the old id is a no-op and the renamed conversation stays
+        // barricaded until the queue's own expiry. Ids are globally unique,
+        // so the release finds it wherever it lives.
+        let mut app = app_with_buffer();
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Query, "bob"));
+        // The reservation lives under bob (post-rename)…
+        let mut queue = TranslateQueue::new();
+        queue.reserve(1);
+        queue.push_resolved(2, message(2, "linia za bariera"), ActivityLevel::Activity);
+        app.state.translate_queues.insert("test/bob".to_string(), queue);
+        // …while the deliver still names alice, dispatched so long ago the
+        // redirect history cannot answer for it any more.
+        let mut out = outgoing(
+            "sekret",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "geheim".to_string(),
+            },
+            false,
+        );
+        out.buffer_id = "test/alice".to_string();
+        out.buffer_name = "alice".to_string();
+        out.buffer_type = BufferType::Query;
+        out.submitted_at = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(301))
+            .expect("301s before now");
+
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(out)));
+
+        let rows: Vec<String> = app.state.buffers["test/bob"]
+            .messages
+            .iter()
+            .map(|m| m.text.clone())
+            .collect();
+        assert_eq!(
+            rows,
+            vec!["linia za bariera".to_string()],
+            "the line behind the moved barrier is delivered now, not at expiry"
+        );
+        assert!(!app.state.translate_queues.contains_key("test/bob"));
+    }
+
+    #[test]
+    fn a_hand_edited_timeout_below_the_floor_is_clamped_at_sync() {
+        // `/set` validates (500 ms floor); a hand-edited config.toml goes
+        // through serde with no validation and an unfloored `timeout_ms = 0`
+        // reaches the queue tick as Duration::ZERO — every pending line
+        // times out on the next tick and every send is refused.
+        let mut app = app_with_buffer();
+        app.config.translate.timeout_ms = 0;
+        app.config.translate.max_in_flight = 0;
+        app.config.translate.max_queue = 0;
+        app.sync_translate_from_config();
+        assert_eq!(app.config.translate.timeout_ms, 500, "the /set floor");
+        assert_eq!(app.config.translate.max_in_flight, 1);
+        assert_eq!(app.config.translate.max_queue, 1);
+    }
+
+    #[test]
+    fn a_brokers_error_text_reads_back_verbatim_in_the_refusal_row() {
+        // The reason quotes broker-authored text, and provider errors
+        // routinely contain `%` ("quota 100% used"). Unescaped it reaches
+        // the theme parser as format codes and the row renders mangled.
+        let mut app = app_with_buffer();
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(outgoing(
+            "moje zdanie",
+            TranslateOutcome::Untranslated {
+                id: 1,
+                reason: crate::translate::UntranslatedReason::Error(
+                    "quota 100% used %N%Z112233".to_string(),
+                ),
+            },
+            false,
+        ))));
+        let row = app.state.buffers[BUF]
+            .messages
+            .back()
+            .expect("the refusal row");
+        assert!(
+            as_rendered(&row.text).contains("quota 100% used %N%Z112233"),
+            "the broker's words survive the theme parser untouched:\n  {}",
+            as_rendered(&row.text)
+        );
+    }
+
+    #[test]
+    fn an_answer_the_client_refused_counts_as_refused_not_translated() {
+        // /translate status exists to tell a provider that is down from a
+        // filter doing its job. Counting an RPE2E-shaped answer as
+        // "translated" reported a healthy provider while every send was
+        // being refused.
+        let mut app = app_with_buffer();
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(outgoing(
+            "moje zdanie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "+RPE2E01 dGFqbmU=".to_string(),
+            },
+            false,
+        ))));
+        assert_eq!(app.state.translate_tally.refused, 1);
+        assert_eq!(
+            app.state.translate_tally.translated, 0,
+            "an answer this client would not use is not a success"
+        );
+    }
+
+    #[test]
+    fn a_transport_refusal_still_counts_the_answer_as_translated() {
+        // The tally reports the TRANSLATOR's health. A good answer whose
+        // SEND failed (connection unavailable here) is still an answer that
+        // came back fine — filing it under refused would smear a healthy
+        // provider for a flaky connection.
+        let mut app = app_with_buffer();
+        app.apply_translate_deliver(TranslateDeliver::Outgoing(Box::new(outgoing(
+            "moje zdanie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "mein satz".to_string(),
+            },
+            false,
+        ))));
+        assert_eq!(app.state.translate_tally.translated, 1);
+        assert_eq!(app.state.translate_tally.refused, 0);
     }
 
     #[test]

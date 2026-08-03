@@ -1456,7 +1456,14 @@ impl App {
                 return self.refuse_untranslatable_send(text, reason);
             }
             crate::app::translate::OutgoingTranslatePolicy::Translate => {
-                let Some(pending) = self.build_outgoing_translate(
+                // ONE dispatch path, shared with the by-target senders. This
+                // arm used to hand-copy `dispatch_by_target_translation` —
+                // reserve, note, try_send, and the release-and-refuse
+                // failure arms — and the reservation-leak class this branch
+                // has fixed repeatedly is exactly what two hand-synchronised
+                // copies of a release protocol breed. The retry form is the
+                // bare text: typed into the buffer, it retries as itself.
+                return self.dispatch_by_target_translation(
                     &crate::app::translate::OutgoingRequest {
                         conn_id: &conn_id,
                         buffer_id: &active_id,
@@ -1468,43 +1475,8 @@ impl App {
                         // Typed into the buffer: the existing echo rule.
                         echo: crate::app::translate::OutgoingEchoPlan::BufferInput,
                     },
-                ) else {
-                    // The policy said translate, so this is a race (the
-                    // buffer closed, or E2E was enabled between the two
-                    // checks). Refuse — it is never permission to send.
-                    return self.refuse_untranslatable_send(
-                        text,
-                        "this conversation can no longer be translated",
-                    );
-                };
-                self.state.reserve_echo_slot(&active_id, pending.echo_id);
-                // The reservation says where the row goes; this says the send
-                // is still out. The queue ceiling may take the first back
-                // while the second is still true.
-                self.state.note_outgoing_dispatch(&active_id);
-                let reserved_id = pending.echo_id;
-                match self.translate_outgoing_tx.try_send(pending) {
-                    // Nothing is on the wire yet, so we must not claim a
-                    // send. The deferred path reports the outcome via
-                    // `note_message_sent`.
-                    Ok(()) => return false,
-                    Err(TrySendError::Full(_)) => {
-                        tracing::warn!("translate: outgoing queue full, refusing to send");
-                        self.state.release_echo_slot(&active_id, reserved_id);
-                        self.state.clear_outgoing_dispatch(&active_id);
-                        return self
-                            .refuse_untranslatable_send(text, "the translation queue is full");
-                    }
-                    Err(TrySendError::Closed(_)) => {
-                        tracing::error!("translate: outgoing worker dead, refusing to send");
-                        self.state.release_echo_slot(&active_id, reserved_id);
-                        self.state.clear_outgoing_dispatch(&active_id);
-                        return self.refuse_untranslatable_send(
-                            text,
-                            "the translation worker has died — restart to restore it",
-                        );
-                    }
-                }
+                    text,
+                );
             }
         }
 

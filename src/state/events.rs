@@ -6,6 +6,16 @@ use crate::state::connection::{Connection, ConnectionStatus};
 use crate::state::sorting::sort_buffers;
 use crate::storage::LogRow;
 
+/// Which arrival gate's shrink rules apply to a row parked for ordering —
+/// see [`AppState::offer_parked_row_to_shrink`].
+#[derive(Clone, Copy)]
+enum ParkedShrinkRules {
+    /// [`AppState::add_message`]'s gate: NOTICEs from a real user only.
+    Notice,
+    /// [`AppState::add_message_with_activity`]'s gate: any chat row.
+    Chat,
+}
+
 impl AppState {
     pub fn new() -> Self {
         Self {
@@ -222,8 +232,12 @@ impl AppState {
         // here mostly for the queue-parking half: a JOIN or a notice arriving
         // while lines are still translating must take its place in the queue
         // rather than render ahead of them.
-        let Some(message) = self.route_through_translation(buffer_id, message, ActivityLevel::None)
-        else {
+        let Some(message) = self.route_through_translation(
+            buffer_id,
+            message,
+            ActivityLevel::None,
+            ParkedShrinkRules::Notice,
+        ) else {
             return;
         };
         // Incoming-shrink dispatch for NOTICEs from a real user (not
@@ -431,7 +445,9 @@ impl AppState {
         // Translation dispatch runs BEFORE shrink: the two are mutually
         // exclusive per line and translation wins. Two external round-trips
         // on one line is worse than losing shrink on a translated buffer.
-        let Some(message) = self.route_through_translation(buffer_id, message, level) else {
+        let Some(message) =
+            self.route_through_translation(buffer_id, message, level, ParkedShrinkRules::Chat)
+        else {
             return true;
         };
         // Incoming shrink: if the message text has URL(s) above the
@@ -515,7 +531,7 @@ impl AppState {
             .with_timezone(&chrono::Local)
             .format("%Y/%m/%d %H:%M:%S")
             .to_string();
-        let mention_text = crate::ui::format_mention_line(
+        let mention_text = crate::state::mention_format::format_mention_line(
             &datetime,
             conn_label,
             target,
@@ -1025,10 +1041,35 @@ impl AppState {
     }
 
     /// Give up a reservation whose message will never arrive.
+    ///
+    /// Prunes the queue when that emptied it. A queue's mere EXISTENCE is
+    /// what routes every later row through it (`route_through_translation`
+    /// gates on `contains_key`), so an empty queue left behind by a
+    /// dispatch-side refusal parks the buffer's next lines — incoming chat,
+    /// JOINs, their mention alerts — until the one-second tick prunes it,
+    /// and on an outgoing-only buffer no incoming outcome will ever arrive
+    /// to drain them sooner.
     pub fn release_echo_slot(&mut self, buffer_id: &str, id: u64) {
         if let Some(queue) = self.translate_queues.get_mut(buffer_id) {
             queue.release_reserved(id);
+            if queue.is_empty() {
+                self.translate_queues.remove(buffer_id);
+            }
         }
+    }
+
+    /// [`Self::release_echo_slot`] when the buffer id the reservation was
+    /// filed under can no longer be resolved — a redirect that outlived its
+    /// history. Message ids are globally unique, so scanning every queue for
+    /// the one holding this reservation is exact; returns the buffer id it
+    /// was found under so the caller can drain what the release unblocked.
+    pub fn release_echo_slot_anywhere(&mut self, id: u64) -> Option<String> {
+        let holder = self
+            .translate_queues
+            .iter()
+            .find_map(|(bid, q)| q.holds_reservation(id).then(|| bid.clone()))?;
+        self.release_echo_slot(&holder, id);
+        Some(holder)
     }
 
     /// Deliver a line we authored ourselves — a deferred local echo.
@@ -1148,6 +1189,7 @@ impl AppState {
         buffer_id: &str,
         message: Message,
         level: ActivityLevel,
+        parked_shrink: ParkedShrinkRules,
     ) -> Option<Message> {
         // A buffer with a non-empty queue takes EVERYTHING through the
         // queue, translatable or not. Otherwise a JOIN renders before the
@@ -1155,6 +1197,12 @@ impl AppState {
         // same failure the queue exists to prevent, from the other side.
         if !self.translate_should_dispatch(buffer_id, &message) {
             if self.translate_queues.contains_key(buffer_id) {
+                // A row parked only for ORDERING still gets its shrink. The
+                // park used to swallow the shrink dispatch outright, so the
+                // same NOTICE rendered shortened or raw depending on whether
+                // a translation happened to be in flight.
+                let message =
+                    self.offer_parked_row_to_shrink(buffer_id, message, level, parked_shrink)?;
                 let id = message.id;
                 let queue = self.translate_queues.get_mut(buffer_id)?;
                 queue.push_resolved(id, message, level);
@@ -1183,6 +1231,111 @@ impl AppState {
             );
         }
         self.dispatch_for_translation(buffer_id, message, level)
+    }
+
+    /// Offer a row that is about to be PARKED for ordering to the incoming
+    /// shrink worker, mirroring the gate it would have passed on an
+    /// unqueued buffer. Returns the message back when shrink is not taking
+    /// it.
+    ///
+    /// Order still has to hold, so the row's place is RESERVED before
+    /// dispatch and the deferred deliver fills it
+    /// ([`Self::deliver_shrunk_in_order`]); on a full or dead worker the
+    /// reservation is taken back and the caller parks the row raw, exactly
+    /// as before.
+    fn offer_parked_row_to_shrink(
+        &mut self,
+        buffer_id: &str,
+        message: Message,
+        level: ActivityLevel,
+        rules: ParkedShrinkRules,
+    ) -> Option<Message> {
+        if !self.shrink_incoming_active {
+            return Some(message);
+        }
+        // Mirrors the two arrival gates precisely — the shrink blocks in
+        // `add_message` (NOTICE rules) and `add_message_with_activity`.
+        let eligible = match rules {
+            ParkedShrinkRules::Notice => {
+                message.message_type == MessageType::Notice
+                    && message.nick.as_deref().is_some_and(|n| !n.is_empty())
+                    && {
+                        let our_nick = self
+                            .buffers
+                            .get(buffer_id)
+                            .and_then(|b| self.connections.get(&b.connection_id))
+                            .map(|c| c.nick.as_str());
+                        !match (our_nick, message.nick.as_deref()) {
+                            (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                            _ => false,
+                        }
+                    }
+            }
+            ParkedShrinkRules::Chat => true,
+        };
+        if !eligible {
+            return Some(message);
+        }
+        let urls =
+            crate::shrink::find_long_urls(&message.text, self.shrink_min_url_length as usize);
+        if urls.is_empty() {
+            return Some(message);
+        }
+        let Some(tx) = self.shrink_incoming_tx.clone() else {
+            return Some(message);
+        };
+        // Reserve BEFORE dispatching, so the shrunk text comes back exactly
+        // where the raw row would have been.
+        let id = message.id;
+        let Some(queue) = self.translate_queues.get_mut(buffer_id) else {
+            return Some(message);
+        };
+        queue.reserve(id);
+        let pending = crate::app::shrink::PendingIncoming {
+            buffer_id: buffer_id.to_string(),
+            message,
+            activity_level: level,
+            urls,
+            push_to_mentions: false,
+        };
+        match tx.try_send(pending) {
+            Ok(()) => None,
+            Err(TrySendError::Full(p) | TrySendError::Closed(p)) => {
+                tracing::warn!("shrink: incoming queue unavailable, parking the row raw");
+                if let Some(queue) = self.translate_queues.get_mut(buffer_id) {
+                    queue.release_reserved(id);
+                }
+                Some(p.message)
+            }
+        }
+    }
+
+    /// Deliver a shrink-worker result, filling the place reserved for it
+    /// when the row was parked for ordering at dispatch.
+    ///
+    /// The reservation may be gone — expired, flushed, or the buffer closed
+    /// — in which case the row is inserted by its id when a queue still
+    /// exists (the id was allocated at arrival, so this keeps it ahead of
+    /// anything newer) and delivered directly otherwise.
+    pub(crate) fn deliver_shrunk_in_order(
+        &mut self,
+        buffer_id: &str,
+        message: Message,
+        level: ActivityLevel,
+    ) {
+        let id = message.id;
+        if let Some(queue) = self.translate_queues.get_mut(buffer_id) {
+            if queue.holds_reservation(id) {
+                let filled = queue.fill_reserved_with(id, vec![(message, level)]);
+                debug_assert!(filled, "the reservation was checked just above");
+                self.drain_translate_ready(buffer_id);
+                return;
+            }
+            queue.insert_resolved_in_order(id, message, level);
+            self.drain_translate_ready(buffer_id);
+            return;
+        }
+        self.add_message_with_activity_unshrunk(buffer_id, message, level);
     }
 
     /// Deliver a line that will not be translated after all, without letting
@@ -1746,7 +1899,18 @@ impl AppState {
                 .as_ref()
                 .map(|(network, buf_name)| storage_identity(network, buf_name, &msg));
             let already_present = match self.buffers.get(buffer_id) {
-                Some(buf) => buffer_contains_history_row(buf, &msg, candidate_key.as_deref()),
+                // The buffer AND the reorder queue: a live copy of this line
+                // can sit in the queue for the whole translation wait, and a
+                // scan of the buffer alone splices the same message in a
+                // second time — raw, ahead of its still-translating twin.
+                Some(buf) => {
+                    buffer_contains_history_row(buf, &msg, candidate_key.as_deref())
+                        || self.translate_queues.get(buffer_id).is_some_and(|q| {
+                            q.any_message(|m| {
+                                history_row_matches(m, &msg, candidate_key.as_deref())
+                            })
+                        })
+                }
                 None => return,
             };
             if already_present {
@@ -2082,35 +2246,41 @@ fn dedup_text(message: &Message) -> &str {
         .map_or(message.text.as_str(), |o| o.text.as_str())
 }
 
+/// Whether `m` is the same logical message as `candidate` — the one
+/// comparison for the buffer scan AND the reorder-queue scan, because the
+/// two answering differently is precisely how a replay ends up spliced
+/// beside the row it duplicates.
+fn history_row_matches(m: &Message, candidate: &Message, candidate_key: Option<&str>) -> bool {
+    if let Some(cid) = candidate.tags.as_ref().and_then(|t| t.get("msgid"))
+        && let Some(mid) = m.tags.as_ref().and_then(|t| t.get("msgid"))
+    {
+        return cid == mid;
+    }
+    // A row read back from the log kept the key it was stored under and
+    // nothing else that identifies the wire: its text is the DISPLAY text,
+    // which for a translated line is not what a replay carries. Comparing
+    // storage keys is the only match left, and it is the same key the
+    // unique (network, msg_id) index already collapses them on.
+    if let (Some(stored), Some(key)) = (m.log_key.as_deref(), candidate_key) {
+        return stored == key;
+    }
+    m.timestamp == candidate.timestamp
+        && m.nick == candidate.nick
+        && m.message_type == candidate.message_type
+        // Both sides through `dedup_text`: the in-memory row may be a
+        // translation of the very line being replayed, and comparing the
+        // display texts would never match, splicing a duplicate in.
+        && dedup_text(m) == dedup_text(candidate)
+}
+
 fn buffer_contains_history_row(
     buf: &Buffer,
     candidate: &Message,
     candidate_key: Option<&str>,
 ) -> bool {
-    let candidate_msgid = candidate.tags.as_ref().and_then(|t| t.get("msgid"));
-    let candidate_text = dedup_text(candidate);
-    buf.messages.iter().any(|m| {
-        if let Some(cid) = candidate_msgid
-            && let Some(mid) = m.tags.as_ref().and_then(|t| t.get("msgid"))
-        {
-            return cid == mid;
-        }
-        // A row read back from the log kept the key it was stored under and
-        // nothing else that identifies the wire: its text is the DISPLAY text,
-        // which for a translated line is not what a replay carries. Comparing
-        // storage keys is the only match left, and it is the same key the
-        // unique (network, msg_id) index already collapses them on.
-        if let (Some(stored), Some(key)) = (m.log_key.as_deref(), candidate_key) {
-            return stored == key;
-        }
-        m.timestamp == candidate.timestamp
-            && m.nick == candidate.nick
-            && m.message_type == candidate.message_type
-            // Both sides through `dedup_text`: the in-memory row may be a
-            // translation of the very line being replayed, and comparing the
-            // display texts would never match, splicing a duplicate in.
-            && dedup_text(m) == candidate_text
-    })
+    buf.messages
+        .iter()
+        .any(|m| history_row_matches(m, candidate, candidate_key))
 }
 
 /// Trim oldest messages from the buffer if it exceeds the (pin-aware) scrollback
@@ -3554,6 +3724,131 @@ mod translate_gate_tests {
 
     fn shown(state: &AppState, buffer_id: &str) -> usize {
         state.buffers[buffer_id].messages.len()
+    }
+
+    #[test]
+    fn releasing_the_only_reservation_prunes_the_queue_it_created() {
+        // A queue's mere existence routes every later row through it, so an
+        // empty one left behind by a dispatch-side refusal parks the
+        // buffer's next lines until the tick prunes it — and on an
+        // outgoing-only buffer no incoming outcome ever arrives to drain
+        // them sooner.
+        let mut state = make_test_state();
+        state.reserve_echo_slot(BUF, 7);
+        assert!(state.translate_queues.contains_key(BUF), "precondition");
+        state.release_echo_slot(BUF, 7);
+        assert!(
+            !state.translate_queues.contains_key(BUF),
+            "an emptied queue must not linger to park the next lines"
+        );
+    }
+
+    #[test]
+    fn a_gap_fill_is_deduped_against_a_line_still_in_the_queue() {
+        // A live line sits in the reorder queue for the whole translation
+        // wait, invisible to a scan of the buffer. A reconnect gap-fill
+        // overlapping it would splice the same message in a second time —
+        // raw, ahead of its still-translating twin — and log it under two
+        // keys on a msgid-less server.
+        let (mut state, rx) = state_with_translation();
+        // Keep the dispatch channel open, or the gate delivers untranslated.
+        std::mem::forget(rx);
+        let mut live = make_test_message(&mut state, "hola que tal");
+        live.tags = Some(std::collections::HashMap::from([(
+            "msgid".to_string(),
+            "m1".to_string(),
+        )]));
+        state.add_message_with_activity(BUF, live, ActivityLevel::Activity);
+        assert!(
+            state.translate_queues.contains_key(BUF),
+            "precondition: the live copy is pending translation"
+        );
+        assert_eq!(shown(&state, BUF), 0);
+
+        let mut replay = make_test_message(&mut state, "hola que tal");
+        replay.tags = Some(std::collections::HashMap::from([(
+            "msgid".to_string(),
+            "m1".to_string(),
+        )]));
+        state.surface_history_rows(BUF, vec![replay]);
+
+        assert_eq!(
+            shown(&state, BUF),
+            0,
+            "the replay's live copy is still translating; splicing it in \
+             would show the message twice"
+        );
+    }
+
+    #[test]
+    fn a_notice_parked_for_ordering_still_goes_through_shrink_in_place() {
+        // A non-empty reorder queue used to skip incoming shrink entirely
+        // for rows parked only for ordering: the same NOTICE rendered
+        // shortened or raw depending on whether a translation happened to
+        // be in flight. The row's place is reserved while it is at the
+        // worker, so the shrunk text comes back exactly where the raw row
+        // would have been.
+        let (mut state, t_rx) = state_with_translation();
+        std::mem::forget(t_rx);
+        let (shrink_tx, mut shrink_rx) = mpsc::channel(4);
+        state.shrink_incoming_tx = Some(shrink_tx);
+        state.shrink_incoming_active = true;
+        state.shrink_min_url_length = 10;
+
+        // A translation in flight parks everything behind it.
+        let pending_line = make_test_message(&mut state, "hola que tal");
+        let pending_id = pending_line.id;
+        state.add_message_with_activity(BUF, pending_line, ActivityLevel::Activity);
+
+        // A user NOTICE with a long URL arrives while the queue is
+        // non-empty.
+        let mut notice =
+            make_test_message(&mut state, "zobacz http://example.com/bardzo-dlugi-link");
+        notice.message_type = MessageType::Notice;
+        let notice_id = notice.id;
+        state.add_message(BUF, notice);
+
+        let handed = shrink_rx
+            .try_recv()
+            .expect("the parked NOTICE still reaches the shrink worker");
+        assert_eq!(handed.message.id, notice_id);
+        assert!(
+            state.translate_queues[BUF].holds_reservation(notice_id),
+            "and its place is held while it is away"
+        );
+
+        // The worker returns the substituted text; the row takes its held
+        // place — after the still-translating line, never before it.
+        let mut shrunk = handed.message;
+        shrunk.text = "zobacz [example.com]".to_string();
+        state.deliver_shrunk_in_order(BUF, shrunk, handed.activity_level);
+        assert_eq!(
+            shown(&state, BUF),
+            0,
+            "still behind the pending head — order holds"
+        );
+
+        state
+            .translate_queues
+            .get_mut(BUF)
+            .expect("queue")
+            .resolve(pending_id, Ok("czesc".to_string()));
+        state.drain_translate_ready(BUF);
+        let texts: Vec<String> = state.buffers[BUF]
+            .messages
+            .iter()
+            .map(|m| m.text.clone())
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                // `show_original_in` is on by default, so the resolved line
+                // carries its original in brackets.
+                "czesc [hola que tal]".to_string(),
+                "zobacz [example.com]".to_string(),
+            ],
+            "the shrunk NOTICE lands in its reserved place, in order"
+        );
     }
 
     #[test]

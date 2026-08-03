@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 pub mod buffer;
 pub mod connection;
 pub mod events;
+pub mod mention_format;
 pub mod sorting;
 pub mod typing;
 
