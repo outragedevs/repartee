@@ -2832,6 +2832,22 @@ fn handle_quit(
         push_typing_web_event(state, &buf_id);
     }
 
+    // A translated private message may be in the worker right now, addressed
+    // to this nick. A rename is answerable — the conversation moved and is
+    // followed — but a quit answers nothing: the server simply frees the
+    // name, and the next person to ask for it gets it. Sending immediately
+    // races that by milliseconds; holding the text for a translation makes
+    // the race seconds wide, so the mechanism that opened it has to record
+    // the fact. Recorded BEFORE the ignore and netsplit returns below: those
+    // decide what is shown, and this is about who the name means.
+    //
+    // Only for a conversation with a send actually in flight, so a netsplit's
+    // thousand quits do not become a thousand entries.
+    let query_id = crate::state::buffer::make_buffer_id(conn_id, &nick);
+    if state.has_outgoing_in_flight(&query_id, AppState::redirect_ttl()) {
+        state.note_query_departure(&query_id);
+    }
+
     // --- Ignore check ---
     if should_ignore(
         &state.ignores,
@@ -2942,6 +2958,17 @@ fn rename_query_buffers(
         if let Some(mut buf) = state.buffers.shift_remove(buf_id) {
             buf.name = new_nick.to_string();
             buf.id.clone_from(&new_buf_id);
+            // The nick being renamed ONTO may still hold a previous
+            // conversation, queue and all — somebody who quit or renamed away
+            // moments ago, with lines the network delivered still waiting on
+            // their translations. The insert below replaces that window
+            // wholesale, so the queue must be dealt with FIRST and while its
+            // own conversation is still the one at this id: released normally
+            // it would print, log and broadcast one person's private lines
+            // inside another's window. `rekey_buffer_state` releases a stale
+            // queue for the callers that do not replace the buffer; this one
+            // does, so it retires it instead.
+            state.retire_translate_queue(&new_buf_id);
             state.buffers.insert(new_buf_id.clone(), buf);
             if state.active_buffer_id.as_deref() == Some(buf_id.as_str()) {
                 state.active_buffer_id.clone_from(&Some(new_buf_id.clone()));
@@ -11252,6 +11279,60 @@ mod tests {
             vec!["alice"],
             "a QUIT on one network says nothing about the other"
         );
+    }
+
+    #[test]
+    fn a_quit_invalidates_a_private_message_still_in_the_translator() {
+        // A rename can be followed; a quit cannot. The server frees the nick
+        // there and then, and the next person to ask for it gets it — so a
+        // translated private message finishing a few seconds later would be
+        // addressed to whoever that turned out to be.
+        //
+        // Recorded whatever the display rules say: an ignored quit and a
+        // netsplit quit free the name exactly as loudly as any other.
+        for ignored in [false, true] {
+            let mut state = make_test_state();
+            state.add_buffer(make_channel_buffer("test", "#rust"));
+            handle_irc_message(
+                &mut state,
+                "test",
+                &":alice!u@h JOIN #rust\r\n".parse::<IrcMessage>().expect("valid"),
+            );
+            if ignored {
+                ignore(&mut state, "alice", vec![IgnoreLevel::All]);
+            }
+            let dispatched = std::time::Instant::now();
+            state.note_outgoing_dispatch("test/alice");
+
+            let quit: IrcMessage = ":alice!u@h QUIT :bye\r\n".parse().expect("valid");
+            handle_irc_message(&mut state, "test", &quit);
+
+            assert!(
+                state.query_departed_since("test/alice", dispatched),
+                "ignored={ignored}: the send in the translator was addressed \
+                 to a name that has just been freed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quit_with_nothing_in_flight_is_not_recorded() {
+        // The record exists for one question — "may this pending send still
+        // be addressed to that name" — and nothing else asks it. Writing one
+        // per quitting nick would turn a netsplit into thousands of entries
+        // that answer a question nobody has.
+        let mut state = make_test_state();
+        state.add_buffer(make_channel_buffer("test", "#rust"));
+        handle_irc_message(
+            &mut state,
+            "test",
+            &":alice!u@h JOIN #rust\r\n".parse::<IrcMessage>().expect("valid"),
+        );
+        let before = std::time::Instant::now();
+        let quit: IrcMessage = ":alice!u@h QUIT :bye\r\n".parse().expect("valid");
+        handle_irc_message(&mut state, "test", &quit);
+        assert!(!state.query_departed_since("test/alice", before));
+        assert!(state.query_departures.is_empty());
     }
 
     #[test]

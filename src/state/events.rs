@@ -44,6 +44,7 @@ impl AppState {
             outgoing_in_flight: std::collections::HashMap::new(),
             own_echo_decorations: std::collections::HashMap::new(),
             buffer_redirects: std::collections::HashMap::new(),
+            query_departures: std::collections::HashMap::new(),
             pending_buffer_rekeys: Vec::new(),
             log_exclude_types: Vec::new(),
             scrollback_limit: 2000,
@@ -888,6 +889,81 @@ impl AppState {
             BufferRedirect::Unknown
         } else {
             BufferRedirect::Stays
+        }
+    }
+
+    /// Note that the peer of a query LEFT the network.
+    ///
+    /// See [`AppState::query_departures`]. Recorded whatever the display
+    /// rules say about the QUIT itself — an ignored quit and a netsplit quit
+    /// free the nick exactly as loudly as any other, and this is a fact about
+    /// identity, not a message.
+    pub fn note_query_departure(&mut self, buffer_id: &str) {
+        let now = std::time::Instant::now();
+        self.query_departures
+            .retain(|_, at| now.duration_since(*at) < Self::REDIRECT_TTL);
+        self.query_departures.insert(buffer_id.to_string(), now);
+    }
+
+    /// Whether the peer of `buffer_id` left after work was dispatched against
+    /// it — the window in which a translation, and only a translation, is
+    /// still holding the user's text.
+    ///
+    /// A departure recorded BEFORE the dispatch is deliberately not a refusal:
+    /// text typed into a query whose peer had already gone is the same gamble
+    /// with or without translation, and turning that into a refusal would be a
+    /// policy for the whole client rather than for this mechanism.
+    #[must_use]
+    pub fn query_departed_since(
+        &self,
+        buffer_id: &str,
+        dispatched_at: std::time::Instant,
+    ) -> bool {
+        self.query_departures
+            .get(buffer_id)
+            .is_some_and(|at| *at >= dispatched_at)
+    }
+
+    /// Take the queue away from an id whose CONVERSATION is being replaced,
+    /// writing what it held to the log and showing none of it.
+    ///
+    /// The rows belong to whoever held this nick until a moment ago, and the
+    /// window that could have shown them is being handed to somebody else in
+    /// the same breath — so delivering them normally would print one person's
+    /// private lines inside another's conversation, log them there, and
+    /// broadcast them to every open web tab under that id.
+    ///
+    /// Dropping them outright is not the answer either: the network delivered
+    /// them and the log is the record of what was said. The log is keyed by
+    /// the NAME, which both occupants share, so a row written there is
+    /// indistinguishable from any other line that nick sent — which is the
+    /// truth of the situation rather than a compromise.
+    pub fn retire_translate_queue(&mut self, buffer_id: &str) {
+        let Some(mut queue) = self.translate_queues.remove(buffer_id) else {
+            return;
+        };
+        let ready = queue.flush_all();
+        if ready.is_empty() {
+            return;
+        }
+        tracing::warn!(
+            buffer_id,
+            count = ready.len(),
+            "translate: the nick was taken over; logging its queued lines \
+             without showing them in the new conversation"
+        );
+        for entry in ready {
+            self.translate_tally.record(&entry.origin);
+            // Only rows that would have been logged on the way out. A
+            // transient placeholder or a local notice is display-only by
+            // contract, and a contract does not change because the window
+            // did.
+            if matches!(
+                entry.delivery,
+                crate::translate::queue::ReadyDelivery::Logged
+            ) {
+                let _stored = self.maybe_log(buffer_id, &entry.message);
+            }
         }
     }
 
@@ -3821,6 +3897,80 @@ mod translate_gate_tests {
             state.translate_queues["libera/frankie"].has_reservation(),
             "and the moved queue is installed with its reservation intact"
         );
+    }
+
+    #[test]
+    fn a_taken_over_nick_does_not_pour_the_old_conversation_into_the_new_one() {
+        // The other half of the test above, and the half that decides whose
+        // private lines a user reads. `rename_query_buffers` REPLACES the
+        // buffer at the new id before any of the queue handling runs, so by
+        // the time the stale queue is released the window under it belongs to
+        // somebody else — and releasing it normally prints the previous
+        // occupant's private lines in the new person's conversation, logs
+        // them there, and broadcasts them to every open web tab.
+        //
+        // They are not dropped either: the network delivered them and the log
+        // is the record of what was said. The log is keyed by the NAME, which
+        // both occupants share, so a row written there is indistinguishable
+        // from any other line that nick sent.
+        let (log_tx, mut log_rx) = mpsc::channel(16);
+        let mut state = make_test_state();
+        state.log_tx = Some(log_tx);
+        state.add_buffer(crate::state::buffer::Buffer::for_test(
+            "libera",
+            crate::state::buffer::BufferType::Query,
+            "frank",
+        ));
+        state.add_buffer(crate::state::buffer::Buffer::for_test(
+            "libera",
+            crate::state::buffer::BufferType::Query,
+            "bob",
+        ));
+
+        // Old frank's line, still waiting on its translation.
+        let mut leftover = crate::translate::queue::TranslateQueue::new();
+        let line = make_test_message(&mut state, "sekret starego franka");
+        leftover.push_pending(
+            line.id,
+            line.text.clone(),
+            crate::translate::queue::PendingPayload {
+                message: line,
+                activity: ActivityLevel::Activity,
+                show_original: false,
+            },
+        );
+        state
+            .translate_queues
+            .insert("libera/frank".to_string(), leftover);
+
+        // bob renames onto the nick frank left behind.
+        crate::irc::events::rename_query_buffers_for_test(
+            &mut state,
+            "libera",
+            "bob",
+            "frank",
+            &["libera/bob".to_string()],
+        );
+
+        let shown: Vec<String> = state.buffers["libera/frank"]
+            .messages
+            .iter()
+            .map(|m| m.text.clone())
+            .collect();
+        assert!(
+            shown.is_empty(),
+            "the new occupant's window must not be handed the old one's \
+             private lines: {shown:?}"
+        );
+        assert!(
+            !state
+                .pending_web_events
+                .iter()
+                .any(|e| matches!(e, crate::web::protocol::WebEvent::NewMessage { .. })),
+            "and no web tab may be sent them either"
+        );
+        let logged = log_rx.try_recv().expect("the line still reaches the log");
+        assert_eq!(logged.text, "sekret starego franka [untranslated: timeout]");
     }
 
     #[test]

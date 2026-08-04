@@ -168,6 +168,16 @@ the message is refused and handed back rather than sent to a name that is no
 longer theirs. The saved setting still names the nick you typed, so it is
 that name a restart looks for.
 
+If they **quit** instead of renaming, nothing can be followed: the server
+frees the nick there and then, and the next person to ask for it gets it. A
+private message still being translated when that happens is refused and handed
+back rather than addressed to a name that may already mean somebody else.
+Sending without translation races the same reassignment by milliseconds; a
+translation makes the gap seconds wide, so the mechanism that opened it is the
+one that closes it. Text you type *after* they have gone is sent as it always
+was — that is the same gamble with or without translation, and not this
+feature's to refuse.
+
 That tracking has a horizon of **five minutes**. A private message whose
 translation comes back later than that is refused and handed back: the nick it
 was addressed to can no longer be shown to still mean the same person. This is

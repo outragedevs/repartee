@@ -322,6 +322,23 @@ pub struct AppState {
     /// window. Each era carries the window it covers, and a result is matched
     /// against the era that was current when it was dispatched.
     pub buffer_redirects: HashMap<String, Vec<RedirectEra>>,
+    /// Query ids whose peer LEFT the network, `id -> when`.
+    ///
+    /// A rename is answerable — the conversation moved and can be followed.
+    /// A quit is not: the nick is simply freed, and the next person to ask
+    /// the server for it gets it, with nothing recorded anywhere that says
+    /// the name now means somebody else.
+    ///
+    /// Sending immediately races that by milliseconds. A translated private
+    /// message holds the user's text for as long as the provider takes and
+    /// then addresses the name it was written to, so the race becomes seconds
+    /// wide — long enough to matter, and opened by the translation itself.
+    /// This record is what lets the delivery refuse instead of guessing.
+    ///
+    /// Written only for conversations with a send actually in the translator,
+    /// so a netsplit's thousand quits do not become a thousand entries, and
+    /// pruned on the same horizon as `buffer_redirects`.
+    pub query_departures: HashMap<String, std::time::Instant>,
     /// Query buffers re-keyed by a peer's nick change, as `(old_id, new_id)`.
     ///
     /// Drained by the App after each IRC message, the same way

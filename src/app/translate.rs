@@ -1139,6 +1139,28 @@ impl crate::app::App {
     /// nick its owner no longer answers to — and if somebody else has claimed
     /// it in the meantime, to a stranger.
     fn redirect_outgoing_deliver(&self, out: &mut OutgoingTranslateDeliver) -> RedirectVerdict {
+        // The recipient LEFT while this was being translated. Nothing points
+        // anywhere — a quit is not a move — but the nick it was written to is
+        // free from that moment, and the next person to ask the server for it
+        // gets it. Sending now would hand private text to whoever that is.
+        //
+        // A channel is exempt for the reason it is exempt below: `#dupa`
+        // cannot be claimed, and the "peer" of a channel quitting means
+        // nothing about the channel.
+        if out.buffer_type != crate::state::buffer::BufferType::Channel
+            && self
+                .state
+                .query_departed_since(&out.buffer_id, out.submitted_at)
+        {
+            tracing::warn!(
+                buffer_id = %out.buffer_id,
+                "translate: the recipient quit during the wait; refusing the send"
+            );
+            return RedirectVerdict::Refuse(
+                "its recipient left the network while it was being translated, \
+                 so the nick may since have been taken by somebody else",
+            );
+        }
         let new_id = match self
             .state
             .redirected_buffer_id(&out.buffer_id, out.submitted_at)
@@ -4671,6 +4693,71 @@ mod app_tests {
                 RedirectVerdict::Refuse(_)
             ),
             "an unanswerable redirect must not fall through to the old name"
+        );
+    }
+
+    #[test]
+    fn a_recipient_who_quit_mid_translation_gets_nothing_sent_to_their_nick() {
+        // The nick was freed the moment they quit and belongs to whoever
+        // asked for it next. Nothing points anywhere — a quit is not a move,
+        // so the redirect machinery has no era to offer and would answer
+        // `Stays`, which here means "send it to that name" and is exactly the
+        // wrong answer.
+        let mut app = app_with_buffer();
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Query, "frank"));
+        let mut out = outgoing(
+            "sekret",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "geheim".to_string(),
+            },
+            false,
+        );
+        out.buffer_id = "test/frank".to_string();
+        out.buffer_name = "frank".to_string();
+        out.buffer_type = BufferType::Query;
+
+        // Nobody has left yet: this is an ordinary send.
+        assert_eq!(
+            app.redirect_outgoing_deliver(&mut out),
+            RedirectVerdict::Proceed,
+            "precondition: without a departure it goes"
+        );
+
+        app.state.note_query_departure("test/frank");
+        assert!(
+            matches!(
+                app.redirect_outgoing_deliver(&mut out),
+                RedirectVerdict::Refuse(_)
+            ),
+            "they left while it was being translated — the name is no longer \
+             proof of who receives it"
+        );
+
+        // The boundary, stated on purpose: a departure from BEFORE the send
+        // was written is not this mechanism's to refuse. Typing into a query
+        // whose peer had already gone is the same gamble with or without
+        // translation, and an immediate client sends it too.
+        out.submitted_at = std::time::Instant::now();
+        assert_eq!(
+            app.redirect_outgoing_deliver(&mut out),
+            RedirectVerdict::Proceed
+        );
+
+        // And a channel is not a nick: nobody can claim `#dupa`.
+        let mut chan = outgoing(
+            "moje zdanie",
+            TranslateOutcome::Translated {
+                id: 2,
+                text: "mein satz".to_string(),
+            },
+            false,
+        );
+        app.state.note_query_departure(BUF);
+        assert_eq!(
+            app.redirect_outgoing_deliver(&mut chan),
+            RedirectVerdict::Proceed
         );
     }
 

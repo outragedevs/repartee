@@ -416,6 +416,53 @@ the five minutes of rename history kept for it. The incoming path treats `Unknow
 "stays put" instead, because nothing is sent from there — the outcome simply lands
 nowhere and the queue's expiry releases the line.
 
+`Unknown` refuses for a **query**, and only for a query. A channel id cannot move:
+`rename_query_buffers` is the sole producer of eras and it skips everything that is not
+a Query, so `Unknown` on a channel is the absence of a question rather than doubt about
+the answer. `#dupa` is `#dupa` — the name cannot be claimed out from under a send the
+way an abandoned nick can — and refusing there threw away a channel line that was always
+safe to send. The exemption is written as a whitelist so that any buffer type added
+later inherits the fail-closed side.
+
+### 3.6.1 A quit is not a move
+
+A rename can be followed. A **quit** cannot: the server frees the nick there and then,
+and the next person to ask for it gets it, with nothing recorded anywhere that says the
+name has changed hands. An immediate send races that reassignment by milliseconds; a
+translated one holds the user's private text for as long as the provider takes and then
+addresses the name it was written to, so the race becomes seconds wide — and it is the
+mechanism's own latency that opened it.
+
+`AppState::query_departures` records the departure of a query's peer, and the outgoing
+delivery refuses when it happened AFTER the send was dispatched. Written only for
+conversations with a send actually in the translator (the same in-flight marker §3.6
+uses), so a netsplit's thousand quits do not become a thousand entries, and pruned on
+the same horizon as the redirects.
+
+A departure recorded BEFORE the dispatch is deliberately not a refusal. Text typed into
+a query whose peer had already gone is the same gamble with or without translation — an
+immediate client sends it too — and turning that into a refusal would be a policy for
+the whole client rather than for this mechanism.
+
+### 3.6.2 A nick taken over is not the same conversation
+
+`rename_query_buffers` REPLACES the buffer at the new id: somebody renaming onto a nick
+whose previous occupant still has a window destroys that window in the same statement.
+If that occupant also had a translation queue, releasing it afterwards prints their
+private lines inside the new person's conversation, logs them there, and broadcasts them
+to every open web tab under that id.
+
+So the stale queue is **retired** before the replacement rather than released:
+`retire_translate_queue` writes what it held to the log and shows none of it. Dropping
+it outright is not the answer — the network delivered those lines and the log is the
+record of what was said — and the log is keyed by the NAME, which both occupants share,
+so a row written there is indistinguishable from any other line that nick sent. That is
+the truth of the situation rather than a compromise.
+
+`rekey_buffer_state` still RELEASES a stale queue for the callers that do not replace a
+buffer (the closed-window path), where the window under the id still belongs to the
+conversation whose lines those are.
+
 A peer who renames twice repoints the first era to the new destination but keeps
 its ORIGINAL window. The timestamp answers "which work does this apply to", and
 that was settled by the rename that created it; a second rename changes only where the
