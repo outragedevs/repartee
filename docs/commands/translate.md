@@ -168,6 +168,14 @@ the message is refused and handed back rather than sent to a name that is no
 longer theirs. The saved setting still names the nick you typed, so it is
 that name a restart looks for.
 
+That tracking has a horizon of **five minutes**. A private message whose
+translation comes back later than that is refused and handed back: the nick it
+was addressed to can no longer be shown to still mean the same person. This is
+only reachable with a `translate.timeout_ms` above five minutes, which is far
+past any sane provider budget — the default is five *seconds*. Channels are
+never affected, in any configuration: a channel name cannot change hands, so
+there is nothing to trace and nothing to doubt.
+
 ## When translation does not happen
 
 A line that was not translated is shown as its original, marked with the

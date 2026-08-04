@@ -137,10 +137,12 @@ enum RedirectVerdict {
     /// Send it — either nothing moved, or the deliver was pointed at where
     /// the conversation is now.
     Proceed,
-    /// Refuse. The conversation moved and its window is gone, so the only
-    /// name left to address is the abandoned one, which somebody else may
-    /// hold.
-    Refuse,
+    /// Refuse, carrying what to tell the user. The two refusals have
+    /// genuinely different causes — the conversation moved and its window is
+    /// gone, or we can no longer tell whether it moved at all — and the row
+    /// they produce is routinely the last copy of the user's text, so it had
+    /// better not describe the wrong one.
+    Refuse(&'static str),
 }
 
 /// How a translated outgoing message should echo locally.
@@ -1097,7 +1099,7 @@ impl crate::app::App {
                     }
                 };
                 self.state.clear_outgoing_dispatch(&marker_id);
-                if self.redirect_outgoing_deliver(&mut out) == RedirectVerdict::Refuse {
+                if let RedirectVerdict::Refuse(why) = self.redirect_outgoing_deliver(&mut out) {
                     // The conversation this was addressed to has moved and
                     // its new window is gone. Sending under the old NAME is
                     // the one thing that must not happen: somebody else may
@@ -1121,10 +1123,7 @@ impl crate::app::App {
                     if matches!(out.outcome, TranslateOutcome::Translated { .. }) {
                         self.state.translate_tally.record_outcome(&out.outcome);
                     }
-                    self.abandon_with_text(
-                        &out,
-                        "the conversation it was addressed to is no longer open",
-                    );
+                    self.abandon_with_text(&out, why);
                     return;
                 }
                 self.send_outgoing_translated(&out);
@@ -1147,23 +1146,46 @@ impl crate::app::App {
             crate::state::BufferRedirect::Stays => return RedirectVerdict::Proceed,
             crate::state::BufferRedirect::MovedTo(id) => id.to_string(),
             crate::state::BufferRedirect::Unknown => {
+                // A CHANNEL cannot have moved. Only `rename_query_buffers`
+                // ever re-keys a buffer and it skips everything that is not a
+                // Query, so no channel id has ever had a redirect era — which
+                // makes `Unknown` here not doubt about where the conversation
+                // went but the absence of a question. `#dupa` is `#dupa`: the
+                // name cannot be claimed out from under the send the way an
+                // abandoned nick can. Refusing dropped a line that was always
+                // safe to send, and only for a `translate.timeout_ms` above
+                // the five-minute redirect horizon — which nothing forbids.
+                //
+                // Everything else stays fail-closed, INCLUDING any buffer type
+                // added later: refusing a channel line costs a refusal row
+                // with the text handed back, and sending a private line to
+                // whoever now holds that nick costs the message.
+                if out.buffer_type == crate::state::buffer::BufferType::Channel {
+                    return RedirectVerdict::Proceed;
+                }
+
                 // We cannot say whether this conversation moved: the request
                 // outlived the redirect history, which `translate.timeout_ms`
                 // is free to allow. Sending under the recorded NAME is the one
                 // thing that must not happen — somebody may hold that nick
-                // now, and this may be a private message.
+                // now, and this is a private message.
                 tracing::warn!(
                     buffer_id = %out.buffer_id,
                     "translate: send outlived the redirect history; refusing it"
                 );
-                return RedirectVerdict::Refuse;
+                return RedirectVerdict::Refuse(
+                    "it waited longer than this conversation can be traced, so \
+                     the nick it was addressed to can no longer be trusted",
+                );
             }
         };
         let Some(new_name) = self.state.buffers.get(&new_id).map(|b| b.name.clone()) else {
             // Renamed, then closed. The old NAME must not be used either way
             // — somebody may hold that nick now — so this cannot fall through
             // to the ordinary send. Refuse and hand the text back.
-            return RedirectVerdict::Refuse;
+            return RedirectVerdict::Refuse(
+                "the conversation it was addressed to is no longer open",
+            );
         };
         tracing::debug!(
             from = %out.buffer_id,
@@ -4638,14 +4660,70 @@ mod app_tests {
         );
         out.buffer_id = "test/frank".to_string();
         out.buffer_name = "frank".to_string();
+        out.buffer_type = BufferType::Query;
         out.submitted_at = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs(600))
             .expect("600s before now");
 
+        assert!(
+            matches!(
+                app.redirect_outgoing_deliver(&mut out),
+                RedirectVerdict::Refuse(_)
+            ),
+            "an unanswerable redirect must not fall through to the old name"
+        );
+    }
+
+    #[test]
+    fn a_channel_send_is_not_refused_for_a_redirect_that_could_never_exist() {
+        // Only `rename_query_buffers` ever re-keys a buffer, and it skips
+        // everything that is not a Query — so no channel id has ever had a
+        // redirect era. Past the five-minute horizon `redirected_buffer_id`
+        // answers `Unknown` for want of history rather than for want of an
+        // answer, and refusing on it threw away a channel line that was
+        // always safe to send.
+        //
+        // Reachable for any `translate.timeout_ms` above that horizon, which
+        // nothing forbids: the send's own deadline is the timeout, so a
+        // translation back at six minutes on a ten-minute budget is still
+        // inside every rule the user configured.
+        let app = app_with_buffer();
+        let mut out = outgoing(
+            "moje zdanie",
+            TranslateOutcome::Translated {
+                id: 1,
+                text: "mein satz".to_string(),
+            },
+            false,
+        );
+        out.submitted_at = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(600))
+            .expect("600s before now");
+        assert_eq!(
+            app.state
+                .redirected_buffer_id(&out.buffer_id, out.submitted_at),
+            crate::state::BufferRedirect::Unknown,
+            "precondition: the horizon really has passed"
+        );
+
         assert_eq!(
             app.redirect_outgoing_deliver(&mut out),
-            RedirectVerdict::Refuse,
-            "an unanswerable redirect must not fall through to the old name"
+            RedirectVerdict::Proceed,
+            "#dupa is #dupa — nobody can claim it out from under the send"
+        );
+        assert_eq!(out.buffer_id, BUF, "and it is still addressed where it was");
+
+        // The same wait on a QUERY stays fail-closed: a nick can change hands
+        // and this one is unaccounted for.
+        out.buffer_type = BufferType::Query;
+        out.buffer_id = "test/frank".to_string();
+        out.buffer_name = "frank".to_string();
+        assert!(
+            matches!(
+                app.redirect_outgoing_deliver(&mut out),
+                RedirectVerdict::Refuse(_)
+            ),
+            "a private message may not be addressed to an untraceable nick"
         );
     }
 
@@ -4774,11 +4852,12 @@ mod app_tests {
         );
         out.buffer_id = "test/frank".to_string();
         out.buffer_name = "frank".to_string();
+        out.buffer_type = BufferType::Query;
         out.submitted_at = submitted;
-        assert_eq!(
+        assert!(matches!(
             app.redirect_outgoing_deliver(&mut out),
-            RedirectVerdict::Refuse
-        );
+            RedirectVerdict::Refuse(_)
+        ));
     }
 
     #[test]
