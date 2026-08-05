@@ -126,6 +126,11 @@ fn add(app: &mut App, args: &[String], dir: Dir) {
         return;
     }
 
+    // The user is configuring THIS conversation, so a setting that has been
+    // following its peer's `/nick` becomes theirs to edit here — under the
+    // nick they are looking at, on disk, with the follow ended.
+    app.materialize_translate_follow(&buffer_id);
+
     let given_lang = given_lang.filter(|l| !l.is_empty());
     let given_my_lang = given_my_lang.filter(|l| !l.is_empty());
 
@@ -210,6 +215,11 @@ fn del(app: &mut App, args: &[String], dir: Dir) {
     let Some((_, buffer_id)) = resolve_target(app, target) else {
         return;
     };
+    // Same as `add`: a followed setting is edited where the conversation is
+    // now. Without this the entry lives under the old nick, `delin` finds
+    // nothing to switch off, and the follow keeps translating a conversation
+    // the user has just told it to leave alone.
+    app.materialize_translate_follow(&buffer_id);
     let Some(entry) = app.config.translate.buffers.get_mut(&buffer_id) else {
         add_local_event(
             app,

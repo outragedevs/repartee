@@ -924,6 +924,36 @@ impl AppState {
             .is_some_and(|at| *at >= dispatched_at)
     }
 
+    /// Drop the reflection records held for an id whose conversation is being
+    /// replaced, releasing whatever they were holding.
+    ///
+    /// A record says "when the server reflects THIS wire text back, render it
+    /// like so" — and the only thing it is matched on is that text. It is
+    /// therefore meaningful only inside the conversation that filed it: once
+    /// the id belongs to somebody else, the next identical line consumes a
+    /// record meant for a different person.
+    ///
+    /// The reservations go with them, because a record that will never be
+    /// matched leaves a barrier nothing can fill — the same orphan an expired
+    /// or evicted record leaves, and released the same way.
+    pub fn retire_own_echo_decorations(&mut self, buffer_id: &str) {
+        let Some(entries) = self.own_echo_decorations.remove(buffer_id) else {
+            return;
+        };
+        let mut ids: Vec<u64> = Vec::new();
+        for d in &entries {
+            if !ids.contains(&d.echo_id) {
+                ids.push(d.echo_id);
+            }
+        }
+        tracing::debug!(
+            buffer_id,
+            count = ids.len(),
+            "translate: the nick changed hands; dropping its pending reflections"
+        );
+        self.abandon_reflections(buffer_id, ids);
+    }
+
     /// Take the queue away from an id whose CONVERSATION is being replaced,
     /// writing what it held to the log and showing none of it.
     ///
@@ -997,6 +1027,18 @@ impl AppState {
         if let Some(cfg) = self.translate_buffers.remove(old_id) {
             self.translate_buffers.insert(new_id.to_string(), cfg);
         }
+        // Records under the NEW id belong to whoever held that nick until
+        // now, and a reflection is matched by its wire TEXT alone — nothing
+        // in it says which conversation it came from. Left in place, the
+        // arriving conversation's "ok" consumes the departed occupant's
+        // "ok": the reflection is decorated with a stranger's original, and
+        // its own reservation stays up as a barrier nothing will ever fill,
+        // holding the buffer until the queue expires.
+        //
+        // Retired rather than replaced, because the moving buffer may have no
+        // records of its own — and then a plain insert leaves the old ones
+        // exactly where they do harm.
+        self.retire_own_echo_decorations(new_id);
         if let Some(echoes) = self.own_echo_decorations.remove(old_id) {
             self.own_echo_decorations.insert(new_id.to_string(), echoes);
         }
@@ -3971,6 +4013,63 @@ mod translate_gate_tests {
         );
         let logged = log_rx.try_recv().expect("the line still reaches the log");
         assert_eq!(logged.text, "sekret starego franka [untranslated: timeout]");
+    }
+
+    #[test]
+    fn a_taken_over_nick_does_not_inherit_the_old_conversation_s_reflections() {
+        // A reflection record says "when the server sends THIS wire text
+        // back, render it like so", and the wire text is the only thing it is
+        // matched on — nothing in it says which conversation filed it.
+        //
+        // So a record left behind by the nick's previous occupant is taken by
+        // the new one's next identical line: "ok" comes back decorated with a
+        // stranger's original, and the reservation the new line filed stays up
+        // as a barrier nothing will fill, holding the conversation until the
+        // queue expires. The old occupant's own records may be the only ones
+        // there — the arriving buffer need not have any — so nothing else
+        // clears them.
+        let mut state = make_test_state();
+        state.add_buffer(crate::state::buffer::Buffer::for_test(
+            "libera",
+            crate::state::buffer::BufferType::Query,
+            "frank",
+        ));
+        state.add_buffer(crate::state::buffer::Buffer::for_test(
+            "libera",
+            crate::state::buffer::BufferType::Query,
+            "bob",
+        ));
+        state.decorate_own_echo(
+            "libera/frank",
+            AppState::own_echo_decoration(
+                "ok".to_string(),
+                7,
+                Some((
+                    "ok [dobra]".to_string(),
+                    crate::state::buffer::WireOrigin {
+                        text: "ok".to_string(),
+                        suffix_at: Some(2),
+                    },
+                )),
+                true,
+            ),
+        );
+
+        crate::irc::events::rename_query_buffers_for_test(
+            &mut state,
+            "libera",
+            "bob",
+            "frank",
+            &["libera/bob".to_string()],
+        );
+
+        assert!(
+            state
+                .take_own_echo_decoration("libera/frank", "ok")
+                .is_none(),
+            "the new occupant's line must not consume a record filed by the \
+             person who held the nick before them"
+        );
     }
 
     #[test]

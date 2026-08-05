@@ -515,6 +515,23 @@ pub struct App {
     /// `translate.enabled` at runtime cannot materialise one. Mirrors the
     /// role `shrink_client` plays for shrink.
     pub(crate) translate_backend: Option<crate::translate::backend::SharedBackend>,
+    /// Per-buffer translate settings that are following a peer's `/nick`,
+    /// as `(the key the user wrote, where that conversation lives now)`.
+    ///
+    /// Kept HERE and not in `config.translate.buffers`, which is what the
+    /// obvious implementation does and what this replaced: moving the key
+    /// inside the config makes the migration permanent the moment anything
+    /// saves — `/set`, `/translate add*`, several admin commands all write
+    /// the whole config — so a peer's `/nick` silently rewrote a setting the
+    /// user had typed themselves, and a restart then followed a nick that
+    /// existed for five minutes one afternoon.
+    ///
+    /// Applied over the mirror on every `sync_translate_from_config`, so
+    /// re-deriving from the config cannot undo the follow. Ends when the user
+    /// configures that conversation explicitly (see
+    /// `App::materialize_translate_follow`) — that IS them renaming the
+    /// setting, and it is written to disk under the name they chose.
+    pub(crate) translate_follows: Vec<(String, String)>,
     /// Shared concurrency limiter for the translation workers, so
     /// `/set translate.max_in_flight` takes effect without a restart.
     ///
@@ -906,6 +923,7 @@ impl App {
             translate_deliver_rx,
             translate_deliver_tx,
             translate_backend,
+            translate_follows: Vec::new(),
             translate_in_flight: Some(translate_in_flight),
             submit_origin: crate::app::translate::SubmitOrigin::Tui,
             conn_generations: std::collections::HashMap::new(),

@@ -2645,6 +2645,13 @@ impl crate::app::App {
         self.state
             .translate_buffers
             .clone_from(&self.config.translate.buffers);
+        // The config keys a conversation by the nick the user typed; a peer's
+        // `/nick` moves the conversation, not what they wrote. Re-applied
+        // here, over a mirror that was just re-derived, so no `/set`,
+        // `/reload` or `/translate` can silently end translation for a
+        // conversation whose peer renamed.
+        self.apply_translate_follows();
+
         self.state
             .translate_my_lang
             .clone_from(&self.config.translate.my_lang);
@@ -2725,34 +2732,114 @@ impl crate::app::App {
         self.state.flush_translate_queue(buffer_id);
     }
 
-    /// Follow a re-keyed query buffer in the config that `AppState` cannot
-    /// reach.
+    /// Follow a re-keyed query buffer in the half of the settings that
+    /// `AppState` cannot reach.
     ///
-    /// Not persisted here. `/translate add*|del*` writes the file, and one of
-    /// those will carry the migrated key along the next time the user runs
-    /// it; writing `config.toml` in response to somebody else's `/nick` is
-    /// disk I/O the user did not ask for, and would race an editor they may
-    /// have open. The consequence is that the setting follows the peer for
-    /// this session, and a restart keys it by the nick they actually typed —
-    /// which is what they wrote down.
+    /// The config itself is NOT touched. Moving the key inside
+    /// `config.translate.buffers` — which is what this used to do — makes the
+    /// migration permanent the moment anything saves the config, and `/set`,
+    /// `/translate add*` and several admin commands all save the whole of it.
+    /// So somebody else's `/nick` quietly rewrote a line the user had typed,
+    /// and after a restart their setting named a nick that existed for five
+    /// minutes one afternoon. The documented behaviour is the opposite: the
+    /// conversation is followed for this session, and the saved setting still
+    /// names the nick they wrote down.
+    ///
+    /// See [`App::translate_follows`].
     pub(crate) fn drain_pending_buffer_rekeys(&mut self) {
         if self.state.pending_buffer_rekeys.is_empty() {
             return;
         }
         let rekeys = std::mem::take(&mut self.state.pending_buffer_rekeys);
-        let mut moved = false;
+        let mut followed = false;
         for (old_id, new_id) in rekeys {
-            if let Some(cfg) = self.config.translate.buffers.remove(&old_id) {
-                tracing::debug!(%old_id, %new_id, "translate: following a re-keyed query buffer");
-                self.config.translate.buffers.insert(new_id, cfg);
-                moved = true;
+            // A conversation the user never configured has nothing to follow.
+            // Skipping it also bounds the list by the number of configured
+            // buffers, so a peer flipping nicks cannot grow it.
+            if !self.translate_governs(&old_id) {
+                continue;
+            }
+            tracing::debug!(%old_id, %new_id, "translate: following a re-keyed query buffer");
+            self.record_translate_follow(&old_id, &new_id);
+            followed = true;
+        }
+        if followed {
+            // Re-derive the mirror so it and the config agree again —
+            // `rekey_buffer_state` moved the mirror, and the follows are
+            // re-applied over it here.
+            self.sync_translate_from_config();
+        }
+    }
+
+    /// Whether some setting — written by the user or already following a
+    /// rename — governs this id.
+    fn translate_governs(&self, buffer_id: &str) -> bool {
+        self.config.translate.buffers.contains_key(buffer_id)
+            || self.translate_follows.iter().any(|(_, to)| to == buffer_id)
+    }
+
+    /// Record that the conversation at `old_id` now lives at `new_id`.
+    fn record_translate_follow(&mut self, old_id: &str, new_id: &str) {
+        // A follow that pointed AT the new id is dead: that conversation has
+        // just lost the nick to this one, and applying its settings here
+        // would hand one person's translation setup to another.
+        self.translate_follows.retain(|(_, to)| to != new_id);
+        // A peer who renames twice moves the SAME setting again. Retarget
+        // rather than chain, so the list stays one entry per configured
+        // conversation and the order it is applied in cannot matter.
+        if let Some((_, to)) = self
+            .translate_follows
+            .iter_mut()
+            .find(|(_, to)| to == old_id)
+        {
+            new_id.clone_into(to);
+            return;
+        }
+        self.translate_follows
+            .push((old_id.to_string(), new_id.to_string()));
+    }
+
+    /// Re-point the per-buffer mirror at where each followed conversation
+    /// lives now. Called from `sync_translate_from_config`, which has just
+    /// re-derived that mirror from the config and would otherwise undo every
+    /// rename this session followed.
+    fn apply_translate_follows(&mut self) {
+        for (from, to) in &self.translate_follows {
+            if let Some(cfg) = self.state.translate_buffers.remove(from) {
+                self.state.translate_buffers.insert(to.clone(), cfg);
             }
         }
-        if moved {
-            // Re-derive the mirrors so `translate_buffers` and the config
-            // agree again — `rekey_buffer_state` moved the mirror, and this
-            // is what stops the two drifting from here on.
-            self.sync_translate_from_config();
+    }
+
+    /// Bring a followed setting under the id its conversation lives at now,
+    /// because the user is about to change it THERE.
+    ///
+    /// Until this moment the entry stays keyed by the nick they typed and the
+    /// rename is followed at runtime. An explicit `/translate add*|del*` on
+    /// the conversation is the user renaming the setting themselves: from
+    /// here it is keyed by the nick they are looking at, it goes to disk that
+    /// way, and the follow ends.
+    ///
+    /// Without this the two disagree in the worst possible direction —
+    /// `delin` would remove an entry the follow puts straight back, leaving
+    /// translation running on a conversation the user has just switched off.
+    pub(crate) fn materialize_translate_follow(&mut self, buffer_id: &str) {
+        let Some(pos) = self
+            .translate_follows
+            .iter()
+            .position(|(_, to)| to == buffer_id)
+        else {
+            return;
+        };
+        let (from, _) = self.translate_follows.remove(pos);
+        if let Some(cfg) = self.config.translate.buffers.remove(&from) {
+            // Never over an entry the user wrote for this id themselves —
+            // that one is the more explicit statement of the two.
+            self.config
+                .translate
+                .buffers
+                .entry(buffer_id.to_string())
+                .or_insert(cfg);
         }
     }
 
@@ -4974,13 +5061,11 @@ mod app_tests {
         );
     }
 
-    #[test]
-    fn a_rekeyed_query_keeps_translating_after_a_sync() {
-        // `sync_translate_from_config` re-derives the state mirror from the
-        // config, so moving only the mirror is undone by the next `/set` or
-        // `/reload`. The config key the App owns has to move too.
+    /// An app with `frank` configured for incoming translation.
+    fn app_with_translated_query() -> crate::app::App {
         let mut app = app_with_buffer();
         app.config.translate.enabled = true;
+        app.config.translate.backend = "stub".to_string();
         app.translate_backend = Some(std::sync::Arc::new(
             crate::translate::backend::StubBackend::new(0, 0),
         ));
@@ -4994,6 +5079,16 @@ mod app_tests {
             },
         );
         app.sync_translate_from_config();
+        app
+    }
+
+    #[test]
+    fn a_rekeyed_query_keeps_translating_after_a_sync() {
+        // `sync_translate_from_config` re-derives the state mirror from the
+        // config, so moving only the mirror is undone by the next `/set` or
+        // `/reload` — and translation would silently stop mid-conversation
+        // because the person on the other end typed `/nick`.
+        let mut app = app_with_translated_query();
         app.state
             .pending_buffer_rekeys
             .push(("test/frank".to_string(), "test/frankie".to_string()));
@@ -5001,16 +5096,92 @@ mod app_tests {
         app.drain_pending_buffer_rekeys();
 
         assert!(
+            app.state.translate_buffers.contains_key("test/frankie"),
+            "the conversation is followed"
+        );
+        // …and STILL followed after every re-derive, which is the whole point.
+        app.sync_translate_from_config();
+        assert!(app.state.translate_buffers.contains_key("test/frankie"));
+        assert!(!app.state.translate_buffers.contains_key("test/frank"));
+    }
+
+    #[test]
+    fn following_a_nick_change_never_rewrites_what_the_user_typed() {
+        // The obvious way to follow a rename is to move the key inside
+        // `config.translate.buffers` — and that quietly makes it permanent,
+        // because `/set` and half a dozen admin commands save the WHOLE
+        // config. A peer who is `frankie` for five minutes one afternoon
+        // would then own the user's setting for good, and after a restart
+        // translation would follow a nick nobody chose. The documented
+        // behaviour is the opposite: followed this session, saved under the
+        // name that was typed.
+        let mut app = app_with_translated_query();
+        app.state
+            .pending_buffer_rekeys
+            .push(("test/frank".to_string(), "test/frankie".to_string()));
+        app.drain_pending_buffer_rekeys();
+
+        assert!(
+            app.config.translate.buffers.contains_key("test/frank"),
+            "what goes to disk still names the nick the user wrote"
+        );
+        assert!(
+            !app.config.translate.buffers.contains_key("test/frankie"),
+            "and nothing was written for a nick they never typed"
+        );
+
+        // A second rename moves the same setting again rather than chaining.
+        app.state
+            .pending_buffer_rekeys
+            .push(("test/frankie".to_string(), "test/franek".to_string()));
+        app.drain_pending_buffer_rekeys();
+        assert_eq!(app.translate_follows.len(), 1, "one entry, retargeted");
+        assert!(app.state.translate_buffers.contains_key("test/franek"));
+        assert!(app.config.translate.buffers.contains_key("test/frank"));
+
+        // Somebody else renaming ONTO the nick a followed conversation left
+        // must not inherit its settings.
+        app.state
+            .pending_buffer_rekeys
+            .push(("test/other".to_string(), "test/franek".to_string()));
+        app.config.translate.buffers.insert(
+            "test/other".to_string(),
+            crate::config::TranslateBufferConfig::default(),
+        );
+        app.drain_pending_buffer_rekeys();
+        assert_eq!(
+            app.translate_follows,
+            vec![("test/other".to_string(), "test/franek".to_string())],
+            "the conversation that lost the nick stops being followed onto it"
+        );
+    }
+
+    #[test]
+    fn configuring_a_followed_conversation_moves_the_setting_for_good() {
+        // `/translate add*|del*` on the conversation IS the user renaming the
+        // setting: from there it is keyed by the nick they are looking at and
+        // written that way. Without this the two disagree in the worst
+        // direction — `delin` removes an entry the follow puts straight back,
+        // and translation keeps running on a conversation just switched off.
+        let mut app = app_with_translated_query();
+        app.state
+            .pending_buffer_rekeys
+            .push(("test/frank".to_string(), "test/frankie".to_string()));
+        app.drain_pending_buffer_rekeys();
+
+        app.materialize_translate_follow("test/frankie");
+
+        assert!(
             app.config.translate.buffers.contains_key("test/frankie"),
-            "the config key follows the conversation"
+            "now it is theirs under this name"
         );
         assert!(!app.config.translate.buffers.contains_key("test/frank"));
-        // The mirror must survive a re-derive, which is the whole point.
+        assert!(app.translate_follows.is_empty(), "and nothing is followed");
+
+        // Which is what makes switching it off actually switch it off.
+        app.config.translate.buffers.remove("test/frankie");
         app.sync_translate_from_config();
-        assert!(
-            app.state.translate_buffers.contains_key("test/frankie"),
-            "and a later sync does not undo it"
-        );
+        assert!(!app.state.translate_buffers.contains_key("test/frankie"));
     }
 
     #[test]

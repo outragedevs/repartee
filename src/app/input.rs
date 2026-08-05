@@ -2984,6 +2984,7 @@ pub mod submit_typing_tests {
             translate_deliver_rx,
             translate_deliver_tx,
             translate_backend: None,
+            translate_follows: Vec::new(),
             translate_in_flight: None,
             submit_origin: crate::app::translate::SubmitOrigin::Tui,
             conn_generations: std::collections::HashMap::new(),

@@ -463,6 +463,15 @@ the truth of the situation rather than a compromise.
 buffer (the closed-window path), where the window under the id still belongs to the
 conversation whose lines those are.
 
+The **reflection records** at the destination go the same way, and for a sharper reason:
+a record is matched on its wire TEXT and nothing else. Left in place, the arriving
+conversation's "ok" consumes the departed occupant's "ok" — the reflection is decorated
+with a stranger's original, and the reservation the new line filed stays up as a barrier
+nothing will ever fill. `rekey_buffer_state` retires them (dropping the records and
+releasing what they held) rather than inserting over them, because the moving buffer may
+have no records of its own, and then a plain insert leaves the old ones exactly where
+they do harm.
+
 A peer who renames twice repoints the first era to the new destination but keeps
 its ORIGINAL window. The timestamp answers "which work does this apply to", and
 that was settled by the rename that created it; a second rename changes only where the
@@ -489,10 +498,29 @@ the only remaining record that a message is still out for that conversation — 
 rename is turned into an era whenever one is live, buffer or no buffer. The delivery
 path then follows it, or refuses when the destination has no window either.
 
-The migrated key is not written to disk. `/translate add*|del*` writes the file and
-will carry it along next time; rewriting `config.toml` in response to somebody else's
-`/nick` is I/O the user did not ask for. So the setting follows the peer for this
-session, and a restart keys it by the nick they actually typed.
+The migrated key is not written to disk — and that has to be true of the config in
+MEMORY, not merely of this code path. The first implementation moved the key inside
+`config.translate.buffers` and relied on nothing saving afterwards, which is false:
+`/set`, `/translate add*|del*` and several admin commands write the whole config. A
+peer's `/nick` therefore rewrote a line the user had typed, permanently, the next time
+they changed any unrelated setting.
+
+So the config is not touched at all. `App::translate_follows` holds
+`(the key the user wrote, where that conversation lives now)` and is re-applied over the
+per-buffer mirror on every `sync_translate_from_config`, which is what stops a re-derive
+from undoing the follow. The list holds one entry per configured conversation: a second
+rename retargets the existing entry rather than chaining, and a follow pointing AT an id
+is dropped when somebody else renames onto it, so one person's translation setup cannot
+be handed to another.
+
+`/translate add*|del*` on a followed conversation **materialises** it — the entry moves
+under the id it lives at now, is written there, and the follow ends. That is the user
+renaming the setting themselves. Without it the two disagree in the worst direction:
+`delin` would remove an entry the follow puts straight back, and translation would keep
+running on a conversation the user had just switched off.
+
+So the setting follows the peer for this session, and a restart keys it by the nick they
+actually typed.
 
 ### 3.7 Disabling one direction must not flush the other
 
