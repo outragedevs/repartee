@@ -105,22 +105,18 @@ fn read_hex6_bytes(bytes: &[u8], pos: usize) -> Option<String> {
 
 /// Substitute positional variables ($0, $1, $*, $[N]0, $[-N]0) in a string.
 ///
-/// **With no params there is nothing to substitute, and the input is returned
-/// untouched.** Running the pass anyway can only ever DELETE: `$0` and
-/// `$[3]0` expand to nothing, `$*` to the join of nothing. So on the call
-/// sites that pass `&[]` — an event row with no themed format, the topic bar,
-/// the body handed to `split_body_for_dimming` — it silently ate text that
-/// nobody had asked to be treated as a variable. "costs $5" rendered as
-/// "costs ", and "echo $0" as "echo ".
+/// A variable with no argument behind it expands to NOTHING, as in irssi —
+/// including when there are no arguments at all. That is what an abstraction
+/// invoked without any (`{label}` where the template spells `$0`) relies on,
+/// and it is the only reading under which a template means the same thing
+/// however it was reached.
 ///
-/// Skipping is what makes those call sites need no escape at all: the text
-/// they carry is a person's, not a format string, and `$` in it is a dollar
-/// sign. It is also what keeps the TUI and the web UI agreeing, since the
-/// web's renderer substitutes no variables either.
+/// The rule that raw text is not a format string belongs one layer up, at
+/// [`parse_format_string`], because that is where a caller says which of the
+/// two it is holding. Putting it HERE also caught the one caller that passes
+/// no arguments and means it — abstraction resolution — and left its `$0`
+/// standing for the enclosing format's first parameter to swallow later.
 pub fn substitute_vars(input: &str, params: &[&str]) -> String {
-    if params.is_empty() {
-        return input.to_string();
-    }
     let chars: Vec<char> = input.chars().collect();
     let mut result = String::new();
     let mut i = 0;
@@ -340,8 +336,26 @@ pub fn resolve_abstractions(
 /// - `%%` literal percent
 /// - mIRC control characters (`\x02`, `\x03`, `\x04`, `\x0F`, `\x16`, `\x1D`, `\x1E`, `\x1F`, `\x11`)
 pub fn parse_format_string(input: &str, params: &[&str]) -> Vec<StyledSpan> {
-    // Step 1: Substitute variables
-    let text = substitute_vars(input, params);
+    // Step 1: Substitute variables — unless there are none, in which case
+    // this is not a format string at all.
+    //
+    // A row rendered with no parameters is a line somebody TYPED: an event
+    // with no themed format, the topic bar, the body handed to
+    // `split_body_for_dimming`. Nothing in it was meant as a variable, and
+    // substituting can only ever delete — `$0` and `$[3]0` expand to nothing,
+    // `$*` to the join of nothing — so "costs $5" rendered as "costs ". It is
+    // also what keeps the two front ends agreeing, since the web renderer
+    // substitutes no variables either (see
+    // `crate::commands::helpers::escape_format`).
+    //
+    // The test is on the CALLER's parameters, not on the text, which is why
+    // it lives here rather than inside `substitute_vars`: an abstraction
+    // invoked without arguments passes none and means it.
+    let text = if params.is_empty() {
+        input.to_string()
+    } else {
+        substitute_vars(input, params)
+    };
 
     // Step 2: Walk bytes (all control/format chars are single-byte ASCII), build spans.
     // For text content between control sequences, decode chars with proper UTF-8 handling.
@@ -640,20 +654,52 @@ mod tests {
     }
 
     #[test]
-    fn with_no_params_the_text_is_returned_untouched() {
+    fn a_row_with_no_params_is_rendered_untouched() {
         // Substituting into nothing can only DELETE — `$0` and `$[3]0` expand
         // to nothing, `$*` to the join of nothing — so on the call sites that
         // pass no params (an event row with no themed format, the topic bar)
         // this pass silently ate text nobody meant as a variable. It is also
         // what let the two front ends disagree: the web renderer substitutes
         // no variables at all.
+        //
+        // Asserted through the RENDERER, because that is the layer that knows
+        // it is holding a person's line rather than a format string —
+        // `substitute_vars` itself has one caller that passes no arguments and
+        // means it. See `an_abstraction_with_no_arguments_still_expands`.
         for input in ["costs $5", "echo $$", "$* and $[3]0", "a $ b $x", "$0"] {
+            let rendered: String = parse_format_string(input, &[])
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect();
             assert_eq!(
-                substitute_vars(input, &[]),
-                input,
+                rendered, input,
                 "{input:?} is a person's text, not a format string"
             );
         }
+    }
+
+    #[test]
+    fn an_abstraction_with_no_arguments_still_expands() {
+        // A theme may spell an abstraction that takes arguments and use it
+        // without any. Its `$0` has to become nothing THERE, where the
+        // template is expanded: left standing it survives into the enclosing
+        // format string, and the row's own first parameter — a nick, a
+        // channel, whoever — is substituted into a slot that was never meant
+        // for it.
+        let abstracts = HashMap::from([
+            ("label".to_string(), "[$0]".to_string()),
+            ("all".to_string(), "<$*>".to_string()),
+        ]);
+        assert_eq!(resolve_abstractions("{label}", &abstracts, 0), "[]");
+        assert_eq!(resolve_abstractions("{all}", &abstracts, 0), "<>");
+
+        // And the enclosing format cannot reach into it afterwards.
+        let resolved = resolve_abstractions("{label} $0", &abstracts, 0);
+        let rendered: String = parse_format_string(&resolved, &["alice"])
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect();
+        assert_eq!(rendered, "[] alice");
     }
 
     // -----------------------------------------------------------------------

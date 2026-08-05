@@ -522,6 +522,16 @@ running on a conversation the user had just switched off.
 So the setting follows the peer for this session, and a restart keys it by the nick they
 actually typed.
 
+That splits the two views apart, and the split has one rule: **every runtime decision
+reads `AppState::translate_buffers`, never `config.translate.buffers`.** The config keeps
+the key the user wrote; the mirror knows where that conversation is now. A gate that
+consults the config goes quiet the moment somebody renames — which is exactly what
+happened to the outgoing path while the incoming half, reading the mirror, kept working:
+`outgoing_translate_policy` answered `NotApplicable`, which IS the ordinary send, so the
+user's line went out in their own language with no refusal, no marker and nothing on
+screen to say translation had stopped. `/translate list` prints the saved key, and
+annotates it with where it is being applied when the two differ.
+
 ### 3.7 Disabling one direction must not flush the other
 
 `delin` and `delout` share a queue, but not its contents. The only outgoing thing in

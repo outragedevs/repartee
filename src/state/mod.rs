@@ -254,7 +254,17 @@ pub struct AppState {
     /// `/set` so a runtime flip needs no restart, exactly as
     /// `shrink_incoming_active` is.
     pub translate_active: bool,
-    /// Mirror of `config.translate.buffers`, keyed by buffer id.
+    /// Where each conversation's translate settings live NOW, keyed by buffer
+    /// id — the config re-derived, with every rename this session followed
+    /// over the top of it (see `App::translate_follows`).
+    ///
+    /// **Every runtime decision reads this and never `config.translate.buffers`.**
+    /// The two agree only until a peer types `/nick`: the config keeps the key
+    /// the user wrote, because that is what a restart must look for, and this
+    /// map moves with the conversation. A gate that consults the config
+    /// instead goes quiet the moment somebody renames — which is how the
+    /// outgoing path came to send a configured conversation's lines
+    /// untranslated while the incoming half, reading this map, kept working.
     pub translate_buffers: HashMap<String, crate::config::TranslateBufferConfig>,
     /// Mirror of `config.translate.my_lang`.
     pub translate_my_lang: String,

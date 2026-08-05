@@ -1925,9 +1925,14 @@ impl crate::app::App {
         // a TARGET cannot be autodetected: there is nothing to detect which
         // language to write in from. Refusing lets the caller fall through
         // to sending untranslated rather than guessing.
+        // From the MIRROR, never the config: after a peer's `/nick` the config
+        // still holds the key the user typed and only the mirror knows where
+        // that conversation lives now. Same map the incoming gate reads, so
+        // the two directions cannot disagree about which buffer is
+        // configured.
         let Some((source_lang, target_lang)) = crate::translate::resolve_langs(
-            self.config.translate.buffers.get(buffer_id),
-            &self.config.translate.my_lang,
+            self.state.translate_buffers.get(buffer_id),
+            &self.state.translate_my_lang,
         )
         .outgoing() else {
             tracing::warn!(
@@ -2004,12 +2009,17 @@ impl crate::app::App {
     ) -> OutgoingTranslatePolicy {
         // E2E wins: the conversation is simply not translated, and the
         // ordinary (encrypted) send is exactly right.
+        // The mirror, for the reason spelled out in `AppState::translate_buffers`:
+        // the config keys a conversation by the nick the user typed, and a
+        // peer's `/nick` moves the conversation but not what they wrote.
+        // Reading the config here sent a configured query's lines out
+        // untranslated from the moment its peer renamed — silently, since the
+        // bypass is the ordinary send path.
         let bypass = e2e_possible
             || !self.state.translate_active
             || self
-                .config
-                .translate
-                .buffers
+                .state
+                .translate_buffers
                 .get(buffer_id)
                 .is_none_or(|cfg| !cfg.outgoing);
         if bypass {
@@ -2040,10 +2050,13 @@ impl crate::app::App {
             }
             return OutgoingTranslatePolicy::NotApplicable;
         }
+        // The same map the bypass above consulted — not the config, which
+        // after a peer's `/nick` is keyed by a name this buffer no longer
+        // has. Two lookups in one function reading two different maps is how
+        // this went wrong the first time.
         let cfg = self
-            .config
-            .translate
-            .buffers
+            .state
+            .translate_buffers
             .get(buffer_id)
             .expect("the bypass check above proved this is present");
         // From here translation is REQUIRED, so everything below refuses
@@ -2769,6 +2782,19 @@ impl crate::app::App {
             // re-applied over it here.
             self.sync_translate_from_config();
         }
+    }
+
+    /// Where the setting saved under `buffer_id` is being applied right now,
+    /// when a peer's `/nick` has moved that conversation this session.
+    ///
+    /// For `/translate list`, which prints the saved keys: without it the list
+    /// says `frank` while the user is talking to `frankie` and gives them no
+    /// way to tell whether translation is still running.
+    pub(crate) fn translate_follow_target(&self, buffer_id: &str) -> Option<&str> {
+        self.translate_follows
+            .iter()
+            .find(|(from, _)| from == buffer_id)
+            .map(|(_, to)| to.as_str())
     }
 
     /// Whether some setting — written by the user or already following a
@@ -5157,6 +5183,70 @@ mod app_tests {
     }
 
     #[test]
+    fn a_renamed_peer_is_still_translated_in_both_directions() {
+        // The config keeps the key the user typed and only the mirror follows
+        // the conversation — so every runtime gate has to read the mirror. The
+        // incoming gate did; the outgoing one asked the config, found nothing
+        // under the new id, and reported `NotApplicable`, which is the
+        // ORDINARY SEND path. The user's line went to the channel in their own
+        // language, with no refusal, no marker and nothing on screen to say
+        // translation had stopped — because somebody else typed `/nick`.
+        let mut app = app_with_buffer();
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Query, "frank"));
+        app.config.translate.enabled = true;
+        app.config.translate.backend = "stub".to_string();
+        app.translate_backend = Some(std::sync::Arc::new(
+            crate::translate::backend::StubBackend::new(0, 0),
+        ));
+        app.config.translate.my_lang = "pl".to_string();
+        app.config.translate.buffers.insert(
+            "test/frank".to_string(),
+            crate::config::TranslateBufferConfig {
+                incoming: true,
+                outgoing: true,
+                lang: Some("de".to_string()),
+                my_lang: None,
+            },
+        );
+        app.sync_translate_from_config();
+        assert_eq!(
+            app.outgoing_translate_policy("test/frank", "moje zdanie", false),
+            OutgoingTranslatePolicy::Translate,
+            "precondition: it translates before the rename"
+        );
+
+        // frank becomes frankie.
+        app.state
+            .add_buffer(Buffer::for_test("test", BufferType::Query, "frankie"));
+        app.state.rekey_buffer_state("test/frank", "test/frankie");
+        app.state
+            .pending_buffer_rekeys
+            .push(("test/frank".to_string(), "test/frankie".to_string()));
+        app.drain_pending_buffer_rekeys();
+
+        assert_eq!(
+            app.outgoing_translate_policy("test/frankie", "moje zdanie", false),
+            OutgoingTranslatePolicy::Translate,
+            "the conversation moved; what the user asked for did not"
+        );
+        let built = app
+            .build_outgoing_translate(&OutgoingRequest {
+                conn_id: "test",
+                buffer_id: "test/frankie",
+                buffer_name: "frankie",
+                buffer_type: &BufferType::Query,
+                nick: "me",
+                text: "moje zdanie",
+                is_action: false,
+                echo: OutgoingEchoPlan::BufferInput,
+            })
+            .expect("the request is still built for the renamed query");
+        assert_eq!(built.req.target_lang, "de");
+        assert_eq!(built.req.source_lang.as_deref(), Some("pl"));
+    }
+
+    #[test]
     fn configuring_a_followed_conversation_moves_the_setting_for_good() {
         // `/translate add*|del*` on the conversation IS the user renaming the
         // setting: from there it is keyed by the nick they are looking at and
@@ -5604,9 +5694,15 @@ mod app_tests {
         {
             cfg.my_lang = Some(mine.to_string());
         }
+        app.sync_translate_from_config();
     }
 
     /// Configure one buffer id for translation in both directions.
+    ///
+    /// Through the config AND the sync, exactly as `/translate addin` does:
+    /// every runtime gate reads the mirror `sync_translate_from_config`
+    /// derives, so a fixture that writes only the config is testing a state
+    /// the client is never in.
     fn set_langs_for(app: &mut crate::app::App, buffer_id: &str, lang: Option<&str>) {
         app.config.translate.buffers.insert(
             buffer_id.to_string(),
@@ -5617,6 +5713,7 @@ mod app_tests {
                 my_lang: None,
             },
         );
+        app.sync_translate_from_config();
     }
 
     fn build(app: &mut crate::app::App) -> Option<PendingOutgoingTranslate> {
@@ -5673,6 +5770,7 @@ mod app_tests {
                 my_lang: None,
             },
         );
+        app.sync_translate_from_config();
 
         let de = build(&mut app).expect("german buffer");
         let es = app
@@ -5719,13 +5817,22 @@ mod app_tests {
     use crate::app::translate::OutgoingTranslatePolicy as P;
 
     /// App with `#dupa` configured for outgoing translation.
+    ///
+    /// Built the way the client builds it — a named backend, then a sync —
+    /// rather than by poking `translate_active`: the sync is what derives
+    /// every mirror the gates read, and a fixture that sets one by hand can
+    /// pass while the real path is broken.
     fn app_with_outgoing(lang: Option<&str>) -> crate::app::App {
         let mut app = app_with_buffer();
         app.state.set_active_buffer(BUF);
-        app.state.translate_active = true;
         app.config.translate.enabled = true;
+        app.config.translate.backend = "stub".to_string();
+        app.translate_backend = Some(std::sync::Arc::new(
+            crate::translate::backend::StubBackend::new(0, 0),
+        ));
         app.config.translate.my_lang = "pl".to_string();
         set_buffer_langs(&mut app, lang, None);
+        assert!(app.state.translate_active, "fixture: translation is live");
         app
     }
 
@@ -5792,6 +5899,7 @@ mod app_tests {
             .get_mut(BUF)
             .expect("configured")
             .outgoing = false;
+        app.sync_translate_from_config();
         assert_eq!(
             app.outgoing_translate_policy(BUF, "moje zdanie", false),
             P::NotApplicable

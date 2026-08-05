@@ -337,7 +337,19 @@ fn list(app: &mut App) {
                 None => dirs.push("out: NO LANGUAGE SET".to_string()),
             }
         }
-        add_local_event(app, &format!("  {}  {}", esc(&buffer_id), dirs.join("   ")));
+        // The row names the SAVED key, which is what a restart looks for. If
+        // that conversation's peer has renamed since, the setting is being
+        // applied somewhere else this session — and a user reading a list
+        // that says `frank` while they are talking to `frankie` has no way to
+        // tell whether translation is still running.
+        let followed = app
+            .translate_follow_target(&buffer_id)
+            .map(|to| format!("  {C_DIM}(now: {}){C_RST}", esc(to)))
+            .unwrap_or_default();
+        add_local_event(
+            app,
+            &format!("  {}  {}{followed}", esc(&buffer_id), dirs.join("   ")),
+        );
     }
 }
 
