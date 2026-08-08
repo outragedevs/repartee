@@ -111,6 +111,23 @@ impl AppState {
             .push(crate::web::protocol::WebEvent::BufferCreated { buffer: meta });
     }
 
+    pub(crate) fn push_buffer_e2e_status(&mut self, buffer_id: &str) {
+        let Some(buffer) = self.buffers.get(buffer_id) else {
+            return;
+        };
+        let connection_id = buffer.connection_id.clone();
+        let name = buffer.name.clone();
+        let enabled = matches!(
+            buffer.buffer_type,
+            crate::state::buffer::BufferType::Channel | crate::state::buffer::BufferType::Query
+        ) && self.e2e_enabled_for_target(&connection_id, &name);
+        self.pending_web_events
+            .push(crate::web::protocol::WebEvent::BufferE2eChanged {
+                buffer_id: buffer_id.to_string(),
+                enabled,
+            });
+    }
+
     pub fn remove_buffer(&mut self, id: &str) {
         // Idempotent: callers may invoke this twice for the same buffer
         // — e.g. `/wc` removes the channel buffer immediately for an

@@ -453,16 +453,10 @@ fn warn(app: &mut App, msg: &str) {
 }
 
 fn push_active_e2e_status(app: &mut App) {
-    let Some(buffer) = app.state.active_buffer() else {
+    let Some(buffer_id) = app.state.active_buffer_id.clone() else {
         return;
     };
-    let buffer_id = buffer.id.clone();
-    let enabled = app
-        .state
-        .e2e_enabled_for_target(&buffer.connection_id, &buffer.name);
-    app.state
-        .pending_web_events
-        .push(crate::web::protocol::WebEvent::BufferE2eChanged { buffer_id, enabled });
+    app.state.push_buffer_e2e_status(&buffer_id);
 }
 
 // ─── on / off / mode ─────────────────────────────────────────────────────────

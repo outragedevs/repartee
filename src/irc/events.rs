@@ -1573,6 +1573,9 @@ fn handle_privmsg(
                     prev
                 };
             }
+            if observed {
+                state.push_buffer_e2e_status(&buffer_id);
+            }
         }
     }
 
@@ -2580,6 +2583,7 @@ fn observe_dm_peer_handle(state: &mut AppState, conn_id: &str, nick: &str, new_h
         && buf.buffer_type == BufferType::Query
     {
         buf.peer_handle = Some(new_handle.to_string());
+        state.push_buffer_e2e_status(&dm_buffer_id);
     }
 }
 
@@ -2640,6 +2644,7 @@ fn handle_chghost(
         || track_dm_handle_change(state, conn_id, &nick, prev_handle.as_deref(), &new_handle);
 
     // Update ident/host + the cached DM peer_handle in shared buffers.
+    let mut changed_query_ids = Vec::new();
     for buf in state.buffers.values_mut() {
         if buf.connection_id != conn_id {
             continue;
@@ -2657,7 +2662,11 @@ fn handle_chghost(
             && buf.name.eq_ignore_ascii_case(&nick)
         {
             buf.peer_handle = Some(new_handle.clone());
+            changed_query_ids.push(buf.id.clone());
         }
+    }
+    for buffer_id in changed_query_ids {
+        state.push_buffer_e2e_status(&buffer_id);
     }
 
     // Log a subtle event in every shared channel
@@ -7687,6 +7696,66 @@ mod tests {
 
         let buf = state.buffers.get("test/bob").unwrap();
         assert_eq!(buf.peer_handle.as_deref(), Some("~bob@user/bob"));
+    }
+
+    #[test]
+    fn learning_a_query_peer_handle_refreshes_the_web_e2e_status() {
+        use crate::e2e::keyring::{ChannelConfig, ChannelMode, Keyring};
+        use crate::e2e::manager::E2eManager;
+        use std::sync::{Arc, Mutex};
+
+        let conn = crate::storage::db::open_database(false).unwrap();
+        let manager = E2eManager::load_or_init(Keyring::new(Arc::new(Mutex::new(conn)))).unwrap();
+        manager
+            .keyring()
+            .set_channel_config(&ChannelConfig {
+                channel: crate::e2e::scoped_context("TestServer", "@~bob@new.host"),
+                enabled: true,
+                mode: ChannelMode::Normal,
+            })
+            .unwrap();
+
+        let mut state = make_test_state();
+        state.e2e_manager = Some(Arc::new(manager));
+        state.add_buffer(Buffer {
+            id: "test/bob".to_string(),
+            connection_id: "test".to_string(),
+            buffer_type: BufferType::Query,
+            name: "bob".to_string(),
+            messages: VecDeque::new(),
+            activity: ActivityLevel::None,
+            unread_count: 0,
+            last_read: Utc::now(),
+            topic: None,
+            topic_set_by: None,
+            users: HashMap::new(),
+            modes: None,
+            mode_params: None,
+            list_modes: HashMap::new(),
+            last_speakers: Vec::new(),
+            peer_handle: None,
+            log_total_lines: None,
+            log_oldest_ts: None,
+            log_newest_ts: None,
+            history_exhausted: false,
+            log_initial_loaded: false,
+            pin_backlog: false,
+        });
+        state.pending_web_events.clear();
+
+        let msg = make_irc_msg(
+            Some("bob!~bob@new.host"),
+            Command::PRIVMSG("me".into(), "hello".into()),
+        );
+        handle_irc_message(&mut state, "test", &msg);
+
+        let status = state.pending_web_events.iter().find_map(|event| match event {
+            crate::web::protocol::WebEvent::BufferE2eChanged { buffer_id, enabled } => {
+                Some((buffer_id.as_str(), *enabled))
+            }
+            _ => None,
+        });
+        assert_eq!(status, Some(("test/bob", true)));
     }
 
     #[test]
