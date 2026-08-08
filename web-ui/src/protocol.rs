@@ -77,6 +77,10 @@ pub enum WebEvent {
     BufferCreated {
         buffer: BufferMeta,
     },
+    BufferE2eChanged {
+        buffer_id: String,
+        enabled: bool,
+    },
     BufferClosed {
         buffer_id: String,
     },
@@ -292,6 +296,8 @@ pub struct BufferMeta {
     pub nick_count: u32,
     #[serde(default)]
     pub modes: Option<String>,
+    #[serde(default)]
+    pub e2e_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

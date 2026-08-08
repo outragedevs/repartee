@@ -90,7 +90,7 @@ impl AppState {
     // === Buffer management ===
 
     pub fn add_buffer(&mut self, buffer: Buffer) {
-        let meta = crate::web::protocol::BufferMeta {
+        let mut meta = crate::web::protocol::BufferMeta {
             id: buffer.id.clone(),
             connection_id: buffer.connection_id.clone(),
             name: buffer.name.clone(),
@@ -100,8 +100,13 @@ impl AppState {
             activity: buffer.activity as u8,
             nick_count: u32::try_from(buffer.users.len()).unwrap_or(u32::MAX),
             modes: buffer.modes.clone(),
+            e2e_enabled: false,
         };
         self.buffers.insert(buffer.id.clone(), buffer);
+        meta.e2e_enabled = matches!(
+            self.buffers[&meta.id].buffer_type,
+            crate::state::buffer::BufferType::Channel | crate::state::buffer::BufferType::Query
+        ) && self.e2e_enabled_for_target(&meta.connection_id, &meta.name);
         self.pending_web_events
             .push(crate::web::protocol::WebEvent::BufferCreated { buffer: meta });
     }

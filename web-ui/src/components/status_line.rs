@@ -231,10 +231,10 @@ pub fn status_items(enabled: bool, names: &[String]) -> Vec<StatusItem> {
 fn typing_phrase(nicks: &[String]) -> Option<String> {
     match nicks {
         [] => None,
-        [one] => Some(format!("{one} is typing…")),
-        [a, b] => Some(format!("{a} and {b} are typing…")),
-        [a, b, c] => Some(format!("{a}, {b} and {c} are typing…")),
-        [a, b, rest @ ..] => Some(format!("{a}, {b} and {} others are typing…", rest.len())),
+        [one] => Some(format!("⌨ {one} is typing…")),
+        [a, b] => Some(format!("⌨ {a} and {b} are typing…")),
+        [a, b, c] => Some(format!("⌨ {a}, {b} and {c} are typing…")),
+        [a, b, rest @ ..] => Some(format!("⌨ {a}, {b} and {} others are typing…", rest.len())),
     }
 }
 
@@ -268,6 +268,7 @@ mod tests {
             activity,
             nick_count: 0,
             modes: None,
+            e2e_enabled: false,
         }
     }
 

@@ -428,6 +428,13 @@ impl AppState {
                 self.shell_screen.set(None);
                 self.active_buffer.set(Some(new_id));
             }
+            WebEvent::BufferE2eChanged { buffer_id, enabled } => {
+                self.buffers.update(|bufs| {
+                    if let Some(buffer) = bufs.iter_mut().find(|buffer| buffer.id == buffer_id) {
+                        buffer.e2e_enabled = enabled;
+                    }
+                });
+            }
             WebEvent::BufferClosed { buffer_id } => {
                 // If the closed buffer was active, switch to first available.
                 if self.active_buffer.get_untracked().as_deref() == Some(&buffer_id) {
@@ -1549,4 +1556,3 @@ mod tests {
         assert!(!message_already_present(&existing, &incoming));
     }
 }
-

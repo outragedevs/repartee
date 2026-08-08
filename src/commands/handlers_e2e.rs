@@ -452,6 +452,19 @@ fn warn(app: &mut App, msg: &str) {
     e2e_event(app, E2eEventLevel::Warning, msg);
 }
 
+fn push_active_e2e_status(app: &mut App) {
+    let Some(buffer) = app.state.active_buffer() else {
+        return;
+    };
+    let buffer_id = buffer.id.clone();
+    let enabled = app
+        .state
+        .e2e_enabled_for_target(&buffer.connection_id, &buffer.name);
+    app.state
+        .pending_web_events
+        .push(crate::web::protocol::WebEvent::BufferE2eChanged { buffer_id, enabled });
+}
+
 // ─── on / off / mode ─────────────────────────────────────────────────────────
 
 fn e2e_on(app: &mut App) {
@@ -469,6 +482,7 @@ fn e2e_on(app: &mut App) {
         err(app, &format!("/e2e on: {e}"));
         return;
     }
+    push_active_e2e_status(app);
     ok(app, &format!("enabled on {} (mode=normal)", crate::e2e::display_context(&chan)));
     // The user just made this a conversation translation must never touch.
     // The exclusion itself is enforced at the gate, from the next line, with
@@ -507,6 +521,7 @@ fn e2e_off(app: &mut App) {
         err(app, &format!("/e2e off: {e}"));
         return;
     }
+    push_active_e2e_status(app);
     ok(app, &format!("disabled on {}", crate::e2e::display_context(&chan)));
 }
 
@@ -532,6 +547,7 @@ fn e2e_mode(app: &mut App, mode_str: &str) {
         err(app, &format!("/e2e mode: {e}"));
         return;
     }
+    push_active_e2e_status(app);
     ok(
         app,
         &format!(

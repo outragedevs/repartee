@@ -276,10 +276,10 @@ fn status_spans<'a>(ctx: &StatusCtx<'a>) -> Option<Vec<Span<'a>>> {
 fn typing_phrase(nicks: &[&str]) -> Option<String> {
     match nicks {
         [] => None,
-        [one] => Some(format!("{one} is typing…")),
-        [a, b] => Some(format!("{a} and {b} are typing…")),
-        [a, b, c] => Some(format!("{a}, {b} and {c} are typing…")),
-        [a, b, rest @ ..] => Some(format!("{a}, {b} and {} others are typing…", rest.len())),
+        [one] => Some(format!("⌨ {one} is typing…")),
+        [a, b] => Some(format!("⌨ {a} and {b} are typing…")),
+        [a, b, c] => Some(format!("⌨ {a}, {b} and {c} are typing…")),
+        [a, b, rest @ ..] => Some(format!("⌨ {a}, {b} and {} others are typing…", rest.len())),
     }
 }
 
@@ -564,7 +564,7 @@ mod tests {
         assert_eq!(
             f.spans(),
             vec![
-                "[", "TIME", "|", "me", "|", "#rust", "|", "alice is typing…", "|", "Lag: ",
+                "[", "TIME", "|", "me", "|", "#rust", "|", "⌨ alice is typing…", "|", "Lag: ",
                 "1.2s", "|", "Act: ", "2", "]",
             ]
         );

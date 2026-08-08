@@ -99,6 +99,10 @@ pub enum WebEvent {
     },
     /// A new buffer was created.
     BufferCreated { buffer: BufferMeta },
+    BufferE2eChanged {
+        buffer_id: String,
+        enabled: bool,
+    },
     /// A buffer was closed.
     BufferClosed { buffer_id: String },
     /// Buffer activity level or unread count changed.
@@ -336,6 +340,8 @@ pub struct BufferMeta {
     pub nick_count: u32,
     #[serde(default)]
     pub modes: Option<String>,
+    #[serde(default)]
+    pub e2e_enabled: bool,
 }
 
 /// Connection metadata sent in `SyncInit`.

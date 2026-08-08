@@ -58,7 +58,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, scroll_offset: usize) ->
 
         // Server buffers display the connection label instead of the buffer name —
         // they serve as both the visual network separator and the status window.
-        let display_name = if buf.buffer_type == crate::state::buffer::BufferType::Server {
+        let mut display_name = if buf.buffer_type == crate::state::buffer::BufferType::Server {
             app.state
                 .connections
                 .get(&buf.connection_id)
@@ -67,6 +67,15 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, scroll_offset: usize) ->
         } else {
             buf.name.clone()
         };
+        if matches!(
+            buf.buffer_type,
+            crate::state::buffer::BufferType::Channel | crate::state::buffer::BufferType::Query
+        ) && app
+            .state
+            .e2e_enabled_for_target(&buf.connection_id, &buf.name)
+        {
+            display_name.push_str(" 🔒");
+        }
 
         let num_str = ref_num.to_string();
         let full_spans = parse_format_string(&resolved, &[&num_str, &display_name]);

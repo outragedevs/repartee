@@ -37,6 +37,8 @@ pub fn build_sync_init(
             activity: b.activity as u8,
             nick_count: u32::try_from(b.users.len()).unwrap_or(u32::MAX),
             modes: b.modes.clone(),
+            e2e_enabled: matches!(b.buffer_type, BufferType::Channel | BufferType::Query)
+                && state.e2e_enabled_for_target(&b.connection_id, &b.name),
         })
         .collect();
 
