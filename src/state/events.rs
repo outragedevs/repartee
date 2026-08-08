@@ -128,6 +128,24 @@ impl AppState {
             });
     }
 
+    pub(crate) fn push_all_buffer_e2e_statuses(&mut self) {
+        let buffer_ids: Vec<String> = self
+            .buffers
+            .values()
+            .filter(|buffer| {
+                matches!(
+                    buffer.buffer_type,
+                    crate::state::buffer::BufferType::Channel
+                        | crate::state::buffer::BufferType::Query
+                )
+            })
+            .map(|buffer| buffer.id.clone())
+            .collect();
+        for buffer_id in buffer_ids {
+            self.push_buffer_e2e_status(&buffer_id);
+        }
+    }
+
     pub fn remove_buffer(&mut self, id: &str) {
         // Idempotent: callers may invoke this twice for the same buffer
         // — e.g. `/wc` removes the channel buffer immediately for an

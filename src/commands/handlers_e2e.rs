@@ -1409,6 +1409,7 @@ fn e2e_import(app: &mut App, path: Option<&str>) {
     let Some(mgr) = require_mgr(app) else { return };
     match crate::e2e::portable::import_from_path(mgr.keyring(), &resolved) {
         Ok(summary) => {
+            app.state.push_all_buffer_e2e_statuses();
             ok(
                 app,
                 &format!(
@@ -1743,6 +1744,45 @@ mod tests {
             "no translation was configured, so nothing to say: {:?}",
             rows(&app)
         );
+    }
+
+    #[test]
+    fn e2e_import_refreshes_open_buffer_statuses() {
+        let mut app = app_on_a_channel();
+        app.state.pending_web_events.clear();
+        let network = app
+            .state
+            .connections
+            .get("test")
+            .map(|connection| connection.label.clone())
+            .unwrap_or_default();
+
+        let donor_db = crate::storage::db::open_database(false).unwrap();
+        let donor_keyring = crate::e2e::keyring::Keyring::new(std::sync::Arc::new(
+            std::sync::Mutex::new(donor_db),
+        ));
+        let donor = crate::e2e::E2eManager::load_or_init(donor_keyring).unwrap();
+        donor
+            .keyring()
+            .set_channel_config(&ChannelConfig {
+                channel: crate::e2e::scoped_context(&network, "#dupa"),
+                enabled: true,
+                mode: ChannelMode::Normal,
+            })
+            .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("keyring.json");
+        crate::e2e::portable::export_to_path(donor.keyring(), &path).unwrap();
+
+        e2e_import(&mut app, path.to_str());
+
+        let status = app.state.pending_web_events.iter().find_map(|event| match event {
+            crate::web::protocol::WebEvent::BufferE2eChanged { buffer_id, enabled } => {
+                Some((buffer_id.as_str(), *enabled))
+            }
+            _ => None,
+        });
+        assert_eq!(status, Some(("test/#dupa", true)));
     }
 
     // ---------- DM keying context ----------
