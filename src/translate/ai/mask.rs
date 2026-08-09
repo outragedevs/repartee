@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -22,7 +22,9 @@ static BRAND_MODEL: LazyLock<Regex> = LazyLock::new(|| {
 static MODEL_CODE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b[a-z]{1,6}\d{1,4}[a-z]{0,3}\b").expect("valid regex"));
 static PLACEHOLDER: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"__([A-Z]+\d+)__").expect("valid regex"));
+    LazyLock::new(|| Regex::new(r"(?i)__([A-Z]+\d+)__").expect("valid regex"));
+static BARE_PLACEHOLDER_KEY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b([A-Z]+\d+)\b").expect("valid regex"));
 
 const UNIT_BLACKLIST: &str = "gb tb mb kb pb gib mib kib ghz mhz khz hz gbit mbit kbit gbps mbps kbps eur usd pln chf mm cm km kg mg ml cl dl std min sek h2o co2 mp3 mp4 flac x86 x64 i18n l10n a11y utf8 utf16 sha1 sha256 md5 rgb rgba hdmi vga dvi usb3 usb2 ipv4 ipv6 http2 http3 tls12 tls13 wifi6 wifi5 cat5 cat6 cat7";
 const MIRC_CONTROLS: &str = "\u{2}\u{3}\u{4}\u{f}\u{16}\u{1d}\u{1f}";
@@ -32,6 +34,7 @@ pub struct MaskedText {
     pub text: String,
     mapping: HashMap<String, String>,
     expected: HashMap<String, usize>,
+    literal_expected: HashMap<String, usize>,
 }
 
 #[derive(Debug, Default)]
@@ -51,14 +54,23 @@ impl UnmaskReport {
     }
 }
 
-#[derive(Default)]
 struct MaskState {
     mapping: HashMap<String, String>,
     seen: HashMap<(char, String), String>,
     counters: HashMap<char, usize>,
+    reserved: HashSet<String>,
 }
 
 impl MaskState {
+    fn new(text: &str) -> Self {
+        Self {
+            mapping: HashMap::new(),
+            seen: HashMap::new(),
+            counters: HashMap::new(),
+            reserved: reserved_keys(text),
+        }
+    }
+
     fn take(&mut self, kind: char, original: &str) -> String {
         let identity = (
             kind,
@@ -72,8 +84,13 @@ impl MaskState {
             return format!("__{key}__");
         }
         let counter = self.counters.entry(kind).or_default();
-        *counter += 1;
-        let key = format!("{kind}{counter}");
+        let key = loop {
+            *counter += 1;
+            let candidate = format!("{kind}{counter}");
+            if self.reserved.insert(candidate.clone()) {
+                break candidate;
+            }
+        };
         self.mapping.insert(key.clone(), original.to_string());
         self.seen.insert(identity, key.clone());
         format!("__{key}__")
@@ -81,7 +98,8 @@ impl MaskState {
 }
 
 pub fn mask(text: &str, known_nicks: &[String]) -> MaskedText {
-    let mut state = MaskState::default();
+    let literal_expected = count_literal_placeholders(text);
+    let mut state = MaskState::new(text);
     let mut output = replace_regex(text, &URL, 'U', &mut state, |_| true);
     output = replace_channel(&output, &mut state);
     output = replace_regex(&output, &NORM, 'T', &mut state, |_| true);
@@ -97,7 +115,7 @@ pub fn mask(text: &str, known_nicks: &[String]) -> MaskedText {
     let mut nicks: Vec<&str> = known_nicks
         .iter()
         .map(String::as_str)
-        .filter(|nick| nick.len() >= 3)
+        .filter(|nick| !nick.is_empty())
         .collect();
     nicks.sort_unstable_by_key(|nick| std::cmp::Reverse(nick.len()));
     nicks.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
@@ -111,6 +129,7 @@ pub fn mask(text: &str, known_nicks: &[String]) -> MaskedText {
         text: output,
         mapping: state.mapping,
         expected,
+        literal_expected,
     }
 }
 
@@ -168,10 +187,19 @@ pub fn unmask(masked: &MaskedText, output: &str) -> (String, UnmaskReport) {
         }
     }
 
+    let remaining = count_literal_placeholders(&text);
+    for (key, expected) in &masked.literal_expected {
+        if remaining.get(key).copied().unwrap_or_default() != *expected {
+            report.count_mismatch.push(key.clone());
+        }
+    }
     for capture in PLACEHOLDER.captures_iter(&text) {
-        let key = capture.get(1).map_or("", |m| m.as_str());
-        if !masked.mapping.contains_key(key) {
-            report.extra.push(key.to_string());
+        let literal = capture.get(0).map_or("", |matched| matched.as_str());
+        let key = capture
+            .get(1)
+            .map_or_else(String::new, |matched| matched.as_str().to_ascii_uppercase());
+        if !masked.mapping.contains_key(&key) && !masked.literal_expected.contains_key(literal) {
+            report.extra.push(key);
         }
     }
 
@@ -218,10 +246,7 @@ fn formatting_end(text: &str, start: usize, control: char) -> usize {
 
 fn consume_digits(bytes: &[u8], mut at: usize, limit: usize, radix: u32) -> usize {
     let start = at;
-    while at < bytes.len()
-        && at - start < limit
-        && char::from(bytes[at]).is_digit(radix)
-    {
+    while at < bytes.len() && at - start < limit && char::from(bytes[at]).is_digit(radix) {
         at += 1;
     }
     at
@@ -360,10 +385,27 @@ fn count_placeholders(text: &str) -> HashMap<String, usize> {
     let mut counts = HashMap::new();
     for capture in PLACEHOLDER.captures_iter(text) {
         if let Some(key) = capture.get(1) {
-            *counts.entry(key.as_str().to_string()).or_default() += 1;
+            *counts.entry(key.as_str().to_ascii_uppercase()).or_default() += 1;
         }
     }
     counts
+}
+
+fn count_literal_placeholders(text: &str) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    for matched in PLACEHOLDER.find_iter(text) {
+        *counts.entry(matched.as_str().to_string()).or_default() += 1;
+    }
+    counts
+}
+
+fn reserved_keys(text: &str) -> HashSet<String> {
+    PLACEHOLDER
+        .captures_iter(text)
+        .chain(BARE_PLACEHOLDER_KEY.captures_iter(text))
+        .filter_map(|capture| capture.get(1))
+        .map(|key| key.as_str().to_ascii_uppercase())
+        .collect()
 }
 
 #[cfg(test)]
@@ -408,6 +450,20 @@ mod tests {
     }
 
     #[test]
+    fn masks_and_restores_one_and_two_character_nicks() {
+        let masked = mask("k told ab", &["k".to_string(), "ab".to_string()]);
+        let (restored, report) = unmask(&masked, &masked.text);
+        assert_eq!(
+            (masked.text, restored, report.failed()),
+            (
+                "__N2__ told __N1__".to_string(),
+                "k told ab".to_string(),
+                false
+            )
+        );
+    }
+
+    #[test]
     fn formatting_boundaries_follow_the_translated_span() {
         let masked = mask("\u{2}hello world\u{2}", &[]);
         let (translated, report) = unmask(&masked, "__F1__dłuższe tłumaczenie tekstu__F1__");
@@ -443,5 +499,21 @@ mod tests {
         assert_eq!(masked.text, "__U1__ __U2__");
         let (restored, report) = unmask(&masked, &masked.text);
         assert_eq!((restored.as_str(), report.failed()), (source, false));
+    }
+
+    #[test]
+    fn generated_placeholders_do_not_collide_with_source_tokens() {
+        let source = "__N1__ N2 [[N3]] hello alice";
+        let masked = mask(source, &["alice".to_string()]);
+        assert_eq!(masked.text, "__N1__ N2 [[N3]] hello __N4__");
+        let (restored, report) = unmask(&masked, &masked.text);
+        assert_eq!((restored.as_str(), report.failed()), (source, false));
+    }
+
+    #[test]
+    fn changing_a_literal_placeholder_is_reported() {
+        let masked = mask("keep __N1__", &[]);
+        let (_, report) = unmask(&masked, "zachowaj __n1__");
+        assert!(report.failed());
     }
 }

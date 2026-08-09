@@ -2,6 +2,8 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
+use super::lang::KnownLanguage;
+
 static RECURRING: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(?:nich|nen|ned|ooch|wa|keen|icke|haste|weeste|bissu|dit|wat)\b")
         .expect("valid regex")
@@ -19,7 +21,7 @@ pub enum Difficulty {
 }
 
 pub fn classify(text: &str, source_lang: Option<&str>) -> Difficulty {
-    if source_lang.is_some_and(|lang| !lang.eq_ignore_ascii_case("de")) {
+    if source_lang.is_some_and(|lang| KnownLanguage::from_code(lang) != Some(KnownLanguage::De)) {
         return Difficulty::Easy;
     }
     let score = RECURRING.find_iter(text).count()
@@ -47,5 +49,15 @@ mod tests {
     #[test]
     fn does_not_apply_the_german_router_to_polish_input() {
         assert_eq!(classify("nie wiem co będzie", Some("pl")), Difficulty::Easy);
+    }
+
+    #[test]
+    fn routes_regionally_tagged_german_to_the_strong_policy() {
+        for source_lang in ["de-DE", "de_DE"] {
+            assert_eq!(
+                classify("haste ooch keen bock uff die luefter", Some(source_lang)),
+                Difficulty::Strong
+            );
+        }
     }
 }

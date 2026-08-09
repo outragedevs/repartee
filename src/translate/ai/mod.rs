@@ -23,6 +23,8 @@ pub enum AiBuildError {
     DuplicateModel(String),
     #[error("AI model {0} has an incomplete configuration")]
     InvalidModel(String),
+    #[error("AI policy references an unknown model: {0}")]
+    UnknownPolicyModel(String),
     #[error("no AI model in the configured policies has an API key")]
     NoUsableModel,
     #[error("cannot load the AI translation prompt: {0}")]
@@ -36,6 +38,7 @@ pub struct AiBackend {
     easy: Vec<usize>,
     strong: Vec<usize>,
     prompt_template: String,
+    runtime_config: TranslateAiConfig,
 }
 
 impl AiBackend {
@@ -76,11 +79,8 @@ impl AiBackend {
             models.push(ModelClient::new(http.clone(), model.clone()));
         }
 
-        if models.is_empty() || !models.iter().any(ModelClient::is_available) {
-            return Err(AiBuildError::NoUsableModel);
-        }
-        let mut easy = policy_indexes(&config.easy, &indexes);
-        let mut strong = policy_indexes(&config.strong, &indexes);
+        let mut easy = policy_indexes(&config.easy, &indexes)?;
+        let mut strong = policy_indexes(&config.strong, &indexes)?;
         if easy.is_empty() || strong.is_empty() {
             if easy.is_empty() {
                 easy.clone_from(&strong);
@@ -89,12 +89,16 @@ impl AiBackend {
                 strong.clone_from(&easy);
             }
         }
+        if models.is_empty() || !models.iter().any(ModelClient::is_available) {
+            return Err(AiBuildError::NoUsableModel);
+        }
 
         Ok(Self {
             models,
             easy,
             strong,
             prompt_template,
+            runtime_config: configuration_without_credentials(config),
         })
     }
 
@@ -126,14 +130,6 @@ impl AiBackend {
             Difficulty::Easy => (&self.easy, &self.strong),
             Difficulty::Strong => (&self.strong, &self.easy),
         };
-        let policy = if preferred
-            .iter()
-            .any(|&index| self.models[index].is_available())
-        {
-            preferred
-        } else {
-            alternate
-        };
         let masked = mask::mask(&req.text, &req.known_nicks);
         let system = prompt::render(
             &self.prompt_template,
@@ -144,7 +140,11 @@ impl AiBackend {
         let mut saw_daily_limit = false;
         let mut saw_provider_failure = false;
 
-        for &index in policy {
+        let mut attempted = HashSet::new();
+        for &index in preferred.iter().chain(alternate) {
+            if !attempted.insert(index) {
+                continue;
+            }
             let model = &self.models[index];
             if !model.is_available() {
                 continue;
@@ -217,6 +217,12 @@ impl TranslateBackend for AiBackend {
         self.models.iter().any(ModelClient::is_available)
     }
 
+    fn configuration_matches(&self, config: &crate::config::TranslateConfig) -> bool {
+        crate::translate::backend::backend_kind(&config.backend)
+            == crate::translate::backend::BackendKind::Ai
+            && self.runtime_config == configuration_without_credentials(&config.ai)
+    }
+
     fn refresh_credentials(&self, config: &crate::config::TranslateConfig) {
         self.reload_credentials(&config.ai);
     }
@@ -226,10 +232,26 @@ impl TranslateBackend for AiBackend {
     }
 }
 
-fn policy_indexes(names: &[String], indexes: &HashMap<String, usize>) -> Vec<usize> {
+fn configuration_without_credentials(config: &TranslateAiConfig) -> TranslateAiConfig {
+    let mut config = config.clone();
+    for model in &mut config.models {
+        model.api_key.clear();
+    }
+    config
+}
+
+fn policy_indexes(
+    names: &[String],
+    indexes: &HashMap<String, usize>,
+) -> Result<Vec<usize>, AiBuildError> {
     names
         .iter()
-        .filter_map(|name| indexes.get(name).copied())
+        .map(|name| {
+            indexes
+                .get(name)
+                .copied()
+                .ok_or_else(|| AiBuildError::UnknownPolicyModel(name.clone()))
+        })
         .collect()
 }
 
@@ -286,6 +308,16 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn refuses_to_build_with_an_unknown_policy_model() {
+        let mut config = config_with_key();
+        config.easy.push("typo".to_string());
+        assert!(matches!(
+            AiBackend::new(&config),
+            Err(AiBuildError::UnknownPolicyModel(name)) if name == "typo"
+        ));
+    }
+
     #[tokio::test]
     async fn filters_before_attempting_network_io() {
         let backend = AiBackend::new(&config_with_key()).expect("valid config");
@@ -331,6 +363,52 @@ mod tests {
             prompt_path: String::new(),
             models: vec![
                 model("failed", "fail", "failed-model"),
+                model("success", "v1", "success-model"),
+            ],
+        };
+        let backend = AiBackend::new(&config).expect("valid config");
+
+        assert!(matches!(
+            backend
+                .translate(request("ich glaube das funktioniert wirklich"))
+                .await,
+            TranslateOutcome::Translated { text, .. }
+                if text == "naprawdę wierzę, że to działa i wszystko będzie dobrze"
+        ));
+    }
+
+    #[tokio::test]
+    async fn falls_through_to_the_alternate_policy_after_auth_failure() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let app = Router::new()
+            .route(
+                "/auth/chat/completions",
+                post(|| async { StatusCode::UNAUTHORIZED }),
+            )
+            .route("/v1/chat/completions", post(successful_translation));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve test request");
+        });
+        let model = |name: &str, path: &str, model: &str| TranslateAiModelConfig {
+            name: name.to_string(),
+            base_url: format!("http://{address}/{path}"),
+            model: model.to_string(),
+            api_key_env: "TEST_API".to_string(),
+            api_key: "secret".to_string(),
+            max_retries: 0,
+            ..TranslateAiModelConfig::default()
+        };
+        let config = TranslateAiConfig {
+            easy: vec!["auth".to_string()],
+            strong: vec!["success".to_string()],
+            prompt_path: String::new(),
+            models: vec![
+                model("auth", "auth", "auth-model"),
                 model("success", "v1", "success-model"),
             ],
         };

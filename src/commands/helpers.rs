@@ -107,8 +107,8 @@ pub fn warn_if_translate_cannot_run(app: &mut App) {
         .map_or_else(
             || {
                 format!(
-                    "{warn}translate: AI is configured but no backend was built \
-                     at startup — restart to activate{rst}"
+                    "{warn}translate: AI is configured but no compatible backend \
+                     is active — restart to activate{rst}"
                 )
             },
             |error| {

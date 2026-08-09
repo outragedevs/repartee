@@ -17,6 +17,9 @@ static THINK: std::sync::LazyLock<Regex> =
 static THINK_OPEN: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"(?is)<think>.*\z").expect("valid regex"));
 
+const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+const RETRY_AFTER_OVERFLOW_PENALTY: Duration = Duration::from_secs(24 * 60 * 60);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureKind {
     DailyLimit,
@@ -144,14 +147,12 @@ impl ModelClient {
             let status = response.status();
             let headers = response.headers().clone();
             self.limiter.sync(&headers);
-            let raw = response.text().await.map_err(|error| AttemptFailure {
-                kind: FailureKind::InvalidResponse,
-                message: error.to_string(),
-            })?;
+            let response_body = read_response_body(response).await?;
 
             if status.is_success() {
-                return parse_reply(&raw);
+                return parse_success_body(&response_body);
             }
+            let raw = response_body.text;
 
             let status_code = status.as_u16();
             if status_code == 400
@@ -174,14 +175,16 @@ impl ModelClient {
                 continue;
             }
             if status_code == 429 || status.is_server_error() {
+                let next_retry = retries.saturating_add(1);
+                let delay = retry_after(&headers).unwrap_or_else(|| backoff(next_retry));
+                if status_code == 429 {
+                    self.limiter.penalize(delay);
+                }
                 if retries >= self.config.max_retries {
                     return Err(failure(FailureKind::Transient, status_code, &raw));
                 }
-                retries += 1;
-                let delay = retry_after(&headers).unwrap_or_else(|| backoff(retries));
-                if status_code == 429 {
-                    self.limiter.penalize(delay);
-                } else {
+                retries = next_retry;
+                if status_code != 429 {
                     tokio::time::sleep(delay).await;
                 }
                 continue;
@@ -224,6 +227,60 @@ impl ModelClient {
         state.disabled = Some(kind);
         true
     }
+}
+
+struct ResponseBody {
+    text: String,
+    exceeded_limit: bool,
+}
+
+fn parse_success_body(response: &ResponseBody) -> Result<String, AttemptFailure> {
+    if response.exceeded_limit {
+        return Err(AttemptFailure {
+            kind: FailureKind::InvalidResponse,
+            message: format!("response body exceeds the {MAX_RESPONSE_BYTES}-byte limit"),
+        });
+    }
+    parse_reply(&response.text)
+}
+
+async fn read_response_body(
+    mut response: reqwest::Response,
+) -> Result<ResponseBody, AttemptFailure> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+    {
+        return Ok(ResponseBody {
+            text: String::new(),
+            exceeded_limit: true,
+        });
+    }
+
+    let capacity = response
+        .content_length()
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or_default()
+        .min(MAX_RESPONSE_BYTES);
+    let mut bytes = Vec::with_capacity(capacity);
+    while let Some(chunk) = response.chunk().await.map_err(|error| AttemptFailure {
+        kind: FailureKind::InvalidResponse,
+        message: error.to_string(),
+    })? {
+        let remaining = MAX_RESPONSE_BYTES.saturating_sub(bytes.len());
+        if chunk.len() > remaining {
+            bytes.extend_from_slice(&chunk[..remaining]);
+            return Ok(ResponseBody {
+                text: String::from_utf8_lossy(&bytes).into_owned(),
+                exceeded_limit: true,
+            });
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(ResponseBody {
+        text: String::from_utf8_lossy(&bytes).into_owned(),
+        exceeded_limit: false,
+    })
 }
 
 #[derive(Serialize)]
@@ -326,7 +383,7 @@ fn retry_after_value(value: &str, now: chrono::DateTime<chrono::Utc>) -> Option<
         .ok()
         .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
     {
-        return Some(Duration::from_secs_f64(seconds));
+        return Duration::try_from_secs_f64(seconds).ok();
     }
     let deadline = chrono::DateTime::parse_from_rfc2822(value)
         .ok()?
@@ -359,8 +416,8 @@ impl RateLimiter {
             rpm: f64::from(rpm),
             tpm: f64::from(tpm),
             state: Mutex::new(Bucket {
-                requests: f64::from(rpm) * 0.25,
-                tokens: f64::from(tpm) * 0.25,
+                requests: f64::from(rpm),
+                tokens: f64::from(tpm),
                 last: now,
                 blocked_until: now,
             }),
@@ -439,7 +496,12 @@ impl RateLimiter {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.blocked_until = state.blocked_until.max(Instant::now() + duration);
+        let now = Instant::now();
+        let deadline = now
+            .checked_add(duration)
+            .or_else(|| now.checked_add(RETRY_AFTER_OVERFLOW_PENALTY))
+            .unwrap_or(now);
+        state.blocked_until = state.blocked_until.max(deadline);
     }
 }
 
@@ -454,11 +516,13 @@ fn remaining(headers: &HeaderMap, name: &'static str) -> Option<f64> {
 mod tests {
     use super::*;
 
+    use std::convert::Infallible;
     use std::sync::Arc;
 
+    use axum::body::Body;
     use axum::extract::State;
     use axum::http::{HeaderMap as AxumHeaderMap, StatusCode, header};
-    use axum::response::IntoResponse;
+    use axum::response::{IntoResponse, Response};
     use axum::routing::post;
     use axum::{Json, Router};
     use serde_json::json;
@@ -493,6 +557,93 @@ mod tests {
             retry_after_value("Sun, 06 Nov 1994 08:49:37 GMT", now),
             Some(Duration::from_secs(2))
         );
+    }
+
+    #[test]
+    fn rejects_an_unrepresentable_numeric_retry_after() {
+        assert_eq!(retry_after_value("1e300", chrono::Utc::now()), None);
+    }
+
+    #[tokio::test]
+    async fn low_rate_limiter_allows_the_first_request_immediately() {
+        let limiter = RateLimiter::new(1, 4);
+        tokio::time::timeout(Duration::from_millis(100), limiter.acquire(4))
+            .await
+            .expect("initial rate-limit credit should cover one request");
+    }
+
+    #[tokio::test]
+    async fn final_rate_limit_response_penalizes_the_shared_limiter() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let router = Router::new().route("/v1/chat/completions", post(rate_limited_response));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("serve test requests");
+        });
+        let client = ModelClient::new(
+            reqwest::Client::new(),
+            TranslateAiModelConfig {
+                name: "final-rate-limit-test".to_string(),
+                base_url: format!("http://{address}/v1"),
+                model: "test-model".to_string(),
+                api_key: "secret".to_string(),
+                max_retries: 0,
+                ..TranslateAiModelConfig::default()
+            },
+        );
+
+        client
+            .translate("translate", "hallo")
+            .await
+            .expect_err("the provider always rate-limits this request");
+        let remaining = client
+            .limiter
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .blocked_until
+            .saturating_duration_since(Instant::now());
+        server.abort();
+
+        assert!(remaining > Duration::from_secs(59));
+    }
+
+    #[tokio::test]
+    async fn rejects_a_chunked_response_above_the_body_limit() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let router = Router::new().route("/v1/chat/completions", post(oversized_response));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("serve test requests");
+        });
+        let client = ModelClient::new(
+            reqwest::Client::new(),
+            TranslateAiModelConfig {
+                name: "body-limit-test".to_string(),
+                base_url: format!("http://{address}/v1"),
+                model: "test-model".to_string(),
+                api_key: "secret".to_string(),
+                max_retries: 0,
+                ..TranslateAiModelConfig::default()
+            },
+        );
+
+        let error = client
+            .translate("translate", "hallo")
+            .await
+            .expect_err("oversized response must fail");
+        server.abort();
+
+        assert_eq!(error.kind, FailureKind::InvalidResponse);
+        assert!(error.message.contains("65536-byte limit"));
     }
 
     #[tokio::test]
@@ -574,6 +725,19 @@ mod tests {
         (
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": "unexpected key" })),
+        )
+    }
+
+    async fn oversized_response() -> Response {
+        let chunks = (0..=MAX_RESPONSE_BYTES / 1024).map(|_| Ok::<_, Infallible>(vec![b'x'; 1024]));
+        Response::new(Body::from_stream(futures::stream::iter(chunks)))
+    }
+
+    async fn rate_limited_response() -> impl IntoResponse {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, "60")],
+            Json(json!({ "error": "slow down" })),
         )
     }
 }

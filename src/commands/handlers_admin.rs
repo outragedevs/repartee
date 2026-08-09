@@ -106,6 +106,13 @@ fn manual_cred(value: Option<String>) -> CredUpdate {
 /// `commands::settings` has to have a counterpart here, or the two routes to the
 /// same state disagree.
 pub(crate) fn apply_reloaded_config(app: &mut App, new_config: crate::config::AppConfig) {
+    if app
+        .translate_backend
+        .as_ref()
+        .is_some_and(|backend| !backend.configuration_matches(&new_config.translate))
+    {
+        app.translate_backend = None;
+    }
     app.config = new_config;
     app.cached_config_toml = None;
     // A reload swaps out config.servers wholesale; an open edit-wizard
@@ -124,7 +131,7 @@ pub(crate) fn apply_reloaded_config(app: &mut App, new_config: crate::config::Ap
     // The same post-config-change sync `/set typing.*` runs — a hand-edited
     // `send_channels = false` has to reach the machine by this route too.
     app.sync_typing_from_config();
-    if let Some(backend) = app.translate_backend.as_ref() {
+    if let Some(backend) = &app.translate_backend {
         backend.refresh_credentials(&app.config.translate);
     }
     // Same for `[translate]`, and this one is privacy-sensitive rather than
@@ -1835,7 +1842,24 @@ mod server_add_tests {
 #[cfg(test)]
 mod translate_reload_tests {
     use crate::app::input::submit_typing_tests::test_app;
-    use crate::config::TranslateBufferConfig;
+    use crate::config::{TranslateAiConfig, TranslateAiModelConfig, TranslateBufferConfig};
+
+    fn ai_config(base_url: &str, api_key: &str) -> TranslateAiConfig {
+        let model = TranslateAiModelConfig {
+            name: "reload-test".to_string(),
+            base_url: base_url.to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "RELOAD_TEST_API".to_string(),
+            api_key: api_key.to_string(),
+            ..TranslateAiModelConfig::default()
+        };
+        TranslateAiConfig {
+            easy: vec![model.name.clone()],
+            strong: vec![model.name.clone()],
+            prompt_path: String::new(),
+            models: vec![model],
+        }
+    }
 
     #[test]
     fn reload_turning_translation_off_stops_it_immediately() {
@@ -1916,6 +1940,57 @@ mod translate_reload_tests {
         assert_eq!(app.state.translate_my_lang, "pl");
         assert!(!app.state.translate_show_original_in);
         assert!(app.state.translate_buffers.contains_key("net/#german"));
+    }
+
+    #[test]
+    fn reload_disables_ai_when_the_provider_configuration_changes() {
+        let mut app = test_app();
+        app.state
+            .add_buffer(crate::state::buffer::Buffer::for_test(
+                "net",
+                crate::state::buffer::BufferType::Channel,
+                "#german",
+            ));
+        app.state.set_active_buffer("net/#german");
+        let ai = ai_config("https://old.example/v1", "secret");
+        app.translate_backend = Some(std::sync::Arc::new(
+            crate::translate::ai::AiBackend::new(&ai).expect("valid AI backend"),
+        ));
+        app.config.translate.enabled = true;
+        app.config.translate.backend = "ai".to_string();
+        app.config.translate.ai = ai;
+        app.sync_translate_from_config();
+        let mut reloaded = app.config.clone();
+        reloaded.translate.ai.models[0].base_url = "https://new.example/v1".to_string();
+
+        super::apply_reloaded_config(&mut app, reloaded);
+
+        assert!(
+            app.translate_backend.is_none()
+                && !app.state.translate_active
+                && rows(&app)
+                    .iter()
+                    .any(|text| text.contains("restart to activate"))
+        );
+    }
+
+    #[test]
+    fn reload_keeps_ai_active_when_only_the_api_key_changes() {
+        let mut app = test_app();
+        let ai = ai_config("https://provider.example/v1", "old-secret");
+        app.translate_backend = Some(std::sync::Arc::new(
+            crate::translate::ai::AiBackend::new(&ai).expect("valid AI backend"),
+        ));
+        app.config.translate.enabled = true;
+        app.config.translate.backend = "ai".to_string();
+        app.config.translate.ai = ai;
+        app.sync_translate_from_config();
+        let mut reloaded = app.config.clone();
+        reloaded.translate.ai.models[0].api_key = "new-secret".to_string();
+
+        super::apply_reloaded_config(&mut app, reloaded);
+
+        assert!(app.translate_backend.is_some() && app.state.translate_active);
     }
 
     /// Every row the reload wrote into the active buffer.

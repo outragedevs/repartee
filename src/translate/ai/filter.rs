@@ -20,7 +20,12 @@ static CODE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         r"(?i)println!|eprintln!|unwrap\(\)|-&gt;|->\s*\w+\s*\{",
         r#"(?i)#include\s*[<\"]"#,
         r"(?i)^\s*(?:def|class)\s+\w+\s*[(:]",
-        r"(?i)^\s*(?:sudo|apt|apt-get|git|cd|ls|cat|grep|awk|sed|gcc|make|nm|strip|chmod|systemctl|docker|ssh|scp|curl|wget|dd|mount|lsblk|dmesg)\s+-?\w",
+        r"(?i)^\s*sudo\s+(?:-\S+\s+)*\S+",
+        r"(?i)^\s*git\s+(?:add|bisect|branch|checkout|clone|commit|diff|fetch|grep|init|log|merge|mv|pull|push|rebase|remote|reset|restore|revert|show|stash|status|switch|tag|worktree)\b",
+        r"(?i)^\s*make(?:\s+(?:all|build|check|clean|clippy|docs|fmt|install|release|test|wasm|web))?\s*$",
+        r"(?i)^\s*(?:apt|apt-get)\s+(?:install|remove|update|upgrade|search|show|purge)\b",
+        r"(?i)^\s*(?:docker\s+(?:build|run|compose|exec|images|logs|ps|pull|push|stop)|systemctl\s+(?:start|stop|restart|status|enable|disable|daemon-reload))\b",
+        r"(?i)^\s*(?:cd|ls|cat|grep|awk|sed|gcc|nm|strip|chmod|ssh|scp|curl|wget|dd|mount|lsblk|dmesg)\s+(?:--?\S+|[./~]\S+|\S+=\S+)",
         r"(?i)\|\s*(?:wc|grep|head|tail|sort|uniq|less)\b",
         r"^\s*\d+\s*$",
         r"^[\w./-]+:\d+:\d+:\s",
@@ -30,7 +35,9 @@ static CODE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     .collect()
 });
 static SHORT_NOISE: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    "lol rofl lmao xd xdd".split_whitespace().collect()
+    "haha hehe hihi lol rofl lmao xd xdd"
+        .split_whitespace()
+        .collect()
 });
 
 pub fn should_filter(req: &TranslateRequest) -> bool {
@@ -76,11 +83,9 @@ fn is_onomatopoeia(text: &str) -> bool {
     if words.is_empty() {
         return false;
     }
-    let hits = words
+    words
         .iter()
-        .filter(|word| is_stretched(word) || is_reduplicated(word))
-        .count();
-    hits * 2 >= words.len()
+        .all(|word| is_stretched(word) || is_reduplicated(word) || is_known_noise(word))
 }
 
 fn is_stretched(word: &str) -> bool {
@@ -93,19 +98,23 @@ fn is_stretched(word: &str) -> bool {
             previous = Some(ch);
             run = 1;
         }
-        run >= 3
+        run >= 4
     })
 }
 
 fn is_reduplicated(word: &str) -> bool {
     let lower: Vec<char> = word.to_lowercase().chars().collect();
     (2..=6).any(|width| {
-        lower.len() >= width * 2
+        lower.len() >= width * 3
             && lower.len().is_multiple_of(width)
             && lower[width..]
                 .chunks(width)
                 .all(|chunk| chunk == &lower[..chunk.len()])
     })
+}
+
+fn is_known_noise(word: &str) -> bool {
+    SHORT_NOISE.contains(word.to_ascii_lowercase().as_str())
 }
 
 #[cfg(test)]
@@ -162,6 +171,32 @@ mod tests {
         assert!(!should_filter(&request(
             Direction::Outgoing,
             "level radar"
+        )));
+    }
+
+    #[test]
+    fn keeps_make_sure_as_ordinary_prose() {
+        assert!(!should_filter(&request(
+            Direction::Outgoing,
+            "make sure this works"
+        )));
+    }
+
+    #[test]
+    fn keeps_words_with_lexical_letter_repetition() {
+        for text in ["mama kommt", "Schifffahrt beginnt"] {
+            assert!(
+                !should_filter(&request(Direction::Outgoing, text)),
+                "ordinary prose filtered: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn filters_unambiguous_repeated_chat_noise() {
+        assert!(should_filter(&request(
+            Direction::Outgoing,
+            "hahaha brrrrt"
         )));
     }
 }

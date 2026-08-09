@@ -444,10 +444,17 @@ that file are held only in memory and are never serialized into `config.toml`.
 `/reload` applies added, removed and rotated keys to an already-running AI
 backend. If no AI backend was built at startup, adding the first usable key
 still requires a restart and `/reload` reports that explicitly.
+Changing any other `[translate.ai]` value does not hot-swap a running client.
+`/reload` immediately deactivates a backend whose endpoint, model, policy,
+prompt or rate configuration no longer matches, then reports that a restart is
+required. New conversation text is never sent through the stale configuration.
 `rpm` and `tpm` are local safety limits; zero disables that dimension. Server
 rate-limit headers and `Retry-After` are honored, `429` and transient server
 errors use bounded retries, and authentication, access and daily-quota errors
-disable that model for the rest of the session.
+disable that model for the rest of the session. Provider response bodies are
+streamed under a 64 KiB limit before JSON parsing. Every model named in an
+`easy` or `strong` policy must exist in `translate.ai.models`; an unknown name
+prevents the AI backend from starting and is reported as a configuration error.
 
 Enabling `translate.enabled`, or naming a `translate.backend`, at runtime when
 translation was not running at startup reports that a restart is required: the

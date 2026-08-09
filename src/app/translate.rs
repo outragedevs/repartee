@@ -8106,6 +8106,11 @@ mod tests {
             true
         }
 
+        fn configuration_matches(&self, config: &crate::config::TranslateConfig) -> bool {
+            crate::translate::backend::backend_kind(&config.backend)
+                == crate::translate::backend::BackendKind::Stub
+        }
+
         fn refresh_credentials(&self, _config: &crate::config::TranslateConfig) {}
 
         fn translate(

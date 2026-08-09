@@ -667,7 +667,7 @@ impl Default for TranslateConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct TranslateAiConfig {
     pub easy: Vec<String>,
@@ -698,7 +698,7 @@ impl Default for TranslateAiConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct TranslateAiModelConfig {
     pub name: String,
@@ -733,7 +733,7 @@ impl Default for TranslateAiModelConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct TranslateAiProviderConfig {
     pub only: Vec<String>,
