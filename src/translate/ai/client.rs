@@ -45,6 +45,7 @@ struct ClientState {
     api_key: String,
     generation: u64,
     disabled: Option<FailureKind>,
+    supports_temperature: bool,
 }
 
 struct Credential {
@@ -63,6 +64,7 @@ impl ModelClient {
                 api_key,
                 generation: 0,
                 disabled: None,
+                supports_temperature: true,
             }),
         }
     }
@@ -95,7 +97,7 @@ impl ModelClient {
     pub async fn translate(&self, system: &str, user: &str) -> Result<String, AttemptFailure> {
         let mut body = ChatRequest {
             model: &self.config.model,
-            temperature: Some(0.0),
+            temperature: self.temperature(),
             max_tokens: self.config.max_output_tokens.max(1),
             messages: [
                 ChatMessage {
@@ -116,13 +118,13 @@ impl ModelClient {
         let mut retries = 0;
 
         loop {
-            self.limiter.acquire(estimate).await;
+            self.limiter.acquire(estimate).await?;
             let credential = self.credential()?;
             let response = self
                 .http
                 .post(format!(
                     "{}/chat/completions",
-                    self.config.base_url.trim_end_matches('/')
+                    self.config.base_url.trim().trim_end_matches('/')
                 ))
                 .bearer_auth(&credential.api_key)
                 .json(&body)
@@ -159,6 +161,7 @@ impl ModelClient {
                 && body.temperature.is_some()
                 && raw.to_ascii_lowercase().contains("temperature")
             {
+                self.disable_temperature();
                 body.temperature = None;
                 continue;
             }
@@ -226,6 +229,22 @@ impl ModelClient {
         }
         state.disabled = Some(kind);
         true
+    }
+
+    fn temperature(&self) -> Option<f32> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.supports_temperature.then_some(0.0)
+    }
+
+    fn disable_temperature(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.supports_temperature = false;
     }
 }
 
@@ -424,7 +443,17 @@ impl RateLimiter {
         }
     }
 
-    async fn acquire(&self, estimated_tokens: u32) {
+    async fn acquire(&self, estimated_tokens: u32) -> Result<(), AttemptFailure> {
+        let needed = f64::from(estimated_tokens);
+        if self.tpm > 0.0 && needed > self.tpm {
+            return Err(AttemptFailure {
+                kind: FailureKind::Permanent,
+                message: format!(
+                    "estimated request cost of {estimated_tokens} tokens exceeds configured TPM limit of {}",
+                    self.tpm
+                ),
+            });
+        }
         loop {
             let wait = {
                 let mut state = self
@@ -440,7 +469,6 @@ impl RateLimiter {
                 if self.tpm > 0.0 {
                     state.tokens = (state.tokens + elapsed * self.tpm / 60.0).min(self.tpm);
                 }
-                let needed = f64::from(estimated_tokens).min(self.tpm);
                 if now < state.blocked_until {
                     state
                         .blocked_until
@@ -455,7 +483,7 @@ impl RateLimiter {
                     if self.tpm > 0.0 {
                         state.tokens -= needed;
                     }
-                    return;
+                    return Ok(());
                 } else {
                     let request_wait = if self.rpm > 0.0 && state.requests < 1.0 {
                         (1.0 - state.requests) * 60.0 / self.rpm
@@ -518,6 +546,7 @@ mod tests {
 
     use std::convert::Infallible;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use axum::body::Body;
     use axum::extract::State;
@@ -531,6 +560,10 @@ mod tests {
     struct RotationState {
         old_key_seen: Notify,
         release_old_request: Notify,
+    }
+
+    struct TemperatureState {
+        requests: AtomicUsize,
     }
 
     #[test]
@@ -569,7 +602,62 @@ mod tests {
         let limiter = RateLimiter::new(1, 4);
         tokio::time::timeout(Duration::from_millis(100), limiter.acquire(4))
             .await
-            .expect("initial rate-limit credit should cover one request");
+            .expect("initial rate-limit credit should cover one request")
+            .expect("request should fit within the token limit");
+    }
+
+    #[tokio::test]
+    async fn rejects_a_request_larger_than_the_tpm_limit() {
+        let limiter = RateLimiter::new(1, 100);
+        let error = limiter
+            .acquire(1_000)
+            .await
+            .expect_err("oversized request must not reach the provider");
+
+        assert_eq!(error.kind, FailureKind::Permanent);
+        assert!(error.message.contains("1000 tokens"));
+    }
+
+    #[tokio::test]
+    async fn remembers_that_a_provider_rejects_temperature() {
+        let state = Arc::new(TemperatureState {
+            requests: AtomicUsize::new(0),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let router = Router::new()
+            .route("/v1/chat/completions", post(temperature_response))
+            .with_state(Arc::clone(&state));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("serve test requests");
+        });
+        let client = ModelClient::new(
+            reqwest::Client::new(),
+            TranslateAiModelConfig {
+                name: "temperature-test".to_string(),
+                base_url: format!("http://{address}/v1"),
+                model: "test-model".to_string(),
+                api_key: "secret".to_string(),
+                max_retries: 0,
+                ..TranslateAiModelConfig::default()
+            },
+        );
+
+        client
+            .translate("translate", "hallo")
+            .await
+            .expect("compatibility retry should succeed");
+        client
+            .translate("translate", "noch einmal")
+            .await
+            .expect("subsequent request should omit temperature");
+        server.abort();
+
+        assert_eq!(state.requests.load(Ordering::Relaxed), 3);
     }
 
     #[tokio::test]
@@ -738,6 +826,28 @@ mod tests {
             StatusCode::TOO_MANY_REQUESTS,
             [(header::RETRY_AFTER, "60")],
             Json(json!({ "error": "slow down" })),
+        )
+    }
+
+    async fn temperature_response(
+        State(state): State<Arc<TemperatureState>>,
+        Json(body): Json<Value>,
+    ) -> impl IntoResponse {
+        state.requests.fetch_add(1, Ordering::Relaxed);
+        if body.get("temperature").is_some() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "temperature is not supported" })),
+            );
+        }
+        (
+            StatusCode::OK,
+            Json(json!({
+                "choices": [{
+                    "message": { "content": "przetłumaczono" },
+                    "finish_reason": "stop"
+                }]
+            })),
         )
     }
 }

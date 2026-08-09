@@ -23,6 +23,8 @@ pub enum AiBuildError {
     DuplicateModel(String),
     #[error("AI model {0} has an incomplete configuration")]
     InvalidModel(String),
+    #[error("AI model {0} has an invalid HTTP(S) base URL")]
+    InvalidModelUrl(String),
     #[error("AI policy references an unknown model: {0}")]
     UnknownPolicyModel(String),
     #[error("no AI model in the configured policies has an API key")]
@@ -74,6 +76,7 @@ impl AiBackend {
             {
                 return Err(AiBuildError::InvalidModel(model.name.clone()));
             }
+            validate_model_url(model)?;
             let index = models.len();
             indexes.insert(model.name.clone(), index);
             models.push(ModelClient::new(http.clone(), model.clone()));
@@ -208,6 +211,15 @@ impl AiBackend {
     }
 }
 
+fn validate_model_url(model: &crate::config::TranslateAiModelConfig) -> Result<(), AiBuildError> {
+    let url = reqwest::Url::parse(model.base_url.trim())
+        .map_err(|_| AiBuildError::InvalidModelUrl(model.name.clone()))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(AiBuildError::InvalidModelUrl(model.name.clone()));
+    }
+    Ok(())
+}
+
 impl TranslateBackend for AiBackend {
     fn kind(&self) -> crate::translate::backend::BackendKind {
         crate::translate::backend::BackendKind::Ai
@@ -315,6 +327,26 @@ mod tests {
         assert!(matches!(
             AiBackend::new(&config),
             Err(AiBuildError::UnknownPolicyModel(name)) if name == "typo"
+        ));
+    }
+
+    #[test]
+    fn refuses_to_build_with_a_malformed_model_url() {
+        let mut config = config_with_key();
+        config.models[0].base_url = "localhost:11434/v1".to_string();
+        assert!(matches!(
+            AiBackend::new(&config),
+            Err(AiBuildError::InvalidModelUrl(name)) if name == "test"
+        ));
+    }
+
+    #[test]
+    fn refuses_to_build_with_a_non_http_model_url() {
+        let mut config = config_with_key();
+        config.models[0].base_url = "ftp://example.com/v1".to_string();
+        assert!(matches!(
+            AiBackend::new(&config),
+            Err(AiBuildError::InvalidModelUrl(name)) if name == "test"
         ));
     }
 
