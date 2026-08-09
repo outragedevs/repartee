@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 static URL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"https?://[^\s<>\"'\x00-\x1f]+(?:\s*\[[A-Za-z0-9.-]+\.[A-Za-z]{2,}\])?"#)
+    Regex::new(r#"(?i:https?)://[^\s<>\"'\x00-\x1f]+(?:\s*\[[A-Za-z0-9.-]+\.[A-Za-z]{2,}\])?"#)
         .expect("valid regex")
 });
 static CHANNEL: LazyLock<Regex> =
@@ -72,14 +72,7 @@ impl MaskState {
     }
 
     fn take(&mut self, kind: char, original: &str) -> String {
-        let identity = (
-            kind,
-            if matches!(kind, 'C' | 'N') {
-                original.to_lowercase()
-            } else {
-                original.to_string()
-            },
-        );
+        let identity = (kind, original.to_string());
         if let Some(key) = self.seen.get(&identity) {
             return format!("__{key}__");
         }
@@ -497,6 +490,24 @@ mod tests {
         let source = "https://example.com/Foo https://example.com/foo";
         let masked = mask(source, &[]);
         assert_eq!(masked.text, "__U1__ __U2__");
+        let (restored, report) = unmask(&masked, &masked.text);
+        assert_eq!((restored.as_str(), report.failed()), (source, false));
+    }
+
+    #[test]
+    fn masks_urls_with_case_insensitive_schemes() {
+        let source = "HTTPS://Example.com/X HtTp://example.com/y";
+        let masked = mask(source, &[]);
+        assert_eq!(masked.text, "__U1__ __U2__");
+        let (restored, report) = unmask(&masked, &masked.text);
+        assert_eq!((restored.as_str(), report.failed()), (source, false));
+    }
+
+    #[test]
+    fn preserves_case_distinct_irc_entities_independently() {
+        let source = "Alice ALICE #Rust #rust";
+        let masked = mask(source, &["alice".to_string()]);
+        assert_eq!(masked.text, "__N1__ __N2__ __C1__ __C2__");
         let (restored, report) = unmask(&masked, &masked.text);
         assert_eq!((restored.as_str(), report.failed()), (source, false));
     }

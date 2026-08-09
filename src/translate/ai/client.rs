@@ -351,10 +351,12 @@ fn parse_reply(raw: &str) -> Result<String, AttemptFailure> {
             kind: FailureKind::InvalidResponse,
             message: "response has no choices".to_string(),
         })?;
-    if choice.finish_reason.as_deref() == Some("length") {
+    if let Some(reason) = choice.finish_reason.as_deref()
+        && reason != "stop"
+    {
         return Err(AttemptFailure {
             kind: FailureKind::InvalidResponse,
-            message: "response was truncated".to_string(),
+            message: format!("response ended with finish reason {reason}"),
         });
     }
     let content = choice
@@ -579,6 +581,25 @@ mod tests {
             parse_reply(raw).unwrap_err().kind,
             FailureKind::InvalidResponse
         );
+    }
+
+    #[test]
+    fn rejects_every_non_stop_finish_reason() {
+        for reason in ["content_filter", "tool_calls", "provider_error"] {
+            let raw = format!(
+                r#"{{"choices":[{{"message":{{"content":"częściowa odpowiedź"}},"finish_reason":"{reason}"}}]}}"#
+            );
+            assert_eq!(
+                parse_reply(&raw).unwrap_err().kind,
+                FailureKind::InvalidResponse
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_a_response_without_a_finish_reason() {
+        let raw = r#"{"choices":[{"message":{"content":"dzień dobry"}}]}"#;
+        assert_eq!(parse_reply(raw).unwrap(), "dzień dobry");
     }
 
     #[test]
