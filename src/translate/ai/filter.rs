@@ -29,10 +29,8 @@ static CODE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     .map(|pattern| Regex::new(pattern).expect("valid regex"))
     .collect()
 });
-static VERBS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    "ist sind bin bist seid war warst waren hab habe hast hat haben hatte hatten wird wirst werden werde wurde wurden kann kannst koennen koennte konnte muss musst muessen sollte soll will willst wollen mag moechte weiss weisst wissen gibt gibts geht gehts kommt kommst kommen macht machst machen mach sagt sagen sag sieht sehen seh denke denkst glaub glaube glaubst brauch brauche braucht nimmt nimm laeuft lauft steht liegt bleibt findet find funktioniert klappt passt fehlt hilft schaut guck kuck bau baut nutzt nutze teste testet jest sa bylo byl byla mam masz ma mamy macie maja moge mozesz moze mozemy musze musisz musi wiem wiesz wie robie robisz robi ide idziesz idzie widze widzisz widzi daj dam dasz da bedzie beda mial miala mieli"
-        .split_whitespace()
-        .collect()
+static SHORT_NOISE: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    "lol rofl lmao xd xdd".split_whitespace().collect()
 });
 
 pub fn should_filter(req: &TranslateRequest) -> bool {
@@ -53,7 +51,7 @@ pub fn should_filter(req: &TranslateRequest) -> bool {
         }
     }
 
-    req.direction == Direction::Incoming && is_short_without_verb(text)
+    req.direction == Direction::Incoming && is_short_noise(text)
 }
 
 fn words(text: &str) -> Vec<&str> {
@@ -64,16 +62,13 @@ fn is_emote_only(text: &str) -> bool {
     words(text).is_empty()
 }
 
-fn is_short_without_verb(text: &str) -> bool {
+fn is_short_noise(text: &str) -> bool {
     let words = words(text);
-    words.len() < 3
-        && !words.iter().any(|word| {
-            let lower = word.to_ascii_lowercase();
-            VERBS.contains(lower.as_str())
-                || lower
-                    .strip_suffix('s')
-                    .is_some_and(|stem| VERBS.contains(stem))
-        })
+    !words.is_empty()
+        && words.len() < 3
+        && words
+            .iter()
+            .all(|word| SHORT_NOISE.contains(word.to_ascii_lowercase().as_str()))
 }
 
 fn is_onomatopoeia(text: &str) -> bool {
@@ -133,7 +128,7 @@ mod tests {
 
     #[test]
     fn filters_short_incoming_noise() {
-        assert!(should_filter(&request(Direction::Incoming, "moin")));
+        assert!(should_filter(&request(Direction::Incoming, "lol")));
     }
 
     #[test]
@@ -142,6 +137,16 @@ mod tests {
             Direction::Outgoing,
             "good morning"
         )));
+    }
+
+    #[test]
+    fn keeps_short_incoming_phrases_that_carry_meaning() {
+        for text in ["guten Morgen", "keine Ahnung"] {
+            assert!(
+                !should_filter(&request(Direction::Incoming, text)),
+                "meaningful phrase filtered: {text}"
+            );
+        }
     }
 
     #[test]

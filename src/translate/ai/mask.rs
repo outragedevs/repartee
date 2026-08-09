@@ -60,7 +60,14 @@ struct MaskState {
 
 impl MaskState {
     fn take(&mut self, kind: char, original: &str) -> String {
-        let identity = (kind, original.to_lowercase());
+        let identity = (
+            kind,
+            if matches!(kind, 'C' | 'N') {
+                original.to_lowercase()
+            } else {
+                original.to_string()
+            },
+        );
         if let Some(key) = self.seen.get(&identity) {
             return format!("__{key}__");
         }
@@ -427,5 +434,14 @@ mod tests {
         let source = format!("join #c and {long}");
         let masked = mask(&source, &[]);
         assert_eq!(masked.text, "join __C1__ and __C2__");
+    }
+
+    #[test]
+    fn preserves_case_distinct_urls_independently() {
+        let source = "https://example.com/Foo https://example.com/foo";
+        let masked = mask(source, &[]);
+        assert_eq!(masked.text, "__U1__ __U2__");
+        let (restored, report) = unmask(&masked, &masked.text);
+        assert_eq!((restored.as_str(), report.failed()), (source, false));
     }
 }

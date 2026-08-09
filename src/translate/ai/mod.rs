@@ -290,7 +290,7 @@ mod tests {
     async fn filters_before_attempting_network_io() {
         let backend = AiBackend::new(&config_with_key()).expect("valid config");
         assert!(matches!(
-            backend.translate(request("moin")).await,
+            backend.translate(request("lol")).await,
             TranslateOutcome::Untranslated {
                 reason: UntranslatedReason::Filtered,
                 ..

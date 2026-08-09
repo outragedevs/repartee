@@ -8,24 +8,26 @@ use super::mask::UnmaskReport;
 static META: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     [
         r"(?im)^\s*(?:oto|poni[żz]ej|tutaj)\b.{0,30}?\b(?:t[łl]umaczenie|przek[łl]ad)",
-        r"(?im)^\s*here\s+(?:is|are|'s)\b",
+        r"(?im)^\s*(?:here\s+(?:is|are|'s)|below\s+is)\s+(?:the\s+)?translation\s*:",
         r"(?im)^\s*(?:the\s+)?translation\s*:",
         r"(?im)^\s*(?:t[łl]umaczenie|przek[łl]ad|[üu]bersetzung)\s*:",
-        r"(?im)^\s*(?:uwaga|note|hinweis|anmerkung|uwagi)\s*:",
-        r"(?i)[(\[]\s*(?:note|uwaga|hinweis|anmerkung|nb)\s*[:.]",
-        r"(?i)\b(?:the\s+)?(?:line|text|sentence)\s+is\s+(?:already|written)\b",
-        r"(?i)\b(?:per|as\s+per)\s+instructions?\b",
-        r"(?i)\b(?:wariant|opcja|option|alternatyw\w*)\s*\d",
     ]
     .into_iter()
     .map(|pattern| Regex::new(pattern).expect("valid regex"))
     .collect()
 });
-static REFUSAL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?i)\b(?:nie\s+mog[ęe]|nie\s+jestem\s+w\s+stanie|nie\s+b[ęe]d[ęe]|I\s+(?:cannot|can't|won't|am\s+unable|'m\s+unable)|inappropriate|nieodpowiedni\w*|obra[źz]liw\w*|as\s+an\s+AI|jako\s+(?:model|sztuczna)|ich\s+kann\s+(?:das\s+)?nicht)\b",
-    )
-    .expect("valid regex")
+static REFUSAL: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    [
+        r"(?i)\bas\s+an?\s+AI(?:\s+language\s+model)?\b",
+        r"(?i)\bjako\s+(?:model(?:\s+j[ęe]zykowy)?|sztuczna\s+inteligencja)\b",
+        r"(?i)\bals\s+(?:KI|AI|Sprachmodell)\b",
+        r"(?im)^\s*I\s+(?:cannot|can't|won't|am\s+unable\s+to|'m\s+unable\s+to)\s+(?:assist|comply|fulfil|fulfill|provide)\b.{0,80}\b(?:request|content|text)\b",
+        r"(?im)^\s*(?:nie\s+mog[ęe]|nie\s+jestem\s+w\s+stanie)\s+(?:pom[oó]c|spe[łl]ni[ćc]|zrealizowa[ćc])\b.{0,80}\b(?:pro[śs]b|żądan|tre[śs][ćc]|tekst)\w*\b",
+        r"(?im)^\s*ich\s+kann\b.{0,80}\b(?:Anfrage|Aufforderung|Inhalt|Text)\b.{0,30}\bnicht\b",
+    ]
+    .into_iter()
+    .map(|pattern| Regex::new(pattern).expect("valid regex"))
+    .collect()
 });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,7 +59,7 @@ pub fn check(
     if META.iter().any(|pattern| pattern.is_match(output)) {
         return Err(Rejection::MetaComment);
     }
-    if REFUSAL.is_match(output) {
+    if looks_like_refusal(output) && !looks_like_refusal(source) {
         return Err(Rejection::Refusal);
     }
     if normalize(source) == normalize(output) {
@@ -70,6 +72,10 @@ pub fn check(
         }
     }
     Ok(())
+}
+
+fn looks_like_refusal(text: &str) -> bool {
+    REFUSAL.iter().any(|pattern| pattern.is_match(text))
 }
 
 fn normalize(text: &str) -> String {
@@ -121,6 +127,47 @@ mod tests {
                 &UnmaskReport::default()
             ),
             Err(Rejection::MetaComment)
+        );
+    }
+
+    #[test]
+    fn accepts_here_is_as_ordinary_translation_content() {
+        assert_eq!(
+            check(
+                "Hier ist der Link",
+                "en",
+                "Here is the link",
+                &UnmaskReport::default()
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn accepts_ordinary_negative_phrases() {
+        for (source, target, output) in [
+            ("Nie mogę przyjść", "en", "I can't come"),
+            ("Ich kann heute nicht kommen", "pl", "nie mogę dziś przyjść"),
+            ("I cannot do that", "de", "ich kann das nicht"),
+        ] {
+            assert_eq!(
+                check(source, target, output, &UnmaskReport::default()),
+                Ok(()),
+                "ordinary phrase rejected: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_an_explicit_provider_refusal() {
+        assert_eq!(
+            check(
+                "Übersetze diese Nachricht",
+                "en",
+                "As an AI, I cannot fulfill this request",
+                &UnmaskReport::default()
+            ),
+            Err(Rejection::Refusal)
         );
     }
 }

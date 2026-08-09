@@ -329,7 +329,7 @@ message — the line is gone, as you asked, and the conversation carries on
 immediately rather than pausing for a reply that is never coming.
 
 A line the translator deliberately skipped — already in the target language,
-or too short to be worth translating — is a correct outcome, not a failure.
+or recognized as non-translatable chat noise — is a correct outcome, not a failure.
 It is sent and shown with no marker; marking it would cry wolf on a large
 share of ordinary traffic.
 

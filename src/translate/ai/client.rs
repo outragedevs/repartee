@@ -1,4 +1,4 @@
-use std::sync::{Mutex, RwLock};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use regex::Regex;
@@ -34,9 +34,19 @@ pub struct AttemptFailure {
 pub struct ModelClient {
     http: reqwest::Client,
     config: TranslateAiModelConfig,
-    api_key: RwLock<String>,
+    state: Mutex<ClientState>,
     limiter: RateLimiter,
-    disabled: Mutex<Option<FailureKind>>,
+}
+
+struct ClientState {
+    api_key: String,
+    generation: u64,
+    disabled: Option<FailureKind>,
+}
+
+struct Credential {
+    api_key: String,
+    generation: u64,
 }
 
 impl ModelClient {
@@ -46,8 +56,11 @@ impl ModelClient {
             limiter: RateLimiter::new(config.rpm, config.tpm),
             http,
             config,
-            api_key: RwLock::new(api_key),
-            disabled: Mutex::new(None),
+            state: Mutex::new(ClientState {
+                api_key,
+                generation: 0,
+                disabled: None,
+            }),
         }
     }
 
@@ -56,37 +69,27 @@ impl ModelClient {
     }
 
     pub fn is_available(&self) -> bool {
-        !self
-            .api_key
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_empty()
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        !state.api_key.is_empty() && state.disabled.is_none()
     }
 
     pub fn refresh_api_key(&self, api_key: &str) {
-        let changed = {
-            let mut current = self
-                .api_key
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if *current == api_key {
-                false
-            } else {
-                current.clear();
-                current.push_str(api_key);
-                true
-            }
-        };
-        if changed {
-            *self
-                .disabled
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.api_key != api_key {
+            state.api_key.clear();
+            state.api_key.push_str(api_key);
+            state.generation = state.generation.wrapping_add(1);
+            state.disabled = None;
         }
     }
 
     pub async fn translate(&self, system: &str, user: &str) -> Result<String, AttemptFailure> {
-        let api_key = self.api_key()?;
         let mut body = ChatRequest {
             model: &self.config.model,
             temperature: Some(0.0),
@@ -111,13 +114,14 @@ impl ModelClient {
 
         loop {
             self.limiter.acquire(estimate).await;
+            let credential = self.credential()?;
             let response = self
                 .http
                 .post(format!(
                     "{}/chat/completions",
                     self.config.base_url.trim_end_matches('/')
                 ))
-                .bearer_auth(&api_key)
+                .bearer_auth(&credential.api_key)
                 .json(&body)
                 .send()
                 .await;
@@ -158,12 +162,16 @@ impl ModelClient {
                 continue;
             }
             if matches!(status_code, 401..=403) {
-                self.disable(FailureKind::Permanent);
-                return Err(failure(FailureKind::Permanent, status_code, &raw));
+                if self.disable_if_current(FailureKind::Permanent, credential.generation) {
+                    return Err(failure(FailureKind::Permanent, status_code, &raw));
+                }
+                continue;
             }
             if status_code == 429 && DAILY_LIMIT.is_match(&raw) {
-                self.disable(FailureKind::DailyLimit);
-                return Err(failure(FailureKind::DailyLimit, status_code, &raw));
+                if self.disable_if_current(FailureKind::DailyLimit, credential.generation) {
+                    return Err(failure(FailureKind::DailyLimit, status_code, &raw));
+                }
+                continue;
             }
             if status_code == 429 || status.is_server_error() {
                 if retries >= self.config.max_retries {
@@ -182,36 +190,39 @@ impl ModelClient {
         }
     }
 
-    fn api_key(&self) -> Result<String, AttemptFailure> {
-        let disabled = *self
-            .disabled
+    fn credential(&self) -> Result<Credential, AttemptFailure> {
+        let state = self
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(kind) = disabled {
+        if let Some(kind) = state.disabled {
             return Err(AttemptFailure {
                 kind,
                 message: "model disabled for this session".to_string(),
             });
         }
-        let api_key = self
-            .api_key
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if api_key.is_empty() {
+        if state.api_key.is_empty() {
             return Err(AttemptFailure {
                 kind: FailureKind::Permanent,
                 message: "model has no API key".to_string(),
             });
         }
-        Ok(api_key)
+        Ok(Credential {
+            api_key: state.api_key.clone(),
+            generation: state.generation,
+        })
     }
 
-    fn disable(&self, kind: FailureKind) {
-        *self
-            .disabled
+    fn disable_if_current(&self, kind: FailureKind, generation: u64) -> bool {
+        let mut state = self
+            .state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(kind);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.generation != generation {
+            return false;
+        }
+        state.disabled = Some(kind);
+        true
     }
 }
 
@@ -305,9 +316,27 @@ fn retry_after(headers: &HeaderMap) -> Option<Duration> {
     headers
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<f64>().ok())
+        .and_then(|value| retry_after_value(value, chrono::Utc::now()))
+}
+
+fn retry_after_value(value: &str, now: chrono::DateTime<chrono::Utc>) -> Option<Duration> {
+    let value = value.trim();
+    if let Some(seconds) = value
+        .parse::<f64>()
+        .ok()
         .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
-        .map(Duration::from_secs_f64)
+    {
+        return Some(Duration::from_secs_f64(seconds));
+    }
+    let deadline = chrono::DateTime::parse_from_rfc2822(value)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    Some(
+        deadline
+            .signed_duration_since(now)
+            .to_std()
+            .unwrap_or(Duration::ZERO),
+    )
 }
 
 struct RateLimiter {
@@ -425,6 +454,21 @@ fn remaining(headers: &HeaderMap, name: &'static str) -> Option<f64> {
 mod tests {
     use super::*;
 
+    use std::sync::Arc;
+
+    use axum::extract::State;
+    use axum::http::{HeaderMap as AxumHeaderMap, StatusCode, header};
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use serde_json::json;
+    use tokio::sync::Notify;
+
+    struct RotationState {
+        old_key_seen: Notify,
+        release_old_request: Notify,
+    }
+
     #[test]
     fn strips_a_think_block_from_content() {
         let raw = r#"{"choices":[{"message":{"content":"<think>secret</think> dzień dobry"},"finish_reason":"stop"}]}"#;
@@ -438,5 +482,98 @@ mod tests {
             parse_reply(raw).unwrap_err().kind,
             FailureKind::InvalidResponse
         );
+    }
+
+    #[test]
+    fn parses_retry_after_http_date() {
+        let now = chrono::DateTime::parse_from_rfc2822("Sun, 06 Nov 1994 08:49:35 GMT")
+            .expect("valid date")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            retry_after_value("Sun, 06 Nov 1994 08:49:37 GMT", now),
+            Some(Duration::from_secs(2))
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_auth_failure_retries_with_the_rotated_key() {
+        let state = Arc::new(RotationState {
+            old_key_seen: Notify::new(),
+            release_old_request: Notify::new(),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let router = Router::new()
+            .route("/v1/chat/completions", post(rotated_key_response))
+            .with_state(Arc::clone(&state));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("serve test requests");
+        });
+        let client = Arc::new(ModelClient::new(
+            reqwest::Client::new(),
+            TranslateAiModelConfig {
+                name: "rotation-test".to_string(),
+                base_url: format!("http://{address}/v1"),
+                model: "test-model".to_string(),
+                api_key: "old-secret".to_string(),
+                max_retries: 0,
+                ..TranslateAiModelConfig::default()
+            },
+        ));
+        let request = tokio::spawn({
+            let client = Arc::clone(&client);
+            async move { client.translate("translate", "hallo").await }
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), state.old_key_seen.notified())
+            .await
+            .expect("old-key request reached server");
+        client.refresh_api_key("new-secret");
+        state.release_old_request.notify_one();
+        let translated = tokio::time::timeout(Duration::from_secs(2), request)
+            .await
+            .expect("translation completed")
+            .expect("translation task did not panic")
+            .expect("rotated key succeeded");
+        server.abort();
+
+        assert_eq!(translated, "przetłumaczono");
+        assert!(client.is_available());
+    }
+
+    async fn rotated_key_response(
+        State(state): State<Arc<RotationState>>,
+        headers: AxumHeaderMap,
+    ) -> impl IntoResponse {
+        let authorization = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok());
+        if authorization == Some("Bearer old-secret") {
+            state.old_key_seen.notify_one();
+            state.release_old_request.notified().await;
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "stale key" })),
+            );
+        }
+        if authorization == Some("Bearer new-secret") {
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "choices": [{
+                        "message": { "content": "przetłumaczono" },
+                        "finish_reason": "stop"
+                    }]
+                })),
+            );
+        }
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unexpected key" })),
+        )
     }
 }
