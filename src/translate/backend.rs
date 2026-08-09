@@ -188,6 +188,7 @@ mod tests {
             text: text.to_string(),
             source_lang: None,
             target_lang: "pl".to_string(),
+            deadline: None,
             known_nicks: Vec::new(),
         }
     }

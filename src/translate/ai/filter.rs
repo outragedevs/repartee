@@ -39,6 +39,11 @@ static SHORT_NOISE: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         .split_whitespace()
         .collect()
 });
+static TECHNICAL_PROSE: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    "use uses need needs buy buys get gets want wants have has is are ist sind brauche braucht nutze nutzt użyj"
+        .split_whitespace()
+        .collect()
+});
 
 pub fn should_filter(req: &TranslateRequest) -> bool {
     let text = req.text.trim();
@@ -47,18 +52,52 @@ pub fn should_filter(req: &TranslateRequest) -> bool {
         || CODE.iter().any(|pattern| pattern.is_match(text))
         || is_emote_only(text)
         || is_onomatopoeia(text)
+        || is_technical_only(text)
     {
         return true;
     }
 
     if let Some(target) = KnownLanguage::from_code(&req.target_lang) {
         let detected = lang::detect(text);
-        if !detected.uncertain && detected.language == Some(target) {
+        if detected.likely_matches(target) {
             return true;
         }
     }
 
     req.direction == Direction::Incoming && is_short_noise(text)
+}
+
+fn is_technical_only(text: &str) -> bool {
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    if tokens.is_empty()
+        || tokens.len() > 3
+        || tokens
+            .iter()
+            .any(|token| TECHNICAL_PROSE.contains(token.to_ascii_lowercase().as_str()))
+    {
+        return false;
+    }
+    let mut has_letter = false;
+    let mut has_digit = false;
+    for token in tokens {
+        if !token
+            .chars()
+            .all(|ch| ch.is_alphanumeric() || matches!(ch, '-' | '+' | '.' | '_' | '/'))
+        {
+            return false;
+        }
+        let token_has_letter = token.chars().any(char::is_alphabetic);
+        let token_has_digit = token.chars().any(|ch| ch.is_ascii_digit());
+        if token_has_letter
+            && !token_has_digit
+            && !token.chars().next().is_some_and(char::is_uppercase)
+        {
+            return false;
+        }
+        has_letter |= token_has_letter;
+        has_digit |= token_has_digit;
+    }
+    has_letter && has_digit && lang::detect(text).language.is_none()
 }
 
 fn words(text: &str) -> Vec<&str> {
@@ -131,6 +170,7 @@ mod tests {
             text: text.to_string(),
             source_lang: Some("de".to_string()),
             target_lang: "pl".to_string(),
+            deadline: None,
             known_nicks: Vec::new(),
         }
     }
@@ -164,6 +204,21 @@ mod tests {
             Direction::Incoming,
             "https://example.com/x"
         )));
+    }
+
+    #[test]
+    fn filters_a_short_phrase_already_in_the_target_language() {
+        assert!(should_filter(&request(Direction::Outgoing, "nie wiem")));
+    }
+
+    #[test]
+    fn filters_a_technical_product_name() {
+        assert!(should_filter(&request(Direction::Outgoing, "Shure SM58")));
+    }
+
+    #[test]
+    fn keeps_ordinary_prose_that_mentions_a_product_number() {
+        assert!(!should_filter(&request(Direction::Outgoing, "Use SM58")));
     }
 
     #[test]

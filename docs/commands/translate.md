@@ -342,10 +342,10 @@ known nicks are replaced with opaque placeholders first and restored only
 after the answer passes validation.
 
 The network name, channel/query name, speaker nick and channel nick list are
-not sent as metadata. The nick list is used locally only to find names that
-must be masked. Text not recognized by the masker still leaves the client, so
-translation should be treated as disclosure of the conversation content to
-the configured provider.
+not sent as metadata. The nick list, speaker and query peer are used locally
+only to find names that must be masked. Text not recognized by the masker
+still leaves the client, so translation should be treated as disclosure of
+the conversation content to the configured provider.
 
 Nothing is sent for a channel you have not explicitly enabled, and nothing is
 sent for history — only lines arriving live, and only while the master switch

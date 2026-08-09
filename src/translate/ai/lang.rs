@@ -76,6 +76,17 @@ impl KnownLanguage {
 pub struct Detection {
     pub language: Option<KnownLanguage>,
     pub uncertain: bool,
+    top_score: f32,
+    margin: f32,
+    token_count: usize,
+}
+
+impl Detection {
+    pub fn likely_matches(self, language: KnownLanguage) -> bool {
+        self.language == Some(language)
+            && (!self.uncertain
+                || (self.token_count >= 2 && self.top_score >= 1.0 && self.margin >= 0.3))
+    }
 }
 
 pub fn detect(text: &str) -> Detection {
@@ -135,6 +146,9 @@ pub fn detect(text: &str) -> Detection {
     Detection {
         language: (total > 0.0).then_some(ranked[0].0),
         uncertain: tokens.len() < 4 || total < 2.5 || margin < 0.2,
+        top_score: ranked[0].1,
+        margin,
+        token_count: tokens.len(),
     }
 }
 
@@ -185,5 +199,19 @@ mod tests {
     #[test]
     fn treats_short_text_as_uncertain() {
         assert!(detect("nie wiem").uncertain);
+    }
+
+    #[test]
+    fn recognizes_a_decisive_short_target_phrase() {
+        let detected = detect("nie wiem");
+        assert!(
+            detected.likely_matches(KnownLanguage::Pl),
+            "unexpected detection: {detected:?}"
+        );
+    }
+
+    #[test]
+    fn does_not_trust_an_ambiguous_single_word() {
+        assert!(!detect("ja").likely_matches(KnownLanguage::Pl));
     }
 }

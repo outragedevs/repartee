@@ -1637,6 +1637,7 @@ impl AppState {
             text: original.clone(),
             source_lang,
             target_lang,
+            deadline: None,
             known_nicks,
         };
 

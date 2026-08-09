@@ -7,6 +7,7 @@ mod quality;
 mod router;
 
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use futures::future::BoxFuture;
 use thiserror::Error;
@@ -16,6 +17,9 @@ use self::router::Difficulty;
 use super::backend::TranslateBackend;
 use super::{TranslateOutcome, TranslateRequest, UntranslatedReason};
 use crate::config::TranslateAiConfig;
+
+const DEFAULT_TRANSLATION_BUDGET: Duration = Duration::from_secs(5);
+const ATTEMPT_HEADROOM: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Error)]
 pub enum AiBuildError {
@@ -133,7 +137,7 @@ impl AiBackend {
             Difficulty::Easy => (&self.easy, &self.strong),
             Difficulty::Strong => (&self.strong, &self.easy),
         };
-        let masked = mask::mask(&req.text, &req.known_nicks);
+        let masked = mask_request(&req);
         let system = prompt::render(
             &self.prompt_template,
             req.source_lang.as_deref(),
@@ -143,17 +147,33 @@ impl AiBackend {
         let mut saw_daily_limit = false;
         let mut saw_provider_failure = false;
 
-        let mut attempted = HashSet::new();
-        for &index in preferred.iter().chain(alternate) {
-            if !attempted.insert(index) {
-                continue;
-            }
+        let deadline = req
+            .deadline
+            .unwrap_or_else(|| Instant::now() + DEFAULT_TRANSLATION_BUDGET);
+        let candidates = self.available_candidates(preferred, alternate);
+        for (position, index) in candidates.iter().copied().enumerate() {
             let model = &self.models[index];
-            if !model.is_available() {
-                continue;
-            }
-            match model.translate(&system, &masked.text).await {
-                Ok(output) => {
+            let attempts_left = candidates.len().saturating_sub(position);
+            let Some(attempt_budget) = model_attempt_budget(deadline, attempts_left) else {
+                saw_provider_failure = true;
+                break;
+            };
+            let attempt = tokio::time::timeout(
+                attempt_budget,
+                model.translate(&system, &masked.text),
+            )
+            .await;
+            match attempt {
+                Err(_) => {
+                    saw_provider_failure = true;
+                    tracing::warn!(
+                        request_id = req.id,
+                        model = model.name(),
+                        ?attempt_budget,
+                        "translate: AI model attempt timed out"
+                    );
+                }
+                Ok(Ok(output)) => {
                     let (translated, placeholders) = mask::unmask(&masked, &output);
                     match quality::check(&req.text, &req.target_lang, &translated, &placeholders) {
                         Ok(()) => {
@@ -179,7 +199,7 @@ impl AiBackend {
                         }
                     }
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     saw_daily_limit |= error.kind == FailureKind::DailyLimit;
                     saw_provider_failure |= matches!(
                         error.kind,
@@ -198,17 +218,60 @@ impl AiBackend {
             }
         }
 
-        let reason = if saw_quality_failure {
-            UntranslatedReason::QualityGate
-        } else if saw_provider_failure {
-            UntranslatedReason::Error("all AI models failed".to_string())
-        } else if saw_daily_limit {
-            UntranslatedReason::DailyLimit
-        } else {
-            UntranslatedReason::NoProvider
-        };
+        let reason = failed_policy_reason(
+            saw_quality_failure,
+            saw_provider_failure,
+            saw_daily_limit,
+        );
         TranslateOutcome::Untranslated { id: req.id, reason }
     }
+
+    fn available_candidates(&self, preferred: &[usize], alternate: &[usize]) -> Vec<usize> {
+        let mut attempted = HashSet::new();
+        preferred
+            .iter()
+            .chain(alternate)
+            .copied()
+            .filter(|index| attempted.insert(*index))
+            .filter(|index| self.models[*index].is_available())
+            .collect()
+    }
+}
+
+fn failed_policy_reason(
+    saw_quality_failure: bool,
+    saw_provider_failure: bool,
+    saw_daily_limit: bool,
+) -> UntranslatedReason {
+    if saw_quality_failure {
+        UntranslatedReason::QualityGate
+    } else if saw_provider_failure {
+        UntranslatedReason::Error("all AI models failed".to_string())
+    } else if saw_daily_limit {
+        UntranslatedReason::DailyLimit
+    } else {
+        UntranslatedReason::NoProvider
+    }
+}
+
+fn model_attempt_budget(deadline: Instant, attempts_left: usize) -> Option<Duration> {
+    let divisor = u32::try_from(attempts_left).unwrap_or(u32::MAX).max(1);
+    let budget = deadline
+        .saturating_duration_since(Instant::now())
+        .checked_div(divisor)
+        .unwrap_or_default()
+        .saturating_sub(ATTEMPT_HEADROOM);
+    (!budget.is_zero()).then_some(budget)
+}
+
+fn mask_request(req: &TranslateRequest) -> mask::MaskedText {
+    let mut nicks = Vec::with_capacity(req.known_nicks.len() + 2);
+    nicks.extend(req.known_nicks.iter().cloned());
+    nicks.push(req.nick.clone());
+    if !crate::irc::formatting::is_channel(&req.target) {
+        nicks.push(req.target.clone());
+    }
+    mask::mask(&req.text, &nicks)
 }
 
 fn validate_model_url(model: &crate::config::TranslateAiModelConfig) -> Result<(), AiBuildError> {
@@ -306,6 +369,7 @@ mod tests {
             text: text.to_string(),
             source_lang: Some("de".to_string()),
             target_lang: "pl".to_string(),
+            deadline: None,
             known_nicks: vec!["alice".to_string()],
         }
     }
@@ -360,6 +424,100 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn masks_the_speaker_and_query_peer_without_a_nick_list() {
+        let mut req = request("alice: guten morgen bob");
+        req.target = "bob".to_string();
+        req.known_nicks.clear();
+        let masked = mask_request(&req);
+
+        assert!(!masked.text.to_ascii_lowercase().contains("alice"));
+        assert!(!masked.text.to_ascii_lowercase().contains("bob"));
+    }
+
+    #[tokio::test]
+    async fn a_hanging_model_does_not_consume_the_fallback_budget() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let app = Router::new()
+            .route("/hang/chat/completions", post(hanging_translation))
+            .route("/v1/chat/completions", post(successful_translation));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve test requests");
+        });
+        let model = |name: &str, path: &str, model: &str| TranslateAiModelConfig {
+            name: name.to_string(),
+            base_url: format!("http://{address}/{path}"),
+            model: model.to_string(),
+            api_key_env: "TEST_API".to_string(),
+            api_key: "secret".to_string(),
+            max_retries: 0,
+            ..TranslateAiModelConfig::default()
+        };
+        let config = TranslateAiConfig {
+            easy: vec!["hanging".to_string(), "success".to_string()],
+            strong: vec!["hanging".to_string(), "success".to_string()],
+            prompt_path: String::new(),
+            models: vec![
+                model("hanging", "hang", "hanging-model"),
+                model("success", "v1", "success-model"),
+            ],
+        };
+        let backend = AiBackend::new(&config).expect("valid config");
+        let mut req = request("ich glaube das funktioniert wirklich");
+        req.deadline = Some(Instant::now() + Duration::from_millis(400));
+
+        let outcome = backend.translate(req).await;
+        server.abort();
+
+        assert!(matches!(outcome, TranslateOutcome::Translated { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_long_retry_after_does_not_consume_the_fallback_budget() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let app = Router::new()
+            .route("/limited/chat/completions", post(rate_limited_translation))
+            .route("/v1/chat/completions", post(successful_translation));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve test requests");
+        });
+        let model = |name: &str, path: &str, model: &str| TranslateAiModelConfig {
+            name: name.to_string(),
+            base_url: format!("http://{address}/{path}"),
+            model: model.to_string(),
+            api_key_env: "TEST_API".to_string(),
+            api_key: "secret".to_string(),
+            ..TranslateAiModelConfig::default()
+        };
+        let config = TranslateAiConfig {
+            easy: vec!["limited".to_string(), "success".to_string()],
+            strong: vec!["limited".to_string(), "success".to_string()],
+            prompt_path: String::new(),
+            models: vec![
+                model("limited", "limited", "limited-model"),
+                model("success", "v1", "success-model"),
+            ],
+        };
+        let backend = AiBackend::new(&config).expect("valid config");
+        let mut req = request("ich glaube das funktioniert wirklich");
+        req.deadline = Some(Instant::now() + Duration::from_millis(400));
+
+        let outcome = backend.translate(req).await;
+        server.abort();
+
+        assert!(matches!(outcome, TranslateOutcome::Translated { .. }));
     }
 
     #[tokio::test]
@@ -532,6 +690,19 @@ mod tests {
                     "finish_reason": "stop"
                 }]
             })),
+        )
+    }
+
+    async fn hanging_translation() -> StatusCode {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        StatusCode::GATEWAY_TIMEOUT
+    }
+
+    async fn rate_limited_translation() -> impl IntoResponse {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, "60")],
+            Json(json!({ "error": "slow down" })),
         )
     }
 }

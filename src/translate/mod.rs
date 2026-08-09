@@ -45,6 +45,7 @@ pub struct TranslateRequest {
     /// `None` lets the broker autodetect.
     pub source_lang: Option<String>,
     pub target_lang: String,
+    pub deadline: Option<std::time::Instant>,
     /// The channel's nicklist. Travels in the request because only the
     /// client knows it, and masking behind the seam needs it to protect
     /// nicks from being "translated".

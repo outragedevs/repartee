@@ -450,7 +450,7 @@ pub fn startup_backend_notice(cfg: &crate::config::TranslateConfig) -> Option<St
 /// budget.
 async fn translate_isolated(
     backend: &SharedBackend,
-    req: TranslateRequest,
+    mut req: TranslateRequest,
     timeout: &Arc<std::sync::atomic::AtomicU64>,
     submitted_at: std::time::Instant,
 ) -> TranslateOutcome {
@@ -478,6 +478,7 @@ async fn translate_isolated(
             reason: UntranslatedReason::Timeout,
         };
     };
+    req.deadline = std::time::Instant::now().checked_add(budget);
     // The boundary has to cover BUILDING the future, not just polling it. A
     // backend that panics synchronously inside `translate()` — before it ever
     // returns its `BoxFuture` — would otherwise unwind past this: the
@@ -1970,6 +1971,7 @@ impl crate::app::App {
                 text: text.to_string(),
                 source_lang,
                 target_lang,
+                deadline: None,
                 known_nicks,
             },
             nick: captured_nick,
@@ -7645,6 +7647,7 @@ mod tests {
             text: text.to_string(),
             source_lang: None,
             target_lang: "pl".to_string(),
+            deadline: None,
             known_nicks: Vec::new(),
         }
     }
