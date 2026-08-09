@@ -1800,6 +1800,434 @@ with original URLs).</li>
 <h2>See Also</h2>
 <p>/set, /preview</p>
 </div>
+<div class="command-entry" data-command="translate" data-category="Other">
+<h1>/translate</h1>
+<h2>Syntax</h2>
+<pre><code>/translate list
+/translate status
+/translate addin  &lt;#channel|nick&gt; [lang] [my-lang]
+/translate delin  &lt;#channel|nick&gt;
+/translate addout &lt;#channel|nick&gt; &lt;lang&gt; [my-lang]
+/translate delout &lt;#channel|nick&gt;
+</code></pre>
+<p>Alias: <code>/tr</code></p>
+<h2>Description</h2>
+<p>Turn a channel or query into one you can read — and write — in your own
+language. Incoming lines are shown already translated; outgoing messages are
+translated before they reach IRC.</p>
+<p>Translation is per buffer and per direction. <code>addin</code> translates what others
+say to you; <code>addout</code> translates what you send. They are independent, so
+reading a German channel in Polish while still writing German yourself is
+just <code>addin</code> without <code>addout</code>.</p>
+<p>Nothing happens until the master switch is on <strong>and</strong> a translator is named:</p>
+<pre><code>/set translate.enabled true
+/set translate.backend &lt;name&gt;
+</code></pre>
+<p>The switch and the translator are separate settings on purpose. <code>enabled</code>
+says the mechanism may run; <code>backend</code> says what it runs on. With
+<code>translate.backend = &quot;none&quot;</code> — the default — every line is delivered exactly
+as it arrived, however many buffers are configured, and <code>/translate status</code>
+says so.</p>
+<p>Available backends:</p>
+<table>
+<thead>
+<tr>
+<th>name</th>
+<th>what it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>none</code></td>
+<td>nothing is translated (default)</td>
+</tr>
+<tr>
+<td><code>ai</code></td>
+<td>production AI translator with ordered OpenAI-compatible providers</td>
+</tr>
+<tr>
+<td><code>stub</code></td>
+<td>test backend — <strong>reverses word order</strong>, no network, no API key</td>
+</tr>
+</tbody></table>
+<p><code>stub</code> exists only to exercise the mechanism end to end. It is never installed
+implicitly, because its output does not stay on your screen: on the outgoing
+side it is what goes to the channel, under your nick. Repartee says so loudly
+at startup when it is on. Do not leave it on for a real conversation.</p>
+<h3>AI setup</h3>
+<p>The quickest production setup uses the default OpenRouter model. Put the key
+in <code>~/.repartee/.env</code>, never in <code>config.toml</code>:</p>
+<pre><code>OPENROUTER_API=your-key
+</code></pre>
+<p>Then select the backend and restart Repartee:</p>
+<pre><code>/set translate.enabled true
+/set translate.backend ai
+</code></pre>
+<p>The AI backend is a policy, not one hard-wired vendor. It can use any
+OpenAI-compatible chat-completions endpoint and tries configured models in
+order. The built-in easy-line order is OpenRouter Gemma 4 31B, Ollama Gemma 4
+31B, Groq GPT-OSS 120B, then Groq Qwen 3.6 27B. Lines classified as difficult
+start with Gemini 3.6 Flash, followed by the same fallbacks. A model whose key
+is absent is skipped; one usable key is enough. The recognized default <code>.env</code>
+names are:</p>
+<table>
+<thead>
+<tr>
+<th>provider</th>
+<th>key</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>OpenRouter</td>
+<td><code>OPENROUTER_API</code></td>
+</tr>
+<tr>
+<td>Ollama Cloud</td>
+<td><code>OLLAMA_API</code></td>
+</tr>
+<tr>
+<td>Gemini</td>
+<td><code>GEMINI_API</code></td>
+</tr>
+<tr>
+<td>Groq</td>
+<td><code>GROQ_API_KEY</code></td>
+</tr>
+</tbody></table>
+<p>Before a provider call, Repartee filters lines that do not need translation,
+masks URLs, channel names, nicks and technical identifiers, then routes the
+remaining text to the easy or strong policy. Every answer passes a local
+quality gate. Missing or altered placeholders, refusals, explanations,
+unchanged source text, a confidently wrong target language, empty output and
+multi-line output all cause fallback to the next model. If the policy is
+exhausted, the existing untranslated/refusal behavior applies.</p>
+<p>The supplied prompt is embedded in the binary. Set
+<code>translate.ai.prompt_path</code> in <code>config.toml</code> to load a custom prompt at startup.
+The provider-independent translation seam remains outside this AI module, so
+a future Google Translate backend does not change queues, ordering, E2E rules
+or line replacement.</p>
+<h2>Languages</h2>
+<p>A buffer has a <strong>language pair</strong>, not a per-direction setting:</p>
+<ul>
+<li><code>&lt;lang&gt;</code> — the language the channel or query is written in</li>
+<li><code>translate.my_lang</code> — the language <em>you</em> read and write</li>
+</ul>
+<p>The two directions swap them:</p>
+<table>
+<thead>
+<tr>
+<th>direction</th>
+<th>from</th>
+<th>into</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>incoming</td>
+<td>the channel&#39;s <code>lang</code></td>
+<td>your <code>my_lang</code></td>
+</tr>
+<tr>
+<td>outgoing</td>
+<td>your <code>my_lang</code></td>
+<td>the channel&#39;s <code>lang</code></td>
+</tr>
+</tbody></table>
+<p>So the language you write <em>into</em> is per channel, which is what makes a German
+and a Spanish channel work at the same time. <code>/translate list</code> prints the
+arrows for each direction so you can check at a glance:</p>
+<pre><code>test/#german  in: de→pl   out: pl→de
+test/#somos   in: es→pl   out: pl→es
+</code></pre>
+<p><code>[my-lang]</code> overrides <code>translate.my_lang</code> for one buffer only — useful when
+machine translation into your own language is poor for a particular source
+and English reads better.</p>
+<p>For <strong>incoming</strong>, <code>&lt;lang&gt;</code> may be left off and the language is detected
+automatically. For <strong>outgoing</strong> it is required and <code>addout</code> refuses without
+it: there is nothing to detect which language to <em>write</em> in from, so guessing
+is the one thing that must not happen.</p>
+<h2>What you see</h2>
+<p>A translated line replaces the original in place — one line, never two:</p>
+<pre><code>11:32:33 alice&gt; albalb [blabla]
+</code></pre>
+<p>The bracketed part is the original, dimmed. Turn it off and only the
+translation is shown:</p>
+<pre><code>/set translate.show_original_in  false
+/set translate.show_original_out false
+</code></pre>
+<p>The two directions have separate switches, because wanting your own words
+echoed back is a different question from wanting everyone else&#39;s.</p>
+<p><strong>What is on screen is what is logged.</strong> Stored history keeps exactly the
+text that was displayed, brackets included, so <code>/search</code> finds both the
+translation and the original. The consequence is that changing
+<code>show_original_*</code> does not rewrite history: lines logged with brackets keep
+them.</p>
+<p>The bracketed original is dimmed in the terminal and in the browser alike. A
+line reloaded from history renders it undimmed in both: the stored text is
+flat, and the client will not guess which trailing brackets are an original —
+an ordinary message may simply end that way.</p>
+<p>On servers that echo your own messages back to you, that echo is still the
+copy you see — Repartee adds the original to it as it arrives, rather than
+printing a second line of its own. The server&#39;s copy is the one carrying the
+message&#39;s identity, and keeping it is what stops your own messages coming
+back a second time after a reconnect.</p>
+<h2>Ordering</h2>
+<p>Lines are sent for translation the instant they arrive and translate
+concurrently, but they are only <em>shown</em> in the order they arrived. A short
+line that comes back quickly will wait for the longer one in front of it, so
+an answer can never appear above its question.</p>
+<p>A line that has waited longer than <code>translate.timeout_ms</code> is shown
+untranslated rather than holding up the channel, and the queue is capped at
+<code>translate.max_queue</code> so a dead provider cannot stall a busy channel or grow
+without bound. That deadline counts from the moment the line arrived — or,
+for your own messages, from the moment you pressed Enter — not from when the
+translator was actually reached, so a busy queue cannot quietly stretch it.
+A message of yours whose translation misses the deadline is not sent; the
+text comes back as with any other refusal. The same happens to a private
+message that has been in flight so long the client can no longer be sure
+whether the person you addressed still answers to that nick — better to hand
+it back than to risk delivering it to whoever picked the nick up. Losing the connection releases that server&#39;s queued lines at
+once rather than waiting the timeout out for a server that is gone.</p>
+<p>The queue is held to <code>translate.max_queue</code> as lines arrive, not on a timer,
+so a stalled translator cannot let a busy channel build a backlog between
+checks. If the queue reaches the cap while a message of yours is still being
+translated, that message can lose the place held for it and will then appear
+below the replies that arrived meanwhile. It is still sent — a full display
+queue never eats something you typed — and the client logs a warning saying
+so.</p>
+<p><code>/translate delin</code> releases the lines it was still waiting on, shown
+untranslated. <code>/translate delout</code> releases nothing: it does not touch the
+incoming direction, and a message of yours already being translated is still
+sent when it comes back. Until it does, the next message to that same
+conversation is refused with a note rather than sent — it would otherwise
+reach the channel ahead of the one still being translated, and you would have
+no way to see that it had. Press Enter again once the earlier one lands.
+Turning off <code>translate.enabled</code>, running <code>/reload</code>, or enabling E2E on the
+conversation all behave the same way for the same reason.</p>
+<p>Closing a window — <code>/close</code>, leaving the channel, or being kicked from it —
+also shows whatever it was still waiting on, untranslated, before the window
+goes. Those lines had already reached you; the queue only decides when they
+are allowed on screen, so they are displayed and written to your log rather
+than discarded.</p>
+<p>If the person you are talking to changes nick, the settings and any lines in
+flight follow the conversation — including a message of yours that was still
+being translated, which goes to them under their new nick and never to
+whoever may have picked up the old one. That holds however many times the
+nick changes hands: each conversation that held it is tracked with the period
+it held it for, so a message you sent to the first person cannot be delivered
+to the second. If their window has closed by then,
+the message is refused and handed back rather than sent to a name that is no
+longer theirs. The saved setting still names the nick you typed, so it is
+that name a restart looks for.</p>
+<p>If they <strong>quit</strong> instead of renaming, nothing can be followed: the server
+frees the nick there and then, and the next person to ask for it gets it. A
+private message still being translated when that happens is refused and handed
+back rather than addressed to a name that may already mean somebody else.
+Sending without translation races the same reassignment by milliseconds; a
+translation makes the gap seconds wide, so the mechanism that opened it is the
+one that closes it. Text you type <em>after</em> they have gone is sent as it always
+was — that is the same gamble with or without translation, and not this
+feature&#39;s to refuse.</p>
+<p>That tracking has a horizon of <strong>five minutes</strong>. A private message whose
+translation comes back later than that is refused and handed back: the nick it
+was addressed to can no longer be shown to still mean the same person. This is
+only reachable with a <code>translate.timeout_ms</code> above five minutes, which is far
+past any sane provider budget — the default is five <em>seconds</em>. Channels are
+never affected, in any configuration: a channel name cannot change hands, so
+there is nothing to trace and nothing to doubt.</p>
+<h2>When translation does not happen</h2>
+<p>A line that was not translated is shown as its original, marked with the
+reason:</p>
+<pre><code>11:32:33 alice&gt; hola que tal [untranslated: timeout]
+</code></pre>
+<p>A translation that comes back as more than one line is refused outright. The
+translator is an outside service and its answer is about to be sent under
+your nick, so anything that could be read as a second IRC command never
+reaches the network.</p>
+<p>For the same reason, a translation carrying the CTCP byte (<code>\x01</code>) is refused.
+That byte is what tells an IRC client a message is a <em>request</em> rather than
+text — a DCC file offer, a VERSION query — so an answer containing one would
+send a request under your nick instead of a sentence, and inside a <code>/me</code> it
+would break out of the action your client wrapped round it. Any framing that
+reaches the network from a translated message is framing this client built.
+Incoming is checked too: a reply carrying it would render as a <code>/me</code> from the
+other person, putting words in their mouth.</p>
+<p>A translation <em>beginning</em> with one of the E2E wire prefixes is refused too.
+Those are recognised as protocol on every conversation, encrypted or not —
+that is how the first handshake from a peer can arrive at all — so an answer
+shaped like one would be swallowed as a handshake or fed to the decryption
+path by every Repartee that received it, your own included, instead of being
+read. Only the prefix is reserved: mentioning the protocol mid-sentence is
+ordinary conversation and passes.</p>
+<p>A translation that comes back empty is refused too — the original comes
+back to you rather than an empty line going out under your nick. One that
+comes back implausibly long is refused rather than sent:
+it would be split across the wire budget and published as a long run of
+messages under your nick. Never a guess, never a partial translation. A fluent sentence that means
+something else is the one failure a reader cannot detect, so a visible gap is
+always preferred — and the gap has to be visible, or it is just the original
+text with nothing to say it is not a translation.</p>
+<p>The one exception carries no marker, because it is not a gap: see below.</p>
+<p>For <strong>outgoing</strong> messages the rule is stricter: if translation fails, the
+message is <strong>not sent at all</strong>. Your text goes back into the input line you
+sent it from — the terminal or the browser tab that submitted it — and an
+error explains why.</p>
+<p>If you have already started typing the next message, the composer is left
+alone rather than overwritten — and since a translation takes a moment, that
+is the usual case rather than the exception. The error row always carries the
+refused text for exactly that reason, so it is recoverable either way — and it
+carries it <strong>character for character</strong> — including <code>%</code>, which the theme engine
+would otherwise read as a formatting code and swallow. A row you are meant to
+retype from has to be exactly what you typed.
+Sending the untranslated original would put something other than what you
+intended in front of the channel.</p>
+<p>If you have moved to a different conversation while it was translating, what
+comes back is re-addressed — a private message returns as
+<code>/msg &lt;nick&gt; &lt;text&gt;</code>, so pressing Enter cannot publish it to the channel you
+are now in. Where no such form exists nothing is put in the composer at all
+and the text stays in the error row, which names where it was going. That
+covers a <code>/me</code>, a conversation that has since closed, and — because <code>/msg</code>
+names a person, not a server — <strong>any</strong> move to a different network: the same
+nick there is somebody else.</p>
+<p>The local echo names whoever the message actually went out as. If you <code>/nick</code>
+while a translation is running, the message reaches the channel under your new
+name, and that is the name your own copy carries too.</p>
+<p>A connection that drops and comes back while your message is being translated
+also refuses it, rather than sending a message you typed on the old session
+into the new one.</p>
+<p>That applies to every way of not translating, not just a provider error: a
+full or dead translation queue, a message too long to translate in one piece,
+a multi-line paste, and a buffer with <code>outgoing</code> enabled but no language all
+refuse rather than sending as-is.</p>
+<p>Incoming multi-line messages are the mirror of this: they are shown intact
+and marked untranslated rather than being flattened into one request, which
+would let a translator reorder words across the line breaks. <code>/translate delout &lt;target&gt;</code> is how you
+send something untranslated on purpose.</p>
+<p>It also applies however the message was submitted. <code>/msg</code>, <code>/query &lt;nick&gt; &lt;text&gt;</code>, <code>/me</code> and messages sent by scripts go through the same gate as text
+typed in the buffer, so whether a line is translated depends on the buffer,
+never on which command you used. A <code>/me</code> is translated as its text; other
+CTCPs (<code>VERSION</code>, DCC negotiation) are protocol and pass through untouched.</p>
+<p>There is one case where your text is <strong>not</strong> put back in the composer: a long
+message is split into several lines before it goes out, and if the connection
+dies partway through, the first parts are already on the channel. Restoring
+the whole thing would invite you to press Enter and send those parts twice, so
+it stays in the error row only — which says as much.</p>
+<p>On a server with <code>echo-message</code>, your own translated message is the copy the
+server sends back, and the client holds its place in the buffer until that
+copy arrives. If something in your own setup throws that copy away — an
+<code>/ignore</code> mask broad enough to cover you, or a script that swallows the
+message — the line is gone, as you asked, and the conversation carries on
+immediately rather than pausing for a reply that is never coming.</p>
+<p>A line the translator deliberately skipped — already in the target language,
+or too short to be worth translating — is a correct outcome, not a failure.
+It is sent and shown with no marker; marking it would cry wolf on a large
+share of ordinary traffic.</p>
+<h2>What leaves your client</h2>
+<p>Translating means sending text to an outside service. The AI backend sends a
+system prompt containing the source and target language plus the line after
+local masking. URLs, channel names, recognized technical identifiers and
+known nicks are replaced with opaque placeholders first and restored only
+after the answer passes validation.</p>
+<p>The network name, channel/query name, speaker nick and channel nick list are
+not sent as metadata. The nick list is used locally only to find names that
+must be masked. Text not recognized by the masker still leaves the client, so
+translation should be treated as disclosure of the conversation content to
+the configured provider.</p>
+<p>Nothing is sent for a channel you have not explicitly enabled, and nothing is
+sent for history — only lines arriving live, and only while the master switch
+is on.</p>
+<h2>End-to-end encrypted conversations</h2>
+<p><strong>Translation is refused on any conversation E2E might be protecting, and
+this cannot be overridden.</strong></p>
+<p>Translating means sending the text to an outside provider. For an encrypted
+conversation that would hand its plaintext to exactly the party the
+encryption exists to exclude.</p>
+<p>The refusal is enforced where each request is built, not just in
+<code>/translate addin</code>, so the order you enable things in does not matter:
+turning E2E on for a channel that already had translation enabled stops it
+from the next line — and <code>/e2e on</code> says so, rather than leaving a channel
+that silently stopped translating to read as a broken translator. When E2E
+status cannot be determined at all — an unreadable keyring, a DM whose peer
+handle has not resolved yet — the conversation is treated as encrypted and
+left untranslated.</p>
+<h2>Interaction with URL shortening</h2>
+<p>A translated line is not also URL-shortened. Sending one line through two
+outside services is worse than losing the shortening, so translation takes
+precedence on buffers where both are enabled.</p>
+<h2>Examples</h2>
+<pre><code>/set translate.enabled true
+/set translate.my_lang pl
+
+/translate addin  #german de     # read it in Polish
+/translate addout #german        # write it in German (lang already known)
+/translate addin  #somos  es     # a second channel, a different language
+/translate addout #somos  es
+/translate addin  #cn zh en      # read this one in English, not Polish
+/translate list
+/translate status
+/translate delout #german
+</code></pre>
+<h2>Configuration</h2>
+<pre><code>/set translate.enabled           false
+/set translate.backend           none
+/set translate.my_lang           en
+/set translate.show_original_in  true
+/set translate.show_original_out true
+/set translate.timeout_ms        5000
+/set translate.max_in_flight     4
+/set translate.max_queue         200
+</code></pre>
+<p><code>/translate status</code> shows what is in flight, and — whether or not anything
+is, and for both directions — how lines have come back this session: how many were translated, how
+many the translator decided needed no translation, and any failures split
+into timeouts, provider refusals, and answers this client would not use.
+That split is the point: a channel sitting in its original language looks
+identical whether the translator is filtering correctly or not answering at
+all.</p>
+<p><code>translate.max_in_flight</code> caps concurrent translations. Raising it past what
+your provider actually allows makes throughput worse, not better. It takes
+effect immediately. Lowering it applies as work already in flight finishes —
+including under sustained traffic, where the reduction is applied by the next
+translations to start rather than waiting for a lull that may never come.</p>
+<p>Outgoing messages are translated one at a time <strong>per connection</strong>, so they
+reach IRC in the order you sent them without a slow request on one network
+holding up another.</p>
+<p>Per-buffer settings live under <code>[translate.buffers]</code> in <code>config.toml</code> and are
+managed with the <code>add*</code> / <code>del*</code> subcommands rather than <code>/set</code>.</p>
+<p>AI policies and models are configured directly in <code>config.toml</code>. This minimal
+example replaces the built-in policy with one OpenAI-compatible model:</p>
+<pre><code>[translate.ai]
+easy = [&quot;primary&quot;]
+strong = [&quot;primary&quot;]
+prompt_path = &quot;&quot;
+
+[[translate.ai.models]]
+name = &quot;primary&quot;
+base_url = &quot;https://openrouter.ai/api/v1&quot;
+model = &quot;google/gemma-4-31b-it&quot;
+api_key_env = &quot;OPENROUTER_API&quot;
+rpm = 60
+tpm = 0
+max_retries = 2
+max_output_tokens = 256
+</code></pre>
+<p><code>api_key_env</code> names a variable in <code>~/.repartee/.env</code>. API keys loaded from
+that file are held only in memory and are never serialized into <code>config.toml</code>.
+<code>/reload</code> applies added, removed and rotated keys to an already-running AI
+backend. If no AI backend was built at startup, adding the first usable key
+still requires a restart and <code>/reload</code> reports that explicitly.
+<code>rpm</code> and <code>tpm</code> are local safety limits; zero disables that dimension. Server
+rate-limit headers and <code>Retry-After</code> are honored, <code>429</code> and transient server
+errors use bounded retries, and authentication, access and daily-quota errors
+disable that model for the rest of the session.</p>
+<p>Enabling <code>translate.enabled</code>, or naming a <code>translate.backend</code>, at runtime when
+translation was not running at startup reports that a restart is required: the
+translation workers and the backend are built once, when the client starts.
+<code>/reload</code> says the same thing — editing <code>enabled = true</code> in <code>config.toml</code> and
+reloading cannot build a backend either, so the reload warns instead of
+reporting a plain success you would have no reason to distrust.</p>
+<p>Turning it <strong>off</strong> needs no restart, by either switch. <code>/set translate.backend none</code>, <code>/set translate.enabled false</code>, and the same edits followed by
+<code>/reload</code> all stop translation immediately: deciding your lines should stop
+leaving for a translator is not a decision that should wait.</p>
+</div>
 <h2 id="cat-scripts">Scripts</h2>
 <div class="command-entry" data-command="script" data-category="Scripts">
 <h1>/script</h1>

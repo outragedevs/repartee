@@ -10,6 +10,7 @@
 //! detection, masking of nicks and URLs, model routing, provider policy,
 //! retries, and quality gating.
 
+pub mod ai;
 pub mod backend;
 pub mod queue;
 

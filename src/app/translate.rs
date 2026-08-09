@@ -31,6 +31,7 @@ use futures::FutureExt;
 use tokio::sync::{Semaphore, mpsc};
 
 use crate::state::buffer::BufferType;
+use crate::translate::ai::AiBackend;
 use crate::translate::backend::{SharedBackend, StubBackend};
 use crate::translate::{TranslateOutcome, TranslateRequest, UntranslatedReason};
 
@@ -322,18 +323,21 @@ impl TranslateRuntime {
     /// Build the runtime and spawn the workers.
     ///
     /// The backend is chosen by NAME, never implied by `translate.enabled`.
-    /// This branch ships only the stub — the mechanism is what is being
-    /// built, and the stub proves it end to end with no API key — and the
-    /// stub does not translate: it reverses word order. Installing it
-    /// because it is the only implementation that exists would put reversed
-    /// sentences on a real channel under the user's own nick. So `enabled`
-    /// on its own resolves to no backend, and every line is delivered as it
-    /// arrived until a real broker is written and named here.
+    /// `enabled` on its own resolves to no backend. The configured backend is
+    /// built once at startup and can be AI, the explicit test stub, or a
+    /// future machine-translation implementation behind the same seam.
     pub fn build(cfg: &crate::config::TranslateConfig) -> Self {
         use crate::translate::backend::BackendKind;
         let backend: Option<SharedBackend> = if cfg.enabled {
             match crate::translate::backend::backend_kind(&cfg.backend) {
                 BackendKind::Stub => Some(Arc::new(StubBackend::new(0, 0))),
+                BackendKind::Ai => match AiBackend::new(&cfg.ai) {
+                    Ok(backend) => Some(Arc::new(backend)),
+                    Err(error) => {
+                        tracing::error!(%error, "translate: cannot build AI backend");
+                        None
+                    }
+                },
                 BackendKind::None | BackendKind::Unknown => None,
             }
         } else {
@@ -427,6 +431,13 @@ pub fn startup_backend_notice(cfg: &crate::config::TranslateConfig) -> Option<St
              sent to the network under your nick. Do not leave it on for a \
              real conversation.{C_RST}"
         ),
+        BackendKind::Ai => {
+            if let Some(error) = AiBackend::configuration_error(&cfg.ai) {
+                format!("{C_ERR}translate: AI backend is unavailable — {error}{C_RST}")
+            } else {
+                return None;
+            }
+        }
     })
 }
 
@@ -2645,16 +2656,12 @@ impl crate::app::App {
         // change their mind mid-conversation. Turning it back ON still needs
         // the restart the workers were bound in — `warn_if_translate_cannot_run`
         // says so.
-        let has_backend = self.translate_backend.is_some();
-        // Spelled as "not one of the no-op kinds" so that a real broker added
-        // to `BackendKind` later is active by default rather than silently
-        // inert until somebody remembers this line.
-        let wants_backend = !matches!(
-            crate::translate::backend::backend_kind(&self.config.translate.backend),
-            crate::translate::backend::BackendKind::None
-                | crate::translate::backend::BackendKind::Unknown
-        );
-        self.state.translate_active = self.config.translate.enabled && has_backend && wants_backend;
+        let configured_kind =
+            crate::translate::backend::backend_kind(&self.config.translate.backend);
+        let has_matching_backend = self.translate_backend.as_ref().is_some_and(|backend| {
+            backend.kind() == configured_kind && backend.is_ready()
+        });
+        self.state.translate_active = self.config.translate.enabled && has_matching_backend;
         self.state
             .translate_buffers
             .clone_from(&self.config.translate.buffers);
@@ -7166,6 +7173,52 @@ mod app_tests {
     }
 
     #[test]
+    fn changing_from_the_built_stub_to_ai_never_runs_the_stub() {
+        let mut app = app_with_buffer();
+        app.translate_backend = Some(std::sync::Arc::new(
+            crate::translate::backend::StubBackend::new(0, 0),
+        ));
+        app.config.translate.enabled = true;
+        app.config.translate.backend = "stub".to_string();
+        app.sync_translate_from_config();
+        assert!(app.state.translate_active);
+
+        app.config.translate.backend = "ai".to_string();
+        app.sync_translate_from_config();
+        assert!(!app.state.translate_active);
+    }
+
+    #[test]
+    fn changing_from_the_built_ai_to_stub_never_runs_ai() {
+        let model = crate::config::TranslateAiModelConfig {
+            name: "test".to_string(),
+            base_url: "http://127.0.0.1:1/v1".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "TEST_API".to_string(),
+            api_key: "secret".to_string(),
+            ..crate::config::TranslateAiModelConfig::default()
+        };
+        let ai = crate::config::TranslateAiConfig {
+            easy: vec!["test".to_string()],
+            strong: vec!["test".to_string()],
+            prompt_path: String::new(),
+            models: vec![model],
+        };
+        let backend = AiBackend::new(&ai).expect("valid AI backend");
+        let mut app = app_with_buffer();
+        app.translate_backend = Some(std::sync::Arc::new(backend));
+        app.config.translate.enabled = true;
+        app.config.translate.backend = "ai".to_string();
+        app.config.translate.ai = ai;
+        app.sync_translate_from_config();
+        assert!(app.state.translate_active);
+
+        app.config.translate.backend = "stub".to_string();
+        app.sync_translate_from_config();
+        assert!(!app.state.translate_active);
+    }
+
+    #[test]
     fn a_tab_that_submits_says_where_it_is_and_is_trusted_again() {
         // `web_buffer_unconfirmed` records not knowing which buffer a tab is
         // showing. A submit ANSWERS that: the command carries the buffer its
@@ -8045,6 +8098,16 @@ mod tests {
     struct EchoingBackend(String);
 
     impl crate::translate::backend::TranslateBackend for EchoingBackend {
+        fn kind(&self) -> crate::translate::backend::BackendKind {
+            crate::translate::backend::BackendKind::Stub
+        }
+
+        fn is_ready(&self) -> bool {
+            true
+        }
+
+        fn refresh_credentials(&self, _config: &crate::config::TranslateConfig) {}
+
         fn translate(
             &self,
             req: crate::translate::TranslateRequest,

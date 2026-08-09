@@ -38,18 +38,59 @@ says the mechanism may run; `backend` says what it runs on. With
 as it arrived, however many buffers are configured, and `/translate status`
 says so.
 
-This build ships one backend, and it is **not** a translator:
+Available backends:
 
 | name | what it does |
 |---|---|
 | `none` | nothing is translated (default) |
+| `ai` | production AI translator with ordered OpenAI-compatible providers |
 | `stub` | test backend — **reverses word order**, no network, no API key |
 
-`stub` exists so the mechanism can be exercised end to end while the real
-translator is written. It is never installed implicitly, because its output
-does not stay on your screen: on the outgoing side it is what goes to the
-channel, under your nick. Repartee says so loudly at startup when it is on.
-Do not leave it on for a real conversation.
+`stub` exists only to exercise the mechanism end to end. It is never installed
+implicitly, because its output does not stay on your screen: on the outgoing
+side it is what goes to the channel, under your nick. Repartee says so loudly
+at startup when it is on. Do not leave it on for a real conversation.
+
+### AI setup
+
+The quickest production setup uses the default OpenRouter model. Put the key
+in `~/.repartee/.env`, never in `config.toml`:
+
+    OPENROUTER_API=your-key
+
+Then select the backend and restart Repartee:
+
+    /set translate.enabled true
+    /set translate.backend ai
+
+The AI backend is a policy, not one hard-wired vendor. It can use any
+OpenAI-compatible chat-completions endpoint and tries configured models in
+order. The built-in easy-line order is OpenRouter Gemma 4 31B, Ollama Gemma 4
+31B, Groq GPT-OSS 120B, then Groq Qwen 3.6 27B. Lines classified as difficult
+start with Gemini 3.6 Flash, followed by the same fallbacks. A model whose key
+is absent is skipped; one usable key is enough. The recognized default `.env`
+names are:
+
+| provider | key |
+|---|---|
+| OpenRouter | `OPENROUTER_API` |
+| Ollama Cloud | `OLLAMA_API` |
+| Gemini | `GEMINI_API` |
+| Groq | `GROQ_API_KEY` |
+
+Before a provider call, Repartee filters lines that do not need translation,
+masks URLs, channel names, nicks and technical identifiers, then routes the
+remaining text to the easy or strong policy. Every answer passes a local
+quality gate. Missing or altered placeholders, refusals, explanations,
+unchanged source text, a confidently wrong target language, empty output and
+multi-line output all cause fallback to the next model. If the policy is
+exhausted, the existing untranslated/refusal behavior applies.
+
+The supplied prompt is embedded in the binary. Set
+`translate.ai.prompt_path` in `config.toml` to load a custom prompt at startup.
+The provider-independent translation seam remains outside this AI module, so
+a future Google Translate backend does not change queues, ordering, E2E rules
+or line replacement.
 
 ## Languages
 
@@ -294,18 +335,17 @@ share of ordinary traffic.
 
 ## What leaves your client
 
-Translating means sending text to an outside service. For each line that is
-translated, the request carries:
+Translating means sending text to an outside service. The AI backend sends a
+system prompt containing the source and target language plus the line after
+local masking. URLs, channel names, recognized technical identifiers and
+known nicks are replaced with opaque placeholders first and restored only
+after the answer passes validation.
 
-- the line itself, in full
-- the nick who said it, and the channel or query name
-- the network name, and the two languages for that direction
-- **the channel's nick list**
-
-The nick list travels because only your client knows it, and the translator
-needs it to recognise nicks as names rather than words to translate. If that
-is more than you want to share with a provider, do not enable translation on
-that channel.
+The network name, channel/query name, speaker nick and channel nick list are
+not sent as metadata. The nick list is used locally only to find names that
+must be masked. Text not recognized by the masker still leaves the client, so
+translation should be treated as disclosure of the conversation content to
+the configured provider.
 
 Nothing is sent for a channel you have not explicitly enabled, and nothing is
 sent for history — only lines arriving live, and only while the master switch
@@ -380,6 +420,34 @@ holding up another.
 
 Per-buffer settings live under `[translate.buffers]` in `config.toml` and are
 managed with the `add*` / `del*` subcommands rather than `/set`.
+
+AI policies and models are configured directly in `config.toml`. This minimal
+example replaces the built-in policy with one OpenAI-compatible model:
+
+    [translate.ai]
+    easy = ["primary"]
+    strong = ["primary"]
+    prompt_path = ""
+
+    [[translate.ai.models]]
+    name = "primary"
+    base_url = "https://openrouter.ai/api/v1"
+    model = "google/gemma-4-31b-it"
+    api_key_env = "OPENROUTER_API"
+    rpm = 60
+    tpm = 0
+    max_retries = 2
+    max_output_tokens = 256
+
+`api_key_env` names a variable in `~/.repartee/.env`. API keys loaded from
+that file are held only in memory and are never serialized into `config.toml`.
+`/reload` applies added, removed and rotated keys to an already-running AI
+backend. If no AI backend was built at startup, adding the first usable key
+still requires a restart and `/reload` reports that explicitly.
+`rpm` and `tpm` are local safety limits; zero disables that dimension. Server
+rate-limit headers and `Retry-After` are honored, `429` and transient server
+errors use bounded retries, and authentication, access and daily-quota errors
+disable that model for the rest of the session.
 
 Enabling `translate.enabled`, or naming a `translate.backend`, at runtime when
 translation was not running at startup reports that a restart is required: the

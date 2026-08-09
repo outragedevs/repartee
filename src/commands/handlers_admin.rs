@@ -124,6 +124,9 @@ pub(crate) fn apply_reloaded_config(app: &mut App, new_config: crate::config::Ap
     // The same post-config-change sync `/set typing.*` runs — a hand-edited
     // `send_channels = false` has to reach the machine by this route too.
     app.sync_typing_from_config();
+    if let Some(backend) = app.translate_backend.as_ref() {
+        backend.refresh_credentials(&app.config.translate);
+    }
     // Same for `[translate]`, and this one is privacy-sensitive rather than
     // cosmetic: without it a hand-edited `enabled = false` leaves
     // `translate_active` true and lines keep going to the provider after the
@@ -155,29 +158,30 @@ pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
     // expects. Like startup, it writes nothing — the user's comments and unknown
     // keys survive a `/reload`, and the migrated version persists on the next
     // save they actually ask for (see `config::load_and_migrate`).
-    match crate::config::load_and_migrate(&crate::constants::config_path()) {
-        Ok(new_config) => {
-            apply_reloaded_config(app, new_config);
-            add_local_event(app, &format!("{C_OK}Config reloaded{C_RST}"));
-        }
+    let mut new_config = match crate::config::load_and_migrate(&crate::constants::config_path()) {
+        Ok(config) => config,
         Err(e) => {
             add_local_event(app, &format!("{C_ERR}Failed to reload config: {e}{C_RST}"));
             return;
         }
-    }
+    };
 
     // Re-read .env and re-apply every credential layer (server
-    // passwords / SASL, web session secret, SHRINK_API_KEY). Without
+    // passwords / SASL, web session secret, shrink and translation API keys). Without
     // this step, keys added or rotated in ~/.repartee/.env after
     // startup stay invisible until the user quits and restarts.
     // Existing connections keep their already-negotiated credentials;
     // new /connect attempts (and any code path that re-reads
     // app.config) pick up the new values.
-    match crate::config::load_env(&crate::constants::env_path()) {
-        Ok(env_vars) => {
-            crate::config::apply_credentials(&mut app.config.servers, &env_vars);
-            crate::config::apply_web_credentials(&mut app.config.web, &env_vars);
-            crate::config::apply_shrink_credentials(&mut app.config.shrink, &env_vars);
+    let env_result = crate::config::load_env(&crate::constants::env_path());
+    if let Ok(env_vars) = &env_result {
+        apply_env_credentials(&mut new_config, env_vars);
+    }
+    apply_reloaded_config(app, new_config);
+    add_local_event(app, &format!("{C_OK}Config reloaded{C_RST}"));
+
+    match env_result {
+        Ok(_) => {
             add_local_event(app, &format!("{C_OK}.env reloaded{C_RST}"));
 
             // Surface the shrink restart-required edge case: the API
@@ -215,6 +219,16 @@ pub(crate) fn cmd_reload(app: &mut App, _args: &[String]) {
 
     // Recompute cached wrap-indent (depends on config + theme).
     app.recompute_wrap_indent();
+}
+
+fn apply_env_credentials(
+    config: &mut crate::config::AppConfig,
+    env: &std::collections::HashMap<String, String>,
+) {
+    crate::config::apply_credentials(&mut config.servers, env);
+    crate::config::apply_web_credentials(&mut config.web, env);
+    crate::config::apply_shrink_credentials(&mut config.shrink, env);
+    crate::config::apply_translate_credentials(&mut config.translate, env);
 }
 
 pub(crate) fn cmd_flood(app: &mut App, args: &[String]) {
@@ -1940,6 +1954,35 @@ mod translate_reload_tests {
             rows(&app).iter().any(|t| t.contains("restart to activate")),
             "the reload must not report success on a no-op: {:?}",
             rows(&app)
+        );
+    }
+
+    #[test]
+    fn reload_applies_ai_credentials_before_reporting_restart_required() {
+        let mut app = test_app();
+        app.state
+            .add_buffer(crate::state::buffer::Buffer::for_test(
+                "net",
+                crate::state::buffer::BufferType::Channel,
+                "#german",
+            ));
+        app.state.set_active_buffer("net/#german");
+        let mut reloaded = crate::config::AppConfig::default();
+        reloaded.translate.enabled = true;
+        reloaded.translate.backend = "ai".to_string();
+        let env = std::collections::HashMap::from([(
+            "OPENROUTER_API".to_string(),
+            "new-secret".to_string(),
+        )]);
+
+        super::apply_env_credentials(&mut reloaded, &env);
+        super::apply_reloaded_config(&mut app, reloaded);
+
+        let said = rows(&app);
+        assert!(
+            said.iter().any(|text| text.contains("restart to activate"))
+                && !said.iter().any(|text| text.contains("no AI model")),
+            "credential-aware diagnostic expected: {said:?}"
         );
     }
 

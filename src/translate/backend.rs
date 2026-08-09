@@ -25,6 +25,9 @@ use super::{TranslateOutcome, TranslateRequest, UntranslatedReason};
 /// [`TranslateOutcome::Untranslated`] with a reason is always the better
 /// answer — a visible hole beats an invisible lie.
 pub trait TranslateBackend: Send + Sync + 'static {
+    fn kind(&self) -> BackendKind;
+    fn is_ready(&self) -> bool;
+    fn refresh_credentials(&self, config: &crate::config::TranslateConfig);
     fn translate(&self, req: TranslateRequest) -> BoxFuture<'_, TranslateOutcome>;
 }
 
@@ -43,6 +46,7 @@ pub enum BackendKind {
     None,
     /// The built-in test stub — never a default, always named explicitly.
     Stub,
+    Ai,
     /// A name this build has no implementation for. Treated as [`Self::None`]
     /// and reported, rather than silently read as "no translation": a typo in
     /// `config.toml` otherwise looks exactly like a working setup that never
@@ -59,13 +63,14 @@ pub fn backend_kind(name: &str) -> BackendKind {
     match name.trim().to_ascii_lowercase().as_str() {
         "" | "none" => BackendKind::None,
         "stub" => BackendKind::Stub,
+        "ai" => BackendKind::Ai,
         _ => BackendKind::Unknown,
     }
 }
 
 /// The names `/set translate.backend` accepts, for its error message and the
 /// docs to agree on one list.
-pub const BACKEND_NAMES: &[&str] = &["none", "stub"];
+pub const BACKEND_NAMES: &[&str] = &["none", "stub", "ai"];
 
 /// Exercises the whole mechanism with no API key and no network.
 ///
@@ -123,6 +128,16 @@ impl StubBackend {
 }
 
 impl TranslateBackend for StubBackend {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Stub
+    }
+
+    fn is_ready(&self) -> bool {
+        true
+    }
+
+    fn refresh_credentials(&self, _config: &crate::config::TranslateConfig) {}
+
     fn translate(&self, req: TranslateRequest) -> BoxFuture<'_, TranslateOutcome> {
         Box::pin(async move {
             let n = self.calls.fetch_add(1, Ordering::Relaxed) + 1;

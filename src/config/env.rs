@@ -113,6 +113,19 @@ pub fn apply_shrink_credentials(shrink: &mut super::ShrinkConfig, env: &HashMap<
     }
 }
 
+pub fn apply_translate_credentials(
+    translate: &mut super::TranslateConfig,
+    env: &HashMap<String, String>,
+) {
+    for model in &mut translate.ai.models {
+        let key = model.api_key_env.trim();
+        model.api_key = env
+            .get(key)
+            .or_else(|| env.get(&key.to_ascii_uppercase()))
+            .map_or_else(String::new, |value| value.trim().to_string());
+    }
+}
+
 /// Ensure `web.session_secret` is set, generating and persisting a fresh
 /// 32-byte secret to `.env` on first run.
 ///
@@ -229,6 +242,28 @@ mod tests {
         assert_eq!(server.sasl_user.as_deref(), Some("myuser"));
         assert_eq!(server.sasl_pass.as_deref(), Some("mypass"));
         assert!(server.password.is_none());
+    }
+
+    #[test]
+    fn applies_translation_keys_without_serializing_them() {
+        let mut translate = super::super::TranslateConfig::default();
+        let env = HashMap::from([(
+            "OPENROUTER_API".to_string(),
+            " translation-secret ".to_string(),
+        )]);
+
+        apply_translate_credentials(&mut translate, &env);
+
+        let model = translate
+            .ai
+            .models
+            .iter()
+            .find(|model| model.api_key_env == "OPENROUTER_API")
+            .expect("default OpenRouter model");
+        assert_eq!(model.api_key, "translation-secret");
+        let serialized = toml::to_string_pretty(&translate).expect("serialize translate config");
+        assert!(!serialized.contains("translation-secret"));
+        assert!(!serialized.contains("api_key ="));
     }
 
     #[test]

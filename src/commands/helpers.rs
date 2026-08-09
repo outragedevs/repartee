@@ -101,6 +101,23 @@ pub fn warn_if_translate_cannot_run(app: &mut App) {
              at startup — restart to activate{rst}",
             name = escape_format(app.config.translate.backend.trim()),
         ),
+        BackendKind::Ai => crate::translate::ai::AiBackend::configuration_error(
+            &app.config.translate.ai,
+        )
+        .map_or_else(
+            || {
+                format!(
+                    "{warn}translate: AI is configured but no backend was built \
+                     at startup — restart to activate{rst}"
+                )
+            },
+            |error| {
+                format!(
+                    "{warn}translate: AI backend is not usable: \
+                     {error}{rst}"
+                )
+            },
+        ),
     };
     add_local_event(app, &row);
 }

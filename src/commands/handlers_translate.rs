@@ -361,14 +361,23 @@ fn status(app: &mut App) {
     // saying it when the config names none sends the user to restart into
     // exactly the same silence.
     let active = if app.state.translate_active {
-        "active"
+        "active".to_string()
     } else if !app.config.translate.enabled {
-        "off"
+        "off".to_string()
     } else {
         match backend_kind(&backend) {
-            BackendKind::None => "enabled, but no translator is configured",
-            BackendKind::Unknown => "enabled, but translate.backend names no translator this build has",
-            BackendKind::Stub => "enabled but not running (restart required)",
+            BackendKind::None => "enabled, but no translator is configured".to_string(),
+            BackendKind::Unknown => {
+                "enabled, but translate.backend names no translator this build has".to_string()
+            }
+            BackendKind::Stub => "enabled but not running (restart required)".to_string(),
+            BackendKind::Ai => crate::translate::ai::AiBackend::configuration_error(
+                &app.config.translate.ai,
+            )
+            .map_or_else(
+                || "enabled but not running (restart required)".to_string(),
+                |error| format!("enabled, but AI configuration is unusable: {error}"),
+            ),
         }
     };
     add_local_event(

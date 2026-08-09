@@ -631,6 +631,7 @@ impl App {
         config::apply_credentials(&mut config.servers, &env_vars);
         config::apply_web_credentials(&mut config.web, &env_vars);
         config::apply_shrink_credentials(&mut config.shrink, &env_vars);
+        config::apply_translate_credentials(&mut config.translate, &env_vars);
         let theme_path = constants::theme_dir().join(format!("{}.theme", config.general.theme));
         let theme = theme::load_theme(&theme_path)?;
 

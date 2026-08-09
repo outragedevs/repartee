@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 
 pub use defaults::default_config;
 pub use env::{
-    apply_credentials, apply_shrink_credentials, apply_web_credentials, ensure_session_secret,
-    load_env, set_env_value,
+    apply_credentials, apply_shrink_credentials, apply_translate_credentials,
+    apply_web_credentials, ensure_session_secret, load_env, set_env_value,
 };
 
 // === Helper for serde defaults ===
@@ -576,17 +576,17 @@ pub struct TranslateConfig {
     /// Which implementation behind the seam to install, by name.
     ///
     /// `"none"` (the default) means there is no translator: the mechanism
-    /// stays wired but every line is delivered as it arrived. `"stub"`
-    /// selects the built-in test backend, which does not translate — it
-    /// REVERSES word order — and exists so the mechanism can be exercised
+    /// stays wired but every line is delivered as it arrived. `"ai"` selects
+    /// the OpenAI-compatible provider policy configured under `translate.ai`.
+    /// `"stub"` selects the built-in test backend, which does not translate —
+    /// it REVERSES word order — and exists so the mechanism can be exercised
     /// end to end with no API key.
     ///
     /// Deliberately not implied by `enabled`. A user who turns translation
-    /// on expects a translator; installing the stub because it is the only
-    /// implementation that exists would publish reversed sentences on a real
-    /// channel, under their nick, as if they had typed them. Naming the stub
-    /// is the difference between testing the mechanism and being handed it
-    /// by surprise.
+    /// on expects a translator; installing the stub would publish reversed
+    /// sentences on a real channel, under their nick, as if they had typed
+    /// them. Naming the stub is the difference between testing the mechanism
+    /// and being handed it by surprise.
     pub backend: String,
     /// The language YOU read and write, unless a buffer overrides it.
     ///
@@ -610,6 +610,7 @@ pub struct TranslateConfig {
     /// released untranslated, so a dead provider cannot turn the queue into
     /// an unbounded memory leak with a frozen channel behind it.
     pub max_queue: u32,
+    pub ai: TranslateAiConfig,
     /// Per-buffer settings, keyed by buffer id (`<connection_id>/<target>`).
     pub buffers: HashMap<String, TranslateBufferConfig>,
 }
@@ -660,9 +661,142 @@ impl Default for TranslateConfig {
             timeout_ms: 5000,
             max_in_flight: 4,
             max_queue: 200,
+            ai: TranslateAiConfig::default(),
             buffers: HashMap::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TranslateAiConfig {
+    pub easy: Vec<String>,
+    pub strong: Vec<String>,
+    pub prompt_path: String,
+    pub models: Vec<TranslateAiModelConfig>,
+}
+
+impl Default for TranslateAiConfig {
+    fn default() -> Self {
+        Self {
+            easy: vec![
+                "openrouter-gemma4-31b".to_string(),
+                "ollama-gemma4-31b".to_string(),
+                "groq-gptoss-120b".to_string(),
+                "groq-qwen36-27b".to_string(),
+            ],
+            strong: vec![
+                "gemini-36-flash".to_string(),
+                "openrouter-gemma4-31b".to_string(),
+                "ollama-gemma4-31b".to_string(),
+                "groq-qwen36-27b".to_string(),
+                "groq-gptoss-120b".to_string(),
+            ],
+            prompt_path: String::new(),
+            models: default_translate_ai_models(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TranslateAiModelConfig {
+    pub name: String,
+    pub base_url: String,
+    pub model: String,
+    pub api_key_env: String,
+    #[serde(skip)]
+    pub api_key: String,
+    pub rpm: u32,
+    pub tpm: u32,
+    pub max_retries: u32,
+    pub max_output_tokens: u32,
+    pub reasoning_effort: Option<String>,
+    pub provider: Option<TranslateAiProviderConfig>,
+}
+
+impl Default for TranslateAiModelConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            base_url: String::new(),
+            model: String::new(),
+            api_key_env: String::new(),
+            api_key: String::new(),
+            rpm: 0,
+            tpm: 0,
+            max_retries: 2,
+            max_output_tokens: 256,
+            reasoning_effort: None,
+            provider: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TranslateAiProviderConfig {
+    pub only: Vec<String>,
+    pub quantizations: Vec<String>,
+    pub allow_fallbacks: bool,
+}
+
+fn default_translate_ai_models() -> Vec<TranslateAiModelConfig> {
+    vec![
+        TranslateAiModelConfig {
+            name: "openrouter-gemma4-31b".to_string(),
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            model: "google/gemma-4-31b-it".to_string(),
+            api_key_env: "OPENROUTER_API".to_string(),
+            rpm: 60,
+            provider: Some(TranslateAiProviderConfig {
+                only: vec![
+                    "OpenInference".to_string(),
+                    "Venice".to_string(),
+                    "CoreWeave".to_string(),
+                ],
+                quantizations: vec!["bf16".to_string(), "fp16".to_string()],
+                allow_fallbacks: false,
+            }),
+            ..TranslateAiModelConfig::default()
+        },
+        TranslateAiModelConfig {
+            name: "ollama-gemma4-31b".to_string(),
+            base_url: "https://ollama.com/v1".to_string(),
+            model: "gemma4:31b".to_string(),
+            api_key_env: "OLLAMA_API".to_string(),
+            rpm: 20,
+            ..TranslateAiModelConfig::default()
+        },
+        TranslateAiModelConfig {
+            name: "gemini-36-flash".to_string(),
+            base_url: "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
+            model: "gemini-3.6-flash".to_string(),
+            api_key_env: "GEMINI_API".to_string(),
+            rpm: 15,
+            ..TranslateAiModelConfig::default()
+        },
+        TranslateAiModelConfig {
+            name: "groq-qwen36-27b".to_string(),
+            base_url: "https://api.groq.com/openai/v1".to_string(),
+            model: "qwen/qwen3.6-27b".to_string(),
+            api_key_env: "GROQ_API_KEY".to_string(),
+            rpm: 30,
+            tpm: 8_000,
+            reasoning_effort: Some("none".to_string()),
+            ..TranslateAiModelConfig::default()
+        },
+        TranslateAiModelConfig {
+            name: "groq-gptoss-120b".to_string(),
+            base_url: "https://api.groq.com/openai/v1".to_string(),
+            model: "openai/gpt-oss-120b".to_string(),
+            api_key_env: "GROQ_API_KEY".to_string(),
+            rpm: 30,
+            tpm: 8_000,
+            reasoning_effort: Some("low".to_string()),
+            ..TranslateAiModelConfig::default()
+        },
+    ]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
