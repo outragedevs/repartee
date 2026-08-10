@@ -4,7 +4,8 @@ use regex::Regex;
 
 static TOKEN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^\W\d_]+").expect("valid regex"));
 static STRIP: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"https?://\S+|__[A-Z]+\d+__|«[A-Z]+\d+»|[#@]\S+").expect("valid regex")
+    Regex::new(r"(?i:https?)://\S+|__[A-Z]+\d+__|«[A-Z]+\d+»|[#@]\S+")
+        .expect("valid regex")
 });
 static DE_TRANSLIT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -70,6 +71,54 @@ impl KnownLanguage {
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SupportedLanguage {
+    detector: whatlang::Lang,
+    known: Option<KnownLanguage>,
+}
+
+impl SupportedLanguage {
+    pub fn from_code(code: &str) -> Option<Self> {
+        let primary = code
+            .trim()
+            .split(['-', '_'])
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let iso = match primary.len() {
+            2 => isolang::Language::from_639_1(&primary),
+            3 => isolang::Language::from_639_3(&primary),
+            _ => None,
+        }?;
+        let detector_code = match iso.to_639_3() {
+            "fas" => "pes",
+            "nor" => "nob",
+            "zho" => "cmn",
+            code => code,
+        };
+        Some(Self {
+            detector: whatlang::Lang::from_code(detector_code)?,
+            known: KnownLanguage::from_code(&primary),
+        })
+    }
+
+    pub fn confidently_matches(self, text: &str) -> Option<bool> {
+        if let Some(known) = self.known {
+            let detected = detect(text);
+            return (!detected.uncertain).then_some(detected.language == Some(known));
+        }
+        let stripped = STRIP.replace_all(text, " ");
+        let detected = whatlang::detect(&stripped)?;
+        detected
+            .is_reliable()
+            .then_some(detected.lang() == self.detector)
+    }
+}
+
+pub fn supports(code: &str) -> bool {
+    SupportedLanguage::from_code(code).is_some()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -213,5 +262,20 @@ mod tests {
     #[test]
     fn does_not_trust_an_ambiguous_single_word() {
         assert!(!detect("ja").likely_matches(KnownLanguage::Pl));
+    }
+
+    #[test]
+    fn resolves_iso_codes_and_regional_tags_supported_by_the_detector() {
+        assert_eq!(
+            ["es", "fra", "zh-CN", "fa_IR", "no-NO"]
+                .map(SupportedLanguage::from_code)
+                .map(|language| language.is_some()),
+            [true; 5]
+        );
+    }
+
+    #[test]
+    fn rejects_codes_the_detector_cannot_validate() {
+        assert!(!supports("xx-INVALID"));
     }
 }

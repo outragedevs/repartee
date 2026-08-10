@@ -27,7 +27,7 @@ static BARE_PLACEHOLDER_KEY: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b([A-Z]+\d+)\b").expect("valid regex"));
 
 const UNIT_BLACKLIST: &str = "gb tb mb kb pb gib mib kib ghz mhz khz hz gbit mbit kbit gbps mbps kbps eur usd pln chf mm cm km kg mg ml cl dl std min sek h2o co2 mp3 mp4 flac x86 x64 i18n l10n a11y utf8 utf16 sha1 sha256 md5 rgb rgba hdmi vga dvi usb3 usb2 ipv4 ipv6 http2 http3 tls12 tls13 wifi6 wifi5 cat5 cat6 cat7";
-const MIRC_CONTROLS: &str = "\u{2}\u{3}\u{4}\u{f}\u{16}\u{1d}\u{1f}";
+const MIRC_CONTROLS: &str = "\u{2}\u{3}\u{4}\u{f}\u{11}\u{16}\u{1d}\u{1e}\u{1f}";
 
 #[derive(Debug)]
 pub struct MaskedText {
@@ -475,6 +475,15 @@ mod tests {
             (restored, report.failed()),
             ("\u{2}#c https://example.com\u{2}".to_string(), false)
         );
+    }
+
+    #[test]
+    fn masks_and_restores_strikethrough_and_monospace_controls() {
+        let source = "\u{1e}struck\u{1e} and \u{11}mono\u{11}";
+        let masked = mask(source, &[]);
+        assert_eq!(masked.text, "__F1__struck__F1__ and __F2__mono__F2__");
+        let (restored, report) = unmask(&masked, &masked.text);
+        assert_eq!((restored.as_str(), report.failed()), (source, false));
     }
 
     #[test]

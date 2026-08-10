@@ -125,11 +125,8 @@ impl AiBackend {
     }
 
     async fn translate_one(&self, req: TranslateRequest) -> TranslateOutcome {
-        if filter::should_filter(&req) {
-            return TranslateOutcome::Untranslated {
-                id: req.id,
-                reason: UntranslatedReason::Filtered,
-            };
+        if let Some(outcome) = preflight_outcome(&req) {
+            return outcome;
         }
 
         let difficulty = router::classify(&req.text, req.source_lang.as_deref());
@@ -236,6 +233,24 @@ impl AiBackend {
             .filter(|index| self.models[*index].is_available())
             .collect()
     }
+}
+
+fn preflight_outcome(req: &TranslateRequest) -> Option<TranslateOutcome> {
+    if !lang::supports(&req.target_lang) {
+        tracing::warn!(
+            request_id = req.id,
+            target_lang = %req.target_lang,
+            "translate: target language is unsupported by the AI quality gate"
+        );
+        return Some(TranslateOutcome::Untranslated {
+            id: req.id,
+            reason: UntranslatedReason::QualityGate,
+        });
+    }
+    filter::should_filter(req).then_some(TranslateOutcome::Untranslated {
+        id: req.id,
+        reason: UntranslatedReason::Filtered,
+    })
 }
 
 fn failed_policy_reason(
@@ -421,6 +436,21 @@ mod tests {
             backend.translate(request("lol")).await,
             TranslateOutcome::Untranslated {
                 reason: UntranslatedReason::Filtered,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_an_unverifiable_target_before_attempting_network_io() {
+        let backend = AiBackend::new(&config_with_key()).expect("valid config");
+        let mut req = request("ich glaube das funktioniert wirklich");
+        req.target_lang = "xx-INVALID".to_string();
+
+        assert!(matches!(
+            backend.translate(req).await,
+            TranslateOutcome::Untranslated {
+                reason: UntranslatedReason::QualityGate,
                 ..
             }
         ));

@@ -1944,6 +1944,10 @@ and English reads better.</p>
 automatically. For <strong>outgoing</strong> it is required and <code>addout</code> refuses without
 it: there is nothing to detect which language to <em>write</em> in from, so guessing
 is the one thing that must not happen.</p>
+<p>The AI backend accepts ISO 639-1 and ISO 639-3 codes covered by its language
+validator, including regional forms such as <code>fr-FR</code> and <code>zh_CN</code>. A code the
+validator cannot recognize is refused before conversation text is sent to a
+provider.</p>
 <h2>What you see</h2>
 <p>A translated line replaces the original in place — one line, never two:</p>
 <pre><code>11:32:33 alice&gt; albalb [blabla]

@@ -2,7 +2,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::lang::{self, KnownLanguage};
+use super::lang::SupportedLanguage;
 use super::mask::UnmaskReport;
 
 static META: LazyLock<Vec<Regex>> = LazyLock::new(|| {
@@ -37,6 +37,7 @@ pub enum Rejection {
     Refusal,
     Passthrough,
     WrongLanguage,
+    UnsupportedLanguage,
     Empty,
     Multiline,
 }
@@ -47,6 +48,9 @@ pub fn check(
     output: &str,
     placeholders: &UnmaskReport,
 ) -> Result<(), Rejection> {
+    let Some(target) = SupportedLanguage::from_code(target_lang) else {
+        return Err(Rejection::UnsupportedLanguage);
+    };
     if placeholders.failed() {
         return Err(Rejection::Placeholder);
     }
@@ -65,11 +69,8 @@ pub fn check(
     if normalize(source) == normalize(output) {
         return Err(Rejection::Passthrough);
     }
-    if let Some(target) = KnownLanguage::from_code(target_lang) {
-        let detected = lang::detect(output);
-        if !detected.uncertain && detected.language != Some(target) {
-            return Err(Rejection::WrongLanguage);
-        }
+    if target.confidently_matches(output) == Some(false) {
+        return Err(Rejection::WrongLanguage);
     }
     Ok(())
 }
@@ -168,6 +169,45 @@ mod tests {
                 &UnmaskReport::default()
             ),
             Err(Rejection::Refusal)
+        );
+    }
+
+    #[test]
+    fn rejects_confidently_wrong_output_for_a_supported_arbitrary_target() {
+        assert_eq!(
+            check(
+                "Das ist eine längere Nachricht über den heutigen Tag",
+                "fr-FR",
+                "This is a longer message about everything that happened today",
+                &UnmaskReport::default()
+            ),
+            Err(Rejection::WrongLanguage)
+        );
+    }
+
+    #[test]
+    fn accepts_output_in_a_supported_arbitrary_target() {
+        assert_eq!(
+            check(
+                "Das ist eine längere Nachricht über den heutigen Tag",
+                "fr-FR",
+                "Ceci est un message plus long sur tout ce qui s'est passé aujourd'hui",
+                &UnmaskReport::default()
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn rejects_a_target_the_detector_cannot_validate() {
+        assert_eq!(
+            check(
+                "Das ist eine längere Nachricht",
+                "xx-INVALID",
+                "This is a longer message",
+                &UnmaskReport::default()
+            ),
+            Err(Rejection::UnsupportedLanguage)
         );
     }
 }
