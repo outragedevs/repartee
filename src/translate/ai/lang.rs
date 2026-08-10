@@ -59,15 +59,16 @@ pub enum KnownLanguage {
 impl KnownLanguage {
     pub fn from_code(code: &str) -> Option<Self> {
         match code
+            .trim()
             .split(['-', '_'])
             .next()
             .unwrap_or_default()
             .to_ascii_lowercase()
             .as_str()
         {
-            "de" => Some(Self::De),
-            "pl" => Some(Self::Pl),
-            "en" => Some(Self::En),
+            "de" | "deu" => Some(Self::De),
+            "pl" | "pol" => Some(Self::Pl),
+            "en" | "eng" => Some(Self::En),
             _ => None,
         }
     }
@@ -277,5 +278,20 @@ mod tests {
     #[test]
     fn rejects_codes_the_detector_cannot_validate() {
         assert!(!supports("xx-INVALID"));
+    }
+
+    #[test]
+    fn recognizes_two_and_three_letter_known_language_codes() {
+        assert_eq!(
+            ["de", "deu", "pl", "pol", "en", "eng"].map(KnownLanguage::from_code),
+            [
+                Some(KnownLanguage::De),
+                Some(KnownLanguage::De),
+                Some(KnownLanguage::Pl),
+                Some(KnownLanguage::Pl),
+                Some(KnownLanguage::En),
+                Some(KnownLanguage::En),
+            ]
+        );
     }
 }

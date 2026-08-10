@@ -62,12 +62,12 @@ struct MaskState {
 }
 
 impl MaskState {
-    fn new(text: &str) -> Self {
+    fn new(text: &str, known_nicks: &[String]) -> Self {
         Self {
             mapping: HashMap::new(),
             seen: HashMap::new(),
             counters: HashMap::new(),
-            reserved: reserved_keys(text),
+            reserved: reserved_keys(text, known_nicks),
         }
     }
 
@@ -92,7 +92,7 @@ impl MaskState {
 
 pub fn mask(text: &str, known_nicks: &[String]) -> MaskedText {
     let literal_expected = count_literal_placeholders(text);
-    let mut state = MaskState::new(text);
+    let mut state = MaskState::new(text, known_nicks);
     let mut output = replace_regex(text, &URL, 'U', &mut state, |_| true);
     output = replace_channel(&output, &mut state);
     output = replace_regex(&output, &NORM, 'T', &mut state, |_| true);
@@ -392,10 +392,14 @@ fn count_literal_placeholders(text: &str) -> HashMap<String, usize> {
     counts
 }
 
-fn reserved_keys(text: &str) -> HashSet<String> {
-    PLACEHOLDER
-        .captures_iter(text)
-        .chain(BARE_PLACEHOLDER_KEY.captures_iter(text))
+fn reserved_keys(text: &str, known_nicks: &[String]) -> HashSet<String> {
+    std::iter::once(text)
+        .chain(known_nicks.iter().map(String::as_str))
+        .flat_map(|value| {
+            PLACEHOLDER
+                .captures_iter(value)
+                .chain(BARE_PLACEHOLDER_KEY.captures_iter(value))
+        })
         .filter_map(|capture| capture.get(1))
         .map(|key| key.as_str().to_ascii_uppercase())
         .collect()
@@ -526,6 +530,15 @@ mod tests {
         let source = "__N1__ N2 [[N3]] hello alice";
         let masked = mask(source, &["alice".to_string()]);
         assert_eq!(masked.text, "__N1__ N2 [[N3]] hello __N4__");
+        let (restored, report) = unmask(&masked, &masked.text);
+        assert_eq!((restored.as_str(), report.failed()), (source, false));
+    }
+
+    #[test]
+    fn placeholder_shaped_nicks_cannot_consume_generated_url_tokens() {
+        let source = "__U1__: visit https://example.com/path";
+        let masked = mask(source, &["__U1__".to_string()]);
+        assert_eq!(masked.text, "__N1__: visit __U2__");
         let (restored, report) = unmask(&masked, &masked.text);
         assert_eq!((restored.as_str(), report.failed()), (source, false));
     }

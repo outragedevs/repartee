@@ -39,8 +39,10 @@ mod tests {
     }
 
     #[test]
-    fn includes_german_guidance_for_a_regional_language_tag() {
-        let rendered = render(DEFAULT_PROMPT, Some("de_DE"), "pl");
-        assert!(rendered.contains("berliński"));
+    fn includes_german_guidance_for_regional_and_three_letter_tags() {
+        for source_lang in ["de_DE", "deu"] {
+            let rendered = render(DEFAULT_PROMPT, Some(source_lang), "pl");
+            assert!(rendered.contains("berliński"));
+        }
     }
 }

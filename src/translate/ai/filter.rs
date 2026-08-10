@@ -207,8 +207,10 @@ mod tests {
     }
 
     #[test]
-    fn filters_a_short_phrase_already_in_the_target_language() {
-        assert!(should_filter(&request(Direction::Outgoing, "nie wiem")));
+    fn filters_a_short_phrase_already_in_a_three_letter_target_language() {
+        let mut req = request(Direction::Outgoing, "nie wiem");
+        req.target_lang = "pol".to_string();
+        assert!(should_filter(&req));
     }
 
     #[test]

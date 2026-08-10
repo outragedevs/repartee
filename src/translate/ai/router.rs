@@ -52,8 +52,8 @@ mod tests {
     }
 
     #[test]
-    fn routes_regionally_tagged_german_to_the_strong_policy() {
-        for source_lang in ["de-DE", "de_DE"] {
+    fn routes_regional_and_three_letter_german_tags_to_the_strong_policy() {
+        for source_lang in ["de-DE", "de_DE", "deu"] {
             assert_eq!(
                 classify("haste ooch keen bock uff die luefter", Some(source_lang)),
                 Difficulty::Strong

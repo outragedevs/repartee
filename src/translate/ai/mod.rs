@@ -236,11 +236,20 @@ impl AiBackend {
 }
 
 fn preflight_outcome(req: &TranslateRequest) -> Option<TranslateOutcome> {
-    if !lang::supports(&req.target_lang) {
+    let unsupported = if lang::supports(&req.target_lang) {
+        req.source_lang
+            .as_deref()
+            .filter(|source| !lang::supports(source))
+            .map(|source| ("source", source))
+    } else {
+        Some(("target", req.target_lang.as_str()))
+    };
+    if let Some((role, language)) = unsupported {
         tracing::warn!(
             request_id = req.id,
-            target_lang = %req.target_lang,
-            "translate: target language is unsupported by the AI quality gate"
+            language_role = role,
+            language,
+            "translate: language is unsupported by the AI quality gate"
         );
         return Some(TranslateOutcome::Untranslated {
             id: req.id,
@@ -446,6 +455,21 @@ mod tests {
         let backend = AiBackend::new(&config_with_key()).expect("valid config");
         let mut req = request("ich glaube das funktioniert wirklich");
         req.target_lang = "xx-INVALID".to_string();
+
+        assert!(matches!(
+            backend.translate(req).await,
+            TranslateOutcome::Untranslated {
+                reason: UntranslatedReason::QualityGate,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_an_unverifiable_source_before_attempting_network_io() {
+        let backend = AiBackend::new(&config_with_key()).expect("valid config");
+        let mut req = request("ich glaube das funktioniert wirklich");
+        req.source_lang = Some("xx-INVALID".to_string());
 
         assert!(matches!(
             backend.translate(req).await,
