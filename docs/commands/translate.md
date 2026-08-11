@@ -122,10 +122,10 @@ automatically. For **outgoing** it is required and `addout` refuses without
 it: there is nothing to detect which language to *write* in from, so guessing
 is the one thing that must not happen.
 
-The AI backend accepts ISO 639-1 and ISO 639-3 codes covered by its language
-validator, including regional forms such as `fr-FR` and `zh_CN`. A code the
-validator cannot recognize is refused before conversation text is sent to a
-provider.
+The AI backend accepts English, German, Polish, French, Spanish and Mandarin
+Chinese. Their ISO 639-1 and ISO 639-3 codes are accepted, including regional
+forms such as `fr-FR` and `zh_CN`. Any other code is refused before conversation
+text is sent to a provider.
 
 ## What you see
 

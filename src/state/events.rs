@@ -1612,11 +1612,18 @@ impl AppState {
         level: ActivityLevel,
     ) -> Option<Message> {
         let buffer = self.buffers.get(buffer_id)?;
-        let network = self
+        let (network, casemapping) = self
             .connections
             .get(&buffer.connection_id)
-            .map(|c| c.label.clone())
-            .unwrap_or_default();
+            .map_or_else(
+                || (String::new(), "rfc1459".to_string()),
+                |connection| {
+                    (
+                        connection.label.clone(),
+                        connection.isupport_parsed.casemapping().to_string(),
+                    )
+                },
+            );
         let target = buffer.name.clone();
         let known_nicks: Vec<String> = buffer.users.keys().cloned().collect();
         // One resolver for both directions — see `resolve_langs`.
@@ -1638,6 +1645,7 @@ impl AppState {
             source_lang,
             target_lang,
             deadline: None,
+            casemapping,
             known_nicks,
         };
 

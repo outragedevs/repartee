@@ -129,12 +129,15 @@ impl AiBackend {
             return outcome;
         }
 
+        let masked = mask_request(&req);
+        if let Some(outcome) = masked_preflight_outcome(&req, &masked) {
+            return outcome;
+        }
         let difficulty = router::classify(&req.text, req.source_lang.as_deref());
         let (preferred, alternate) = match difficulty {
             Difficulty::Easy => (&self.easy, &self.strong),
             Difficulty::Strong => (&self.strong, &self.easy),
         };
-        let masked = mask_request(&req);
         let system = prompt::render(
             &self.prompt_template,
             req.source_lang.as_deref(),
@@ -262,6 +265,16 @@ fn preflight_outcome(req: &TranslateRequest) -> Option<TranslateOutcome> {
     })
 }
 
+fn masked_preflight_outcome(
+    req: &TranslateRequest,
+    masked: &mask::MaskedText,
+) -> Option<TranslateOutcome> {
+    (!masked.has_translatable_prose()).then_some(TranslateOutcome::Untranslated {
+        id: req.id,
+        reason: UntranslatedReason::Filtered,
+    })
+}
+
 fn failed_policy_reason(
     saw_quality_failure: bool,
     saw_provider_failure: bool,
@@ -295,7 +308,7 @@ fn mask_request(req: &TranslateRequest) -> mask::MaskedText {
     if !crate::irc::formatting::is_channel(&req.target) {
         nicks.push(req.target.clone());
     }
-    mask::mask(&req.text, &nicks)
+    mask::mask_with_casemapping(&req.text, &nicks, &req.casemapping)
 }
 
 fn validate_model_url(model: &crate::config::TranslateAiModelConfig) -> Result<(), AiBuildError> {
@@ -394,6 +407,7 @@ mod tests {
             source_lang: Some("de".to_string()),
             target_lang: "pl".to_string(),
             deadline: None,
+            casemapping: "rfc1459".to_string(),
             known_nicks: vec!["alice".to_string()],
         }
     }
@@ -448,6 +462,21 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn filters_when_masking_removes_all_prose() {
+        let backend = AiBackend::new(&config_with_key()).expect("valid config");
+
+        for text in ["alice:", "#test"] {
+            assert!(matches!(
+                backend.translate(request(text)).await,
+                TranslateOutcome::Untranslated {
+                    reason: UntranslatedReason::Filtered,
+                    ..
+                }
+            ));
+        }
     }
 
     #[tokio::test]

@@ -1906,12 +1906,19 @@ impl crate::app::App {
             .get(buffer_id)
             .map(|b| b.users.keys().cloned().collect())
             .unwrap_or_default();
-        let network = self
+        let (network, casemapping) = self
             .state
             .connections
             .get(conn_id)
-            .map(|c| c.label.clone())
-            .unwrap_or_default();
+            .map_or_else(
+                || (String::new(), "rfc1459".to_string()),
+                |connection| {
+                    (
+                        connection.label.clone(),
+                        connection.isupport_parsed.casemapping().to_string(),
+                    )
+                },
+            );
         let captured_nick = self
             .state
             .connections
@@ -1972,6 +1979,7 @@ impl crate::app::App {
                 source_lang,
                 target_lang,
                 deadline: None,
+                casemapping,
                 known_nicks,
             },
             nick: captured_nick,
@@ -7648,6 +7656,7 @@ mod tests {
             source_lang: None,
             target_lang: "pl".to_string(),
             deadline: None,
+            casemapping: "rfc1459".to_string(),
             known_nicks: Vec::new(),
         }
     }

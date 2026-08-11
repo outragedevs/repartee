@@ -7,6 +7,16 @@ static STRIP: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i:https?)://\S+|__[A-Z]+\d+__|«[A-Z]+\d+»|[#@]\S+")
         .expect("valid regex")
 });
+static SUPPORTED_DETECTOR: LazyLock<whatlang::Detector> = LazyLock::new(|| {
+    whatlang::Detector::with_allowlist(vec![
+        whatlang::Lang::Deu,
+        whatlang::Lang::Pol,
+        whatlang::Lang::Eng,
+        whatlang::Lang::Fra,
+        whatlang::Lang::Spa,
+        whatlang::Lang::Cmn,
+    ])
+});
 static DE_TRANSLIT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\b\w*(?:fuer|ueber|koenn|moecht|schoen|muess|waere|haett|laeuft|luefter|gruen|hoer|zurueck|natuerlich|spaet|naechst|aehnlich|stueck|wuerd)\w*\b",
@@ -99,10 +109,32 @@ impl SupportedLanguage {
             "zho" => "cmn",
             code => code,
         };
+        let detector = whatlang::Lang::from_code(detector_code)?;
+        if !matches!(
+            detector,
+            whatlang::Lang::Deu
+                | whatlang::Lang::Pol
+                | whatlang::Lang::Eng
+                | whatlang::Lang::Fra
+                | whatlang::Lang::Spa
+                | whatlang::Lang::Cmn
+        ) {
+            return None;
+        }
         Some(Self {
-            detector: whatlang::Lang::from_code(detector_code)?,
+            detector,
             known: KnownLanguage::from_code(&primary),
         })
+    }
+
+    pub fn likely_matches(self, text: &str) -> bool {
+        if let Some(known) = self.known {
+            return detect(text).likely_matches(known);
+        }
+        let stripped = STRIP.replace_all(text, " ");
+        SUPPORTED_DETECTOR
+            .detect(&stripped)
+            .is_some_and(|detected| detected.is_reliable() && detected.lang() == self.detector)
     }
 
     pub fn confidently_matches(self, text: &str) -> Option<bool> {
@@ -111,7 +143,7 @@ impl SupportedLanguage {
             return (!detected.uncertain).then_some(detected.language == Some(known));
         }
         let stripped = STRIP.replace_all(text, " ");
-        let detected = whatlang::detect(&stripped)?;
+        let detected = SUPPORTED_DETECTOR.detect(&stripped)?;
         detected
             .is_reliable()
             .then_some(detected.lang() == self.detector)
@@ -268,11 +300,16 @@ mod tests {
     #[test]
     fn resolves_iso_codes_and_regional_tags_supported_by_the_detector() {
         assert_eq!(
-            ["es", "fra", "zh-CN", "fa_IR", "no-NO"]
+            ["es", "spa", "fr-FR", "fra", "zh-CN", "zho"]
                 .map(SupportedLanguage::from_code)
                 .map(|language| language.is_some()),
-            [true; 5]
+            [true; 6]
         );
+    }
+
+    #[test]
+    fn rejects_languages_without_complete_quality_gates() {
+        assert_eq!(["fa_IR", "no-NO"].map(supports), [false; 2]);
     }
 
     #[test]

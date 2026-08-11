@@ -3,7 +3,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::lang::{self, KnownLanguage};
+use super::lang::{self, SupportedLanguage};
 use crate::translate::{Direction, TranslateRequest};
 
 static TOKEN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^\W\d_]+").expect("valid regex"));
@@ -57,11 +57,10 @@ pub fn should_filter(req: &TranslateRequest) -> bool {
         return true;
     }
 
-    if let Some(target) = KnownLanguage::from_code(&req.target_lang) {
-        let detected = lang::detect(text);
-        if detected.likely_matches(target) {
-            return true;
-        }
+    if SupportedLanguage::from_code(&req.target_lang)
+        .is_some_and(|target| target.likely_matches(text))
+    {
+        return true;
     }
 
     req.direction == Direction::Incoming && is_short_noise(text)
@@ -171,6 +170,7 @@ mod tests {
             source_lang: Some("de".to_string()),
             target_lang: "pl".to_string(),
             deadline: None,
+            casemapping: "rfc1459".to_string(),
             known_nicks: Vec::new(),
         }
     }
@@ -211,6 +211,28 @@ mod tests {
         let mut req = request(Direction::Outgoing, "nie wiem");
         req.target_lang = "pol".to_string();
         assert!(should_filter(&req));
+    }
+
+    #[test]
+    fn filters_already_target_text_for_every_supported_language_family() {
+        for (target, text) in [
+            (
+                "fr-FR",
+                "Je pense que cette décision est vraiment importante pour notre avenir commun",
+            ),
+            (
+                "spa",
+                "Mañana iremos juntos al mercado porque quiero comprar verduras y también hablar con nuestros amigos",
+            ),
+            ("zh_CN", "我认为这个决定对我们的共同未来非常重要"),
+        ] {
+            let mut req = request(Direction::Outgoing, text);
+            req.target_lang = target.to_string();
+            assert!(
+                should_filter(&req),
+                "target text was not filtered: {target}"
+            );
+        }
     }
 
     #[test]

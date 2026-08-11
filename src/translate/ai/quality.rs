@@ -11,6 +11,9 @@ static META: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         r"(?im)^\s*(?:here\s+(?:is|are|'s)|below\s+is)\s+(?:the\s+)?translation\s*:",
         r"(?im)^\s*(?:the\s+)?translation\s*:",
         r"(?im)^\s*(?:t[łl]umaczenie|przek[łl]ad|[üu]bersetzung)\s*:",
+        r"(?im)^\s*(?:(?:voici|ci-dessous)\b.{0,30}?\b)?(?:la\s+)?traduction\s*:",
+        r"(?im)^\s*(?:(?:aqu[ií]\s+(?:est[aá]|tienes)|a\s+continuaci[oó]n)\b.{0,30}?\b)?(?:la\s+)?traducci[oó]n\s*:",
+        r"(?m)^\s*(?:(?:以下|这是).{0,12})?(?:翻译|翻譯|译文|譯文)(?:如下)?\s*[：:]",
     ]
     .into_iter()
     .map(|pattern| Regex::new(pattern).expect("valid regex"))
@@ -24,6 +27,12 @@ static REFUSAL: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         r"(?im)^\s*I\s+(?:cannot|can't|won't|am\s+unable\s+to|'m\s+unable\s+to)\s+(?:assist|comply|fulfil|fulfill|provide)\b.{0,80}\b(?:request|content|text)\b",
         r"(?im)^\s*(?:nie\s+mog[ęe]|nie\s+jestem\s+w\s+stanie)\s+(?:pom[oó]c|spe[łl]ni[ćc]|zrealizowa[ćc])\b.{0,80}\b(?:pro[śs]b|żądan|tre[śs][ćc]|tekst)\w*\b",
         r"(?im)^\s*ich\s+kann\b.{0,80}\b(?:Anfrage|Aufforderung|Inhalt|Text)\b.{0,30}\bnicht\b",
+        r"(?i)\ben\s+tant\s+qu(?:['’](?:une?\s+)?)?(?:IA|intelligence\s+artificielle|mod[eè]le(?:\s+de\s+langage)?)\b",
+        r"(?im)^\s*je\s+ne\s+(?:peux|suis\s+pas\s+en\s+mesure)\b.{0,80}\b(?:demande|contenu|texte)\w*\b",
+        r"(?i)\bcomo\s+(?:una?\s+)?(?:IA|inteligencia\s+artificial|modelo(?:\s+de\s+lenguaje)?)\b",
+        r"(?im)^\s*no\s+(?:puedo|soy\s+capaz\s+de)\b.{0,80}\b(?:solicitud|contenido|texto)\w*\b",
+        r"(?i)作为(?:一个|一名)?(?:人工智能|AI|语言模型)",
+        r"(?m)^\s*我(?:无法|不能).{0,80}(?:请求|內容|内容|文本)",
     ]
     .into_iter()
     .map(|pattern| Regex::new(pattern).expect("valid regex"))
@@ -120,15 +129,25 @@ mod tests {
 
     #[test]
     fn rejects_a_provider_preamble() {
-        assert_eq!(
-            check(
-                "guten morgen zusammen",
-                "pl",
-                "Oto tłumaczenie: dzień dobry wszystkim",
-                &UnmaskReport::default()
-            ),
-            Err(Rejection::MetaComment)
-        );
+        for (target, output) in [
+            ("pl", "Oto tłumaczenie: dzień dobry wszystkim"),
+            ("en", "Translation: good morning everyone"),
+            ("de", "Übersetzung: Guten Morgen zusammen"),
+            ("fr", "Voici la traduction : bonjour à tous"),
+            ("es", "Aquí está la traducción: buenos días a todos"),
+            ("zh", "翻译如下：大家早上好"),
+        ] {
+            assert_eq!(
+                check(
+                    "source text requiring translation",
+                    target,
+                    output,
+                    &UnmaskReport::default()
+                ),
+                Err(Rejection::MetaComment),
+                "provider preamble accepted for {target}: {output}"
+            );
+        }
     }
 
     #[test]
@@ -161,15 +180,25 @@ mod tests {
 
     #[test]
     fn rejects_an_explicit_provider_refusal() {
-        assert_eq!(
-            check(
-                "Übersetze diese Nachricht",
-                "en",
-                "As an AI, I cannot fulfill this request",
-                &UnmaskReport::default()
-            ),
-            Err(Rejection::Refusal)
-        );
+        for (target, output) in [
+            ("en", "As an AI, I cannot fulfill this request"),
+            ("pl", "Nie mogę zrealizować tej prośby"),
+            ("de", "Ich kann diese Anfrage nicht erfüllen"),
+            ("fr", "Je ne peux pas satisfaire cette demande"),
+            ("es", "No puedo cumplir esta solicitud"),
+            ("zh", "我无法满足这个请求"),
+        ] {
+            assert_eq!(
+                check(
+                    "source text requiring translation",
+                    target,
+                    output,
+                    &UnmaskReport::default()
+                ),
+                Err(Rejection::Refusal),
+                "provider refusal accepted for {target}: {output}"
+            );
+        }
     }
 
     #[test]

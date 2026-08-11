@@ -8,7 +8,7 @@ static URL: LazyLock<Regex> = LazyLock::new(|| {
         .expect("valid regex")
 });
 static CHANNEL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?:^|[^\w#])(#[^\s,:\x00-\x1f]+)").expect("valid regex"));
+    LazyLock::new(|| Regex::new(r"(?:^|[^\w#&+!])([#&+!][^\s,:\x00-\x1f]+)").expect("valid regex"));
 static NORM: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(?:din(?:\s+en)?\s+vde|din|vde|iso|iec|en|ieee|rfc)\s*\d+(?:[/-]\d+)*\b")
         .expect("valid regex")
@@ -37,6 +37,15 @@ pub struct MaskedText {
     literal_expected: HashMap<String, usize>,
 }
 
+impl MaskedText {
+    pub fn has_translatable_prose(&self) -> bool {
+        PLACEHOLDER
+            .replace_all(&self.text, "")
+            .chars()
+            .any(char::is_alphabetic)
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct UnmaskReport {
     pub missing: Vec<String>,
@@ -59,6 +68,36 @@ struct MaskState {
     seen: HashMap<(char, String), String>,
     counters: HashMap<char, usize>,
     reserved: HashSet<String>,
+}
+
+#[derive(Clone, Copy)]
+enum CaseMapping {
+    Ascii,
+    Rfc1459,
+    StrictRfc1459,
+}
+
+impl CaseMapping {
+    const fn from_name(name: &str) -> Self {
+        if name.eq_ignore_ascii_case("ascii") {
+            Self::Ascii
+        } else if name.eq_ignore_ascii_case("strict-rfc1459") {
+            Self::StrictRfc1459
+        } else {
+            Self::Rfc1459
+        }
+    }
+
+    const fn fold(self, byte: u8) -> u8 {
+        let byte = byte.to_ascii_lowercase();
+        match (self, byte) {
+            (Self::Rfc1459 | Self::StrictRfc1459, b'[' | b'{') => b'{',
+            (Self::Rfc1459 | Self::StrictRfc1459, b']' | b'}') => b'}',
+            (Self::Rfc1459 | Self::StrictRfc1459, b'\\' | b'|') => b'|',
+            (Self::Rfc1459, b'^' | b'~') => b'~',
+            _ => byte,
+        }
+    }
 }
 
 impl MaskState {
@@ -90,7 +129,13 @@ impl MaskState {
     }
 }
 
+#[cfg(test)]
 pub fn mask(text: &str, known_nicks: &[String]) -> MaskedText {
+    mask_with_casemapping(text, known_nicks, "rfc1459")
+}
+
+pub fn mask_with_casemapping(text: &str, known_nicks: &[String], casemapping: &str) -> MaskedText {
+    let casemapping = CaseMapping::from_name(casemapping);
     let literal_expected = count_literal_placeholders(text);
     let mut state = MaskState::new(text, known_nicks);
     let mut output = replace_regex(text, &URL, 'U', &mut state, |_| true);
@@ -111,9 +156,9 @@ pub fn mask(text: &str, known_nicks: &[String]) -> MaskedText {
         .filter(|nick| !nick.is_empty())
         .collect();
     nicks.sort_unstable_by_key(|nick| std::cmp::Reverse(nick.len()));
-    nicks.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    nicks.dedup_by(|left, right| irc_eq(left, right, casemapping));
     for nick in nicks {
-        output = replace_nick(&output, nick, &mut state);
+        output = replace_nick(&output, nick, casemapping, &mut state);
     }
     output = mask_formatting(&output, &mut state);
 
@@ -279,7 +324,7 @@ fn replace_channel(text: &str, state: &mut MaskState) -> String {
         .into_owned()
 }
 
-fn replace_nick(text: &str, nick: &str, state: &mut MaskState) -> String {
+fn replace_nick(text: &str, nick: &str, casemapping: CaseMapping, state: &mut MaskState) -> String {
     let mut output = String::with_capacity(text.len());
     let mut cursor = 0;
     while cursor < text.len() {
@@ -291,7 +336,7 @@ fn replace_nick(text: &str, nick: &str, state: &mut MaskState) -> String {
             break;
         };
         let candidate = text.get(cursor..end);
-        if candidate.is_some_and(|value| value.eq_ignore_ascii_case(nick))
+        if candidate.is_some_and(|value| irc_eq(value, nick, casemapping))
             && boundary_before(text, cursor)
             && boundary_after(text, end)
         {
@@ -307,6 +352,14 @@ fn replace_nick(text: &str, nick: &str, state: &mut MaskState) -> String {
         }
     }
     output
+}
+
+fn irc_eq(left: &str, right: &str, casemapping: CaseMapping) -> bool {
+    left.len() == right.len()
+        && left
+            .bytes()
+            .zip(right.bytes())
+            .all(|(left, right)| casemapping.fold(left) == casemapping.fold(right))
 }
 
 fn replace_bounded_key(text: &str, key: &str, replacement: &str) -> (String, usize) {
@@ -496,6 +549,36 @@ mod tests {
         let source = format!("join #c and {long}");
         let masked = mask(&source, &[]);
         assert_eq!(masked.text, "join __C1__ and __C2__");
+    }
+
+    #[test]
+    fn masks_every_supported_channel_prefix() {
+        let source = "#hash &local +modeless !safe";
+        let masked = mask(source, &[]);
+        assert_eq!(masked.text, "__C1__ __C2__ __C3__ __C4__");
+        let (restored, report) = unmask(&masked, &masked.text);
+        assert_eq!((restored.as_str(), report.failed()), (source, false));
+    }
+
+    #[test]
+    fn matches_nicks_with_the_selected_irc_casemapping() {
+        let bracket_nick = ["foo[bar]".to_string()];
+        let tilde_nick = ["hat~nick".to_string()];
+        let rfc_bracket = mask_with_casemapping("foo{bar}", &bracket_nick, "rfc1459");
+        let rfc_tilde = mask_with_casemapping("hat^nick", &tilde_nick, "rfc1459");
+        let strict = mask_with_casemapping("hat^nick", &tilde_nick, "strict-rfc1459");
+        let ascii = mask_with_casemapping("foo{bar}", &bracket_nick, "ascii");
+
+        assert_eq!(rfc_bracket.text, "__N1__");
+        assert_eq!(rfc_tilde.text, "__N1__");
+        assert_eq!(strict.text, "hat^nick");
+        assert_eq!(ascii.text, "foo{bar}");
+    }
+
+    #[test]
+    fn recognizes_when_masking_removes_all_prose() {
+        assert!(!mask("alice: #rust", &["alice".to_string()]).has_translatable_prose());
+        assert!(mask("hello alice", &["alice".to_string()]).has_translatable_prose());
     }
 
     #[test]

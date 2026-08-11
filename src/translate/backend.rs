@@ -189,6 +189,7 @@ mod tests {
             source_lang: None,
             target_lang: "pl".to_string(),
             deadline: None,
+            casemapping: "rfc1459".to_string(),
             known_nicks: Vec::new(),
         }
     }
