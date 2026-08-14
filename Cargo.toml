@@ -3,7 +3,7 @@ members = [".", "web-ui"]
 
 [package]
 name = "repartee"
-version = "1.7.0"
+version = "2.0.0"
 edition = "2024"
 # The real floor, not the edition's. Edition 2024 alone needs 1.85, and the
 # dependency graph asks 1.90 (`quantette`, via ratatui-image → icy_sixel),
