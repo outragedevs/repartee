@@ -192,10 +192,7 @@ pub struct GapfillContinuation {
 /// Returns [`GapfillContinuation`] when a reconnect `AFTER` gap-fill page came
 /// back full (the gap is larger than one page); the App caller then issues the
 /// next `AFTER`. `None` for every other case.
-#[expect(
-    clippy::too_many_lines,
-    reason = "batch-type dispatch; the CHATHISTORY arm is large but cohesive"
-)]
+#[allow(clippy::too_many_lines)]
 pub fn process_completed_batch(
     state: &mut AppState,
     conn_id: &str,

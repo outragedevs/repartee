@@ -92,6 +92,10 @@ fn opt(s: &str) -> Option<String> {
 
 /// The field schema. Page 0 = Basics, page 1 = Advanced. `edit` makes the
 /// server-id field read-only (it is the map key and cannot change).
+#[allow(
+    clippy::too_many_lines,
+    reason = "declarative field schema is clearer as one ordered list"
+)]
 fn schema(edit: bool) -> Vec<Field> {
     let text = |key, label, page| Field {
         key,

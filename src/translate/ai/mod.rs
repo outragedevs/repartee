@@ -7,6 +7,7 @@ mod quality;
 mod router;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use futures::future::BoxFuture;
@@ -20,6 +21,8 @@ use crate::config::TranslateAiConfig;
 
 const DEFAULT_TRANSLATION_BUDGET: Duration = Duration::from_secs(5);
 const ATTEMPT_HEADROOM: Duration = Duration::from_millis(10);
+const MIN_PREFERRED_ATTEMPT_MS: u64 = 500;
+const TERMINAL_ATTEMPT_RESERVE: Duration = Duration::from_millis(1_500);
 
 #[derive(Debug, Error)]
 pub enum AiBuildError {
@@ -43,7 +46,9 @@ pub struct AiBackend {
     models: Vec<ModelClient>,
     easy: Vec<usize>,
     strong: Vec<usize>,
+    terminal: HashSet<usize>,
     prompt_template: String,
+    preferred_attempt_ms: AtomicU64,
     runtime_config: TranslateAiConfig,
 }
 
@@ -88,6 +93,17 @@ impl AiBackend {
 
         let mut easy = policy_indexes(&config.easy, &indexes)?;
         let mut strong = policy_indexes(&config.strong, &indexes)?;
+        let terminal_names = config.terminal.clone().unwrap_or_else(|| {
+            config
+                .models
+                .iter()
+                .filter(|model| indexes.contains_key(&model.name) && is_groq_endpoint(model))
+                .map(|model| model.name.clone())
+                .collect()
+        });
+        let terminal = policy_indexes(&terminal_names, &indexes)?
+            .into_iter()
+            .collect();
         if easy.is_empty() || strong.is_empty() {
             if easy.is_empty() {
                 easy.clone_from(&strong);
@@ -104,8 +120,12 @@ impl AiBackend {
             models,
             easy,
             strong,
+            terminal,
             prompt_template,
-            runtime_config: configuration_without_credentials(config),
+            preferred_attempt_ms: AtomicU64::new(
+                config.preferred_attempt_ms.max(MIN_PREFERRED_ATTEMPT_MS),
+            ),
+            runtime_config: restart_bound_configuration(config),
         })
     }
 
@@ -153,10 +173,9 @@ impl AiBackend {
         let candidates = self.available_candidates(preferred, alternate);
         for (position, index) in candidates.iter().copied().enumerate() {
             let model = &self.models[index];
-            let attempts_left = candidates.len().saturating_sub(position);
-            let Some(attempt_budget) = model_attempt_budget(deadline, attempts_left) else {
+            let Some(attempt_budget) = self.attempt_budget(deadline, &candidates, position) else {
                 saw_provider_failure = true;
-                break;
+                continue;
             };
             let attempt = tokio::time::timeout(
                 attempt_budget,
@@ -226,15 +245,55 @@ impl AiBackend {
         TranslateOutcome::Untranslated { id: req.id, reason }
     }
 
+    fn attempt_budget(
+        &self,
+        deadline: Instant,
+        candidates: &[usize],
+        position: usize,
+    ) -> Option<Duration> {
+        let terminal_attempts_left = candidates[position..]
+            .iter()
+            .filter(|index| self.is_terminal(**index))
+            .count();
+        let regular_attempts_left = candidates[position..]
+            .iter()
+            .filter(|index| !self.is_terminal(**index))
+            .count();
+        let preferred_attempt =
+            Duration::from_millis(self.preferred_attempt_ms.load(Ordering::Relaxed));
+        model_attempt_budget(
+            deadline.saturating_duration_since(Instant::now()),
+            self.is_terminal(candidates[position]),
+            terminal_attempts_left,
+            regular_attempts_left,
+            preferred_attempt,
+        )
+    }
+
     fn available_candidates(&self, preferred: &[usize], alternate: &[usize]) -> Vec<usize> {
         let mut attempted = HashSet::new();
-        preferred
+        let candidates: Vec<_> = preferred
             .iter()
             .chain(alternate)
             .copied()
             .filter(|index| attempted.insert(*index))
             .filter(|index| self.models[*index].is_available())
+            .collect();
+        candidates
+            .iter()
+            .copied()
+            .filter(|index| !self.is_terminal(*index))
+            .chain(
+                candidates
+                    .iter()
+                    .copied()
+                    .filter(|index| self.is_terminal(*index)),
+            )
             .collect()
+    }
+
+    fn is_terminal(&self, index: usize) -> bool {
+        self.terminal.contains(&index)
     }
 }
 
@@ -293,13 +352,39 @@ fn failed_policy_reason(
     }
 }
 
-fn model_attempt_budget(deadline: Instant, attempts_left: usize) -> Option<Duration> {
-    let divisor = u32::try_from(attempts_left).unwrap_or(u32::MAX).max(1);
-    let budget = deadline
-        .saturating_duration_since(Instant::now())
-        .checked_div(divisor)
-        .unwrap_or_default()
-        .saturating_sub(ATTEMPT_HEADROOM);
+fn model_attempt_budget(
+    remaining: Duration,
+    terminal: bool,
+    terminal_attempts_left: usize,
+    regular_attempts_left: usize,
+    preferred_attempt: Duration,
+) -> Option<Duration> {
+    let budget = if terminal {
+        let divisor = u32::try_from(terminal_attempts_left)
+            .unwrap_or(u32::MAX)
+            .max(1);
+        remaining
+            .checked_div(divisor)
+            .unwrap_or_default()
+            .saturating_sub(ATTEMPT_HEADROOM)
+    } else {
+        let terminal_count = u32::try_from(terminal_attempts_left).unwrap_or(u32::MAX);
+        let regular_count = u32::try_from(regular_attempts_left)
+            .unwrap_or(u32::MAX)
+            .max(1);
+        let total_count = terminal_count.saturating_add(regular_count).max(1);
+        let desired_terminal_reserve = TERMINAL_ATTEMPT_RESERVE.saturating_mul(terminal_count);
+        let proportional_terminal_reserve = remaining
+            .saturating_mul(terminal_count)
+            .checked_div(total_count)
+            .unwrap_or_default();
+        let terminal_reserve = desired_terminal_reserve.min(proportional_terminal_reserve);
+        remaining
+            .saturating_sub(terminal_reserve)
+            .checked_div(regular_count)
+            .unwrap_or_default()
+            .min(preferred_attempt)
+    };
     (!budget.is_zero()).then_some(budget)
 }
 
@@ -322,6 +407,14 @@ fn validate_model_url(model: &crate::config::TranslateAiModelConfig) -> Result<(
     Ok(())
 }
 
+fn is_groq_endpoint(model: &crate::config::TranslateAiModelConfig) -> bool {
+    reqwest::Url::parse(model.base_url.trim())
+        .is_ok_and(|url| {
+            url.host_str()
+                .is_some_and(|host| host.eq_ignore_ascii_case("api.groq.com"))
+        })
+}
+
 impl TranslateBackend for AiBackend {
     fn kind(&self) -> crate::translate::backend::BackendKind {
         crate::translate::backend::BackendKind::Ai
@@ -334,11 +427,15 @@ impl TranslateBackend for AiBackend {
     fn configuration_matches(&self, config: &crate::config::TranslateConfig) -> bool {
         crate::translate::backend::backend_kind(&config.backend)
             == crate::translate::backend::BackendKind::Ai
-            && self.runtime_config == configuration_without_credentials(&config.ai)
+            && self.runtime_config == restart_bound_configuration(&config.ai)
     }
 
-    fn refresh_credentials(&self, config: &crate::config::TranslateConfig) {
+    fn refresh_config(&self, config: &crate::config::TranslateConfig) {
         self.reload_credentials(&config.ai);
+        self.preferred_attempt_ms.store(
+            config.ai.preferred_attempt_ms.max(MIN_PREFERRED_ATTEMPT_MS),
+            Ordering::Relaxed,
+        );
     }
 
     fn translate(&self, req: TranslateRequest) -> BoxFuture<'_, TranslateOutcome> {
@@ -346,8 +443,9 @@ impl TranslateBackend for AiBackend {
     }
 }
 
-fn configuration_without_credentials(config: &TranslateAiConfig) -> TranslateAiConfig {
+fn restart_bound_configuration(config: &TranslateAiConfig) -> TranslateAiConfig {
     let mut config = config.clone();
+    config.preferred_attempt_ms = 0;
     for model in &mut config.models {
         model.api_key.clear();
     }
@@ -393,6 +491,8 @@ mod tests {
         TranslateAiConfig {
             easy: vec!["test".to_string()],
             strong: vec!["test".to_string()],
+            terminal: Some(Vec::new()),
+            preferred_attempt_ms: 3_000,
             prompt_path: String::new(),
             models: vec![model],
         }
@@ -435,6 +535,16 @@ mod tests {
     }
 
     #[test]
+    fn refuses_to_build_with_an_unknown_terminal_model() {
+        let mut config = config_with_key();
+        config.terminal = Some(vec!["typo".to_string()]);
+        assert!(matches!(
+            AiBackend::new(&config),
+            Err(AiBuildError::UnknownPolicyModel(name)) if name == "typo"
+        ));
+    }
+
+    #[test]
     fn refuses_to_build_with_a_malformed_model_url() {
         let mut config = config_with_key();
         config.models[0].base_url = "localhost:11434/v1".to_string();
@@ -452,6 +562,111 @@ mod tests {
             AiBackend::new(&config),
             Err(AiBuildError::InvalidModelUrl(name)) if name == "test"
         ));
+    }
+
+    #[test]
+    fn terminal_models_follow_all_regular_candidates() {
+        let model = |name: &str| TranslateAiModelConfig {
+            name: name.to_string(),
+            base_url: "http://127.0.0.1:1/v1".to_string(),
+            model: name.to_string(),
+            api_key_env: "TEST_API".to_string(),
+            api_key: "secret".to_string(),
+            ..TranslateAiModelConfig::default()
+        };
+        let config = TranslateAiConfig {
+            easy: vec!["terminal".to_string(), "primary".to_string()],
+            strong: vec!["alternate".to_string()],
+            terminal: Some(vec!["terminal".to_string()]),
+            preferred_attempt_ms: 3_000,
+            prompt_path: String::new(),
+            models: vec![
+                model("terminal"),
+                model("primary"),
+                model("alternate"),
+            ],
+        };
+        let backend = AiBackend::new(&config).expect("valid config");
+        let candidates = backend.available_candidates(&backend.easy, &backend.strong);
+        let names: Vec<_> = candidates
+            .iter()
+            .map(|index| backend.models[*index].name())
+            .collect();
+
+        assert_eq!(names, ["primary", "alternate", "terminal"]);
+    }
+
+    #[test]
+    fn a_legacy_policy_infers_groq_as_terminal() {
+        let mut config = config_with_key();
+        config.terminal = None;
+        config.models[0].base_url = "https://api.groq.com/openai/v1".to_string();
+
+        let backend = AiBackend::new(&config).expect("valid config");
+
+        assert!(backend.is_terminal(0));
+    }
+
+    #[test]
+    fn a_missing_terminal_policy_remains_distinguishable_from_an_empty_one() {
+        let config: TranslateAiConfig = toml::from_str("easy = []\nstrong = []")
+            .expect("minimal legacy AI policy");
+
+        assert!(config.terminal.is_none());
+    }
+
+    #[test]
+    fn regular_attempt_keeps_terminal_time_in_reserve() {
+        assert_eq!(
+            model_attempt_budget(Duration::from_secs(5), false, 2, 1, Duration::from_secs(3),),
+            Some(Duration::from_secs(2))
+        );
+    }
+
+    #[test]
+    fn short_deadline_still_assigns_time_to_a_regular_model() {
+        assert_eq!(
+            model_attempt_budget(
+                Duration::from_millis(500),
+                false,
+                2,
+                3,
+                Duration::from_secs(3),
+            ),
+            Some(Duration::from_millis(100))
+        );
+    }
+
+    #[test]
+    fn regular_attempt_uses_the_configured_budget_when_deadline_allows() {
+        assert_eq!(
+            model_attempt_budget(Duration::from_secs(13), false, 2, 2, Duration::from_secs(3),),
+            Some(Duration::from_secs(3))
+        );
+    }
+
+    #[test]
+    fn terminal_attempts_share_the_reserved_remainder() {
+        assert_eq!(
+            model_attempt_budget(Duration::from_secs(4), true, 2, 0, Duration::from_secs(3),),
+            Some(Duration::from_millis(1_990))
+        );
+    }
+
+    #[test]
+    fn preferred_attempt_budget_refreshes_without_rebuild() {
+        let config = config_with_key();
+        let backend = AiBackend::new(&config).expect("valid config");
+        let mut translate = crate::config::TranslateConfig {
+            backend: "ai".to_string(),
+            ai: config,
+            ..crate::config::TranslateConfig::default()
+        };
+        translate.ai.preferred_attempt_ms = 4_200;
+
+        backend.refresh_config(&translate);
+
+        assert_eq!(backend.preferred_attempt_ms.load(Ordering::Relaxed), 4_200);
     }
 
     #[tokio::test]
@@ -539,7 +754,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_hanging_model_does_not_consume_the_fallback_budget() {
+    async fn a_hanging_regular_model_still_reaches_the_terminal_fallback() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test server");
@@ -564,6 +779,8 @@ mod tests {
         let config = TranslateAiConfig {
             easy: vec!["hanging".to_string(), "success".to_string()],
             strong: vec!["hanging".to_string(), "success".to_string()],
+            terminal: Some(vec!["success".to_string()]),
+            preferred_attempt_ms: 500,
             prompt_path: String::new(),
             models: vec![
                 model("hanging", "hang", "hanging-model"),
@@ -572,7 +789,7 @@ mod tests {
         };
         let backend = AiBackend::new(&config).expect("valid config");
         let mut req = request("ich glaube das funktioniert wirklich");
-        req.deadline = Some(Instant::now() + Duration::from_millis(400));
+        req.deadline = Some(Instant::now() + Duration::from_millis(2_200));
 
         let outcome = backend.translate(req).await;
         server.abort();
@@ -605,6 +822,8 @@ mod tests {
         let config = TranslateAiConfig {
             easy: vec!["limited".to_string(), "success".to_string()],
             strong: vec!["limited".to_string(), "success".to_string()],
+            terminal: Some(Vec::new()),
+            preferred_attempt_ms: 500,
             prompt_path: String::new(),
             models: vec![
                 model("limited", "limited", "limited-model"),
@@ -651,6 +870,8 @@ mod tests {
         let config = TranslateAiConfig {
             easy: vec!["failed".to_string(), "success".to_string()],
             strong: vec!["failed".to_string(), "success".to_string()],
+            terminal: Some(Vec::new()),
+            preferred_attempt_ms: 3_000,
             prompt_path: String::new(),
             models: vec![
                 model("failed", "fail", "failed-model"),
@@ -697,6 +918,8 @@ mod tests {
         let config = TranslateAiConfig {
             easy: vec!["auth".to_string()],
             strong: vec!["success".to_string()],
+            terminal: Some(Vec::new()),
+            preferred_attempt_ms: 3_000,
             prompt_path: String::new(),
             models: vec![
                 model("auth", "auth", "auth-model"),

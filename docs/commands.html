@@ -1864,11 +1864,12 @@ in <code>~/.repartee/.env</code>, never in <code>config.toml</code>:</p>
 </code></pre>
 <p>The AI backend is a policy, not one hard-wired vendor. It can use any
 OpenAI-compatible chat-completions endpoint and tries configured models in
-order. The built-in easy-line order is OpenRouter Gemma 4 31B, Ollama Gemma 4
-31B, Groq GPT-OSS 120B, then Groq Qwen 3.6 27B. Lines classified as difficult
-start with Gemini 3.6 Flash, followed by the same fallbacks. A model whose key
-is absent is skipped; one usable key is enough. The recognized default <code>.env</code>
-names are:</p>
+order. The built-in easy-line order starts with OpenRouter Gemma 4 31B and
+Ollama Gemma 4 31B. Lines classified as difficult start with Gemini 3.6 Flash.
+Groq GPT-OSS 120B and Groq Qwen 3.6 27B are terminal fallbacks: regardless of
+their policy positions, Repartee tries every available non-terminal model
+before either Groq model. A model whose key is absent is skipped; one usable
+key is enough. The recognized default <code>.env</code> names are:</p>
 <table>
 <thead>
 <tr>
@@ -2175,7 +2176,8 @@ precedence on buffers where both are enabled.</p>
 /set translate.my_lang           en
 /set translate.show_original_in  true
 /set translate.show_original_out true
-/set translate.timeout_ms        5000
+/set translate.timeout_ms        15000
+/set translate.ai.preferred_attempt_ms 3000
 /set translate.max_in_flight     4
 /set translate.max_queue         200
 </code></pre>
@@ -2194,6 +2196,14 @@ translations to start rather than waiting for a lull that may never come.</p>
 <p>Outgoing messages are translated one at a time <strong>per connection</strong>, so they
 reach IRC in the order you sent them without a slow request on one network
 holding up another.</p>
+<p><code>translate.ai.preferred_attempt_ms</code> is the maximum time assigned to each
+available non-terminal model before moving on. Its default is 3000 ms and it
+takes effect immediately through <code>/set</code> or <code>/reload</code>. Repartee preserves time
+inside the overall <code>translate.timeout_ms</code> deadline for configured terminal
+fallbacks. Terminal models share the remaining budget and are never tried
+before an available non-terminal model. Keep the overall timeout large enough
+for the number of preferred providers you configured; the built-in 15000 ms
+default covers the standard policy.</p>
 <p>Per-buffer settings live under <code>[translate.buffers]</code> in <code>config.toml</code> and are
 managed with the <code>add*</code> / <code>del*</code> subcommands rather than <code>/set</code>.</p>
 <p>AI policies and models are configured directly in <code>config.toml</code>. This minimal
@@ -2201,6 +2211,8 @@ example replaces the built-in policy with one OpenAI-compatible model:</p>
 <pre><code>[translate.ai]
 easy = [&quot;primary&quot;]
 strong = [&quot;primary&quot;]
+terminal = []
+preferred_attempt_ms = 3000
 prompt_path = &quot;&quot;
 
 [[translate.ai.models]]
@@ -2215,10 +2227,15 @@ max_output_tokens = 256
 </code></pre>
 <p><code>api_key_env</code> names a variable in <code>~/.repartee/.env</code>. API keys loaded from
 that file are held only in memory and are never serialized into <code>config.toml</code>.
+<code>terminal</code> names models that must run only after all regular candidates. An
+explicit empty list disables terminal routing. For compatibility, an older
+configuration without this field recognizes models using the standard
+<code>api.groq.com</code> endpoint as terminal fallbacks.
 <code>/reload</code> applies added, removed and rotated keys to an already-running AI
 backend. If no AI backend was built at startup, adding the first usable key
 still requires a restart and <code>/reload</code> reports that explicitly.
-Changing any other <code>[translate.ai]</code> value does not hot-swap a running client.
+Changing <code>translate.ai.preferred_attempt_ms</code> takes effect immediately. Any
+other <code>[translate.ai]</code> value does not hot-swap a running client.
 <code>/reload</code> immediately deactivates a backend whose endpoint, model, policy,
 prompt or rate configuration no longer matches, then reports that a restart is
 required. New conversation text is never sent through the stale configuration.

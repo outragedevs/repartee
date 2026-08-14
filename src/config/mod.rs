@@ -658,7 +658,7 @@ impl Default for TranslateConfig {
             my_lang: "en".to_string(),
             show_original_in: true,
             show_original_out: true,
-            timeout_ms: 5000,
+            timeout_ms: 15_000,
             max_in_flight: 4,
             max_queue: 200,
             ai: TranslateAiConfig::default(),
@@ -672,6 +672,9 @@ impl Default for TranslateConfig {
 pub struct TranslateAiConfig {
     pub easy: Vec<String>,
     pub strong: Vec<String>,
+    #[serde(default)]
+    pub terminal: Option<Vec<String>>,
+    pub preferred_attempt_ms: u64,
     pub prompt_path: String,
     pub models: Vec<TranslateAiModelConfig>,
 }
@@ -692,6 +695,11 @@ impl Default for TranslateAiConfig {
                 "groq-qwen36-27b".to_string(),
                 "groq-gptoss-120b".to_string(),
             ],
+            terminal: Some(vec![
+                "groq-qwen36-27b".to_string(),
+                "groq-gptoss-120b".to_string(),
+            ]),
+            preferred_attempt_ms: 3_000,
             prompt_path: String::new(),
             models: default_translate_ai_models(),
         }

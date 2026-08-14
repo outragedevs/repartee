@@ -65,11 +65,12 @@ Then select the backend and restart Repartee:
 
 The AI backend is a policy, not one hard-wired vendor. It can use any
 OpenAI-compatible chat-completions endpoint and tries configured models in
-order. The built-in easy-line order is OpenRouter Gemma 4 31B, Ollama Gemma 4
-31B, Groq GPT-OSS 120B, then Groq Qwen 3.6 27B. Lines classified as difficult
-start with Gemini 3.6 Flash, followed by the same fallbacks. A model whose key
-is absent is skipped; one usable key is enough. The recognized default `.env`
-names are:
+order. The built-in easy-line order starts with OpenRouter Gemma 4 31B and
+Ollama Gemma 4 31B. Lines classified as difficult start with Gemini 3.6 Flash.
+Groq GPT-OSS 120B and Groq Qwen 3.6 27B are terminal fallbacks: regardless of
+their policy positions, Repartee tries every available non-terminal model
+before either Groq model. A model whose key is absent is skipped; one usable
+key is enough. The recognized default `.env` names are:
 
 | provider | key |
 |---|---|
@@ -401,7 +402,8 @@ precedence on buffers where both are enabled.
     /set translate.my_lang           en
     /set translate.show_original_in  true
     /set translate.show_original_out true
-    /set translate.timeout_ms        5000
+    /set translate.timeout_ms        15000
+    /set translate.ai.preferred_attempt_ms 3000
     /set translate.max_in_flight     4
     /set translate.max_queue         200
 
@@ -423,6 +425,15 @@ Outgoing messages are translated one at a time **per connection**, so they
 reach IRC in the order you sent them without a slow request on one network
 holding up another.
 
+`translate.ai.preferred_attempt_ms` is the maximum time assigned to each
+available non-terminal model before moving on. Its default is 3000 ms and it
+takes effect immediately through `/set` or `/reload`. Repartee preserves time
+inside the overall `translate.timeout_ms` deadline for configured terminal
+fallbacks. Terminal models share the remaining budget and are never tried
+before an available non-terminal model. Keep the overall timeout large enough
+for the number of preferred providers you configured; the built-in 15000 ms
+default covers the standard policy.
+
 Per-buffer settings live under `[translate.buffers]` in `config.toml` and are
 managed with the `add*` / `del*` subcommands rather than `/set`.
 
@@ -432,6 +443,8 @@ example replaces the built-in policy with one OpenAI-compatible model:
     [translate.ai]
     easy = ["primary"]
     strong = ["primary"]
+    terminal = []
+    preferred_attempt_ms = 3000
     prompt_path = ""
 
     [[translate.ai.models]]
@@ -446,10 +459,15 @@ example replaces the built-in policy with one OpenAI-compatible model:
 
 `api_key_env` names a variable in `~/.repartee/.env`. API keys loaded from
 that file are held only in memory and are never serialized into `config.toml`.
+`terminal` names models that must run only after all regular candidates. An
+explicit empty list disables terminal routing. For compatibility, an older
+configuration without this field recognizes models using the standard
+`api.groq.com` endpoint as terminal fallbacks.
 `/reload` applies added, removed and rotated keys to an already-running AI
 backend. If no AI backend was built at startup, adding the first usable key
 still requires a restart and `/reload` reports that explicitly.
-Changing any other `[translate.ai]` value does not hot-swap a running client.
+Changing `translate.ai.preferred_attempt_ms` takes effect immediately. Any
+other `[translate.ai]` value does not hot-swap a running client.
 `/reload` immediately deactivates a backend whose endpoint, model, policy,
 prompt or rate configuration no longer matches, then reports that a restart is
 required. New conversation text is never sent through the stale configuration.
