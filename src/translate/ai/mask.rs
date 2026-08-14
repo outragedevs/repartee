@@ -23,6 +23,12 @@ static MODEL_CODE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b[a-z]{1,6}\d{1,4}[a-z]{0,3}\b").expect("valid regex"));
 static PLACEHOLDER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)__([A-Z]+\d+)__").expect("valid regex"));
+static PLACEHOLDER_SHAPED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(?:__|«|\[\[|\{\{|<|\*\*|\[|⟦|_|\*)\s*([A-Z]+\d+)\s*(?:__|»|\]\]|\}\}|>|\*\*|\]|⟧|_|\*)",
+    )
+    .expect("valid regex")
+});
 static BARE_PLACEHOLDER_KEY: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b([A-Z]+\d+)\b").expect("valid regex"));
 
@@ -231,12 +237,18 @@ pub fn unmask(masked: &MaskedText, output: &str) -> (String, UnmaskReport) {
             report.count_mismatch.push(key.clone());
         }
     }
-    for capture in PLACEHOLDER.captures_iter(&text) {
+    for capture in PLACEHOLDER_SHAPED.captures_iter(&text) {
         let literal = capture.get(0).map_or("", |matched| matched.as_str());
         let key = capture
             .get(1)
             .map_or_else(String::new, |matched| matched.as_str().to_ascii_uppercase());
-        if !masked.mapping.contains_key(&key) && !masked.literal_expected.contains_key(literal) {
+        if remaining.get(literal).copied().unwrap_or_default()
+            > masked
+                .literal_expected
+                .get(literal)
+                .copied()
+                .unwrap_or_default()
+        {
             report.extra.push(key);
         }
     }
@@ -439,7 +451,7 @@ fn count_placeholders(text: &str) -> HashMap<String, usize> {
 
 fn count_literal_placeholders(text: &str) -> HashMap<String, usize> {
     let mut counts = HashMap::new();
-    for matched in PLACEHOLDER.find_iter(text) {
+    for matched in PLACEHOLDER_SHAPED.find_iter(text) {
         *counts.entry(matched.as_str().to_string()).or_default() += 1;
     }
     counts
@@ -449,7 +461,7 @@ fn reserved_keys(text: &str, known_nicks: &[String]) -> HashSet<String> {
     std::iter::once(text)
         .chain(known_nicks.iter().map(String::as_str))
         .flat_map(|value| {
-            PLACEHOLDER
+            PLACEHOLDER_SHAPED
                 .captures_iter(value)
                 .chain(BARE_PLACEHOLDER_KEY.captures_iter(value))
         })
@@ -491,6 +503,13 @@ mod tests {
         let masked = mask("hello alice", &["alice".to_string()]);
         let (_, report) = unmask(&masked, "cześć");
         assert_eq!(report.missing, vec!["N1"]);
+    }
+
+    #[test]
+    fn reports_an_invented_placeholder_with_alternate_delimiters() {
+        let masked = mask("hello world", &[]);
+        let (_, report) = unmask(&masked, "cześć świecie [[N9]]");
+        assert_eq!(report.extra, vec!["N9"]);
     }
 
     #[test]

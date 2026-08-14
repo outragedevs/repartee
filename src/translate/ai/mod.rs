@@ -269,7 +269,9 @@ fn masked_preflight_outcome(
     req: &TranslateRequest,
     masked: &mask::MaskedText,
 ) -> Option<TranslateOutcome> {
-    (!masked.has_translatable_prose()).then_some(TranslateOutcome::Untranslated {
+    (!masked.has_translatable_prose()
+        || filter::is_already_target(&masked.text, &req.target_lang))
+    .then_some(TranslateOutcome::Untranslated {
         id: req.id,
         reason: UntranslatedReason::Filtered,
     })
@@ -518,6 +520,22 @@ mod tests {
 
         assert!(!masked.text.to_ascii_lowercase().contains("alice"));
         assert!(!masked.text.to_ascii_lowercase().contains("bob"));
+    }
+
+    #[test]
+    fn target_language_preflight_ignores_masked_nicknames() {
+        let mut req = request("ich: hello");
+        req.direction = Direction::Outgoing;
+        req.source_lang = Some("en".to_string());
+        req.target_lang = "de".to_string();
+        req.known_nicks = vec!["ich".to_string()];
+
+        let outcome = preflight_outcome(&req).or_else(|| {
+            let masked = mask_request(&req);
+            masked_preflight_outcome(&req, &masked)
+        });
+
+        assert!(outcome.is_none(), "nickname biased target detection");
     }
 
     #[tokio::test]

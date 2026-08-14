@@ -57,13 +57,12 @@ pub fn should_filter(req: &TranslateRequest) -> bool {
         return true;
     }
 
-    if SupportedLanguage::from_code(&req.target_lang)
-        .is_some_and(|target| target.likely_matches(text))
-    {
-        return true;
-    }
-
     req.direction == Direction::Incoming && is_short_noise(text)
+}
+
+pub fn is_already_target(text: &str, target_lang: &str) -> bool {
+    SupportedLanguage::from_code(target_lang)
+        .is_some_and(|target| target.likely_matches(text.trim()))
 }
 
 fn is_technical_only(text: &str) -> bool {
@@ -210,7 +209,7 @@ mod tests {
     fn filters_a_short_phrase_already_in_a_three_letter_target_language() {
         let mut req = request(Direction::Outgoing, "nie wiem");
         req.target_lang = "pol".to_string();
-        assert!(should_filter(&req));
+        assert!(is_already_target(&req.text, &req.target_lang));
     }
 
     #[test]
@@ -229,7 +228,7 @@ mod tests {
             let mut req = request(Direction::Outgoing, text);
             req.target_lang = target.to_string();
             assert!(
-                should_filter(&req),
+                is_already_target(&req.text, &req.target_lang),
                 "target text was not filtered: {target}"
             );
         }
