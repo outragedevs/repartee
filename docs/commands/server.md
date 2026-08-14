@@ -54,6 +54,7 @@ Add a new server to the configuration.
 - `-reconnect-max-retries=<n>` — Maximum reconnect attempts
 - `-autosendcmd=<cmds>` — Commands to run on connect (semicolon-separated)
 - `-client-cert=<path>` — Client TLS certificate path for SASL EXTERNAL / CertFP
+- `-sasl-key=<path>` — P-256 private key path for ECDSA-NIST256P-CHALLENGE
 
 Flag values are parsed as single command arguments, so values with spaces should
 be edited in `config.toml` or with `/set`. For a guided form instead of flags,
@@ -64,8 +65,6 @@ use `/wizard server`.
 Remove a server and disconnect if connected.
 
     /server remove <id>
-
-Aliases: del
 
 ## Examples
 

@@ -1,5 +1,5 @@
 ---
-category: Server
+category: Other
 description: Authenticate as an IRC operator
 ---
 

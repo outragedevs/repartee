@@ -1,5 +1,5 @@
 ---
-category: Info
+category: Other
 description: Request server statistics
 ---
 

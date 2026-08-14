@@ -1,5 +1,5 @@
 ---
-category: Moderation
+category: Channel
 description: Ban a user or hostmask
 ---
 

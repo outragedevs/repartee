@@ -748,6 +748,21 @@ fn split_list(raw: &str) -> Vec<String> {
         .collect()
 }
 
+fn server_password_env_key(path: &str) -> Option<String> {
+    let mut parts = path.split('.');
+    let (Some("servers"), Some(server_id), Some(field), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    let suffix = match field {
+        "password" => "PASSWORD",
+        "sasl_pass" => "SASL_PASS",
+        _ => return None,
+    };
+    Some(format!("{}_{suffix}", server_id.to_uppercase()))
+}
+
 // === Available setting paths for tab completion ===
 
 /// Base setting paths (without server-specific ones).
@@ -960,6 +975,14 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
                     ev(app, &format!("{C_ERR}Failed to save to .env: {e}{C_RST}"));
                 } else {
                     ev(app, &format!("{C_DIM}Password saved to .env{C_RST}"));
+                }
+            }
+            if let Some(key) = server_password_env_key(path) {
+                let env_path = crate::constants::env_path();
+                if let Err(e) = crate::config::set_env_value(&env_path, &key, raw) {
+                    ev(app, &format!("{C_ERR}Failed to save to .env: {e}{C_RST}"));
+                } else {
+                    ev(app, &format!("{C_DIM}Credential saved to .env{C_RST}"));
                 }
             }
 
@@ -1624,6 +1647,18 @@ mod tests {
                 .value,
             "SCRAM-SHA-512"
         );
+    }
+
+    #[test]
+    fn server_passwords_map_to_their_env_keys() {
+        for (path, expected) in [
+            ("servers.libera.password", Some("LIBERA_PASSWORD")),
+            ("servers.libera.sasl_user", None),
+            ("servers.libera.sasl_pass", Some("LIBERA_SASL_PASS")),
+            ("servers.libera.nick", None),
+        ] {
+            assert_eq!(server_password_env_key(path).as_deref(), expected);
+        }
     }
 
     #[test]

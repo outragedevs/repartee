@@ -1,5 +1,5 @@
 ---
-category: Channel
+category: Other
 description: Clear current buffer's messages
 ---
 

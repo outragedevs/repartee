@@ -1708,4 +1708,16 @@ items = ["time", "nick_info", "channel_info", "lag", "active_windows"]
         assert_eq!(reloaded.config_version, CONFIG_VERSION);
         assert!(reloaded.statusbar.items.contains(&StatusbarItem::Typing));
     }
+
+    #[test]
+    fn documented_configuration_example_parses() {
+        let markdown = include_str!("../../docs/src/content/configuration.md");
+        let (_, after_fence) = markdown
+            .split_once("```toml\n")
+            .expect("documented TOML example");
+        let (example, _) = after_fence
+            .split_once("\n```")
+            .expect("closed TOML example");
+        let _: AppConfig = toml::from_str(example).expect("documented configuration must parse");
+    }
 }

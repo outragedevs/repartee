@@ -1,6 +1,6 @@
 ---
 category: Configuration
-description: Reload theme and config
+description: Reload config, .env credentials, and theme
 ---
 
 # /reload
@@ -11,8 +11,12 @@ description: Reload theme and config
 
 ## Description
 
-Reload the configuration file and theme from disk. Useful after manually
-editing `config/config.toml` or theme files.
+Reload `~/.repartee/config.toml`, `~/.repartee/.env` credentials, and the
+current theme from disk.
+
+Existing IRC connections keep credentials already used to authenticate. New
+or rotated service keys are applied where the running component supports a
+safe live refresh; otherwise Repartee reports that a restart is required.
 
 ## See Also
 

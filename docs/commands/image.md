@@ -1,5 +1,5 @@
 ---
-category: Media
+category: Other
 description: Manage image preview cache
 ---
 

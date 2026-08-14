@@ -1,5 +1,5 @@
 ---
-category: Server
+category: Other
 description: Send a raw IRC command
 ---
 

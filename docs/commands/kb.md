@@ -1,5 +1,5 @@
 ---
-category: Moderation
+category: Channel
 description: Kickban a user (kick then ban *!*ident@host)
 ---
 

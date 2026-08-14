@@ -1,5 +1,5 @@
 ---
-category: Media
+category: Other
 description: Preview an image URL in the terminal
 ---
 

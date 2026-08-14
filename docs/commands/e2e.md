@@ -1,4 +1,5 @@
 ---
+category: Other
 description: End-to-end encryption commands and key management
 ---
 

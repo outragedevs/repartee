@@ -11,11 +11,9 @@ Spell checker status and control.
 
 Two modes: "replace" (default) replaces misspelled words inline — Tab cycles suggestions, Space accepts, Escape reverts. "highlight" marks misspelled words with red underline without changing text. Switch with `/set spellcheck.mode highlight` or `/set spellcheck.mode replace`.
 
-## Usage
+## Syntax
 
-```
-/spellcheck [status|reload|list|get <lang>]
-```
+    /spellcheck [status|reload|list|get <lang>]
 
 ## Subcommands
 
@@ -31,9 +29,11 @@ Reload dictionaries from disk. Useful after adding new `.dic`/`.aff` files or ch
 
 Fetch the list of available dictionaries from the Repartee dictionary repository. Shows each language with its install status.
 
-### get &lt;lang&gt;
+### get
 
 Download a dictionary by language code (e.g. `en_US`, `pl_PL`, `de_DE`). Files are saved to `~/.repartee/dicts/` and the spell checker is automatically reloaded.
+
+    /spellcheck get <lang>
 
 ## Configuration
 

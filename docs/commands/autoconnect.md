@@ -1,5 +1,5 @@
 ---
-category: Connection
+category: Configuration
 description: Toggle server autoconnect
 ---
 

@@ -1,5 +1,5 @@
 ---
-category: Moderation
+category: Other
 description: Disconnect a user from the network
 ---
 

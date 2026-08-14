@@ -111,16 +111,23 @@
   sessions/            # Unix sockets for detached sessions
   certs/               # TLS certificates for web frontend
 </code></pre>
-<h2>Full annotated example</h2>
-<pre><code class="language-toml">[general]
+<h2>Annotated example</h2>
+<p>This example covers every top-level configuration section and the settings
+most commonly changed by hand. Repartee fills omitted fields with their current
+defaults. Provider-specific AI model entries are documented under
+<a href="commands.html#translate"><code>/translate</code></a>.</p>
+<pre><code class="language-toml">config_version = 1
+
+[general]
 nick = &quot;mynick&quot;
 username = &quot;mynick&quot;
-realname = &quot;repartee user&quot;
+realname = &quot;repartee Client&quot;
 theme = &quot;default&quot;
 timestamp_format = &quot;%H:%M:%S&quot;
 flood_protection = true
 flood_exemptions = []  # nick or nick!user@host wildcard masks exempt from PRIVMSG flood checks
 ctcp_version = &quot;repartee&quot;
+# default_bind_ip = &quot;192.0.2.10&quot;
 
 [display]
 nick_column_width = 8
@@ -145,7 +152,10 @@ width = 18
 visible = true
 
 [statusbar]
-items = [&quot;active_windows&quot;, &quot;nick_info&quot;, &quot;channel_info&quot;, &quot;typing&quot;, &quot;lag&quot;, &quot;time&quot;]
+enabled = true
+items = [&quot;time&quot;, &quot;nick_info&quot;, &quot;channel_info&quot;, &quot;typing&quot;, &quot;lag&quot;, &quot;active_windows&quot;]
+separator = &quot; | &quot;
+prompt = &quot;[$server❱ &quot;
 
 [servers.libera]
 label = &quot;Libera&quot;
@@ -158,7 +168,6 @@ channels = [&quot;#repartee&quot;, &quot;#secret mykey&quot;]
 autosendcmd = &quot;MSG NickServ identify pass; WAIT 2000; MODE $N +i&quot;
 # nick = &quot;othernick&quot;           # per-server nick override
 # sasl_user = &quot;mynick&quot;
-# sasl_pass = &quot;hunter2&quot;
 # sasl_mechanism = &quot;SCRAM-SHA-512&quot;  # omit to auto-detect the strongest offered
 # client_cert_path = &quot;libera-cert.pem&quot;  # TLS client cert, for EXTERNAL/CertFP
 # sasl_key_path = &quot;libera-key.pem&quot;      # P-256 key, for ECDSA-NIST256P-CHALLENGE
@@ -204,14 +213,53 @@ autoaccept_lowports = false    # allow auto-accept from ports &lt; 1024
 max_connections = 10
 
 [spellcheck]
-enabled = true
+enabled = false
+computing = true
+mode = &quot;replace&quot;                  # &quot;replace&quot; or &quot;highlight&quot;
 languages = [&quot;en_US&quot;]              # Hunspell language codes
 dictionary_dir = &quot;&quot;                # default: ~/.repartee/dicts
+
+[e2e]
+enabled = true
+default_mode = &quot;normal&quot;             # &quot;auto-accept&quot;, &quot;normal&quot;, or &quot;quiet&quot;
+ts_tolerance_secs = 300
+
+[shrink]
+enabled = false
+api_url = &quot;https://shr.al&quot;
+outgoing_enabled = true
+incoming_enabled = true
+min_url_length = 50
+outgoing_timeout_ms = 2000
+incoming_timeout_ms = 2000
+cache_max_entries = 500
+
+[emotes]
+enabled = true
+render = &quot;graphical&quot;                # &quot;graphical&quot;, &quot;text&quot;, or &quot;off&quot;
+lang = &quot;en&quot;                         # &quot;en&quot; or &quot;pl&quot;
+max_cols = 8
+max_rows = 3
 
 [typing]
 show = true                        # receive and display others&#39; typing indicators
 send_channels = true               # send +typing while typing in a channel
 send_queries = true                # send +typing while typing in a private query
+
+[translate]
+enabled = false
+backend = &quot;none&quot;                   # &quot;none&quot;, &quot;ai&quot;, or test-only &quot;stub&quot;
+my_lang = &quot;en&quot;
+show_original_in = true
+show_original_out = true
+timeout_ms = 15000
+max_in_flight = 4
+max_queue = 200
+
+[translate.buffers.&quot;libera/#german&quot;]
+incoming = true
+outgoing = true
+lang = &quot;de&quot;
 
 [web]
 enabled = false                    # enable embedded web frontend
@@ -221,8 +269,15 @@ tls_cert = &quot;&quot;                      # custom cert (empty = auto self-si
 tls_key = &quot;&quot;                       # custom key
 timestamp_format = &quot;%H:%M&quot;        # web UI timestamp format
 line_height = 1.35                 # CSS line-height for chat messages
+nick_column_width = 12
+nick_max_length = 9
 theme = &quot;nightfall&quot;                # web theme (nightfall, catppuccin-mocha, etc.)
-# cloudflare_tunnel_name = &quot;&quot;     # future: Cloudflare tunnel name
+session_days = 90
+username = &quot;repartee&quot;
+image_previews = false
+image_previews_max_per_msg = 4
+thumbnail_cache_mb = 200
+cloudflare_tunnel_name = &quot;&quot;
 
 [[ignores]]
 mask = &quot;*!*@spammer.host&quot;
@@ -314,7 +369,31 @@ w = &quot;/who $C&quot;
 <p><code>port_range</code> controls the TCP port for DCC listeners. <code>&quot;0&quot;</code> lets the OS assign a free port. Use <code>&quot;1025 65535&quot;</code> or <code>&quot;5000-5100&quot;</code> to restrict to a range (useful for firewall rules).</p>
 <p><code>autochat_masks</code> is a list of <code>nick!ident@host</code> wildcard patterns. Incoming DCC CHAT offers matching any pattern are auto-accepted without prompting.</p>
 <h3><code>[spellcheck]</code></h3>
-<p>Inline spell checking. When <code>enabled = true</code>, misspelled words are underlined in red while typing. Press Tab to cycle suggestions, Space to accept, Escape to revert. <code>languages</code> is a list of Hunspell language codes (e.g., <code>en_US</code>, <code>pl_PL</code>, <code>de_DE</code>) — a word is correct if <strong>any</strong> active dictionary accepts it. Place <code>.dic</code>/<code>.aff</code> files in <code>~/.repartee/dicts/</code> (or set <code>dictionary_dir</code> to a custom path).</p>
+<p>Inline spell checking. <code>mode = &quot;replace&quot;</code> replaces a misspelling with the first
+suggestion and lets Tab cycle alternatives; <code>mode = &quot;highlight&quot;</code> keeps the
+typed word and marks it instead. <code>languages</code> is a list of Hunspell language
+codes such as <code>en_US</code>, <code>pl_PL</code>, or <code>de_DE</code>. The bundled computing dictionary is
+controlled independently with <code>computing</code>.</p>
+<h3><code>[e2e]</code></h3>
+<p>RPE2E end-to-end encryption defaults. <code>enabled</code> controls whether the encryption
+manager is available, <code>default_mode</code> is applied by <code>/e2e on</code>, and
+<code>ts_tolerance_secs</code> bounds accepted clock skew. Channel trust and peer state are
+managed with <code>/e2e</code>, not by editing this table.</p>
+<h3><code>[shrink]</code></h3>
+<p>URL shortening through the configured shrink-compatible endpoint. The master
+switch and incoming/outgoing switches are independent. <code>SHRINK_API_KEY</code> belongs
+in <code>~/.repartee/.env</code>; it is never serialized to this table. See <code>/help shrink</code>
+for runtime/restart behavior.</p>
+<h3><code>[emotes]</code></h3>
+<p>Built-in <code>:name:</code> emotes. <code>render</code> accepts <code>graphical</code>, <code>text</code>, or <code>off</code>; <code>lang</code>
+selects English or Polish picker names. <code>max_cols</code> and <code>max_rows</code> bound inline
+image dimensions in terminal cells.</p>
+<h3><code>[translate]</code> and <code>[translate.ai]</code></h3>
+<p>Per-buffer incoming and outgoing translation. <code>enabled</code> is the master switch,
+<code>backend</code> selects <code>none</code>, <code>ai</code>, or the test-only <code>stub</code>, and <code>my_lang</code> is the
+language you read and write. Manage buffer mappings with <code>/translate addin</code>,
+<code>addout</code>, <code>delin</code>, and <code>delout</code>; use <code>/help translate</code> for AI providers, keys,
+language support, fallback routing, and restart behavior.</p>
 <h3><code>[typing]</code></h3>
 <p>IRCv3 <code>+typing</code> client tag support (typing indicators). <code>show = true</code> (default) receives and displays other people&#39;s typing status in the TUI status line and the web UI; set to <code>false</code> to stop showing it, both live and after reload. <code>send_channels</code> and <code>send_queries</code> independently control whether Repartee sends its own <code>+typing</code> while you type in a channel or a private query, respectively — turn either off if you&#39;d rather not announce your own typing in that context. All three are booleans, so use <code>/set typing.show false</code> (not <code>off</code>) to disable one at runtime.</p>
 <p>Turning a send switch off at runtime stops all further notifications immediately, but it does <strong>not</strong> retract an indicator that is already on the wire: an indicator you have just sent lapses at the peer&#39;s own timeout — 6 seconds after your last <code>active</code>, or 30 seconds after a <code>paused</code> — rather than being taken down with an explicit <code>done</code>.</p>
@@ -325,18 +404,27 @@ w = &quot;/who $C&quot;
 <h3><code>[[ignores]]</code></h3>
 <p>Ignore patterns for filtering unwanted messages. Uses wildcard matching (<code>*!*@host</code>). Levels: <code>MSGS</code>, <code>PUBLIC</code>, <code>NOTICES</code>, <code>ACTIONS</code>, <code>JOINS</code>, <code>PARTS</code>, <code>QUITS</code>, <code>NICKS</code>, <code>KICKS</code>, <code>CTCPS</code>, <code>ALL</code>.</p>
 <h2>Credentials</h2>
-<p>Passwords and SASL credentials should <strong>not</strong> go in <code>config.toml</code> — store them in <code>~/.repartee/.env</code> instead.</p>
+<p>Passwords should <strong>not</strong> go in <code>config.toml</code> — store them in
+<code>~/.repartee/.env</code> instead. SASL usernames may be set in <code>config.toml</code>; the
+environment form remains supported for existing configurations.</p>
 <pre><code class="language-bash"># ~/.repartee/.env
 LIBERA_SASL_USER=mynick
 LIBERA_SASL_PASS=hunter2
 LIBERA_PASSWORD=serverpassword
 WEB_PASSWORD=mysecretpassword
+SHRINK_API_KEY=your-shr-al-key
+OPENROUTER_API=your-openrouter-key
+OLLAMA_API=your-ollama-key
+GEMINI_API=your-gemini-key
+GROQ_API_KEY=your-groq-key
 </code></pre>
-<p>Server credentials use the server identifier uppercased. <code>WEB_PASSWORD</code> is required for the web frontend — the server won&#39;t start without it.</p>
+<p>Server credentials use the server identifier uppercased. <code>WEB_PASSWORD</code> is
+required for the web frontend. Translation needs only one usable model key;
+models whose keys are absent are skipped.</p>
 <h2>Runtime changes</h2>
 <ul>
 <li><strong><code>/set section.field value</code></strong> — change a config value at runtime. Changes are saved immediately.</li>
-<li><strong><code>/reload</code></strong> — reload theme and config from disk.</li>
+<li><strong><code>/reload</code></strong> — reload config, <code>.env</code> credentials, and the current theme from disk.</li>
 </ul>
 
 

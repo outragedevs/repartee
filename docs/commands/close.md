@@ -1,5 +1,5 @@
 ---
-category: Channel
+category: Other
 description: Close windows by number, range, or the active one
 ---
 

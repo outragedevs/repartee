@@ -7,19 +7,18 @@ description: Disconnect from a server
 
 ## Syntax
 
-    /disconnect [server-id|label] [message]
+    /disconnect [message]
 
 ## Description
 
-Disconnect from an IRC server. With no arguments, disconnects from the
-server associated with the current buffer. Optionally specify a server
-by ID or label, and a quit message.
+Disconnect the IRC server associated with the current buffer and disable its
+automatic reconnect for this session. Any argument is used as the quit
+message; switch to a buffer on the intended network before running the command.
 
 ## Examples
 
     /disconnect
-    /disconnect libera
-    /disconnect libera Goodbye!
+    /disconnect Goodbye!
 
 ## See Also
 

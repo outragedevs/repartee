@@ -7,9 +7,7 @@ description: Detach from the terminal, keeping repartee running in the backgroun
 
 ## Syntax
 
-```
-/detach
-```
+    /detach
 
 ## Description
 
@@ -35,9 +33,7 @@ You can also detach with keyboard chords instead of typing the command:
 
 ## Examples
 
-```
-/detach              # detach from terminal
-```
+    /detach              # detach from terminal
 
 From your shell after detaching:
 

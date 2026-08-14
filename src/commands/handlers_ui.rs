@@ -29,7 +29,8 @@ pub(crate) fn cmd_help(app: &mut App, args: &[String]) {
         show_command_list(app);
     } else {
         let name = args[0].strip_prefix('/').unwrap_or(&args[0]).to_lowercase();
-        show_command_help(app, &name);
+        let subcommand = args.get(1).map(|sub| sub.to_lowercase());
+        show_command_help(app, &name, subcommand.as_deref());
     }
 }
 
@@ -72,7 +73,7 @@ fn show_command_list(app: &mut App) {
     add_local_event(app, &divider(""));
 }
 
-fn show_command_help(app: &mut App, name: &str) {
+fn show_command_help(app: &mut App, name: &str, subcommand: Option<&str>) {
     let commands = super::registry::get_commands();
 
     // Find by name or alias
@@ -90,6 +91,13 @@ fn show_command_help(app: &mut App, name: &str) {
 
     // Try loading detailed help from docs/commands/*.md
     let doc = super::docs::help(cmd_name);
+
+    if let Some(requested) = subcommand
+        && has_structured_subcommands(doc)
+    {
+        show_subcommand_help(app, cmd_name, doc, requested);
+        return;
+    }
 
     add_local_event(app, &divider(&format!("/{cmd_name}")));
 
@@ -160,6 +168,52 @@ fn show_command_help(app: &mut App, name: &str) {
         }
     }
 
+    add_local_event(app, &divider(""));
+}
+
+fn has_structured_subcommands(doc: Option<&super::docs::CommandHelp>) -> bool {
+    doc.is_some_and(|doc| !doc.subcommands.is_empty())
+}
+
+fn show_subcommand_help(
+    app: &mut App,
+    command: &str,
+    doc: Option<&super::docs::CommandHelp>,
+    requested: &str,
+) {
+    let Some(doc) = doc else {
+        add_local_event(
+            app,
+            &format!("{C_ERR}No subcommand help for /{command} {requested}.{C_RST}"),
+        );
+        return;
+    };
+    let Some(sub) = super::docs::subcommand(command, requested) else {
+        let available = doc
+            .subcommands
+            .iter()
+            .filter_map(|sub| sub.name.split_whitespace().next())
+            .collect::<Vec<_>>()
+            .join(", ");
+        add_local_event(
+            app,
+            &format!(
+                "{C_ERR}Unknown subcommand: /{command} {requested}. Available: {available}{C_RST}"
+            ),
+        );
+        return;
+    };
+
+    add_local_event(app, &divider(&format!("/{command} {}", sub.name)));
+    if !sub.description.is_empty() {
+        add_local_event(app, &format!("  {C_TEXT}{}{C_RST}", sub.description));
+    }
+    if !sub.syntax.is_empty() {
+        add_local_event(app, "");
+        for line in sub.syntax.lines() {
+            add_local_event(app, &format!("  {C_CMD}{line}{C_RST}"));
+        }
+    }
     add_local_event(app, &divider(""));
 }
 
@@ -1147,6 +1201,16 @@ pub(crate) fn cmd_wizard(app: &mut App, args: &[String]) {
 mod tests {
     use super::*;
     use crate::config::StatusbarItem;
+
+    #[test]
+    fn syntax_only_actions_fall_back_to_main_command_help() {
+        assert!(!has_structured_subcommands(super::super::docs::help("flood")));
+    }
+
+    #[test]
+    fn documented_subcommands_use_specialized_help() {
+        assert!(has_structured_subcommands(super::super::docs::help("server")));
+    }
 
     #[test]
     fn typing_is_a_manageable_statusbar_item() {

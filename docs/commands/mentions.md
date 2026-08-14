@@ -7,11 +7,9 @@ description: Switch to the mentions buffer
 
 Switch to the Mentions buffer — a persistent buffer pinned at the top of the sidebar that aggregates all highlight mentions from all networks.
 
-## Usage
+## Syntax
 
-```
-/mentions
-```
+    /mentions
 
 ## Description
 
