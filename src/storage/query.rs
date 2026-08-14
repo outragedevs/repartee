@@ -28,6 +28,11 @@ fn map_row(
     let msg_type: String = row.get("type")?;
     let nick: Option<String> = row.get("nick")?;
     let stored_text: String = row.get("text")?;
+    let translation_suffix_at = row
+        .get_ref("translation_suffix_at")
+        .ok()
+        .and_then(|value| value.as_i64().ok())
+        .and_then(|value| usize::try_from(value).ok());
     let highlight_int: i32 = row.get("highlight")?;
     let iv: Option<Vec<u8>> = row.get("iv")?;
 
@@ -61,6 +66,7 @@ fn map_row(
         msg_type,
         nick,
         text,
+        translation_suffix_at,
         highlight: highlight_int != 0,
         ref_id,
         tags,
@@ -79,6 +85,14 @@ fn has_ts_ms_column(db: &Connection) -> bool {
     db.prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name = 'ts_ms'")
         .and_then(|mut stmt| stmt.exists([]))
         .unwrap_or(false)
+}
+
+fn has_translation_suffix_column(db: &Connection) -> bool {
+    db.prepare(
+        "SELECT 1 FROM pragma_table_info('messages') WHERE name = 'translation_suffix_at'",
+    )
+    .and_then(|mut stmt| stmt.exists([]))
+    .unwrap_or(false)
 }
 
 /// SQL expression yielding a row's millisecond `@time`, tolerant of databases
@@ -103,11 +117,17 @@ fn ts_ms_expr(db: &Connection, prefix: &str) -> String {
 /// a reference exists; `map_row` is unchanged. `ts_ms` is built via
 /// [`ts_ms_expr`] so the read works even on an unmigrated read-only DB.
 fn select_message_columns(db: &Connection) -> String {
+    let translation_suffix = if has_translation_suffix_column(db) {
+        "COALESCE(p.translation_suffix_at, m.translation_suffix_at)"
+    } else {
+        "NULL"
+    };
     format!(
         "m.id, m.msg_id, m.network, m.buffer, m.timestamp,
          {} AS ts_ms,
          m.type, m.nick,
          COALESCE(p.text, m.text) AS text,
+         {translation_suffix} AS translation_suffix_at,
          m.highlight,
          COALESCE(p.iv,   m.iv)   AS iv,
          m.ref_id, m.tags, m.event_key",

@@ -52,6 +52,7 @@ pub fn add_local_event(app: &mut App, text: &str) {
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 }

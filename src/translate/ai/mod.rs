@@ -52,6 +52,18 @@ pub struct AiBackend {
     runtime_config: TranslateAiConfig,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidatePolicy {
+    Preferred,
+    Alternate,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Candidate {
+    model_index: usize,
+    policy: CandidatePolicy,
+}
+
 impl AiBackend {
     pub fn new(config: &TranslateAiConfig) -> Result<Self, AiBuildError> {
         let prompt_template = prompt::load_template(&config.prompt_path)?;
@@ -171,8 +183,8 @@ impl AiBackend {
             .deadline
             .unwrap_or_else(|| Instant::now() + DEFAULT_TRANSLATION_BUDGET);
         let candidates = self.available_candidates(preferred, alternate);
-        for (position, index) in candidates.iter().copied().enumerate() {
-            let model = &self.models[index];
+        for (position, candidate) in candidates.iter().copied().enumerate() {
+            let model = &self.models[candidate.model_index];
             let Some(attempt_budget) = self.attempt_budget(deadline, &candidates, position) else {
                 saw_provider_failure = true;
                 continue;
@@ -248,48 +260,61 @@ impl AiBackend {
     fn attempt_budget(
         &self,
         deadline: Instant,
-        candidates: &[usize],
+        candidates: &[Candidate],
         position: usize,
     ) -> Option<Duration> {
-        let terminal_attempts_left = candidates[position..]
+        let current = candidates[position];
+        let stage_attempts_left = candidates[position..]
             .iter()
-            .filter(|index| self.is_terminal(**index))
+            .take_while(|candidate| candidate.policy == current.policy)
             .count();
-        let regular_attempts_left = candidates[position..]
-            .iter()
-            .filter(|index| !self.is_terminal(**index))
-            .count();
+        let stage = &candidates[position..position + stage_attempts_left];
+        let current_is_terminal = self.is_terminal(current.model_index);
+        let (regular_attempts_left, terminal_attempts_left) = if current_is_terminal {
+            (0, stage.len())
+        } else {
+            let regular = stage
+                .iter()
+                .take_while(|candidate| !self.is_terminal(candidate.model_index))
+                .count();
+            (regular, stage.len() - regular)
+        };
         let preferred_attempt =
             Duration::from_millis(self.preferred_attempt_ms.load(Ordering::Relaxed));
         model_attempt_budget(
             deadline.saturating_duration_since(Instant::now()),
-            self.is_terminal(candidates[position]),
+            current_is_terminal,
             terminal_attempts_left,
             regular_attempts_left,
             preferred_attempt,
         )
     }
 
-    fn available_candidates(&self, preferred: &[usize], alternate: &[usize]) -> Vec<usize> {
+    fn available_candidates(&self, preferred: &[usize], alternate: &[usize]) -> Vec<Candidate> {
         let mut attempted = HashSet::new();
-        let candidates: Vec<_> = preferred
-            .iter()
-            .chain(alternate)
-            .copied()
-            .filter(|index| attempted.insert(*index))
-            .filter(|index| self.models[*index].is_available())
-            .collect();
+        let mut candidates = Vec::new();
+        for (policy, candidate_policy) in [
+            (preferred, CandidatePolicy::Preferred),
+            (alternate, CandidatePolicy::Alternate),
+        ] {
+            for terminal in [false, true] {
+                candidates.extend(
+                    policy
+                        .iter()
+                        .copied()
+                        .filter(|index| {
+                            self.is_terminal(*index) == terminal
+                                && self.models[*index].is_available()
+                                && attempted.insert(*index)
+                        })
+                        .map(|model_index| Candidate {
+                            model_index,
+                            policy: candidate_policy,
+                        }),
+                );
+            }
+        }
         candidates
-            .iter()
-            .copied()
-            .filter(|index| !self.is_terminal(*index))
-            .chain(
-                candidates
-                    .iter()
-                    .copied()
-                    .filter(|index| self.is_terminal(*index)),
-            )
-            .collect()
     }
 
     fn is_terminal(&self, index: usize) -> bool {
@@ -565,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_models_follow_all_regular_candidates() {
+    fn selected_policy_finishes_before_the_alternate_policy() {
         let model = |name: &str| TranslateAiModelConfig {
             name: name.to_string(),
             base_url: "http://127.0.0.1:1/v1".to_string(),
@@ -590,10 +615,70 @@ mod tests {
         let candidates = backend.available_candidates(&backend.easy, &backend.strong);
         let names: Vec<_> = candidates
             .iter()
-            .map(|index| backend.models[*index].name())
+            .map(|candidate| backend.models[candidate.model_index].name())
             .collect();
 
-        assert_eq!(names, ["primary", "alternate", "terminal"]);
+        assert_eq!(names, ["primary", "terminal", "alternate"]);
+    }
+
+    #[test]
+    fn preferred_budget_ignores_an_alternate_beyond_terminal_fallbacks() {
+        let mut config = config_with_key();
+        let alternate = TranslateAiModelConfig {
+            name: "alternate".to_string(),
+            base_url: "http://127.0.0.1:1/v1".to_string(),
+            model: "alternate".to_string(),
+            api_key_env: "TEST_API".to_string(),
+            api_key: "secret".to_string(),
+            ..TranslateAiModelConfig::default()
+        };
+        let terminal = TranslateAiModelConfig {
+            name: "terminal".to_string(),
+            base_url: "http://127.0.0.1:1/v1".to_string(),
+            model: "terminal".to_string(),
+            api_key_env: "TEST_API".to_string(),
+            api_key: "secret".to_string(),
+            ..TranslateAiModelConfig::default()
+        };
+        config.easy = vec!["test".to_string(), "terminal".to_string()];
+        config.strong = vec!["alternate".to_string()];
+        config.terminal = Some(vec!["terminal".to_string()]);
+        config.preferred_attempt_ms = 10_000;
+        config.models.extend([alternate, terminal]);
+        let backend = AiBackend::new(&config).expect("valid config");
+        let candidates = backend.available_candidates(&backend.easy, &backend.strong);
+        let budget = backend.attempt_budget(
+            Instant::now() + Duration::from_secs(10),
+            &candidates,
+            0,
+        );
+
+        assert!(budget.is_some_and(|value| value >= Duration::from_millis(6_900)));
+    }
+
+    #[test]
+    fn preferred_budget_ignores_adjacent_regular_alternate_policy() {
+        let mut config = config_with_key();
+        config.strong = vec!["alternate".to_string()];
+        config.terminal = Some(Vec::new());
+        config.preferred_attempt_ms = 10_000;
+        config.models.push(TranslateAiModelConfig {
+            name: "alternate".to_string(),
+            base_url: "http://127.0.0.1:1/v1".to_string(),
+            model: "alternate".to_string(),
+            api_key_env: "TEST_API".to_string(),
+            api_key: "secret".to_string(),
+            ..TranslateAiModelConfig::default()
+        });
+        let backend = AiBackend::new(&config).expect("valid config");
+        let candidates = backend.available_candidates(&backend.easy, &backend.strong);
+        let budget = backend.attempt_budget(
+            Instant::now() + Duration::from_secs(10),
+            &candidates,
+            0,
+        );
+
+        assert!(budget.is_some_and(|value| value >= Duration::from_millis(9_900)));
     }
 
     #[test]

@@ -220,6 +220,7 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
                             log_ref_id: None,
                             tags: None,
                             wire_origin: None,
+                            translation_suffix_at: None,
                         },
                     );
                 }
@@ -326,6 +327,7 @@ pub fn handle_irc_message(state: &mut AppState, conn_id: &str, msg: &IrcMessage)
                     log_ref_id: None,
                     tags: None,
                     wire_origin: None,
+                    translation_suffix_at: None,
                 },
             );
         }
@@ -382,6 +384,7 @@ pub fn handle_connected(state: &mut AppState, conn_id: &str) {
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 }
@@ -507,6 +510,7 @@ pub fn handle_disconnected(state: &mut AppState, conn_id: &str, error: Option<&s
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 }
@@ -638,6 +642,7 @@ pub fn handle_cap_new(
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 
@@ -709,6 +714,7 @@ pub fn handle_cap_del(
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 }
@@ -764,6 +770,7 @@ pub fn handle_cap_ack(
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 }
@@ -819,6 +826,7 @@ pub fn handle_cap_nak(
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 }
@@ -1102,6 +1110,7 @@ pub fn ingest_chathistory_batch(
             log_ref_id: None,
             tags,
             wire_origin: None,
+            translation_suffix_at: None,
         };
 
         // Only count rows the storage layer actually queued. A row dropped by
@@ -1635,6 +1644,7 @@ fn handle_privmsg(
                     // the row shows `translation [original]` while the wire
                     // carried the translation alone.
                     wire_origin: own_origin,
+                    translation_suffix_at: None,
             };
             // `true` when translation took the row over — see the plain
             // branch below.
@@ -1840,6 +1850,7 @@ fn handle_privmsg(
         // `translation [original]` while the wire carried the translation
         // alone, so identity has to come from the wire text.
         wire_origin: own_origin,
+        translation_suffix_at: None,
     };
     // Placeholders are delivered transiently (never logged) so they don't
     // persist; the decrypted replay is logged + surfaced under the real @msgid.
@@ -1996,6 +2007,7 @@ fn handle_notice(
             log_ref_id: None,
             tags,
             wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 }
@@ -2198,6 +2210,7 @@ fn handle_join(
             log_ref_id: None,
             tags,
             wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 }
@@ -2292,6 +2305,7 @@ fn handle_account(
                 log_ref_id: None,
                 tags: tags.clone(),
                 wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     }
@@ -2706,6 +2720,7 @@ fn handle_chghost(
                 log_ref_id: None,
                 tags: tags.clone(),
                 wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     }
@@ -2788,6 +2803,7 @@ fn handle_part(
                 log_ref_id: None,
                 tags,
                 wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     }
@@ -2915,6 +2931,7 @@ fn handle_quit(
                 },
                 tags: tags.clone(),
                 wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     }
@@ -3168,6 +3185,7 @@ fn handle_nick_change(
                 },
                 tags: tags.clone(),
                 wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     }
@@ -3175,7 +3193,11 @@ fn handle_nick_change(
     rename_query_buffers(state, conn_id, &old_nick, new_nick, &affected);
 }
 
-#[expect(clippy::too_many_arguments, reason = "IRC KICK has many parameters")]
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "IRC KICK handling owns the channel, server, and landing-buffer updates"
+)]
 fn handle_kick(
     state: &mut AppState,
     conn_id: &str,
@@ -3189,13 +3211,11 @@ fn handle_kick(
     let (kicker, kicker_ident, kicker_host) = extract_nick_userhost(prefix);
     let buffer_id = make_buffer_id(conn_id, channel);
     let reason_str = reason.unwrap_or("");
-
     // The person who was kicked stopped typing — not the kicker, and
     // regardless of ignore (spec §1.2).
     if state.typing.clear(&buffer_id, kicked_user) {
         push_typing_web_event(state, &buffer_id);
     }
-
     // --- Ignore check (never ignore kicks against us) ---
     if kicked_user != our_nick
         && should_ignore(
@@ -3211,7 +3231,6 @@ fn handle_kick(
         state.remove_nick(&buffer_id, kicked_user);
         return;
     }
-
     let ts = message_timestamp(tags.as_ref());
     if kicked_user == our_nick {
         let text = format!("You were kicked from {channel} by {kicker} ({reason_str})");
@@ -3234,10 +3253,9 @@ fn handle_kick(
                              p: Option<Vec<String>>,
                              tg: Option<HashMap<String, String>>|
          -> Message {
-            let id = state.next_message_id();
             Message {
                 log_key: None,
-                id,
+                id: state.next_message_id(),
                 timestamp: ts,
                 message_type: MessageType::Event,
                 nick: None,
@@ -3250,6 +3268,7 @@ fn handle_kick(
                 log_ref_id: None,
                 tags: tg,
                 wire_origin: None,
+                translation_suffix_at: None,
             }
         };
 
@@ -3305,6 +3324,7 @@ fn handle_kick(
                 log_ref_id: None,
                 tags,
                 wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     }
@@ -3349,6 +3369,7 @@ fn handle_topic(
                 log_ref_id: None,
                 tags,
                 wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     }
@@ -3418,6 +3439,7 @@ fn handle_mode(
                 log_ref_id: None,
                 tags,
                 wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     } else {
@@ -3444,6 +3466,7 @@ fn handle_mode(
                 log_ref_id: None,
                 tags,
                 wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     }
@@ -3729,6 +3752,7 @@ fn handle_invite(
                 log_ref_id: None,
                 tags,
                 wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     } else {
@@ -3753,6 +3777,7 @@ fn handle_invite(
                     log_ref_id: None,
                     tags,
                     wire_origin: None,
+                    translation_suffix_at: None,
                 },
             );
         }
@@ -4437,6 +4462,7 @@ fn handle_response(state: &mut AppState, conn_id: &str, response: Response, args
                     event_params: None, log_msg_id: None, log_ref_id: None,
                     tags: None,
                     wire_origin: None,
+                    translation_suffix_at: None,
                 },
             );
         }
@@ -4497,6 +4523,7 @@ pub fn emit(state: &mut AppState, buffer_id: &str, text: &str) {
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 }
@@ -4526,6 +4553,7 @@ fn emit_event(
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 }
@@ -5444,6 +5472,7 @@ fn emit_e2e_debug(
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 }
@@ -5473,6 +5502,7 @@ fn emit_e2e_message(
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         },
     );
 }
@@ -5741,6 +5771,7 @@ pub(crate) fn e2e_event_message(
         log_ref_id: None,
         tags: None,
         wire_origin: None,
+        translation_suffix_at: None,
     }
 }
 

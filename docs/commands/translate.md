@@ -68,9 +68,11 @@ OpenAI-compatible chat-completions endpoint and tries configured models in
 order. The built-in easy-line order starts with OpenRouter Gemma 4 31B and
 Ollama Gemma 4 31B. Lines classified as difficult start with Gemini 3.6 Flash.
 Groq GPT-OSS 120B and Groq Qwen 3.6 27B are terminal fallbacks: regardless of
-their policy positions, Repartee tries every available non-terminal model
-before either Groq model. A model whose key is absent is skipped; one usable
-key is enough. The recognized default `.env` names are:
+their positions inside the selected policy, Repartee tries that policy's
+available non-terminal models before either Groq model. The alternate policy
+is attempted only if the selected policy is exhausted. A model whose key is
+absent is skipped; one usable key is enough. The recognized default `.env`
+names are:
 
 | provider | key |
 |---|---|
@@ -429,10 +431,12 @@ holding up another.
 available non-terminal model before moving on. Its default is 3000 ms and it
 takes effect immediately through `/set` or `/reload`. Repartee preserves time
 inside the overall `translate.timeout_ms` deadline for configured terminal
-fallbacks. Terminal models share the remaining budget and are never tried
-before an available non-terminal model. Keep the overall timeout large enough
-for the number of preferred providers you configured; the built-in 15000 ms
-default covers the standard policy.
+fallbacks. Models from the selected easy or strong policy run first, with its
+terminal models last. Only after that policy is exhausted does Repartee try the
+alternate policy, so a model intended for difficult lines does not dilute the
+normal-line budget. Keep the overall timeout large enough for the number of
+preferred providers you configured; the built-in 15000 ms default covers the
+standard policy.
 
 Per-buffer settings live under `[translate.buffers]` in `config.toml` and are
 managed with the `add*` / `del*` subcommands rather than `/set`.
@@ -459,7 +463,7 @@ example replaces the built-in policy with one OpenAI-compatible model:
 
 `api_key_env` names a variable in `~/.repartee/.env`. API keys loaded from
 that file are held only in memory and are never serialized into `config.toml`.
-`terminal` names models that must run only after all regular candidates. An
+`terminal` names models that run after regular candidates in each policy. An
 explicit empty list disables terminal routing. For compatibility, an older
 configuration without this field recognizes models using the standard
 `api.groq.com` endpoint as terminal fallbacks.

@@ -207,9 +207,8 @@ fn split_body_for_dimming(
     emote_sizing: Option<crate::ui::emote_layout::EmoteSizing>,
 ) -> (String, Option<String>) {
     let at = msg
-        .wire_origin
-        .as_ref()
-        .and_then(|o| o.suffix_at)
+        .translation_suffix_at
+        .or_else(|| msg.wire_origin.as_ref().and_then(|origin| origin.suffix_at))
         .filter(|at| *at < msg.text.len() && msg.text.is_char_boundary(*at));
     let Some(at) = at else {
         return (emotify_message_text(&msg.text, emote_sizing), None);
@@ -428,6 +427,7 @@ mod tests {
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         }
     }
 
@@ -633,6 +633,7 @@ mod tests {
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         };
         render_event(&msg, &theme)
             .into_iter()
@@ -845,6 +846,7 @@ mod tests {
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         };
         let theme = default_theme();
         let config = default_config();

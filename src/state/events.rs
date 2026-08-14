@@ -595,6 +595,7 @@ impl AppState {
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
             log_key: None,
         };
         self.add_mention_to_buffer(mention_msg);
@@ -2011,6 +2012,13 @@ impl AppState {
             } else {
                 message.text.clone()
             },
+            translation_suffix_at: if is_ref {
+                None
+            } else {
+                message
+                    .translation_suffix_at
+                    .or_else(|| message.wire_origin.as_ref().and_then(|origin| origin.suffix_at))
+            },
             highlight: message.highlight,
             ref_id: message.log_ref_id.clone(),
             tags: tags_json,
@@ -2660,6 +2668,7 @@ pub mod tests {
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         }
     }
 
@@ -2719,6 +2728,7 @@ pub mod tests {
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         };
         state.add_message("libera/#rust", event_msg);
         assert!(
@@ -2755,6 +2765,7 @@ pub mod tests {
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         };
         state.add_message("libera/#rust", event_msg2);
         assert_eq!(
@@ -2963,6 +2974,7 @@ pub mod tests {
             log_ref_id: None,
             tags: Some(tags),
             wire_origin: None,
+            translation_suffix_at: None,
         };
         state.add_message("libera/#rust", msg);
 
@@ -2994,6 +3006,7 @@ pub mod tests {
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         };
 
         // Normal config: the row is queued, so ingest reports success.
@@ -3031,6 +3044,7 @@ pub mod tests {
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         };
         // First fills the single slot (kept unread via _rx), second overflows.
         assert!(state.ingest_history_message("libera/#rust", &msg));
@@ -3068,6 +3082,7 @@ pub mod tests {
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         };
 
         state.add_message("libera/#rust", build());
@@ -3126,6 +3141,7 @@ pub mod tests {
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         };
         // What the queue produces: display text replaced, wire text recorded.
         let mut translated = wire();
@@ -3176,6 +3192,7 @@ pub mod tests {
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         };
         let mut translated = wire.clone();
         translated.text = "good morning".to_string();
@@ -3230,6 +3247,7 @@ pub mod tests {
                 text: "guten morgen".to_string(),
                 suffix_at: Some("guten morgen".len()),
             }),
+            translation_suffix_at: None,
         };
         state.add_message_unshrunk("libera/#rust", echo.clone());
 
@@ -3244,6 +3262,7 @@ pub mod tests {
             text: "guten morgen".to_string(),
             tags: Some(tags),
             wire_origin: None,
+            translation_suffix_at: None,
             ..echo.clone()
         };
         state.surface_history_rows("libera/#rust", vec![replay]);
@@ -3310,6 +3329,7 @@ pub mod tests {
             log_ref_id: None,
             tags: Some(tags.clone()),
             wire_origin: None,
+            translation_suffix_at: None,
         };
         state.add_message("libera/#rust", primary);
 
@@ -3328,6 +3348,7 @@ pub mod tests {
             log_ref_id: Some("primary-gen-id".to_string()),
             tags: Some(tags),
             wire_origin: None,
+            translation_suffix_at: None,
         };
         state.add_message("libera/#linux", reference);
 
@@ -3369,6 +3390,7 @@ pub mod tests {
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         };
         state.add_message("libera/#rust", msg1);
 
@@ -3388,6 +3410,7 @@ pub mod tests {
             log_ref_id: Some(primary_id.clone()),
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         };
         state.add_message("libera/#linux", msg2);
 

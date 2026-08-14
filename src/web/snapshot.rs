@@ -136,8 +136,10 @@ pub fn message_to_wire(
         log_id: msg.log_msg_id.as_ref().and_then(|s| s.parse::<i64>().ok()),
         event_key: msg.event_key.clone(),
         previews: extractor.map(|e| e.extract(&msg.text)).unwrap_or_default(),
-        // Live-only, exactly as in the TUI: the log stores the flat text.
-        orig_offset: msg.wire_origin.as_ref().and_then(|o| o.suffix_at),
+        // Persisted rows carry the display boundary separately from the text.
+        orig_offset: msg
+            .translation_suffix_at
+            .or_else(|| msg.wire_origin.as_ref().and_then(|origin| origin.suffix_at)),
     }
 }
 
@@ -159,9 +161,9 @@ pub fn stored_to_wire(
         log_id: Some(msg.id),
         event_key: msg.event_key.clone(),
         previews: extractor.map(|e| e.extract(&msg.text)).unwrap_or_default(),
-        // A stored row's text is flat — the suffix is indistinguishable from
-        // any other trailing brackets, and must not be guessed at.
-        orig_offset: None,
+        orig_offset: msg
+            .translation_suffix_at
+            .filter(|offset| msg.text.is_char_boundary(*offset)),
     }
 }
 
@@ -432,6 +434,7 @@ mod tests {
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         };
         let wire = message_to_wire(&msg, None);
         assert_eq!(wire.id, 42);
@@ -459,6 +462,7 @@ mod tests {
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         };
         let wire = message_to_wire(&msg, None);
         assert_eq!(wire.event_key.as_deref(), Some("join"));
@@ -482,6 +486,7 @@ mod tests {
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         };
         let wire = message_to_wire(&msg, Some(&extractor));
         assert_eq!(wire.previews.len(), 1);
@@ -509,6 +514,7 @@ mod tests {
             msg_type: "event".to_string(),
             nick: None,
             text: "You were kicked from #rust by op (behave)".to_string(),
+            translation_suffix_at: None,
             highlight: true,
             ref_id: None,
             tags: None,
@@ -519,8 +525,35 @@ mod tests {
         assert!(wire.highlight);
         assert_eq!(
             wire.orig_offset, None,
-            "a stored row's text is flat — the suffix must never be guessed"
+            "an ordinary stored row has no translation boundary"
         );
+    }
+
+    #[test]
+    fn stored_translation_boundary_reaches_the_browser() {
+        let mut stored = crate::storage::types::StoredMessage {
+            id: 1,
+            msg_id: "msg-1".to_string(),
+            network: "Libera".to_string(),
+            buffer: "#rust".to_string(),
+            timestamp: 1_710_000_000,
+            ts_ms: 1_710_000_000_000,
+            msg_type: "message".to_string(),
+            nick: Some("alice".to_string()),
+            text: "dzień dobry [guten tag]".to_string(),
+            translation_suffix_at: Some("dzień dobry".len()),
+            highlight: false,
+            ref_id: None,
+            tags: None,
+            event_key: None,
+        };
+        assert_eq!(
+            stored_to_wire(&stored, None).orig_offset,
+            Some("dzień dobry".len())
+        );
+
+        stored.translation_suffix_at = Some(5);
+        assert_eq!(stored_to_wire(&stored, None).orig_offset, None);
     }
 
     #[test]
@@ -546,6 +579,7 @@ mod tests {
                 text: "dzien dobry".to_string(),
                 suffix_at: Some("good morning".len()),
             }),
+            translation_suffix_at: None,
         };
         let wire = message_to_wire(&msg, None);
         assert_eq!(wire.orig_offset, Some("good morning".len()));
@@ -574,6 +608,7 @@ mod tests {
                 text: "dzien dobry".to_string(),
                 suffix_at: None,
             }),
+            translation_suffix_at: None,
         };
         assert_eq!(message_to_wire(&msg, None).orig_offset, None);
     }

@@ -105,10 +105,12 @@ pub struct Message {
     /// IRC wire — today, only a translated line. `None` for everything else,
     /// which is the overwhelming majority of rows.
     ///
-    /// Live-only, deliberately NOT persisted. The stored text is flat (the
-    /// log records exactly what was on screen); what survives the round trip
-    /// instead is [`Self::log_key`].
+    /// Live-only, deliberately NOT persisted. The stored text is flat; the
+    /// transport key and optional display boundary survive separately.
     pub wire_origin: Option<WireOrigin>,
+    /// Byte offset where a translated line's appended original begins.
+    /// Unlike [`Self::wire_origin`], this display-only value survives logging.
+    pub translation_suffix_at: Option<usize>,
     /// The key this row is stored under in the log (`messages.msg_id`), set
     /// only on rows READ BACK from `SQLite`.
     ///

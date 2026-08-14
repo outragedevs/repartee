@@ -506,6 +506,7 @@ pub(crate) fn rows_to_buffer_messages(
                 log_ref_id: None,
                 tags: None,
                 wire_origin: None,
+                translation_suffix_at: None,
             });
         }
         last_date = Some(local_date);
@@ -564,6 +565,9 @@ pub(crate) fn stored_to_message(
         log_ref_id: None,
         tags: None,
         wire_origin: None,
+        translation_suffix_at: stored
+            .translation_suffix_at
+            .filter(|offset| stored.text.is_char_boundary(*offset)),
     }
 }
 
@@ -584,6 +588,7 @@ mod tests {
             // What the log holds for a translated row: the DISPLAY text. The
             // wire text it was keyed by is not recoverable from here.
             text: "czesc".to_string(),
+            translation_suffix_at: None,
             highlight: false,
             ref_id: None,
             tags: None,
@@ -612,5 +617,18 @@ mod tests {
             Some("42"),
             "and the SQLite row id still means the row id, which paging needs"
         );
+    }
+
+    #[test]
+    fn a_loaded_translation_keeps_its_display_boundary() {
+        let mut state = crate::state::events::tests::make_test_state();
+        let mut stored = stored_row();
+        stored.text = "cześć [hola]".to_string();
+        stored.translation_suffix_at = Some("cześć".len());
+
+        let msg = stored_to_message(&mut state, &stored);
+
+        assert_eq!(msg.translation_suffix_at, Some("cześć".len()));
+        assert!(msg.wire_origin.is_none());
     }
 }

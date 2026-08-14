@@ -40,6 +40,7 @@ impl App {
                         log_ref_id: None,
                         tags: None,
                         wire_origin: None,
+                        translation_suffix_at: None,
                     },
                 );
             }
@@ -254,6 +255,7 @@ impl App {
                     log_ref_id: None,
                     tags: None,
                     wire_origin: None,
+                    translation_suffix_at: None,
                 },
             );
         }
@@ -304,6 +306,7 @@ impl App {
                             event_key: None,
                             event_params: Some(Vec::new()),
                             wire_origin: None,
+                            translation_suffix_at: None,
                         },
                     );
                     if let Some(handle) = self.irc_handles.get(&conn_id) {

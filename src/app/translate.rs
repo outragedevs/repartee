@@ -2582,6 +2582,7 @@ impl crate::app::App {
                         text: body,
                         suffix_at,
                     }),
+                    translation_suffix_at: None,
                 }
             })
             .collect();
@@ -2631,6 +2632,7 @@ impl crate::app::App {
                 log_ref_id: None,
                 tags: None,
                 wire_origin: None,
+                translation_suffix_at: None,
             },
         );
     }
@@ -3010,6 +3012,7 @@ mod app_tests {
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         }
     }
 
@@ -8219,6 +8222,7 @@ mod ordering_integration {
             log_ref_id: None,
             tags: None,
             wire_origin: None,
+            translation_suffix_at: None,
         }
     }
 
