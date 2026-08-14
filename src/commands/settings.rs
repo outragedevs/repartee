@@ -158,15 +158,20 @@ fn get_config_value(config: &AppConfig, path: &str) -> Option<Resolved> {
             // `buffers` is not exposed here: it is a per-buffer map, managed
             // by `/translate addin|delin|addout|delout`, and a dotted-path
             // setter has no sane spelling for it.
-            let val = match parts[1] {
-                "enabled" => config.translate.enabled.to_string(),
-                "backend" => config.translate.backend.clone(),
-                "my_lang" => config.translate.my_lang.clone(),
-                "show_original_in" => config.translate.show_original_in.to_string(),
-                "show_original_out" => config.translate.show_original_out.to_string(),
-                "timeout_ms" => config.translate.timeout_ms.to_string(),
-                "max_in_flight" => config.translate.max_in_flight.to_string(),
-                "max_queue" => config.translate.max_queue.to_string(),
+            let val = match parts.as_slice() {
+                ["translate", "enabled"] => config.translate.enabled.to_string(),
+                ["translate", "backend"] => config.translate.backend.clone(),
+                ["translate", "my_lang"] => config.translate.my_lang.clone(),
+                ["translate", "show_original_in"] => config.translate.show_original_in.to_string(),
+                ["translate", "show_original_out"] => {
+                    config.translate.show_original_out.to_string()
+                }
+                ["translate", "timeout_ms"] => config.translate.timeout_ms.to_string(),
+                ["translate", "max_in_flight"] => config.translate.max_in_flight.to_string(),
+                ["translate", "max_queue"] => config.translate.max_queue.to_string(),
+                ["translate", "ai", "preferred_attempt_ms"] => {
+                    config.translate.ai.preferred_attempt_ms.to_string()
+                }
                 _ => return None,
             };
             Some(Resolved {
@@ -454,9 +459,9 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
             }
             _ => return Err(format!("Unknown field: {path}")),
         },
-        "translate" => match parts[1] {
-            "enabled" => config.translate.enabled = parse_bool(raw)?,
-            "backend" => {
+        "translate" => match parts.as_slice() {
+            ["translate", "enabled"] => config.translate.enabled = parse_bool(raw)?,
+            ["translate", "backend"] => {
                 // Rejected rather than stored-and-ignored: an unknown name
                 // installs nothing, and a config that asks for translation
                 // and silently does none is the failure this whole setting
@@ -470,15 +475,19 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
                 }
                 config.translate.backend = want;
             }
-            "my_lang" => {
+            ["translate", "my_lang"] => {
                 if raw.trim().is_empty() {
                     return Err("translate.my_lang must not be empty".to_string());
                 }
                 config.translate.my_lang = raw.trim().to_lowercase();
             }
-            "show_original_in" => config.translate.show_original_in = parse_bool(raw)?,
-            "show_original_out" => config.translate.show_original_out = parse_bool(raw)?,
-            "timeout_ms" => {
+            ["translate", "show_original_in"] => {
+                config.translate.show_original_in = parse_bool(raw)?;
+            }
+            ["translate", "show_original_out"] => {
+                config.translate.show_original_out = parse_bool(raw)?;
+            }
+            ["translate", "timeout_ms"] => {
                 let v: u64 = raw.parse().map_err(|_| "Expected a number".to_string())?;
                 // Floor 500: below that a healthy provider would be cut off
                 // mid-flight and every line would render untranslated, which
@@ -488,19 +497,28 @@ fn set_config_value(config: &mut AppConfig, path: &str, raw: &str) -> Result<(),
                 }
                 config.translate.timeout_ms = v;
             }
-            "max_in_flight" => {
+            ["translate", "max_in_flight"] => {
                 let v: u32 = raw.parse().map_err(|_| "Expected a number".to_string())?;
                 if v < 1 {
                     return Err("translate.max_in_flight must be at least 1".to_string());
                 }
                 config.translate.max_in_flight = v;
             }
-            "max_queue" => {
+            ["translate", "max_queue"] => {
                 let v: u32 = raw.parse().map_err(|_| "Expected a number".to_string())?;
                 if v < 1 {
                     return Err("translate.max_queue must be at least 1".to_string());
                 }
                 config.translate.max_queue = v;
+            }
+            ["translate", "ai", "preferred_attempt_ms"] => {
+                let v: u64 = raw.parse().map_err(|_| "Expected a number".to_string())?;
+                if v < 500 {
+                    return Err(
+                        "translate.ai.preferred_attempt_ms must be at least 500".to_string()
+                    );
+                }
+                config.translate.ai.preferred_attempt_ms = v;
             }
             _ => return Err(format!("Unknown field: {path}")),
         },
@@ -834,6 +852,7 @@ const BASE_PATHS: &[&str] = &[
     "translate.timeout_ms",
     "translate.max_in_flight",
     "translate.max_queue",
+    "translate.ai.preferred_attempt_ms",
 ];
 
 const SERVER_FIELDS: &[&str] = &[
@@ -1009,6 +1028,9 @@ pub fn cmd_set(app: &mut App, args: &[String]) {
             // nothing.
             if path.starts_with("translate.") {
                 app.sync_translate_from_config();
+                if let Some(backend) = &app.translate_backend {
+                    backend.refresh_config(&app.config.translate);
+                }
                 // `backend` has the same restart caveat as `enabled` and for
                 // the same reason — naming a translator cannot conjure the
                 // workers that were bound at startup. Warning on only one of
@@ -1267,6 +1289,7 @@ fn build_settings_lines(config: &AppConfig) -> Vec<String> {
                 "timeout_ms",
                 "max_in_flight",
                 "max_queue",
+                "ai.preferred_attempt_ms",
             ],
         ),
     ];
@@ -1712,6 +1735,19 @@ mod tests {
         );
         assert_eq!(config.translate.backend, "none", "and nothing was stored");
         assert!(BASE_PATHS.contains(&"translate.backend"));
+    }
+
+    #[test]
+    fn get_set_translate_preferred_attempt_budget() {
+        let mut config = default_config();
+        let path = "translate.ai.preferred_attempt_ms";
+
+        assert_eq!(get_config_value(&config, path).unwrap().value, "3000");
+        set_config_value(&mut config, path, "4500").unwrap();
+        assert_eq!(config.translate.ai.preferred_attempt_ms, 4_500);
+        assert_eq!(get_config_value(&config, path).unwrap().value, "4500");
+        assert!(set_config_value(&mut config, path, "499").is_err());
+        assert!(BASE_PATHS.contains(&path));
     }
 
     #[test]

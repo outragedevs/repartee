@@ -28,7 +28,7 @@ pub trait TranslateBackend: Send + Sync + 'static {
     fn kind(&self) -> BackendKind;
     fn is_ready(&self) -> bool;
     fn configuration_matches(&self, config: &crate::config::TranslateConfig) -> bool;
-    fn refresh_credentials(&self, config: &crate::config::TranslateConfig);
+    fn refresh_config(&self, config: &crate::config::TranslateConfig);
     fn translate(&self, req: TranslateRequest) -> BoxFuture<'_, TranslateOutcome>;
 }
 
@@ -141,7 +141,7 @@ impl TranslateBackend for StubBackend {
         backend_kind(&config.backend) == BackendKind::Stub
     }
 
-    fn refresh_credentials(&self, _config: &crate::config::TranslateConfig) {}
+    fn refresh_config(&self, _config: &crate::config::TranslateConfig) {}
 
     fn translate(&self, req: TranslateRequest) -> BoxFuture<'_, TranslateOutcome> {
         Box::pin(async move {

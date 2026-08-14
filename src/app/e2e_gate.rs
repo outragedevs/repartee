@@ -716,6 +716,10 @@ impl super::App {
     /// Returns `false` when nothing reached the wire: the gate refused
     /// (fail-closed — the `[E2E]` reason has already been surfaced) or the
     /// connection was down/failed. Callers must NOT retry with plaintext.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one outbound gate preserves ordering across encryption and translation"
+    )]
     pub(crate) fn send_gated_message(
         &mut self,
         conn_id: &str,

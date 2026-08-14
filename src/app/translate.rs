@@ -2655,6 +2655,12 @@ impl crate::app::App {
         // refused — the feature bricked with misleading per-line markers
         // instead of the validation error `/set` would have shown.
         self.config.translate.timeout_ms = self.config.translate.timeout_ms.max(500);
+        self.config.translate.ai.preferred_attempt_ms = self
+            .config
+            .translate
+            .ai
+            .preferred_attempt_ms
+            .max(500);
         self.config.translate.max_in_flight = self.config.translate.max_in_flight.max(1);
         self.config.translate.max_queue = self.config.translate.max_queue.max(1);
         // A backend OBJECT exists only if one was built at startup; the
@@ -7211,6 +7217,8 @@ mod app_tests {
         let ai = crate::config::TranslateAiConfig {
             easy: vec!["test".to_string()],
             strong: vec!["test".to_string()],
+            terminal: Some(Vec::new()),
+            preferred_attempt_ms: 3_000,
             prompt_path: String::new(),
             models: vec![model],
         };
@@ -8123,7 +8131,7 @@ mod tests {
                 == crate::translate::backend::BackendKind::Stub
         }
 
-        fn refresh_credentials(&self, _config: &crate::config::TranslateConfig) {}
+        fn refresh_config(&self, _config: &crate::config::TranslateConfig) {}
 
         fn translate(
             &self,

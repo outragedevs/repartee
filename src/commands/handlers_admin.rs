@@ -132,7 +132,7 @@ pub(crate) fn apply_reloaded_config(app: &mut App, new_config: crate::config::Ap
     // `send_channels = false` has to reach the machine by this route too.
     app.sync_typing_from_config();
     if let Some(backend) = &app.translate_backend {
-        backend.refresh_credentials(&app.config.translate);
+        backend.refresh_config(&app.config.translate);
     }
     // Same for `[translate]`, and this one is privacy-sensitive rather than
     // cosmetic: without it a hand-edited `enabled = false` leaves
@@ -1856,6 +1856,8 @@ mod translate_reload_tests {
         TranslateAiConfig {
             easy: vec![model.name.clone()],
             strong: vec![model.name.clone()],
+            terminal: Some(Vec::new()),
+            preferred_attempt_ms: 3_000,
             prompt_path: String::new(),
             models: vec![model],
         }
@@ -1987,6 +1989,25 @@ mod translate_reload_tests {
         app.sync_translate_from_config();
         let mut reloaded = app.config.clone();
         reloaded.translate.ai.models[0].api_key = "new-secret".to_string();
+
+        super::apply_reloaded_config(&mut app, reloaded);
+
+        assert!(app.translate_backend.is_some() && app.state.translate_active);
+    }
+
+    #[test]
+    fn reload_keeps_ai_active_when_the_attempt_budget_changes() {
+        let mut app = test_app();
+        let ai = ai_config("https://provider.example/v1", "secret");
+        app.translate_backend = Some(std::sync::Arc::new(
+            crate::translate::ai::AiBackend::new(&ai).expect("valid AI backend"),
+        ));
+        app.config.translate.enabled = true;
+        app.config.translate.backend = "ai".to_string();
+        app.config.translate.ai = ai;
+        app.sync_translate_from_config();
+        let mut reloaded = app.config.clone();
+        reloaded.translate.ai.preferred_attempt_ms = 4_500;
 
         super::apply_reloaded_config(&mut app, reloaded);
 
