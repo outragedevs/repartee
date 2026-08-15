@@ -47,6 +47,9 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use color_eyre::eyre::{Result, eyre};
 use tracing_subscriber::EnvFilter;
 
+const BACKEND_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const BACKEND_CONNECT_RETRY: std::time::Duration = std::time::Duration::from_millis(50);
+
 fn log_path() -> std::path::PathBuf {
     constants::home_dir().join(format!("{}.log", constants::APP_NAME))
 }
@@ -287,6 +290,55 @@ fn try_reap(child_pid: u32) -> Option<String> {
         Some(format!("killed by signal {}", libc::WTERMSIG(status)))
     } else {
         Some("unknown termination".into())
+    }
+}
+
+async fn wait_for_backend_socket(
+    child_pid: u32,
+    sock_path: &std::path::Path,
+    timeout: std::time::Duration,
+) -> Result<tokio::net::UnixStream> {
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        let connect_error = match tokio::net::UnixStream::connect(sock_path).await {
+            Ok(stream) => return Ok(stream),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                error
+            }
+            Err(error) => {
+                return Err(eyre!(
+                    "Backend (PID {child_pid}) session socket {} rejected the connection: \
+                     {error}. See {} for details.",
+                    sock_path.display(),
+                    log_path().display()
+                ));
+            }
+        };
+
+        if let Some(reason) = try_reap(child_pid) {
+            return Err(eyre!(
+                "Backend exited during startup ({reason}). See {} for details.",
+                log_path().display()
+            ));
+        }
+
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(eyre!(
+                "Backend (PID {child_pid}) is alive but did not accept a session connection at \
+                 {} within {timeout:?}. Last socket error: {connect_error}. See {} for details.",
+                sock_path.display(),
+                log_path().display()
+            ));
+        }
+
+        tokio::time::sleep(BACKEND_CONNECT_RETRY.min(remaining)).await;
     }
 }
 
@@ -547,40 +599,13 @@ fn main() -> Result<()> {
                     // appears during this time (splash takes ~1.5-2.5s).
                     session::shim::run_splash(Some(&sock_path)).await?;
 
-                    // Wait for the socket OR for the child to die. `waitpid`
-                    // (non-blocking) reaps a dead child so we can report its
-                    // actual exit status instead of staring 5 s at a zombie
-                    // PID that `kill(0)` insists is alive. The log file we
-                    // unconditionally maintain in `setup_logging` carries
-                    // any backtrace the user needs.
-                    let mut socket_ready = false;
-                    for _ in 0..100 {
-                        if sock_path.exists() {
-                            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                            socket_ready = true;
-                            break;
-                        }
-                        if let Some(reason) = try_reap(child_pid) {
-                            let log_path = log_path();
-                            return Err(color_eyre::eyre::eyre!(
-                                "Backend exited during startup ({reason}). \
-                                 See {} for details.",
-                                log_path.display()
-                            ));
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    }
-                    if !socket_ready {
-                        let log_path = log_path();
-                        return Err(color_eyre::eyre::eyre!(
-                            "Backend (PID {child_pid}) is alive but never opened its session \
-                             socket within 5 s — likely failed to bind {}. \
-                             See {} for details.",
-                            sock_path.display(),
-                            log_path.display()
-                        ));
-                    }
-                    session::shim::run_shim(Some(child_pid), false).await
+                    let stream = wait_for_backend_socket(
+                        child_pid,
+                        &sock_path,
+                        BACKEND_STARTUP_TIMEOUT,
+                    )
+                    .await?;
+                    session::shim::run_connected_shim(child_pid, stream).await
                 })
         }
     }
@@ -588,7 +613,60 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CliOption, OPTIONS, SUBCOMMANDS, help_text, parse_bind_override, wants_help};
+    use super::{
+        CliOption, OPTIONS, SUBCOMMANDS, help_text, parse_bind_override,
+        wait_for_backend_socket, wants_help,
+    };
+
+    async fn delayed_listener(path: std::path::PathBuf, delay: std::time::Duration) {
+        tokio::time::sleep(delay).await;
+        let _ = std::fs::remove_file(&path);
+        let listener = tokio::net::UnixListener::bind(path).unwrap();
+        let _ = listener.accept().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn backend_wait_connects_after_delayed_socket_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("delayed.sock");
+        let listener = tokio::spawn(delayed_listener(
+            path.clone(),
+            std::time::Duration::from_millis(75),
+        ));
+
+        let stream = wait_for_backend_socket(
+            std::process::id(),
+            &path,
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        drop(stream);
+        listener.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn backend_wait_retries_a_stale_socket_until_rebound() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stale.sock");
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        let listener = tokio::spawn(delayed_listener(
+            path.clone(),
+            std::time::Duration::from_millis(75),
+        ));
+
+        let stream = wait_for_backend_socket(
+            std::process::id(),
+            &path,
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        drop(stream);
+        listener.await.unwrap();
+    }
 
     /// Every form as the user would type it, across both tables.
     fn declared_forms() -> Vec<String> {
