@@ -42,6 +42,11 @@ pub async fn run_shim(target_pid: Option<u32>, show_splash: bool) -> Result<()> 
     let stream = UnixStream::connect(&sock_path)
         .await
         .map_err(|e| color_eyre::eyre::eyre!("Failed to connect to session PID {pid}: {e}"))?;
+
+    run_connected_shim(pid, stream).await
+}
+
+pub async fn run_connected_shim(pid: u32, stream: UnixStream) -> Result<()> {
     let (read_half, mut write_half) = tokio::io::split(stream);
     let read_half = tokio::io::BufReader::new(read_half);
 
