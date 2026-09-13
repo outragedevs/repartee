@@ -13,6 +13,8 @@ static META: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         r"(?im)^\s*(?:t[łl]umaczenie|przek[łl]ad|[üu]bersetzung)\s*:",
         r"(?im)^\s*(?:(?:voici|ci-dessous)\b.{0,30}?\b)?(?:la\s+)?traduction\s*:",
         r"(?im)^\s*(?:(?:aqu[ií]\s+(?:est[aá]|tienes)|a\s+continuaci[oó]n)\b.{0,30}?\b)?(?:la\s+)?traducci[oó]n\s*:",
+        r"(?im)^\s*(?:(?:ecco|qui\s+sotto|di\s+seguito)\b.{0,30}?\b)?(?:la\s+)?traduzion[ei]\s*:",
+        r"(?im)^\s*(?:(?:t[äa]ss[äa]|all[äa]|seuraavaksi?)\b.{0,30}?\b)?(?:suomennos|k[äa]{1,2}nn[oö]s)\s*:",
         r"(?m)^\s*(?:(?:以下|这是).{0,12})?(?:翻译|翻譯|译文|譯文)(?:如下)?\s*[：:]",
     ]
     .into_iter()
@@ -31,6 +33,10 @@ static REFUSAL: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         r"(?im)^\s*je\s+ne\s+(?:peux|suis\s+pas\s+en\s+mesure)\b.{0,80}\b(?:demande|contenu|texte)\w*\b",
         r"(?i)\bcomo\s+(?:una?\s+)?(?:IA|inteligencia\s+artificial|modelo(?:\s+de\s+lenguaje)?)\b",
         r"(?im)^\s*no\s+(?:puedo|soy\s+capaz\s+de)\b.{0,80}\b(?:solicitud|contenido|texto)\w*\b",
+        r"(?i)\bcome\s+(?:una?['’]?\s*)?(?:ia|intelligenza\s+artificiale|modello(?:\s+di\s+linguaggio)?)\b",
+        r"(?im)^\s*non\s+(?:posso|riesco|sono\s+in\s+grado\s+di)\b.{0,80}\b(?:richiest[ae]|contenut[oi]|testo)\w*\b",
+        r"(?i)\b(?:tekoälynä|tekoälyksi|kielimallina|kielimalliksi|(?:olen\s+(?:vain\s+)?|vain\s+)tekoäly)\b",
+        r"(?im)^\s*en\s+(?:voi|pysty)\b.{0,80}\b(?:pyyntöä?|pyynnön|sisältöä|tekstiä)\w*\b",
         r"(?i)作为(?:一个|一名)?(?:人工智能|AI|语言模型)",
         r"(?m)^\s*我(?:无法|不能).{0,80}(?:请求|內容|内容|文本)",
     ]
@@ -135,6 +141,10 @@ mod tests {
             ("de", "Übersetzung: Guten Morgen zusammen"),
             ("fr", "Voici la traduction : bonjour à tous"),
             ("es", "Aquí está la traducción: buenos días a todos"),
+            ("it", "Ecco la traduzione: buongiorno a tutti"),
+            ("it", "Traduzione: buon giorno a tutti"),
+            ("fi", "Tässä käännös: hyvää huomenta kaikille"),
+            ("fi", "Käännös: hyvää huomenta"),
             ("zh", "翻译如下：大家早上好"),
         ] {
             assert_eq!(
@@ -169,6 +179,8 @@ mod tests {
             ("Nie mogę przyjść", "en", "I can't come"),
             ("Ich kann heute nicht kommen", "pl", "nie mogę dziś przyjść"),
             ("I cannot do that", "de", "ich kann das nicht"),
+            ("I can't help you today", "fi", "En voi auttaa sinua tänään"),
+            ("I can't answer that right now", "fi", "En voi vastata siihen nyt"),
         ] {
             assert_eq!(
                 check(source, target, output, &UnmaskReport::default()),
@@ -186,6 +198,12 @@ mod tests {
             ("de", "Ich kann diese Anfrage nicht erfüllen"),
             ("fr", "Je ne peux pas satisfaire cette demande"),
             ("es", "No puedo cumplir esta solicitud"),
+            ("it", "Non posso soddisfare questa richiesta"),
+            ("it", "Come un'intelligenza artificiale, non posso aiutarti"),
+            ("fi", "En voi auttaa tätä pyyntöä"),
+            ("fi", "En voi täyttää tätä pyyntöä"),
+            ("fi", "En voi käsitellä tätä sisältöä"),
+            ("fi", "Olen vain tekoäly enkä voi auttaa"),
             ("zh", "我无法满足这个请求"),
         ] {
             assert_eq!(
@@ -216,15 +234,50 @@ mod tests {
 
     #[test]
     fn accepts_output_in_a_supported_arbitrary_target() {
-        assert_eq!(
-            check(
-                "Das ist eine längere Nachricht über den heutigen Tag",
+        for (target, output) in [
+            (
                 "fr-FR",
                 "Ceci est un message plus long sur tout ce qui s'est passé aujourd'hui",
-                &UnmaskReport::default()
             ),
-            Ok(())
-        );
+            ("it-IT", "Non so cosa succederà oggi ma vediamo domani"),
+            (
+                "fi",
+                "En tiedä mitä tänään tapahtuu mutta katsotaan huomenna",
+            ),
+        ] {
+            assert_eq!(
+                check(
+                    "Das ist eine längere Nachricht über den heutigen Tag",
+                    target,
+                    output,
+                    &UnmaskReport::default()
+                ),
+                Ok(()),
+                "supported output rejected for {target}: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_confidently_wrong_output_for_italian_and_finnish_targets() {
+        for (target, output) in [
+            (
+                "it-IT",
+                "This is a longer message about everything that happened today",
+            ),
+            ("fi", "Non so cosa succederà oggi ma vediamo domani"),
+        ] {
+            assert_eq!(
+                check(
+                    "Das ist eine längere Nachricht über den heutigen Tag",
+                    target,
+                    output,
+                    &UnmaskReport::default()
+                ),
+                Err(Rejection::WrongLanguage),
+                "wrong-language output accepted for {target}: {output}"
+            );
+        }
     }
 
     #[test]
