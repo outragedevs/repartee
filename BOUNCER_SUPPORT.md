@@ -170,3 +170,11 @@ large to review, retaining the acceptance rows and dependencies.
   automatically borrowed by bouncer scopes. Regression tests cover equal names,
   equal network IDs on two accounts, rename, password rotation and legacy-key
   isolation. Automatic child lifecycle and server-owned history remain pending.
+
+- Connection attempts now carry a generation through registration and all
+  forwarded events. Cancelling or replacing an attempt discards its queued
+  events; dropping a handle aborts both reader and writer tasks. Disconnecting
+  during registration cancels the pending attempt. Tests cover stale handles,
+  stale connection events, pending-task cancellation and an idle registered
+  socket closing without further server traffic. Automatic discovery-driven
+  child creation and teardown still need to be wired to this infrastructure.
