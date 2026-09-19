@@ -34,9 +34,9 @@ in part of its extension document.
 
 | Surface | Lurker | Soju | Required behavior / evidence still needed |
 | --- | --- | --- | --- |
-| Authentication | PASS and SASL PLAIN; dedicated bouncer credential parsing in `bouncerLogin.ts` | PLAIN or configured OAUTHBEARER, optionally EXTERNAL; connection/client/network selectors | Credential isolation, selectors, failure handling, TLS and reconnect tests against both |
+| Authentication | PASS and SASL PLAIN; dedicated bouncer credential parsing in `bouncerLogin.ts` | PASS, SASL PLAIN or configured OAUTHBEARER, optionally EXTERNAL; connection/client/network selectors | Credential isolation, selectors, failure handling, TLS and reconnect tests against both |
 | Network discovery | `soju.im/bouncer-networks`, notify; batched or unbatched NETWORK | Same extensions | Control connection, initial list, partial attribute updates, attribute removal, deletion, unknown attributes |
-| Binding | BIND before registration; requires successful SASL or supplied PASS | BIND before registration, authenticated account | Bind after SASL success, or after supplying PASS (verified at CAP END), always before CAP END; independent child connections per account/netid |
+| Binding | BIND before registration; requires successful SASL or supplied PASS | BIND before registration requires successful SASL; PASS is verified only at registration | Use SASL success then BIND then CAP END on both. Lurker additionally permits supplied PASS before BIND; Soju PASS uses login/network selectors or an unbound control session. Independent child connections per account/netid |
 | Network editing | ADDNETWORK/CHANGENETWORK/DELNETWORK explicitly rejected; web UI manages networks | All three implemented | Soju commands and replies; display Lurker's rejection without claiming a change succeeded |
 | Network lifecycle | State/nick/error notifications; retained upstream session on downstream QUIT | State/error notifications and retained upstream sessions | Separate transport and upstream status; no accidental PART/rejoin, duplicated autojoin, or reconnect storms |
 | History | CHATHISTORY LATEST/BEFORE/AFTER/AROUND/BETWEEN/TARGETS, event playback, limit 1000 | Same query family; availability depends on message store | Initial channels and DMs, scrollback, reconnect gaps, timestamp-only references on both servers, msgid deduplication, limits, failures, cancellation, offline upstream |
@@ -45,6 +45,7 @@ in part of its extension document.
 | Presence | `draft/pre-away`, aggregate account away, background `AWAY *` | `draft/pre-away` and aggregate presence | Explicit attached/away behavior; daemon attachment must not imply active user; test multiple clients |
 | Message delivery | server-time, tags, echo-message, znc.in/self-message, batch | server-time, echo-message, batch; tags depend on upstream | Own messages from other clients, deduplication, correct private-message routing, event playback, no double echo |
 | Dynamic upstream caps | away/account notifications, account-tag, chghost, extended-join, multi-prefix, userhost-in-names, extended-monitor aliases | Same core passthrough except userhost-in-names; adds labeled-response and message-redaction | CAP NEW/DEL correctness, state updates, MONITOR numerics, label routing, redaction behavior |
+| Invitations | `invite-notify` always available | `invite-notify` always available | Third-party INVITE routing, channel context and native/web presentation; distinguish invitations addressed to our own nick |
 | Account operations | Post-registration AUTHENTICATE rejected locally | Upstream SASL and account-registration conditionally available | Keep bouncer auth separate from upstream auth; supported registration/verification operations and failures |
 | Identity and ISUPPORT | Bound network ISUPPORT plus BOUNCER_NETID and FILEHOST | Extended ISUPPORT batches, SETNAME, BOUNCER_NETID, account-required, SAFERATE, ICON | Parse updates/removals and batches, preserve identity, enforce auth requirements, honor server rate semantics |
 | Name population | Implicit names supported | no-implicit-names plus two aliases | If negotiated, explicitly request needed names; no empty nicklists; aliases handled consistently |
@@ -93,8 +94,8 @@ large to review, retaining the acceptance rows and dependencies.
 1. **Protocol state and configuration:** account/netid identity, bouncer mode,
    history ownership policy, network attribute encoding/decoding, isolated unit
    tests. Do not request new caps before their consumers exist.
-2. **Registration and explicit binding:** SASL/PASS selector handling (PASS need only be supplied before BIND), BIND
-   ordering, control-mode registration, reconnect identity, socket tests.
+2. **Registration and explicit binding:** SASL/PASS selector handling, implementation-specific PASS binding rules, BIND
+   ordering after SASL success, control-mode registration, reconnect identity, socket tests.
 3. **Discovery and connection lifecycle:** network batches/notifications, child
    connection creation and teardown, offline states, duplicate names, two
    accounts with equal IDs, native/web snapshots.
@@ -107,7 +108,7 @@ large to review, retaining the acceptance rows and dependencies.
 7. **Soju network management:** user commands/UI, tag escaping, acknowledgments,
    failures, Lurker unsupported-operation handling and documentation.
 8. **Remaining IRC passthrough behavior:** dynamic caps, MONITOR aliases, SETNAME,
-   labeled replies, redaction, extended ISUPPORT, names and upstream account
+   labeled replies, redaction, invite-notify, extended ISUPPORT, names and upstream account
    operations. Split by extension if needed.
 9. **Soju server-side search:** request correlation, dedicated result handling,
    navigation/history context, native/web parity.
