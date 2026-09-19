@@ -697,6 +697,7 @@ fn parse_server_add_config(args: &[String]) -> Result<crate::config::ServerConfi
         client_cert_path: None,
         sasl_key_path: None,
         bouncer_network_id: None,
+        bouncer_control: false,
     };
 
     for arg in args.iter().skip(1) {
@@ -762,6 +763,8 @@ fn parse_server_add_config(args: &[String]) -> Result<crate::config::ServerConfi
             config.autosendcmd = Some(value.to_string());
         } else if let Some(value) = arg.strip_prefix("-client-cert=") {
             config.client_cert_path = Some(value.to_string());
+        } else if arg == "-bouncer-control" {
+            config.bouncer_control = true;
         } else if let Some(value) = arg.strip_prefix("-bouncer-network=") {
             config.bouncer_network_id = Some(crate::irc::bouncer::normalize_network_id(value)?);
         } else if let Some(value) = arg.strip_prefix("-sasl-key=") {
@@ -1750,6 +1753,7 @@ mod server_add_tests {
             client_cert_path: None,
             sasl_key_path: None,
             bouncer_network_id: None,
+            bouncer_control: false,
         }
     }
 

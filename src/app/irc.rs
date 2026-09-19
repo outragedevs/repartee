@@ -49,7 +49,7 @@ impl App {
             reconnect_delay_secs: reconnect_delay,
             next_reconnect: None,
             should_reconnect: auto_reconnect,
-            joined_channels: if server_config.bouncer_network_id.is_some() {
+            joined_channels: if server_config.bouncer_network_id.is_some() || server_config.bouncer_control {
                 Vec::new()
             } else {
                 server_config.channels.clone()
@@ -365,10 +365,19 @@ impl App {
                 }
             }
             IrcEvent::Connected(conn_id, enabled_caps, multiline_limits) => {
+                self.bouncer_networks.remove(&conn_id);
                 // Store negotiated caps on connection
                 if let Some(conn) = self.state.connections.get_mut(&conn_id) {
                     conn.enabled_caps = enabled_caps;
                     conn.multiline = multiline_limits;
+                }
+                if self.state.connections.get(&conn_id).is_some_and(|conn| conn.origin_config.bouncer_control) {
+                    self.bouncer_networks.insert(conn_id.clone(), crate::irc::bouncer::NetworkRegistry::default());
+                    if !self.state.connections[&conn_id].enabled_caps.contains(crate::irc::bouncer::NETWORKS_NOTIFY_CAP)
+                        && let Some(handle) = self.irc_handles.get(&conn_id)
+                    {
+                        let _ = handle.sender().send(::irc::proto::Command::Raw("BOUNCER".into(), vec!["LISTNETWORKS".into()]));
+                    }
                 }
                 // Collect channels to rejoin before handle_connected resets state
                 let rejoin_channels = crate::irc::events::channels_to_rejoin(&self.state, &conn_id);
@@ -410,7 +419,7 @@ impl App {
 
                 // Config channels (used for eager buffer creation + rejoin filtering)
                 let explicit_binding = self.state.connections.get(&conn_id)
-                    .is_some_and(|conn| conn.origin_config.bouncer_network_id.is_some());
+                    .is_some_and(|conn| conn.origin_config.bouncer_network_id.is_some() || conn.origin_config.bouncer_control);
                 let config_channels: Vec<String> = self
                     .config
                     .servers
@@ -520,6 +529,7 @@ impl App {
                 // limits/ref types and could be rejected for non-membership.
             }
             IrcEvent::Disconnected(conn_id, error) => {
+                self.bouncer_networks.remove(&conn_id);
                 // Release anything still waiting on a translation for this
                 // connection FIRST. The lines already arrived; holding them
                 // for the full timeout after the server is gone means a
@@ -568,6 +578,9 @@ impl App {
                 self.channel_query_sent_at.remove(&conn_id);
             }
             IrcEvent::Message(conn_id, msg) => {
+                if self.handle_bouncer_network_message(&conn_id, &msg) {
+                    return;
+                }
                 // Intercept PONG to update lag measurement
                 if let ::irc::proto::Command::PONG(_, _) = &msg.command
                     && let Some(sent_at) = self.lag_pings.get(&conn_id)

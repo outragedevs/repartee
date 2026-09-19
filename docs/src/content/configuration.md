@@ -436,5 +436,19 @@ binding: the bouncer restores its joined channels. PASS-only logins can continue
 using the bouncer's username/network selector without this option; explicit ID
 binding currently requires SASL.
 
-Automatic network discovery and server-owned history are separate implementation
-stages. Explicit binding alone does not disable the existing local history policy.
+## Bouncer control connection
+
+Set `bouncer_control = true` on a dedicated server entry to discover its networks.
+Authenticate using the account login without a network selector. Do not set
+`bouncer_network_id` on that entry. The connection negotiates the network-list
+capabilities, suppresses configured autojoin and receives network changes when
+notifications are supported. Use `/bouncer list` to see IDs, names, states and
+errors, or `/bouncer refresh` to request a fresh list.
+
+`/server add -bouncer-control` and `/set servers.<id>.bouncer_control true`
+configure this mode. Reconnect after changing the setting. Both terminal and web
+command input support `/bouncer`.
+
+Automatic connections to discovered networks and server-owned history are
+separate implementation stages. Neither explicit binding nor control mode alone
+disables the existing local history policy.

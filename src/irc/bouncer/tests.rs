@@ -29,6 +29,8 @@ async fn next_command(
 #[derive(Clone, Copy, Debug)]
 enum Reply {
     Success,
+    ControlSuccess,
+    ControlUnexpectedBound,
     NoCapability,
     Nak,
     AuthenticationFailure,
@@ -43,6 +45,7 @@ enum Reply {
     reason = "scripted TCP registration with success and failure replies"
 )]
 async fn registration(reply: Reply, bound: bool) {
+    let control = matches!(reply, Reply::ControlSuccess | Reply::ControlUnexpectedBound);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let peer = tokio::spawn(async move {
@@ -72,7 +75,7 @@ async fn registration(reply: Reply, bound: bool) {
         let advertised = if matches!(reply, Reply::NoCapability) {
             "sasl=PLAIN"
         } else {
-            "sasl=PLAIN soju.im/bouncer-networks"
+            "sasl=PLAIN batch soju.im/bouncer-networks soju.im/bouncer-networks-notify"
         };
         write
             .write_all(format!(":fixture CAP * LS :{advertised}\r\n").as_bytes())
@@ -87,7 +90,8 @@ async fn registration(reply: Reply, bound: bool) {
         let requested = request
             .trim_start_matches("CAP REQ ")
             .trim_start_matches(':');
-        assert_eq!(requested.contains(super::NETWORKS_CAP), bound);
+        assert_eq!(requested.contains(super::NETWORKS_CAP), bound || control);
+        assert_eq!(requested.contains(super::NETWORKS_NOTIFY_CAP), control);
         let ack = if matches!(reply, Reply::Nak) {
             "NAK"
         } else {
@@ -148,7 +152,7 @@ async fn registration(reply: Reply, bound: bool) {
             Reply::WrongNetwork => {
                 ":fixture 001 tester :Welcome\r\n:fixture 005 tester BOUNCER_NETID=43 :supported\r\n:fixture 422 tester :No MOTD\r\n"
             }
-            Reply::MissingNetwork => {
+            Reply::MissingNetwork | Reply::ControlSuccess => {
                 ":fixture 001 tester :Welcome\r\n:fixture 005 tester NETWORK=fixture :supported\r\n:fixture 422 tester :No MOTD\r\n"
             }
             _ => {
@@ -156,8 +160,8 @@ async fn registration(reply: Reply, bound: bool) {
             }
         };
         write.write_all(burst.as_bytes()).await.unwrap();
-        if matches!(reply, Reply::Success) {
-            if bound {
+        if matches!(reply, Reply::Success | Reply::ControlSuccess) {
+            if bound || control {
                 assert!(
                     tokio::time::timeout(
                         Duration::from_millis(100),
@@ -181,13 +185,14 @@ async fn registration(reply: Reply, bound: bool) {
     server.nick = Some("tester".into());
     server.sasl_user = Some("fixture".into());
     server.sasl_pass = Some("fixture-password".into());
+    server.bouncer_control = control;
     server.bouncer_network_id = bound.then(|| "00042".into());
     let general = GeneralConfig {
         flood_protection: false,
         ..GeneralConfig::default()
     };
     let result = connect_server("fixture", &server, &general).await;
-    if matches!(reply, Reply::Success) {
+    if matches!(reply, Reply::Success | Reply::ControlSuccess) {
         let (handle, mut events) = result.unwrap();
         let mut connected = false;
         let mut confirmed = false;
@@ -195,7 +200,7 @@ async fn registration(reply: Reply, bound: bool) {
             match event {
                 IrcEvent::Connected(_, caps, _) => {
                     assert!(!connected);
-                    assert_eq!(caps.contains(super::NETWORKS_CAP), bound);
+                    assert_eq!(caps.contains(super::NETWORKS_CAP), bound || control);
                     connected = true;
                 }
                 IrcEvent::Message(_, message) => {
@@ -205,7 +210,8 @@ async fn registration(reply: Reply, bound: bool) {
                 _ => {}
             }
         }
-        assert!(connected && confirmed);
+        assert!(connected);
+        assert_eq!(confirmed, !control);
         if let Some(task) = handle.outgoing_handle {
             task.abort();
         }
@@ -322,5 +328,68 @@ async fn pinned_bouncer_registration() {
             task.abort();
         }
         drop(events);
+    }
+}
+
+#[tokio::test]
+async fn control_registration_has_no_binding_or_autojoin() {
+    for reply in [Reply::ControlSuccess, Reply::ControlUnexpectedBound] {
+        tokio::time::timeout(Duration::from_secs(5), registration(reply, false))
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable local bouncer fixture; see docs/validation/bouncer-binding.md"]
+async fn pinned_bouncer_discovery() {
+    let mut config: ServerConfig = toml::from_str(
+        "label = 'fixture'\naddress = '127.0.0.1'\nport = 6667\ntls = false\nchannels = []\n",
+    )
+    .unwrap();
+    config.port = std::env::var("REPARTEE_BOUNCER_TEST_PORT")
+        .unwrap()
+        .parse()
+        .unwrap();
+    config.bouncer_control = true;
+    config.sasl_user = Some(std::env::var("REPARTEE_BOUNCER_TEST_USER").unwrap());
+    config.sasl_pass = Some("fixture-password".into());
+    let expected = std::env::var("REPARTEE_BOUNCER_TEST_NETID").unwrap();
+    let general = GeneralConfig {
+        flood_protection: false,
+        ..GeneralConfig::default()
+    };
+    let (handle, mut events) = tokio::time::timeout(
+        Duration::from_secs(5),
+        connect_server("fixture", &config, &general),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let mut registry = super::NetworkRegistry::default();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = events.recv().await {
+            match event {
+                IrcEvent::Connected(_, caps, _) => {
+                    assert!(caps.contains(super::NETWORKS_NOTIFY_CAP));
+                }
+                IrcEvent::Message(_, message) => {
+                    registry.handle(&message);
+                    if registry.complete {
+                        assert!(registry.networks.contains_key(&expected));
+                        assert!(registry.networks[&expected].attributes.contains_key("name"));
+                        return;
+                    }
+                }
+                IrcEvent::Disconnected(_, reason) => panic!("bouncer disconnected: {reason:?}"),
+                _ => {}
+            }
+        }
+        panic!("bouncer did not provide a complete network list");
+    })
+    .await
+    .unwrap();
+    if let Some(task) = handle.outgoing_handle {
+        task.abort();
     }
 }

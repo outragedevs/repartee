@@ -479,8 +479,19 @@ connection error. Configured autojoin channels are suppressed for explicit
 binding: the bouncer restores its joined channels. PASS-only logins can continue
 using the bouncer&#39;s username/network selector without this option; explicit ID
 binding currently requires SASL.</p>
-<p>Automatic network discovery and server-owned history are separate implementation
-stages. Explicit binding alone does not disable the existing local history policy.</p>
+<h2>Bouncer control connection</h2>
+<p>Set <code>bouncer_control = true</code> on a dedicated server entry to discover its networks.
+Authenticate using the account login without a network selector. Do not set
+<code>bouncer_network_id</code> on that entry. The connection negotiates the network-list
+capabilities, suppresses configured autojoin and receives network changes when
+notifications are supported. Use <code>/bouncer list</code> to see IDs, names, states and
+errors, or <code>/bouncer refresh</code> to request a fresh list.</p>
+<p><code>/server add -bouncer-control</code> and <code>/set servers.&lt;id&gt;.bouncer_control true</code>
+configure this mode. Reconnect after changing the setting. Both terminal and web
+command input support <code>/bouncer</code>.</p>
+<p>Automatic connections to discovered networks and server-owned history are
+separate implementation stages. Neither explicit binding nor control mode alone
+disables the existing local history policy.</p>
 
 
         <!-- Prev / Next navigation -->
