@@ -2,13 +2,60 @@ use super::AppState;
 use super::buffer::Message;
 
 #[derive(Default)]
+enum AccountIdentity {
+    #[default]
+    Unknown,
+    Known(Option<String>),
+}
+
+#[derive(Default)]
 pub(super) struct ReadIdentity {
+    account: AccountIdentity,
     current_nick: String,
     current_since: Option<i64>,
     previous: Vec<(String, Option<i64>, i64)>,
 }
 
 impl AppState {
+    pub(crate) fn record_read_account(&mut self, conn_id: &str, nick: &str, account: Option<&str>) {
+        if self
+            .connections
+            .get(conn_id)
+            .is_some_and(|conn| conn.server_owns_history() && conn.nick.eq_ignore_ascii_case(nick))
+        {
+            self.read_identities
+                .entry(conn_id.to_string())
+                .or_default()
+                .account = AccountIdentity::Known(
+                account
+                    .filter(|account| !account.is_empty() && *account != "*")
+                    .map(str::to_string),
+            );
+        }
+    }
+
+    pub(crate) fn record_read_account_message(&mut self, conn_id: &str, msg: &irc::proto::Message) {
+        use irc::proto::{Command, Prefix};
+        let (numeric, args) = match &msg.command {
+            Command::Response(response, args) => (*response as u16, args),
+            Command::Raw(command, args) => (command.parse::<u16>().unwrap_or(0), args),
+            _ => return,
+        };
+        if matches!(msg.prefix.as_ref(), Some(Prefix::ServerName(name)) if name == "lurker.bouncer")
+        {
+            return;
+        }
+        if numeric == 900
+            && let (Some(nick), Some(account)) = (args.first(), args.get(2))
+        {
+            self.record_read_account(conn_id, nick, Some(account));
+        } else if numeric == 901
+            && let Some(nick) = args.first()
+        {
+            self.record_read_account(conn_id, nick, None);
+        }
+    }
+
     pub(crate) fn record_read_nick_change(&mut self, conn_id: &str, old: &str, new: &str, at: i64) {
         if !self
             .connections
@@ -46,6 +93,15 @@ impl AppState {
             .and_then(|tags| tags.get("account"))
             .filter(|account| !account.is_empty() && *account != "*")
         {
+            if let Some(ReadIdentity {
+                account: AccountIdentity::Known(account_state),
+                ..
+            }) = self.read_identities.get(conn_id)
+            {
+                return account_state
+                    .as_deref()
+                    .is_some_and(|own| account.eq_ignore_ascii_case(own));
+            }
             let own_account = own_nick.and_then(|own| {
                 self.buffers
                     .values()
