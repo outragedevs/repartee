@@ -916,7 +916,7 @@ impl App {
             socket_output: None,
             shim_event_rx: None,
             is_socket_attached: false,
-            terminal_focused: true,
+            terminal_focused: false,
             term_reader_stop: Arc::new(AtomicBool::new(false)),
             term_rx: None,
             shim_output_handle: None,

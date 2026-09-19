@@ -151,3 +151,9 @@ request rather than rejecting all buffers; timestamp and target contexts select
 the first matching request. Rejected queries are tracked separately from rejected
 write timestamps, so a subsequent displayed message can still advance its marker.
 The pending request window is bounded to prevent unlimited queue growth.
+
+Startup and shim attachment begin with unconfirmed terminal focus. A background
+terminal does not advance read markers merely because its output renders. Focus
+reporting, a key press/repeat, or a paste confirms interactive focus; key release
+alone does not. A socket-pair regression exercises the real shim attach path and
+waits for queued terminal output before checking the rendered read boundary.

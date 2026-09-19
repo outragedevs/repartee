@@ -43,9 +43,17 @@ impl App {
         match event {
             Event::FocusGained => { self.terminal_focused = true; self.needs_full_redraw = true; }
             Event::FocusLost => self.terminal_focused = false,
-            Event::Key(key) => self.handle_key(key),
+            Event::Key(key) => {
+                if key.kind != crossterm::event::KeyEventKind::Release {
+                    self.terminal_focused = true;
+                }
+                self.handle_key(key);
+            },
             Event::Mouse(mouse) => self.handle_mouse(mouse),
-            Event::Paste(text) => self.handle_paste(&text),
+            Event::Paste(text) => {
+                self.terminal_focused = true;
+                self.handle_paste(&text);
+            },
             Event::Resize(cols, rows) if cols > 0 && rows > 0 => {
                 self.cached_term_cols = cols;
                 self.cached_term_rows = rows;
