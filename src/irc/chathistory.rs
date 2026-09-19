@@ -159,6 +159,7 @@ pub struct HistoryState {
     /// by [`set_gapfill_cutoff`] so every (re)connection re-arms all targets.
     gapfilled_targets: HashSet<String>,
     closed_targets: HashSet<String>,
+    completion: HashMap<String, bool>,
     /// Per-target count of chained `AFTER` gap-fill pages this connection. A
     /// healthy chain terminates at `gapfill_cutoff_ms` (each page anchors at the
     /// newest row received and walks forward to "now"), but a server that floors
@@ -176,6 +177,14 @@ pub struct HistoryState {
 const MAX_GAPFILL_PAGES: usize = 10_000;
 
 impl HistoryState {
+    pub fn last_request_succeeded(&self, target: &str) -> Option<bool> {
+        self.completion.get(&target.to_ascii_lowercase()).copied()
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.in_flight.len()
+    }
+
     pub fn request_started_at(&self, target: &str) -> Option<Instant> {
         let target = target.to_ascii_lowercase();
         self.in_flight.iter().find_map(|((name, _), (_, started))| {
@@ -233,6 +242,7 @@ impl HistoryState {
     /// Returns `false` if an identical request was already tracked (caller
     /// should not send a duplicate).
     pub fn mark_in_flight(&mut self, target: &str, dir: Direction, limit: usize) -> bool {
+        self.completion.remove(&target.to_ascii_lowercase());
         self.in_flight
             .insert((target.to_ascii_lowercase(), dir), (limit, Instant::now()))
             .is_none()
@@ -254,6 +264,7 @@ impl HistoryState {
             .collect();
         let mut targets: Vec<String> = Vec::new();
         for key in stale {
+            self.completion.insert(key.0.clone(), false);
             if !targets.contains(&key.0) {
                 targets.push(key.0.clone());
             }
@@ -457,6 +468,9 @@ impl HistoryState {
                     }
                 })
                 .or_insert((ts, msgid));
+        }
+        if !completed.is_empty() {
+            self.completion.insert(target.clone(), clean_end);
         }
         for (dir, limit) in completed {
             self.in_flight.remove(&(target.clone(), dir));

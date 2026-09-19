@@ -363,6 +363,7 @@ impl App {
                 }
             }
             IrcEvent::Connected(conn_id, enabled_caps, multiline_limits) => {
+                self.history_discovery.remove(&conn_id);
                 self.bouncer_networks.remove(&conn_id);
                 // Store negotiated caps on connection
                 if let Some(conn) = self.state.connections.get_mut(&conn_id) {
@@ -536,6 +537,7 @@ impl App {
                 // limits/ref types and could be rejected for non-membership.
             }
             IrcEvent::Disconnected(conn_id, error) => {
+                self.history_discovery.remove(&conn_id);
                 self.suspend_bouncer_children(&conn_id);
                 if let Some(requested) = self.state.background_join_connections.get_mut(&conn_id) { requested.clear(); }
                 self.bouncer_networks.remove(&conn_id);
@@ -722,6 +724,8 @@ impl App {
                                     }
                                     crate::irc::batch::MultilineOutcome::Empty => {}
                                 }
+                            } else if batch.batch_type == "DRAFT/CHATHISTORY-TARGETS" {
+                                self.receive_history_targets(&conn_id, &batch);
                             } else {
                                 // Normal close via `BATCH -tag` (`clean_end = true`).
                                 let continuation = crate::irc::batch::process_completed_batch(
@@ -1126,6 +1130,7 @@ impl App {
                         )
                     ) {
                         self.gapfill_active_buffer_on_connect(&conn_id);
+                        self.start_history_discovery(&conn_id);
                     }
                 }
             }

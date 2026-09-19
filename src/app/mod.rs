@@ -16,6 +16,7 @@ mod irc;
 pub mod bouncer;
 mod bouncer_children;
 mod server_history;
+mod history_discovery;
 mod connection_attempt;
 mod log_browser;
 mod maintenance;
@@ -400,6 +401,7 @@ pub struct App {
     pub storage: Option<crate::storage::Storage>,
     pub(crate) volatile_mentions: VecDeque<(String, crate::web::protocol::WireMention)>,
     pub(crate) pending_history_pages: Vec<server_history::PendingHistoryPage>,
+    pub(crate) history_discovery: HashMap<String, history_discovery::HistoryDiscovery>,
     pub(crate) last_event_purge: Instant,
     pub(crate) last_mention_purge: Instant,
     pub quit_message: Option<String>,
@@ -862,6 +864,7 @@ impl App {
             batch_trackers: HashMap::new(),
             storage,
             pending_history_pages: Vec::new(),
+            history_discovery: HashMap::new(),
             volatile_mentions: VecDeque::new(),
             last_event_purge: Instant::now(),
             last_mention_purge: Instant::now(),
@@ -1614,6 +1617,7 @@ impl App {
                     self.settle_translate_concurrency_debt();
                     self.purge_expired_batches();
                     self.purge_stale_chathistory_requests();
+                    self.tick_history_discovery();
                     self.check_reconnects();
                     self.measure_lag();
                     self.check_day_changed();
