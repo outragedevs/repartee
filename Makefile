@@ -30,7 +30,7 @@ install: release
 # Run tests (both crates — the release pre-flight runs this target, so the
 # web-ui unit tests must be part of it, not a separate opt-in)
 test: test-web
-	cargo test -p repartee
+	cargo test -p repartee $(TEST_ARGS)
 
 # Run clippy (both crates — same 0-warnings policy)
 clippy: clippy-web

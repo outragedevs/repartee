@@ -696,6 +696,7 @@ fn parse_server_add_config(args: &[String]) -> Result<crate::config::ServerConfi
         sasl_mechanism: None,
         client_cert_path: None,
         sasl_key_path: None,
+        bouncer_network_id: None,
     };
 
     for arg in args.iter().skip(1) {
@@ -761,6 +762,8 @@ fn parse_server_add_config(args: &[String]) -> Result<crate::config::ServerConfi
             config.autosendcmd = Some(value.to_string());
         } else if let Some(value) = arg.strip_prefix("-client-cert=") {
             config.client_cert_path = Some(value.to_string());
+        } else if let Some(value) = arg.strip_prefix("-bouncer-network=") {
+            config.bouncer_network_id = Some(crate::irc::bouncer::normalize_network_id(value)?);
         } else if let Some(value) = arg.strip_prefix("-sasl-key=") {
             config.sasl_key_path = Some(value.to_string());
         } else if arg.starts_with('-') {
@@ -1641,6 +1644,7 @@ mod server_add_tests {
             "-autosendcmd=/msg NickServ identify",
             "-client-cert=/tmp/client.pem",
             "-sasl-key=libera.pem",
+            "-bouncer-network=00042",
         ]))
         .unwrap();
 
@@ -1669,6 +1673,7 @@ mod server_add_tests {
         assert_eq!(config.sasl_mechanism.as_deref(), Some("SCRAM-SHA-256"));
         assert_eq!(config.client_cert_path.as_deref(), Some("/tmp/client.pem"));
         assert_eq!(config.sasl_key_path.as_deref(), Some("libera.pem"));
+        assert_eq!(config.bouncer_network_id.as_deref(), Some("42"));
     }
 
     #[test]
@@ -1744,6 +1749,7 @@ mod server_add_tests {
             sasl_mechanism: None,
             client_cert_path: None,
             sasl_key_path: None,
+            bouncer_network_id: None,
         }
     }
 

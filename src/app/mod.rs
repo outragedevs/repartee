@@ -1200,6 +1200,7 @@ impl App {
         );
     }
 
+    #[expect(clippy::too_many_lines, reason = "initialize the complete default connection and buffer")]
     fn create_default_status(state: &mut AppState) {
         let buf_id = make_buffer_id(Self::DEFAULT_CONN_ID, "Status");
         state.add_connection(Connection {
@@ -1242,6 +1243,7 @@ impl App {
                 sasl_mechanism: None,
                 client_cert_path: None,
                 sasl_key_path: None,
+                bouncer_network_id: None,
             },
             local_ip: None,
             enabled_caps: HashSet::new(),
