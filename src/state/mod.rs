@@ -210,6 +210,7 @@ pub struct RedirectEra {
 pub struct AppState {
     pub connections: HashMap<String, Connection>,
     pub buffers: IndexMap<String, Buffer>,
+    pub(crate) web_history_buffers: HashMap<String, String>,
     pub active_buffer_id: Option<String>,
     pub previous_buffer_id: Option<String>,
     pub message_counter: u64,

@@ -74,7 +74,7 @@ impl App {
         self.web_active_buffers.clear();
         self.web_buffer_unconfirmed.clear();
         self.pending_history_pages.clear();
-        while let Some(session_id) = self.web_history_buffers.keys().next().cloned() {
+        while let Some(session_id) = self.state.web_history_buffers.keys().next().cloned() {
             self.release_web_history(&session_id);
         }
         // Detach the preview extractor from AppState too — otherwise
@@ -547,7 +547,7 @@ impl App {
                 );
             }
             WebCommand::SwitchBuffer { buffer_id } => {
-                if self.web_history_buffers.get(session_id).is_some_and(|id| id != &buffer_id) {
+                if self.state.web_history_buffers.get(session_id).is_some_and(|id| id != &buffer_id) {
                     self.release_web_history(session_id);
                 }
                 // Flip the GLOBAL active buffer so the TUI and every other web
@@ -600,7 +600,7 @@ impl App {
                 }
             }
             WebCommand::CollapseBacklog { buffer_id } => {
-                if self.web_history_buffers.get(session_id) == Some(&buffer_id) {
+                if self.state.web_history_buffers.get(session_id) == Some(&buffer_id) {
                     self.release_web_history(session_id);
                 }
             }

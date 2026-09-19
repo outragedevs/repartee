@@ -82,10 +82,14 @@ fn memory_page(
 
 impl App {
     pub(crate) fn release_web_history(&mut self, session_id: &str) {
-        let Some(buffer_id) = self.web_history_buffers.remove(session_id) else {
+        let Some(buffer_id) = self.state.web_history_buffers.remove(session_id) else {
             return;
         };
-        if !self.web_history_buffers.values().any(|id| id == &buffer_id)
+        if !self
+            .state
+            .web_history_buffers
+            .values()
+            .any(|id| id == &buffer_id)
             && !(self.state.active_buffer_id.as_deref() == Some(&buffer_id)
                 && (self.scroll_offset > 0 || self.log_browser_mode))
         {
@@ -124,13 +128,15 @@ impl App {
         };
         if before.is_some() && self.state.buffers.contains_key(buffer_id) {
             if self
+                .state
                 .web_history_buffers
                 .get(session_id)
                 .is_some_and(|id| id != buffer_id)
             {
                 self.release_web_history(session_id);
             }
-            self.web_history_buffers
+            self.state
+                .web_history_buffers
                 .insert(session_id.to_string(), buffer_id.to_string());
         }
         let Some(buffer) = self.state.buffers.get(buffer_id) else {
@@ -410,6 +416,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn switching_one_web_session_preserves_another_readers_backlog() {
+        let mut app = app();
+        app.state.scrollback_limit = 1;
+        app.state.active_buffer_id = Some("account/#test".into());
+        app.state.add_buffer_with_focus(
+            Buffer::for_test("account", BufferType::Query, "peer"),
+            false,
+        );
+        for text in ["older", "current"] {
+            let message = crate::state::events::tests::make_test_message(&mut app.state, text);
+            app.state
+                .buffers
+                .get_mut("account/#test")
+                .unwrap()
+                .messages
+                .push_back(message);
+        }
+        app.state
+            .buffers
+            .get_mut("account/#test")
+            .unwrap()
+            .pin_backlog = true;
+        for session in ["first", "second"] {
+            app.state
+                .web_history_buffers
+                .insert(session.into(), "account/#test".into());
+        }
+        app.handle_web_command(
+            crate::web::protocol::WebCommand::SwitchBuffer {
+                buffer_id: "account/peer".into(),
+            },
+            "first",
+        );
+        assert_eq!(app.state.active_buffer_id.as_deref(), Some("account/peer"));
+        assert!(app.state.buffers["account/#test"].pin_backlog);
+        assert_eq!(app.state.buffers["account/#test"].messages.len(), 2);
+        app.release_web_history("second");
+        assert!(!app.state.buffers["account/#test"].pin_backlog);
+        assert_eq!(app.state.buffers["account/#test"].messages.len(), 1);
+    }
+
+    #[tokio::test]
     async fn web_history_releases_memory_after_the_last_reader_leaves() {
         let mut app = app();
         app.state.scrollback_limit = 1;
@@ -441,7 +489,7 @@ mod tests {
         app.handle_web_command(crate::web::protocol::WebCommand::WebDisconnect, "second");
         assert!(!app.state.buffers["account/#test"].pin_backlog);
         assert_eq!(app.state.buffers["account/#test"].messages.len(), 1);
-        assert!(app.web_history_buffers.is_empty());
+        assert!(app.state.web_history_buffers.is_empty());
     }
 
     #[tokio::test]
@@ -454,7 +502,8 @@ mod tests {
             .get_mut("account/#test")
             .unwrap()
             .pin_backlog = true;
-        app.web_history_buffers
+        app.state
+            .web_history_buffers
             .insert("browser".into(), "account/#test".into());
         app.release_web_history("browser");
         assert!(app.state.buffers["account/#test"].pin_backlog);
