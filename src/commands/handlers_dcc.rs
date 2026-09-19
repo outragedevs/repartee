@@ -389,7 +389,7 @@ fn cmd_dcc_close(app: &mut App, args: &[String]) {
     if !args[0].eq_ignore_ascii_case("chat") {
         add_local_event(
             app,
-            &format!("{}Unknown DCC type: {}{C_RST}", C_ERR, &args[0]),
+            &format!("{}Unknown DCC type: {}{C_RST}", C_ERR, args[0]),
         );
         return;
     }
@@ -484,7 +484,7 @@ fn cmd_dcc_reject(app: &mut App, args: &[String]) {
     if !args[0].eq_ignore_ascii_case("chat") {
         add_local_event(
             app,
-            &format!("{}Unknown DCC type: {}{C_RST}", C_ERR, &args[0]),
+            &format!("{}Unknown DCC type: {}{C_RST}", C_ERR, args[0]),
         );
         return;
     }

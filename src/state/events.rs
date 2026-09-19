@@ -853,7 +853,7 @@ impl AppState {
     /// that matters: comfortably longer than any request, short enough that a
     /// stranger who later claims the abandoned nick does not inherit a
     /// redirect meant for its previous owner.
-    const REDIRECT_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+    const REDIRECT_TTL: std::time::Duration = std::time::Duration::from_mins(5);
 
     /// [`Self::REDIRECT_TTL`], for callers outside this module that need the
     /// same window — a nick change has to be recorded for as long as a
