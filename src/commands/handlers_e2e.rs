@@ -368,7 +368,7 @@ fn current_e2e_context(app: &App) -> Option<String> {
         .state
         .connections
         .get(&buf.connection_id)
-        .map(|c| c.label.clone())
+        .map(|c| c.network_key().to_string())
         .unwrap_or_default();
     e2e_context_for(
         &network,
@@ -415,7 +415,7 @@ fn current_e2e_own_context(app: &App) -> Option<String> {
         .state
         .connections
         .get(&buf.connection_id)
-        .map(|c| c.label.clone())
+        .map(|c| c.network_key().to_string())
         .unwrap_or_default();
     e2e_own_context_for(&network, &buf.buffer_type, &buf.name, own.as_deref())
 }
@@ -462,10 +462,43 @@ fn push_active_e2e_status(app: &mut App) {
 
 // ─── on / off / mode ─────────────────────────────────────────────────────────
 
+fn confirmed_e2e_context(app: &App) -> crate::e2e::error::Result<Option<String>> {
+    if let Some(context) = current_e2e_context(app) {
+        return Ok(Some(context));
+    }
+    let Some(buffer) = app.state.active_buffer() else { return Ok(None) };
+    if buffer.buffer_type != crate::state::buffer::BufferType::Query {
+        return Ok(None);
+    }
+    let Some(connection) = app.state.connections.get(&buffer.connection_id) else { return Ok(None) };
+    if connection.origin_config.bouncer_network_id.is_none() && !connection.origin_config.bouncer_control {
+        return Ok(None);
+    }
+    let Some(manager) = app.state.e2e_manager.as_ref() else { return Ok(None) };
+    let keyring = manager.keyring();
+    let mut handles = keyring.previous_handles_for_nick(&buffer.name)?;
+    handles.extend(keyring.legacy_handle_for_nick(&buffer.name)?);
+    handles.sort();
+    handles.dedup();
+    let [handle] = handles.as_slice() else { return Ok(None) };
+    keyring.cache_dm_handle(connection.network_key(), &buffer.name, handle)?;
+    Ok(Some(crate::e2e::scoped_context(
+        connection.network_key(),
+        &crate::e2e::context_key(&buffer.name, handle),
+    )))
+}
+
 fn e2e_on(app: &mut App) {
-    let Some(chan) = current_e2e_context(app) else {
-        err(app, "/e2e on: no active channel or known query peer");
-        return;
+    let chan = match confirmed_e2e_context(app) {
+        Ok(Some(context)) => context,
+        Ok(None) => {
+            err(app, "/e2e on: no active channel or unique query peer; wait for the peer to speak");
+            return;
+        }
+        Err(error) => {
+            err(app, &format!("/e2e on: {error}"));
+            return;
+        }
     };
     let Some(mgr) = require_mgr(app) else { return };
     let cfg = ChannelConfig {
@@ -502,9 +535,16 @@ fn e2e_on(app: &mut App) {
 }
 
 fn e2e_off(app: &mut App) {
-    let Some(chan) = current_e2e_context(app) else {
-        err(app, "/e2e off: no active channel or known query peer");
-        return;
+    let chan = match confirmed_e2e_context(app) {
+        Ok(Some(context)) => context,
+        Ok(None) => {
+            err(app, "/e2e off: no active channel or unique query peer; wait for the peer to speak");
+            return;
+        }
+        Err(error) => {
+            err(app, &format!("/e2e off: {error}"));
+            return;
+        }
     };
     let Some(mgr) = require_mgr(app) else { return };
     let cfg = ChannelConfig {
@@ -1540,7 +1580,7 @@ fn resolve_cached_handle_by_nick(
         .state
         .active_buffer()
         .and_then(|b| app.state.connections.get(&b.connection_id))
-        .map(|c| c.label.clone())?;
+        .map(|c| c.network_key().to_string())?;
     match mgr.keyring().last_handle_for_nick(nick, &network) {
         Ok(Some(handle)) => Some(Ok(handle)),
         Ok(None) => None,
@@ -1755,7 +1795,7 @@ mod tests {
             .state
             .connections
             .get("test")
-            .map(|connection| connection.label.clone())
+            .map(|connection| connection.network_key().to_string())
             .unwrap_or_default();
 
         let donor_db = crate::storage::db::open_database(false).unwrap();

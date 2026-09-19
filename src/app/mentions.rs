@@ -5,6 +5,44 @@ use crate::state::buffer::{ActivityLevel, Buffer, BufferType, Message, MessageTy
 use super::App;
 
 impl App {
+    pub(crate) fn mention_target(&self, network: &str) -> Option<(String, String)> {
+        if let Some(connection) = self.state.connections.values().find(|connection| {
+            connection
+                .network_scope
+                .as_deref()
+                .map_or(connection.id == network, |scope| scope == network)
+        }) {
+            return Some((connection.id.clone(), connection.label.clone()));
+        }
+        if let Some((id, server)) = self.config.servers.iter().find(|(id, server)| {
+            if server.bouncer_control || server.bouncer_network_id.is_some() {
+                crate::config::network_scope::network_scope(id, server, &self.config.general.username) == network
+            } else {
+                id.as_str() == network
+            }
+        }) {
+            if self.state.connections.contains_key(id) {
+                return None;
+            }
+            return Some((id.clone(), server.label.clone()));
+        }
+        if crate::config::network_scope::is_bouncer_scope(network)
+            || self
+                .state
+                .connections
+                .get(network)
+                .is_some_and(|connection| connection.network_scope.is_some())
+            || self
+                .config
+                .servers
+                .get(network)
+                .is_some_and(|server| server.bouncer_control || server.bouncer_network_id.is_some())
+        {
+            return None;
+        }
+        Some((network.to_string(), network.to_string()))
+    }
+
     /// Buffer ID for the mentions aggregation buffer.
     pub const MENTIONS_BUFFER_ID: &'static str = "_mentions";
 
@@ -48,11 +86,17 @@ impl App {
         let Some(storage) = &self.storage else { return };
         let Ok(db) = storage.db.lock() else { return };
         let seven_days_ago = chrono::Utc::now().timestamp() - 7 * 24 * 3600;
-        let Ok(rows) = crate::storage::query::load_recent_mentions(&db, seven_days_ago, 1000)
+        let Ok(mut rows) = crate::storage::query::load_recent_mentions(&db, seven_days_ago, 1000)
         else {
             return;
         };
         drop(db);
+        for row in &mut rows {
+            row.network = self.mention_target(&row.network).map_or_else(
+                || "Previous bouncer network".to_string(),
+                |(_, label)| label,
+            );
+        }
         // Pre-allocate message IDs before borrowing buffers mutably.
         let base_id = self.state.message_counter + 1;
         self.state.message_counter += rows.len() as u64;

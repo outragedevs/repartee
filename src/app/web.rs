@@ -433,6 +433,9 @@ impl App {
             return;
         };
         let (network, buffer) = crate::web::snapshot::split_buffer_id(buffer_id);
+        let network = self.state.connections.get(network)
+            .and_then(|connection| connection.network_scope.as_deref())
+            .unwrap_or(network);
         let channel = self
             .state
             .buffers
@@ -892,7 +895,7 @@ impl App {
             .state
             .connections
             .get(conn_id)
-            .map_or_else(|| conn_id.to_string(), |c| c.label.clone());
+            .map_or_else(|| conn_id.to_string(), |c| c.network_key().to_string());
         // Read-side key so encrypted logs decrypt on web scroll-back (previously
         // `None` => the client received ciphertext).
         let key = storage.crypto_key.as_ref();
@@ -963,7 +966,8 @@ impl App {
                 .map(|m| crate::web::protocol::WireMention {
                     id: m.id,
                     timestamp: m.timestamp,
-                    buffer_id: format!("{}/{}", m.network, m.buffer),
+                    buffer_id: self.mention_target(&m.network)
+                        .map_or_else(String::new, |(id, _)| crate::state::buffer::make_buffer_id(&id, &m.buffer)),
                     channel: m.channel.clone(),
                     nick: m.nick.clone(),
                     text: m.text.clone(),

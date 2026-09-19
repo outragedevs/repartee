@@ -501,6 +501,7 @@ mod tests {
         Connection {
             id: "net".to_string(),
             label: "NetServer".to_string(),
+            network_scope: None,
             status: ConnectionStatus::Connected,
             own_handle: None,
             nick: "me".to_string(),

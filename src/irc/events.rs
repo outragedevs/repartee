@@ -976,7 +976,7 @@ pub fn ingest_chathistory_batch(
     let network = state
         .connections
         .get(conn_id)
-        .map(|c| c.label.clone())
+        .map(|c| c.network_key().to_string())
         .unwrap_or_default();
 
     let mut ingested = 0usize;
@@ -1385,7 +1385,7 @@ fn handle_privmsg(
     let e2e_network = state
         .connections
         .get(conn_id)
-        .map(|c| c.label.clone())
+        .map(|c| c.network_key().to_string())
         .unwrap_or_default();
     let decrypted_owned = match incoming_e2e_context(&e2e_network, target, own_handle.as_deref()) {
         Some(decrypt_context) => try_decrypt_e2e(
@@ -2457,7 +2457,7 @@ fn track_dm_handle_change(
     prev_buffer_handle: Option<&str>,
     new_handle: &str,
 ) -> bool {
-    let Some(network) = state.connections.get(conn_id).map(|c| c.label.clone()) else {
+    let Some(network) = state.connections.get(conn_id).map(|c| c.network_key().to_string()) else {
         return true;
     };
     let Some(mgr) = state.e2e_manager.clone() else {
@@ -2492,7 +2492,7 @@ fn track_dm_handle_change(
         if c != new_handle && !sources.iter().any(|(s, _)| *s == c) {
             sources.push((c, false));
         }
-    } else if sources.is_empty() {
+    } else if sources.is_empty() && !crate::config::network_scope::is_bouncer_scope(&network) {
         // Legacy network-agnostic nick fallback. A read fault here is NOT "no
         // legacy handle": the enabled config may live under an @<old> context
         // reachable only via this lookup, so swallowing the error and skipping
@@ -3065,7 +3065,7 @@ fn handle_nick_change(
         && let Some(conn) = state.connections.get(conn_id)
         && let Err(e) = mgr
             .keyring()
-            .rename_dm_nick(&conn.label, &old_nick, new_nick)
+            .rename_dm_nick(conn.network_key(), &old_nick, new_nick)
     {
         tracing::warn!("e2e: dm handle cache rename '{old_nick}' -> '{new_nick}' failed: {e}");
     }
@@ -5239,7 +5239,7 @@ fn try_dispatch_rpe2e_ctcp(
     let network = state
         .connections
         .get(conn_id)
-        .map(|c| c.label.clone())
+        .map(|c| c.network_key().to_string())
         .unwrap_or_default();
     let parsed = {
         use crate::e2e::handshake::HandshakeMsg as HM;
@@ -5599,7 +5599,7 @@ fn handle_userhost_reply(state: &mut AppState, conn_id: &str, args: &[String]) {
                             let network = state
                                 .connections
                                 .get(conn_id)
-                                .map(|c| c.label.clone())
+                                .map(|c| c.network_key().to_string())
                                 .unwrap_or_default();
                             let own = state
                                 .connections
@@ -5924,6 +5924,7 @@ mod tests {
         state.add_connection(Connection {
             id: "test".to_string(),
             label: "TestServer".to_string(),
+            network_scope: None,
             status: ConnectionStatus::Connected,
             own_handle: None,
             nick: "me".to_string(),
@@ -10759,6 +10760,7 @@ mod tests {
         state.add_connection(Connection {
             id: "other".into(),
             label: "Other".into(),
+            network_scope: None,
             status: ConnectionStatus::Connected,
             own_handle: None,
             nick: "me".into(),

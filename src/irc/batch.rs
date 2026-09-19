@@ -906,6 +906,7 @@ mod tests {
         state.add_connection(crate::state::connection::Connection {
             id: conn_id.to_string(),
             label: "Test".to_string(),
+            network_scope: None,
             status: crate::state::connection::ConnectionStatus::Connected,
             own_handle: None,
             nick: "me".to_string(),
@@ -1161,6 +1162,7 @@ mod tests {
         state.add_connection(crate::state::connection::Connection {
             id: conn_id.to_string(),
             label: "libera".to_string(),
+            network_scope: None,
             status: crate::state::connection::ConnectionStatus::Connected,
             own_handle: None,
             nick: "me".to_string(),
@@ -1995,6 +1997,7 @@ mod tests {
         state.add_connection(crate::state::connection::Connection {
             id: conn_id.to_string(),
             label: "Test".to_string(),
+            network_scope: None,
             status: crate::state::connection::ConnectionStatus::Connected,
             own_handle: None,
             nick: "me".to_string(),

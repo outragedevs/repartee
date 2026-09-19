@@ -36,6 +36,13 @@ pub struct Storage {
 }
 
 impl Storage {
+    #[cfg(test)]
+    pub fn in_memory() -> Self {
+        let db = Arc::new(Mutex::new(db::open_database(false).unwrap()));
+        let (writer, log_tx) = writer::LogWriterHandle::spawn(Arc::clone(&db), None);
+        Self { db, log_tx, writer, encrypt: false, crypto_key: None }
+    }
+
     /// Initialize storage from the logging config section.
     ///
     /// Opens (or creates) the `SQLite` database under `~/.repartee/logs/`,

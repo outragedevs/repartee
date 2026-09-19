@@ -478,3 +478,18 @@ async fn cancellation_discards_a_blocked_registration_write() {
         "cancelled registration completed its blocked write"
     );
 }
+
+#[tokio::test]
+async fn ambiguous_bouncer_authentication_is_rejected_before_connecting() {
+    let mut config: ServerConfig = toml::from_str(
+        "label = 'fixture'\naddress = '127.0.0.1'\nport = 1\ntls = false\nchannels = []\nbouncer_control = true",
+    ).unwrap();
+    config.sasl_user = Some("account".into());
+    config.sasl_pass = Some("fixture-password".into());
+    for certificate in [true, false] {
+        config.client_cert_path = certificate.then(|| "fixture-cert.pem".into());
+        config.sasl_key_path = (!certificate).then(|| "fixture-key.pem".into());
+        let result = connect_server("fixture", &config, &GeneralConfig::default()).await;
+        assert!(result.err().unwrap().to_string().contains("explicit SASL mechanism"));
+    }
+}

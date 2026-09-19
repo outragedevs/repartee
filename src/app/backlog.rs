@@ -116,7 +116,7 @@ impl App {
             .state
             .connections
             .get(&buf.connection_id)
-            .map_or_else(|| buf.connection_id.clone(), |c| c.label.clone());
+            .map_or_else(|| buf.connection_id.clone(), |c| c.network_key().to_string());
         let buf_name = buf.name.clone();
 
         let encrypt = storage.encrypt;
@@ -333,7 +333,7 @@ impl App {
             .state
             .connections
             .get(&buf.connection_id)
-            .map_or_else(|| buf.connection_id.clone(), |c| c.label.clone());
+            .map_or_else(|| buf.connection_id.clone(), |c| c.network_key().to_string());
         let buf_name = buf.name.clone();
         let encrypt = storage.encrypt;
         let key = storage.crypto_key;
@@ -472,7 +472,7 @@ impl App {
                 conn.chathistory.is_before_exhausted(&target),
                 conn.chathistory.any_in_flight(&target),
                 conn.chathistory.oldest_fetched(&target),
-                conn.label.clone(),
+                conn.network_key().to_string(),
             )
         };
 
@@ -748,7 +748,7 @@ impl App {
             // Exclude reconnect-time rows (JOIN echo, traffic logged during a slow
             // NAMES) so the AFTER anchor stays on the pre-disconnect tail and the
             // gap-fill targets the actual disconnected gap.
-            (conn.label.clone(), conn.chathistory.gapfill_cutoff())
+            (conn.network_key().to_string(), conn.chathistory.gapfill_cutoff())
         };
 
         // Newest stored row (older than the reconnect cutoff) → AFTER anchor; if

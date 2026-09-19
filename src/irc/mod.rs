@@ -649,6 +649,16 @@ pub async fn connect_server(
     if server_config.bouncer_control && server_config.bouncer_network_id.is_some() {
         return Err(eyre!("Choose either bouncer control mode or an explicit network ID"));
     }
+    if (server_config.bouncer_control || server_config.bouncer_network_id.is_some())
+        && server_config.sasl_mechanism.is_none()
+        && [
+            server_config.client_cert_path.is_some(),
+            server_config.sasl_key_path.is_some() && server_config.sasl_user.is_some(),
+            server_config.sasl_pass.is_some() && server_config.sasl_user.is_some(),
+        ].into_iter().filter(|available| *available).count() > 1
+    {
+        return Err(eyre!("Choose an explicit SASL mechanism for a bouncer with multiple authentication methods"));
+    }
     let bouncer_network_id = server_config
         .bouncer_network_id
         .as_deref()
