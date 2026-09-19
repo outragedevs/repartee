@@ -44,3 +44,11 @@ attribute-removal encodings, deletion, malformed batches and abandoned batches.
 
 Automatic child-connection lifecycle, PASS-specific explicit binding,
 server-owned history and the remaining feature matrix are separate pending work.
+
+Cancellation regression tests drop registration during CAP negotiation and
+network confirmation and verify peer EOF. A separate synthetic 16 MiB PASS write
+fills the local socket while the peer stops reading; after cancellation, the
+client must abort the pending write instead of finishing it in the background.
+Disabling the abort makes this regression fail. The oversized synthetic payload
+exists only to produce backpressure deterministically, not as a supported login
+format or a real credential.
