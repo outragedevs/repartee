@@ -110,7 +110,13 @@ impl AppState {
         self.add_buffer_with_focus(buffer, activate);
     }
 
-    pub(crate) fn add_buffer_with_focus(&mut self, buffer: Buffer, activate: bool) {
+    pub(crate) fn add_buffer_with_focus(&mut self, mut buffer: Buffer, activate: bool) {
+        if let Some(timestamp) = self.read_activity.get(&buffer.id)
+            .and_then(|read| read.through)
+            .and_then(chrono::DateTime::from_timestamp_millis)
+        {
+            buffer.last_read = timestamp;
+        }
         let mut meta = crate::web::protocol::BufferMeta {
             id: buffer.id.clone(),
             connection_id: buffer.connection_id.clone(),
@@ -215,7 +221,12 @@ impl AppState {
             conn.chathistory.close_target(&buffer.name);
         }
         self.activity_order.remove(id);
-        self.read_activity.remove(id);
+        if let Some(mut read) = self.read_activity.remove(id)
+            && read.through.is_some()
+        {
+            read.unread = std::collections::HashMap::new();
+            self.read_activity.insert(id.to_string(), read);
+        }
         self.web_history_buffers.retain(|_, buffer_id| buffer_id != id);
         self.typing.remove_buffer(id);
         // Clean up per-buffer flood tracking to prevent unbounded map growth.

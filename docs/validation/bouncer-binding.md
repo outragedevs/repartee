@@ -157,3 +157,8 @@ terminal does not advance read markers merely because its output renders. Focus
 reporting, a key press/repeat, or a paste confirms interactive focus; key release
 alone does not. A socket-pair regression exercises the real shim attach path and
 waits for queued terminal output before checking the rendered read boundary.
+
+Closing a buffer drops its unread rows but retains the target watermark. Reopening
+restores both the read threshold and last-read timestamp before server history
+is hydrated, preventing already-read rows from regaining unread activity. Active
+mouse actions also confirm terminal focus; pointer motion alone does not.

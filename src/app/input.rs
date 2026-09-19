@@ -49,7 +49,15 @@ impl App {
                 }
                 self.handle_key(key);
             },
-            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Mouse(mouse) => {
+                if matches!(mouse.kind, MouseEventKind::Down(_) | MouseEventKind::Drag(_)
+                    | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                    | MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight)
+                {
+                    self.terminal_focused = true;
+                }
+                self.handle_mouse(mouse);
+            },
             Event::Paste(text) => {
                 self.terminal_focused = true;
                 self.handle_paste(&text);
