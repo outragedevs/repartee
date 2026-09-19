@@ -19,6 +19,16 @@ impl App {
         conn_id: &str,
         server_config: &config::ServerConfig,
     ) -> String {
+        self.setup_connection_for_account(conn_id, server_config, conn_id, true)
+    }
+
+    pub(crate) fn setup_connection_for_account(
+        &mut self,
+        conn_id: &str,
+        server_config: &config::ServerConfig,
+        account_id: &str,
+        activate: bool,
+    ) -> String {
         // Remove placeholder default Status buffer when first real connection starts
         let default_buf_id = make_buffer_id(Self::DEFAULT_CONN_ID, "Status");
         if self.state.buffers.contains_key(&default_buf_id) {
@@ -26,14 +36,11 @@ impl App {
             self.state.connections.remove(Self::DEFAULT_CONN_ID);
         }
 
-        let auto_reconnect = server_config.auto_reconnect.unwrap_or(true);
-        let reconnect_delay = server_config.reconnect_delay.unwrap_or(30);
-
         self.state.add_connection(Connection {
             id: conn_id.to_string(),
             label: server_config.label.clone(),
             network_scope: (server_config.bouncer_network_id.is_some() || server_config.bouncer_control)
-                .then(|| config::network_scope::network_scope(conn_id, server_config, &self.config.general.username)),
+                .then(|| config::network_scope::network_scope(account_id, server_config, &self.config.general.username)),
             status: ConnectionStatus::Connecting,
             own_handle: None,
             nick: server_config
@@ -48,9 +55,9 @@ impl App {
             lag: None,
             lag_pending: false,
             reconnect_attempts: 0,
-            reconnect_delay_secs: reconnect_delay,
+            reconnect_delay_secs: server_config.reconnect_delay.unwrap_or(30),
             next_reconnect: None,
-            should_reconnect: auto_reconnect,
+            should_reconnect: server_config.auto_reconnect.unwrap_or(true),
             joined_channels: if server_config.bouncer_network_id.is_some() || server_config.bouncer_control {
                 Vec::new()
             } else {
@@ -83,7 +90,7 @@ impl App {
         self.refresh_e2e_configured_networks();
 
         let server_buf_id = make_buffer_id(conn_id, &server_config.label);
-        self.state.add_buffer(Buffer {
+        self.state.add_buffer_with_focus(Buffer {
             id: server_buf_id.clone(),
             connection_id: conn_id.to_string(),
             buffer_type: BufferType::Server,
@@ -106,8 +113,10 @@ impl App {
             history_exhausted: false,
             log_initial_loaded: false,
             pin_backlog: false,
-        });
-        self.state.set_active_buffer(&server_buf_id);
+        }, activate);
+        if activate {
+            self.state.set_active_buffer(&server_buf_id);
+        }
 
         let id = self.state.next_message_id();
         self.state.add_message(
@@ -518,6 +527,8 @@ impl App {
                 // limits/ref types and could be rejected for non-membership.
             }
             IrcEvent::Disconnected(conn_id, error) => {
+                self.suspend_bouncer_children(&conn_id);
+                if let Some(requested) = self.state.background_join_connections.get_mut(&conn_id) { requested.clear(); }
                 self.bouncer_networks.remove(&conn_id);
                 // Release anything still waiting on a translation for this
                 // connection FIRST. The lines already arrived; holding them

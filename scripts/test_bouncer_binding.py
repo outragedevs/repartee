@@ -80,7 +80,7 @@ def main():
                 })
                 run(["make", "test", "TEST_ARGS=pinned_bouncer_ -- --ignored"],
                     cwd=ROOT, env=environment)
-                print(f"{args.implementation}: binding, reconnect and control discovery passed")
+                print(f"{args.implementation}: binding, reconnect, control discovery and generated child connection passed")
             except Exception:
                 log.flush()
                 log.seek(0)

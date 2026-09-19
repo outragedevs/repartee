@@ -368,6 +368,7 @@ pub struct AppState {
     /// Pending web events to broadcast after IRC event processing.
     /// Drained by `App` after each `handle_irc_message` call.
     pub pending_web_events: Vec<crate::web::protocol::WebEvent>,
+    pub background_join_connections: HashMap<String, std::collections::HashSet<String>>,
     /// Pending E2E CTCP NOTICE sends produced by the event handlers.
     /// Drained by `App::drain_pending_e2e_sends` right after
     /// `drain_pending_web_events`. Same pattern as `pending_web_events`.

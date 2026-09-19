@@ -496,6 +496,7 @@ fn close_one(app: &mut App, buf_id: &str, reason: Option<&str>, confirmed: bool,
                 )
             });
             if is_disconnected {
+                app.prepare_bouncer_close(&conn_id);
                 // Remove all buffers for this connection
                 let to_remove: Vec<String> = app
                     .state

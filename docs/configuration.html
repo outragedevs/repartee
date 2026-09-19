@@ -489,9 +489,12 @@ errors, or <code>/bouncer refresh</code> to request a fresh list.</p>
 <p><code>/server add -bouncer-control</code> and <code>/set servers.&lt;id&gt;.bouncer_control true</code>
 configure this mode. Reconnect after changing the setting. Both terminal and web
 command input support <code>/bouncer</code>.</p>
-<p>Automatic connections to discovered networks and server-owned history are
-separate implementation stages. Neither explicit binding nor control mode alone
-disables the existing local history policy.</p>
+<p>Control connections automatically open their discovered networks using separate,
+SASL-authenticated bound connections. Names and removals follow bouncer updates;
+manual child disconnects remain off until <code>/bouncer connect ID</code>. Disconnecting the
+control connection suspends all children until a new valid network list arrives.
+Server-owned history is a separate implementation stage. Neither explicit binding
+nor control mode alone disables the existing local history policy.</p>
 <h2>Bouncer network identity</h2>
 <p>For explicit network binding and control connections, local data uses a stable
 scope separate from the display label. It combines the configured server ID,

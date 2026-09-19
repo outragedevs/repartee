@@ -76,6 +76,8 @@ pub enum WebEvent {
     },
     BufferCreated {
         buffer: BufferMeta,
+        #[serde(default = "default_true")]
+        activate: bool,
     },
     BufferE2eChanged {
         buffer_id: String,
@@ -89,6 +91,8 @@ pub enum WebEvent {
         activity: u8,
         unread_count: u32,
     },
+    ConnectionRemoved { conn_id: String },
+    BufferRenamed { old_id: String, new_id: String, name: String },
     ConnectionStatus {
         conn_id: String,
         label: String,
