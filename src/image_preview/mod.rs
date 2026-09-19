@@ -3,6 +3,8 @@
 //! Orchestrates the image preview pipeline: URL detection, async fetching,
 //! disk caching, image decoding, and protocol encoding for ratatui-image.
 
+pub mod inline;
+pub mod tmux;
 pub mod cache;
 pub mod detect;
 pub mod fetch;
@@ -55,6 +57,7 @@ pub enum PreviewStatus {
 
 /// Result of an async image preview task, sent via channel.
 pub enum ImagePreviewEvent {
+    Inline { request: u64, result: Result<Box<image::DynamicImage>, String> },
     /// Image is ready to display.
     Ready {
         url: String,
@@ -106,7 +109,7 @@ pub fn spawn_preview(
 
     tokio::spawn(async move {
         // Phase 1: Async I/O — fetch image bytes (network or disk cache).
-        let fetch_result = fetch_image_data(&url, &config, &client).await;
+        let fetch_result = fetch_image_data(&url, &config, &client, None, FetchMode::Popup).await;
 
         let event = match fetch_result {
             Ok((data, title)) => {
@@ -157,6 +160,11 @@ pub fn spawn_preview(
     });
 }
 
+enum FetchMode {
+    Popup,
+    Inline,
+}
+
 /// Phase 1: Fetch image bytes from the network or disk cache (async I/O).
 ///
 /// Returns the raw image data and an optional title extracted from the URL.
@@ -164,9 +172,18 @@ async fn fetch_image_data(
     url: &str,
     config: &ImagePreviewConfig,
     client: &reqwest::Client,
+    validator: Option<fetch::UrlValidator>,
+    mode: FetchMode,
 ) -> color_eyre::eyre::Result<(Vec<u8>, Option<String>)> {
+    let disk_cache = matches!(mode, FetchMode::Popup);
+    if let Some(validate) = validator {
+        validate(url).map_err(color_eyre::eyre::Error::msg)?;
+    }
     // 1. Check the disk cache first.
-    if let Some(cached_path) = cache::is_cached(url) {
+    if disk_cache && let Some(cached_path) = cache::is_cached(url) {
+        if tokio::fs::metadata(&cached_path).await?.len() > config.max_file_size {
+            return Err(color_eyre::eyre::eyre!("cached image exceeds maximum file size"));
+        }
         let data = tokio::fs::read(&cached_path).await?;
         let title = detect::classify_url(url).and_then(|c| c.title);
         return Ok((data, title));
@@ -176,9 +193,12 @@ async fn fetch_image_data(
     let fetch_config = fetch::FetchConfig {
         timeout_secs: config.fetch_timeout,
         max_file_size: config.max_file_size,
-        url_validator: None,
+        url_validator: validator,
     };
-    let result = fetch::fetch_image(url, &fetch_config, client).await?;
+    let result = match mode {
+        FetchMode::Popup => fetch::fetch_image(url, &fetch_config, client).await?,
+        FetchMode::Inline => fetch::fetch_direct_image(url, &fetch_config, client).await?,
+    };
 
     // 3. Validate magic bytes.
     if !cache::validate_magic_bytes(&result.data) {
@@ -188,7 +208,7 @@ async fn fetch_image_data(
     }
 
     // 4. Store in cache.
-    if let Err(e) = cache::store(url, &result.data, &result.content_type) {
+    if disk_cache && let Err(e) = cache::store(url, &result.data, &result.content_type) {
         warn!(url, error = %e, "failed to cache image");
     }
 

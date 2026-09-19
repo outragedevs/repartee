@@ -168,6 +168,7 @@ impl App {
         // black squares. Clearing forces fresh protocols that re-transmit on the
         // first frame to the new terminal.
         self.emote_animator.clear();
+        self.inline_previews.invalidate_protocols();
 
         // Same transmit-once hazard for an image-preview overlay left open across
         // the reattach: its cached `StatefulProtocol` would emit dangling

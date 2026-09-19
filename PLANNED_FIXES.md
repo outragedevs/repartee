@@ -79,6 +79,6 @@ This is security hardening rather than a known functional failure.
 
 These open requests are not bugs, but remain candidates for future work:
 
-- [#40: Display images inline with chat](https://github.com/outragedevs/repartee/issues/40)
+- [#40: Display images inline with chat](https://github.com/outragedevs/repartee/issues/40) — completed on `feat/inline-chat-images`; Clippy, 2288 native tests, 138 web tests, native build, and Sol medium review passed. See [validation scope](docs/validation/2026-09-19-inline-images.md).
 - [#26: Add an Alt+A binding for buffers with new activity](https://github.com/outragedevs/repartee/issues/26)
 
