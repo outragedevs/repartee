@@ -139,7 +139,7 @@ account = "%Z64748b···%N %Z94a3b8$0%N %Z64748b$1%N"
 
 # kick — red lightning ⚡
 # erssi: kick = "%ZEF4444⚡ {channick_hilight $0} %ZEF4444kicked%N from {channel $1} %Z64748Bby%N {nick $2} {reason $3}"
-kick = "%Zef4444⚡%N %Ze2e8f0%_$0%_%N %Zef4444kicked%N from {channel $1} %Z64748bby%N %Z94a3b8$2%N %Z94a3b8⟨%N$3%Z94a3b8⟩%N"
+kick = "%Zef4444⚡%N %Ze2e8f0%_$0%_%N %Zef4444kicked%N from {channel $2} %Z64748bby%N %Z94a3b8$1%N %Z94a3b8⟨%N$3%Z94a3b8⟩%N"
 
 # chghost — dim dots
 chghost = "%Z64748b···%N %Z94a3b8$0%N %Z64748bchanged host to $1@$2%N"
