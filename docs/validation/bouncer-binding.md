@@ -114,3 +114,15 @@ before marking, then 150 after the server confirms the middle message. Unit
 regressions cover marker-before-history and history-before-marker ordering,
 reconnect gap rows, older-page insertion, deduplication and own-message exclusion.
 History contributes unread counts but emits no live-message or mention alerts.
+
+A web-dispatch regression sends `FetchMessages` through `handle_web_command` with
+an empty bouncer buffer and seeded stale SQLite rows. The response remains empty
+and the stored rows remain untouched: this route uses `fetch_server_history_page`,
+not the direct-IRC SQLite fallback in `web_fetch_messages`.
+
+Pending read updates retain their original IRC target even if a query buffer is
+renamed locally. Retry scheduling includes pending targets without a current
+buffer; the renamed target is queried separately. This follows the pinned
+bouncers' target-keyed storage (`GetReadReceipt(networkID, target)` in Soju and
+`newestIdAtOrBefore(networkId, target, ...)` in Lurker), rather than applying an
+old target's timestamp to a different server-side history.
