@@ -309,6 +309,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capability_loss_does_not_restore_read_messages_as_unread() {
+        let mut state = state();
+        state.apply_server_read_marker("account/peer", 2000);
+        crate::irc::events::handle_cap_del(&mut state, "account", Some("draft/read-marker"), None);
+        state.pending_web_events.clear();
+        deliver(&mut state, 1000, ActivityLevel::Mention);
+        assert_eq!(state.buffers["account/peer"].unread_count, 0);
+        assert_eq!(state.buffers["account/peer"].activity, ActivityLevel::None);
+        assert!(
+            !state
+                .pending_web_events
+                .iter()
+                .any(|event| matches!(event, crate::web::protocol::WebEvent::MentionAlert { .. }))
+        );
+        deliver(&mut state, 3000, ActivityLevel::Activity);
+        assert_eq!(state.buffers["account/peer"].unread_count, 1);
+    }
+
+    #[tokio::test]
     async fn partial_read_removes_old_mentions_without_clearing_later_activity() {
         let mut state = state();
         deliver(&mut state, 1000, ActivityLevel::Mention);

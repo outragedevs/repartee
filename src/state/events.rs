@@ -1999,7 +1999,7 @@ impl AppState {
             enforce_scrollback(buf, self.scrollback_limit);
             // Only escalate activity if this is not the active buffer
             let is_active = self.active_buffer_id.as_deref() == Some(buffer_id);
-            if !read_markers && !is_active && level > buf.activity {
+            if !read_markers && !already_read && !is_active && level > buf.activity {
                 buf.activity = level;
                 buf.unread_count += 1;
                 self.pending_web_events
