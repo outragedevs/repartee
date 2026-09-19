@@ -32,6 +32,7 @@ impl AppState {
         Self {
             connections: std::collections::HashMap::new(),
             buffers: indexmap::IndexMap::new(),
+            web_history_buffers: std::collections::HashMap::new(),
             active_buffer_id: None,
             previous_buffer_id: None,
             message_counter: 0,
@@ -212,6 +213,7 @@ impl AppState {
             conn.chathistory.clear_connect_gapfilled(&buffer.name);
         }
         self.activity_order.remove(id);
+        self.web_history_buffers.retain(|_, buffer_id| buffer_id != id);
         self.typing.remove_buffer(id);
         // Clean up per-buffer flood tracking to prevent unbounded map growth.
         self.flood_state.remove_buffer(id);
@@ -244,6 +246,9 @@ impl AppState {
     /// so a later scroll-up reloads, and trim back to the normal
     /// `scrollback_limit` — freeing the loaded backlog. No-op if not pinned.
     pub(crate) fn collapse_buffer_backlog(&mut self, buffer_id: &str) {
+        if self.web_history_buffers.values().any(|id| id == buffer_id) {
+            return;
+        }
         let limit = self.scrollback_limit;
         if let Some(buf) = self.buffers.get_mut(buffer_id)
             && buf.pin_backlog
