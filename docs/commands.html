@@ -1906,10 +1906,21 @@ switches away from the shell.</p>
 </ul>
 <p>If the subcommand is not recognized, it is treated as a command to run
 (e.g. <code>/shell htop</code> is equivalent to <code>/shell cmd htop</code>).</p>
+<p>Commands support single and double quotes, backslash-escaped spaces, and empty
+quoted arguments. An unmatched quote or an empty executable is rejected before
+a session is opened. The buffer name comes from the executable, not its arguments.</p>
+<p>The executable is launched directly: variables, wildcards, pipes, redirections,
+and command substitutions are not evaluated. A <code>#</code> starts a literal argument,
+not a comment. For shell syntax, explicitly run a
+shell, for example <code>/shell cmd /bin/sh -c &#39;printf &quot;%s\\n&quot; &quot;$HOME&quot;&#39;</code>.
+The default <code>$SHELL</code> value is treated as one executable path.</p>
 <h2>Examples</h2>
 <pre><code>/shell
 /sh cmd htop
 /shell cmd vim /etc/hosts
+/shell cmd vim &quot;/path with spaces/notes.txt&quot;
+/shell &quot;/path with spaces/tool&quot; &#39;one argument&#39; &#39;&#39;
+/sh cmd echo escaped\ space
 /shell close
 /shell list
 </code></pre>
