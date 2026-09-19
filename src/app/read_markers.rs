@@ -490,6 +490,7 @@ mod tests {
         let mut message =
             crate::state::events::tests::make_test_message(&mut app.state, "server message");
         message.timestamp = chrono::DateTime::from_timestamp_millis(millis).unwrap();
+            message.tags = Some(HashMap::from([("time".into(), message.timestamp.to_rfc3339())]));
         message.tags = Some(HashMap::from([(
             "time".into(),
             crate::irc::chathistory::rfc3339_millis(millis),
@@ -531,6 +532,7 @@ mod tests {
         );
         late.nick = Some("Peer".into());
         late.timestamp = chrono::DateTime::from_timestamp_millis(1500).unwrap();
+            late.tags = Some(HashMap::from([("time".into(), late.timestamp.to_rfc3339())]));
         app.state.surface_history_page_from_target(
             "account/renamed",
             vec![late],
@@ -1297,6 +1299,7 @@ mod tests {
             let mut delayed =
                 crate::state::events::tests::make_test_message(&mut app.state, "delayed mention");
             delayed.timestamp = chrono::DateTime::from_timestamp_millis(1000).unwrap();
+            delayed.tags = Some(HashMap::from([("time".into(), delayed.timestamp.to_rfc3339())]));
             delayed.highlight = true;
             app.state.add_transient_message_with_activity(
                 "account/peer",
@@ -1396,6 +1399,7 @@ mod tests {
             let mut message =
                 crate::state::events::tests::make_test_message(&mut app.state, "unread");
             message.timestamp = chrono::DateTime::from_timestamp_millis(millis).unwrap();
+            message.tags = Some(HashMap::from([("time".into(), message.timestamp.to_rfc3339())]));
             app.state.add_transient_message_with_activity(
                 "account/peer",
                 message,

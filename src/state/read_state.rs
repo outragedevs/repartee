@@ -7,7 +7,16 @@ use super::buffer::{ActivityLevel, BufferType, Message, MessageType};
 pub(super) struct ReadActivity {
     pub(super) through: Option<i64>,
     pub(super) origins: HashMap<u64, String>,
-    pub(super) unread: HashMap<u64, (i64, ActivityLevel, u64)>,
+    pub(super) unread: HashMap<u64, (Option<i64>, ActivityLevel, u64)>,
+}
+
+fn server_time(message: &Message) -> Option<i64> {
+    message
+        .tags
+        .as_ref()?
+        .get("time")
+        .and_then(|time| chrono::DateTime::parse_from_rfc3339(time).ok())
+        .map(|time| time.timestamp_millis())
 }
 
 impl AppState {
@@ -42,6 +51,9 @@ impl AppState {
     }
 
     pub(super) fn message_already_read(&self, buffer_id: &str, message: &Message) -> bool {
+        let Some(time) = server_time(message) else {
+            return false;
+        };
         let origin = self
             .read_activity
             .get(buffer_id)
@@ -50,7 +62,7 @@ impl AppState {
         self.read_activity
             .get(origin)
             .and_then(|state| state.through)
-            .is_some_and(|through| message.timestamp.timestamp_millis() <= through)
+            .is_some_and(|through| time <= through)
     }
 
     pub(super) fn record_read_origin(&mut self, buffer_id: &str, message: &Message, origin: &str) {
@@ -113,10 +125,10 @@ impl AppState {
             .unread
             .entry(message.id)
             .and_modify(|entry| {
-                entry.0 = message.timestamp.timestamp_millis();
+                entry.0 = server_time(message);
                 entry.1 = level;
             })
-            .or_insert_with(|| (message.timestamp.timestamp_millis(), level, order));
+            .or_insert_with(|| (server_time(message), level, order));
     }
 
     pub(crate) fn activate_connection_read_markers(&mut self, conn_id: &str) {
@@ -274,7 +286,7 @@ impl AppState {
                     .get(message_id)
                     .map_or(id.as_str(), String::as_str)
                     != buffer_id
-                    || *time > millis
+                    || time.is_none_or(|time| time > millis)
             });
             if state.unread.len() != before && id != buffer_id {
                 changed.push(id.clone());
@@ -315,6 +327,10 @@ mod tests {
     fn deliver(state: &mut AppState, time: i64, level: ActivityLevel) {
         let mut message = crate::state::events::tests::make_test_message(state, "unread");
         message.timestamp = chrono::DateTime::from_timestamp_millis(time).unwrap();
+        message.tags = Some(HashMap::from([(
+            "time".into(),
+            message.timestamp.to_rfc3339(),
+        )]));
         message.highlight = level == ActivityLevel::Mention;
         state.add_transient_message_with_activity("account/peer", message, level);
     }
@@ -326,6 +342,10 @@ mod tests {
         deliver(&mut state, 1000, ActivityLevel::Mention);
         let mut other = crate::state::events::tests::make_test_message(&mut state, "other");
         other.timestamp = chrono::DateTime::from_timestamp_millis(2000).unwrap();
+        other.tags = Some(HashMap::from([(
+            "time".into(),
+            other.timestamp.to_rfc3339(),
+        )]));
         state.add_transient_message_with_activity("account/other", other, ActivityLevel::Activity);
         deliver(&mut state, 3000, ActivityLevel::Activity);
         assert_eq!(
@@ -393,6 +413,10 @@ mod tests {
     fn history_row(state: &mut AppState, millis: i64) -> Message {
         let mut message = crate::state::events::tests::make_test_message(state, "history");
         message.timestamp = chrono::DateTime::from_timestamp_millis(millis).unwrap();
+        message.tags = Some(HashMap::from([(
+            "time".into(),
+            message.timestamp.to_rfc3339(),
+        )]));
         message.nick = Some("Peer".into());
         message
     }
@@ -544,5 +568,70 @@ mod tests {
         assert_eq!(state.buffers["account/peer"].unread_count, 2);
         state.apply_server_read_marker("account/peer", 9);
         assert_eq!(state.buffers["account/peer"].unread_count, 1);
+    }
+    #[tokio::test]
+    async fn server_markers_never_clear_untimed_rows_with_skewed_local_clocks() {
+        let mut state = state();
+        state.apply_server_read_marker("account/peer", 2000);
+        for time_tag in [None, Some("invalid")] {
+            let mut row = history_row(&mut state, 1000);
+            row.tags = time_tag.map(|time| HashMap::from([("time".into(), time.into())]));
+            state.add_transient_message_with_activity("account/peer", row, ActivityLevel::Mention);
+        }
+        assert_eq!(state.buffers["account/peer"].unread_count, 2);
+        state.apply_server_read_marker("account/peer", 3000);
+        assert_eq!(state.buffers["account/peer"].unread_count, 2);
+        let last = state.buffers["account/peer"].messages.back().unwrap().id;
+        state.clear_visible_read_rows("account/peer", last);
+        assert_eq!(state.buffers["account/peer"].unread_count, 0);
+    }
+    #[tokio::test]
+    async fn authenticated_history_identity_needs_no_channel_membership() {
+        let mut state = state();
+        let nick = state.connections["account"].nick.clone();
+        for wire in [
+            format!(":bnc 900 {nick} {nick}!user@host upstream-account :Logged in"),
+            format!(":lurker.bouncer 900 {nick} {nick}!user@host bouncer-login :Logged in"),
+        ] {
+            crate::irc::events::handle_irc_message(&mut state, "account", &wire.parse().unwrap());
+        }
+        assert!(state.buffers.values().all(|buffer| buffer.users.is_empty()));
+        let mut own = history_row(&mut state, 1000);
+        own.nick = Some("EarlierNick".into());
+        own.tags
+            .as_mut()
+            .unwrap()
+            .insert("account".into(), "upstream-account".into());
+        let mut other = history_row(&mut state, 2000);
+        other.nick = Some(nick.clone());
+        other
+            .tags
+            .as_mut()
+            .unwrap()
+            .insert("account".into(), "another-account".into());
+        state.surface_history_page("account/peer", vec![own.clone(), other], false);
+        assert_eq!(state.buffers["account/peer"].unread_count, 1);
+        crate::irc::events::handle_irc_message(
+            &mut state,
+            "account",
+            &format!(":{nick}!user@host ACCOUNT *").parse().unwrap(),
+        );
+        assert!(!state.is_own_history_message("account/peer", &own, Some(&nick)));
+        crate::irc::events::handle_irc_message(
+            &mut state,
+            "account",
+            &format!(":{nick}!user@host ACCOUNT upstream-account")
+                .parse()
+                .unwrap(),
+        );
+        assert!(state.is_own_history_message("account/peer", &own, Some(&nick)));
+        crate::irc::events::handle_irc_message(
+            &mut state,
+            "account",
+            &format!(":bnc 901 {nick} {nick}!user@host :Logged out")
+                .parse()
+                .unwrap(),
+        );
+        assert!(!state.is_own_history_message("account/peer", &own, Some(&nick)));
     }
 }

@@ -178,3 +178,11 @@ cover a full unanswered request window followed by a new user read position.
 Historical self-message classification uses a known upstream account tag when
 available and records nick ownership intervals from live self-NICK events, so
 old self messages stay read while later reuse of the old nick remains unread.
+
+Server read thresholds only compare valid server-time tags. Missing or invalid
+time tags retain unread activity despite local clock skew until the row is
+visibly read and cleared by message ID. The authenticated upstream account is
+retained independently of channel membership using 900/901, live account-notify,
+extended JOIN, account tags and WHOX. Lurker bouncer-login numerics are excluded
+because their account names are not upstream IRC identities. Tests cover a
+query-only connection, nickname reuse, account login/logout, and local clock skew.
