@@ -3,6 +3,7 @@ use std::collections::{HashMap, VecDeque};
 
 use tokio::sync::mpsc;
 
+mod activity;
 pub mod buffer;
 pub mod connection;
 pub mod events;
@@ -212,6 +213,8 @@ pub struct AppState {
     pub active_buffer_id: Option<String>,
     pub previous_buffer_id: Option<String>,
     pub message_counter: u64,
+    activity_counter: u64,
+    activity_order: HashMap<String, u64>,
     /// Flood detection state (global, not per-connection).
     pub flood_state: FloodState,
     /// Netsplit detection state (global, not per-connection).

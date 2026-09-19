@@ -1,6 +1,6 @@
 # Planned Fixes
 
-This document tracks confirmed bugs and deferred hardening work that still needs to be addressed.
+All six fixes and both feature requests below were completed on separate branches and merged after clean Sol medium reviews on 2026-09-19. The original problem statements are retained as historical context.
 
 ## Priority 1
 
@@ -77,8 +77,8 @@ This is security hardening rather than a known functional failure.
 
 ## Feature Requests
 
-These open requests are not bugs, but remain candidates for future work:
+These feature requests are included in this implementation pass:
 
 - [#40: Display images inline with chat](https://github.com/outragedevs/repartee/issues/40) — completed on `feat/inline-chat-images`; Clippy, 2288 native tests, 138 web tests, native build, and Sol medium review passed. See [validation scope](docs/validation/2026-09-19-inline-images.md).
-- [#26: Add an Alt+A binding for buffers with new activity](https://github.com/outragedevs/repartee/issues/26)
+- [#26: Add an Alt+A binding for buffers with new activity](https://github.com/outragedevs/repartee/issues/26) — completed on `feat/activity-buffer-shortcut`; Clippy, 2299 native tests, 138 web tests, native build, and Sol medium review passed. See [validation scope](docs/validation/2026-09-19-activity-shortcut.md).
 
