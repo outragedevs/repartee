@@ -203,7 +203,14 @@ impl AppState {
             .push(crate::web::protocol::WebEvent::BufferClosed {
                 buffer_id: id.to_string(),
             });
-        self.buffers.shift_remove(id);
+        if let Some(buffer) = self.buffers.shift_remove(id)
+            && matches!(buffer.buffer_type, crate::state::buffer::BufferType::Channel | crate::state::buffer::BufferType::Query)
+            && let Some(conn) = self.connections.get_mut(&buffer.connection_id)
+            && conn.server_owns_history()
+        {
+            conn.chathistory.reset_pagination(&buffer.name);
+            conn.chathistory.clear_connect_gapfilled(&buffer.name);
+        }
         self.activity_order.remove(id);
         self.typing.remove_buffer(id);
         // Clean up per-buffer flood tracking to prevent unbounded map growth.

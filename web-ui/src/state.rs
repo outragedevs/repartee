@@ -305,6 +305,9 @@ impl AppState {
     /// no longer displaying) and re-arm `has_more` so a later scroll-up fetches
     /// again. Mirrors the TUI's collapse-on-return-to-bottom.
     pub fn collapse_backlog(&self, buffer_id: &str) {
+        crate::ws::send_command(&WebCommand::CollapseBacklog {
+            buffer_id: buffer_id.to_string(),
+        });
         let mut trimmed = false;
         self.messages.update(|msgs| {
             if let Some(entry) = msgs.get_mut(buffer_id)

@@ -249,6 +249,7 @@ pub enum WebCommand {
         #[serde(default)]
         before_message_id: Option<u64>,
     },
+    CollapseBacklog { buffer_id: String },
     /// Request full nick list for a channel buffer.
     FetchNickList { buffer_id: String },
     /// Request unread mentions.

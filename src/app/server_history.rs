@@ -81,6 +81,18 @@ fn memory_page(
 }
 
 impl App {
+    pub(crate) fn release_web_history(&mut self, session_id: &str) {
+        let Some(buffer_id) = self.web_history_buffers.remove(session_id) else {
+            return;
+        };
+        if !self.web_history_buffers.values().any(|id| id == &buffer_id)
+            && !(self.state.active_buffer_id.as_deref() == Some(&buffer_id)
+                && (self.scroll_offset > 0 || self.log_browser_mode))
+        {
+            self.state.collapse_buffer_backlog(&buffer_id);
+        }
+    }
+
     pub(crate) fn fetch_server_history_page(
         &mut self,
         buffer_id: &str,
@@ -110,6 +122,17 @@ impl App {
             before_message_id,
             started: Instant::now(),
         };
+        if before.is_some() && self.state.buffers.contains_key(buffer_id) {
+            if self
+                .web_history_buffers
+                .get(session_id)
+                .is_some_and(|id| id != buffer_id)
+            {
+                self.release_web_history(session_id);
+            }
+            self.web_history_buffers
+                .insert(session_id.to_string(), buffer_id.to_string());
+        }
         let Some(buffer) = self.state.buffers.get(buffer_id) else {
             self.reply_server_history_page(&request);
             return;
@@ -384,6 +407,96 @@ mod tests {
             app.volatile_mentions[0].1.timestamp,
             (now - chrono::Duration::days(1)).timestamp()
         );
+    }
+
+    #[tokio::test]
+    async fn web_history_releases_memory_after_the_last_reader_leaves() {
+        let mut app = app();
+        app.state.scrollback_limit = 1;
+        for text in ["older", "middle", "current"] {
+            let message = crate::state::events::tests::make_test_message(&mut app.state, text);
+            app.state
+                .buffers
+                .get_mut("account/#test")
+                .unwrap()
+                .messages
+                .push_back(message);
+        }
+        app.state
+            .buffers
+            .get_mut("account/#test")
+            .unwrap()
+            .pin_backlog = true;
+        app.fetch_server_history_page("account/#test", 1, Some(i64::MAX), None, "first");
+        app.fetch_server_history_page("account/#test", 1, Some(i64::MAX), None, "second");
+        app.collapse_backlog_if_at_bottom();
+        assert_eq!(app.state.buffers["account/#test"].messages.len(), 3);
+        app.handle_web_command(
+            crate::web::protocol::WebCommand::CollapseBacklog {
+                buffer_id: "account/#test".into(),
+            },
+            "first",
+        );
+        assert!(app.state.buffers["account/#test"].pin_backlog);
+        app.handle_web_command(crate::web::protocol::WebCommand::WebDisconnect, "second");
+        assert!(!app.state.buffers["account/#test"].pin_backlog);
+        assert_eq!(app.state.buffers["account/#test"].messages.len(), 1);
+        assert!(app.web_history_buffers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn web_collapse_preserves_history_being_read_in_the_terminal() {
+        let mut app = app();
+        app.state.active_buffer_id = Some("account/#test".into());
+        app.scroll_offset = 5;
+        app.state
+            .buffers
+            .get_mut("account/#test")
+            .unwrap()
+            .pin_backlog = true;
+        app.web_history_buffers
+            .insert("browser".into(), "account/#test".into());
+        app.release_web_history("browser");
+        assert!(app.state.buffers["account/#test"].pin_backlog);
+        app.scroll_offset = 0;
+        app.collapse_backlog_if_at_bottom();
+        assert!(!app.state.buffers["account/#test"].pin_backlog);
+    }
+
+    #[tokio::test]
+    async fn reopening_query_reloads_history_after_pagination_exhaustion() {
+        let mut app = app();
+        app.state
+            .add_buffer(Buffer::for_test("account", BufferType::Query, "peer"));
+        app.load_backlog("account/peer");
+        app.state
+            .connections
+            .get_mut("account")
+            .unwrap()
+            .chathistory
+            .complete_target("peer", 0, None, true);
+        let message = crate::state::events::tests::make_test_message(&mut app.state, "current");
+        app.state.add_message("account/peer", message);
+        assert!(app.fetch_older_via_chathistory("account/peer"));
+        app.state
+            .connections
+            .get_mut("account")
+            .unwrap()
+            .chathistory
+            .complete_target("peer", 0, Some((1000, None)), true);
+        assert!(
+            app.state.connections["account"]
+                .chathistory
+                .is_before_exhausted("peer")
+        );
+        app.state.remove_buffer("account/peer");
+        app.state
+            .add_buffer(Buffer::for_test("account", BufferType::Query, "peer"));
+        app.load_backlog("account/peer");
+        let history = &app.state.connections["account"].chathistory;
+        assert!(!history.is_before_exhausted("peer"));
+        assert!(history.oldest_fetched("peer").is_none());
+        assert!(history.requested_limit("peer", Direction::Latest).is_some());
     }
 
     #[tokio::test]
