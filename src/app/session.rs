@@ -76,6 +76,13 @@ impl App {
         let (output_tx, mut output_rx) = mpsc::unbounded_channel::<MainMessage>();
         let queued_output_bytes = Arc::new(AtomicUsize::new(0));
         let output_queued_bytes = Arc::clone(&queued_output_bytes);
+        let socket_writer = SocketWriter::new(
+            output_tx.clone(),
+            queued_output_bytes,
+            MAX_SOCKET_OUTPUT_QUEUE_BYTES,
+        );
+        let output = socket_writer.output();
+        let output_drained = Arc::clone(&output.drained);
         let output_handle = tokio::spawn(async move {
             let mut write_half = write_half;
             while let Some(msg) = output_rx.recv().await {
@@ -83,9 +90,14 @@ impl App {
                     MainMessage::Output(data) => data.len(),
                     MainMessage::Detached | MainMessage::Quit => 0,
                 };
-                let result = protocol::write_message(&mut write_half, &msg).await;
-                if output_len > 0 {
-                    output_queued_bytes.fetch_sub(output_len, Ordering::AcqRel);
+                let result = match &msg {
+                    MainMessage::Output(data) => protocol::write_output(&mut write_half, data).await,
+                    _ => protocol::write_message(&mut write_half, &msg).await,
+                };
+                if output_len > 0
+                    && output_queued_bytes.fetch_sub(output_len, Ordering::AcqRel) == output_len
+                {
+                    output_drained.notify_one();
                 }
                 if result.is_err() {
                     tracing::warn!("shim output write failed, closing output task");
@@ -96,11 +108,6 @@ impl App {
         });
 
         // Create socket-backed terminal.
-        let socket_writer = SocketWriter::new(
-            output_tx.clone(),
-            queued_output_bytes,
-            MAX_SOCKET_OUTPUT_QUEUE_BYTES,
-        );
         let terminal = ui::setup_socket_terminal(Box::new(socket_writer), cols, rows)?;
 
         // Set up input reader: read ShimMessages from socket → mpsc.
@@ -126,6 +133,7 @@ impl App {
 
         self.terminal = Some(terminal);
         self.socket_output_tx = Some(output_tx);
+        self.socket_output = Some(output);
         self.shim_event_rx = Some(shim_rx);
         self.shim_output_handle = Some(output_handle);
         self.shim_input_handle = Some(input_handle);
@@ -216,6 +224,7 @@ impl App {
     pub(crate) fn teardown_shim(&mut self) {
         self.terminal = None;
         self.socket_output_tx = None;
+        self.socket_output = None;
         self.shim_event_rx = None;
         self.is_socket_attached = false;
         self.shim_term_env = None;

@@ -18,6 +18,7 @@ mod maintenance;
 mod mentions;
 pub mod scripting;
 mod session;
+mod terminal_output;
 mod shell;
 pub mod shrink;
 pub mod translate;
@@ -444,6 +445,7 @@ pub struct App {
     /// when `[storage] encrypt = true`.
     pub log_db: Option<crate::storage::LogDb>,
     pub(crate) socket_listener: Option<tokio::net::UnixListener>,
+    pub(crate) socket_output: Option<crate::session::writer::SocketOutput>,
     pub(crate) socket_output_tx:
         Option<tokio::sync::mpsc::UnboundedSender<crate::session::protocol::MainMessage>>,
     pub(crate) shim_event_rx:
@@ -890,6 +892,7 @@ impl App {
             log_db: None,
             socket_listener: None,
             socket_output_tx: None,
+            socket_output: None,
             shim_event_rx: None,
             is_socket_attached: false,
             term_reader_stop: Arc::new(AtomicBool::new(false)),
@@ -970,7 +973,8 @@ impl App {
     #[must_use]
     pub fn emotes_graphical(&self) -> bool {
         use crate::config::RenderMode;
-        self.config.emotes.enabled
+        self.terminal_graphics_enabled()
+            && self.config.emotes.enabled
             && self.config.emotes.render == RenderMode::Graphical
             && self.picker.protocol_type() != ratatui_image::picker::ProtocolType::Halfblocks
     }
@@ -1415,35 +1419,8 @@ impl App {
             // it early-returns unless the active buffer is at-bottom AND pinned.
             self.collapse_backlog_if_at_bottom();
 
-            if let Some(mut terminal) = self.terminal.take() {
-                let size = terminal.size().map_or((self.cached_term_cols, self.cached_term_rows), |size| (size.width, size.height));
-                let key = crate::image_preview::inline::frame_key(self, size);
-                let clear_inline = self.inline_previews.prepare_frame(key, self.needs_full_redraw);
-                if clear_inline {
-                    self.inline_previews.clear_graphics(terminal.backend_mut(), self.picker.protocol_type(), self.in_tmux);
-                    self.emote_animator.clear();
-                }
-                if self.needs_full_redraw || clear_inline {
-                    let _ = terminal.clear();
-                    self.needs_full_redraw = false;
-                }
-                match terminal.draw(|frame| ui::layout::draw(frame, self)) {
-                    Ok(_) => {
-                        self.inline_previews.write_direct(terminal.backend_mut(), self.picker.protocol_type());
-                        let key = crate::image_preview::inline::frame_key(self, size);
-                        self.inline_previews.finish_frame(key);
-                        self.terminal = Some(terminal);
-                    }
-                    Err(e) => {
-                        tracing::warn!("terminal draw failed, triggering detach: {e}");
-                        self.should_detach = true;
-                    }
-                }
-            }
-
-            if self.terminal.is_some() {
-                self.write_tmux_direct_image();
-            }
+            let output_deferred = !self.render_terminal_frame();
+            let output_drained = self.socket_output.as_ref().map(|output| Arc::clone(&output.drained));
 
             // Re-arm the animation clock: wake in 50ms iff an animated (multi-frame)
             // emote is currently on screen, else sleep far out (idle = no wakeups).
@@ -1468,6 +1445,12 @@ impl App {
             }
 
             tokio::select! {
+                () = async {
+                    match output_drained {
+                        Some(notify) => notify.notified().await,
+                        None => std::future::pending().await,
+                    }
+                }, if output_deferred => {},
                 ev = async {
                     match self.term_rx.as_mut() {
                         Some(rx) => rx.recv().await,
@@ -1529,6 +1512,7 @@ impl App {
                         tracing::info!("shim disconnected, returning to detached mode");
                         self.terminal = None;
                         self.socket_output_tx = None;
+                        self.socket_output = None;
                         self.shim_event_rx = None;
                         self.is_socket_attached = false;
                         self.shim_term_env = None;
