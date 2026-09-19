@@ -767,18 +767,17 @@ async fn pinned_bouncer_generated_children() {
     app.config.display.backlog_lines = 200;
     let id = app.bouncer_children.keys().next().unwrap().clone();
     let buffer_id = make_buffer_id(&id, "history-peer");
-    app.state.add_buffer(crate::state::buffer::Buffer::for_test(
-        &id, crate::state::buffer::BufferType::Query, "history-peer",
-    ));
+    let channel_id = make_buffer_id(&id, "#history-channel");
     let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(512);
     app.state.log_tx = Some(log_tx);
-    app.load_backlog(&buffer_id);
     for expected in [200, 300] {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while let Some(event) = app.irc_rx.recv().await {
                 app.handle_irc_event(event);
-                if app.state.buffers[&buffer_id].messages.len() >= expected
+                if app.state.buffers.get(&buffer_id).is_some_and(|buffer| buffer.messages.len() >= expected)
+                    && app.state.buffers.get(&channel_id).is_some_and(|buffer| buffer.messages.len() == 200)
                     && !app.state.connections[&id].chathistory.any_in_flight("history-peer")
+                    && !app.state.connections[&id].chathistory.any_in_flight("#history-channel")
                 {
                     return;
                 }
@@ -795,8 +794,15 @@ async fn pinned_bouncer_generated_children() {
         assert_eq!(message.text, format!("fixture-history-{index}"));
     }
     assert!(app.state.connections[&id].chathistory.is_before_exhausted("history-peer"));
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !app.history_discovery[&id].finished {
+            let event = app.irc_rx.recv().await.expect("connection closed during TARGETS pagination");
+            app.handle_irc_event(event);
+        }
+    }).await.expect("TARGETS discovery did not finish");
     while let Ok(row) = log_rx.try_recv() {
         assert_ne!(row.buffer, "history-peer");
+        assert_ne!(row.buffer, "#history-channel");
     }
     app.suspend_bouncer_children("fixture");
     assert!(

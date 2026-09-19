@@ -284,6 +284,8 @@ mod tests {
             "label = 'Bouncer'\naddress = 'bnc.example.org'\nport = 6697\ntls = true\nchannels = []\nbouncer_network_id = '42'",
         ).unwrap();
         app.setup_connection("account", &server);
+        app.state.connections.get_mut("account").unwrap().status =
+            crate::state::connection::ConnectionStatus::Connected;
         app.state
             .add_buffer(Buffer::for_test("account", BufferType::Channel, "#test"));
         app.state
