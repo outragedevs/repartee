@@ -314,6 +314,7 @@ impl Default for StatusbarConfig {
 #[serde(default)]
 pub struct ImagePreviewConfig {
     pub enabled: bool,
+    pub inline: bool,
     pub max_width: u32,
     pub max_height: u32,
     pub cache_max_mb: u32,
@@ -328,6 +329,7 @@ impl Default for ImagePreviewConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            inline: false,
             max_width: 0,
             max_height: 0,
             cache_max_mb: 100,

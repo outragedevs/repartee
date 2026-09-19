@@ -747,29 +747,8 @@ impl App {
             return;
         };
 
-        // Map the clicked row to the corresponding message, same logic as
-        // chat_view render (approximated in message units — wrapped messages
-        // shift the mapping; do NOT write the clamped value back here).
-        let total = buf.messages.len();
-        let chat_height = self
-            .ui_regions
-            .and_then(|r| r.chat_area)
-            .map_or(0, |a| a.height as usize);
-        let (_scroll, skip) = crate::ui::chat_view::resolve_scroll(
-            total,
-            chat_height,
-            self.scroll_offset,
-        );
-        let msg_index = skip + y_offset;
-
-        let Some(msg) = buf.messages.get(msg_index) else {
-            return;
-        };
-
-        // Extract URLs from message text and preview the first classifiable one.
-        let urls = crate::image_preview::detect::extract_urls(&msg.text);
-        if let Some(classification) = urls.first() {
-            self.show_image_preview(&classification.url);
+        if let Some(url) = self.chat_rows.as_ref().and_then(|rows| rows.preview_url(buf, y_offset)) {
+            self.show_image_preview(&url);
         }
     }
 
@@ -2914,6 +2893,8 @@ pub mod submit_typing_tests {
             last_mention_purge: Instant::now(),
             quit_message: None,
             image_preview: crate::image_preview::PreviewStatus::default(),
+            chat_rows: None,
+            inline_previews: crate::image_preview::inline::InlinePreviews::default(),
             image_clear_rect: None,
             preview_rx,
             preview_tx,

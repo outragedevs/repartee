@@ -394,6 +394,8 @@ pub struct App {
     pub(crate) last_mention_purge: Instant,
     pub quit_message: Option<String>,
     pub image_preview: crate::image_preview::PreviewStatus,
+    pub chat_rows: Option<crate::ui::chat_view::ChatRows>,
+    pub inline_previews: crate::image_preview::inline::InlinePreviews,
     pub image_clear_rect: Option<Rect>,
     pub(crate) preview_rx: mpsc::Receiver<crate::image_preview::ImagePreviewEvent>,
     pub(crate) preview_tx: mpsc::Sender<crate::image_preview::ImagePreviewEvent>,
@@ -849,6 +851,8 @@ impl App {
             last_mention_purge: Instant::now(),
             quit_message: None,
             image_preview: crate::image_preview::PreviewStatus::default(),
+            chat_rows: None,
+            inline_previews: crate::image_preview::inline::InlinePreviews::default(),
             image_clear_rect: None,
             preview_rx,
             preview_tx,
@@ -980,6 +984,7 @@ impl App {
     }
 
     pub fn recompute_wrap_indent(&mut self) {
+        self.inline_previews.invalidate_layout();
         let ts_sample = chrono::Local::now()
             .format(&self.config.general.timestamp_format)
             .to_string();
@@ -1411,12 +1416,22 @@ impl App {
             self.collapse_backlog_if_at_bottom();
 
             if let Some(mut terminal) = self.terminal.take() {
-                if self.needs_full_redraw {
+                let size = terminal.size().map_or((self.cached_term_cols, self.cached_term_rows), |size| (size.width, size.height));
+                let key = crate::image_preview::inline::frame_key(self, size);
+                let clear_inline = self.inline_previews.prepare_frame(key, self.needs_full_redraw);
+                if clear_inline {
+                    self.inline_previews.clear_graphics(terminal.backend_mut(), self.picker.protocol_type(), self.in_tmux);
+                    self.emote_animator.clear();
+                }
+                if self.needs_full_redraw || clear_inline {
                     let _ = terminal.clear();
                     self.needs_full_redraw = false;
                 }
                 match terminal.draw(|frame| ui::layout::draw(frame, self)) {
                     Ok(_) => {
+                        self.inline_previews.write_direct(terminal.backend_mut(), self.picker.protocol_type());
+                        let key = crate::image_preview::inline::frame_key(self, size);
+                        self.inline_previews.finish_frame(key);
                         self.terminal = Some(terminal);
                     }
                     Err(e) => {

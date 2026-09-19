@@ -163,6 +163,18 @@ pub async fn fetch_image(
     Err(FetchError::NotAnImage { content_type })
 }
 
+pub async fn fetch_direct_image(
+    url: &str,
+    config: &FetchConfig,
+    client: &Client,
+) -> Result<FetchResult, FetchError> {
+    let (data, content_type, _) = fetch_url(url, config, client).await?;
+    if !is_image_content_type(&content_type) {
+        return Err(FetchError::NotAnImage { content_type });
+    }
+    Ok(FetchResult { data, content_type })
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -184,7 +196,7 @@ async fn fetch_url(
         return Err(FetchError::BlockedUrl(reason.to_owned()));
     }
 
-    let response = client
+    let mut response = client
         .get(url)
         .header(reqwest::header::USER_AGENT, USER_AGENT)
         .timeout(Duration::from_secs(u64::from(config.timeout_secs)))
@@ -221,22 +233,22 @@ async fn fetch_url(
         });
     }
 
-    let bytes = response.bytes().await.map_err(|e| {
-        if e.is_timeout() {
+    let mut data = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        if error.is_timeout() {
             FetchError::Timeout
         } else {
-            FetchError::Network(e.to_string())
+            FetchError::Network(error.to_string())
         }
-    })?;
-
-    if bytes.len() as u64 > config.max_file_size {
-        return Err(FetchError::TooLarge {
-            size: bytes.len() as u64,
-            max: config.max_file_size,
-        });
+    })? {
+        let size = (data.len() as u64).saturating_add(chunk.len() as u64);
+        if size > config.max_file_size {
+            return Err(FetchError::TooLarge { size, max: config.max_file_size });
+        }
+        data.extend_from_slice(&chunk);
     }
 
-    Ok((bytes.to_vec(), content_type, final_url))
+    Ok((data, content_type, final_url))
 }
 
 /// Return `true` if the content-type string indicates an image.
@@ -279,6 +291,67 @@ fn resolve_url(url: &str, base: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn direct_image_mode_rejects_html_without_following_og_image() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/fake.png", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            let body = r#"<meta property="og:image" content="/other.png">"#;
+            let reply = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            socket.write_all(reply.as_bytes()).await.unwrap();
+            drop(socket);
+            tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept()).await.is_ok()
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let result = super::fetch_direct_image(&url, &super::FetchConfig::default(), &client).await;
+        assert!(matches!(result, Err(super::FetchError::NotAnImage { .. })));
+        assert!(!server.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn chunked_download_stops_at_limit_without_waiting_for_eof() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/large.png", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nTransfer-Encoding: chunked\r\n\r\n400\r\n").await.unwrap();
+            socket.write_all(&[0; 1024]).await.unwrap();
+            socket.write_all(b"\r\n").await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let config = super::FetchConfig { max_file_size: 64, ..super::FetchConfig::default() };
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), super::fetch_image(&url, &config, &client)).await;
+        server.abort();
+        assert!(matches!(result.unwrap(), Err(super::FetchError::TooLarge { max: 64, .. })));
+    }
+
+    #[tokio::test]
+    async fn memory_only_fetch_does_not_create_a_disk_cache_entry() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/memory-only.png", listener.local_addr().unwrap());
+        assert!(crate::image_preview::cache::is_cached(&url).is_none());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 8\r\nConnection: close\r\n\r\n\x89PNG\r\n\x1a\n").await.unwrap();
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let result = crate::image_preview::fetch_image_data(&url, &crate::config::ImagePreviewConfig::default(), &client, None, crate::image_preview::FetchMode::Inline).await.unwrap();
+        server.await.unwrap();
+        assert_eq!(result.0, b"\x89PNG\r\n\x1a\n");
+        assert!(crate::image_preview::cache::is_cached(&url).is_none());
+    }
+
     use super::*;
 
     // -- og:image extraction ------------------------------------------------

@@ -6,6 +6,28 @@ use ratatui::widgets::Paragraph;
 use crate::app::App;
 use crate::theme::hex_to_color;
 
+pub struct ChatRows {
+    buffer_id: String,
+    rows: Vec<(u64, Option<String>)>,
+    walked_messages: usize,
+}
+
+impl ChatRows {
+    pub fn message_count(&self, buffer_id: &str) -> usize {
+        if self.buffer_id == buffer_id { self.walked_messages } else { 0 }
+    }
+
+    pub fn preview_url(&self, buffer: &crate::state::buffer::Buffer, row: usize) -> Option<String> {
+        if buffer.id != self.buffer_id {
+            return None;
+        }
+        let (id, inline_url) = self.rows.get(row)?;
+        let message = buffer.messages.iter().find(|message| message.id == *id)?;
+        inline_url.clone().or_else(|| crate::image_preview::detect::extract_urls(&message.text)
+            .into_iter().next().map(|url| url.url))
+    }
+}
+
 // Hard upper bound on wrapped lines per message used by `compute_render_budget`
 // to cap the render loop's work. A ~1000-char NOTICE on an 80-col terminal
 // wraps to ~13 visual lines; 16 is a safe over-estimate for realistic IRC
@@ -25,9 +47,9 @@ const MAX_WRAPPED_LINES_PER_MSG: usize = 16;
 // Capped at `buffer_len * MAX_WRAPPED_LINES_PER_MSG` so the caller's break
 // condition `visual_lines.len() > needed` fires in O(buffer_len) regardless
 // of `scroll_offset`. Empty buffers fall back to `visible_height`.
-fn compute_render_budget(buffer_len: usize, visible_height: usize, scroll_offset: usize) -> usize {
+fn compute_render_budget(buffer_len: usize, visible_height: usize, scroll_offset: usize, inline: bool) -> usize {
     let cap = buffer_len
-        .saturating_mul(MAX_WRAPPED_LINES_PER_MSG)
+        .saturating_mul(MAX_WRAPPED_LINES_PER_MSG + if inline { usize::from(crate::image_preview::inline::ROWS) } else { 0 })
         .max(visible_height);
     visible_height.saturating_add(scroll_offset).min(cap)
 }
@@ -69,6 +91,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     // area) don't leave stale rects that would ghost-render over another view
     // and keep the animation clock spinning. The normal path overwrites this.
     app.emote_placements.clear();
+    app.chat_rows = None;
+    app.inline_previews.visible = false;
     // Same hygiene for the pinned-top flag: early returns must not leave a
     // stale `true` from another buffer feeding the backlog paginators.
     app.chat_scroll_at_top = false;
@@ -99,6 +123,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     // after the immutable borrow below ends, for the compositing pass.
     let mut placements: Vec<crate::ui::emote_layout::EmotePlacement> = Vec::new();
 
+    let inline_enabled = app.config.image_preview.enabled && app.config.image_preview.inline;
+    let mut inline_placements = Vec::new();
     let colors = &app.theme.colors;
     let bg = hex_to_color(&colors.bg).unwrap_or(Color::Reset);
     let fg_muted = hex_to_color(&colors.fg_muted).unwrap_or(Color::DarkGray);
@@ -123,8 +149,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         // Walk messages in reverse and wrap each into visual lines. The break
         // below fires in O(buf.messages.len()) via the budget cap — this
         // prevents the v0.8.4 OOM on long mouse-wheel scrolls.
-        let needed = compute_render_budget(buf.messages.len(), visible_height, app.scroll_offset);
+        let needed = compute_render_budget(buf.messages.len(), visible_height, app.scroll_offset, inline_enabled);
         let mut visual_lines: VecDeque<Line<'_>> = VecDeque::new();
+        let mut image_rows = VecDeque::new();
+        let mut message_rows = VecDeque::new();
 
         let mut msgs = buf.messages.iter().rev();
         for msg in msgs.by_ref() {
@@ -159,9 +187,21 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
                 None => wrapped,
             };
 
+            if inline_enabled
+                && let Some(key) = crate::image_preview::inline::ImageKey::for_message(&buf.id, msg)
+            {
+                for row in (0..crate::image_preview::inline::ROWS).rev() {
+                    visual_lines.push_front(Line::default());
+                    image_rows.push_front(Some((key.clone(), row)));
+                    message_rows.push_front(msg.id);
+                }
+            }
+
             // Push in reverse so the final deque is in chronological order.
             for wl in wrapped.into_iter().rev() {
                 visual_lines.push_front(wl);
+                image_rows.push_front(None);
+                message_rows.push_front(msg.id);
             }
 
             // The budget check counts the *expanded* lines (reserved blanks
@@ -176,6 +216,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
 
         // If the walk broke on the budget with messages left, `total` is a
         // lower bound, not the true line count.
+        let walked_messages = buf.messages.len().saturating_sub(msgs.len());
         let walked_all = msgs.next().is_none();
 
         let total = visual_lines.len();
@@ -195,6 +236,16 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             .take(visible_height)
             .collect();
 
+        let visible_image_rows: Vec<_> = image_rows.into_iter().skip(skip).take(visible_height).collect();
+        inline_placements = crate::image_preview::inline::placements(&visible_image_rows, area);
+        app.chat_rows = Some(ChatRows {
+            buffer_id: buf.id.clone(),
+            walked_messages,
+            rows: message_rows.into_iter().skip(skip).take(visible_height)
+                .zip(visible_image_rows.iter().map(|row| row.as_ref().map(|(key, _)| key.url.clone())))
+                .collect(),
+        });
+
         // Resolve inline-emote screen rects before the Paragraph consumes the lines.
         if let Some(sizing) = emote_sizing {
             placements = crate::ui::emote_layout::resolve_placements(
@@ -213,6 +264,16 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         frame.render_widget(paragraph, area);
     }
 
+    app.inline_previews.render(frame, &inline_placements, &crate::image_preview::inline::RenderContext {
+        picker: &app.picker,
+        config: &app.config.image_preview,
+        tx: &app.preview_tx,
+        background: crate::theme::hex_to_rgb_or(&app.theme.colors.bg, (0, 0, 0)),
+        tmux_direct: app.in_tmux && !app.is_socket_attached
+            && matches!(app.picker.protocol_type(), ratatui_image::picker::ProtocolType::Kitty | ratatui_image::picker::ProtocolType::Iterm2),
+        suppressed: !matches!(app.image_preview, crate::image_preview::PreviewStatus::Hidden)
+            || app.wizard.is_some() || app.emote_picker.is_open(),
+    });
     app.emote_placements = placements;
 }
 
@@ -222,9 +283,16 @@ mod tests {
         use super::super::{MAX_WRAPPED_LINES_PER_MSG, compute_render_budget};
 
         #[test]
+        fn includes_reserved_image_rows_in_history_budget() {
+            let got = compute_render_budget(100, 20, usize::MAX, true);
+            assert_eq!(got, 100 * (MAX_WRAPPED_LINES_PER_MSG + usize::from(crate::image_preview::inline::ROWS)));
+            assert_eq!(compute_render_budget(0, 20, usize::MAX, true), 20);
+        }
+
+        #[test]
         fn returns_visible_plus_offset_for_normal_scroll() {
             // Typical case: user scrolled a bit, offset small vs buffer cap.
-            let got = compute_render_budget(2000, 78, 50);
+            let got = compute_render_budget(2000, 78, 50, false);
             assert_eq!(
                 got, 128,
                 "2000-msg buffer with scroll_offset=50 should return visible_height+offset (78+50=128), got {got}"
@@ -233,7 +301,7 @@ mod tests {
 
         #[test]
         fn returns_visible_height_when_scroll_is_zero() {
-            let got = compute_render_budget(2000, 78, 0);
+            let got = compute_render_budget(2000, 78, 0, false);
             assert_eq!(
                 got, 78,
                 "zero scroll_offset should return exactly visible_height, got {got}"
@@ -248,7 +316,7 @@ mod tests {
             // buffer_len * MAX_WRAPPED_LINES_PER_MSG, guaranteeing
             // O(buffer_len) termination.
             let buffer_len = 2000;
-            let got = compute_render_budget(buffer_len, 78, usize::MAX / 2);
+            let got = compute_render_budget(buffer_len, 78, usize::MAX / 2, false);
             let expected = buffer_len * MAX_WRAPPED_LINES_PER_MSG;
             assert_eq!(
                 got,
@@ -263,7 +331,7 @@ mod tests {
             // Empty buffer: buffer_cap is 0 before the .max(visible_height)
             // floor. The floor ensures render still targets a full screen
             // even when scroll_offset is large.
-            let got = compute_render_budget(0, 78, 1000);
+            let got = compute_render_budget(0, 78, 1000, false);
             assert_eq!(
                 got, 78,
                 "empty buffer with any scroll_offset should fall back to visible_height, got {got}"
@@ -274,7 +342,7 @@ mod tests {
         fn caps_at_buffer_cap_for_small_buffer_with_large_scroll() {
             // 10-message buffer cannot produce more than 10*16=160 lines
             // even if the user scrolled a million ticks up.
-            let got = compute_render_budget(10, 78, 1_000_000);
+            let got = compute_render_budget(10, 78, 1_000_000, false);
             let expected = 10 * MAX_WRAPPED_LINES_PER_MSG;
             assert_eq!(
                 got, expected,
@@ -287,7 +355,7 @@ mod tests {
             // visible_height + scroll_offset must never panic on overflow.
             // saturating_add protects the intermediate, then .min() with
             // the cap brings the final value down to a sane number.
-            let got = compute_render_budget(100, 78, usize::MAX);
+            let got = compute_render_budget(100, 78, usize::MAX, false);
             let expected = 100 * MAX_WRAPPED_LINES_PER_MSG;
             assert_eq!(
                 got, expected,
