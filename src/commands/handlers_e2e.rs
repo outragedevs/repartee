@@ -628,7 +628,7 @@ fn e2e_accept(app: &mut App, nick: &str) {
 
     match mgr.keyring().get_incoming_session(&handle, &chan) {
         Ok(Some(sess)) => {
-            if sess.status == TrustStatus::Pending && sess.sk == [0u8; 32] {
+            if sess.status == TrustStatus::Pending && *sess.sk == [0u8; 32] {
                 err(
                     app,
                     &format!(
@@ -2270,7 +2270,7 @@ mod tests {
                 0xde, 0xad, 0xbe, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xed,
                 0xfa, 0xce,
             ],
-            sk: [0u8; 32],
+            sk: [0u8; 32].into(),
             status: TrustStatus::Trusted,
             created_at: 0,
         };

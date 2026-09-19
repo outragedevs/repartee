@@ -539,7 +539,7 @@ fn import_replaces_existing_keyring_state() {
             handle: "~stale@old.host".to_string(),
             channel: "#stale".to_string(),
             fingerprint: [9u8; 16],
-            sk: [8u8; 32],
+            sk: [8u8; 32].into(),
             status: TrustStatus::Trusted,
             created_at: 2_000,
         })
@@ -1073,7 +1073,7 @@ fn rekey_rejects_unknown_peer() {
     let mut wrap_key = [0u8; 32];
     hk.expand(info.as_bytes(), &mut wrap_key).unwrap();
     let (wrap_nonce, wrap_ct) =
-        crate::e2e::crypto::aead::encrypt(&wrap_key, info.as_bytes(), &sk).unwrap();
+        crate::e2e::crypto::aead::encrypt(&wrap_key, info.as_bytes(), sk.as_slice()).unwrap();
     let nonce = [7u8; 16];
     let pubkey = stranger.identity_pub();
     let sig_payload = crate::e2e::handshake::signed_keyrekey_payload(
@@ -3363,7 +3363,7 @@ fn trusted_peer_listing_unions_scoped_and_legacy_rows() {
                 handle: handle.to_string(),
                 channel: channel.to_string(),
                 fingerprint: [fpb; 16],
-                sk: [1u8; 32],
+                sk: [1u8; 32].into(),
                 status: TrustStatus::Trusted,
                 created_at: 100,
             })
@@ -3399,7 +3399,7 @@ fn first_scoped_rekey_retains_legacy_key_and_fingerprint_check() {
         handle: "~alice@a.host".into(),
         channel: "#x".into(),
         fingerprint: [0xaa; 16],
-        sk: [1u8; 32],
+        sk: [1u8; 32].into(),
         status: TrustStatus::Trusted,
         created_at: 100,
     })
@@ -3411,7 +3411,7 @@ fn first_scoped_rekey_retains_legacy_key_and_fingerprint_check() {
         handle: "~alice@a.host".into(),
         channel: scoped.clone(),
         fingerprint: [0xaa; 16],
-        sk: [2u8; 32],
+        sk: [2u8; 32].into(),
         status: TrustStatus::Trusted,
         created_at: 200,
     })
@@ -3420,7 +3420,7 @@ fn first_scoped_rekey_retains_legacy_key_and_fingerprint_check() {
         .get_incoming_prev_key("~alice@a.host", &scoped)
         .unwrap()
         .expect("legacy key must be retained as prev on the first scoped install");
-    assert_eq!(prev_sk, [1u8; 32]);
+    assert_eq!(*prev_sk, [1u8; 32]);
 
     // Different fingerprint under another scoped context with only a legacy
     // row → must be rejected like any TOFU fingerprint change.
@@ -3431,7 +3431,7 @@ fn first_scoped_rekey_retains_legacy_key_and_fingerprint_check() {
         handle: "~alice@a.host".into(),
         channel: "#x".into(),
         fingerprint: [0xaa; 16],
-        sk: [1u8; 32],
+        sk: [1u8; 32].into(),
         status: TrustStatus::Trusted,
         created_at: 100,
     })
@@ -3441,7 +3441,7 @@ fn first_scoped_rekey_retains_legacy_key_and_fingerprint_check() {
             handle: "~alice@a.host".into(),
             channel: crate::e2e::scoped_context("NetA", "#x"),
             fingerprint: [0xbb; 16],
-            sk: [2u8; 32],
+            sk: [2u8; 32].into(),
             status: TrustStatus::Trusted,
             created_at: 200,
         })

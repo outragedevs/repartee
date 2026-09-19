@@ -21,6 +21,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::e2e::crypto::aead::SessionKey;
 use crate::e2e::crypto::fingerprint::Fingerprint;
@@ -52,7 +53,7 @@ pub struct Portable {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortableIdentity {
     pub pubkey: String,
-    pub privkey: String,
+    pub privkey: Zeroizing<String>,
     pub fingerprint: String,
     #[serde(rename = "createdAt")]
     pub created_at: i64,
@@ -79,7 +80,7 @@ pub struct PortableIncoming {
     pub handle: String,
     pub channel: String,
     pub fingerprint: String,
-    pub sk: String,
+    pub sk: Zeroizing<String>,
     pub status: String,
     #[serde(rename = "createdAt")]
     pub created_at: i64,
@@ -88,7 +89,7 @@ pub struct PortableIncoming {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortableOutgoing {
     pub channel: String,
-    pub sk: String,
+    pub sk: Zeroizing<String>,
     #[serde(rename = "createdAt")]
     pub created_at: i64,
     #[serde(rename = "pendingRotation")]
@@ -166,10 +167,11 @@ pub fn expand_path(path: &str) -> Result<PathBuf> {
 /// responsible for warning the user.
 pub fn export_to_path(keyring: &Keyring, path: &Path) -> Result<ExportSummary> {
     let doc = build_portable(keyring)?;
-    let json = serde_json::to_string_pretty(&doc)
+    let mut json = Zeroizing::new(Vec::new());
+    serde_json::to_writer_pretty(&mut *json, &doc)
         .map_err(|e| E2eError::Keyring(format!("serialize export json: {e}")))?;
 
-    write_private_file(path, json.as_bytes())?;
+    write_private_file(path, &json)?;
 
     Ok(ExportSummary {
         peers: doc.peers.len(),
@@ -200,7 +202,7 @@ fn build_portable(keyring: &Keyring) -> Result<Portable> {
         exported_at: chrono::Utc::now().timestamp(),
         identity: PortableIdentity {
             pubkey: hex::encode(pubkey),
-            privkey: hex::encode(privkey),
+            privkey: Zeroizing::new(hex::encode(&privkey)),
             fingerprint: hex::encode(fingerprint),
             created_at,
         },
@@ -222,7 +224,7 @@ fn build_portable(keyring: &Keyring) -> Result<Portable> {
                 handle: s.handle,
                 channel: s.channel,
                 fingerprint: hex::encode(s.fingerprint),
-                sk: hex::encode(s.sk),
+                sk: Zeroizing::new(hex::encode(&s.sk)),
                 status: s.status.as_str().to_string(),
                 created_at: s.created_at,
             })
@@ -231,7 +233,7 @@ fn build_portable(keyring: &Keyring) -> Result<Portable> {
             .into_iter()
             .map(|o| PortableOutgoing {
                 channel: o.channel,
-                sk: hex::encode(o.sk),
+                sk: Zeroizing::new(hex::encode(&o.sk)),
                 created_at: o.created_at,
                 pending_rotation: o.pending_rotation,
             })
@@ -263,12 +265,12 @@ fn build_portable(keyring: &Keyring) -> Result<Portable> {
 pub fn import_from_path(keyring: &Keyring, path: &Path) -> Result<ImportSummary> {
     let mut file =
         File::open(path).map_err(|e| E2eError::Keyring(format!("open {}: {e}", path.display())))?;
-    let mut raw = String::new();
-    file.read_to_string(&mut raw)
+    let mut raw = Zeroizing::new(Vec::new());
+    file.read_to_end(&mut raw)
         .map_err(|e| E2eError::Keyring(format!("read {}: {e}", path.display())))?;
 
     let doc: Portable =
-        serde_json::from_str(&raw).map_err(|e| E2eError::Keyring(format!("parse json: {e}")))?;
+        serde_json::from_slice(&raw).map_err(|e| E2eError::Keyring(format!("parse json: {e}")))?;
 
     // Validate EVERYTHING first — no writes on failure.
     let validated = validate(&doc)?;
@@ -371,7 +373,7 @@ struct Validated {
 
 struct ValidatedIdentity {
     pubkey: [u8; 32],
-    privkey: [u8; 32],
+    privkey: Zeroizing<[u8; 32]>,
     fingerprint: Fingerprint,
     created_at: i64,
 }
@@ -386,7 +388,7 @@ fn validate(doc: &Portable) -> Result<Validated> {
 
     let identity = ValidatedIdentity {
         pubkey: parse_hex_array::<32>("identity.pubkey", &doc.identity.pubkey)?,
-        privkey: parse_hex_array::<32>("identity.privkey", &doc.identity.privkey)?,
+        privkey: parse_secret_array::<32>("identity.privkey", &doc.identity.privkey)?,
         fingerprint: parse_hex_array::<16>("identity.fingerprint", &doc.identity.fingerprint)?,
         created_at: doc.identity.created_at,
     };
@@ -419,7 +421,7 @@ fn validate(doc: &Portable) -> Result<Validated> {
                 &format!("incomingSessions[{idx}].fingerprint"),
                 &s.fingerprint,
             )?,
-            sk: parse_hex_array::<32>(&format!("incomingSessions[{idx}].sk"), &s.sk)?,
+            sk: parse_secret_array::<32>(&format!("incomingSessions[{idx}].sk"), &s.sk)?,
             status: parse_trust_status(&format!("incomingSessions[{idx}].status"), &s.status)?,
             created_at: s.created_at,
         });
@@ -427,7 +429,7 @@ fn validate(doc: &Portable) -> Result<Validated> {
 
     let mut outgoing: Vec<OutgoingSession> = Vec::with_capacity(doc.outgoing_sessions.len());
     for (idx, o) in doc.outgoing_sessions.iter().enumerate() {
-        let sk: SessionKey = parse_hex_array::<32>(&format!("outgoingSessions[{idx}].sk"), &o.sk)?;
+        let sk: SessionKey = parse_secret_array::<32>(&format!("outgoingSessions[{idx}].sk"), &o.sk)?;
         outgoing.push(OutgoingSession {
             channel: o.channel.clone(),
             sk,
@@ -458,6 +460,13 @@ fn validate(doc: &Portable) -> Result<Validated> {
         channels,
         autotrust,
     })
+}
+
+fn parse_secret_array<const N: usize>(field: &str, s: &str) -> Result<Zeroizing<[u8; N]>> {
+    let mut out = Zeroizing::new([0u8; N]);
+    hex::decode_to_slice(s, out.as_mut_slice())
+        .map_err(|e| E2eError::Keyring(format!("{field}: invalid {N}-byte hex value ({e})")))?;
+    Ok(out)
 }
 
 fn parse_hex_array<const N: usize>(field: &str, s: &str) -> Result<[u8; N]> {
@@ -502,6 +511,23 @@ fn parse_channel_mode(field: &str, s: &str) -> Result<ChannelMode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portable_secret_fields_remain_guarded_after_deserialization() {
+        use zeroize::{Zeroize, ZeroizeOnDrop};
+        fn guarded<T: ZeroizeOnDrop>(_: &T) {}
+        let json = r#"{"pubkey":"public","privkey":"aabb","fingerprint":"fingerprint","createdAt":1}"#;
+        let mut identity: PortableIdentity = serde_json::from_str(json).unwrap();
+        guarded(&identity.privkey);
+        assert_eq!(serde_json::to_value(&identity).unwrap()["privkey"], "aabb");
+        identity.privkey.zeroize();
+        assert!(identity.privkey.is_empty());
+        let key = parse_secret_array::<2>("identity.privkey", "aabb").unwrap();
+        guarded(&key);
+        assert_eq!(*key, [0xaa, 0xbb]);
+        assert!(parse_secret_array::<2>("identity.privkey", "aaz?").is_err());
+        assert!(parse_secret_array::<2>("identity.privkey", "aa").is_err());
+    }
 
     #[test]
     fn parse_hex_array_rejects_wrong_length() {

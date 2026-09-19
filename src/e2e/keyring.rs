@@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex};
 use aes_gcm::{Aes256Gcm, Key};
 use rusqlite::{Connection, OptionalExtension, params};
 
+use zeroize::{Zeroize, Zeroizing};
+
 use crate::e2e::crypto::aead::SessionKey;
 use crate::e2e::crypto::fingerprint::Fingerprint;
 use crate::e2e::error::Result;
@@ -138,6 +140,22 @@ pub struct Keyring {
     configured_networks: Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
 }
 
+struct SecretBlob(Zeroizing<Vec<u8>>);
+
+impl rusqlite::types::FromSql for SecretBlob {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        Ok(Self(Zeroizing::new(value.as_blob()?.to_vec())))
+    }
+}
+
+impl Drop for Keyring {
+    fn drop(&mut self) {
+        if let Some(key) = self.secret_key.as_mut() {
+            key.as_mut_slice().zeroize();
+        }
+    }
+}
+
 impl Keyring {
     /// Construct a keyring that shares the given SQLite connection.
     #[must_use]
@@ -161,29 +179,30 @@ impl Keyring {
         })
     }
 
-    fn encode_secret(&self, bytes: &[u8]) -> Result<Vec<u8>> {
+    fn encode_secret(&self, bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         self.secret_key.as_ref().map_or_else(
-            || Ok(bytes.to_vec()),
+            || Ok(Zeroizing::new(bytes.to_vec())),
             |key| {
                 crate::storage::crypto::encrypt_bytes(bytes, key)
+                    .map(Zeroizing::new)
                     .map_err(crate::e2e::error::E2eError::Keyring)
             },
         )
     }
 
-    fn decode_secret<const N: usize>(&self, bytes: &[u8], field: &str) -> Result<[u8; N]> {
-        let decoded = match self.secret_key.as_ref() {
+    fn decode_secret<const N: usize>(&self, bytes: &[u8], field: &str) -> Result<Zeroizing<[u8; N]>> {
+        let decoded = Zeroizing::new(match self.secret_key.as_ref() {
             Some(key) if bytes.len() != N => crate::storage::crypto::decrypt_bytes(bytes, key)
                 .map_err(crate::e2e::error::E2eError::Keyring)?,
             _ => bytes.to_vec(),
-        };
+        });
         if decoded.len() != N {
             return Err(crate::e2e::error::E2eError::Keyring(format!(
                 "{field} has unexpected length {}",
                 decoded.len()
             )));
         }
-        let mut out = [0u8; N];
+        let mut out = Zeroizing::new([0u8; N]);
         out.copy_from_slice(&decoded);
         Ok(out)
     }
@@ -219,7 +238,7 @@ impl Keyring {
              VALUES (1, ?1, ?2, ?3, ?4)",
             params![
                 pubkey.as_slice(),
-                enc_privkey,
+                enc_privkey.as_slice(),
                 fingerprint.as_slice(),
                 created_at
             ],
@@ -243,7 +262,7 @@ impl Keyring {
         }
 
         for sess in incoming {
-            let enc_sk = self.encode_secret(&sess.sk)?;
+            let enc_sk = self.encode_secret(sess.sk.as_slice())?;
             tx.execute(
                 "INSERT INTO e2e_incoming_sessions
                     (handle, channel, fingerprint, sk, status, created_at)
@@ -252,7 +271,7 @@ impl Keyring {
                     sess.handle,
                     sess.channel,
                     sess.fingerprint.as_slice(),
-                    enc_sk,
+                    enc_sk.as_slice(),
                     sess.status.as_str(),
                     sess.created_at,
                 ],
@@ -260,14 +279,14 @@ impl Keyring {
         }
 
         for sess in outgoing {
-            let enc_sk = self.encode_secret(&sess.sk)?;
+            let enc_sk = self.encode_secret(sess.sk.as_slice())?;
             tx.execute(
                 "INSERT INTO e2e_outgoing_sessions
                     (channel, sk, created_at, pending_rotation)
                  VALUES (?1, ?2, ?3, ?4)",
                 params![
                     sess.channel,
-                    enc_sk,
+                    enc_sk.as_slice(),
                     sess.created_at,
                     i64::from(sess.pending_rotation),
                 ],
@@ -313,7 +332,7 @@ impl Keyring {
              VALUES (1, ?1, ?2, ?3, ?4)",
             params![
                 pubkey.as_slice(),
-                enc_privkey,
+                enc_privkey.as_slice(),
                 fingerprint.as_slice(),
                 created_at
             ],
@@ -322,9 +341,9 @@ impl Keyring {
     }
 
     /// Return `Ok(None)` if no identity has been generated yet.
-    pub fn load_identity(&self) -> Result<Option<([u8; 32], [u8; 32], Fingerprint, i64)>> {
+    pub fn load_identity(&self) -> Result<Option<([u8; 32], Zeroizing<[u8; 32]>, Fingerprint, i64)>> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
-        let row: Option<(Vec<u8>, Vec<u8>, Vec<u8>, i64)> = conn
+        let row: Option<(Vec<u8>, SecretBlob, Vec<u8>, i64)> = conn
             .query_row(
                 "SELECT pubkey, privkey, fingerprint, created_at FROM e2e_identity WHERE id = 1",
                 [],
@@ -345,7 +364,7 @@ impl Keyring {
         let mut fp_arr = [0u8; 16];
         pk_arr.copy_from_slice(&pk);
         fp_arr.copy_from_slice(&fp);
-        let sk_arr = self.decode_secret::<32>(&sk, "e2e_identity privkey")?;
+        let sk_arr = self.decode_secret::<32>(&sk.0, "e2e_identity privkey")?;
         Ok(Some((pk_arr, sk_arr, fp_arr, ts)))
     }
 
@@ -478,7 +497,7 @@ impl Keyring {
     pub fn set_outgoing_session(
         &self,
         channel: &str,
-        sk: &SessionKey,
+        sk: &[u8; 32],
         created_at: i64,
     ) -> Result<()> {
         let enc_sk = self.encode_secret(sk)?;
@@ -487,7 +506,7 @@ impl Keyring {
             "INSERT OR REPLACE INTO e2e_outgoing_sessions
                 (channel, sk, created_at, pending_rotation)
              VALUES (?1, ?2, ?3, 0)",
-            params![channel, enc_sk, created_at],
+            params![channel, enc_sk.as_slice(), created_at],
         )?;
         Ok(())
     }
@@ -505,7 +524,7 @@ impl Keyring {
 
     fn get_outgoing_session_exact(&self, channel: &str) -> Result<Option<OutgoingSession>> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
-        let row: Option<(Vec<u8>, i64, i64)> = conn
+        let row: Option<(SecretBlob, i64, i64)> = conn
             .query_row(
                 "SELECT sk, created_at, pending_rotation
                  FROM e2e_outgoing_sessions WHERE channel = ?1",
@@ -516,7 +535,7 @@ impl Keyring {
         let Some((sk, ts, pr)) = row else {
             return Ok(None);
         };
-        let k = self.decode_secret::<32>(&sk, "e2e_outgoing_sessions sk")?;
+        let k = self.decode_secret::<32>(&sk.0, "e2e_outgoing_sessions sk")?;
         Ok(Some(OutgoingSession {
             channel: channel.to_string(),
             sk: k,
@@ -549,7 +568,7 @@ impl Keyring {
     // ---------- incoming sessions ----------
 
     pub fn set_incoming_session(&self, s: &IncomingSession) -> Result<()> {
-        let enc_sk = self.encode_secret(&s.sk)?;
+        let enc_sk = self.encode_secret(s.sk.as_slice())?;
         let conn = self.db.lock().expect("keyring mutex poisoned");
         conn.execute(
             "INSERT OR REPLACE INTO e2e_incoming_sessions
@@ -559,7 +578,7 @@ impl Keyring {
                 s.handle,
                 s.channel,
                 s.fingerprint.as_slice(),
-                enc_sk,
+                enc_sk.as_slice(),
                 s.status.as_str(),
                 s.created_at,
             ],
@@ -580,9 +599,9 @@ impl Keyring {
     /// `set_incoming_session` remains for explicit-override paths
     /// (`/e2e reverify`, import, tests).
     pub fn install_incoming_session_strict(&self, s: &IncomingSession) -> Result<()> {
-        let enc_sk = self.encode_secret(&s.sk)?;
+        let enc_sk = self.encode_secret(s.sk.as_slice())?;
         let conn = self.db.lock().expect("keyring mutex poisoned");
-        let mut existing: Option<(Vec<u8>, Vec<u8>, String)> = conn
+        let mut existing: Option<(Vec<u8>, SecretBlob, String)> = conn
             .query_row(
                 "SELECT fingerprint, sk, status FROM e2e_incoming_sessions
                  WHERE handle = ?1 AND channel = ?2",
@@ -623,14 +642,14 @@ impl Keyring {
         // time so decrypt can enforce the grace window
         // (`manager::REKEY_PREV_KEY_GRACE_SECS`). The blob is copied as
         // stored — already encrypted when the keyring is.
-        let prev: Option<(Vec<u8>, i64)> = existing.and_then(|(_, old_enc, old_status)| {
+        let prev: Option<(SecretBlob, i64)> = existing.and_then(|(_, old_enc, old_status)| {
             if old_status != TrustStatus::Trusted.as_str() {
                 return None;
             }
             let old_sk = self
-                .decode_secret::<32>(&old_enc, "e2e_incoming_sessions sk")
+                .decode_secret::<32>(&old_enc.0, "e2e_incoming_sessions sk")
                 .ok()?;
-            if old_sk == s.sk || old_sk == [0u8; 32] {
+            if old_sk == s.sk || *old_sk == [0u8; 32] {
                 return None;
             }
             Some((old_enc, now_unix()))
@@ -643,10 +662,10 @@ impl Keyring {
                 s.handle,
                 s.channel,
                 s.fingerprint.as_slice(),
-                enc_sk,
+                enc_sk.as_slice(),
                 s.status.as_str(),
                 s.created_at,
-                prev.as_ref().map(|(blob, _)| blob.as_slice()),
+                prev.as_ref().map(|(blob, _)| blob.0.as_slice()),
                 prev.as_ref().map(|(_, at)| *at),
             ],
         )?;
@@ -676,7 +695,7 @@ impl Keyring {
         channel: &str,
     ) -> Result<Option<(SessionKey, i64)>> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
-        let row: Option<(Option<Vec<u8>>, Option<i64>)> = conn
+        let row: Option<(Option<SecretBlob>, Option<i64>)> = conn
             .query_row(
                 "SELECT prev_sk, prev_created_at FROM e2e_incoming_sessions
                  WHERE handle = ?1 AND channel = ?2",
@@ -687,7 +706,7 @@ impl Keyring {
         let Some((Some(enc), Some(replaced_at))) = row else {
             return Ok(None);
         };
-        let sk = self.decode_secret::<32>(&enc, "e2e_incoming_sessions prev_sk")?;
+        let sk = self.decode_secret::<32>(&enc.0, "e2e_incoming_sessions prev_sk")?;
         Ok(Some((sk, replaced_at)))
     }
 
@@ -734,7 +753,7 @@ impl Keyring {
         channel: &str,
     ) -> Result<Option<IncomingSession>> {
         let conn = self.db.lock().expect("keyring mutex poisoned");
-        let row: Option<(Vec<u8>, Vec<u8>, String, i64)> = conn
+        let row: Option<(Vec<u8>, SecretBlob, String, i64)> = conn
             .query_row(
                 "SELECT fingerprint, sk, status, created_at
                  FROM e2e_incoming_sessions WHERE handle = ?1 AND channel = ?2",
@@ -753,7 +772,7 @@ impl Keyring {
         }
         let mut fp_arr = [0u8; 16];
         fp_arr.copy_from_slice(&fp);
-        let sk_arr = self.decode_secret::<32>(&sk, "e2e_incoming_sessions sk")?;
+        let sk_arr = self.decode_secret::<32>(&sk.0, "e2e_incoming_sessions sk")?;
         Ok(Some(IncomingSession {
             handle: handle.to_string(),
             channel: channel.to_string(),
@@ -894,7 +913,7 @@ impl Keyring {
         let rows = stmt.query_map(params![channel], |r| {
             let handle: String = r.get(0)?;
             let fp: Vec<u8> = r.get(1)?;
-            let sk: Vec<u8> = r.get(2)?;
+            let sk: SecretBlob = r.get(2)?;
             let st: String = r.get(3)?;
             let ts: i64 = r.get(4)?;
             Ok((handle, fp, sk, st, ts))
@@ -910,7 +929,7 @@ impl Keyring {
             }
             let mut fp_arr = [0u8; 16];
             fp_arr.copy_from_slice(&fp);
-            let sk_arr = self.decode_secret::<32>(&sk, "e2e_incoming_sessions sk")?;
+            let sk_arr = self.decode_secret::<32>(&sk.0, "e2e_incoming_sessions sk")?;
             out.push(IncomingSession {
                 handle,
                 channel: channel.to_string(),
@@ -1555,7 +1574,7 @@ impl Keyring {
             let handle: String = r.get(0)?;
             let channel: String = r.get(1)?;
             let fp: Vec<u8> = r.get(2)?;
-            let sk: Vec<u8> = r.get(3)?;
+            let sk: SecretBlob = r.get(3)?;
             let st: String = r.get(4)?;
             let ts: i64 = r.get(5)?;
             Ok((handle, channel, fp, sk, st, ts))
@@ -1571,7 +1590,7 @@ impl Keyring {
             }
             let mut fp_arr = [0u8; 16];
             fp_arr.copy_from_slice(&fp);
-            let sk_arr = self.decode_secret::<32>(&sk, "e2e_incoming_sessions sk")?;
+            let sk_arr = self.decode_secret::<32>(&sk.0, "e2e_incoming_sessions sk")?;
             out.push(IncomingSession {
                 handle,
                 channel,
@@ -1593,7 +1612,7 @@ impl Keyring {
         )?;
         let rows = stmt.query_map([], |r| {
             let channel: String = r.get(0)?;
-            let sk: Vec<u8> = r.get(1)?;
+            let sk: SecretBlob = r.get(1)?;
             let ts: i64 = r.get(2)?;
             let pr: i64 = r.get(3)?;
             Ok((channel, sk, ts, pr))
@@ -1601,7 +1620,7 @@ impl Keyring {
         let mut out = Vec::new();
         for row in rows {
             let (channel, sk, ts, pr) = row?;
-            let sk_arr = self.decode_secret::<32>(&sk, "e2e_outgoing_sessions sk")?;
+            let sk_arr = self.decode_secret::<32>(&sk.0, "e2e_outgoing_sessions sk")?;
             out.push(OutgoingSession {
                 channel,
                 sk: sk_arr,
@@ -1817,7 +1836,7 @@ mod tests {
         kr.save_identity(&pk, &sk, &fp, 1000).unwrap();
         let (lpk, lsk, lfp, lts) = kr.load_identity().unwrap().unwrap();
         assert_eq!(lpk, pk);
-        assert_eq!(lsk, sk);
+        assert_eq!(*lsk, sk);
         assert_eq!(lfp, fp);
         assert_eq!(lts, 1000);
     }
@@ -1842,7 +1861,7 @@ mod tests {
 
         let (lpk, lsk, lfp, lts) = kr.load_identity().unwrap().unwrap();
         assert_eq!(lpk, pk);
-        assert_eq!(lsk, sk);
+        assert_eq!(*lsk, sk);
         assert_eq!(lfp, fp);
         assert_eq!(lts, 1000);
     }
@@ -1901,7 +1920,7 @@ mod tests {
             handle: "~alice@host".into(),
             channel: "#x".into(),
             fingerprint: [5; 16],
-            sk: [8; 32],
+            sk: [8; 32].into(),
             status: TrustStatus::Pending,
             created_at: 100,
         };
@@ -2144,7 +2163,7 @@ mod tests {
                 handle: handle.into(),
                 channel: channel.into(),
                 fingerprint: [fp_byte; 16],
-                sk: [sk_byte; 32],
+                sk: [sk_byte; 32].into(),
                 status,
                 created_at: 1_000,
             })
@@ -2186,7 +2205,7 @@ mod tests {
             handle: "~alice@host".into(),
             channel: "#x".into(),
             fingerprint: [0xaa; 16],
-            sk: [1u8; 32],
+            sk: [1u8; 32].into(),
             status: TrustStatus::Trusted,
             created_at: 100,
         };
@@ -2196,7 +2215,7 @@ mod tests {
         // different Ed25519 identity — must be rejected.
         let imposter = IncomingSession {
             fingerprint: [0xbb; 16],
-            sk: [2u8; 32],
+            sk: [2u8; 32].into(),
             created_at: 200,
             ..first
         };
@@ -2214,7 +2233,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(loaded.fingerprint, [0xaa; 16]);
-        assert_eq!(loaded.sk, [1u8; 32]);
+        assert_eq!(*loaded.sk, [1u8; 32]);
     }
 
     #[test]
@@ -2224,7 +2243,7 @@ mod tests {
             handle: "~alice@host".into(),
             channel: "#x".into(),
             fingerprint: [0xaa; 16],
-            sk: [1u8; 32],
+            sk: [1u8; 32].into(),
             status: TrustStatus::Trusted,
             created_at: 100,
         };
@@ -2232,7 +2251,7 @@ mod tests {
 
         // Same fingerprint, rotated session key, later timestamp → allowed.
         let refresh = IncomingSession {
-            sk: [2u8; 32],
+            sk: [2u8; 32].into(),
             created_at: 200,
             ..first
         };
@@ -2243,7 +2262,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(loaded.fingerprint, [0xaa; 16]);
-        assert_eq!(loaded.sk, [2u8; 32]);
+        assert_eq!(*loaded.sk, [2u8; 32]);
         assert_eq!(loaded.created_at, 200);
     }
 

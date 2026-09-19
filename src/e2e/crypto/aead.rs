@@ -6,13 +6,15 @@ use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit, OsRng, Payload},
 };
 
+use zeroize::Zeroizing;
+
 use crate::e2e::error::{E2eError, Result};
 
 pub const KEY_LEN: usize = 32;
 pub const NONCE_LEN: usize = 24;
 
 /// Raw 32-byte symmetric session key.
-pub type SessionKey = [u8; KEY_LEN];
+pub type SessionKey = Zeroizing<[u8; KEY_LEN]>;
 
 /// 24-byte XChaCha20 nonce.
 pub type Nonce = [u8; NONCE_LEN];
@@ -21,7 +23,7 @@ pub type Nonce = [u8; NONCE_LEN];
 ///
 /// A fresh random nonce is generated for each call. Returns `(nonce, ciphertext)`
 /// where `ciphertext` includes the Poly1305 tag.
-pub fn encrypt(key: &SessionKey, aad: &[u8], plaintext: &[u8]) -> Result<(Nonce, Vec<u8>)> {
+pub fn encrypt(key: &[u8; KEY_LEN], aad: &[u8], plaintext: &[u8]) -> Result<(Nonce, Vec<u8>)> {
     let cipher = XChaCha20Poly1305::new(key.into());
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
     let ct = cipher
@@ -39,7 +41,7 @@ pub fn encrypt(key: &SessionKey, aad: &[u8], plaintext: &[u8]) -> Result<(Nonce,
 }
 
 /// Decrypt `ciphertext` using `nonce` and `aad`.
-pub fn decrypt(key: &SessionKey, nonce: &Nonce, aad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
+pub fn decrypt(key: &[u8; KEY_LEN], nonce: &Nonce, aad: &[u8], ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     let cipher = XChaCha20Poly1305::new(key.into());
     let xnonce = XNonce::from_slice(nonce);
     cipher
@@ -50,13 +52,14 @@ pub fn decrypt(key: &SessionKey, nonce: &Nonce, aad: &[u8], ciphertext: &[u8]) -
                 aad,
             },
         )
+        .map(Zeroizing::new)
         .map_err(|e| E2eError::Crypto(format!("aead decrypt: {e}")))
 }
 
 /// Generate a fresh 32-byte session key.
 pub fn generate_session_key() -> Result<SessionKey> {
-    let mut key = [0u8; KEY_LEN];
-    rand::fill(&mut key);
+    let mut key = Zeroizing::new([0u8; KEY_LEN]);
+    rand::fill(key.as_mut_slice());
     Ok(key)
 }
 
@@ -65,13 +68,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn secret_results_keep_zeroizing_ownership_across_clones() {
+        use zeroize::{Zeroize, ZeroizeOnDrop};
+        fn guarded<T: ZeroizeOnDrop>(_: &T) {}
+        let original = generate_session_key().unwrap();
+        let mut temporary = original.clone();
+        guarded(&original);
+        temporary.zeroize();
+        assert!(temporary.iter().all(|byte| *byte == 0));
+        let (nonce, ciphertext) = encrypt(&original, b"context", b"secret").unwrap();
+        let mut plaintext = decrypt(&original, &nonce, b"context", &ciphertext).unwrap();
+        guarded(&plaintext);
+        assert_eq!(plaintext.as_slice(), b"secret");
+        plaintext.zeroize();
+        assert!(plaintext.is_empty());
+        let seed = crate::e2e::crypto::identity::Identity::generate().unwrap().secret_bytes();
+        guarded(&seed);
+        guarded(&crate::e2e::crypto::ecdh::ed25519_seed_to_x25519(&seed));
+    }
+
+    #[test]
     fn aead_roundtrip() {
         let key = generate_session_key().unwrap();
         let aad = b"RPE2E01:sender@host:#chan:msgid:ts:1:1";
         let pt = b"hello world";
         let (nonce, ct) = encrypt(&key, aad, pt).unwrap();
         let pt2 = decrypt(&key, &nonce, aad, &ct).unwrap();
-        assert_eq!(pt2, pt);
+        assert_eq!(pt2.as_slice(), pt);
     }
 
     #[test]
