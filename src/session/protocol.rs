@@ -109,6 +109,16 @@ where
     Ok(())
 }
 
+pub async fn write_output<W>(writer: &mut W, bytes: &[u8]) -> Result<()>
+where
+    W: AsyncWriteExt + Unpin + Send,
+{
+    for chunk in bytes.chunks(super::writer::SOCKET_OUTPUT_CHUNK_BYTES) {
+        write_message(writer, &MainMessage::Output(chunk.to_vec())).await?;
+    }
+    Ok(())
+}
+
 /// Read a length-prefixed bincode message from an async reader.
 pub async fn read_message<R, M>(reader: &mut R) -> Result<M>
 where
@@ -125,4 +135,37 @@ where
     reader.read_exact(&mut payload).await?;
     let msg: M = postcard::from_bytes(&payload)?;
     Ok(msg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn output_chunks_reassemble_through_a_small_socket_buffer() {
+        let (mut sender, mut receiver) = tokio::io::duplex(128);
+        let expected = b"\x1b_Gm=1;image-data\x1b\\".repeat(150_000);
+        let original = expected.clone();
+        let writer = tokio::spawn(async move {
+            write_output(&mut sender, &original).await.unwrap();
+            write_message(&mut sender, &MainMessage::Detached).await.unwrap();
+        });
+        let mut reconstructed = Vec::new();
+        let mut chunks = 0;
+        loop {
+            match read_message::<_, MainMessage>(&mut receiver).await.unwrap() {
+                MainMessage::Output(bytes) => {
+                    assert!(bytes.len() <= super::super::writer::SOCKET_OUTPUT_CHUNK_BYTES);
+                    reconstructed.extend(bytes);
+                    chunks += 1;
+                    tokio::task::yield_now().await;
+                }
+                MainMessage::Detached => break,
+                MainMessage::Quit => panic!("unexpected quit"),
+            }
+        }
+        writer.await.unwrap();
+        assert!(chunks > 1);
+        assert_eq!(reconstructed, expected);
+    }
 }

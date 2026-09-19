@@ -466,6 +466,51 @@ mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
 
+    #[tokio::test]
+    async fn oversized_inline_frame_recovers_as_text_for_the_attachment() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use crate::session::protocol::MainMessage;
+        use crate::session::writer::SocketWriter;
+        use crate::state::buffer::{Buffer, BufferType};
+        use crate::state::events::tests::make_test_message;
+
+        let mut app = crate::app::input::submit_typing_tests::test_app();
+        app.config.image_preview.inline = true;
+        app.state.add_buffer(Buffer::for_test("net", BufferType::Channel, "#images"));
+        app.state.set_active_buffer("net/#images");
+        let message = make_test_message(&mut app.state, "https://example.invalid/picture.png");
+        let image_key = ImageKey::for_message("net/#images", &message).unwrap();
+        app.state.add_local_message("net/#images", message);
+        app.inline_previews.entries.insert(image_key, Entry {
+            status: Status::Ready { image: Box::new(thumbnail()), protocol: None },
+            used: 0,
+        });
+        app.picker = Picker::halfblocks();
+        app.picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let queued = Arc::new(AtomicUsize::new(0));
+        let writer = SocketWriter::new(tx, Arc::clone(&queued), 64 * 1024);
+        app.socket_output = Some(writer.output());
+        app.terminal = Some(crate::ui::setup_socket_terminal(Box::new(writer), 120, 60).unwrap());
+        app.is_socket_attached = true;
+        while let Ok(MainMessage::Output(bytes)) = rx.try_recv() {
+            queued.fetch_sub(bytes.len(), Ordering::AcqRel);
+        }
+        assert!(app.render_terminal_frame());
+        assert!(!app.should_detach);
+        assert!(!app.terminal_graphics_enabled());
+        assert!(!app.emotes_graphical());
+        assert_eq!(queued.load(Ordering::Acquire), 0);
+        assert!(rx.try_recv().is_err());
+        app.image_preview = super::super::PreviewStatus::Hidden;
+        assert!(app.render_terminal_frame());
+        assert!(!app.should_detach);
+        assert!(queued.load(Ordering::Acquire) > 0);
+        assert!(!app.inline_previews.visible);
+        assert!(app.config.image_preview.inline);
+    }
+
     fn key(id: u64) -> ImageKey {
         ImageKey {
             buffer_id: "net/#images".into(),

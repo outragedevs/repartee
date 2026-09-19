@@ -123,7 +123,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     // after the immutable borrow below ends, for the compositing pass.
     let mut placements: Vec<crate::ui::emote_layout::EmotePlacement> = Vec::new();
 
-    let inline_enabled = app.config.image_preview.enabled && app.config.image_preview.inline;
+    let inline_enabled = app.terminal_graphics_enabled() && app.config.image_preview.enabled && app.config.image_preview.inline;
     let mut inline_placements = Vec::new();
     let colors = &app.theme.colors;
     let bg = hex_to_color(&colors.bg).unwrap_or(Color::Reset);
