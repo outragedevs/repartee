@@ -69,6 +69,7 @@ impl App {
         self.state.add_connection(Connection {
             id: Self::SHELL_CONN_ID.to_string(),
             label: "Shell".to_string(),
+            network_scope: None,
             status: ConnectionStatus::Connected,
             own_handle: None,
             nick: String::new(),

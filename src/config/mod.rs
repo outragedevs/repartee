@@ -1,5 +1,6 @@
 pub mod defaults;
 pub mod env;
+pub mod network_scope;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -403,10 +404,15 @@ pub struct ServerConfig {
     /// against `~/.repartee/certs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sasl_key_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_bouncer_network_id")]
     pub bouncer_network_id: Option<String>,
     #[serde(default)]
     pub bouncer_control: bool,
+}
+
+fn deserialize_bouncer_network_id<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Option<String>, D::Error> {
+    let value = Option::<String>::deserialize(deserializer)?;
+    value.map(|id| crate::irc::bouncer::normalize_network_id(&id).map_err(serde::de::Error::custom)).transpose()
 }
 
 #[expect(
