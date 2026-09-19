@@ -108,3 +108,9 @@ Focus, modal visibility and following the conversation tail gate browser request
 
 This stage is still under review. These tests do not establish completion of
 aggregate presence or the full bouncer feature matrix.
+
+The read-marker fixture additionally asserts 300 unread hydrated query messages
+before marking, then 150 after the server confirms the middle message. Unit
+regressions cover marker-before-history and history-before-marker ordering,
+reconnect gap rows, older-page insertion, deduplication and own-message exclusion.
+History contributes unread counts but emits no live-message or mention alerts.

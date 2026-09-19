@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::AppState;
-use super::buffer::{ActivityLevel, Message};
+use super::buffer::{ActivityLevel, BufferType, Message, MessageType};
 
 #[derive(Default)]
 pub(super) struct ReadActivity {
@@ -65,6 +65,69 @@ impl AppState {
             .collect();
         for id in buffers {
             self.refresh_read_activity(&id);
+        }
+    }
+
+    pub(super) fn record_history_read_activity(
+        &mut self,
+        buffer_id: &str,
+        message: &Message,
+        own_nick: Option<&str>,
+    ) {
+        if !self.buffer_uses_server_history(buffer_id)
+            || (!self.uses_read_markers(buffer_id)
+                && self.active_buffer_id.as_deref() == Some(buffer_id))
+            || own_nick.is_some_and(|own| {
+                message
+                    .nick
+                    .as_deref()
+                    .is_some_and(|nick| nick.eq_ignore_ascii_case(own))
+            })
+        {
+            return;
+        }
+        let mentioned = message.highlight
+            || own_nick
+                .filter(|nick| !nick.is_empty())
+                .is_some_and(|nick| {
+                    crate::irc::formatting::strip_irc_formatting(&message.text)
+                        .to_lowercase()
+                        .contains(&nick.to_lowercase())
+                });
+        let level = match message.message_type {
+            MessageType::Message | MessageType::Action => {
+                if mentioned
+                    || self
+                        .buffers
+                        .get(buffer_id)
+                        .is_some_and(|buffer| buffer.buffer_type == BufferType::Query)
+                {
+                    ActivityLevel::Mention
+                } else {
+                    ActivityLevel::Activity
+                }
+            }
+            MessageType::Notice => {
+                if mentioned {
+                    ActivityLevel::Mention
+                } else {
+                    ActivityLevel::Activity
+                }
+            }
+            MessageType::Event => ActivityLevel::Events,
+            MessageType::MentionLog => ActivityLevel::None,
+        };
+        if !self.message_already_read(buffer_id, message) {
+            self.record_activity(buffer_id, level);
+        }
+        self.record_read_activity(buffer_id, message, level);
+    }
+
+    pub(super) fn finish_history_read_activity(&mut self, buffer_id: &str) {
+        if self.uses_read_markers(buffer_id) {
+            self.refresh_read_activity(buffer_id);
+        } else if self.buffer_uses_server_history(buffer_id) {
+            self.prune_read_activity(buffer_id);
         }
     }
 
@@ -191,6 +254,58 @@ mod tests {
             state.buffers["account/peer"].activity,
             ActivityLevel::Activity
         );
+    }
+
+    fn history_row(state: &mut AppState, millis: i64) -> Message {
+        let mut message = crate::state::events::tests::make_test_message(state, "history");
+        message.timestamp = chrono::DateTime::from_timestamp_millis(millis).unwrap();
+        message.nick = Some("Peer".into());
+        message
+    }
+
+    #[tokio::test]
+    async fn server_history_tracks_unread_rows_without_playback_notifications() {
+        let mut state = state();
+        state.apply_server_read_marker("account/peer", 1000);
+        let mut rows: Vec<_> = [500, 1000, 2000, 3000]
+            .into_iter()
+            .map(|time| history_row(&mut state, time))
+            .collect();
+        let mut own = history_row(&mut state, 3500);
+        own.nick = Some(state.connections["account"].nick.clone());
+        rows.push(own);
+        state.pending_web_events.clear();
+        state.surface_history_page("account/peer", rows.clone(), false);
+        assert_eq!(state.buffers["account/peer"].unread_count, 2);
+        assert_eq!(
+            state.buffers["account/peer"].activity,
+            ActivityLevel::Mention
+        );
+        state.surface_history_page("account/peer", rows, false);
+        assert_eq!(state.buffers["account/peer"].unread_count, 2);
+        let older = history_row(&mut state, 1500);
+        state.surface_history_page("account/peer", vec![older], true);
+        assert_eq!(state.buffers["account/peer"].unread_count, 3);
+        state.apply_server_read_marker("account/peer", 2500);
+        assert_eq!(state.buffers["account/peer"].unread_count, 1);
+        assert!(!state.pending_web_events.iter().any(|event| matches!(
+            event,
+            crate::web::protocol::WebEvent::MentionAlert { .. }
+                | crate::web::protocol::WebEvent::NewMessage { .. }
+        )));
+    }
+
+    #[tokio::test]
+    async fn marker_arriving_after_initial_hydration_reconciles_unread_rows() {
+        let mut state = state();
+        let rows: Vec<_> = [1000, 2000, 3000]
+            .into_iter()
+            .map(|time| history_row(&mut state, time))
+            .collect();
+        state.surface_history_page("account/peer", rows, false);
+        assert_eq!(state.buffers["account/peer"].unread_count, 3);
+        state.apply_server_read_marker("account/peer", 2000);
+        assert_eq!(state.buffers["account/peer"].unread_count, 1);
     }
 
     #[tokio::test]
