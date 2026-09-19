@@ -31,6 +31,12 @@ pub fn format_mention_line(
 ) -> String {
     let nick_hex = crate::nick_color::nick_color_hex(nick, nick_sat, nick_lit);
 
+    let datetime = datetime.replace('%', "%%");
+    let network = network.replace('%', "%%");
+    let channel = channel.replace('%', "%%");
+    let nick = nick.replace('%', "%%");
+    let text = text.replace('%', "%%");
+
     format!(
         "%Z{COLOR_TIMESTAMP}[{datetime}]%N \
          %Z{COLOR_NETWORK}[{network}]%N \

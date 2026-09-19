@@ -536,16 +536,6 @@ pub(crate) fn stored_to_message(
         "mention_log" => MessageType::MentionLog,
         _ => MessageType::Message,
     };
-    // Suppress `event_key` for log rows. The theme's event templates
-    // expand `$0..$N` from `event_params`, but `event_params` is not
-    // persisted to SQLite — only the rendered `text` is. If we passed
-    // `event_key` through, `render_event` would pick the template,
-    // substitute `$0..$N` against an empty params slice, and produce
-    // stripped lines like `(@) has joined`, `sets mode on`, or
-    // `is now known as` (with the actual nicks/channels missing).
-    // Setting `event_key = None` makes the renderer fall through to
-    // `parse_format_string(&msg.text, &[])`, which prints the
-    // original text that was logged at write time.
     Message {
         id: state.next_message_id(),
         timestamp: ts,
@@ -554,7 +544,7 @@ pub(crate) fn stored_to_message(
         nick_mode: None,
         text: stored.text.clone(),
         highlight: stored.highlight,
-        event_key: None,
+        event_key: stored.event_key.clone(),
         event_params: None,
         log_msg_id: Some(stored.id.to_string()),
         // The one identity that survives the round trip. `text` above is the
@@ -631,4 +621,39 @@ mod tests {
         assert_eq!(msg.translation_suffix_at, Some("cześć".len()));
         assert!(msg.wire_origin.is_none());
     }
+    #[test]
+    fn themed_event_percents_match_live_and_both_history_paths() {
+        let mut state = crate::state::events::tests::make_test_state();
+        let mut stored = stored_row();
+        stored.msg_type = "event".into();
+        stored.event_key = Some("test_event".into());
+        stored.text = "alice says 100% %N %i and \x02bold\x02".into();
+        let loaded = stored_to_message(&mut state, &stored);
+        let mut live_message = loaded.clone();
+        live_message.log_msg_id = None;
+        live_message.event_params = Some(vec![stored.text.clone()]);
+        let mut theme = crate::theme::loader::default_theme();
+        theme.formats.events.insert("test_event".into(), "%Zabcdef$0%N".into());
+        let config = crate::config::default_config();
+        for message in [&loaded, &live_message] {
+            let line = crate::ui::message_line::render_message(message, false, &theme, &config, None, None);
+            let visible: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+            assert!(visible.ends_with("alice says 100% %N %i and bold"), "{visible}");
+        }
+        let wire_live = crate::web::snapshot::message_to_wire(&live_message, None);
+        let wire_loaded = crate::web::snapshot::message_to_wire(&loaded, None);
+        let wire_stored = crate::web::snapshot::stored_to_wire(&stored, None);
+        assert_eq!(wire_live.text, wire_stored.text);
+        assert_eq!(wire_loaded.text, wire_stored.text);
+        assert_eq!(wire_stored.text, stored.text.replace('%', "%%"));
+
+        stored.event_key = None;
+        stored.text = "%Zff0000local status%N".into();
+        let local = stored_to_message(&mut state, &stored);
+        let line = crate::ui::message_line::render_message(&local, false, &theme, &config, None, None);
+        let visible: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+        assert!(visible.ends_with("local status"));
+        assert!(!visible.contains("%Z"));
+    }
+
 }
