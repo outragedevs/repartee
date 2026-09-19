@@ -51,3 +51,5 @@ mempalace.yaml
 /.zencoder
 # Finder metadata
 .DS_Store
+
+/todo_next.md
