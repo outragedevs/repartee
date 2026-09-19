@@ -39,6 +39,7 @@ impl AppState {
             activity_counter: 0,
             activity_order: std::collections::HashMap::new(),
             read_activity: std::collections::HashMap::new(),
+            read_identities: std::collections::HashMap::new(),
             flood_state: crate::irc::flood::FloodState::new(),
             netsplit_state: crate::irc::netsplit::NetsplitState::new(),
             flood_protection: true,
@@ -225,6 +226,7 @@ impl AppState {
             && read.through.is_some()
         {
             read.unread = std::collections::HashMap::new();
+            read.origins = std::collections::HashMap::new();
             self.read_activity.insert(id.to_string(), read);
         }
         self.web_history_buffers.retain(|_, buffer_id| buffer_id != id);
@@ -1982,6 +1984,7 @@ impl AppState {
     ) {
         let read_markers = self.uses_read_markers(buffer_id);
         let server_owned = self.buffer_uses_server_history(buffer_id);
+        self.record_read_origin(buffer_id, &message, buffer_id);
         let already_read = server_owned && self.message_already_read(buffer_id, &message);
         if server_owned && (read_markers || self.active_buffer_id.as_deref() != Some(buffer_id)) {
             self.record_read_activity(buffer_id, &message, level);
@@ -2145,7 +2148,12 @@ impl AppState {
         self.surface_history_page(buffer_id, rows, false);
     }
 
-    pub(crate) fn surface_history_page(&mut self, buffer_id: &str, mut rows: Vec<Message>, before: bool) {
+    #[cfg(test)]
+    pub(crate) fn surface_history_page(&mut self, buffer_id: &str, rows: Vec<Message>, before: bool) {
+        self.surface_history_page_from_target(buffer_id, rows, before, buffer_id);
+    }
+
+    pub(crate) fn surface_history_page_from_target(&mut self, buffer_id: &str, mut rows: Vec<Message>, before: bool, origin: &str) {
         if before {
             rows.reverse();
         }
@@ -2211,6 +2219,7 @@ impl AppState {
             }
             spliced_ts.push(msg.timestamp);
             msg.id = self.next_message_id();
+            self.record_read_origin(buffer_id, &msg, origin);
             self.record_history_read_activity(buffer_id, &msg, own_nick.as_deref());
             // Splicing into buf.messages bypasses add_message's web-event queue,
             // so broadcast the row ourselves — these gap-fill rows are not

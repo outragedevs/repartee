@@ -3077,8 +3077,11 @@ fn handle_nick_change(
 ) {
     let old_nick = extract_nick(prefix).unwrap_or_default();
 
+    if old_nick.eq_ignore_ascii_case(our_nick) {
+        state.record_read_nick_change(conn_id, &old_nick, new_nick, message_timestamp(tags.as_ref()).timestamp_millis());
+    }
     // Update our own nick if it's us
-    if old_nick == our_nick
+    if old_nick.eq_ignore_ascii_case(our_nick)
         && let Some(conn) = state.connections.get_mut(conn_id)
     {
         conn.nick = new_nick.to_string();

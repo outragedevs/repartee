@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 
 mod activity;
 mod read_state;
+mod read_identity;
 pub mod buffer;
 pub mod connection;
 pub mod events;
@@ -218,6 +219,7 @@ pub struct AppState {
     activity_counter: u64,
     activity_order: HashMap<String, u64>,
     read_activity: HashMap<String, read_state::ReadActivity>,
+    read_identities: HashMap<String, read_identity::ReadIdentity>,
     /// Flood detection state (global, not per-connection).
     pub flood_state: FloodState,
     /// Netsplit detection state (global, not per-connection).

@@ -25,6 +25,7 @@ impl AppState {
         if let Some(mut state) = self.read_activity.remove(old_id) {
             let destination = self.read_activity.entry(new_id.to_string()).or_default();
             destination.unread.extend(std::mem::take(&mut state.unread));
+            destination.origins.extend(std::mem::take(&mut state.origins));
             if let Some(timestamp) = destination.through.and_then(chrono::DateTime::from_timestamp_millis)
                 && let Some(buffer) = self.buffers.get_mut(new_id)
             {

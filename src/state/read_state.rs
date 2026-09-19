@@ -6,11 +6,13 @@ use super::buffer::{ActivityLevel, BufferType, Message, MessageType};
 #[derive(Default)]
 pub(super) struct ReadActivity {
     pub(super) through: Option<i64>,
+    pub(super) origins: HashMap<u64, String>,
     pub(super) unread: HashMap<u64, (i64, ActivityLevel, u64)>,
 }
 
 impl AppState {
     pub(crate) fn reset_connection_read_markers(&mut self, conn_id: &str) {
+        self.read_identities.remove(conn_id);
         let buffers: Vec<_> = self
             .read_activity
             .keys()
@@ -40,10 +42,58 @@ impl AppState {
     }
 
     pub(super) fn message_already_read(&self, buffer_id: &str, message: &Message) -> bool {
-        self.read_activity
+        let origin = self
+            .read_activity
             .get(buffer_id)
+            .and_then(|state| state.origins.get(&message.id))
+            .map_or(buffer_id, String::as_str);
+        self.read_activity
+            .get(origin)
             .and_then(|state| state.through)
             .is_some_and(|through| message.timestamp.timestamp_millis() <= through)
+    }
+
+    pub(super) fn record_read_origin(&mut self, buffer_id: &str, message: &Message, origin: &str) {
+        if self.buffer_uses_server_history(buffer_id) {
+            self.read_activity
+                .entry(buffer_id.to_string())
+                .or_default()
+                .origins
+                .insert(message.id, origin.to_string());
+        }
+    }
+
+    pub(crate) fn visible_read_markers(
+        &self,
+        buffer_id: &str,
+        message_id: u64,
+    ) -> Option<HashMap<String, i64>> {
+        let buffer = self.buffers.get(buffer_id)?;
+        let position = buffer
+            .messages
+            .iter()
+            .position(|message| message.id == message_id)?;
+        let mut markers = HashMap::<String, i64>::new();
+        for message in buffer.messages.range(..=position) {
+            let Some(time) = message
+                .tags
+                .as_ref()
+                .and_then(|tags| tags.get("time"))
+                .and_then(|time| chrono::DateTime::parse_from_rfc3339(time).ok())
+            else {
+                continue;
+            };
+            let origin = self
+                .read_activity
+                .get(buffer_id)
+                .and_then(|state| state.origins.get(&message.id))
+                .map_or(buffer_id, String::as_str);
+            let through = markers
+                .entry(origin.to_string())
+                .or_insert_with(|| time.timestamp_millis());
+            *through = (*through).max(time.timestamp_millis());
+        }
+        Some(markers)
     }
 
     pub(super) fn record_read_activity(
@@ -90,12 +140,7 @@ impl AppState {
         if !self.buffer_uses_server_history(buffer_id)
             || (!self.uses_read_markers(buffer_id)
                 && self.active_buffer_id.as_deref() == Some(buffer_id))
-            || own_nick.is_some_and(|own| {
-                message
-                    .nick
-                    .as_deref()
-                    .is_some_and(|nick| nick.eq_ignore_ascii_case(own))
-            })
+            || self.is_own_history_message(buffer_id, message, own_nick)
         {
             return;
         }
@@ -154,6 +199,7 @@ impl AppState {
         let ids: std::collections::HashSet<_> =
             buffer.messages.iter().map(|message| message.id).collect();
         state.unread.retain(|id, _| ids.contains(id));
+        state.origins.retain(|id, _| ids.contains(id));
     }
 
     pub(super) fn refresh_read_activity(&mut self, buffer_id: &str) {
@@ -219,7 +265,24 @@ impl AppState {
             return;
         }
         state.through = Some(millis);
-        state.unread.retain(|_, (time, _, _)| *time > millis);
+        let mut changed = Vec::new();
+        for (id, state) in &mut self.read_activity {
+            let before = state.unread.len();
+            state.unread.retain(|message_id, (time, _, _)| {
+                state
+                    .origins
+                    .get(message_id)
+                    .map_or(id.as_str(), String::as_str)
+                    != buffer_id
+                    || *time > millis
+            });
+            if state.unread.len() != before && id != buffer_id {
+                changed.push(id.clone());
+            }
+        }
+        for id in changed {
+            self.refresh_read_activity(&id);
+        }
         if let Some(buffer) = self.buffers.get_mut(buffer_id)
             && let Some(timestamp) = chrono::DateTime::from_timestamp_millis(millis)
         {
