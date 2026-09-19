@@ -374,7 +374,9 @@ Display a local event message in a specific buffer.
 
 ### `api.ui.switch_buffer(buffer_id)`
 
-Switch to a buffer.
+Queue a buffer switch. Once the queue accepts the request, `api.store.active_buffer()` immediately returns the requested ID, including subsequent reads and multiple switches in the same Lua callback. Queries using the active connection reflect the new target when its metadata is already in the snapshot.
+
+The application validates the target when processing the queue: a buffer being created by the current IRC event can still be selected. If the target does not exist then, the actual selection stays unchanged and the active-buffer snapshot is reconciled to it. A full or closed queue leaves the snapshot unchanged. Other actions such as `api.ui.execute()` remain queued and do not promise immediate state-query updates; observe their results in a later callback.
 
 ### `api.ui.execute(command_line)`
 
