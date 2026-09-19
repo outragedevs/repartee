@@ -78,9 +78,9 @@ def main():
                     "REPARTEE_BOUNCER_TEST_NETID": str(settings["network"]),
                     "REPARTEE_BOUNCER_TEST_USER": settings["user"],
                 })
-                run(["make", "test", "TEST_ARGS=pinned_bouncer_registration -- --ignored"],
+                run(["make", "test", "TEST_ARGS=pinned_bouncer_ -- --ignored"],
                     cwd=ROOT, env=environment)
-                print(f"{args.implementation}: explicit network binding and reconnect passed")
+                print(f"{args.implementation}: binding, reconnect and control discovery passed")
             except Exception:
                 log.flush()
                 log.seek(0)

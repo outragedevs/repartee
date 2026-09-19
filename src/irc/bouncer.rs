@@ -3,6 +3,10 @@ use futures::StreamExt;
 use irc::proto::{Command, Message, Response};
 
 pub const NETWORKS_CAP: &str = "soju.im/bouncer-networks";
+pub const NETWORKS_NOTIFY_CAP: &str = "soju.im/bouncer-networks-notify";
+
+mod networks;
+pub use networks::{Network, NetworkRegistry, RegistryEvent};
 
 pub fn normalize_network_id(value: &str) -> Result<String, String> {
     if !value.is_empty()
@@ -15,18 +19,23 @@ pub fn normalize_network_id(value: &str) -> Result<String, String> {
     Err("Bouncer network ID must be a positive decimal integer".to_string())
 }
 
-pub(super) async fn confirm_binding(
+pub(super) async fn confirm_registration(
     stream: &mut irc::client::ClientStream,
-    expected: &str,
+    expected: Option<&str>,
     early_messages: &mut Vec<Message>,
 ) -> Result<()> {
-    let mut confirmed = false;
+    let mut confirmed = expected.is_none();
     while let Some(result) = stream.next().await {
         let message = result?;
         match &message.command {
             Command::Response(Response::RPL_ISUPPORT, args) => {
                 for token in args.iter().skip(1).take(args.len().saturating_sub(2)) {
                     if let Some(value) = token.strip_prefix("BOUNCER_NETID=") {
+                        let Some(expected) = expected else {
+                            return Err(eyre!(
+                                "Bouncer control login selected a network; remove the network selector from the login"
+                            ));
+                        };
                         if normalize_network_id(value).as_deref() != Ok(expected) {
                             return Err(eyre!(
                                 "Bouncer selected a different network than requested"

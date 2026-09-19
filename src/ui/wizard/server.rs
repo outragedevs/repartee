@@ -305,6 +305,7 @@ pub fn build(w: &WizardState, servers: &HashMap<String, ServerConfig>) -> Result
         client_cert_path: opt(w.text("client_cert_path")),
         sasl_key_path: opt(w.text("sasl_key_path")),
         bouncer_network_id: existing.and_then(|server| server.bouncer_network_id.clone()),
+        bouncer_control: existing.is_some_and(|server| server.bouncer_control),
     };
 
     Ok(BuiltServer {
@@ -429,6 +430,7 @@ pub fn build_from_web(
         client_cert_path: opt(&form.client_cert_path),
         sasl_key_path: opt(&form.sasl_key_path),
         bouncer_network_id: existing.and_then(|server| server.bouncer_network_id.clone()),
+        bouncer_control: existing.is_some_and(|server| server.bouncer_control),
     };
 
     Ok(BuiltServer {
@@ -491,6 +493,7 @@ mod tests {
             client_cert_path: None,
             sasl_key_path: None,
             bouncer_network_id: None,
+            bouncer_control: false,
         }
     }
 
@@ -741,6 +744,7 @@ mod tests {
             client_cert_path: Some("/tmp/cert.pem".into()),
             sasl_key_path: Some("libera.pem".into()),
             bouncer_network_id: Some("42".into()),
+            bouncer_control: false,
         };
         servers.insert("full".into(), s.clone());
 

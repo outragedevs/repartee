@@ -13,6 +13,7 @@ pub(crate) mod emote_anim;
 mod image;
 pub mod input;
 mod irc;
+pub mod bouncer;
 mod log_browser;
 mod maintenance;
 mod mentions;
@@ -380,6 +381,7 @@ pub struct App {
     pub chat_scroll_at_top: bool,
     pub ui_regions: Option<UiRegions>,
     pub irc_handles: HashMap<String, IrcHandle>,
+    pub(crate) bouncer_networks: HashMap<String, crate::irc::bouncer::NetworkRegistry>,
     pub(crate) forwarder_handles: HashMap<String, tokio::task::JoinHandle<()>>,
     pub irc_tx: mpsc::Sender<IrcEvent>,
     pub(crate) irc_rx: mpsc::Receiver<IrcEvent>,
@@ -838,6 +840,7 @@ impl App {
             chat_scroll_at_top: false,
             ui_regions: None,
             irc_handles: HashMap::new(),
+            bouncer_networks: HashMap::new(),
             forwarder_handles: HashMap::new(),
             irc_tx,
             irc_rx,
@@ -1244,6 +1247,7 @@ impl App {
                 client_cert_path: None,
                 sasl_key_path: None,
                 bouncer_network_id: None,
+                bouncer_control: false,
             },
             local_ip: None,
             enabled_caps: HashSet::new(),

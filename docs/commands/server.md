@@ -55,6 +55,7 @@ Add a new server to the configuration.
 - `-autosendcmd=<cmds>` — Commands to run on connect (semicolon-separated)
 - `-client-cert=<path>` — Client TLS certificate path for SASL EXTERNAL / CertFP
 - `-sasl-key=<path>` — P-256 private key path for ECDSA-NIST256P-CHALLENGE
+- `-bouncer-control` — Discover networks through a dedicated bouncer control connection
 - `-bouncer-network=<id>` — Bind to a Lurker/Soju network ID after successful SASL authentication
 
 Flag values are parsed as single command arguments, so values with spaces should
