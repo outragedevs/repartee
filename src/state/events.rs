@@ -1970,8 +1970,9 @@ impl AppState {
         level: ActivityLevel,
     ) {
         let read_markers = self.uses_read_markers(buffer_id);
-        let already_read = read_markers && self.message_already_read(buffer_id, &message);
-        if read_markers {
+        let server_owned = self.buffer_uses_server_history(buffer_id);
+        let already_read = server_owned && self.message_already_read(buffer_id, &message);
+        if server_owned && (read_markers || self.active_buffer_id.as_deref() != Some(buffer_id)) {
             self.record_read_activity(buffer_id, &message, level);
         }
         // Queue web events for broadcast.
@@ -2011,6 +2012,8 @@ impl AppState {
         }
         if read_markers {
             self.refresh_read_activity(buffer_id);
+        } else if server_owned {
+            self.prune_read_activity(buffer_id);
         }
     }
 

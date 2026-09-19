@@ -776,6 +776,10 @@ pub fn handle_cap_ack(
         }
     }
 
+    if acked_caps.iter().any(|cap| matches!(cap.as_str(), "draft/read-marker" | "soju.im/read")) {
+        state.activate_connection_read_markers(conn_id);
+    }
+
     // Log to server status buffer
     let label = state
         .connections
