@@ -37,6 +37,8 @@ The fix should:
 
 ### Make scripted buffer switching observable immediately
 
+Status: completed on `fix/script-buffer-read-after-write`; Clippy, 2268 native tests, 127 web tests, and Sol medium review passed.
+
 GitHub issue: [#41](https://github.com/outragedevs/repartee/issues/41)
 
 `api.ui.switch_buffer()` queues a state change, while `api.store.active_buffer()` reads a snapshot that is refreshed later. A script that switches buffers and immediately reads the active buffer therefore receives stale data.
