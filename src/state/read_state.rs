@@ -199,9 +199,12 @@ impl AppState {
             .map(|message| message.id)
             .collect();
         if let Some(state) = self.read_activity.get_mut(buffer_id) {
+            let before = state.unread.len();
             state.unread.retain(|id, _| !ids.contains(id));
+            if state.unread.len() != before {
+                self.refresh_read_activity(buffer_id);
+            }
         }
-        self.refresh_read_activity(buffer_id);
     }
 
     pub(crate) fn apply_server_read_marker(&mut self, buffer_id: &str, millis: i64) {

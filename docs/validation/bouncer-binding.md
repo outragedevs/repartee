@@ -133,3 +133,7 @@ rendering includes an untimed tail; a later arrival remains unread. Partial read
 recompute activity navigation from the arrival order of the remaining messages
 at the highest unread priority. Legacy browser commands without a displayed ID
 receive a session-targeted reload requirement and preserve unread state.
+Repeated terminal draws leave unchanged read counts silent. If the final marker
+capability disappears, visible terminal buffers clear locally only after a
+focused tail render; background and genuinely scrolled views preserve unread
+rows. The regression uses sixty messages to exercise actual scrollback.
