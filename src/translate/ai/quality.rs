@@ -33,10 +33,10 @@ static REFUSAL: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         r"(?im)^\s*je\s+ne\s+(?:peux|suis\s+pas\s+en\s+mesure)\b.{0,80}\b(?:demande|contenu|texte)\w*\b",
         r"(?i)\bcomo\s+(?:una?\s+)?(?:IA|inteligencia\s+artificial|modelo(?:\s+de\s+lenguaje)?)\b",
         r"(?im)^\s*no\s+(?:puedo|soy\s+capaz\s+de)\b.{0,80}\b(?:solicitud|contenido|texto)\w*\b",
-        r"(?i)\bcome\s+(?:una?['’]?\s*)?(?:ia|intelligenza\s+artificiale|modello(?:\s+di\s+linguaggio)?)\b",
-        r"(?im)^\s*non\s+(?:posso|riesco|sono\s+in\s+grado\s+di)\b.{0,80}\b(?:richiest[ae]|contenut[oi]|testo)\w*\b",
-        r"(?i)\b(?:tekoälynä|tekoälyksi|kielimallina|kielimalliksi|(?:olen\s+(?:vain\s+)?|vain\s+)tekoäly)\b",
-        r"(?im)^\s*en\s+(?:voi|pysty)\b.{0,80}\b(?:pyyntöä?|pyynnön|sisältöä|tekstiä)\w*\b",
+        r"(?i)\bcome\s+(?:una?['’]?\s*)?(?:ia|intelligenza\s+artificiale|modello\s+di\s+linguaggio)\b",
+        r"(?im)^\s*non\s+(?:posso\s+|riesco\s+a\s+|sono\s+in\s+grado\s+di\s+)(?:aiutare|assistere|soddisfare|adempiere|fornire|elaborare)\b.{0,80}\b(?:richiest[ae]|contenut[oi]|testo)\w*\b",
+        r"(?i)\b(?:tekoälynä|tekoälyksi|kielimallina|kielimalliksi|olen\s+(?:vain\s+)?tekoäly)\b",
+        r"(?im)^\s*en\s+(?:voi\s+(?:auttaa|täyttää|käsitellä|tarjota|noudattaa)|pysty\s+(?:auttamaan|täyttämään|käsittelemään|tarjoamaan|noudattamaan))\b.{0,80}\b(?:pyyntöä?|pyynnön|sisältöä|tekstiä)\w*\b",
         r"(?i)作为(?:一个|一名)?(?:人工智能|AI|语言模型)",
         r"(?m)^\s*我(?:无法|不能).{0,80}(?:请求|內容|内容|文本)",
     ]
@@ -179,13 +179,41 @@ mod tests {
             ("Nie mogę przyjść", "en", "I can't come"),
             ("Ich kann heute nicht kommen", "pl", "nie mogę dziś przyjść"),
             ("I cannot do that", "de", "ich kann das nicht"),
+            (
+                "I cannot read this text",
+                "it",
+                "Non posso leggere questo testo",
+            ),
             ("I can't help you today", "fi", "En voi auttaa sinua tänään"),
             ("I can't answer that right now", "fi", "En voi vastata siihen nyt"),
+            (
+                "I cannot read this text",
+                "fi",
+                "En voi lukea tätä tekstiä",
+            ),
         ] {
             assert_eq!(
                 check(source, target, output, &UnmaskReport::default()),
                 Ok(()),
                 "ordinary phrase rejected: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_ordinary_model_descriptions() {
+        for (source, target, output) in [
+            ("She works as a model", "it", "Lavora come modello"),
+            (
+                "It was only AI, not a real person",
+                "fi",
+                "Se oli vain tekoäly, ei oikea ihminen",
+            ),
+        ] {
+            assert_eq!(
+                check(source, target, output, &UnmaskReport::default()),
+                Ok(()),
+                "ordinary model description rejected: {output}"
             );
         }
     }
@@ -203,6 +231,7 @@ mod tests {
             ("fi", "En voi auttaa tätä pyyntöä"),
             ("fi", "En voi täyttää tätä pyyntöä"),
             ("fi", "En voi käsitellä tätä sisältöä"),
+            ("fi", "En pysty käsittelemään tätä sisältöä"),
             ("fi", "Olen vain tekoäly enkä voi auttaa"),
             ("zh", "我无法满足这个请求"),
         ] {
